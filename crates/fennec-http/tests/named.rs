@@ -60,29 +60,19 @@ const STATEMENTS: [&str; 5] = [
 const ACCOUNTS: i64 = 8;
 const START: i64 = 1000;
 
+#[derive(Clone)]
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<Database>>,
 }
 
 fn start(tune: impl FnOnce(&mut Config)) -> Node {
     fennec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
-    let mut cfg = Config {
-        addr: "127.0.0.1:0".into(),
-        token: Some(ROOT.into()),
-        access: Some(Arc::clone(&access)),
-        call_rate: 0,
-        ..Config::default()
-    };
-    tune(&mut cfg);
-    let server = Server::new(Arc::new(RwLock::new(Database::new())), cfg);
-    let listener = server.bind().unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
-    });
-    let node = Node { port, access };
+    let db = Arc::new(RwLock::new(Database::new()));
+    let port = serve(&db, &access, tune);
+    let node = Node { port, access, db };
     for s in SCHEMA.split(';').chain(STATEMENTS) {
         node.ok(ROOT, s);
     }
@@ -95,7 +85,35 @@ fn start(tune: impl FnOnce(&mut Config)) -> Node {
     node
 }
 
+/// A server over `db` on a port of its own, its configuration `tune`d.
+fn serve(db: &Arc<RwLock<Database>>, access: &Arc<Access>, tune: impl FnOnce(&mut Config)) -> u16 {
+    let mut cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        token: Some(ROOT.into()),
+        access: Some(Arc::clone(access)),
+        call_rate: 0,
+        ..Config::default()
+    };
+    tune(&mut cfg);
+    let server = Server::new(Arc::clone(db), cfg);
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    port
+}
+
 impl Node {
+    /// A read-only server (`--read-only`) over this node's database.
+    fn read_only(&self) -> Node {
+        Node {
+            port: serve(&self.db, &self.access, |c| c.read_only = true),
+            access: Arc::clone(&self.access),
+            db: Arc::clone(&self.db),
+        }
+    }
+
     fn send(&self, token: &str, target: &str, body: &str, extra: &str) -> (u16, String, String) {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -184,10 +202,8 @@ fn a_scoped_token_moves_money_through_its_grant_alone() {
     let clients: Vec<_> = (0..ACCOUNTS as u64)
         .map(|t| {
             let token = node.customer(&format!("u{t}"));
-            let port = node.port;
-            let access = Arc::clone(&node.access);
+            let node = node.clone();
             std::thread::spawn(move || {
-                let node = Node { port, access };
                 let mut seed = 0x2545_f491_4f6c_dd1du64 ^ (t + 1);
                 let mut next = |n: u64| {
                     seed ^= seed << 13;
@@ -464,12 +480,10 @@ fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
         )
     };
     node.ok(ROOT, &pair(1));
-    let port = node.port;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let replacer = {
-        let (stop, access) = (Arc::clone(&stop), Arc::clone(&node.access));
+        let (stop, node) = (Arc::clone(&stop), node.clone());
         std::thread::spawn(move || {
-            let node = Node { port, access };
             let mut v = 1;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 v = 3 - v;
@@ -479,9 +493,8 @@ fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
     };
     let callers: Vec<_> = (0..4u32)
         .map(|site| {
-            let access = Arc::clone(&node.access);
+            let node = node.clone();
             std::thread::spawn(move || {
-                let node = Node { port, access };
                 for i in 0..60 {
                     let n = site * 1000 + i;
                     let q = line(&format!("call pair {{n: {n}}}"));
@@ -670,6 +683,57 @@ fn a_marked_call_is_judged_before_it_is_refused() {
     assert!(body.contains("Fennec-Read: replica only reads"), "{body}");
     assert_eq!(node.number("get entries count"), 0);
     assert_eq!(before, node.balances());
+}
+
+/// A read-only server judges a call before its 403 whichever way it came
+/// -- by its path, over `/query` and in a `/batch` -- the grant and the
+/// statement (404), the claims (403), the arguments and `check` (400) and
+/// `append-only` (403), the same status in the same words, a `/batch`'s
+/// with where it stopped; a call that passes is refused as the write it
+/// is, nothing of it run.
+#[test]
+fn a_read_only_server_judges_a_call_alike_at_every_way_in() {
+    let node = start(|_| {}).read_only();
+    let u0 = node.customer("u0");
+    let nameless = node.token(r#"{"role":"customer"}"#);
+    let admin = node.token(r#"{"sub":"ops","role":"admin"}"#);
+    let cases: [(&str, &str, &str, u16, &str); 7] = [
+        (&u0, "purge", r#"{"w":"a"}"#, 404, "purge"),
+        (ROOT, "nothing", "{}", 404, "nothing"),
+        (&nameless, "history", "{}", 403, "sub"),
+        (&u0, "transfer", r#"{"from":1,"to":2}"#, 400, "amount"),
+        (
+            &u0,
+            "transfer",
+            r#"{"from":1,"to":2,"amount":0}"#,
+            400,
+            "check",
+        ),
+        (&admin, "purge", r#"{"w":"a"}"#, 403, "append-only"),
+        (
+            &u0,
+            "transfer",
+            r#"{"from":1,"to":2,"amount":10}"#,
+            403,
+            "read-only",
+        ),
+    ];
+    for (token, name, params, want, says) in cases {
+        let by_path = node.call(token, name, params);
+        let by_query = node.call_query(token, name, params);
+        let line = format!(r#"{{"query":"call {name} $1","params":[{params}]}}"#);
+        let by_batch = node.post(token, "/batch", &line);
+        assert_eq!(by_path.0, want, "{name} {params}: {}", by_path.1);
+        assert!(by_path.1.contains(says), "{name} {params}: {}", by_path.1);
+        assert_eq!(by_path, by_query, "{name} {params}");
+        assert_eq!(by_batch.0, want, "{name} {params}: {}", by_batch.1);
+        // A line's refusal is the same words, with its kind's first where
+        // it stopped the batch, as every `/batch` line's is.
+        let words = by_path.1.trim_start_matches(r#"{"error":""#);
+        let words = words.trim_end_matches(r#""}"#);
+        assert!(by_batch.1.contains(words), "{}: {}", by_path.1, by_batch.1);
+    }
+    assert_eq!(node.number("get entries count"), 0);
 }
 
 /// An `Idempotency-Key` makes a call once: sent again it is the answer

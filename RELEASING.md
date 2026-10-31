@@ -97,15 +97,35 @@ of `deploy/RUNBOOK.md`'s *Upgrading with no downtime*, and one rule more:
 4. only then may any primary define a statement, by `create statement`, a
    declared schema's apply or a tenant created with one.
 
-What an older binary does where the order is not kept, as `make
-upgrade-check` drives it against the last main before the kind: a replica
-refuses the record ("record kind 13 is not a write") and connects again for
-ever, taking no write past it; an archiver keeps the stream but takes no
-image of its own ("unknown record kind 13"), and its `fennec verify`
-refuses the archive, which the new binary reads; a router refuses a
-tenant's schema declaring a statement as one that does not read (400),
-nothing placed. Nothing is misread and nothing is lost, but each stops
-until it is upgraded.
+The rule is the last step: every binary that reads a tenant's file -- the
+archivers and the nodes -- runs the new one before the first definition.
+A router reads no tenant's file, only a schema's text as it creates a
+tenant, and one from before refuses a schema declaring a statement, so its
+place between them loses nothing: it keeps the place every upgrade gives
+it, and the same order is written in the runbook and
+`docs/design/named-statements.md`.
+
+What an older binary does where the order is not kept, each case of which
+`make upgrade-check` (`tools/upgrade-order.sh`) drives against the
+binaries of the last main before the kind, beside this tree's:
+
+- a replica following a primary refuses the record ("record kind 13 is not
+  a write") and connects again for ever, taking no write past it;
+- an archiver keeps the stream but takes no image of its own ("unknown
+  record kind 13"); its `fennec verify` and `fennec restore` refuse the
+  archive, which the new ones read and restore;
+- a node from before refuses to open the file the new `fennec restore`
+  wrote ("could not open ...: corrupt: unknown record kind 13");
+- a router from before refuses a tenant's schema declaring a statement as
+  one that does not read (400), nothing placed;
+- a move onto a node from before fails at its install (400, "the image
+  does not load: corrupt: unknown record kind 13"), and the tenant stays on
+  its source, answering, with what it held.
+
+Nothing is misread and nothing is lost, but each stops until it is
+upgraded. A failover onto a standby from before is not driven: it is the
+replica's case, the standby having stopped at the record before it could
+be promoted.
 
 | Package | From | What it holds |
 | --- | --- | --- |

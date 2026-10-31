@@ -114,6 +114,13 @@ pub struct Config {
     /// that say why ([`read_only_refused`]) rather than as a server taking
     /// none. Never set on a server's own configuration.
     pub marked: bool,
+    /// Set for a tenant's request its freeze or its lapsed lease runs
+    /// read-only ([`handle_admitted`]), whose refused write is told to come
+    /// back (503): a call is refused so before it is judged, since the
+    /// definitions it would be judged by are this copy's, which a failover
+    /// may have left behind -- the new primary's may hold a statement this
+    /// copy answers 404 for. Never set on a server's own configuration.
+    pub come_back: bool,
     /// Since there is no TLS, binding outside loopback without auth is refused.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
@@ -195,6 +202,7 @@ impl Default for Config {
             cors: None,
             read_only: false,
             marked: false,
+            come_back: false,
             insecure: false,
             max_connections: 100,
             max_body: 64 << 20,
@@ -1629,9 +1637,14 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
     let refused = refusal(t);
     let resp = match refused {
         None => handle(&t.db, cfg, req),
+        // A call, too, is refused unjudged ([`Config::come_back`]): judged
+        // against this copy's definitions, an old primary after a failover
+        // answered 404 or 409 for a statement the new one holds, where the
+        // client should come back.
         Some(_) => {
             let read_only = Config {
                 read_only: true,
+                come_back: true,
                 ..cfg.clone()
             };
             handle(&t.db, &read_only, req)
@@ -1931,6 +1944,32 @@ pub(crate) fn read_only_refused(cfg: &Config) -> Response {
              without the header, which a router sends to the tenant's home",
         ),
         false => Response::error(403, "the server is in read-only mode"),
+    }
+}
+
+/// A call `stmt` that read-only mode refuses, judged first -- the
+/// statement, the claims, the arguments, `check`, `append-only` for a
+/// scoped caller -- as a call's answers are ordered: a read-only server's
+/// or a marked read's 403 comes after them, at `/query`, `/_call` and
+/// `/batch` alike. Not under a tenant's freeze or lapsed lease
+/// ([`Config::come_back`]), which refuses it unjudged, to come back.
+fn judged_read_only(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    who: &Who,
+    stmt: &Statement,
+    params: &[Value],
+) -> fennec_core::error::Result<()> {
+    let Statement::Call(c) = stmt else {
+        return Ok(());
+    };
+    if cfg.come_back {
+        return Ok(());
+    }
+    let g = held::read(db);
+    match who.scope() {
+        Some(_) => access::judge_call(who, &g, stmt, params),
+        None => g.callee(c, params).map(drop),
     }
 }
 
@@ -2568,18 +2607,8 @@ fn run_query(
     };
     let mask = mask.as_ref();
     if cfg.read_only && !stmt.is_read_only() {
-        // A call is judged first -- the statement, the claims, the
-        // arguments, `check` -- as a call's answers are ordered: a
-        // read-only server's or a marked read's 403 comes after them.
-        if let Statement::Call(c) = &*stmt {
-            let g = held::read(db);
-            let judged = match who.scope() {
-                Some(_) => access::judge_call(who, &g, &stmt, &params),
-                None => g.callee(c, &params).map(drop),
-            };
-            if let Err(e) = judged {
-                return error_response(&e);
-            }
+        if let Err(e) = judged_read_only(db, cfg, who, &stmt, &params) {
+            return error_response(&e);
         }
         return read_only_refused(cfg);
     }
@@ -2596,7 +2625,7 @@ fn run_query(
         Ok(w) => w.is_some() && !stmt.is_read_only(),
     };
     if wait {
-        if let Err(e) = waits::holdable(db, &stmt, &params) {
+        if let Err(e) = waits::holdable(db, who, &stmt, &params) {
             return error_response(&e);
         }
     }
@@ -3081,6 +3110,14 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return error_response(&e),
     };
     if cfg.read_only && stmts.iter().any(|(s, _)| !s.is_read_only()) {
+        // Each call judged first, in its line's order, as `/query` and
+        // `/_call` judge a lone one: a call answers the same whichever
+        // way it came. Answered as the batch stopped at that line.
+        for (at, (s, p)) in stmts.iter().enumerate() {
+            if let Err(e) = judged_read_only(db, cfg, who, s, p) {
+                return batch_stop(api::stop_of(&e), 0, at);
+            }
+        }
         return read_only_refused(cfg);
     }
     if stmts.iter().any(|(s, _)| !s.is_read_only()) {
@@ -3103,7 +3140,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     if wait {
         for (s, p) in &stmts {
-            if let Err(e) = waits::holdable(db, s, p) {
+            if let Err(e) = waits::holdable(db, who, s, p) {
                 return error_response(&e);
             }
         }

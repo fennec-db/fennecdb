@@ -717,18 +717,24 @@ alerts between steps:
 
 **Named statements move the format by their first use, not their
 install.** A `create statement` writes record kind 13, which every binary
-from before refuses: so upgrade as above -- archivers, routers, every node,
-each replica and standby and each node a move or a restore may target --
-and only then let any primary define one (`create statement`, a declared
-schema's apply, a tenant created with one). An older replica that meets
-the record refuses it and connects again for ever, taking no write past it
-(`could not apply a write: corrupt: record kind 13 is not a write;
-connecting again` in its log); an older archiver keeps the stream but takes
-no image of its own and its `fennec verify` fails (`no image taken: ...
-unknown record kind 13` in its log); an older router refuses a tenant's
-schema declaring one (400, nothing placed). Upgrade the one that stopped
-and it goes on from where it stood: nothing was misread or lost
-(RELEASING.md; `make upgrade-check`).
+from before refuses: so upgrade in the order above -- archivers, then
+routers, then every node, each replica and standby and each node a move, a
+restore or a failover may put a tenant on -- and only then let any primary
+define one (`create statement`, a declared schema's apply, a tenant
+created with one). What the order holds is that last step: every binary
+reading a tenant's file, the archivers and the nodes, is upgraded before
+the first definition; a router reads only a schema's text, and refuses one
+declaring a statement, so its usual place costs nothing. An older replica
+that meets the record refuses it and connects again for ever, taking no
+write past it (`could not apply a write: corrupt: record kind 13 is not a
+write; connecting again` in its log); an older archiver keeps the stream
+but takes no image of its own (`no image taken: ... unknown record kind
+13` in its log), and its `fennec verify` and `fennec restore` fail; an
+older node refuses to open a file holding one and fails a move's install
+onto it, the tenant staying on its source; an older router refuses a
+tenant's schema declaring one (400, nothing placed). Upgrade the one that
+stopped and it goes on from where it stood: nothing was misread or lost
+(RELEASING.md; `make upgrade-check` drives each).
 
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: a router from before regions reads

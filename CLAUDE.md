@@ -685,7 +685,8 @@ line grants (else a missing one's 404; `* call` refused), as itself (`as`
 body to `append-only` under the lock and `run_as` runs it outside
 `within()`, the one statement so, unmasked, its refusals told
 (`told_call`). `POST /_call/<name>` is the `call <name> $1` it stands for,
-run as `/query` runs it, a read-only server's 403 after its judgment; a
+run as `/query` runs it, a read-only server's 403 after its judgment (at
+`/batch` too), a freeze's or a lapsed lease's refusal before it; a
 call is counted as that shape, its slow line naming the version, traced
 with `db.stored_procedure.name`, and the router's route `call`, never its
 name. MCP and a sync replica refuse them (`NOT_BUILT`, `NAMED`); the

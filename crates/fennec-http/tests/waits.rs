@@ -328,6 +328,52 @@ fn a_call_is_held_as_its_body_would_be() {
     assert_eq!(int(&rows(&a.body)[0]["attempts"]), 2, "{}", a.body);
 }
 
+/// A held call is judged before it is asked whether a look can hold it,
+/// as its run would judge it: a scoped token granted a call whose body
+/// inserts and deletes in an `append-only` collection is told
+/// `append-only`'s 403 -- never the 400 naming what the body inserts, which
+/// tells a token something of a body it may not read -- and the server's
+/// token, which `append-only` does not bind, is told that 400.
+#[test]
+fn a_held_call_is_judged_before_its_body_is_asked() {
+    let node = start_with(Some(
+        "jobs  read\njobs  append-only\nrequeue  call  for worker\n",
+    ));
+    let root = [("Authorization", "Bearer root")];
+    let mut c = Conn::open(node.port);
+    let def = "create statement requeue($kind text) public scans as begin
+                 insert jobs {kind: $kind, run_at: now(), attempts: 0};
+                 del jobs where run_at <= now() and kind = $kind
+               end";
+    let a = c.post("/query", &line(def, "[]"), &root);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let token = node
+        .access
+        .as_ref()
+        .unwrap()
+        .mint(r#"{"sub":"w1","role":"worker"}"#)
+        .unwrap();
+    let worker = format!("Bearer {token}");
+    let body = r#"{"params":{"kind":"mail"}}"#;
+    for wait in [None, Some("10000")] {
+        let mut headers = vec![("Authorization", worker.as_str())];
+        headers.extend(wait.map(|w| ("Fennec-Wait", w)));
+        let a = c.post("/_call/requeue", body, &headers);
+        assert_eq!(a.status, 403, "{wait:?}: {}", a.body);
+        assert!(a.body.contains("append-only"), "{wait:?}: {}", a.body);
+        assert!(!a.body.contains("inserts"), "{wait:?}: {}", a.body);
+    }
+    let a = c.post(
+        "/_call/requeue",
+        body,
+        &[("Authorization", "Bearer root"), ("Fennec-Wait", "10000")],
+    );
+    assert_eq!(a.status, 400, "{}", a.body);
+    assert!(a.body.contains("`requeue` inserts"), "{}", a.body);
+    let a = c.post("/query", &line("get jobs count", "[]"), &root);
+    assert!(a.body.contains("\"count\":0"), "{}", a.body);
+}
+
 /// Time passing with no write wakes it: a delayed job is claimed at its
 /// time and not before, and a lease that lapses hands its job on.
 ///

@@ -987,12 +987,15 @@ packaging-test:
 
 ## The upgrade's order for named statements (RELEASING.md): a replica and an
 ## archiver built before record kind 13 meet a primary's first `create
-## statement` and stop in words, never misreading it, and the old `fennec
-## verify` refuses what the old archiver kept where this tree's reads it
-## (tools/upgrade-order.sh). Builds BASE -- 12d6f8db^, the last main before
-## the kind, unless given -- in a scratch worktree: minutes. Not in CI.
+## statement` and stop in words, never misreading it; the old `fennec
+## verify` and `fennec restore` refuse what the old archiver kept, the old
+## server the file this tree's restore wrote; an old router refuses a
+## schema declaring a statement (400); a move onto an old node fails and
+## leaves the tenant on its source (tools/upgrade-order.sh). Builds BASE --
+## 12d6f8db^, the last main before the kind, unless given -- in a scratch
+## worktree: minutes. Not in CI.
 upgrade-check:
-	$(CARGO) build -p fennec-server -p fennec-cli
+	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
 
 ## Publishes to Cloudflare Workers (fennecdb.com). Needs `wrangler login`

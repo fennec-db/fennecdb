@@ -120,9 +120,14 @@ pub fn call(name: &str) {
     });
 }
 
-/// Forgets what was noted for a statement that will not be counted: a
-/// stdio session's (`fennec mcp`), which keeps no counts, and whose notes
-/// would otherwise grow with every call.
+/// Forgets what was noted -- the text and the rows -- for a statement that
+/// will not be counted: a stdio session's (`fennec mcp`), which keeps no
+/// counts, and whose notes would otherwise grow with every call; and a
+/// request held by `Fennec-Wait` before each run again (`respond`), so it
+/// is counted as its last run: one shape, and the rows of the run that
+/// answered. A run before it wrote nothing and was put back, its reads --
+/// a held `/batch`'s `get`s -- answered to no one: their rows are not
+/// counted, though its time is the time of every run.
 pub fn clear() {
     TEXT.with(|t| t.borrow_mut().clear());
     ROWS.with(|r| r.set(0));

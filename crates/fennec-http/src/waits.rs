@@ -102,6 +102,7 @@
 //! held request wakes for a row it could write and for no other, and it is
 //! the run that answers, under the scope, as any request's.
 
+use crate::access::{self, Who};
 use crate::sse::Hub;
 use fennec_core::changes::SCHEMA_MARK;
 use fennec_core::engine::Moments;
@@ -387,23 +388,26 @@ pub fn asked(req: &crate::http::Request) -> std::result::Result<Option<Duration>
 /// `del`s, an `insert` refused -- what it makes, a look cannot test for. A
 /// call the engine would refuse is let through, for the run to answer in
 /// a call's order; one whose definition is replaced before the run is
-/// asked again by every look, which runs `handle` whole.
+/// asked again by every look, which runs `handle` whole. A scoped caller's
+/// call is judged first ([`access::judge_call`]), as its run would judge
+/// it: told what its body holds -- "`X` inserts" -- before `append-only`'s
+/// 403, a token granted the call learned of a body it may not read.
 pub fn holdable(
     db: &RwLock<Database>,
+    who: &Who,
     stmt: &Statement,
     params: &[Value],
 ) -> std::result::Result<(), Error> {
     let Statement::Call(c) = stmt else {
         return holdable_one(stmt, params);
     };
-    let callee = match db
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .callee(c, params)
-    {
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    access::judge_call(who, &g, stmt, params)?;
+    let callee = match g.callee(c, params) {
         Ok(callee) => callee,
         Err(_) => return Ok(()),
     };
+    drop(g);
     for st in &callee.def.body {
         if matches!(st, Statement::Put { .. }) {
             return Err(Error::Query(format!(

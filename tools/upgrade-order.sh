@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
 # The upgrade's order for named statements (docs/design/named-statements.md,
-# slice 4; RELEASING.md): readers first. A binary built before record kind 13
-# -- a replica following a primary's stream, an archiver writing it -- meets
-# the first `create statement` on a primary and refuses it in words, never
-# misreading it: the replica refuses the write ("record kind 13 is not a
-# write") and connects again, never taking one past it; the archiver keeps
-# the stream's bytes but takes no image of its own ("unknown record kind
-# 13"), and the old `fennec verify` refuses what it kept, which this tree's
-# reads. This builds `fennec-server` and `fennec` at BASE, the last main
-# before the kind, runs this tree's server as the primary and the old
-# binaries beside it, defines a statement, and holds each to what it said:
+# slice 4; RELEASING.md): nothing defines a statement until every binary
+# reading a tenant's file is upgraded. A binary built before record kind 13
+# meets the first `create statement` and refuses it in words, never
+# misreading it:
+#
+#   - a replica following the primary's stream refuses the write ("record
+#     kind 13 is not a write") and connects again, never taking one past it;
+#   - an archiver keeps the stream's bytes but takes no image of its own
+#     ("unknown record kind 13"); the old `fennec verify` and `fennec
+#     restore` refuse what it kept, which this tree's read and restore, and
+#     the old server refuses to open the file this tree's restore wrote;
+#   - a router refuses a tenant's schema declaring a statement as one that
+#     does not read (400), placing nothing;
+#   - a move onto an old node fails at its install, and the tenant stays on
+#     its source, answering, with what it held.
+#
+# This builds `fennec-server`, `fennec` and `fennec-shard` at BASE, the last
+# main before the kind, runs this tree's binaries beside the old ones,
+# defines a statement, and holds each old one to what it said:
 #
 #   tools/upgrade-order.sh NEW_BIN_DIR [BASE]
 #
-# NEW_BIN_DIR holds this tree's `fennec-server` and `fennec` (`make
-# upgrade-check` builds them). OLD_BIN_DIR, where set, holds the old ones
+# NEW_BIN_DIR holds this tree's `fennec-server`, `fennec` and `fennec-shard`
+# (`make upgrade-check` builds them). OLD_BIN_DIR, where set, holds the old ones
 # already built and skips their build. Every server listens on port 0, found
 # by its `listening on:` line; everything it started is killed and every
 # path it made removed on its way out.
@@ -51,10 +60,10 @@ fail() {
 if [ -n "${OLD_BIN_DIR:-}" ]; then
     OLD=$OLD_BIN_DIR
 else
-    echo "building fennec-server and fennec at $BASE ..."
+    echo "building fennec-server, fennec and fennec-shard at $BASE ..."
     git -C "$ROOT" worktree add --detach --quiet "$WORK/old" "$BASE"
     CARGO_TARGET_DIR="$WORK/old-target" "${CARGO:-cargo}" build --quiet \
-        --manifest-path "$WORK/old/Cargo.toml" -p fennec-server -p fennec-cli
+        --manifest-path "$WORK/old/Cargo.toml" -p fennec-server -p fennec-cli -p fennec-shard
     OLD="$WORK/old-target/debug"
 fi
 
@@ -135,4 +144,92 @@ TMPDIR="$WORK" "$NEW/fennec" verify "$WORK/archive" >"$WORK/verify-new.log" 2>&1
     fail "this tree's verify refused the archive the old archiver kept"
 echo "old verify:   $(grep -m1 'kind 13' "$WORK/verify-old.log")"
 echo "new verify:   $(head -1 "$WORK/verify-new.log")"
-echo "ok: the readers from before stop in words at the first definition"
+
+# A restore: the old `fennec restore` refuses the archive, this tree's
+# writes the file, and the old server refuses to open what it wrote -- a
+# node a tenant is restored to that still runs the binary from before.
+if TMPDIR="$WORK" "$OLD/fennec" restore "$WORK/archive" "$WORK/restored-old.fennec" \
+    >"$WORK/restore-old.log" 2>&1; then
+    fail "the old restore read an archive holding record kind 13"
+fi
+grep -q 'kind 13' "$WORK/restore-old.log" || fail "the old restore said nothing of record kind 13"
+TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive" "$WORK/restored.fennec" \
+    >"$WORK/restore-new.log" 2>&1 || fail "this tree's restore refused the archive"
+"$OLD/fennec-server" --file "$WORK/restored.fennec" --http 127.0.0.1:0 \
+    >"$WORK/restored-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding record kind 13"
+grep -q 'kind 13' "$WORK/restored-open.log" || fail "the old server said nothing of record kind 13"
+echo "old restore:  $(grep -m1 'kind 13' "$WORK/restore-old.log")"
+echo "old open:     $(grep -m1 'kind 13' "$WORK/restored-open.log")"
+
+# An admin request: its status printed, its body left in admin.out.
+admin() {
+    curl -sS -o "$WORK/admin.out" -w '%{http_code}' -X "$2" -H 'Authorization: Bearer root' \
+        ${4:+-d "$4"} "$1$3"
+}
+SCHEMA='create collection notes (title text); create statement titles() as get notes select title'
+
+# A router from before reads a tenant's schema before it places anything:
+# one declaring a statement does not read there (400), and no tenant is
+# left behind.
+"$OLD/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/old-router.fennec" \
+    --token root >"$WORK/old-router.log" 2>&1 &
+PIDS+=($!)
+OLD_ROUTER=$(address "$WORK/old-router.log")
+code=$(admin "$OLD_ROUTER" PUT /_shard/tenants/acme "{\"schema\":\"$SCHEMA\"}")
+[ "$code" = 400 ] ||
+    fail "the old router answered $code for a schema declaring a statement: $(cat "$WORK/admin.out")"
+echo "old router:   $code $(cat "$WORK/admin.out")"
+code=$(admin "$OLD_ROUTER" GET /_shard/tenants/acme)
+[ "$code" = 404 ] || fail "the old router placed the tenant it refused ($code)"
+
+# A move onto a node from before: this tree's router places the tenant,
+# its statement and all, on this tree's node; the move to the old node
+# fails at its install, and the tenant stays on its source, answering what
+# it held.
+"$NEW/fennec-server" --dir "$WORK/n1" --http 127.0.0.1:0 --admin-token a1 \
+    >"$WORK/n1.log" 2>&1 &
+PIDS+=($!)
+N1=$(address "$WORK/n1.log")
+"$OLD/fennec-server" --dir "$WORK/n2" --http 127.0.0.1:0 --admin-token a2 \
+    >"$WORK/n2.log" 2>&1 &
+PIDS+=($!)
+N2=$(address "$WORK/n2.log")
+"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
+    --token root >"$WORK/router.log" 2>&1 &
+PIDS+=($!)
+ROUTER=$(address "$WORK/router.log")
+for n in "n1 ${N1#http://} a1" "n2 ${N2#http://} a2"; do
+    set -- $n
+    code=$(admin "$ROUTER" PUT "/_shard/nodes/$1" "{\"addr\":\"$2\",\"token\":\"$3\"}")
+    case "$code" in
+    2??) ;;
+    *) fail "the router did not take $1 ($code): $(cat "$WORK/admin.out")" ;;
+    esac
+done
+code=$(admin "$ROUTER" PUT /_shard/tenants/acme "{\"node\":\"n1\",\"schema\":\"$SCHEMA\"}")
+case "$code" in
+2??) ;;
+*) fail "this tree's router did not place the tenant ($code): $(cat "$WORK/admin.out")" ;;
+esac
+query "$ROUTER/t/acme" "put notes {title: 'kept'}" | grep -q '"error"' &&
+    fail "the tenant took no write"
+code=$(admin "$ROUTER" POST /_shard/tenants/acme/move '{"to":"n2"}')
+case "$code" in
+2??) fail "the move onto the old node answered $code: $(cat "$WORK/admin.out")" ;;
+esac
+grep -q 'kind 13' "$WORK/admin.out" "$WORK/n2.log" ||
+    fail "the failed move said nothing of record kind 13: $(cat "$WORK/admin.out")"
+echo "old node:     $code $(cat "$WORK/admin.out")"
+admin "$ROUTER" GET /_shard/tenants/acme >/dev/null
+grep -q '"node":"n1"' "$WORK/admin.out" ||
+    fail "the tenant left its source: $(cat "$WORK/admin.out")"
+query "$ROUTER/t/acme" "get notes count" | grep -q '"count":1' ||
+    fail "the tenant on its source lost what it held"
+echo "ok: the binaries from before stop in words at the first definition"

@@ -440,8 +440,10 @@ statement is also counted by its text with each literal and parameter as
 JSON would all have been one shape. A call is `call <name> $1` however it
 came (`statements::call`, by `POST /_call/<name>` too), and a request held
 by `Fennec-Wait` is counted as its last run, each run forgetting what the
-one before noted ([named-statements.md](named-statements.md#what-is-built),
-slice 4). The counts are shards a thread each
+one before noted, its rows too (`statements::clear`): its time is every
+run's, its rows the answering run's alone, since a run before it wrote
+nothing and was put back, a held `/batch`'s reads in it answered to no one
+([named-statements.md](named-statements.md#what-is-built), slice 4). The counts are shards a thread each
 behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
 the least called forgotten: 0.34 us for a statement of 87 bytes, against the
 2.2 us its parse takes (`make statements-bench`). A shape is made only as

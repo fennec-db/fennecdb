@@ -123,8 +123,13 @@ impl Conn {
             true => "Authorization: Bearer adm\r\n",
             false => "",
         };
+        self.send_with(method, target, auth, body)
+    }
+
+    /// A request with the header lines `extra`, each ending `\r\n`.
+    fn send_with(&mut self, method: &str, target: &str, extra: &str, body: &str) -> Answer {
         let head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: n\r\n{auth}Content-Length: {}\r\n\r\n",
+            "{method} {target} HTTP/1.1\r\nHost: n\r\n{extra}Content-Length: {}\r\n\r\n",
             body.len()
         );
         self.out.write_all(head.as_bytes()).unwrap();
@@ -251,6 +256,69 @@ fn a_call_whose_lease_lapses_as_it_runs_is_told_to_come_back() {
         );
     }
     n.grant();
+    let none = c.query("get notes count");
+    assert!(none.body.contains(r#""count":0"#), "{}", none.body);
+}
+
+/// A call to a frozen tenant, or to one whose lease lapsed, is told to come
+/// back (503, `Retry-After`) before it is judged, whichever way it came:
+/// judged against this copy's definitions, an old primary after a failover
+/// answered 404 for a statement only the new primary holds, or 400 for the
+/// arguments its new version takes. A marked read passes the freeze and is
+/// judged, as a read-only server judges it -- 404, then the 403 of a write
+/// -- and once the tenant takes writes again each call is judged as before.
+#[test]
+fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
+    let n = Node::start("call-unjudged");
+    let mut c = Conn::open(n.port);
+    for q in [
+        "create collection notes (title text)",
+        "create statement stamp($t text) public as insert notes {title: $t}",
+    ] {
+        let a = c.query(q);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    // `ghost` this copy does not hold; `stamp` with an argument it takes not.
+    let calls = [("ghost", "{}"), ("stamp", r#"{"t":"a","at":1}"#)];
+    let ask = |c: &mut Conn, why: &str| {
+        for (name, params) in calls {
+            let body = format!(r#"{{"params":{params}}}"#);
+            let path = format!("/t/acme/_call/{name}");
+            let a = c.send("POST", &path, false, &body);
+            told_to_come_back(&a, &format!("{why}: {path}"));
+            let line = format!(r#"{{"query":"call {name} $1","params":[{params}]}}"#);
+            for route in ["query", "batch"] {
+                let a = c.send("POST", &format!("/t/acme/{route}"), false, &line);
+                told_to_come_back(&a, &format!("{why}: /{route} {name}"));
+            }
+        }
+    };
+    n.tenants.freeze("acme").unwrap();
+    ask(&mut c, "frozen");
+    let marked = "Fennec-Read: replica\r\n";
+    let a = c.send_with("POST", "/t/acme/_call/ghost", marked, "");
+    assert_eq!(a.status, 404, "{}", a.body);
+    let a = c.send_with(
+        "POST",
+        "/t/acme/_call/stamp",
+        marked,
+        r#"{"params":{"t":"a"}}"#,
+    );
+    assert_eq!(a.status, 403, "{}", a.body);
+    assert!(
+        a.body.contains("Fennec-Read: replica only reads"),
+        "{}",
+        a.body
+    );
+    n.tenants.thaw("acme").unwrap();
+    assert!(n.lease.grant(0, "e1", None).is_ok());
+    ask(&mut c, "lapsed");
+    n.grant();
+    for ((name, params), want) in calls.into_iter().zip([404, 400]) {
+        let body = format!(r#"{{"params":{params}}}"#);
+        let a = c.send("POST", &format!("/t/acme/_call/{name}"), false, &body);
+        assert_eq!(a.status, want, "{name}: {}", a.body);
+    }
     let none = c.query("get notes count");
     assert!(none.body.contains(r#""count":0"#), "{}", none.body);
 }

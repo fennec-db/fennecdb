@@ -202,7 +202,12 @@ alone, a vector's components, as one — so the same statement run with other
 values is one line: how often it ran, its total, mean, least and most time,
 the rows it returned or changed, and its failures. Over HTTP a
 <code>/query</code> or <code>/batch</code> is counted as its FennecQL; a call
-to a collection's path as its method and path. <code>GET
+to a collection's path as its method and path. A request held by
+<a href="/docs/http-reference#wait"><code>Fennec-Wait</code></a> is
+one call of its shape, its time every run's but not the wait, and its rows
+the run that answered it: a run before that wrote nothing and was put back,
+so the rows a held <code>/batch</code>'s reads returned in it, answered to
+no one, are not counted. <code>GET
 /_stats/statements</code> answers JSON, most time first, and
 <code>DELETE</code> forgets it all.</p>
 
@@ -373,7 +378,7 @@ statements, so a client holding its answer finds it in the next scrape; its
 time ends once the answer is written.</p>
 
 <pre data-lang="text"># what the router adds, at the median, over five minutes
-histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{route="tenant"}[5m])))
+histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{route=~"tenant|call"}[5m])))
   - histogram_quantile(0.5, sum by (le) (rate(fennec_router_upstream_duration_seconds_bucket[5m])))
 
 # worth an alert
