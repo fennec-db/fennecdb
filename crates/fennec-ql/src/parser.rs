@@ -325,13 +325,13 @@ fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>
     while !p.ended() {
         #[cfg(feature = "statements")]
         let first = p.i;
-        #[cfg_attr(not(feature = "statements"), allow(unused_mut))]
-        let mut s = p.statement()?;
+        // Pushed first and its text filled in place, so a statement is moved
+        // once, as before named statements: the corpus parses in main's time.
+        out.push(p.statement()?);
         #[cfg(feature = "statements")]
-        if let Statement::CreateStatement(d) = &mut s {
+        if let Some(Statement::CreateStatement(d)) = out.last_mut() {
             d.text = definition_text(src, p.toks[first].pos, p.toks[p.i].pos);
         }
-        out.push(s);
     }
     if out.is_empty() {
         return Err(Error::Query("empty query".into()));
