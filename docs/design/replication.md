@@ -259,15 +259,42 @@ first pass 44% longer (`keep_began`): a hello's image whose history a crash
 lost is read for it where the history file would refuse the primary
 (`ends_on_image_of`; `an_image_whose_history_a_crash_lost_goes_on` leaves
 that state by hand and was refused as another database without it), and a
-history without its first image asks for one again. A restore, a backup and
-an unsealed file are synced into place before they return, and a node's
-root once as it is made; `consolidating.fennec`, the side files and a line
-moved aside are not, each harmless brought back or lost, or moved again by
-the next hello. A 1 GiB flat-out `take` of 1 KB records, 17 segments, four
-turns a side: the sync took 4.75-5.23 ms a segment (`F_FULLFSYNC`) against
+history without its first image asks for one again. That image is held to
+its change first, as `verify` holds every image
+(`an_image_of_another_change_than_its_name_is_refused`), and a sibling fork
+is taken too: a `lineage` move with nothing written after the image leaves
+no write of that fork in the archive to mix with the primary's, the state
+a crash before that move's sync leaves anyway, and the fork saying hello
+later is refused as any is. A restore, a backup and an unsealed file are
+synced into place before they return, and a node's root once as it is
+made; a tenant's directory is synced into the root by the first segment
+written after it was made, once for every tenant made before that sync
+(`archive::Parent`), where each tenant's first segment paid two fsyncs on
+the one stream thread, the root's beside its own. `consolidating.fennec`,
+the side files and a line moved aside are not synced, each harmless
+brought back or lost, or moved again by the next hello. A directory sync
+that fails is known to be retried, as a segment's failed fsync already is:
+it fails the step it stands before, and `follow` (`Archive::follow`,
+`NodeArchive::follow`, a tenant's hello as the node's stream) connects
+again and syncs again from where `position` finds the archive, never going
+on past it. The database file stops writes on a failed fsync instead
+(`Database::fail`), since a file system may drop what a failed fsync left
+and report a retry durable; an archive goes on, and a name a crash then
+loses is for `verify` to find. A 1 GiB flat-out `take` of 1 KB records, 17
+segments, four turns a side: the sync took 4.75-5.23 ms a segment
+(`F_FULLFSYNC`) against
 260-290 ms writing one, and the runs 4.40-4.89 s against 4.41-4.82 without
 it; a feed pays it each 64 MB or each image taken (`--image-every`, an hour
-unless given).
+unless given). On a node (`make node-archive-bench`, its defaults, three
+turns a side against main, macOS): every tenant's first image took
+14.1-14.8 s against 15.3-15.8, the writes as they were taken 13.9-14.6 ms
+at p50 against 14.6-15.3, a reconnect 0.15-0.48 s against 0.13-0.35, the
+syncer's passes 46.4-52.6 ms at p50 against 47.4-49.4 and a close 4.0 ms
+both, each within the other's spread. With the root synced a tenant, before
+`Parent`, the passes were 50.6-53.0 ms against 46.4-49.2 and a reconnect
+0.21-0.35 s against 0.12-0.13; traced, the archiver synced nothing in a
+reconnect, and in the passes only at each tenant's first segment, sixteen
+in their first 0.2 s, so both were noise or that start alone.
 
 ## Change data capture
 

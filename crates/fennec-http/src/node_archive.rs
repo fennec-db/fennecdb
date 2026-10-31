@@ -34,7 +34,7 @@
 //! <root>/<tenant>.<hex>/         a line moved aside, its history's id
 //! ```
 
-use crate::archive::{Archive, Took, Writer};
+use crate::archive::{Archive, Parent, Took, Writer};
 use crate::replication::{self, read_head, read_message, u64_at, Upstream, MESSAGE};
 use crate::seal::Key;
 use crate::tenants::check_name;
@@ -167,6 +167,9 @@ pub struct NodeArchive {
     root: PathBuf,
     key: Option<Key>,
     tenants: Mutex<BTreeMap<String, Arc<Kept>>>,
+    /// The root as the tenants' directories are made in it: synced once
+    /// for every one made before the sync (`archive::Parent`).
+    parent: Arc<Parent>,
     /// Two archivers writing one root would write each other's segments.
     _lock: fennec_abi::lock::FileLock,
 }
@@ -208,20 +211,23 @@ impl NodeArchive {
         fs::create_dir_all(&root)?;
         // Its name durable once, at the start: lost to a crash, every
         // tenant's archive went with it. A tenant's own directory is synced
-        // into it with the tenant's first segment (`Archive::sync_dir`).
+        // into it before the tenant's first segment is written, once for
+        // every tenant made before that sync (`archive::Parent`).
         if made {
             fennec_core::fs::sync_dir(&root).map_err(|e| io::Error::other(e.to_string()))?;
         }
         let held = fennec_abi::lock::hold(root.join("archiving"))
             .map_err(|e| io::Error::other(format!("{}: {e}", root.display())))?;
+        let parent = Arc::default();
         let mut tenants = BTreeMap::new();
         for (name, dir) in tenant_dirs(&root)? {
-            tenants.insert(name, Arc::new(Kept::new(&dir, key.clone())?));
+            tenants.insert(name, Arc::new(Kept::new(&dir, key.clone(), &parent)?));
         }
         Ok(NodeArchive {
             root,
             key,
             tenants: Mutex::new(tenants),
+            parent,
             _lock: held,
         })
     }
@@ -236,7 +242,11 @@ impl NodeArchive {
         if let Some(k) = all.get(name) {
             return Ok(Arc::clone(k));
         }
-        let k = Arc::new(Kept::new(&self.root.join(name), self.key.clone())?);
+        let k = Arc::new(Kept::new(
+            &self.root.join(name),
+            self.key.clone(),
+            &self.parent,
+        )?);
         all.insert(name.into(), Arc::clone(&k));
         Ok(k)
     }
@@ -489,9 +499,10 @@ impl NodeArchive {
         // Not synced: lost to a crash, the line is back in its place, which
         // the next hello finds diverged again and moves aside again. The new
         // line's first segment syncs the root (`Archive::sync_dir`, the
-        // directory made), and with it this.
+        // directory made), or finds a sync of it begun since the directory
+        // was made (`archive::Parent`), and with it this.
         fs::rename(&dir, &aside)?;
-        let fresh = Arc::new(Kept::new(&dir, self.key.clone())?);
+        let fresh = Arc::new(Kept::new(&dir, self.key.clone(), &self.parent)?);
         lock(&self.tenants).insert(name.into(), fresh);
         Ok(aside)
     }
@@ -579,9 +590,9 @@ impl NodeArchive {
 }
 
 impl Kept {
-    fn new(dir: &Path, key: Option<Key>) -> io::Result<Kept> {
+    fn new(dir: &Path, key: Option<Key>, parent: &Arc<Parent>) -> io::Result<Kept> {
         Ok(Kept {
-            archive: Archive::with_key(dir, key)?,
+            archive: Archive::in_parent(dir, key, parent)?,
             keeping: Mutex::new(()),
             moved: AtomicBool::new(false),
         })

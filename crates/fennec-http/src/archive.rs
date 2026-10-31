@@ -36,6 +36,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A segment is closed at this size and the next begins.
@@ -107,10 +108,46 @@ pub struct Archive {
     /// taken ([`Self::consolidate`]): an archiver of many tenants looks
     /// only at those written since.
     fresh: AtomicBool,
-    /// Set where this made its directory, until the directory it is in is
-    /// synced ([`Self::sync_dir`]): lost to a crash, the name took every
-    /// file in it along.
-    made: AtomicBool,
+    /// Where this made its directory, its place among the directories made
+    /// in `parent` (0 once synced, or not made here): until the directory
+    /// it is in is synced ([`Self::sync_dir`]), a crash could lose the name
+    /// and every file in it along.
+    made: AtomicU64,
+    parent: Arc<Parent>,
+}
+
+/// The directory archives are made in, synced once for every one made in
+/// it before: a node's tenants made in a pass have their names synced into
+/// its root by the first segment written after, not once a tenant, which
+/// was two fsyncs on the stream thread for each tenant's first segment
+/// rather than one. An archive of its own has a parent of its own.
+#[derive(Default)]
+pub(crate) struct Parent {
+    /// Directories made in it so far.
+    made: AtomicU64,
+    /// How many of them the last sync of it covered.
+    synced: Mutex<u64>,
+}
+
+impl Parent {
+    /// A directory made in it, made before this is called: its place.
+    fn made(&self) -> u64 {
+        self.made.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The directory `dir` is in synced, unless a sync since the `n`th
+    /// directory was made in it covered it. The count is read before the
+    /// sync, so a sync covers only the directories made before it began.
+    fn sync(&self, dir: &Path, n: u64) -> io::Result<()> {
+        let mut synced = self.synced.lock().unwrap_or_else(|e| e.into_inner());
+        if *synced >= n {
+            return Ok(());
+        }
+        let covers = self.made.load(Ordering::SeqCst);
+        sync_dir_of(dir)?;
+        *synced = covers;
+        Ok(())
+    }
 }
 
 fn now_ms() -> u64 {
@@ -345,6 +382,16 @@ impl Archive {
 
     /// An archive whose files are sealed with `key`, or plain without one.
     pub fn with_key(dir: impl AsRef<Path>, key: Option<Key>) -> io::Result<Archive> {
+        Archive::in_parent(dir, key, &Arc::default())
+    }
+
+    /// [`Self::with_key`] in a directory whose sync it shares with the
+    /// other archives made in it ([`Parent`]): a node's tenants in its root.
+    pub(crate) fn in_parent(
+        dir: impl AsRef<Path>,
+        key: Option<Key>,
+        parent: &Arc<Parent>,
+    ) -> io::Result<Archive> {
         let made = !dir.as_ref().is_dir();
         fs::create_dir_all(dir.as_ref())?;
         Ok(Archive {
@@ -352,21 +399,24 @@ impl Archive {
             key,
             roll: AtomicBool::new(false),
             fresh: AtomicBool::new(true),
-            made: AtomicBool::new(made),
+            made: AtomicU64::new(if made { parent.made() } else { 0 }),
+            parent: Arc::clone(parent),
         })
     }
 
     /// Makes every file made, renamed in or removed in the archive's
     /// directory so far durable (`fennec_core::fs::sync_dir`), and the
-    /// directory's own name where this made it. Until then a crash can lose
-    /// a name or bring one back, in any order on some file systems, so it
-    /// runs before a step that stands on the ones before it rather than
-    /// after each (docs/design/replication.md, "A node's archive").
+    /// directory's own name where this made it ([`Parent::sync`]). Until
+    /// then a crash can lose a name or bring one back, in any order on some
+    /// file systems, so it runs before a step that stands on the ones
+    /// before it rather than after each (docs/design/replication.md, "A
+    /// node's archive").
     fn sync_dir(&self) -> io::Result<()> {
         sync_dir_of(&self.dir.join("history"))?;
-        if self.made.load(Ordering::SeqCst) {
-            sync_dir_of(&self.dir)?;
-            self.made.store(false, Ordering::SeqCst);
+        let n = self.made.load(Ordering::SeqCst);
+        if n != 0 {
+            self.parent.sync(&self.dir, n)?;
+            self.made.store(0, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -773,6 +823,16 @@ impl Archive {
     /// Read only where the `history` file would refuse it, so a hello pays
     /// nothing for it; an image `consolidate` took is not asked, since a
     /// segment reaches it and its history is its base image's.
+    ///
+    /// It also takes a sibling fork: the history file moved by `lineage`
+    /// (a promotion here) with nothing written after it, and a hello from
+    /// another promotion of the image's lineage at or past `w.at`. Safe, as
+    /// the image at `w.at` with no segment after it is all the archive
+    /// holds: every change in it is the image's lineage's, which `theirs`
+    /// holds too, and the moved file is the one trace of the other fork, no
+    /// write of which is here to be mixed with `theirs`. It is the archive a
+    /// crash before `lineage`'s sync leaves, which the `history` file takes
+    /// anyway; the other fork saying hello later is refused, as any is.
     fn ends_on_image_of(&self, w: &Writer, theirs: &History, seq: u64) -> io::Result<bool> {
         if w.segment.is_some() {
             return Ok(false);
@@ -780,20 +840,33 @@ impl Archive {
         let Some(&(_, time)) = self.images()?.iter().rev().find(|i| i.0 == w.at) else {
             return Ok(false);
         };
-        let db = self.open_image(&self.image_path(w.at, time))?;
+        // Held to its change as `verify` holds it: a history read from an
+        // image of another change says nothing of `w.at`.
+        let db = self.open_image(w.at, time)?;
         Ok(theirs.continues(db.history().current(), w.at, seq))
     }
 
-    /// An image, opened.
-    fn open_image(&self, path: &Path) -> io::Result<fennec_core::engine::Database> {
+    /// The image of change `seq` taken at `time`, opened, and refused where
+    /// it holds another change than its name says: what it would vouch for,
+    /// a restore's start or the history a hello is held to, it does not.
+    fn open_image(&self, seq: u64, time: u64) -> io::Result<fennec_core::engine::Database> {
+        let path = self.image_path(seq, time);
         let opened = match &self.key {
-            None => fennec_core::fs::open_read_only(path),
+            None => fennec_core::fs::open_read_only(&path),
             Some(_) => {
                 let mut db = fennec_core::engine::Database::new();
-                db.load(&self.read_whole(path)?).map(|_| db)
+                db.load(&self.read_whole(&path)?).map(|_| db)
             }
         };
-        opened.map_err(|e| corrupt(format!("{}: {e}", path.display())))
+        let db = opened.map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+        if db.change_seq() != seq {
+            return Err(corrupt(format!(
+                "{}: the image is at change {}, not {seq}",
+                path.display(),
+                db.change_seq()
+            )));
+        }
+        Ok(db)
     }
 
     /// The history the writes are on moved -- a promotion -- before the
@@ -1125,15 +1198,7 @@ impl Archive {
             ));
         };
         for &(seq, time) in &images {
-            let path = self.image_path(seq, time);
-            let db = self.open_image(&path)?;
-            if db.change_seq() != seq {
-                return Err(corrupt(format!(
-                    "{}: the image is at change {}, not {seq}",
-                    path.display(),
-                    db.change_seq()
-                )));
-            }
+            self.open_image(seq, time)?;
         }
         let segments = self.segments()?;
         let (mut covered, mut to, mut torn) = (first, None, 0);
@@ -1432,5 +1497,33 @@ mod tests {
         let probes: std::collections::HashSet<PathBuf> =
             (0..1000).map(|_| verify_probe()).collect();
         assert_eq!(probes.len(), 1000);
+    }
+
+    /// The archives made in one parent before its sync are covered by it,
+    /// and the ones after it are not: each archive's first `sync_dir` syncs
+    /// the parent only where no sync since it was made has.
+    #[test]
+    fn one_sync_of_the_parent_covers_the_archives_made_before_it() {
+        let root = std::env::temp_dir().join(format!("fennec-parent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let parent = Arc::default();
+        let a = Archive::in_parent(root.join("a"), None, &parent).unwrap();
+        let b = Archive::in_parent(root.join("b"), None, &parent).unwrap();
+        a.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 2, "a's sync covers b");
+        assert_eq!(b.made.load(Ordering::SeqCst), 2);
+        let c = Archive::in_parent(root.join("c"), None, &parent).unwrap();
+        // b's own sync finds the parent synced since b was made, and syncs
+        // only its own directory; c's syncs the parent again.
+        b.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 2);
+        assert_eq!(b.made.load(Ordering::SeqCst), 0);
+        c.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 3);
+        // An archive whose directory was there makes nothing to sync.
+        let again = Archive::in_parent(root.join("a"), None, &parent).unwrap();
+        assert_eq!(again.made.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_dir_all(&root);
     }
 }
