@@ -461,6 +461,112 @@ fn a_writer_that_cannot_refuse_marks_a_statement_broken_while_it_lacks_what_it_r
     assert!(db.statements().get("transfer").unwrap().broken.is_none());
 }
 
+/// A statement marked broken keeps its contract as one that is not, as
+/// the declared plan holds it: the mark is what the schema lacks, and the
+/// tree it was defined as is still the statement a grant names.
+#[test]
+fn a_broken_statement_is_replaced_only_within_its_contract() {
+    use fennec_core::declared::{plan_statements, Declared, Mode, Plan};
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, TRANSFER).unwrap();
+    let drop = fennec_ql::parse_one("drop collection entries").unwrap();
+    db.internally(|db| db.execute(&drop)).unwrap();
+    assert!(db.statements().get("transfer").unwrap().broken.is_some());
+
+    let reads = "create or replace statement transfer($from int) claims (role text) as
+      get accounts select id where id = $from and owner = $jwt.role";
+    let writes = tap.writes.lock().unwrap().len();
+    let e = refused(run(&mut db, reads));
+    assert!(
+        e.contains("statement `transfer` reads, where it wrote: a replacement keeps"),
+        "{e}"
+    );
+    assert_eq!(tap.writes.lock().unwrap().len(), writes, "nothing landed");
+    // The declared plan refuses it alike.
+    let mut d = Declared {
+        collections: Vec::new(),
+        statements: Vec::new(),
+        text: None,
+        migrations: Vec::new(),
+    };
+    let text = format!("create collection accounts (owner text @hash, balance int); {reads}");
+    fennec_ql::schema_into(&mut d, &text).unwrap();
+    let mut plan = Plan::default();
+    plan_statements(&mut plan, db.statements(), &d, Mode::Apply);
+    let kinds: Vec<_> = plan.refusals.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds, ["statement_contract_changed"]);
+
+    // One keeping it lands, holding what it reads.
+    let kept = "create or replace statement transfer($from int, $to int, $amount int)
+      claims (sub text) as
+      set accounts {balance: balance - $amount} where id = $from and owner = $jwt.sub
+        returning id";
+    run(&mut db, kept).unwrap();
+    assert!(db.statements().get("transfer").unwrap().broken.is_none());
+}
+
+/// A `create index` run beside the database lands its schema change
+/// outside `commit`, and works the marks out again as `commit` and a
+/// replica's apply do: the primary, its replica and an open agree.
+#[test]
+fn an_index_built_beside_the_database_clears_the_mark_on_the_primary_as_on_a_replica() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, "create index on entries (by) @hash").unwrap();
+    let probes = "create statement history() claims (sub text) as
+      get accounts select id where owner = $jwt.sub lookup entries on by = owner select amount";
+    run(&mut db, probes).unwrap();
+    run(&mut db, LIKE).unwrap();
+    // A follower copying the collections again, their indexes to come.
+    for drop in [
+        "drop collection entries",
+        "drop index on likes (post, user)",
+    ] {
+        let drop = fennec_ql::parse_one(drop).unwrap();
+        db.internally(|db| db.execute(&drop)).unwrap();
+    }
+    run(
+        &mut db,
+        "create collection entries (src int, dst int, amount int, by text)",
+    )
+    .unwrap();
+    for name in ["history", "like"] {
+        assert!(
+            db.statements().get(name).unwrap().broken.is_some(),
+            "{name}"
+        );
+    }
+
+    let db = std::sync::RwLock::new(db);
+    for index in [
+        "create index on entries (by) @hash",
+        "create index on likes (post, user) @unique",
+    ] {
+        let index = fennec_ql::parse_one(index).unwrap();
+        Database::maintain(&db, &index)
+            .expect("built beside the database")
+            .unwrap();
+    }
+    let db = db.into_inner().unwrap();
+    let replica_tap = Tap::default();
+    let mut replica = replica_tap.database();
+    for (_, record) in tap.writes.lock().unwrap().iter() {
+        replica.apply(record).unwrap();
+    }
+    assert_eq!(held(db.statements()), held(replica.statements()));
+    assert_eq!(
+        held(db.statements()),
+        held(opened(&tap.bytes()).statements())
+    );
+    for name in ["history", "like"] {
+        assert!(
+            db.statements().get(name).unwrap().broken.is_none(),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn a_definition_names_collections_there_and_lookups_an_index_answers() {
     let tap = Tap::default();

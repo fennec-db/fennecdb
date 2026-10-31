@@ -519,6 +519,11 @@ impl Database {
         let (cid, encoded) = (c.id, c.schema.encode());
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);
+        // A schema change landed outside `commit`: the named statements'
+        // marks worked out again, as a replica applying this record works
+        // them out -- the index a broken statement probes may be back.
+        #[cfg(feature = "statements")]
+        self.read_statements();
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
         }
@@ -612,6 +617,9 @@ impl Database {
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);
+        // As `finish_index` does: the marks worked out again.
+        #[cfg(feature = "statements")]
+        self.read_statements();
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
         }

@@ -451,7 +451,14 @@ impl super::Database {
                     "statement `{name}`: `create or replace statement` replaces it"
                 )));
             }
-            if let (Some(tree), None) = (&old.tree, &old.broken) {
+            // Held to the contract wherever the old tree is, broken or
+            // not, as `declared::plan_statements` holds it: a mark is the
+            // schema's lack, and a grant names the statement whatever
+            // the schema holds -- a replacement that writes where the old
+            // one read would start meaning more under the same line. A
+            // text that misreads keeps no tree, and is defined again as
+            // anything.
+            if let Some(tree) = &old.tree {
                 if let Some(why) = def.breaks_contract(tree) {
                     return Err(Error::Query(why));
                 }

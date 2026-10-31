@@ -675,7 +675,9 @@ applied by a replica and passed over by `/_changes`; every build keeps it.
 With the feature an open reads its text back (`fennec_ql::install`) and
 holds its digest, and a schema change's commit holds its `depends`:
 refused naming it, or marked broken -- `Database::internally`, an apply,
-an open -- never failing one, the mark derived, never stored. `$name` is a
+an open -- never failing one, the mark derived wherever a schema change
+lands (`Database::maintain`'s too), never stored, and a replacement held
+to the old tree's contract, broken or not. `$name` is a
 definition's alone, and `call` and `statements` reserve no word: an alias takes either
 (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's and fennec-ql's
 `statements` feature, outside `full` and off in the workspace's
