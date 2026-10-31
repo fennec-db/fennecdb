@@ -204,7 +204,14 @@ impl NodeArchive {
     /// `key` or plain.
     pub fn new(root: impl AsRef<Path>, key: Option<Key>) -> io::Result<NodeArchive> {
         let root = root.as_ref().to_path_buf();
+        let made = !root.is_dir();
         fs::create_dir_all(&root)?;
+        // Its name durable once, at the start: lost to a crash, every
+        // tenant's archive went with it. A tenant's own directory is synced
+        // into it with the tenant's first segment (`Archive::sync_dir`).
+        if made {
+            fennec_core::fs::sync_dir(&root).map_err(|e| io::Error::other(e.to_string()))?;
+        }
         let held = fennec_abi::lock::hold(root.join("archiving"))
             .map_err(|e| io::Error::other(format!("{}: {e}", root.display())))?;
         let mut tenants = BTreeMap::new();
@@ -479,6 +486,10 @@ impl NodeArchive {
             n += 1;
             aside = self.root.join(format!("{name}.{history:016x}-{n}"));
         }
+        // Not synced: lost to a crash, the line is back in its place, which
+        // the next hello finds diverged again and moves aside again. The new
+        // line's first segment syncs the root (`Archive::sync_dir`, the
+        // directory made), and with it this.
         fs::rename(&dir, &aside)?;
         let fresh = Arc::new(Kept::new(&dir, self.key.clone())?);
         lock(&self.tenants).insert(name.into(), fresh);
@@ -753,7 +764,13 @@ pub fn restore_all(
             "a change names one database's: a node's tenants are restored to a moment",
         ));
     }
+    let made = !out.is_dir();
     fs::create_dir_all(out)?;
+    // Its name durable too, as each file restored into it is
+    // (`Archive::restore`): lost to a crash, it took them all along.
+    if made {
+        fennec_core::fs::sync_dir(out).map_err(|e| io::Error::other(e.to_string()))?;
+    }
     let mut by_tenant: BTreeMap<String, Vec<Line>> = BTreeMap::new();
     for line in lines(root)? {
         by_tenant.entry(line.tenant.clone()).or_default().push(line);

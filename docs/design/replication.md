@@ -235,6 +235,40 @@ into the connection loop, four turns a side read 21.5-22.0 against
 15.7-21.5: main ran in a 15-16 us mode three times in twelve, this build
 never). Nothing below `fennec-http` changed.
 
+An archive's names are made durable before what stands on them, not each
+as it is made (`Archive::sync_dir`, through fennec-core's `fs::sync_dir`):
+until its directory is synced a crash can lose a file made or renamed in,
+or bring one removed back, in any order on some file systems. A new segment
+syncs the directory after its magic and before its first write, so its name
+lasts as long as its writes do -- an fsync of the file alone left a segment
+written for an hour to a crash -- and the names before it are on disk
+first: a segment landed without the image a hello brought began after
+changes no segment holds and no image ends, which no restore passes, and a
+crash before the sync leaves a segment holding no write, which `position`
+removes. `prune` syncs before it lets anything go (the image a restore now
+starts from, renamed in by a hello or `consolidate` with no sync of its own,
+and `began`) and again between the images and the segments, since an image
+brought back with the segments after it gone is one `verify` refuses; a
+segment brought back holds writes before the oldest image, which a restore
+passes over. A history moved with no image is synced at once, the writes
+after it going on in the open segment, and an image taken where the
+archive held one is synced before the history naming its lineage: landed
+alone, that history had the primary send a fork's writes on after the old
+lineage's. A first image is not, since an fsync more a tenant made a node's
+first pass 44% longer (`keep_began`): a hello's image whose history a crash
+lost is read for it where the history file would refuse the primary
+(`ends_on_image_of`; `an_image_whose_history_a_crash_lost_goes_on` leaves
+that state by hand and was refused as another database without it), and a
+history without its first image asks for one again. A restore, a backup and
+an unsealed file are synced into place before they return, and a node's
+root once as it is made; `consolidating.fennec`, the side files and a line
+moved aside are not, each harmless brought back or lost, or moved again by
+the next hello. A 1 GiB flat-out `take` of 1 KB records, 17 segments, four
+turns a side: the sync took 4.75-5.23 ms a segment (`F_FULLFSYNC`) against
+260-290 ms writing one, and the runs 4.40-4.89 s against 4.41-4.82 without
+it; a feed pays it each 64 MB or each image taken (`--image-every`, an hour
+unless given).
+
 ## Change data capture
 
 **`/_changes` reads the writes on disk, documents and all** (`cdc.rs`,
