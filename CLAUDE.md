@@ -342,7 +342,8 @@ makes none (`then`, never `then_some`).
 **[A scoped token is held to its rules at every level, twice for
 writes.](docs/design/access.md#scoped-tokens)** A new path that runs a
 statement must go through `scoped()` or it reads everything, and a scoped
-write run outside `within()` goes unchecked; a write over a row meets
+write run outside `within()` goes unchecked, a named statement's call
+alone (`run_as`); a write over a row meets
 `before_overwrite` with the row as it was, which judges `update(a, b)` and
 transitions (`new.`, granting `update` alone), and `append-only` binds
 every scoped token. A scoped stream tells deletions only of ids it sent, a
@@ -662,31 +663,37 @@ engine.](docs/design/fennecql.md#declared-schemas)** `declared::plan`
 plans additions alone, never guessing a rename; `make schema-golden`
 writes `integrations/schema-golden.json`.
 
-**[Named statements are stored, and nothing runs one
-yet.](docs/design/named-statements.md#what-is-built)** `create statement`,
-`drop statement` and `call` parse into `fennec_core::named`'s trees, boxed
-so a `Statement` stays a `get`'s size; a call is refused before any block
-opens (`NOT_BUILT`), in `scoped()` and MCP's `write` too, and so is a
-definition but where `Database::allow_definitions` (tests) lets it, until
-authority lands. A definition is record kind 13 (`engine/stored.rs`), one
-write `writes_in` counts, alone or in a block (`Undo::Statements`), its
-table an `Arc` changed by a new one, kept by every image and by `Beside`,
-applied by a replica and passed over by `/_changes`; every build keeps it.
-With the feature an open reads its text back (`fennec_ql::install`) and
-holds its digest, and a schema change's commit holds its `depends`:
-refused naming it, or marked broken -- `Database::internally`, an apply,
-an open -- never failing one, the mark derived wherever a schema change
-lands (`Database::maintain`'s too), never stored, and a replacement held
-to the old tree's contract, broken or not. `$name` is a
-definition's alone, and `call` and `statements` reserve no word: an alias takes either
-(`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's and fennec-ql's
-`statements` feature, outside `full` and off in the workspace's
-dependency: the server, the shell and the native library name it, the
-module refuses in words of its own, and a path only a definition takes
-stays out of the hot parse, `#[cold]`. `Definition::canonical` writes a
-field only where it holds something and an operator by a byte of its own;
-a change reading a stored text otherwise raises `GRAMMAR_EPOCH`, and `make
-fennecql-corpus` holds every FennecQL text of the repository to main's tree.
+**[Named statements are records of their database, called with their own
+text's authority.](docs/design/named-statements.md#what-is-built)**
+`create statement`, `drop statement` and `call` parse into
+`fennec_core::named`'s trees, boxed so a `Statement` stays a `get`'s size.
+A definition is record kind 13 (`engine/stored.rs`), one write `writes_in`
+counts, alone or in a block (`Undo::Statements`), its table an `Arc`
+changed by a new one, kept by every image and by `Beside`, applied by a
+replica and passed over by `/_changes`; every build keeps it. With the
+feature an open reads its text back (`fennec_ql::install`) and holds its
+digest, and a schema change's commit holds its `depends`: refused naming
+it, or marked broken -- `Database::internally`, an apply, an open -- never
+failing one, the mark derived, never stored; a replacement keeps the old
+tree's contract, and a writing body reads through an index or says `scans`
+(`body_checked`). A call is a write at every site, run in its caller's
+block under the write lock (`Database::call`), judged statement, claims,
+arguments, `check`, broken (`callee`), answering its last statement, put
+back past `--call-max-rows` (`examine`). A scoped token calls what a `call`
+line grants (else a missing one's 404; `* call` refused), as itself (`as`
+403), alone in its `/batch`, held to `--call-rate`; `judge_call` holds the
+body to `append-only` under the lock and `run_as` runs it outside
+`within()`, the one statement so, unmasked, its refusals told
+(`told_call`). MCP, the router and a sync replica refuse them (`NOT_BUILT`,
+`NAMED`). `$name` is a definition's alone, and `call` and `statements`
+reserve no word (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's
+and fennec-ql's `statements` feature, outside `full`: the server, the shell
+and the native library name it, the module refuses in words of its own,
+and a path only a definition takes stays out of the hot parse, `#[cold]`.
+`Definition::canonical` writes a field only where it holds something and an
+operator by a byte of its own; a change reading a stored text otherwise
+raises `GRAMMAR_EPOCH`, and `make fennecql-corpus` holds every FennecQL text
+of the repository to main's tree.
 
 ### Held writes
 

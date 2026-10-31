@@ -125,10 +125,15 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
         buf.clear();
         TEXT.with(|noted| {
             let mut noted = noted.borrow_mut();
-            shape(if noted.is_empty() { text } else { &noted }, &mut buf);
+            let source = if noted.is_empty() {
+                text
+            } else {
+                noted.as_str()
+            };
+            shape(source, &mut buf);
+            crate::audit::statement(tenant, source, &buf, failed);
             noted.clear();
         });
-        crate::audit::statement(tenant, &buf, failed);
         let id = hash(tenant, &buf);
         let shard = &shards()[MINE.with(|m| *m)];
         let mut map = shard.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -313,6 +318,15 @@ fn hash(tenant: Option<&str>, shape: &str) -> u64 {
 /// 128-dim rows spent 1.7 ms of its 12.6 here, over the pg wire as it was
 /// (79k -> 92k rows/s).
 pub fn shape(text: &str, out: &mut String) {
+    shape_to(text, out, TEXT_MAX)
+}
+
+/// [`shape`], as far as `max` bytes of it: an audit line's schema change is
+/// shaped as far as a definition's longest text, so a definition is logged
+/// whole (`audit::statement`). Out of line: inlined into `record` as well,
+/// the audit's copy made it twice, 2.7 KB of the server.
+#[inline(never)]
+pub(crate) fn shape_to(text: &str, out: &mut String, max: usize) {
     let b = text.as_bytes();
     let mut n = 0u32;
     let mut i = 0;
@@ -321,7 +335,7 @@ pub fn shape(text: &str, out: &mut String) {
         out.push('$');
         out.push_str(itoa(n, &mut [0u8; 10]));
     };
-    while i < b.len() && out.len() <= TEXT_MAX {
+    while i < b.len() && out.len() <= max {
         let c = b[i];
         if c.is_ascii_whitespace() {
             while i < b.len() && b[i].is_ascii_whitespace() {

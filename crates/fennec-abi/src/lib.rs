@@ -904,8 +904,7 @@ mod tests {
     /// trees: one it lacks its `create`, one written otherwise and the same
     /// nothing, one changed its `create or replace` where it keeps the
     /// contract and a refusal where not; following, each held to be there
-    /// and the same. Applied, a definition meets the engine's refusal until
-    /// calls are scoped.
+    /// and the same. Applied, the plan defines what it planned.
     #[test]
     fn a_schemas_statements_are_planned_by_their_trees() {
         fennec_ql::install();
@@ -923,13 +922,11 @@ mod tests {
         exec(&mut db, collections, &[]).unwrap();
         let plan = |db: &Database, s: &str| schema_plan(db, &request(s));
         assert_eq!(plan(&db, mine).statements, [mine]);
-        let e = schema(&mut db, &request(mine), true, None).unwrap_err();
-        assert!(e.to_string().contains(fennec_core::named::NOT_BUILT), "{e}");
         let followed = follow(&db, &request(mine)).unwrap().plan;
         assert_eq!(followed.refusals[0].kind, "statement_missing");
-
-        db.allow_definitions();
-        exec(&mut db, mine, &[]).unwrap();
+        // Applied, the plan defines it.
+        schema(&mut db, &request(mine), true, None).unwrap();
+        assert!(db.statements().get("mine").is_some());
         let written_otherwise = mine.replace(" as ", "\n  -- the caller's\n  as ");
         assert_eq!(plan(&db, &written_otherwise), declared::Plan::default());
         let kept = mine.replace("select id", "select id order id");

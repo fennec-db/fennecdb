@@ -310,21 +310,18 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     shell</a>.</li>
 </ul>
 
-<h3 id="named-statements">Named statements, not built yet</h3>
+<h3 id="named-statements">Named statements</h3>
 
 <p>A named statement is a statement, or a block of them, defined once in a
 database and called by name with typed arguments, running with its own
 text's authority — PostgreSQL's function used as an API, with FennecQL for
-its body. Its forms are read, and every one is refused, as <i>named
-statements are not built yet</i>, until the slice that scopes a call lands:
-a statement called with nothing to scope it is never run, and none is
-defined that nothing could call. What keeps one is built: a definition is
-a record of its database's file, kept by every compact, sent to its
-replicas and read back by every open, which checks that its text still
-reads as the statement it was; a schema change taking away a field, a
-collection or an index one reads is refused naming it. A file holding
-them opens in every build, the browser module's included, which keeps
-them as they came.</p>
+its body. The server's token defines one, as it makes any schema change; a
+scoped token calls only what its policy grants it (<a href="http-access.html#calls">Calling a named
+statement</a>). A definition is a record of its database's file, kept by
+every compact, sent to its replicas and read back by every open, which
+checks that its text still reads as the statement it was; a schema change
+taking away a field, a collection or an index one reads is refused naming
+it.</p>
 
 <pre data-lang="fennecql">create [or replace] statement &lt;name&gt;($p &lt;type&gt; [= &lt;literal&gt;], ...)
        [claims (&lt;c&gt; &lt;type&gt; [from "&lt;claim&gt;"], ...)] [public] [scans] [comment '&lt;text&gt;'] [check &lt;expr&gt;]
@@ -337,16 +334,59 @@ call &lt;name&gt; [{p: value, ...} | $1] [as {c: value, ...}]   -- SQL's CALL &l
 and <code>del</code> with a <code>where</code> or a pick, and its last
 statement names the fields it answers; a <code>put</code>, a parameter's
 documents, a schema change, a <code>call</code> or a collection whose name
-starts with <code>_</code> is refused as the definition is read. A
+starts with <code>_</code> is refused as the definition is read. Defining a
+statement also checks that each field a body writes or filters on is one its
+collection holds, and that a writing body reads its rows through an index
+(an equality, an <code>in</code> or a range over <code>id</code> or an
+indexed field, a pick an ordered index walks, <code>near</code>,
+<code>match</code>, <code>fuse</code>) unless the definition says
+<code>scans</code>: a call holds the write lock while it walks. A
 <code>$name</code> outside a definition is refused: a statement sent alone
-numbers its parameters, <code>$1</code>. <code>statements</code> lists
-none, and <code>describe statement</code> finds none. A schema declared in
-code — a <code>schema.fennecql</code> a server or the native library
-applies — may hold <code>create statement</code>s after the collections
-they read: the plan compares each with the database's by what it means,
-never its text, and applying one is refused as not built yet. The browser
-module reads none of these forms, refusing them as <i>named statements are
-a server's</i>.</p>
+numbers its parameters, <code>$1</code>.</p>
+
+<p>A call runs through <code>/query</code> and <code>/batch</code>, the shell
+and the native library. It is one block under the write lock: its writes
+land together or not at all, a read in it sees the writes before it, and the
+answer is its last statement's, as <code>/query</code> would give it. A call
+is a write wherever that is asked, so a read-only server, a replica and a
+marked read refuse one whose body only reads, and an
+<code>Idempotency-Key</code> makes it once. The arguments are a document, a
+parameter's object or SQL's list, by name or by place, and the signature
+types them: one missing, extra, <code>null</code> where the parameter has no
+default, or of another type is a 400 naming it. A <code>check</code> that
+is false is a 400. The claims a statement declares come from the token, or
+from <code>as {…}</code> for the server's token alone; one the caller lacks
+— missing, <code>null</code>, <code>""</code>, an empty list or of another
+type — is a 403, and nothing runs; so is a list claim of more than 1 000
+values, never cut to them. A <code>require … else '…'</code> that
+is not met puts the block back, a 412 carrying its <code>reason</code>. A
+broken statement, whose text no longer reads or whose collection, field or
+index the schema lacks, is a 409 saying why, once its claims, arguments and
+<code>check</code> were asked. A call examines at most
+<code>--call-max-rows</code> rows, 100 000, counted however its statements
+read them — a scan, an index, an ordered walk, <code>near</code>,
+<code>match</code> and a <code>lookup</code>'s children alike: past it the
+block is put back and the call is a 400 naming the bound, never answered
+from the rows it reached.</p>
+
+<p><code>statements</code> lists them and <code>describe statement</code>
+describes one, its text and what it depends on included, to the server's
+token; a scoped token is told what it may call by <code>/_whoami</code>. A
+schema declared in code — a <code>schema.fennecql</code> a server or the
+native library applies — may hold <code>create statement</code>s after the
+collections they read: the plan compares each with the database's by what it
+means, never its text, and applying a planned definition defines it. The
+browser module reads none of these forms, refusing them as <i>named
+statements are a server's</i>; a file holding them opens in every build, the
+module's included, which keeps them as they came.</p>
+
+<p>Not built yet: <code>POST /_call/&lt;name&gt;</code>, a
+<code>call</code> method in the SDKs, the studio's pages for statements, MCP
+tools for them (MCP's <code>write</code> refuses a <code>call</code>) and
+<code>Fennec-Wait</code> on a call. A <a href="sync.html#limits">sync
+replica</a> refuses <code>call</code>, <code>create statement</code> and
+<code>drop statement</code>, and a router refuses a tenant's schema that
+declares one.</p>
 
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a

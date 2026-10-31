@@ -212,6 +212,9 @@ class Run {
         for (const x of w.batch) await this.write(x, t);
       });
     }
+    // A FennecQL text as an app runs it on the replica itself: the page's
+    // raw FennecQL is the replica's own database, `local`.
+    if (w.text !== undefined) return this.db.local.query(w.text, w.params ?? []);
     const t = on ?? this.db;
     // `"require": n`, `"reason"` and `"returning"`: the builders'
     // `{ require: n }`, `{ reason }` and `{ returning }`.

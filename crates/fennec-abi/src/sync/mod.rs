@@ -600,6 +600,20 @@ const PICKED: &str = "a synced write that picks its rows with `order` or `limit`
                       them with `returning`, would pick and answer the replica's: it goes to \
                       the server itself";
 
+/// A named statement's call, definition or drop on a synced database. A
+/// replica holds its shapes' rows, not its server's statements: a call
+/// would run against the replica's part of the rows -- a transfer's credit
+/// finding no account the shape does not hold, its `require` counting the
+/// replica's rows -- and a definition would be one the server never had.
+/// Refused whatever else the text holds, before any of it is applied or
+/// queued, as the browser's sync refuses it
+/// (`integrations/sync-scenarios.json`); forwarding the call instead would
+/// need settling by the collections a body writes and a barrier in the
+/// queue (`docs/design/named-statements.md`).
+const NAMED: &str = "a synced database runs no named statement: `call`, `create statement` and \
+                     `drop statement` go to the server through its HTTP client, and what a call \
+                     writes comes back through the shapes' streams";
+
 /// What [`Sync::write`] made of one statement.
 struct Applied {
     /// The lines the server is sent: a text and its parameters.
@@ -1761,6 +1775,12 @@ impl Sync {
         let mut other = 0;
         let mut guarded = false;
         for s in stmts {
+            // Before any other statement is counted: a text holding a call
+            // behind a synced write lands neither, and a call names no
+            // collection the loop below would stop at.
+            if s.is_named() {
+                return Err(Error::Query(NAMED.into()));
+            }
             if let Statement::Select(sel) = s {
                 guarded |= sel.require.is_some() && self.synced(&sel.collection);
             }

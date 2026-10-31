@@ -45,13 +45,13 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">10 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">274 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">275 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 51 KB brotli as they are served with no build step; a bundler keeps
+imports, 52 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -782,7 +782,7 @@ version's tables is refused: its ranks would mean something else.</p>
 the rest. The release ships <code>fennec.wasm</code> alone, with every
 feature; another set is a build option.</p>
 
-<pre data-lang="bash">make wasm                              # every feature: 274 KB brotli
+<pre data-lang="bash">make wasm                              # every feature: 275 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
 make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 204 KB

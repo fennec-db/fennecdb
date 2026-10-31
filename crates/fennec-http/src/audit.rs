@@ -422,26 +422,70 @@ pub fn refused() -> u64 {
 
 static REFUSED: AtomicU64 = AtomicU64::new(0);
 
-/// A statement counted by its shape (`statements::record`): an event where
-/// it changes the schema.
-pub fn statement(tenant: Option<&str>, shape: &str, failed: bool) {
+/// The statements of `text` counted as `shape` (`statements::record`): an
+/// event, by its own shape, for each that changes the schema.
+///
+/// Each statement as the parser reads one (`fennec_ql::spans`): a
+/// definition's `begin ... end` holds `;`s of its own, and split on `;` it
+/// was logged as far as its first. Shaped as far as a definition's longest
+/// text (`named::MAX_TEXT`), past the 1 000 bytes a count keeps, so one is
+/// logged whole. A text the parser refuses is split on `;`, as it came.
+pub fn statement(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
     if !on() {
         return;
     }
-    for one in shape.split(';') {
-        let word = one.split_whitespace().next().unwrap_or("");
-        if ["create", "drop", "alter", "compact"]
-            .iter()
-            .any(|w| word.eq_ignore_ascii_case(w))
-        {
-            let mut fields = vec![("statement", Field::Text(one.trim()))];
-            if let Some(t) = tenant {
-                fields.push(("tenant", Field::Text(t)));
-            }
-            fields.push(("failed", Field::Bool(failed)));
-            event("schema", &fields);
-        }
+    // Most requests change no schema, and ask nothing more.
+    if shape.split(';').any(changes_schema) {
+        schema_events(tenant, text, shape, failed);
     }
+}
+
+/// [`statement`]'s events, out of line: a schema change is rare, and the
+/// path every statement takes stays as short as it was.
+#[cold]
+#[inline(never)]
+fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
+    let mut each: Vec<String> = Vec::new();
+    match fennec_ql::spans(text) {
+        Ok(spans) => {
+            for (from, to) in spans {
+                let s = text.get(from..to).unwrap_or_default();
+                let s = s.trim_end_matches(|c: char| c == ';' || c.is_ascii_whitespace());
+                if changes_schema(s) {
+                    let mut one = String::new();
+                    crate::statements::shape_to(s, &mut one, fennec_core::named::MAX_TEXT);
+                    each.push(one);
+                }
+            }
+        }
+        Err(_) => each.extend(
+            shape
+                .split(';')
+                .filter(|o| changes_schema(o))
+                .map(|o| o.to_string()),
+        ),
+    }
+    for one in &each {
+        let mut fields = vec![("statement", Field::Text(one.trim_ascii()))];
+        if let Some(t) = tenant {
+            fields.push(("tenant", Field::Text(t)));
+        }
+        fields.push(("failed", Field::Bool(failed)));
+        event("schema", &fields);
+    }
+}
+
+/// Whether a statement, or its shape, starts with a word changing the
+/// schema.
+fn changes_schema(one: &str) -> bool {
+    let word = one
+        .trim_ascii_start()
+        .split(|c: char| c.is_ascii_whitespace())
+        .next()
+        .unwrap_or("");
+    ["create", "drop", "alter", "compact"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
 }
 
 /// An HTTP request answered with `status`: refused for its token (401), it

@@ -250,7 +250,9 @@ export class Fennec {
     // and they go again as JSON.
     if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact, quiet);
     if (res.kind === 'error') {
-      const e = new FennecError(res.message);
+      // On a sync's replica a named statement is the sync's refusal,
+      // in the native core's words (`NAMED`).
+      const e = new FennecError(replicas.has(this) && res.message.endsWith(UNBUILT) ? NAMED : res.message);
       // A text of several says which statement stopped it, from 0, as a
       // `/batch` does.
       if (typeof res.at === 'number') e.at = res.at;
@@ -1307,6 +1309,17 @@ const UPSERT_KEY = "an upsert into a synced collection names each document's key
 // A job queue's claim: the replica would pick its own rows and answer
 // them, and the server its own -- two workers each told they hold a job.
 const PICKED = "a synced write that picks its rows with `order` or `limit`, or answers them with `returning`, would pick and answer the replica's: it goes to the server itself";
+// A named statement's call, definition or drop: a replica holds its shapes'
+// rows, not its server's statements, so a call would run against its part
+// of the rows and a definition be one the server never had. The module,
+// built without them, refuses each as it reads the text, before any of it
+// runs; a replica's database tells it in the native core's words
+// (`Fennec#run`), the scenario file holding both runners to them.
+const NAMED = "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client, and what a call writes comes back through the shapes' streams";
+/** The module's words for them (fennec-ql's `UNBUILT`). */
+const UNBUILT = "named statements are a server's; this module is built without them";
+/** The databases a `FennecSync` keeps as its replica, while it does. */
+const replicas = new WeakSet();
 
 /** Operator spellings in a REST filter. */
 const REST_OPS = {
@@ -1615,7 +1628,10 @@ export class FennecSync {
     });
   }
 
-  /** The local database. For raw FennecQL: `db.local.run(...)`. */
+  /**
+   * The local database. For raw FennecQL: `db.local.run(...)`; a named
+   * statement there is refused as the server's (`NAMED`).
+   */
   get local() {
     return this.#local;
   }
@@ -1778,6 +1794,7 @@ export class FennecSync {
   /** Closes the subscriptions and gives up the lead. The local database stays open. */
   close() {
     this.#closed = true;
+    replicas.delete(this.#local);
     this.#abort.abort();
     for (const s of this.#shapes.values()) this.#cancel(s);
     for (const w of this.#waits) clearTimeout(w.t);
@@ -2436,6 +2453,10 @@ export class FennecSync {
   // ------------------------------------------------------------ stream
 
   async start() {
+    // From here its raw FennecQL (`local`) refuses a named statement in
+    // the sync's words, as a native binding's `run` on a synced database
+    // does; `close` gives the database back.
+    replicas.add(this.#local);
     await this.#loadPersist();
     for (const text of SYNC_STATE) this.#local.run(text);
     this.#load();

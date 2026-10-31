@@ -79,12 +79,10 @@ impl Sink for Tap {
 }
 
 impl Tap {
-    /// A database writing into the tap, which defines named statements.
+    /// A database writing into the tap.
     fn database(&self) -> Database {
         fennec_ql::install();
-        let mut db = Database::with_sink(Box::new(self.clone()));
-        db.allow_definitions();
-        db
+        Database::with_sink(Box::new(self.clone()))
     }
 
     fn bytes(&self) -> Vec<u8> {
@@ -278,7 +276,6 @@ fn a_compact_keeps_the_statements_as_they_were() {
             true => fennec_core::fs::open_mapped(&path).unwrap(),
             false => fennec_core::fs::open(&path).unwrap(),
         };
-        db.allow_definitions();
         run(&mut db, SCHEMA).unwrap();
         run(&mut db, TRANSFER).unwrap();
         run(
@@ -589,14 +586,6 @@ fn a_definition_names_collections_there_and_lookups_an_index_answers() {
     );
 }
 
-#[test]
-fn a_database_refuses_definitions_it_was_not_let_take() {
-    let mut db = Database::new();
-    run(&mut db, SCHEMA).unwrap();
-    let e = refused(run(&mut db, LIKE));
-    assert!(e.contains(fennec_core::named::NOT_BUILT), "{e}");
-}
-
 /// Holds every digest across grammar epochs: the fixture a build of epoch
 /// 1 wrote, `stale` in it a record whose digest no tree of its text has --
 /// what a later grammar reading the text otherwise would find.
@@ -642,5 +631,15 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
     assert!(
         why.starts_with("its text reads as another statement"),
         "{why}"
+    );
+    // An unchanged digest calls; another is refused as broken, with why.
+    let mut db = db;
+    let like = fennec_ql::parse_one("call like {post: 1} as {sub: 'alice'}").unwrap();
+    assert!(db.execute(&like).unwrap().rows().is_some());
+    let stale = fennec_ql::parse_one("call stale").unwrap();
+    let e = db.execute(&stale).unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.contains("reads as another statement")),
+        "{e}"
     );
 }

@@ -33,6 +33,10 @@ mod handover;
 mod limit;
 #[cfg(not(target_arch = "wasm32"))]
 pub use limit::{Landing, Limit};
+#[cfg(feature = "statements")]
+mod call;
+#[cfg(feature = "statements")]
+pub use call::Callee;
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -3754,10 +3758,15 @@ pub struct Database {
     /// ([`Self::internally`]).
     #[cfg_attr(not(feature = "statements"), allow(dead_code))]
     internal: bool,
-    /// Whether `create statement` and `drop statement` run here
-    /// ([`Self::allow_definitions`]).
+    /// The rows a call's statements may still examine, `usize::MAX`
+    /// outside a call: what `--call-max-rows` bounds
+    /// ([`Self::set_call_max_rows`]). An atomic for `Sync` alone, as the
+    /// sink's `Mutex` is: only the writer that runs the call touches it.
     #[cfg(feature = "statements")]
-    defines: bool,
+    call_left: std::sync::atomic::AtomicUsize,
+    /// `--call-max-rows`.
+    #[cfg(feature = "statements")]
+    call_max_rows: usize,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -3828,7 +3837,9 @@ impl Database {
             statements: Arc::default(),
             internal: false,
             #[cfg(feature = "statements")]
-            defines: false,
+            call_left: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            #[cfg(feature = "statements")]
+            call_max_rows: crate::named::CALL_MAX_ROWS,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -6242,12 +6253,6 @@ impl Database {
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
-        // Before anything of the block runs, or a write before a `call`
-        // would have landed beside a refusal.
-        #[cfg(feature = "statements")]
-        if let Some(i) = stmts.iter().position(|(s, _)| self.refuses_named(s)) {
-            return Err((i, not_named()));
-        }
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
             return Err((
                 i,
@@ -6341,11 +6346,9 @@ impl Database {
                 &self.collection(name)?.schema,
             )])),
             #[cfg(feature = "statements")]
-            Statement::ListStatements => Ok(no_statements()),
+            Statement::ListStatements => Ok(self.list_statements()),
             #[cfg(feature = "statements")]
-            Statement::DescribeStatement(name) => Err(no_statement(name)),
-            #[cfg(feature = "statements")]
-            s if s.is_named() => Err(not_named()),
+            Statement::DescribeStatement(name) => self.describe_statement(name),
             _ => Err(Error::Query("this statement requires write access".into())),
         }
     }
@@ -6512,11 +6515,6 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
-        // Refused before a block opens: nothing of it may run.
-        #[cfg(feature = "statements")]
-        if self.refuses_named(stmt) {
-            return Err(not_named());
-        }
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the
@@ -6643,15 +6641,15 @@ impl Database {
             )])),
             Statement::Compact(which) => self.compact(which.as_deref(), true),
             #[cfg(feature = "statements")]
-            Statement::ListStatements => Ok(no_statements()),
+            Statement::ListStatements => Ok(self.list_statements()),
             #[cfg(feature = "statements")]
-            Statement::DescribeStatement(name) => Err(no_statement(name)),
+            Statement::DescribeStatement(name) => self.describe_statement(name),
             #[cfg(feature = "statements")]
             Statement::CreateStatement(def) => self.define_statement(def),
             #[cfg(feature = "statements")]
             Statement::DropStatement { name, if_exists } => self.drop_statement(name, *if_exists),
             #[cfg(feature = "statements")]
-            Statement::Call(_) => Err(not_named()),
+            Statement::Call(c) => self.call(c, params),
         }
     }
 
@@ -8046,8 +8044,16 @@ impl Database {
         };
         let want = cap.unwrap_or(usize::MAX);
 
+        // What a call's statements may still examine (`--call-max-rows`),
+        // `usize::MAX` for every other statement, whose loops are the ones
+        // they were: a call's take one row past its room, and is refused
+        // for it below. A comparison a row in every statement's loop cost
+        // the scan 0.3-1.7% in turns against main.
+        let room = self.call_room();
         let Some(f) = filter else {
             plan(|| "filter: none, rows in id order".into());
+            let n = cap.unwrap_or(usize::MAX).min(c.store.len());
+            self.examine(n)?;
             return Ok(match cap {
                 Some(k) => c.store.iter_ids().take(k).collect(),
                 None => c.store.ids(),
@@ -8055,25 +8061,22 @@ impl Database {
         };
 
         let mut out = Vec::new();
-        let mut tested = 0usize;
+        let tested;
         let test = Filter::new(c, f, &ctx);
         let scanned = match self.filter_candidates(c, f, params, range_want)? {
             // The filter is exactly what the index answered: no row needs a
             // second look.
             Some((mut b, true)) => {
                 b.truncate(want);
+                self.examine(b.len())?;
                 return Ok(b);
             }
             Some((b, false)) => {
-                for id in b {
-                    if out.len() >= want {
-                        break;
-                    }
-                    tested += 1;
-                    if test.matches(id, &ctx)? {
-                        out.push(id);
-                    }
-                }
+                let b = b.into_iter();
+                tested = match room {
+                    usize::MAX => test_each(b, want, &test, &ctx, &mut out)?,
+                    _ => test_each(b.take(room + 1), want, &test, &ctx, &mut out)?,
+                };
                 false
             }
             // No index: the full scan, read lazily so a cap stops it early,
@@ -8087,18 +8090,14 @@ impl Database {
                     .iter_ids_from(f.conjunct_id_floor(params).unwrap_or(0));
                 #[cfg(target_arch = "wasm32")]
                 let ids = c.store.iter_ids();
-                for id in ids {
-                    if out.len() >= want {
-                        break;
-                    }
-                    tested += 1;
-                    if test.matches(id, &ctx)? {
-                        out.push(id);
-                    }
-                }
+                tested = match room {
+                    usize::MAX => test_each(ids, want, &test, &ctx, &mut out)?,
+                    _ => test_each(ids.take(room + 1), want, &test, &ctx, &mut out)?,
+                };
                 true
             }
         };
+        self.examine(tested)?;
         plan(|| {
             let what = if scanned {
                 format!("a full scan, {tested} of {} rows tested", c.store.len())
@@ -8510,6 +8509,7 @@ impl Database {
                         None => FilterProbe::new(c.store.ids()),
                     };
                     probe.run(usize::MAX, matches)?;
+                    self.examine(probe.tested.max(probe.matched.len()))?;
                     let ids = probe.into_sorted();
                     plan(|| format!("near: the {} rows searched exactly", ids.len()));
                     return sp.search_ids(qv, want, near.ef, &ids);
@@ -8525,6 +8525,9 @@ impl Database {
         let cap = if near.exact { usize::MAX } else { budget + 1 };
         let total = probe.rows.len();
         let whole = probe.run(cap, matches)?;
+        // The rows the filter tested, or an index answered exactly, charged
+        // to a call as a scan's are: `exact` tests every one.
+        self.examine(probe.tested.max(probe.matched.len()))?;
         // Rows an index answered exactly were not probed; that step said so.
         if total > 0 {
             plan(|| {
@@ -8859,6 +8862,7 @@ impl Database {
             out.push(id);
             Ok(out.len() < want)
         })?;
+        self.examine(walked.max(out.len()))?;
         plan(|| {
             let dir = if *asc { "" } else { " desc" };
             if gave_up {
@@ -8993,6 +8997,7 @@ impl Database {
             out.push(id);
             Ok(out.len() < want)
         })?;
+        self.examine(walked)?;
         plan(|| {
             // One text for every outcome: each `format!` is code of its own
             // in the browser module.
@@ -9569,6 +9574,8 @@ impl Database {
         let k = whole_k as f32;
         let text = self.run_match(c, sel, m, depth, params, ctx)?;
         let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
+        // Both sides charged to a call: `run_match` charged its own.
+        self.examine(vectors.len())?;
         plan(|| {
             format!(
                 "fuse: reciprocal rank, k = {whole_k}, over {} + {} candidates",
@@ -9647,6 +9654,10 @@ impl Database {
 
         let Some(rr) = &sel.rerank else {
             let hits = search(ix, m, &query, want, accept, within)?;
+            // Charged to a call (`--call-max-rows`) as the rows a scan hands
+            // over are: within its own 10 000, a `match` is no way around
+            // the call's bound.
+            self.examine(hits.len())?;
             plan(|| {
                 format!(
                     "match: the text index on {}{}, {} ranked",
@@ -9694,6 +9705,8 @@ impl Database {
             )));
         }
         let hits = search(ix, m, &query, candidates, accept, within)?;
+        // Every candidate's vector is read from the store.
+        self.examine(hits.len())?;
         plan(|| {
             format!(
                 "match: the text index on {}{}, {} candidates",
@@ -10013,6 +10026,8 @@ impl Database {
                     let n = child.store.len() as u64;
                     let b = cands.map_or(0, Bucket::len) as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
+                        // The bucket's children, charged to a call.
+                        self.examine(b as usize)?;
                         let parents = ids.len();
                         let mut kept = self.retain_via_children(&steps, ids, cands, ctx)?;
                         kept.truncate(stop.unwrap_or(usize::MAX));
@@ -10031,7 +10046,7 @@ impl Database {
         }
 
         let mut out = Vec::new();
-        let (parents, mut probed) = (ids.len(), 0);
+        let (parents, mut probed, mut tested) = (ids.len(), 0, 0usize);
         let stop = stop.unwrap_or(usize::MAX);
         for id in ids {
             if out.len() >= stop {
@@ -10041,10 +10056,16 @@ impl Database {
             // A child only counts if it survives what is below it too: with
             // a `required` level further down, a child that passes its own
             // `where` may still have nothing hanging off it.
-            if steps[0].any(id, |cid| survives(&steps, 0, cid, ctx))? {
+            let kept = steps[0].any(id, |cid| {
+                tested += 1;
+                survives(&steps, 0, cid, ctx)
+            })?;
+            if kept {
                 out.push(id);
             }
         }
+        // The children tested, charged to a call as a scan's rows are.
+        self.examine(tested)?;
         plan(|| {
             let of = match probed < parents {
                 true => format!("{probed} of {parents}"),
@@ -10104,7 +10125,9 @@ impl Database {
                 Parent::Row(row) => t.prefix_of(row),
             };
             if let (true, Some(k)) = (want > 0, prefix) {
+                let mut walked = 0usize;
                 let mut take = |cid| {
+                    walked += 1;
                     if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
                         kept.push(cid);
                     }
@@ -10118,6 +10141,7 @@ impl Database {
                         t.ix.walk(&[t.span(&k)], t.parts.len(), *back, *ties, &mut take)?
                     }
                 }
+                self.examine(walked)?;
             }
             return Ok(kept);
         }
@@ -10125,6 +10149,10 @@ impl Database {
             Parent::Doc(pid) => step.ids(pid, bucket)?,
             Parent::Row(row) => step.ids_of(row, bucket),
         }
+        // A level's children charged to a call (`--call-max-rows`) as a
+        // scan's rows are, before one is tested: a `lookup` is no way
+        // around the call's bound.
+        self.examine(bucket.len())?;
         // The child filter is evaluated over the bucket rather than sent
         // through `matching_ids`. The bucket is already one parent's
         // children, so a second index lookup would have to be intersected
@@ -10390,7 +10418,11 @@ impl Database {
                 ));
             }
             let want = ranked_rows(sel, params, "near", MAX_NEAR_ROWS)?;
-            scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
+            let hits = self.run_near(c, sel, near, want, params, &ctx)?;
+            // Its rows charged to a call (`--call-max-rows`), as a scan's
+            // are; `run_match` charges its own.
+            self.examine(hits.len())?;
+            scored = with_scores(hits);
         } else {
             let (ids, counted) =
                 self.page_ids(c, sel, params, &ctx, wants_facets, all, required)?;
@@ -10751,6 +10783,9 @@ impl Database {
             true => ix.matching(&query),
             false => ix.matching_loose(&query, m.loose())?,
         };
+        // Every row the words reach, which a facet counts over: charged to
+        // a call as a scan's rows are.
+        self.examine(ids.len())?;
         if let Some(f) = filter {
             let test = Filter::new(c, f, ctx);
             let mut kept = Vec::with_capacity(ids.len());
@@ -11843,32 +11878,43 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// The refusal of a `create statement`, a `drop statement` and a `call`:
-/// nothing runs them yet ([`crate::named::NOT_BUILT`]). Out of line, one
-/// copy for its callers.
-#[cfg(feature = "statements")]
-#[inline(never)]
-fn not_named() -> Error {
-    Error::Query(crate::named::NOT_BUILT.into())
+/// Tests `ids` against `test` until `want` of them match, pushing those
+/// onto `out`: how many it tested. A filter's candidates and the scan, the
+/// one loop each always was; a call bounds it by a `take` around `ids`.
+#[inline(always)]
+fn test_each(
+    ids: impl Iterator<Item = DocId>,
+    want: usize,
+    test: &Filter,
+    ctx: &EvalCtx,
+    out: &mut Vec<DocId>,
+) -> Result<usize> {
+    let mut tested = 0usize;
+    for id in ids {
+        if out.len() >= want {
+            break;
+        }
+        tested += 1;
+        if test.matches(id, ctx)? {
+            out.push(id);
+        }
+    }
+    Ok(tested)
 }
 
-/// What `statements` answers while no database holds one: no row, under
-/// the column a statement's row leads with.
-#[cfg(feature = "statements")]
-#[inline(never)]
-fn no_statements() -> Response {
-    Response::Rows(ResultSet {
-        columns: vec!["name".to_string()],
-        ..ResultSet::default()
-    })
-}
+/// A build without named statements runs no call: no statement's rows are
+/// counted, and the bound's checks fold away.
+#[cfg(not(feature = "statements"))]
+impl Database {
+    #[inline(always)]
+    fn call_room(&self) -> usize {
+        usize::MAX
+    }
 
-/// What `describe statement <name>` answers while no database holds one,
-/// as `describe` answers for a collection it does not hold.
-#[cfg(feature = "statements")]
-#[inline(never)]
-fn no_statement(name: &str) -> Error {
-    Error::NotFound(format!("statement `{name}`"))
+    #[inline(always)]
+    fn examine(&self, _: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// What of a statement has to be read as written for a json field: its
@@ -11929,6 +11975,11 @@ impl Database {
     /// here asks nothing: the statement is refused for it when it runs.
     pub fn exactly(&self, stmt: &Statement) -> Exactly {
         let mut out = Exactly::default();
+        #[cfg(feature = "statements")]
+        if let Statement::Call(c) = stmt {
+            self.call_exactly(c, &mut out);
+            return out;
+        }
         let of = |name: &str| match self.collections.get(name) {
             Some(c) => Known::of(&c.schema),
             None => Known::Missing,

@@ -107,7 +107,17 @@ binding's loop is a page. A write
 through `fennec_query` to a shape's collection is the sync's
 (`Sync::claims`, `write`): applied to the replica with what puts it back,
 and queued with an `Idempotency-Key`, in one block; DDL over a synced
-collection is refused, a collection with no shape is the app's own. What
+collection is refused, a collection with no shape is the app's own. A
+named statement -- `call`, `create statement`, `drop statement` -- is
+refused whatever the text holds beside it (`NAMED`), before any of it is
+applied or queued: a replica holds its shapes' rows, not its server's
+statements, so a call would run against the replica's part of the rows
+and a definition would be one the server never had; the app calls the
+server, and what the call wrote comes back through the streams
+([named-statements.md](named-statements.md)). In the browser the module,
+built without them, refuses each as it reads the text, and a sync's
+replica (`local`) tells it in the core's words (`Fennec#run`), a scenario
+holding both. What
 `FennecSync` holds in memory is in the file, written in the blocks it
 describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
@@ -132,7 +142,12 @@ costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
 000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
 native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
 x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
-`fennec-abi`'s `sync` feature, which only `fennec-ffi` turns on. Compiled
+`fennec-abi`'s `sync` feature, which only `fennec-ffi` turns on. It turns
+on fennec-ql's `statements`, to read the named statements it refuses: the
+native library names them anyway, so the refusal is its only cost, 128
+bytes of code and 208 of its words on aarch64-apple-darwin (the library
+2 720 304 bytes either way), and a sync built without them would tell the
+parser's "this module is built without them" instead of its own. Compiled
 in as dead code, it still moved LLVM's inlining and left the module 155
 bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
 `Fennec.openSynced`, since a static `sync` cannot sit beside the instance's
@@ -143,7 +158,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 71 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 73 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

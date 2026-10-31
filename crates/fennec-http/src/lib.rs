@@ -48,6 +48,7 @@ pub mod admin;
 pub mod api;
 pub mod archive;
 pub mod audit;
+pub mod calls;
 pub mod cdc;
 pub mod cors;
 pub mod crypto;
@@ -142,6 +143,12 @@ pub struct Config {
     /// Entry count of the change ring: how far behind a subscriber may fall.
     /// On overflow the subscriber is reseeded.
     pub change_capacity: usize,
+    /// `--call-max-rows`: the rows a named statement's call may examine
+    /// (`Database::set_call_max_rows`).
+    pub call_max_rows: usize,
+    /// `--call-rate`: the calls a second one scoped caller makes, 0 for no
+    /// bound ([`calls::admitted`]).
+    pub call_rate: u32,
     /// Token for `/_admin/` (tenant mode only). Without it the admin
     /// endpoints are off.
     pub admin_token: Option<String>,
@@ -198,6 +205,8 @@ impl Default for Config {
             stream_keepalive: Duration::from_secs(20),
             stream_write_timeout: Duration::from_secs(30),
             change_capacity: fennec_core::changes::DEFAULT_CAPACITY,
+            call_max_rows: fennec_core::named::CALL_MAX_ROWS,
+            call_rate: calls::CALL_RATE,
             admin_token: None,
             max_import: 1 << 30,
             access: None,
@@ -250,10 +259,12 @@ impl Server {
             let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
             guard.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
             guard.set_change_capacity(cfg.change_capacity);
+            guard.set_call_max_rows(cfg.call_max_rows);
             if cfg.access.is_some() {
                 // Once per database: a second server over it finds it there.
                 let _ = guard.install_plugin(&access::CheckPlugin);
             }
+            calls::log_unheld(cfg.access.as_deref(), &guard, None);
         }
         Server {
             backend: Backend::Single {
@@ -288,6 +299,7 @@ impl Server {
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
+        tenants.set_calls(cfg.call_max_rows, cfg.access.clone());
         tenants.shared();
         Server {
             backend: Backend::Tenants(tenants),
@@ -589,7 +601,8 @@ fn run_bound(
     let mut mask = None;
     let (stmt, bound) = scoped_under(who, db, unscoped.clone(), params, &mut mask)?;
     let who = bound.as_ref().unwrap_or(who);
-    access::within(who, || db.execute_with(&stmt, params))
+    access::judge_call(who, db, &stmt, params)?;
+    access::run_as(who, &stmt, || db.execute_with(&stmt, params))
         .map(|r| masked(who, mask.as_ref(), db, r))
 }
 
@@ -2428,6 +2441,11 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
+    // A scoped caller's call is charged against `--call-rate` once its
+    // token is known, before anything of the statement is asked.
+    if let Some(r) = calls::admitted(cfg.call_rate, who, db, std::iter::once(&*stmt)) {
+        return r;
+    }
     // A read is the same sent twice, and keeps no key.
     let key = match stmt.is_read_only() {
         true => None,
@@ -2663,11 +2681,19 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let before = waits::now_ms();
         let running = trace::span("execute");
         let r = match &unscoped {
-            None => access::within(who, || guard.execute_ready(&stmt, &params, &mut ready, 0))
+            None => access::judge_call(who, &guard, &stmt, &params)
+                .and_then(|_| {
+                    access::run_as(who, &stmt, || {
+                        guard.execute_ready(&stmt, &params, &mut ready, 0)
+                    })
+                })
                 .map(|r| masked(who, mask, &guard, r)),
             Some(sent) => run_bound(who, &mut guard, sent, &params),
         };
         drop(running);
+        if r.is_ok() {
+            calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
+        }
         if wait && waits::wrote_nothing(&stmt, &r) {
             waits::plan(&guard, &[(&stmt, &params)], before);
         }
@@ -2822,7 +2848,11 @@ fn keyed_query(
     // A token whose rules read other collections: its rows shown as
     // [`run_bound`] answers them.
     let result = match unscoped {
-        None => access::within(who, || guard.execute_ready(stmt, params, &mut ready, 0)),
+        None => access::judge_call(who, &guard, stmt, params).and_then(|_| {
+            access::run_as(who, stmt, || {
+                guard.execute_ready(stmt, params, &mut ready, 0)
+            })
+        }),
         Some(sent) => run_bound(who, &mut guard, sent, params),
     };
     drop(running);
@@ -2890,6 +2920,26 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
+    if let Some(r) = calls::admitted(cfg.call_rate, who, db, stmts.iter().map(|(s, _)| s)) {
+        return r;
+    }
+    // A scoped token's call runs outside its scope (`access::run_as`), and
+    // the hook finds the scope by a thread-local set around the execution:
+    // switching it inside one block is code in the engine, which knows
+    // nothing of scopes. So such a `/batch` holds one call, and nothing
+    // beside it -- two calls in one block, each refused by the other's
+    // guard and holding the other's writes, are a composition whose
+    // answers this version does not define. The server's token runs any.
+    let calls = stmts
+        .iter()
+        .filter(|(s, _)| matches!(s, Statement::Call(_)));
+    if who.scope().is_some() && calls.count() > 0 && stmts.len() > 1 {
+        return Response::error(
+            400,
+            "a scoped token's /batch holds one call and nothing beside it: send each call \
+             on its own",
+        );
+    }
     // A token whose rules read other collections is held to them as each
     // statement runs, as they answer then ([`run_bound`]): the line before
     // may have changed what they read -- a claim, then the courier
@@ -2988,7 +3038,12 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
             Some(why) => Err((507, why, None)),
             None => match &unscoped {
-                None => access::within(who, || guard.execute_ready(stmt, params, &mut ready, at))
+                None => access::judge_call(who, &guard, stmt, params)
+                    .and_then(|_| {
+                        access::run_as(who, stmt, || {
+                            guard.execute_ready(stmt, params, &mut ready, at)
+                        })
+                    })
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }
@@ -3056,6 +3111,12 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return error_response(&e),
     };
     let seq = Some(At::of(&guard));
+    calls::after_drop(
+        cfg.access.as_deref(),
+        &guard,
+        None,
+        stmts.iter().map(|(s, _)| s),
+    );
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),

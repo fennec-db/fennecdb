@@ -15,7 +15,7 @@ alice deletes it                           {"error":"`audit` is append-only: a s
 a token that has lapsed                    {"error":"the token has expired"} [401]
 no token                                   {"error":"invalid or missing token"} [401]
 -- /_whoami for alice
-{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}
+{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"calls":[],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}
 
 == 2. RS256: the keys of a JWKS file, as an identity provider publishes them
 clerk: sub user_2xYzAbc                    [{"owner":"user_2xYzAbc","title":"clerk note"}] [200]

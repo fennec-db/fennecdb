@@ -214,6 +214,10 @@ usage: fennec-server [options]
                             (0 = no bound)  default: 20
       --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
                             are kept, in seconds. default: 86400
+      --call-max-rows <n>   the most rows a named statement's call examines;
+                            past it the call is put back  default: 100000
+      --call-rate <n>       calls a second from one scoped token's subject
+                            (0 = no bound)  default: 100
       --http-max-streams <n>  ceiling on a database's concurrent subscriptions,
                             on a --dir node each tenant's (0 = unlimited)
                             default: 64. Subscriptions (`GET /<name>/changes`)
@@ -674,6 +678,18 @@ fn main() {
                     fail(&format!("--idempotency-ttl expects seconds, got `{v}`"))
                 });
                 http_cfg.idempotency_ttl = std::time::Duration::from_secs(s);
+            }
+            flag @ ("--call-max-rows" | "--call-rate") => {
+                let v = next(&mut i, flag);
+                let n = v.parse::<u64>().ok();
+                let n = n.filter(|n| *n > 0 || flag == "--call-rate");
+                let Some(n) = n else {
+                    fail(&format!("{flag} expects a number, got `{v}`"));
+                };
+                match flag {
+                    "--call-max-rows" => http_cfg.call_max_rows = n as usize,
+                    _ => http_cfg.call_rate = n.min(u32::MAX as u64) as u32,
+                }
             }
             "--http-max-streams" => {
                 let v = next(&mut i, "--http-max-streams");

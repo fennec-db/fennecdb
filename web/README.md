@@ -10,7 +10,7 @@ npm, and the `fennec-web` bundle of each release.
 | `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fennecdb/web/client`, 10 KB brotli in an app's bundle |
 | `fennec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fennecdb/web/schema` |
-| `fennec.wasm` | the engine with every index and the schema check: 274 KB brotli |
+| `fennec.wasm` | the engine with every index and the schema check: 275 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js
