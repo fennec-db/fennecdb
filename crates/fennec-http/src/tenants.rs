@@ -372,6 +372,9 @@ pub struct Tenants {
     setup: Option<Setup>,
     repl: Option<Replicated>,
     change_capacity: usize,
+    /// `--call-max-rows` and the policy whose `call` lines each tenant's
+    /// database is held to as it opens ([`Tenants::set_calls`]).
+    calls: Mutex<(usize, Option<Arc<crate::access::Access>>)>,
     max_memory: usize,
     checkpoint: bool,
     /// Whether tenant files are mapped (`fs::open`) or read into memory
@@ -481,6 +484,7 @@ impl Tenants {
             setup: None,
             repl: None,
             change_capacity: fennec_core::changes::DEFAULT_CAPACITY,
+            calls: Mutex::new((fennec_core::named::CALL_MAX_ROWS, None)),
             max_memory: 0,
             checkpoint: true,
             mapped: true,
@@ -876,6 +880,19 @@ impl Tenants {
         }
     }
 
+    /// `--call-max-rows` for each tenant's database, and the policy whose
+    /// `call` lines naming a statement a tenant does not hold are logged as
+    /// it opens: those open now and each opened after.
+    pub fn set_calls(&self, max_rows: usize, access: Option<Arc<crate::access::Access>>) {
+        *self.calls.lock().unwrap_or_else(|e| e.into_inner()) = (max_rows, access);
+        for slot in self.all_slots() {
+            let held = slot.held.lock().unwrap_or_else(|e| e.into_inner());
+            if let Held::Open(t) = &*held {
+                crate::held::write(&t.db).set_call_max_rows(max_rows);
+            }
+        }
+    }
+
     fn all_slots(&self) -> Vec<Arc<Slot>> {
         self.registry().values().cloned().collect()
     }
@@ -1225,6 +1242,11 @@ impl Tenants {
         let hub = Hub::new();
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
+        {
+            let calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+            db.set_call_max_rows(calls.0);
+            crate::calls::log_unheld(calls.1.as_deref(), &db, Some(name));
+        }
         // Before anything can write it -- its follower starts below: the
         // node's streams that stand where the file does send from its
         // feed, and its writes wait for them.

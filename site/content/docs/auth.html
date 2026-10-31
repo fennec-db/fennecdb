@@ -115,7 +115,10 @@ no token                                   {"error":"invalid or missing token"} 
 all:</p>
 
 <pre data-lang="text">-- /_whoami for alice
-{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}</pre>
+{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"calls":[],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}</pre>
+
+<p><code>calls</code> lists the <a href="http-access.html#calls">named statements</a> the token may
+call; alice is granted none.</p>
 
 <h2 id="checks">What the server checks, and what it does not</h2>
 

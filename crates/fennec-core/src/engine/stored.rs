@@ -412,26 +412,6 @@ impl super::Database {
         Ok(())
     }
 
-    /// Lets `create statement` and `drop statement` run on this database,
-    /// which refuses them otherwise ([`crate::named::NOT_BUILT`]): the
-    /// record, its checks and its replication are built, and a call is
-    /// not, so nothing a server or an app runs defines one -- a statement
-    /// nobody can call, and the first record an older reader of the file
-    /// would stop at. The storage's tests ask for it, and the slice that
-    /// scopes calls lifts the refusal.
-    #[cfg(feature = "statements")]
-    #[doc(hidden)]
-    pub fn allow_definitions(&mut self) {
-        self.defines = true;
-    }
-
-    /// Whether a named statement's form is refused here: a `call` always,
-    /// a definition or a drop unless [`Self::allow_definitions`] let it.
-    #[cfg(feature = "statements")]
-    pub(super) fn refuses_named(&self, s: &crate::query::Statement) -> bool {
-        matches!(s, crate::query::Statement::Call(_)) || (s.is_named() && !self.defines)
-    }
-
     /// `create [or replace] statement`: its record written, the table
     /// changed by a new `Arc`. Checked against the schema as it stands --
     /// each collection it names held, each `lookup` answered by an index --
@@ -475,6 +455,7 @@ impl super::Database {
         }
         let collections = &self.collections;
         let depends = def.depends(&|c| collections.get(c).map(|c| &*c.schema))?;
+        self.body_checked(def)?;
         let replaced = held.is_some();
         let digest = def.digest()?;
         // The tree its record will be read back into, read from its text

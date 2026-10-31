@@ -234,6 +234,8 @@ pub struct Access {
     /// The collections no scoped token updates or deletes in (`append-only`
     /// lines), `*` for every one.
     append_only: Arc<[String]>,
+    /// The `call` lines: the named statements a role may call.
+    calls: Vec<CallLine>,
     /// Tokens already verified, by their text: a client sends the same one
     /// for as long as it lives, and an RS256 verification takes 38 us (166
     /// in 32-bit limbs), an ES256 one 145, an HS256 token's with its parses
@@ -521,6 +523,14 @@ struct Rule {
     reads: Vec<String>,
 }
 
+/// `transfer, refund call [for teller]`: the statements a line grants
+/// calling, to its role or to every token.
+struct CallLine {
+    line: usize,
+    names: Vec<String>,
+    role: Option<String>,
+}
+
 /// A token's rules, its claims bound in.
 pub struct Scope {
     subject: Option<String>,
@@ -537,6 +547,9 @@ pub struct Scope {
     unbound: bool,
     /// The policy's `append-only` collections, `*` for every one.
     append_only: Arc<[String]>,
+    /// The named statements the token may call, by the policy's `call`
+    /// lines for its roles: none unless a line names one.
+    calls: Vec<String>,
     /// Whether a read rule of the token names its fields (`read(a, b)`):
     /// a token none of whose do takes the path it took before them.
     fielded: bool,
@@ -609,6 +622,7 @@ impl Access {
     ) -> std::result::Result<Access, String> {
         let mut rules = Vec::new();
         let mut append_only = Vec::new();
+        let mut calls = Vec::new();
         let mut lines = Vec::new();
         for (n, line) in policy.lines().enumerate() {
             let line = uncommented(line).trim();
@@ -616,6 +630,10 @@ impl Access {
                 continue;
             }
             let at = |e: String| format!("policy line {}: {e}", n + 1);
+            if let Some(c) = call_line(line, n + 1).map_err(at)? {
+                calls.push(c);
+                continue;
+            }
             let mut words = line.split_whitespace();
             if let (Some(c), Some("append-only")) = (words.next(), words.next()) {
                 if words.next().is_some() {
@@ -652,10 +670,21 @@ impl Access {
             reaching: rules.iter().any(|r| !r.reads.is_empty()),
             rules,
             append_only: append_only.into(),
+            calls,
             verified: Default::default(),
             role_claim: Arc::from(Demands::default().role_claim.as_str()),
             demands: Demands::default(),
         })
+    }
+
+    /// Each statement a `call` line names, with its line: what the server
+    /// logs where a database holds none of that name, as it starts, as a
+    /// tenant opens, and as a `drop` takes one away -- a typo grants
+    /// nothing, silently, otherwise.
+    pub fn call_grants(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.calls
+            .iter()
+            .flat_map(|c| c.names.iter().map(move |n| (c.line, n.as_str())))
     }
 
     /// The same keys and policy, holding tokens to `demands`. A token kept
@@ -862,6 +891,12 @@ impl Access {
         let fielded = rules
             .iter()
             .any(|r| r.ops & READ != 0 && r.read_fields.is_some());
+        let calls = self
+            .calls
+            .iter()
+            .filter(|c| c.role.as_deref().is_none_or(has_role))
+            .flat_map(|c| c.names.iter().cloned())
+            .collect();
         Ok(Scope {
             // `""` is no one: taken for a subject, its Idempotency-Keys were
             // kept under the server token's own, whose answers it was then
@@ -876,6 +911,7 @@ impl Access {
             tenants,
             unbound: self.demands.unbound_tenants,
             append_only: Arc::clone(&self.append_only),
+            calls,
             fielded,
             roles: (Arc::clone(&claims), Arc::clone(&self.role_claim)),
         })
@@ -1010,6 +1046,66 @@ impl Access {
 /// One line of a policy: `<collection|*> <grants> [where <filter>] [for
 /// <role>]`, the grants `read`, `insert`, `update`, `delete` and `write`
 /// joined by commas.
+/// A `call` line, `transfer, refund call [for teller]`, line `at` of the
+/// policy: its statements' names and its role; `None` for any other line. `call` stands alone --
+/// beside another grant or a `where` it is refused, a grant being all or
+/// nothing -- and `* call` is refused: a statement defined later would be
+/// granted by a line no one reads again.
+fn call_line(line: &str, at: usize) -> std::result::Result<Option<CallLine>, String> {
+    let mut names = Vec::new();
+    let mut rest = line;
+    loop {
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == ',')
+            .unwrap_or(rest.len());
+        names.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+        match rest.strip_prefix(',') {
+            Some(r) => rest = r.trim_start(),
+            None => break,
+        }
+    }
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let (grant, rest) = rest.split_at(end);
+    if grant != "call" {
+        if grant.split(',').any(|g| g.trim() == "call") {
+            return Err(
+                "`call` stands alone on its line: a statement is called whole, never \
+                        read or written beside it"
+                    .into(),
+            );
+        }
+        return Ok(None);
+    }
+    let (rest, role) = role_of(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(
+            "`call` takes no filter: a statement's own `check` and `where`s say what \
+                    it allows; write `<statement>, ... call [for <role>]`"
+                .into(),
+        );
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for n in names {
+        if n == "*" {
+            return Err(
+                "`* call` grants no statement: one defined later would be granted by a \
+                        line no one reads again; name each"
+                    .into(),
+            );
+        }
+        if !fennec_core::named::valid_name(n) {
+            return Err(fennec_core::named::name_refused(n));
+        }
+        out.push(n.to_string());
+    }
+    Ok(Some(CallLine {
+        line: at,
+        names: out,
+        role,
+    }))
+}
+
 fn rule(line: &str) -> std::result::Result<Rule, String> {
     let (collection, rest) = line
         .split_once(char::is_whitespace)
@@ -2127,6 +2223,14 @@ fn pinned(e: &Expr, out: &mut Vec<(String, Value)>) {
 }
 
 impl Scope {
+    /// Who a call is counted for against `--call-rate`: the subject and its
+    /// issuer, since a `sub` is unique only within its issuer's.
+    pub fn caller(&self) -> String {
+        let iss = self.roles.0.iter().find(|(k, _)| k == "iss");
+        let iss = iss.and_then(|(_, v)| v.as_text()).unwrap_or("");
+        format!("{iss}\u{0}{}", self.subject.as_deref().unwrap_or(""))
+    }
+
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
@@ -2203,6 +2307,8 @@ impl Scope {
         out.push_str(if self.unbound { "true" } else { "false" });
         out.push_str(",\"append_only\":");
         texts_into(out, Some(&self.append_only));
+        out.push_str(",\"calls\":");
+        texts_into(out, Some(&self.calls));
         out.push_str(",\"rules\":[");
         for (i, r) in self.rules.iter().enumerate() {
             if i > 0 {
@@ -2376,6 +2482,7 @@ impl Scope {
             tenants: self.tenants.clone(),
             unbound: self.unbound,
             append_only: Arc::clone(&self.append_only),
+            calls: self.calls.clone(),
             fielded: self.fielded,
             roles: (Arc::clone(&self.roles.0), Arc::clone(&self.roles.1)),
         })
@@ -2730,15 +2837,41 @@ impl Scope {
                 }
                 Statement::Describe(name)
             }
-            // No database holds a named statement yet: the engine lists
-            // none and finds none, for any token.
-            Statement::ListStatements => Statement::ListStatements,
-            Statement::DescribeStatement(name) => Statement::DescribeStatement(name),
-            // Nothing runs a call yet, nor could scope one: refused for a
-            // scoped token as for the server's, before anything is asked
-            // of its rules. A definition and a drop are schema changes,
-            // refused below.
-            Statement::Call(_) => return Err(Error::Query(fennec_core::named::NOT_BUILT.into())),
+            // A statement's text and what it depends on are the server's
+            // token's: a scoped token is told what it may call by
+            // `/_whoami`, and a name is answered as one no database holds.
+            Statement::ListStatements => {
+                return Err(denied(
+                    "a scoped token is told the statements it may call by /_whoami".into(),
+                ))
+            }
+            Statement::DescribeStatement(name) => {
+                return Err(Error::NotFound(format!("statement `{name}`")))
+            }
+            // A call passes where a `call` line grants its name -- an
+            // ungranted name answered as a missing one, so a name tried
+            // says nothing -- bound to the token's claims, never to `as`.
+            // Its body then runs with no scope installed ([`run_as`]): the
+            // statement's text is its authority, its answer not masked by
+            // the caller's field lists. A definition and a drop are schema
+            // changes, refused below.
+            Statement::Call(mut c) => {
+                if !self.calls.contains(&c.name) {
+                    return Err(Error::NotFound(format!("statement `{}`", c.name)));
+                }
+                if c.claims.is_some() {
+                    return Err(denied(
+                        "`as` names the claims the server's token calls with: a scoped token \
+                         calls as itself"
+                            .into(),
+                    ));
+                }
+                let claims = self.roles.0.iter();
+                let claims = claims.map(|(k, v)| (k.clone(), Expr::Lit(v.clone())));
+                c.claims = Some(fennec_core::named::Args::Named(claims.collect()));
+                *mask = None;
+                Statement::Call(c)
+            }
             _ => {
                 return Err(denied(
                     "a scoped token reads and writes documents; it changes no schema".into(),
@@ -2988,6 +3121,82 @@ fn told(e: Error) -> Error {
     }
 }
 
+/// Runs `f` -- `stmt` executing under the write lock -- as `who` runs it:
+/// [`within`] for every statement but a scoped token's call, the one
+/// statement run outside it. A call's body runs with no scope installed --
+/// the `Check` hook finds none, the field lists hold nothing -- since the
+/// statement's text is its authority; what got it here is
+/// [`Scope::rewrite`]'s grant and [`judge_call`]'s judgment. Its refusals
+/// are told as [`told_call`] tells them.
+pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match (who, stmt) {
+        (Who::Scoped(_), Statement::Call(c)) => f().map_err(|e| told_call(&c.name, e)),
+        _ => within(who, f),
+    }
+}
+
+/// A scoped token's call judged under the lock it runs under, against the
+/// definition it will run: the statement there (404), the claims it reads
+/// from the token (403), the arguments (400), `check` (400), whether it is
+/// broken (409) -- [`Database::callee`] -- and then the policy's
+/// `append-only` collections, which no scoped token updates or deletes in,
+/// a call's body included (403). Nothing for any other statement or token:
+/// the server's token's calls are judged as they run.
+pub fn judge_call(who: &Who, db: &Database, stmt: &Statement, params: &[Value]) -> Result<()> {
+    let (Who::Scoped(scope), Statement::Call(c)) = (who, stmt) else {
+        return Ok(());
+    };
+    let callee = db.callee(c, params).map_err(|e| match e {
+        // Why it is broken names what the schema lacks: the server's.
+        Error::Exists(_) => Error::Exists(format!(
+            "statement `{}` is broken: it runs again once it is defined again",
+            c.name
+        )),
+        e => e,
+    })?;
+    for st in &callee.def.body {
+        let (Statement::Update { collection, .. } | Statement::Delete { collection, .. }) = st
+        else {
+            continue;
+        };
+        if scope
+            .append_only
+            .iter()
+            .any(|a| a == "*" || a == collection)
+        {
+            return Err(denied(format!(
+                "statement `{}` updates or deletes in `{collection}`, which is append-only: no \
+                 scoped token does, through a call or otherwise",
+                c.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A call's refusal as a scoped token is told it: its kind, and a guard's
+/// `reason`, alone. A body's error names the collections, fields and values
+/// it met -- "document 3 holds `bob@x.io` already" -- which a token that
+/// may read none of them is told nothing of. What [`judge_call`] answered
+/// came before the body ran and names the signature alone; the status
+/// stays, and the message is the server's, in its trace.
+fn told_call(name: &str, e: Error) -> Error {
+    let ran = |what: &str| format!("statement `{name}` {what}");
+    match e {
+        Error::Unmet(_) => Error::Unmet(match e.reason() {
+            Some(r) => format!("{r} (`{name}` was put back)"),
+            None => ran("was put back: a guard of it was not met"),
+        }),
+        Error::Duplicate(_) => Error::Duplicate(ran("met a unique value taken")),
+        Error::Query(m) if m.starts_with("a call examines at most") => Error::Query(m),
+        Error::Query(_) | Error::Type(_) | Error::NotFound(_) | Error::Exists(_) => {
+            Error::Query(ran("could not run"))
+        }
+        Error::Denied(_) => Error::Denied(ran("was refused")),
+        e => e,
+    }
+}
+
 fn with_scope<T>(scope: &Arc<Scope>, f: impl FnOnce() -> T) -> T {
     let before = CURRENT.with(|c| c.replace(Some(Arc::clone(scope))));
     struct Restore(Option<Arc<Scope>>);
@@ -3175,6 +3384,39 @@ mod tests {
 
     fn access(policy: &str) -> Access {
         Access::new(SECRET, policy).unwrap()
+    }
+
+    /// A `call` line grants statements by name, to its role or to every
+    /// token; `* call`, `call` beside another grant or a filter, and a name
+    /// no statement may have are refused at startup.
+    #[test]
+    fn a_call_line_grants_statements_by_name_alone() {
+        for bad in [
+            "* call",
+            "* call for admin",
+            "transfer, * call",
+            "transfer read,call",
+            "transfer call,read",
+            "transfer call where $jwt.sub = 'a'",
+            "trans-fer call",
+        ] {
+            let e = Access::new(SECRET, bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad}"));
+            assert!(e.starts_with("policy line 1"), "{bad}: {e}");
+        }
+        let a = access("transfer, refund  call  for teller\nboard call\nnotes read\n");
+        let calls = |claims: &str| {
+            let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+            s.calls.clone()
+        };
+        assert_eq!(
+            calls(r#"{"sub":"t","role":"teller"}"#),
+            ["transfer", "refund", "board"]
+        );
+        assert_eq!(calls(r#"{"sub":"c"}"#), ["board"]);
+        let lines: Vec<_> = a.call_grants().collect();
+        assert_eq!(lines, [(1, "transfer"), (1, "refund"), (2, "board")]);
     }
 
     /// The token from RFC 7515's era of examples that jwt.io shows, with

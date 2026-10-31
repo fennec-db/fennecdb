@@ -12,6 +12,7 @@ mod approx;
 mod autocompact;
 mod blocks;
 mod buckets;
+mod calls;
 mod changes;
 mod claims;
 mod collate;

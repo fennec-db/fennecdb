@@ -3223,7 +3223,11 @@ impl Statement {
             Statement::Delete { filter, pick, .. } => opt(filter) || picked(pick),
             Statement::Select(s) | Statement::Explain(s) => s.reads_vectors(),
             #[cfg(feature = "statements")]
-            Statement::Call(c) => c.args.exprs().any(Expr::reads_vectors),
+            Statement::Call(c) => c
+                .args
+                .exprs()
+                .chain(c.claims.iter().flat_map(|a| a.exprs()))
+                .any(Expr::reads_vectors),
             _ => false,
         }
     }
@@ -3247,8 +3251,8 @@ impl Statement {
         }
     }
 
-    /// Whether it defines, drops or calls a named statement: what nothing
-    /// runs yet ([`crate::named::NOT_BUILT`]).
+    /// Whether it defines, drops or calls a named statement: what a sync
+    /// replica, MCP's tools and the router refuse.
     #[cfg(feature = "statements")]
     pub fn is_named(&self) -> bool {
         matches!(

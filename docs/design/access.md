@@ -11,7 +11,12 @@ that runs a statement must go through `scoped()` or it reads everything. Writes
 also get `WITH CHECK`: the `Check` write hook tests every document a put or a
 set writes against the filter, found through a thread-local set by `within()`
 around the execution -- a scoped write executed outside `within` goes
-unchecked. A scoped subscription keeps the ids it sent and reports deletions
+unchecked. A named statement's call is that path's one instance, and must
+stay its only one: `access::run_as` runs its body with no scope installed,
+since the statement's text is its authority, once `Scope::rewrite` found it
+granted and `access::judge_call` held it, under the lock, to its claims and
+to `append-only` ([named-statements.md](named-statements.md#authority)). A
+scoped subscription keeps the ids it sent and reports deletions
 only for those; the unscoped shape's "a changed id that does not match is a
 deletion" would hand every user everyone's ids. A scoped stream of a shape
 that holds nothing (`where=false`, what `FennecHttp.live` opens) follows the

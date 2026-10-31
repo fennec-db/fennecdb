@@ -4,7 +4,7 @@
 //! run any of it -- nothing of a definition or a call may land before the
 //! slices that check and scope them.
 
-use fennec_core::named::{Args, Call, Claim, Definition, Param, NOT_BUILT};
+use fennec_core::named::{Args, Call, Claim, Definition, Param};
 use fennec_core::prelude::*;
 use fennec_ql::{parse, parse_exact, parse_one};
 
@@ -846,53 +846,37 @@ fn a_field_that_holds_nothing_is_not_written() {
     assert_eq!(d.canonical().unwrap(), want);
 }
 
-/// Nothing runs a definition, a drop or a call yet: each is refused in the
-/// words of its own before anything of it -- or of a block holding it --
-/// lands. `statements` lists none, and `describe statement` finds none.
+/// A definition, a drop and a call are writes wherever they are asked, a
+/// call whatever its body: the read path refuses each, and the write path
+/// runs it. `statements` and `describe statement` are reads.
 #[test]
-fn the_engine_refuses_to_run_them() {
+fn they_are_writes_and_their_listing_reads() {
+    fennec_ql::install();
     let mut db = Database::new();
     for s in parse("create collection t (a int); put t {a: 1}").unwrap() {
         db.execute(&s).unwrap();
     }
-    let not_built = Error::Query(NOT_BUILT.into());
+    let write = Error::Query("this statement requires write access".into());
     for text in [
         "create statement s() as get t select a",
-        "create or replace statement s() as get t select a",
+        "create or replace statement s() as get t select a order a",
+        "call s",
+        "CALL s()",
         "drop statement s",
         "drop statement if exists s",
-        "call s",
-        "call s {a: 1}",
-        "call s $1 as {sub: 'x'}",
-        "CALL s(1, b => 2)",
     ] {
         let s = parse_one(text).unwrap();
         assert!(!s.is_read_only() && s.is_named(), "{text}");
-        assert_eq!(
-            db.execute_with(&s, &[Value::Int(1)]),
-            Err(not_built.clone()),
-            "{text}"
-        );
-        assert_eq!(db.query(&s, &[]), Err(not_built.clone()), "{text}");
-        // In a block, the block is refused before its first statement runs.
-        let put = parse_one("put t {a: 2}").unwrap();
-        let r = db.execute_block(&[(&put, &[]), (&s, &[])]);
-        assert_eq!(r, Err((1, not_built.clone())), "{text}");
+        assert_eq!(db.query(&s, &[]), Err(write.clone()), "{text}");
+        db.execute_with(&s, &[]).unwrap();
     }
-    let all = db
-        .query(&parse_one("get t select a").unwrap(), &[])
-        .unwrap();
-    assert_eq!(all.rows().unwrap().rows.len(), 1);
-    assert_eq!(db.collection_names(), ["t"]);
-    // The reads answer for a database that holds none.
     for run in [true, false] {
         let list = parse_one("statements").unwrap();
         let r = match run {
             true => db.query(&list, &[]),
             false => db.execute(&list),
         };
-        let rows = r.unwrap();
-        assert_eq!(rows.rows().unwrap().rows.len(), 0);
+        assert_eq!(r.unwrap().rows().unwrap().rows.len(), 0);
         let describe = parse_one("describe statement transfer").unwrap();
         let e = match run {
             true => db.query(&describe, &[]),

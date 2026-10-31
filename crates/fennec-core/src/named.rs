@@ -2,14 +2,15 @@
 //! in a database and called by name with typed arguments
 //! (`docs/design/named-statements.md`).
 //!
-//! What this holds today is the tree and what the tree alone decides: a
+//! What this holds is the tree and what the tree alone decides: a
 //! definition's signature and body as the parser reads them, the refusals
 //! a body meets at its definition that need nothing but its text, and the
-//! canonical tree's digest. Nothing runs one yet: the engine and the
-//! server refuse every `create statement`, `drop statement` and `call` as
-//! not built ([`NOT_BUILT`]), so no statement is ever defined with nothing
-//! to check it, nor called with nothing to scope it. `statements` answers
-//! none, and `describe statement` finds none.
+//! canonical tree's digest. The engine keeps a definition as a record of
+//! its database (`engine/stored.rs`) and runs a call under the write lock
+//! (`engine/call.rs`); who may call one, with which claims, is the server's
+//! (`fennec_http::access`). The surfaces still to come -- MCP's tools and a
+//! tenant's schema at the router -- refuse them as not built here
+//! ([`NOT_BUILT`]).
 
 use crate::codec;
 use crate::error::{Error, Result};
@@ -19,13 +20,14 @@ use crate::query::{
 };
 use crate::value::{DataType, Value};
 
-/// What the engine and the server answer a `create statement`, a `drop
-/// statement` and a `call` with, every form of each: the words of their
-/// own a client tells this refusal by, as the sync's refusals are told by
-/// theirs. A query error (400 over HTTP), never a panic, and refused before
-/// anything of the statement runs: no block is opened for it.
-pub const NOT_BUILT: &str = "named statements are not built yet: `create statement`, `drop \
-                             statement` and `call` parse, and nothing runs them";
+/// What a surface that takes no named statement yet answers one with --
+/// MCP's tools, which call them by `call_<name>` once built, and a
+/// tenant's schema at the router, which parses no definition yet: the
+/// words of their own a client tells this refusal by. A query error (400
+/// over HTTP), refused before anything of the statement runs.
+pub const NOT_BUILT: &str = "named statements are not built here yet: `call`, `create \
+                             statement` and `drop statement` run through `/query` and \
+                             `/batch`";
 
 /// The grammar's epoch: raised by every change that could read a text
 /// stored before it as another tree, or write a tree's canonical bytes
@@ -61,6 +63,11 @@ pub(crate) fn reader() -> Option<Reader> {
 /// The most statements a body holds.
 pub const MAX_BODY: usize = 64;
 /// The most named statements a database holds.
+/// What `--call-max-rows` is unless told: the rows a call's statements
+/// may examine, counted where a scan, an index or an ordered walk hands
+/// them over (`Database::set_call_max_rows`). With `scans` at definition,
+/// it and the write lock are what one call can cost every other writer.
+pub const CALL_MAX_ROWS: usize = 100_000;
 pub const MAX_STATEMENTS: usize = 1_000;
 /// The longest definition, in bytes of its text.
 pub const MAX_TEXT: usize = 64 << 10;

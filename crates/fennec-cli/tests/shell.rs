@@ -155,9 +155,8 @@ fn a_delete_written_over_lines_deletes_what_it_says() {
 /// A named statement's definition over lines is one statement: its body's
 /// `;`s cut none, and an unended `begin` reads on to its `end`, which no
 /// bracket of the lexer's holds open -- the parser's refusal at the text's
-/// end does. Nothing runs one yet, so each is refused once, whole, and
-/// nothing of it lands; a `call` whose document is on the next line goes
-/// with it.
+/// end does. It is defined whole, and a `call` whose document is on the
+/// next line goes with it, run as one statement.
 #[test]
 fn a_definition_over_lines_reads_as_one_statement() {
     let d = Dir::new("definition");
@@ -166,11 +165,19 @@ fn a_definition_over_lines_reads_as_one_statement() {
         &f,
         "create statement mine($t int) claims (sub text) as begin\n  get notes select body \
          where topic = $t;\n  del notes where id = 1 and body = $jwt.sub\nend\ncall mine\n  \
-         {t: 4}\nget notes count\ncreate statement open() as begin\n  get notes select body\n",
+         {t: 4} as {sub: 'nobody'}\nget notes count\ncreate statement open() as begin\n  get \
+         notes select body\n",
     );
     let err = text(&out.stderr);
-    let refused = "error: query error: named statements are not built yet";
-    assert_eq!(err.matches(refused).count(), 2, "{err}");
+    assert_eq!(
+        err.lines().filter(|l| l.starts_with("error:")).count(),
+        1,
+        "{err}"
+    );
+    assert!(
+        text(&out.stdout).contains("statement `mine` defined"),
+        "{err}"
+    );
     assert!(!err.contains("begins no statement"), "{err}");
     assert!(
         err.ends_with(
@@ -586,11 +593,11 @@ fn typed_a_definition_reads_on_to_its_end() {
     t.typed("  get notes select body where topic = $t;\n");
     t.typed("  del notes where id = 1 and body = $jwt.sub\n");
     t.typed("end\n");
-    t.wait_for("not built yet", 1);
+    t.wait_for("statement `mine` defined", 1);
     t.typed("create statement purge() public as del notes\n");
     t.typed("  where id = 1\n");
     t.typed("\n");
-    t.wait_for("not built yet", 2);
+    t.wait_for("statement `purge` defined", 1);
     t.typed("get notes count\n");
     t.wait_for("(1 rows", 1);
     // `describe statement` at its line's end waits for the name, which
@@ -603,7 +610,7 @@ fn typed_a_definition_reads_on_to_its_end() {
     t.typed(".quit\n");
     let out = t.end();
     assert!(!out.contains("collection `statement`"), "{out}");
-    assert_eq!(out.matches("not built yet").count(), 2, "{out}");
+    assert_eq!(out.matches("` defined").count(), 2, "{out}");
     assert!(!out.contains("begins no statement"), "{out}");
     assert_eq!(count(&f, ""), 5);
 }

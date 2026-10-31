@@ -3,6 +3,7 @@
 //! waited out the system's check of a new program on its first run.
 //! The files apart (Cargo.toml) read the process's own counts.
 
+mod calls;
 mod crash;
 mod follow;
 mod logs;
