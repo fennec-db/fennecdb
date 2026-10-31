@@ -415,7 +415,10 @@ tenant node publishes counts of its tenants, never a tenant's collection
 names. The router counts its own the same way (`fennec-shard/src/metrics.rs`,
 over `fennec_http::metrics::Timings`): requests by route and status class, a
 forwarded one's time at its node, the nodes it could not reach and its moves,
-never a tenant in a label -- 13.3 ns a request with eight threads counting,
+never a tenant in a label, nor a statement's name -- a tenant's named
+statement called by its path (`/t/<tenant>/_call/<name>`) is the route
+`call`, the rest of a tenant's `tenant` ([named-statements.md](named-statements.md#what-is-built),
+slice 4) -- 13.3 ns a request with eight threads counting,
 beside the 17 µs the router adds. A subscription is timed to its head, and a
 standby's replication stream only counted: both last as long as their
 client. The node and the router alike count a request before its answer is
@@ -434,7 +437,11 @@ statement is also counted by its text with each literal and parameter as
 `$n` and a list of literals alone as one (`fennec_http::statements::shape`)
 -- over HTTP by the FennecQL of `/query` and `/batch`, noted as
 `api::parse_query` reads it (`statements::text`), since the strings of the
-JSON would all have been one shape. The counts are shards a thread each
+JSON would all have been one shape. A call is `call <name> $1` however it
+came (`statements::call`, by `POST /_call/<name>` too), and a request held
+by `Fennec-Wait` is counted as its last run, each run forgetting what the
+one before noted ([named-statements.md](named-statements.md#what-is-built),
+slice 4). The counts are shards a thread each
 behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
 the least called forgotten: 0.34 us for a statement of 87 bytes, against the
 2.2 us its parse takes (`make statements-bench`). A shape is made only as

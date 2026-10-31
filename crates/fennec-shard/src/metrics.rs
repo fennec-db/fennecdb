@@ -28,9 +28,14 @@ pub enum Route {
     Metrics = 3,
     /// Anything else, answered 404.
     Other = 4,
+    /// `/t/<tenant>/_call/<name>`, a tenant's named statement called and
+    /// forwarded as `tenant` is: counted apart, never by its name, which is
+    /// the tenant's API as its collections' names are its own
+    /// (`docs/design/named-statements.md`, *Counted and traced by name*).
+    Call = 5,
 }
 
-const ROUTES: [&str; 5] = ["tenant", "shard", "replication", "metrics", "other"];
+const ROUTES: [&str; 6] = ["tenant", "shard", "replication", "metrics", "other", "call"];
 /// The status classes, and `gone`: a request whose client reset its
 /// connection while the router waited on its node, answered nothing and
 /// counted nowhere else. A reset alone: a client gone with its end -- most

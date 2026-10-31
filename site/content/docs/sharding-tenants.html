@@ -29,7 +29,21 @@ to the router instead, and the app needs the router's token alone:</p>
   <li><b>Under leases</b> it is applied once the node's lease names the
     tenant, since the node takes no write before; a replica follows it as it
     follows every write.</li>
+  <li><b><a href="/docs/fennecql#named-statements">Named statements</a></b>
+    may follow the collections they read, <code>create statement
+    transfer(...) ... as begin ... end</code>: the router reads them with the
+    grammar before anything is placed, and the node defines them as it
+    applies the rest. A router from before named statements refuses such a
+    schema as one that does not read (400): upgrade the routers, and every
+    node and archiver, before a tenant defines one.</li>
 </ul>
+
+<p>A tenant's statement is called through the router as any tenant path,
+<code>POST /t/acme/_call/transfer</code> with <code>{"params": {...}}</code>
+(<a href="/docs/http-reference#call">Calling a named statement</a>),
+forwarded as bytes and sent again only under an
+<code>Idempotency-Key</code>; the router's <code>/_metrics</code> counts it
+under the route <code>call</code>, never its name.</p>
 
 <h2 id="quotas">Quotas</h2>
 

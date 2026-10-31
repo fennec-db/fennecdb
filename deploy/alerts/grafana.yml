@@ -491,7 +491,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: sum by (instance) (rate(fennec_router_requests_total{route="tenant",code="5xx"}[5m])) / sum by (instance) (rate(fennec_router_requests_total{route="tenant"}[5m])) > 0.01
+              expr: sum by (instance) (rate(fennec_router_requests_total{route=~"tenant|call",code="5xx"}[5m])) / sum by (instance) (rate(fennec_router_requests_total{route=~"tenant|call"}[5m])) > 0.01
           - refId: B
             datasourceUid: __expr__
             model:

@@ -220,6 +220,41 @@ fn a_batch_refused_after_a_write_landed_says_the_outcome_is_unknown() {
     assert!(none.body.contains(r#""count":0"#), "{}", none.body);
 }
 
+/// A call by its path is asked of the lease as every write is: one whose
+/// lease lapses while its body runs is put back by the engine's fence at
+/// its block's landing and told to come back (503, `Retry-After`), nothing
+/// of it in the file; and one under a lease still lapsed is told the same.
+#[test]
+fn a_call_whose_lease_lapses_as_it_runs_is_told_to_come_back() {
+    let n = Node::start("call");
+    let mut c = Conn::open(n.port);
+    for q in [
+        "create collection notes (title text @hash)",
+        "create statement stamp($t text) public as begin
+           insert notes {title: $t};
+           get notes select lapse() as l where title = $t limit 1
+         end",
+    ] {
+        let a = c.query(q);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    let body = r#"{"params":{"t":"a"}}"#;
+    for attempt in ["lapsing", "lapsed"] {
+        let a = c.send("POST", "/t/acme/_call/stamp", false, body);
+        assert_eq!(a.status, 503, "{attempt}: {}", a.body);
+        assert!(
+            a.headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("retry-after")),
+            "{attempt}: {:?}",
+            a.headers
+        );
+    }
+    n.grant();
+    let none = c.query("get notes count");
+    assert!(none.body.contains(r#""count":0"#), "{}", none.body);
+}
+
 /// A request is asked of its own writes alone: the schema a router applies
 /// through the admin route is answered on a path that counts no statement,
 /// which cleared what a request wrote, so the read after it on the same

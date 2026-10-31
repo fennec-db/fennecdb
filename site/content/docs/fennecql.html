@@ -344,13 +344,22 @@ indexed field, a pick an ordered index walks, <code>near</code>,
 <code>$name</code> outside a definition is refused: a statement sent alone
 numbers its parameters, <code>$1</code>.</p>
 
-<p>A call runs through <code>/query</code> and <code>/batch</code>, the shell
-and the native library. It is one block under the write lock: its writes
+<p>A call runs through <a href="/docs/http-reference#call"><code>POST
+/_call/&lt;name&gt;</code></a> — its arguments the body's
+<code>params</code>, answered as <code>/query</code> answers the
+<code>call</code> — through <code>/query</code> and <code>/batch</code>,
+the shell and the native library. It is one block under the write lock: its writes
 land together or not at all, a read in it sees the writes before it, and the
 answer is its last statement's, as <code>/query</code> would give it. A call
 is a write wherever that is asked, so a read-only server, a replica and a
-marked read refuse one whose body only reads, and an
-<code>Idempotency-Key</code> makes it once. The arguments are a document, a
+marked read refuse one whose body only reads, once its grant, claims and
+arguments were asked, and an <code>Idempotency-Key</code> makes it once.
+<code>Fennec-Wait</code> holds a call whose body sets or deletes until it
+writes, as it holds those statements sent alone (<a
+href="/docs/http-reference#wait">Holding a write</a>); one whose body
+inserts is refused. <code>/_stats/statements</code> counts every call as
+<code>call &lt;name&gt; $1</code>, however its arguments were written, and
+never its body's statements apart. The arguments are a document, a
 parameter's object or SQL's list, by name or by place, and the signature
 types them: one missing, extra, <code>null</code> where the parameter has no
 default, or of another type is a 400 naming it. A <code>check</code> that
@@ -380,13 +389,19 @@ browser module reads none of these forms, refusing them as <i>named
 statements are a server's</i>; a file holding them opens in every build, the
 module's included, which keeps them as they came.</p>
 
-<p>Not built yet: <code>POST /_call/&lt;name&gt;</code>, a
-<code>call</code> method in the SDKs, the studio's pages for statements, MCP
-tools for them (MCP's <code>write</code> refuses a <code>call</code>) and
-<code>Fennec-Wait</code> on a call. A <a href="sync.html#limits">sync
-replica</a> refuses <code>call</code>, <code>create statement</code> and
-<code>drop statement</code>, and a router refuses a tenant's schema that
-declares one.</p>
+<p>A tenant's schema may declare them at the router as at a node (<a
+href="/docs/sharding-tenants">Tenants</a>). Before a primary defines the
+first one, every reader of its file runs a release that knows them — its
+archivers, replicas and standbys, the nodes a move or a restore may put it
+on, and the routers: a binary from before refuses the record a definition
+writes, and stops there (<a href="/docs/replication">Replication</a>).</p>
+
+<p>Not built yet: a <code>call</code> method in the SDKs, a call answered
+by a replica, a read-only server or a marked read, the studio's pages for
+statements and MCP tools for them (MCP's <code>write</code> refuses a
+<code>call</code>). A <a href="sync.html#limits">sync replica</a> refuses
+<code>call</code>, <code>create statement</code> and <code>drop
+statement</code>.</p>
 
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a

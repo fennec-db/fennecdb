@@ -67,6 +67,57 @@ fn statements_are_counted_by_their_shape() {
     assert!(!json.contains(put), "{json}");
 }
 
+/// A call is one shape, `call <name> $1`, whichever way it came -- by its
+/// path, a document of literals, a parameter, SQL's `CALL` -- never its
+/// body's statements apart; and a held one, run again until it wrote, is
+/// counted once as its last run, not as its text over again.
+#[test]
+fn a_call_is_one_shape_whichever_way_it_came() {
+    let path = tmp("statements-calls", "s.fennec");
+    let s = start(&["--http-token", TOKEN, "--file", path.to_str().unwrap()]);
+    let mut c = s.http().with_token(TOKEN);
+    c.run("create collection jobs (kind text, run_at timestamp @sorted, owner text)");
+    c.run(
+        "create statement claim($owner text) public as \
+         set jobs {owner: $owner, run_at: now() + 60000} \
+         where run_at <= now() order run_at limit 1 returning id, kind",
+    );
+    let a = c.ask("POST", "/_call/claim", r#"{"params":{"owner":"a"}}"#);
+    assert_eq!(a.status, 200, "{}", a.body);
+    c.run("call claim {owner: 'b'}");
+    let a = c.ask(
+        "POST",
+        "/query",
+        r#"{"query":"call claim $1","params":[{"owner":"c"}]}"#,
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    c.run("CALL claim('d')");
+    let a = c.ask("POST", "/_call/nothing", "");
+    assert_eq!(a.status, 404, "{}", a.body);
+    // Held: its job ready a moment after its first run found none, so it
+    // runs twice, the second taking the job.
+    c.run("put jobs {kind: 'mail', run_at: now() + 300}");
+    let a = c.ask_with(
+        "POST",
+        "/_call/claim",
+        r#"{"params":{"owner":"e"}}"#,
+        &[("Fennec-Wait", "10000")],
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert!(a.body.contains("\"kind\":\"mail\""), "{}", a.body);
+
+    let json = stats(&mut c);
+    assert_eq!(field(&json, "call claim $1", "calls"), Some("5"), "{json}");
+    assert_eq!(field(&json, "call claim $1", "rows"), Some("1"), "{json}");
+    assert_eq!(
+        field(&json, "call nothing $1", "errors"),
+        Some("1"),
+        "{json}"
+    );
+    assert!(!json.contains("claim $1; call"), "{json}");
+    assert!(!json.contains(r#""query":"set jobs"#), "{json}");
+}
+
 /// A page's size and offset as parameters are one statement whatever the
 /// page -- one shape here, as the same pages written into the text were
 /// already, since a literal is shaped as a place -- and the answers are

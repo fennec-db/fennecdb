@@ -189,6 +189,49 @@ fn a_durable_write_is_traced_through_the_lock_the_disk_and_the_replicas() {
     assert_eq!(missing.attr("http.response.status_code"), Some("404"));
     assert!(!missing.error);
 
+    // A call, by its path and over `/query`: the statement's name is
+    // OpenTelemetry's stored procedure, its text the call's shape, its
+    // route never its name, and no argument in any span.
+    http.run("create statement stamp($t text) public as insert notes {title: $t} returning id");
+    let by_path = (
+        "/_call/stamp",
+        r#"{"params":{"t":"secret3"}}"#,
+        "req-10",
+        "POST /_call/{name}",
+    );
+    let by_query = (
+        "/query",
+        r#"{"query":"call stamp {t: 'secret4'}"}"#,
+        "req-11",
+        "POST /query",
+    );
+    for (target, body, id, name) in [by_path, by_query] {
+        let a = http.ask_with("POST", target, body, &[("X-Request-Id", id)]);
+        assert_eq!(a.status, 200, "{}", a.body);
+        let spans = recv.until("the call's span", |s| {
+            s.iter().any(|g| g.attr("fennec.request_id") == Some(id))
+        });
+        let call = spans
+            .iter()
+            .find(|g| g.attr("fennec.request_id") == Some(id))
+            .unwrap();
+        assert_eq!(call.name, name);
+        for (k, v) in [
+            ("db.operation.name", "call"),
+            ("db.query.text", "call stamp $1"),
+            ("db.stored_procedure.name", "stamp"),
+        ] {
+            assert_eq!(call.attr(k), Some(v), "{k} in {call:#?}");
+        }
+        let trace: Vec<&Got> = spans.iter().filter(|g| g.trace == call.trace).collect();
+        assert!(
+            trace
+                .iter()
+                .all(|g| !format!("{:?}", g.attrs).contains("secret")),
+            "an argument reached a span: {trace:#?}"
+        );
+    }
+
     for post in recv.posts() {
         assert_eq!(post.path, "/v1/traces");
         let header = |k: &str| {

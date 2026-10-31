@@ -175,6 +175,14 @@ not. Over HTTP the line is the method and the target, and for
 <code>/query</code> and <code>/batch</code> the body that holds the
 statements. A line is cut at 1 000 bytes, so a bulk <code>put</code> of a
 megabyte shows what it was without being all of it.</p>
+
+<p>A <a href="/docs/fennecql#named-statements">named statement</a>'s call
+— <code>POST /_call/&lt;name&gt;</code>, or a lone <code>call</code> over
+<code>/query</code> — is logged as its shape,
+<code>"statement":"call transfer $1"</code>, never an argument, and with
+<code>"version":[history, change]</code>, the definition that ran, as
+<code>statements</code> lists it. Its span's
+<code>db.stored_procedure.name</code> is the statement's name.</p>
 </details>
 
 <h2 id="statements">What each statement cost</h2>
@@ -324,7 +332,7 @@ tenant moves. No label names a tenant.</p>
 <table>
 <thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
 <tbody>
-<tr><td><code>fennec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code>, or <code>gone</code>: a request held at its node (<code>Fennec-Wait</code>) whose client reset its connection, answered nothing. A client gone with its end — most timeouts and aborts — reads as one that half-closed and still reads, so its request is answered as the node answers it and counted by that status</td></tr>
+<tr><td><code>fennec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>call</code> (<code>/t/…/_call/…</code>, a tenant's named statement called by its path, forwarded too, never by its name), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code>, or <code>gone</code>: a request held at its node (<code>Fennec-Wait</code>) whose client reset its connection, answered nothing. A client gone with its end — most timeouts and aborts — reads as one that half-closed and still reads, so its request is answered as the node answers it and counted by that status</td></tr>
 <tr><td><code>fennec_router_request_duration_seconds{route}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
 <tr><td><code>fennec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fennec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>

@@ -30,7 +30,8 @@ POST   /&lt;name&gt;/near             body: {"vector":[...], "limit":10}
 GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental diff
 POST   /query                   body: {"query":"&lt;FennecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
-GET    /_metrics                counters and gauges, Prometheus's text format
+POST   /_call/&lt;name&gt;            body: {"params":{...}} -- the named statement, answered as /query answers it
+GET    /_metrics               counters and gauges, Prometheus's text format
 GET    /_changes?since=N        every write on disk after N, a JSON line each (--cdc)
 GET    /_changes?consumer=C     from where consumer C committed
 POST   /_changes/consumers/C    make C (201), at {"since": N} or the last write; one already there stays put (200; a since ahead of it: 409)
@@ -233,11 +234,62 @@ nothing matched, and a chain nests all the way down.</p>
 </details>
 
 
+<h2 id="call">Calling a named statement</h2>
+
+<p><code>POST /_call/&lt;name&gt;</code> calls the <a
+href="/docs/fennecql#named-statements">named statement</a>
+<code>&lt;name&gt;</code> with the arguments in its body, by name — the
+<code>call &lt;name&gt; $1</code> it stands for, run and answered as
+<code>/query</code> runs and answers that statement: the last statement of
+its body's rows, <code>Fennec-Seq</code> and all. A statement of no
+arguments takes no body.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/_call/transfer -H "Authorization: Bearer $TOKEN" \
+  -H 'Idempotency-Key: t-2026-11-01-7' \
+  -d '{"params": {"from": 1, "to": 2, "amount": 300}}'
+</pre>
+
+<ul>
+  <li><b>The body</b> holds <code>params</code> alone, an object of the
+    arguments by name (or <code>null</code>); anything beside it is a 400,
+    never ignored. The server's token passes the claims a statement reads
+    over <code>/query</code>, <code>call transfer $1 as $2</code>.</li>
+  <li><b>The path</b> takes a <code>POST</code> alone (405 otherwise). A
+    path of its own, so a proxy, a firewall's rule or the router tells one
+    call from another without reading a body; under a tenant it is
+    <code>/t/&lt;tenant&gt;/_call/&lt;name&gt;</code>.</li>
+  <li><b>In order</b>, a call is answered: 401 without a token that
+    verifies; 403 for a token bound to another tenant; 429 past
+    <code>--call-rate</code>; 404 for a statement not granted to a scoped
+    token or none of that name, in the same words; 403 for a claim it
+    declares that the token lacks; 400 for an argument missing, extra,
+    <code>null</code> or of another type, or a <code>check</code> that is
+    false; 403 for an <code>append-only</code> update or delete, a read-only
+    server or a request marked <code>Fennec-Read: replica</code>; 409 for a
+    broken statement, saying why, or a unique value taken; 412 for a
+    <code>require</code> not met, with its <code>reason</code>; 400 past
+    <code>--call-max-rows</code>; then what any write meets — 422, 507,
+    500 <code>outcome: unknown</code>, 503, 504.</li>
+  <li><b>An <code>Idempotency-Key</code></b> makes a call once: sent again,
+    the first answer is replayed (<code>Idempotent-Replayed: true</code>);
+    the key with another path or body is 422.</li>
+  <li><b><code>Fennec-Wait</code></b> holds a call as it would hold its
+    body's <code>set</code>s and <code>del</code>s (<a href="#wait">below</a>);
+    a page on another origin calls as it queries, under
+    <code>--http-cors</code>.</li>
+  <li><b>Counted</b> in <code>/_stats/statements</code> as
+    <code>call &lt;name&gt; $1</code> however it came, logged by
+    <code>--slow-ms</code> by that shape and the version that ran, and
+    traced with <code>db.stored_procedure.name</code>; a router counts it
+    under the route <code>call</code>, never its name.</li>
+</ul>
+
 <h2 id="wait">Holding a write until it can write</h2>
 
 <p>Send <code>Fennec-Wait: &lt;ms&gt;</code> with a <code>set</code> or a
-<code>del</code> on <code>/query</code> or <code>/batch</code>, and while it
-would write nothing the server holds it, answering the moment it writes —
+<code>del</code> on <code>/query</code> or <code>/batch</code>, or a call of
+a statement whose body sets or deletes, and while it would write nothing the
+server holds it, answering the moment it writes —
 or at the end of the wait, 30 seconds at most, as it would have answered
 at once. A job queue's claim waits for a job that way (<a
 href="/docs/queues#wait">Waiting for a job</a>).</p>
@@ -250,9 +302,11 @@ href="/docs/queues#wait">Waiting for a job</a>).</p>
   <li><b>What wakes it:</b> a write to a collection it reads, and the time
     reaching a row's moment — a field compared with <code>now()</code>, a
     <code>@ttl</code>. A filter that reads the time any other way is
-    refused (400), as is a request holding a <code>put</code>.</li>
+    refused (400), as is a request holding a <code>put</code>, or a call
+    whose body inserts. A call whose body only reads is answered at once.</li>
   <li><b>Wrote nothing</b> means no row written, or a
-    <code>require</code> not met; any other refusal is answered at
+    <code>require</code> not met — for a call, nothing its body wrote,
+    whatever its last statement answered; any other refusal is answered at
     once.</li>
   <li><b>With <code>Fennec-After</code></b> the header is that wait's, as
     below, and holds no write.</li>

@@ -861,7 +861,7 @@
                     {
                       "data_source": "metrics",
                       "name": "q1",
-                      "query": "p99:fennecdb.router_request_duration_seconds.bucket{$host,route:tenant}"
+                      "query": "p99:fennecdb.router_request_duration_seconds.bucket{$host AND route IN (tenant, call)}"
                     },
                     {
                       "data_source": "metrics",

@@ -256,6 +256,78 @@ fn a_held_claim_takes_the_job_enqueued() {
     eprintln!("enqueued to answered: {} ms", answered - at);
 }
 
+/// The named statements [`a_call_is_held_as_its_body_would_be`] calls.
+const STATEMENTS: [&str; 4] = [
+    "create statement claim($owner text) public as
+       set jobs {owner: $owner, run_at: now() + 60000, attempts: attempts + 1}
+       where run_at <= now() order run_at limit 1 returning id, kind, run_at",
+    "create statement enqueue($kind text) public as
+       insert jobs {kind: $kind, run_at: now(), attempts: 0} returning id",
+    "create statement peek() as get jobs select id where run_at <= now() order run_at limit 1",
+    "create statement bump($id int, $owner text) public as begin
+       set jobs {attempts: attempts + 1} where id = $id;
+       set jobs {owner: $owner} where kind = 'never' and run_at <= now()
+         order run_at limit 1 returning id
+     end",
+];
+
+/// A call is held as its body's `set` would be (`Fennec-Wait`), over
+/// `POST /_call/<name>` and `/query` alike: its group planned from the body
+/// with its argument bound in, woken by the job enqueued. A body that
+/// inserts is refused; a call that only reads is answered as it ran; and
+/// one whose first `set` wrote and whose last answered no row wrote all
+/// the same -- answered at once, its write made once, never run again for
+/// the empty answer its last statement gave.
+#[test]
+fn a_call_is_held_as_its_body_would_be() {
+    let node = start();
+    let port = node.port;
+    let mut c = Conn::open(port);
+    for def in STATEMENTS {
+        let a = c.query(def, "[]");
+        assert_eq!(a.status, 200, "{def}: {}", a.body);
+    }
+    let mut taken = 0;
+    for (path, body) in [
+        ("/_call/claim", r#"{"params":{"owner":"w1"}}"#.to_string()),
+        ("/query", line("call claim $1", r#"[{"owner":"w2"}]"#)),
+    ] {
+        let held = std::thread::spawn(move || {
+            Conn::open(port).post(path, &body, &[("Fennec-Wait", "10000")])
+        });
+        until_held(&node, 1);
+        let id = put(port, "mail", now_ms() - 1);
+        let a = held.join().unwrap();
+        assert_eq!(a.status, 200, "{path}: {}", a.body);
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{path}: {}", a.body);
+        assert_eq!(int(&got[0]["id"]), id, "{path}");
+        taken = id;
+    }
+    let wait = [("Fennec-Wait", "10000")];
+    let a = c.post("/_call/enqueue", r#"{"params":{"kind":"x"}}"#, &wait);
+    assert_eq!(a.status, 400, "{}", a.body);
+    assert!(a.body.contains("`enqueue` inserts"), "{}", a.body);
+    let before = node.server.waits();
+    let t = Instant::now();
+    let a = c.post("/_call/peek", "", &wait);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let bump = format!(r#"{{"params":{{"id":{taken},"owner":"w3"}}}}"#);
+    let a = c.post("/_call/bump", &bump, &wait);
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(rows(&a.body).len(), 0, "{}", a.body);
+    // Held, each would have been answered at its wait's end, seconds
+    // past this, and the bump run again at every look finding its row.
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    let after = node.server.waits();
+    assert_eq!((after.looks, after.runs), (before.looks, before.runs));
+    let a = c.query(
+        "get jobs select attempts where id = $1",
+        &format!("[{taken}]"),
+    );
+    assert_eq!(int(&rows(&a.body)[0]["attempts"]), 2, "{}", a.body);
+}
+
 /// Time passing with no write wakes it: a delayed job is claimed at its
 /// time and not before, and a lease that lapses hands its job on.
 ///

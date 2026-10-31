@@ -1907,9 +1907,9 @@ impl Router {
         // 404, a node's 502.
         let reply = |out: &mut TcpStream, resp: Response| {
             let resp = self.cors(resp);
-            metrics::counted(Route::Tenant, resp.status);
+            metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
-            metrics::timed(Route::Tenant, arrived.elapsed());
+            metrics::timed(tenant_route(req), arrived.elapsed());
             fennec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
@@ -2026,7 +2026,7 @@ impl Router {
             Err(e) if upstream::client_gone(&e) => {
                 forwarding.error(e.to_string());
                 drop(forwarding);
-                metrics::gone(Route::Tenant, arrived.elapsed());
+                metrics::gone(tenant_route(req), arrived.elapsed());
                 fennec_http::trace::end(499);
                 return false;
             }
@@ -2165,9 +2165,9 @@ impl Router {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
             let resp = self.cors(resp);
-            metrics::counted(Route::Tenant, resp.status);
+            metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
-            metrics::timed(Route::Tenant, arrived.elapsed());
+            metrics::timed(tenant_route(req), arrived.elapsed());
             fennec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
@@ -2309,7 +2309,7 @@ impl Router {
                     match upstream::pause_watching(client_socket, p) {
                         upstream::Paused::Here => {}
                         upstream::Paused::Gone => {
-                            metrics::gone(Route::Tenant, arrived.elapsed());
+                            metrics::gone(tenant_route(req), arrived.elapsed());
                             fennec_http::trace::end(499);
                             return false;
                         }
@@ -2342,7 +2342,7 @@ impl Router {
                 Err(e) if upstream::client_gone(&e) => {
                     forwarding.error(e.to_string());
                     drop(forwarding);
-                    metrics::gone(Route::Tenant, arrived.elapsed());
+                    metrics::gone(tenant_route(req), arrived.elapsed());
                     fennec_http::trace::end(499);
                     return false;
                 }
@@ -2706,9 +2706,9 @@ impl Router {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
             let resp = self.cors(resp);
-            metrics::counted(Route::Tenant, resp.status);
+            metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
-            metrics::timed(Route::Tenant, arrived.elapsed());
+            metrics::timed(tenant_route(req), arrived.elapsed());
             fennec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
@@ -2806,11 +2806,11 @@ impl Router {
                 false => "\r\nConnection: close\r\n\r\n",
             });
             // Counted before a byte of it goes out ([`metrics::counted`]).
-            metrics::counted(Route::Tenant, status);
+            metrics::counted(tenant_route(req), status);
             // One `writev`: the head and the body written apart went in two
             // packets, a send more every answer through the router.
             let written = http::write_parts(out, head.as_bytes(), &body);
-            metrics::timed(Route::Tenant, arrived.elapsed());
+            metrics::timed(tenant_route(req), arrived.elapsed());
             fennec_http::trace::end(status);
             return written.is_ok() && req.keep_alive;
         }
@@ -2821,9 +2821,9 @@ impl Router {
         drop(forwarding);
         metrics::upstream(sent.elapsed());
         head.push_str("Connection: close\r\n\r\n");
-        metrics::counted(Route::Tenant, status);
+        metrics::counted(tenant_route(req), status);
         let written = out.write_all(head.as_bytes());
-        metrics::timed(Route::Tenant, arrived.elapsed());
+        metrics::timed(tenant_route(req), arrived.elapsed());
         fennec_http::trace::end(status);
         if written.is_err() {
             return false;
@@ -5329,11 +5329,25 @@ fn names_in(body: &[u8]) -> Vec<String> {
 /// The route a request is counted under, by its first segment.
 fn route_of(req: &Request) -> Route {
     match req.segments().first() {
-        Some(&"t") => Route::Tenant,
+        Some(&"t") => tenant_route(req),
         Some(&"_shard") => Route::Shard,
         Some(&"_replication") => Route::Replication,
         Some(&"_metrics") => Route::Metrics,
         _ => Route::Other,
+    }
+}
+
+/// The route a tenant's request is counted under: `call` for a named
+/// statement called by its path, `/t/<tenant>/_call/<name>` -- the path a
+/// router tells one call from another by without reading a body, its name
+/// never a label -- `tenant` for every other. Read off the path's segments
+/// with nothing allocated: asked as a forwarded request is counted and as
+/// it is timed.
+fn tenant_route(req: &Request) -> Route {
+    let mut segs = req.path.split('/').filter(|s| !s.is_empty());
+    match (segs.next(), segs.next(), segs.next()) {
+        (Some("t"), Some(_), Some("_call")) => Route::Call,
+        _ => Route::Tenant,
     }
 }
 

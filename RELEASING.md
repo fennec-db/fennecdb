@@ -82,6 +82,31 @@ nothing reaches a registry before the notes have had a read.
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
 
+**A release whose first use moves the format says so in its notes.** The
+first release with named statements is one: installing it changes nothing
+on disk, but a `create statement` writes record kind 13, which every binary
+before it refuses, alone and in a block. Its notes carry, under their
+upgrade heading, the order a cluster of mixed versions takes -- the order
+of `deploy/RUNBOOK.md`'s *Upgrading with no downtime*, and one rule more:
+
+1. every archiver (`fennec archive`);
+2. every router, which reads a tenant's schema text as it creates the
+   tenant;
+3. every node -- each replica and standby, and each node a move, a restore
+   or a failover may put a tenant on;
+4. only then may any primary define a statement, by `create statement`, a
+   declared schema's apply or a tenant created with one.
+
+What an older binary does where the order is not kept, as `make
+upgrade-check` drives it against the last main before the kind: a replica
+refuses the record ("record kind 13 is not a write") and connects again for
+ever, taking no write past it; an archiver keeps the stream but takes no
+image of its own ("unknown record kind 13"), and its `fennec verify`
+refuses the archive, which the new binary reads; a router refuses a
+tenant's schema declaring a statement as one that does not read (400),
+nothing placed. Nothing is misread and nothing is lost, but each stops
+until it is upgraded.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |

@@ -381,8 +381,43 @@ pub fn asked(req: &crate::http::Request) -> std::result::Result<Option<Duration>
 
 /// Whether a held request may hold `stmt`: a `set` or a `del`, whose
 /// writes a look can test, or a read beside them in a `/batch`. Its time
-/// must be one [`Database::wakes_at`] can place.
-pub fn holdable(stmt: &Statement, params: &[Value]) -> std::result::Result<(), Error> {
+/// must be one [`Database::wakes_at`] can place. A call is asked of the
+/// body it would run, its arguments and claims bound in, under a short
+/// read lock of `db` ([`Database::callee`]): a body of `get`s, `set`s and
+/// `del`s, an `insert` refused -- what it makes, a look cannot test for. A
+/// call the engine would refuse is let through, for the run to answer in
+/// a call's order; one whose definition is replaced before the run is
+/// asked again by every look, which runs `handle` whole.
+pub fn holdable(
+    db: &RwLock<Database>,
+    stmt: &Statement,
+    params: &[Value],
+) -> std::result::Result<(), Error> {
+    let Statement::Call(c) = stmt else {
+        return holdable_one(stmt, params);
+    };
+    let callee = match db
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .callee(c, params)
+    {
+        Ok(callee) => callee,
+        Err(_) => return Ok(()),
+    };
+    for st in &callee.def.body {
+        if matches!(st, Statement::Put { .. }) {
+            return Err(Error::Query(format!(
+                "Fennec-Wait holds a call whose body sets or deletes, and `{}` inserts: what \
+                 it makes, no look can wait for",
+                c.name
+            )));
+        }
+        holdable_one(st, &callee.values)?;
+    }
+    Ok(())
+}
+
+fn holdable_one(stmt: &Statement, params: &[Value]) -> std::result::Result<(), Error> {
     match stmt {
         Statement::Update { filter, .. } | Statement::Delete { filter, .. } => {
             let mut f = filter.clone();
@@ -400,12 +435,45 @@ pub fn holdable(stmt: &Statement, params: &[Value]) -> std::result::Result<(), E
     }
 }
 
+/// Where a database stood before a held request ran: what a call is asked
+/// whether it wrote by, since its answer is its last statement's alone --
+/// a body whose first `set` wrote and whose last answered no row wrote all
+/// the same, and held, would have run it again. The change counter moves
+/// as a lone statement's block lands, the open block's writes grow in a
+/// keyed run's or a `/batch`'s.
+#[derive(Clone, Copy)]
+pub struct Mark {
+    seq: u64,
+    writes: usize,
+}
+
+impl Mark {
+    pub fn of(db: &Database) -> Mark {
+        Mark {
+            seq: db.change_seq(),
+            writes: db.block_writes(),
+        }
+    }
+
+    /// Whether `db` took a write since.
+    pub fn moved(&self, db: &Database) -> bool {
+        db.change_seq() != self.seq || db.block_writes() != self.writes
+    }
+}
+
 /// Whether `stmt`, answered `r`, wrote nothing: a count of 0, no row
-/// answered, or a `require` it did not meet -- whose block was put back.
-pub fn wrote_nothing(stmt: &Statement, r: &fennec_core::error::Result<Response>) -> bool {
+/// answered, or a `require` it did not meet -- whose block was put back. A
+/// call, by `db` against where it stood before it ran ([`Mark`]).
+pub fn wrote_nothing(
+    stmt: &Statement,
+    r: &fennec_core::error::Result<Response>,
+    db: &Database,
+    before: Mark,
+) -> bool {
     match r {
         Err(Error::Unmet(_)) => true,
         Err(_) => false,
+        Ok(_) if matches!(stmt, Statement::Call(_)) => !before.moved(db),
         Ok(r) => nothing_written(stmt, r),
     }
 }
@@ -423,67 +491,28 @@ pub fn nothing_written(stmt: &Statement, r: &Response) -> bool {
 
 /// Leaves the plan of a held request's run that wrote nothing, made under
 /// the write lock it ran under: the gets its writes amount to, and when
-/// their answer next changes with no write. `before` is when it ran.
+/// their answer next changes with no write. `before` is when it ran. A
+/// call's are its body's, planned with the arguments and claims it ran
+/// with bound in -- the definition the lock still holds -- and a plan with
+/// nothing to look for, a call that only reads, holds nothing: it is
+/// answered as it ran.
 pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
     let mut tests = Vec::new();
     let mut collections = Vec::new();
     for (stmt, params) in stmts {
-        let (collection, filter, order) = match stmt {
-            Statement::Update {
-                collection,
-                filter,
-                pick,
-                ..
+        match stmt {
+            Statement::Call(c) => {
+                if let Ok(callee) = db.callee(c, params) {
+                    for st in &callee.def.body {
+                        plan_one(st, &callee.values, &mut tests, &mut collections);
+                    }
+                }
             }
-            | Statement::Delete {
-                collection,
-                filter,
-                pick,
-                ..
-            } => (collection, filter, pick.as_ref().map(|p| p.order.clone())),
-            _ => continue,
-        };
-        let mut filter = filter.clone();
-        if let Some(f) = &mut filter {
-            bind(f, params);
-            read_by(f, &mut collections);
+            _ => plan_one(stmt, params, &mut tests, &mut collections),
         }
-        if !collections.contains(collection) {
-            collections.push(collection.clone());
-        }
-        let mut order = order.unwrap_or_default();
-        // A key worked out of the row -- `order distance(pickup, $2)` --
-        // bound as the filter is: a test runs with no parameters, and two
-        // couriers' claims are two groups by the points they name.
-        for e in order.iter_mut().filter_map(|s| s.expr.as_mut()) {
-            bind(e, params);
-        }
-        // Where the first key is worked out of the row, the test answers it
-        // too: what the claim ranks the row it found by, beside every other
-        // claim's rank of it ([`rank`]).
-        let computed: Vec<Column> = order
-            .first()
-            .and_then(|s| s.expr.clone())
-            .map(|expr| Column {
-                expr,
-                name: RANK.to_string(),
-            })
-            .into_iter()
-            .collect();
-        let mut project = vec!["id".to_string()];
-        project.extend(computed.iter().map(|c| c.name.clone()));
-        let test = Select {
-            collection: collection.clone(),
-            project: Some(project),
-            filter,
-            order,
-            limit: Some(Count::N(1)),
-            computed,
-            ..Select::default()
-        };
-        if !tests.contains(&test) {
-            tests.push(test);
-        }
+    }
+    if tests.is_empty() {
+        return;
     }
     let at = next_moment(db, &tests, before);
     let p = Plan {
@@ -493,6 +522,72 @@ pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
         seq: db.change_seq(),
     };
     PLANNED.with(|slot| *slot.borrow_mut() = Some(p));
+}
+
+/// [`plan`]'s test of one `set` or `del`, bound to `params`: the `get` of
+/// the one row it amounts to.
+fn plan_one(
+    stmt: &Statement,
+    params: &[Value],
+    tests: &mut Vec<Select>,
+    collections: &mut Vec<String>,
+) {
+    let (collection, filter, order) = match stmt {
+        Statement::Update {
+            collection,
+            filter,
+            pick,
+            ..
+        }
+        | Statement::Delete {
+            collection,
+            filter,
+            pick,
+            ..
+        } => (collection, filter, pick.as_ref().map(|p| p.order.clone())),
+        _ => return,
+    };
+    let mut filter = filter.clone();
+    if let Some(f) = &mut filter {
+        bind(f, params);
+        read_by(f, collections);
+    }
+    if !collections.contains(collection) {
+        collections.push(collection.clone());
+    }
+    let mut order = order.unwrap_or_default();
+    // A key worked out of the row -- `order distance(pickup, $2)` --
+    // bound as the filter is: a test runs with no parameters, and two
+    // couriers' claims are two groups by the points they name.
+    for e in order.iter_mut().filter_map(|s| s.expr.as_mut()) {
+        bind(e, params);
+    }
+    // Where the first key is worked out of the row, the test answers it
+    // too: what the claim ranks the row it found by, beside every other
+    // claim's rank of it ([`rank`]).
+    let computed: Vec<Column> = order
+        .first()
+        .and_then(|s| s.expr.clone())
+        .map(|expr| Column {
+            expr,
+            name: RANK.to_string(),
+        })
+        .into_iter()
+        .collect();
+    let mut project = vec!["id".to_string()];
+    project.extend(computed.iter().map(|c| c.name.clone()));
+    let test = Select {
+        collection: collection.clone(),
+        project: Some(project),
+        filter,
+        order,
+        limit: Some(Count::N(1)),
+        computed,
+        ..Select::default()
+    };
+    if !tests.contains(&test) {
+        tests.push(test);
+    }
 }
 
 /// The least moment of every test's, a refusal or a failed probe counting
@@ -1917,7 +2012,7 @@ kinds   read                                                                 for
         } else {
             stmt
         };
-        holdable(&stmt, &params).ok()?;
+        holdable_one(&stmt, &params).ok()?;
         plan(db, &[(&stmt, &params)], t);
         planned()
     }
