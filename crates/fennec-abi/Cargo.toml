@@ -25,8 +25,11 @@ fennec-core = { workspace = true, default-features = false, features = ["std-fs"
 [features]
 default = ["sync"]
 # A replica's sync with a server (`sync`): the native library's; the
-# browser module is built without it.
-sync = []
+# browser module is built without it. It reads named statements, to refuse
+# them in its own words (`sync::NAMED`): a build of the sync without them
+# would answer the parser's "this module is built without them" instead,
+# and the native library, its one user, names them anyway.
+sync = ["fennec-ql/statements"]
 
 [dev-dependencies]
 fennec-core = { workspace = true, features = ["full", "std-fs"] }

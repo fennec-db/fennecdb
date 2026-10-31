@@ -163,6 +163,14 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         let wh = filter(member(w, "where"), params, &mut bind);
         return format!("get {c}{wh}{required}");
     }
+    // A FennecQL text as an app runs it, with its parameters: a binding's
+    // `run` hands the core the text as written, no builder between.
+    if let Some(Value::Text(t)) = member(w, "text") {
+        if let Some(Value::List(ps)) = member(w, "params") {
+            params.extend(ps.iter().cloned());
+        }
+        return t.clone();
+    }
     if let Some(Value::List(ws)) = member(w, "batch") {
         return ws
             .iter()
