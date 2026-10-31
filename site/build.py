@@ -611,12 +611,16 @@ def prev_next(active, base):
 #
 # A miss is a warning locally -- a rebuild that moves the module by forty bytes
 # should not stop you working -- and an error under CI, which is the build that
-# ships the number. A size is held to its claim to the half KB either way, and
-# a compressed one with NOISE_KB more: gzip and brotli move by up to 0.3 KB
+# ships the number. A size passes while it is within one unit of the claim's
+# last digit or 1% of the claim, whichever is wider (`size_drifted`). Rounding
+# to the digit written failed a pull request that added a few hundred bytes,
+# and the merge queue, which tests main plus the pull request, failed one
+# whose own CI had passed: two that each grow the module a little push a
+# figure past its rounding together, a tree neither CI ever built. The room
+# also covers the compressed sizes' noise: gzip and brotli move by up to 0.3 KB
 # with nothing but the layout of the bytes changed -- two lines of comment at
 # the top of engine.rs moved brotli 46 bytes, through the line numbers the
-# panics carry -- and held to the whole KB alone, noise that carried the
-# module across a half would fail CI with nothing wrong in the docs.
+# panics carry. A figure that is further off is stale, and fails as before.
 #
 # Not everything measured is in here. The container image's size is written
 # into four files and cannot be checked from a site build, which has neither a
@@ -628,10 +632,18 @@ def prev_next(active, base):
 # two different numbers and fail honest builds. They are re-measured by hand at
 # each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
 # 684/765/927 KB when the text index went in.
-NOISE_KB = 0.3
-COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all",
-              "kb_lite_gz", "kb_lite_br", "kb_min_gz", "kb_min_br",
-              "kb_app_br", "kb_app_gz", "kb_app_client_br", "kb_app_client_gz", "kb_studio_gz"}
+def size_drifted(written, measured, tol=0):
+    """Whether a size the docs quote (`written`, as the page writes it) is
+    further from `measured` than one unit of its last digit or 1% of it,
+    whichever is wider, and `tol` more where a figure is written approximate.
+    The unit is a KB for "274" and a tenth for "332.1"; for a whole KB, 1% is
+    the wider from 100 up, which is what a few hundred bytes of growth stay
+    inside."""
+    quoted = float(written)
+    unit = 10 ** -len(written.partition(".")[2])
+    return abs(measured - quoted) > max(unit, 0.01 * quoted) + tol + 1e-9
+
+
 # The browser client's modules, each after those it imports: what
 # `@fennecdb/web` ships of JavaScript. client.js is `@fennecdb/web/client`,
 # builder.js and http.js without the engine.
@@ -1484,8 +1496,7 @@ def claims_against(truth, unit, wanted):
                 drifted = said != int(want)
                 want = "none" if int(want) == 0 else str(int(want))
             elif fact.startswith("kb"):
-                room = 0.5 + tol + (NOISE_KB if fact in COMPRESSED else 0)
-                drifted = abs(int(written) - want) > room
+                drifted = size_drifted(written, want, tol)
                 want = f"{want:.1f}"
             else:
                 drifted = abs(int(written) - want) > tol
