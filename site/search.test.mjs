@@ -180,12 +180,17 @@ test('a question the words miss finds its page by its meaning', () => {
     // it. They once did vote, and the bounds rested on that chance: mobile
     // was 3rd, then 4th, as docs gained or lost a `tell`; compaction was 2nd
     // by `durable`, and is 7th by its meaning, behind sections on memory,
-    // limits and containers. Each bound is the committed vectors' rank and
-    // one more, for the deploy: it embeds afresh the sections whose text
-    // changed since the cache was committed (21 today), of which CI holds the
-    // vector of an earlier text.
+    // limits and containers. With every section's vector as the deploy
+    // embeds it, it stood 12th, behind those and the five sections of
+    // docs/files, which keeps the bytes of uploads out of the file. Its
+    // section, as embedded (the first 2000 characters), told how a file is
+    // compacted and not that this keeps it from growing; it says so now and
+    // is 1st. Its bound stays wide, since a deploy embeds the pages added
+    // since the cache was committed and CI holds no vector for them. A bound
+    // is otherwise the committed vectors' rank and one more, for the sections
+    // whose text changed since: CI holds the vector of an earlier text.
     ['telefonda veri saklamak', 'docs/mobile', 2], // 1st
-    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 8], // 7th
+    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 8], // 1st
   ]) {
     const [words, meaning] = standing(q, url);
     assert.ok(words === 0, `${q}: the words alone found ${url} at ${words}`);
@@ -270,6 +275,10 @@ test('what the words found, the meaning keeps', () => {
     // until a deploy embeds it and the cache is committed it has none, and
     // the words alone put it 8th. With its vector it is first.
     ['sort names the way Turkish does', 'docs/fennecql-schema#collation', 1],
+    // A section is embedded by its first 2000 characters. docs/sync's on
+    // refusals opened with a table of statuses and told of the offline queue
+    // past them, so it stood 5th, behind a job queue's; it opens with the
+    // replica working offline now.
     ['work offline and catch up later', 'docs/sync', 1],
   ]) {
     const [, meaning] = standing(q, url);

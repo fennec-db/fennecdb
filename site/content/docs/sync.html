@@ -209,9 +209,11 @@ the row is in the replica from the start, and nothing needs to await it.</p>
 
 <h2>Refusals, retries and offline</h2>
 
-<p>Only a refusal puts a write back. Anything else that keeps the server from
-answering keeps the write, and it goes again until the server answers it --
-once, whatever the network did meanwhile.</p>
+<p>A replica works offline and catches up later. It reads from its own copy,
+its writes wait in the queue, and they go in order once the server can be
+reached again. Only a refusal puts a write back. Anything else that keeps the
+server from answering keeps the write, and it goes again until the server
+answers it -- once, whatever the network did meanwhile.</p>
 
 <div class="tbl">
 <table>
