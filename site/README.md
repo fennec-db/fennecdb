@@ -102,8 +102,11 @@ puts on it. The module's size is written into eight files and had drifted by
 generator lists every place, with the pattern that finds it. A mismatch is a
 warning locally — a rebuild moving the module by forty bytes should not stop
 you working — and an error when `CI` is set, which is the build that would ship
-the wrong number. Reword one of those sentences and the check says it could not
-find its pattern: update the entry, do not delete it.
+the wrong number. A size passes while it is within one unit of its last digit or
+1%, whichever is wider, since the merge queue tests main plus the pull request
+and two that each grow the module a little would otherwise push a figure past
+its rounding together. Reword one of those sentences and the check says it
+could not find its pattern: update the entry, do not delete it.
 
 ## Deployment
 
