@@ -587,8 +587,14 @@ archiver.</p>
 closed and fsynced before the next begins, and an image is written beside
 and renamed into place. A sync tool lists the directory and then copies
 each file as it stands, so the copy it leaves is the archive up to a
-moment, its last segment at most cut in a record's middle — which
-<code>verify</code> reports and a restore passes over. A test copies an
+moment, its last segment at most cut in a record's middle, or holding no
+write when the copy caught it as it was made. A restore passes over either.
+<code>verify</code> reports the bytes cut short, a record's or a start of
+the segment's magic, as <code>the last segment ends in a record cut short (N
+bytes)</code>; a segment caught empty, or with its magic whole and no write
+yet, has nothing cut, and <code>verify</code> only counts it among the
+segments. Any segment before the last holding no write it refuses by name.
+An archiver stopped there goes on from the segment before. A test copies an
 archive a file at a time while writes and images go on, and every copy
 verifies and restores to a prefix of what the primary wrote.
 <code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
