@@ -62,8 +62,11 @@ write, and before the magic one that is only a start of it, empty included
 (sealed, of the seal's, or its head frame cut short). Such a segment holds
 no write (`entries`), so a copy whose last segment it is verifies and
 restores to the segment before; and the archiver opening the archive to go
-on removes a last segment holding no write (`position`), going on in the
-one before. Refused as no segment, a cut magic made a copy "not an archive
+on removes a last segment holding no write (`position`), the directory
+synced before it goes on in the one before: brought back by a crash, the
+removed one would hold no write with segments after it, which `verify`
+refuses by name -- only the last segment may hold none. `consolidate` reads
+the archive's end from the segment before it too (`last_write`). Refused as no segment, a cut magic made a copy "not an archive
 segment" (`a_copy_taken_while_the_archive_writes_restores_or_says_why_not`,
 once in CI; in a three-core container beside three busy loops 1 run of
 1 300, and 0 of 1 000 since; with the window widened by a 2 ms sleep between
@@ -72,10 +75,11 @@ archive's end taken then (`consolidate`), and kept an archiver stopped there
 from going on. Left in place, a segment holding no write had the archiver go
 on from its last image, taking the writes after it again into a segment of
 their own, and an image sent then put the next segment after one cut short,
-which no `verify` passes. Making a segment under a temporary name and renaming it in
-was not taken: it covers a copy and a killed archiver, but a machine's crash
-before the segment's first fsync can leave the renamed file empty all the
-same, short of an fsync for each segment made.
+which no `verify` passes. Making a segment under a temporary name and
+renaming it in was not taken: a rename can still leave a last segment
+holding only its magic, which needs `position`'s walk back all the same, and
+an archive written before needs the lenient read all the same -- two
+mechanisms and an fsync for each segment made, where one rule does.
 
 ## A node's archive
 

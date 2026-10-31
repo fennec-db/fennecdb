@@ -846,6 +846,19 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
             assert!(v.torn <= cut, "{v:?}");
             let out = d.join(format!("copy-{sealed}-{cut}.fennec"));
             assert_eq!(c.restore(&out, Target::End).unwrap().seq, p.seq());
+            // The end is in the segment before: an image of it is taken,
+            // where reading the last segment alone took none.
+            assert_eq!(c.consolidate().unwrap(), Some(p.seq()), "cut at {cut}");
+            // Only the last may hold no write: with a segment after it, one
+            // is refused by name.
+            let after = copy.join(format!("writes-{:020}.log", p.seq() + 2));
+            std::fs::write(&after, &head).unwrap();
+            let e = c.verify().unwrap_err().to_string();
+            let name = format!("writes-{:020}.log", p.seq() + 1);
+            assert!(
+                e.contains(&name) && e.contains("holds no write"),
+                "cut at {cut}, sealed {sealed}: {e}"
+            );
         }
 
         // An archiver stopped as it made one goes on in the segment before:

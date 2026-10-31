@@ -499,6 +499,7 @@ impl Archive {
         };
         let mut at = self.images()?.last().map_or(0, |i| i.0);
         let mut open = None;
+        let mut removed = None;
         for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
             let read = self.read_segment(&path)?;
@@ -512,6 +513,7 @@ impl Archive {
                 // a segment of their own, and a hello's image put the next
                 // segment after one cut short, which no `verify` passes.
                 fs::remove_file(&path)?;
+                removed = Some(path);
                 continue;
             }
             let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
@@ -547,6 +549,12 @@ impl Archive {
                 });
             }
             break;
+        }
+        if let Some(path) = removed {
+            // Durable before the archiver writes on in the segment before:
+            // brought back by a crash, the removed one is a segment holding
+            // no write with segments after it, which `verify` refuses.
+            fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string()))?;
         }
         Ok((at, history, open))
     }
@@ -822,15 +830,19 @@ impl Archive {
     }
 
     /// The last change the segments hold and when it was appended: the
-    /// last segment's last whole record.
+    /// last segment's last whole record, or the one's before it where the
+    /// last holds none -- caught as it was made, the end is in the segment
+    /// before, and read from the last alone `consolidate` let a round go by.
     fn last_write(&self) -> io::Result<Option<(u64, u64)>> {
-        let Some(&first) = self.segments()?.last() else {
-            return Ok(None);
-        };
-        let bytes = self.read_segment(&self.segment_path(first))?.plain;
-        let (list, _) = entries(&bytes)?;
-        let writes: u64 = list.iter().map(|e| e.3).sum();
-        Ok(list.last().map(|e| (first + writes - 1, e.0)))
+        for &first in self.segments()?.iter().rev() {
+            let bytes = self.read_segment(&self.segment_path(first))?.plain;
+            let (list, _) = entries(&bytes)?;
+            let writes: u64 = list.iter().map(|e| e.3).sum();
+            if let Some(e) = list.last() {
+                return Ok(Some((first + writes - 1, e.0)));
+            }
+        }
+        Ok(None)
     }
 
     /// Takes an image of the database as the archive's end holds it -- its
@@ -978,9 +990,9 @@ impl Archive {
     /// holds: each image opens and is at the change its name says, the
     /// segments run on from the oldest image with no change missing -- a
     /// gap is the start of a later image, where the primary sent one --
-    /// only the last segment may end in a record cut short, and a restore
-    /// to the end opens. A backup no restore can be made from is not one,
-    /// and this is how to know before it is needed.
+    /// only the last segment may end in a record cut short or hold no
+    /// write, and a restore to the end opens. A backup no restore can be
+    /// made from is not one, and this is how to know before it is needed.
     pub fn verify(&self) -> io::Result<Verified> {
         let images = self.images()?;
         let Some(&(first, from)) = images.first() else {
@@ -1016,6 +1028,15 @@ impl Archive {
             let read = self.read_segment(&path)?;
             let (list, end) =
                 entries(&read.plain).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            // Only the last may hold no write, caught as it was made: one
+            // before it, empty or only its magic, is no segment `take`
+            // leaves, and `position` removes the last before going on.
+            if list.is_empty() && k + 1 < segments.len() {
+                return Err(corrupt(format!(
+                    "{}: holds no write, with segments after it",
+                    path.display(),
+                )));
+            }
             // Cut short: a record, plain, or a frame, sealed.
             let cut = match read.sealed {
                 Some(_) if end < read.plain.len() => {
