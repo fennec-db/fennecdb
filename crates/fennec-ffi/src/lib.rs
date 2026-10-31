@@ -425,6 +425,9 @@ pub fn open_wrapped(
     flags: u32,
     wrap: Box<fennec_core::fs::Wrap<'_>>,
 ) -> Result<u64, (i32, String)> {
+    // Before the open: each named statement the file holds is read back
+    // into its tree, its digest checked.
+    fennec_ql::install();
     let lock = lock_file(path)?;
     let mapped = flags & FENNEC_OPEN_IN_MEMORY == 0;
     let db = fennec_core::fs::open_with(path, mapped, wrap).map_err(|e| failed(&e))?;

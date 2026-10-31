@@ -1,0 +1,540 @@
+//! Named statements as their database keeps them
+//! (`docs/design/named-statements.md`, slice 2): record kind 13, alone and
+//! in a block, one write of the change counter; put back with its block;
+//! read back by every open, its digest checked, and kept by every image;
+//! applied by a replica and passed over by a reader of the changes; and
+//! held to the schema at each schema change's commit -- refused naming the
+//! statement, or marked broken by a writer that cannot refuse.
+//!
+//! `tests/statements.fennec` is a file of stored statements written by a
+//! build of this grammar's epoch, opened by every later one:
+//!
+//!     FENNEC_WRITE_FIXTURE=1 cargo test -p fennec-core --test all stored::
+
+use fennec_core::codec::{encode_str, put_uvarint};
+use fennec_core::engine::{writes_in, ChangeKind, Statements};
+use fennec_core::named::GRAMMAR_EPOCH;
+use fennec_core::prelude::*;
+use std::sync::{Arc, Mutex};
+
+const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/statements.fennec");
+
+const SCHEMA: &str = "create collection accounts (owner text @hash, balance int);
+create collection entries (src int, dst int, amount int, by text);
+create collection likes (post int, user text);
+create index on likes (post, user) @unique";
+
+const TRANSFER: &str = "create statement transfer($from int, $to int, $amount int)
+  claims (sub text)
+  comment 'Moves an amount from an account the caller owns to another'
+  check $amount > 0 and $from != $to
+as begin
+  -- the caller's account, or nothing moves
+  get accounts select id where id = $from and owner = $jwt.sub
+    limit 1 require 1 else 'not your account';
+  set accounts {balance: balance - $amount} where id = $from and balance >= $amount
+    require 1 else 'insufficient funds';
+  set accounts {balance: balance + $amount} where id = $to
+    require 1 else 'no such account';
+  insert entries {src: $from, dst: $to, amount: $amount, by: $jwt.sub}
+    returning id
+end";
+
+const LIKE: &str = "create statement like($post int) claims (sub text) as
+  insert likes {post: $post, user: $jwt.sub} if absent returning id";
+
+/// Each write's record, by its number.
+type Numbered = Vec<(u64, Vec<u8>)>;
+
+/// A sink keeping the file's bytes and each write's record, numbered.
+#[derive(Clone)]
+struct Tap {
+    file: Arc<Mutex<Vec<u8>>>,
+    writes: Arc<Mutex<Numbered>>,
+}
+
+impl Default for Tap {
+    fn default() -> Tap {
+        Tap {
+            file: Arc::new(Mutex::new(fennec_core::engine::MAGIC.to_vec())),
+            writes: Arc::default(),
+        }
+    }
+}
+
+impl Sink for Tap {
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        self.file.lock().unwrap().extend_from_slice(bytes);
+        Ok(())
+    }
+    fn record(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
+        self.file.lock().unwrap().extend_from_slice(bytes);
+        self.writes.lock().unwrap().push((seq, bytes.to_vec()));
+        Ok(())
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
+        *self.file.lock().unwrap() = bytes.to_vec();
+        Ok(())
+    }
+}
+
+impl Tap {
+    /// A database writing into the tap, which defines named statements.
+    fn database(&self) -> Database {
+        fennec_ql::install();
+        let mut db = Database::with_sink(Box::new(self.clone()));
+        db.allow_definitions();
+        db
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.file.lock().unwrap().clone()
+    }
+
+    fn last(&self) -> (u64, Vec<u8>) {
+        self.writes
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a write")
+    }
+}
+
+/// A database opened from `bytes`, as an open of its file reads it.
+fn opened(bytes: &[u8]) -> Database {
+    fennec_ql::install();
+    let mut db = Database::new();
+    db.load(bytes).expect("the file opens");
+    db
+}
+
+/// Each statement of `text` on its own, a block each.
+fn run(db: &mut Database, text: &str) -> Result<Response> {
+    let mut last = Response::Affected(0);
+    for s in fennec_ql::parse(text).expect("parse") {
+        last = db.execute(&s)?;
+    }
+    Ok(last)
+}
+
+/// The statements of `text` as one block.
+fn block(db: &mut Database, text: &str) -> Result<Vec<Response>> {
+    let stmts = fennec_ql::parse(text).expect("parse");
+    let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|s| (s, &[][..])).collect();
+    db.execute_block(&pairs).map_err(|(_, e)| e)
+}
+
+fn schema(tap: &Tap) -> Database {
+    let mut db = tap.database();
+    run(&mut db, SCHEMA).unwrap();
+    db
+}
+
+/// A statement as a reader compares two: its name, version, epoch,
+/// digest, dependencies and text, and whether it is broken.
+type Held = (String, (u64, u64), u32, u64, Vec<String>, String, bool);
+
+/// What a table holds, as a reader compares two: everything but the tree.
+fn held(t: &Statements) -> Vec<Held> {
+    t.iter()
+        .map(|s| {
+            let s = s.clone();
+            let broken = s.broken.is_some();
+            (
+                s.name, s.version, s.epoch, s.digest, s.depends, s.text, broken,
+            )
+        })
+        .collect()
+}
+
+fn digest(text: &str) -> u64 {
+    fennec_ql::definition(text).unwrap().digest().unwrap()
+}
+
+fn refused(r: Result<impl std::fmt::Debug>) -> String {
+    r.expect_err("refused").to_string()
+}
+
+#[test]
+fn a_definition_is_one_record_of_kind_13_and_one_write() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    let before = db.change_seq();
+    run(&mut db, TRANSFER).unwrap();
+    let (seq, record) = tap.last();
+    assert_eq!(record[0], 13, "a record of its own kind");
+    assert_eq!(writes_in(&record).unwrap(), 1, "a write the feed counts");
+    assert_eq!((seq, db.change_seq()), (before + 1, before + 1));
+    let t = db.statements();
+    let s = t.get("transfer").expect("defined");
+    assert_eq!(s.version, (db.history().current(), before + 1));
+    assert_eq!(s.epoch, GRAMMAR_EPOCH);
+    assert_eq!(s.digest, digest(TRANSFER));
+    assert_eq!(
+        s.text, TRANSFER,
+        "the definition's own bytes, comments and all"
+    );
+    for d in [
+        "accounts",
+        "accounts.owner",
+        "accounts.balance",
+        "entries",
+        "entries.by",
+    ] {
+        assert!(s.depends.iter().any(|x| x == d), "{d} in {:?}", s.depends);
+    }
+    assert!(s.broken.is_none() && s.tree.is_some());
+
+    // A drop is a record of the kind too.
+    run(&mut db, "drop statement transfer").unwrap();
+    let (_, record) = tap.last();
+    assert_eq!((record[0], writes_in(&record).unwrap()), (13, 1));
+    assert!(db.statements().is_empty());
+    assert!(refused(run(&mut db, "drop statement transfer")).contains("statement `transfer`"));
+    run(&mut db, "drop statement if exists transfer").unwrap();
+}
+
+#[test]
+fn a_definition_in_a_block_lands_with_its_writes_as_one_record() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    let before = db.change_seq();
+    block(
+        &mut db,
+        &format!("put accounts {{owner: \"ann\", balance: 10}}; {LIKE}"),
+    )
+    .unwrap();
+    let (seq, record) = tap.last();
+    assert_eq!(record[0], 9, "a block record");
+    assert_eq!(writes_in(&record).unwrap(), 2);
+    assert_eq!(seq, before + 2);
+    // Numbered as the block's second write.
+    assert_eq!(db.statements().get("like").unwrap().version.1, before + 2);
+}
+
+#[test]
+fn a_block_put_back_puts_back_its_definitions() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, LIKE).unwrap();
+    let was = held(db.statements());
+    let writes = tap.writes.lock().unwrap().len();
+    let replaced = LIKE
+        .replace("create statement", "create or replace statement")
+        .replace("returning id", "returning id, post");
+    // The replacement answers another field: refused as it is defined.
+    assert!(refused(block(&mut db, &replaced)).contains("answers other fields"));
+    let replaced = LIKE
+        .replace("create statement", "create or replace statement")
+        .replace("if absent ", "");
+    let e = block(
+        &mut db,
+        &format!("{replaced}; {TRANSFER}; put accounts {{balance: \"many\"}}"),
+    );
+    assert!(e.is_err());
+    assert_eq!(held(db.statements()), was, "the table as it was");
+    assert_eq!(
+        tap.writes.lock().unwrap().len(),
+        writes,
+        "nothing reached the file"
+    );
+}
+
+#[test]
+fn every_open_reads_a_statement_back_and_every_image_keeps_it() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, TRANSFER).unwrap();
+    run(&mut db, LIKE).unwrap();
+    run(&mut db, "drop statement like").unwrap();
+    run(&mut db, LIKE).unwrap();
+    let want = held(db.statements());
+
+    let reopened = opened(&tap.bytes());
+    assert_eq!(held(reopened.statements()), want);
+    assert_eq!(reopened.change_seq(), db.change_seq());
+    for s in reopened.statements().iter() {
+        let tree = s.tree.as_ref().expect("read into its tree");
+        assert_eq!(tree.digest().unwrap(), s.digest);
+    }
+
+    // An image: what a compact writes, a replica is sent and a page keeps.
+    let image = db.snapshot();
+    let again = opened(&image);
+    assert_eq!(held(again.statements()), want, "versions kept through it");
+    assert_eq!(held(opened(&again.snapshot()).statements()), want);
+}
+
+#[test]
+fn a_compact_keeps_the_statements_as_they_were() {
+    let dir = std::env::temp_dir().join(format!("fennec-stored-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for mapped in [false, true] {
+        let path = dir.join(format!("compact-{mapped}.fennec"));
+        let _ = std::fs::remove_file(&path);
+        fennec_ql::install();
+        let mut db = match mapped {
+            true => fennec_core::fs::open_mapped(&path).unwrap(),
+            false => fennec_core::fs::open(&path).unwrap(),
+        };
+        db.allow_definitions();
+        run(&mut db, SCHEMA).unwrap();
+        run(&mut db, TRANSFER).unwrap();
+        run(
+            &mut db,
+            "put accounts {owner: \"ann\", balance: 1}; del accounts where id = 1",
+        )
+        .unwrap();
+        let want = held(db.statements());
+        run(&mut db, "compact").unwrap();
+        assert_eq!(held(db.statements()), want);
+        drop(db);
+        let db = fennec_core::fs::open(&path).unwrap();
+        assert_eq!(held(db.statements()), want, "mapped: {mapped}");
+        assert!(db.statements().get("transfer").unwrap().tree.is_some());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_replica_applies_a_definition_and_a_reader_of_the_changes_passes_over_it() {
+    let tap = Tap::default();
+    let mut primary = schema(&tap);
+    run(&mut primary, "put accounts {owner: \"ann\", balance: 10}").unwrap();
+    run(&mut primary, TRANSFER).unwrap();
+    block(
+        &mut primary,
+        &format!("{LIKE}; put accounts {{owner: \"bob\", balance: 5}}"),
+    )
+    .unwrap();
+    run(&mut primary, "drop statement transfer").unwrap();
+    run(&mut primary, "put accounts {owner: \"cy\", balance: 1}").unwrap();
+
+    let replica_tap = Tap::default();
+    let mut replica = replica_tap.database();
+    let writes = tap.writes.lock().unwrap().clone();
+    for (seq, record) in &writes {
+        replica.apply(record).unwrap();
+        assert_eq!(replica.change_seq(), *seq, "the counter, write for write");
+    }
+    assert_eq!(held(replica.statements()), held(primary.statements()));
+    assert!(replica.statements().get("like").unwrap().tree.is_some());
+    // The replica's file holds the records as they came.
+    assert_eq!(
+        held(opened(&replica_tap.bytes()).statements()),
+        held(primary.statements())
+    );
+
+    // A reader of the changes: the definitions and the drop are writes
+    // of no collection, numbered, and nothing else is told of them.
+    let all: Vec<u8> = writes.iter().flat_map(|(_, r)| r.clone()).collect();
+    let mut seen = Vec::new();
+    let last = primary
+        .changes_in(&all, 1, &mut |c| {
+            seen.push((
+                c.seq,
+                c.collection.clone(),
+                matches!(c.kind, ChangeKind::Statement),
+            ));
+            true
+        })
+        .unwrap();
+    assert_eq!(last, primary.change_seq());
+    let numbers: Vec<u64> = seen.iter().map(|s| s.0).collect();
+    assert_eq!(
+        numbers,
+        (1..=last).collect::<Vec<_>>(),
+        "one number each, none skipped"
+    );
+    let named: Vec<_> = seen.iter().filter(|s| s.2).collect();
+    assert_eq!(named.len(), 3, "transfer, like and the drop: {seen:?}");
+    assert!(named.iter().all(|s| s.1.is_none()));
+}
+
+#[test]
+fn a_schema_change_breaking_a_statement_is_refused_naming_it() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, TRANSFER).unwrap();
+    run(&mut db, LIKE).unwrap();
+    let writes = tap.writes.lock().unwrap().len();
+    for (change, says) in [
+        (
+            "drop index on likes (post, user)",
+            "statement `like` relies on `likes (post, user)` being unique: replace or drop it \
+             first",
+        ),
+        (
+            "alter collection accounts drop field balance",
+            "statement `transfer` reads `accounts.balance`: replace or drop it first",
+        ),
+        (
+            "alter collection accounts rename field owner to holder",
+            "statement `transfer` reads `accounts.owner`",
+        ),
+        (
+            "drop collection entries",
+            "statement `transfer` reads `entries`",
+        ),
+    ] {
+        let e = refused(run(&mut db, change));
+        assert!(e.contains(says), "{change}: {e}");
+    }
+    assert_eq!(tap.writes.lock().unwrap().len(), writes, "nothing landed");
+    assert!(db.collection("entries").is_ok());
+
+    // With the statement replaced first, in one block, the drop lands.
+    let replaced = "create or replace statement like($post int) claims (sub text) as
+      del likes where post = $post and user = $jwt.sub returning id";
+    block(
+        &mut db,
+        &format!("{replaced}; drop index on likes (post, user)"),
+    )
+    .unwrap();
+    // And dropped first, so does the field's.
+    block(
+        &mut db,
+        "drop statement transfer; alter collection accounts drop field balance",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_rebuild_under_a_statement_lands_where_it_still_checks() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, TRANSFER).unwrap();
+    // `declared::rebuild`: the field added again, set from the old,
+    // dropped and renamed -- one block, which finds it under its name.
+    let s = db.collection("accounts").unwrap().schema.clone();
+    let rebuild = fennec_core::declared::rebuild(&s, "balance").unwrap();
+    block(&mut db, &rebuild).unwrap();
+    assert!(db.statements().get("transfer").unwrap().broken.is_none());
+    // A block taking it away for good is refused, naming it.
+    let e = refused(block(
+        &mut db,
+        "alter collection accounts add field cents int; alter collection accounts drop field \
+         balance",
+    ));
+    assert!(
+        e.contains("statement `transfer` reads `accounts.balance`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_writer_that_cannot_refuse_marks_a_statement_broken_while_it_lacks_what_it_reads() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    run(&mut db, TRANSFER).unwrap();
+    let drop = fennec_ql::parse_one("drop collection entries").unwrap();
+    // A follower copying the collection again, the sync's remake.
+    db.internally(|db| db.execute(&drop)).unwrap();
+    let why = db.statements().get("transfer").unwrap().broken.clone();
+    assert_eq!(
+        why.as_deref(),
+        Some("it reads `entries`, which the schema no longer holds")
+    );
+    // A replica takes the drop as it came, and marks it too.
+    let replica_tap = Tap::default();
+    let mut replica = replica_tap.database();
+    for (_, record) in tap.writes.lock().unwrap().iter() {
+        replica.apply(record).unwrap();
+    }
+    assert_eq!(replica.statements().get("transfer").unwrap().broken, why);
+    // So does an open.
+    assert_eq!(
+        opened(&tap.bytes())
+            .statements()
+            .get("transfer")
+            .unwrap()
+            .broken,
+        why
+    );
+    // The collection made again, it holds what it reads.
+    run(
+        &mut db,
+        "create collection entries (src int, dst int, amount int, by text)",
+    )
+    .unwrap();
+    assert!(db.statements().get("transfer").unwrap().broken.is_none());
+}
+
+#[test]
+fn a_definition_names_collections_there_and_lookups_an_index_answers() {
+    let tap = Tap::default();
+    let mut db = schema(&tap);
+    let e = refused(run(
+        &mut db,
+        "create statement s() as get nothing select id",
+    ));
+    assert!(e.contains("collection `nothing`"), "{e}");
+    let e = refused(run(
+        &mut db,
+        "create statement s() as get accounts select id lookup entries on by = owner select amount",
+    ));
+    assert!(e.contains("needs an index"), "{e}");
+    assert!(db.statements().is_empty());
+    let e = refused(run(&mut db, &format!("{LIKE}; {LIKE}")));
+    assert!(
+        e.contains("`create or replace statement` replaces it"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_database_refuses_definitions_it_was_not_let_take() {
+    let mut db = Database::new();
+    run(&mut db, SCHEMA).unwrap();
+    let e = refused(run(&mut db, LIKE));
+    assert!(e.contains(fennec_core::named::NOT_BUILT), "{e}");
+}
+
+/// Holds every digest across grammar epochs: the fixture a build of epoch
+/// 1 wrote, `stale` in it a record whose digest no tree of its text has --
+/// what a later grammar reading the text otherwise would find.
+#[test]
+fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
+    if std::env::var_os("FENNEC_WRITE_FIXTURE").is_some() {
+        let tap = Tap::default();
+        let mut db = schema(&tap);
+        run(&mut db, TRANSFER).unwrap();
+        run(&mut db, LIKE).unwrap();
+        let mut file = db.snapshot();
+        let text = "create statement stale() as get accounts select id";
+        let mut body = vec![1u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, db.change_seq() + 1);
+        put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+        body.extend_from_slice(&(digest(text) ^ 1).to_le_bytes());
+        encode_str(&mut body, "stale");
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "accounts");
+        encode_str(&mut body, text);
+        file.push(13);
+        put_uvarint(&mut file, 0);
+        put_uvarint(&mut file, body.len() as u64);
+        file.extend_from_slice(&body);
+        std::fs::write(FIXTURE, file).unwrap();
+    }
+    let db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
+    let t = db.statements();
+    assert_eq!(t.len(), 3);
+    for (name, text) in [("transfer", TRANSFER), ("like", LIKE)] {
+        let s = t.get(name).unwrap();
+        assert_eq!((s.epoch, s.digest), (1, digest(text)), "{name}");
+        assert!(
+            s.broken.is_none() && s.tree.is_some(),
+            "{name}: {:?}",
+            s.broken
+        );
+    }
+    let stale = t.get("stale").unwrap();
+    assert!(stale.tree.is_none());
+    let why = stale.broken.as_deref().unwrap_or_default();
+    assert!(
+        why.starts_with("its text reads as another statement"),
+        "{why}"
+    );
+}

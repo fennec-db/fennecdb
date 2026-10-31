@@ -27,8 +27,43 @@ use crate::value::{DataType, Value};
 pub const NOT_BUILT: &str = "named statements are not built yet: `create statement`, `drop \
                              statement` and `call` parse, and nothing runs them";
 
+/// The grammar's epoch: raised by every change that could read a text
+/// stored before it as another tree, or write a tree's canonical bytes
+/// otherwise. A named statement is stored as its text, with the epoch it
+/// was parsed under and its tree's digest ([`Definition::digest`]); an open
+/// parses it again and marks it broken where the digest is another, rather
+/// than run a tree its author never wrote. The corpus rule keeps that from
+/// happening (`docs/design/fennecql.md`): no text that parsed reads
+/// otherwise, so the epoch moves only where a change means to, and says
+/// so. Here, beside the encoder whose change raises it, so the engine
+/// writes it into a record; `fennec_ql::GRAMMAR_EPOCH` is this one.
+pub const GRAMMAR_EPOCH: u32 = 1;
+
+/// What reads a named statement's stored text back into its tree: the
+/// parser's (`fennec_ql::definition`), which this crate does not hold.
+pub type Reader = fn(&str) -> Result<Definition>;
+
+static READER: std::sync::OnceLock<Reader> = std::sync::OnceLock::new();
+
+/// Installs the reader every open, adoption and replica's apply in this
+/// process reads stored statements with (`fennec_ql::install`), once: a
+/// process holds one grammar. Without one an open keeps each statement as
+/// it came, written again in every image and its digest unchecked, and
+/// reads none into a tree.
+pub fn read_with(reader: Reader) {
+    let _ = READER.set(reader);
+}
+
+pub(crate) fn reader() -> Option<Reader> {
+    READER.get().copied()
+}
+
 /// The most statements a body holds.
 pub const MAX_BODY: usize = 64;
+/// The most named statements a database holds.
+pub const MAX_STATEMENTS: usize = 1_000;
+/// The longest definition, in bytes of its text.
+pub const MAX_TEXT: usize = 64 << 10;
 /// The most parameters a signature declares.
 pub const MAX_PARAMS: usize = 32;
 /// The most claims a signature declares.
@@ -38,8 +73,11 @@ pub const MAX_CLAIMS: usize = 16;
 pub const MAX_NAME: usize = 59;
 
 /// `create [or replace] statement <name>(<parameters>) [claims (...)]
-/// [public] [scans] [comment '<text>'] [check <expr>] as <body>`.
-#[derive(Debug, Clone, PartialEq)]
+/// [public] [scans] [comment '<text>'] [check <expr>] as <body>`. Two are
+/// equal where everything but their [`Definition::text`] is: the same
+/// statement written over one line or several. Its `Debug` form is its
+/// tree's, the text left out, which `make fennecql-corpus` compares.
+#[derive(Clone)]
 pub struct Definition {
     pub name: String,
     /// `create or replace`: what the definition does to a name held, which
@@ -70,6 +108,11 @@ pub struct Definition {
     /// goes on with it, which the shell reads (fennec-cli's `kind`). How it
     /// was written, not what it means: the digest leaves it out.
     pub block: bool,
+    /// The definition's own bytes, from `create` to its end, comments and
+    /// all, as the parser found them in the text it read (`fennec_ql`'s
+    /// `parse`): what its record stores and an open reads again. The
+    /// digest leaves it out, as it leaves out how the tree was written.
+    pub text: String,
 }
 
 /// `$name type [= literal]`.
@@ -266,7 +309,7 @@ impl Definition {
     /// the tree that holds nothing in a statement leaves that statement's
     /// digest as it was: only a statement using it reads otherwise. A
     /// tag is never reused nor renumbered; a change that writes an old
-    /// tree otherwise raises fennec-ql's `GRAMMAR_EPOCH`.
+    /// tree otherwise raises [`GRAMMAR_EPOCH`].
     pub fn canonical(&self) -> Result<Vec<u8>> {
         let Definition {
             name,
@@ -279,6 +322,7 @@ impl Definition {
             check,
             body,
             block: _,
+            text: _,
         } = self;
         let mut c = Canon(Vec::new());
         c.node(1);
@@ -314,6 +358,366 @@ impl Definition {
         c.end();
         Ok(c.0)
     }
+}
+
+impl std::fmt::Debug for Definition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Definition")
+            .field("name", &self.name)
+            .field("replace", &self.replace)
+            .field("params", &self.params)
+            .field("claims", &self.claims)
+            .field("public", &self.public)
+            .field("scans", &self.scans)
+            .field("comment", &self.comment)
+            .field("check", &self.check)
+            .field("body", &self.body)
+            .field("block", &self.block)
+            .finish()
+    }
+}
+
+impl PartialEq for Definition {
+    fn eq(&self, o: &Definition) -> bool {
+        let Definition {
+            name,
+            replace,
+            params,
+            claims,
+            public,
+            scans,
+            comment,
+            check,
+            body,
+            block,
+            text: _,
+        } = self;
+        (name, replace, params, claims, public, scans)
+            == (
+                &o.name, &o.replace, &o.params, &o.claims, &o.public, &o.scans,
+            )
+            && (comment, check, body, block) == (&o.comment, &o.check, &o.body, &o.block)
+    }
+}
+
+impl Definition {
+    /// The fields the last statement answers, by name: what a call's
+    /// caller reads, which a replacement keeps.
+    pub fn answers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        match self.body.last() {
+            Some(Statement::Select(sel)) => {
+                out.extend(sel.project.iter().flatten().cloned());
+                out.extend(
+                    sel.computed
+                        .iter()
+                        .chain(&sel.aggregate)
+                        .map(|c| c.name.clone()),
+                );
+                if sel.count {
+                    out.push("count".into());
+                }
+                for l in sel.lookup.iter().flat_map(Lookup::chain) {
+                    out.extend(l.project.iter().flatten().map(|f| cat(&l.collection, f)));
+                }
+            }
+            Some(s) => {
+                let returning = s.pick().and_then(|p| p.returning.as_ref());
+                out.extend(returning.into_iter().flatten().flatten().cloned());
+            }
+            None => {}
+        }
+        out
+    }
+
+    /// Why a replacement of `old` by this one is refused, if it is: it keeps
+    /// the statement's contract -- whether it writes, the claims it reads
+    /// and their types, the fields it answers -- or it is a new statement,
+    /// written as `drop` and `create`, so no grant starts meaning more with
+    /// no line of a policy changed.
+    pub fn breaks_contract(&self, old: &Definition) -> Option<String> {
+        let what = if self.writes() != old.writes() {
+            match self.writes() {
+                true => "writes, where it read",
+                false => "reads, where it wrote",
+            }
+        } else if self.claims.len() != old.claims.len()
+            || self
+                .claims
+                .iter()
+                .zip(&old.claims)
+                .any(|(a, b)| a.claim() != b.claim() || a.ty != b.ty)
+        {
+            "reads other claims"
+        } else if self.answers() != old.answers() {
+            "answers other fields"
+        } else {
+            return None;
+        };
+        Some(format!(
+            "statement `{}` {what}: a replacement keeps whether it writes, the claims it reads \
+             and the fields it answers -- write `drop statement {}` and `create statement`, \
+             which leaves every grant naming it naming nothing",
+            self.name, self.name
+        ))
+    }
+
+    /// What the body depends on among the collections `schema_of` holds
+    /// (`Stored::depends`, in fennec-core's engine): each collection it
+    /// names; each of their fields it reads or writes -- a name the
+    /// collection does not hold, an alias or a join's, is the statement's
+    /// own checks' to judge; the index each `lookup` probes; and the unique
+    /// indexes of each collection it inserts into, whose refusal of a
+    /// duplicate it relies on. A collection none holds, or a `lookup` no
+    /// index answers, is refused, as running the statement would be.
+    pub fn depends<'a>(
+        &self,
+        schema_of: &dyn Fn(&str) -> Option<&'a crate::schema::Schema>,
+    ) -> Result<Vec<String>> {
+        let mut d = Depends {
+            schema_of,
+            out: Vec::new(),
+        };
+        for s in &self.body {
+            d.statement(s)?;
+        }
+        Ok(d.out)
+    }
+}
+
+/// `c.f`.
+fn cat(c: &str, f: &str) -> String {
+    let mut s = String::with_capacity(c.len() + f.len() + 1);
+    s.push_str(c);
+    s.push('.');
+    s.push_str(f);
+    s
+}
+
+/// [`Definition::depends`]' walk.
+struct Depends<'s, 'a> {
+    schema_of: &'s dyn Fn(&str) -> Option<&'a crate::schema::Schema>,
+    out: Vec<String>,
+}
+
+impl<'a> Depends<'_, 'a> {
+    fn add(&mut self, d: String) {
+        if !self.out.contains(&d) {
+            self.out.push(d);
+        }
+    }
+
+    fn collection(&mut self, c: &str) -> Result<&'a crate::schema::Schema> {
+        let s = (self.schema_of)(c).ok_or_else(|| Error::NotFound(format!("collection `{c}`")))?;
+        self.add(c.to_string());
+        Ok(s)
+    }
+
+    /// `name` of `s`, where `s` holds it: a field, a path, or a path's
+    /// field.
+    fn field(&mut self, s: &crate::schema::Schema, name: &str) {
+        if name == "id" {
+            return;
+        }
+        let held = match s.field(name).is_some() || s.path(name).is_some() {
+            true => Some(name),
+            false => crate::schema::split_path(name)
+                .map(|(root, _)| root)
+                .filter(|root| s.field(root).is_some()),
+        };
+        if let Some(f) = held {
+            self.add(cat(&s.name, f));
+        }
+    }
+
+    /// The fields `e` reads of `s`, and each inner `get` under it.
+    fn expr(&mut self, s: &crate::schema::Schema, e: &Expr) -> Result<()> {
+        let mut names = Vec::new();
+        e.referenced_fields(&mut names);
+        for n in &names {
+            self.field(s, n);
+        }
+        let mut inner: Vec<&Select> = Vec::new();
+        each_expr(e, &mut |x| {
+            if let Expr::InSelect(_, sel) = x {
+                inner.push(sel);
+            }
+        });
+        for sel in inner {
+            self.select(sel)?;
+        }
+        Ok(())
+    }
+
+    fn sorts(&mut self, s: &crate::schema::Schema, order: &[Sort]) -> Result<()> {
+        for o in order {
+            match &o.expr {
+                Some(e) => self.expr(s, e)?,
+                None => self.field(s, &o.field),
+            }
+        }
+        Ok(())
+    }
+
+    fn names(&mut self, s: &crate::schema::Schema, names: &[String]) {
+        for n in names {
+            self.field(s, n);
+        }
+    }
+
+    fn statement(&mut self, st: &Statement) -> Result<()> {
+        match st {
+            Statement::Select(sel) => self.select(sel),
+            Statement::Put {
+                collection, docs, ..
+            } => {
+                let s = self.collection(collection)?;
+                for (k, e) in docs.iter().flatten() {
+                    self.field(s, k);
+                    self.expr(s, e)?;
+                }
+                // The duplicates an insert is refused: each unique index
+                // of the collection, whose refusal the statement's guards
+                // may be written around (`if absent`, `require`).
+                for f in s.fields.iter().chain(&s.paths) {
+                    if f.index.is_unique() {
+                        self.add(cat(collection, &f.name) + "@unique");
+                    }
+                }
+                for c in s.composites.iter().filter(|c| c.unique) {
+                    self.add(composite(collection, c.keys.iter().map(|k| &*k.0)) + "@unique");
+                }
+                self.pick(s, st.pick())
+            }
+            Statement::Update {
+                collection,
+                set,
+                filter,
+                ..
+            } => {
+                let s = self.collection(collection)?;
+                for (k, e) in set {
+                    self.field(s, k);
+                    self.expr(s, e)?;
+                }
+                if let Some(f) = filter {
+                    self.expr(s, f)?;
+                }
+                self.pick(s, st.pick())
+            }
+            Statement::Delete {
+                collection, filter, ..
+            } => {
+                let s = self.collection(collection)?;
+                if let Some(f) = filter {
+                    self.expr(s, f)?;
+                }
+                self.pick(s, st.pick())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn pick(&mut self, s: &crate::schema::Schema, p: Option<&Pick>) -> Result<()> {
+        if let Some(p) = p {
+            self.sorts(s, &p.order)?;
+            self.names(
+                s,
+                p.returning
+                    .as_ref()
+                    .and_then(|r| r.as_deref())
+                    .unwrap_or(&[]),
+            );
+            self.names(s, p.conflict.as_deref().unwrap_or(&[]));
+        }
+        Ok(())
+    }
+
+    fn select(&mut self, sel: &Select) -> Result<()> {
+        let s = self.collection(&sel.collection)?;
+        self.names(s, sel.project.as_deref().unwrap_or(&[]));
+        let mut top: Vec<&Expr> = Vec::new();
+        top.extend(&sel.filter);
+        top.extend(&sel.having);
+        top.extend(&sel.group);
+        top.extend(sel.aggregate.iter().chain(&sel.computed).map(|c| &c.expr));
+        top.extend(sel.near.as_ref().map(|n| &n.vector));
+        top.extend(sel.matcher.as_ref().map(|m| &m.query));
+        top.extend(sel.rerank.as_ref().map(|r| &r.vector));
+        top.extend(sel.marks.iter().flat_map(|m| &m.args));
+        for e in top {
+            self.expr(s, e)?;
+        }
+        self.sorts(s, &sel.order)?;
+        let fields = sel.near.iter().map(|n| &n.field);
+        let fields = fields.chain(sel.matcher.iter().map(|m| &m.field));
+        let fields = fields.chain(sel.rerank.iter().map(|r| &r.field));
+        let fields = fields.chain(sel.marks.iter().map(|m| &m.field));
+        let fields: Vec<String> = fields
+            .chain(sel.facets.iter().map(|f| &f.field))
+            .cloned()
+            .collect();
+        self.names(s, &fields);
+        let mut parent = s;
+        for l in sel.lookup.iter().flat_map(Lookup::chain) {
+            let child = self.collection(&l.collection)?;
+            self.names(parent, &l.parent);
+            self.names(child, &l.on);
+            self.probe(child, l)?;
+            self.names(child, l.project.as_deref().unwrap_or(&[]));
+            for e in l.filter.iter().chain(l.list_exprs()) {
+                self.expr(child, e)?;
+            }
+            self.sorts(child, &l.order)?;
+            parent = child;
+        }
+        Ok(())
+    }
+
+    /// The index a `lookup` level probes its child by: a hash index on its
+    /// one key, or an index over several fields leading with its keys --
+    /// refused where there is none, as the engine refuses the `lookup`.
+    fn probe(&mut self, child: &crate::schema::Schema, l: &Lookup) -> Result<()> {
+        let name = &l.collection;
+        if let [key] = l.on.as_slice() {
+            if key == "id" {
+                return Ok(());
+            }
+            if child
+                .field(key)
+                .is_some_and(|f| matches!(f.index, crate::schema::IndexKind::Hash { .. }))
+            {
+                self.add(cat(name, key) + "@hash");
+                return Ok(());
+            }
+        }
+        let leads = |c: &&crate::schema::Composite| {
+            c.keys.len() >= l.on.len() && c.keys.iter().zip(&l.on).all(|(k, n)| k.0 == *n)
+        };
+        if child.composites.iter().any(|c| leads(&c)) {
+            self.add(composite(name, l.on.iter().map(|k| &**k)) + "@");
+            return Ok(());
+        }
+        Err(Error::Query(format!(
+            "`lookup` on `{name}` ({}) needs an index: a hash index on one key (@hash), or one \
+             over several fields whose first fields are those (@sorted)",
+            l.on.join(", ")
+        )))
+    }
+}
+
+/// `c(a,b)`.
+fn composite<'k>(c: &str, keys: impl Iterator<Item = &'k str>) -> String {
+    let mut s = String::from(c);
+    s.push('(');
+    for (i, k) in keys.enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(k);
+    }
+    s.push(')');
+    s
 }
 
 /// Why `check` is refused, if it is: it reads the parameters, the claims

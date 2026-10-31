@@ -155,6 +155,10 @@ struct Beside {
     mapped: bool,
     parts: Vec<BesidePart>,
     history: Option<Vec<u8>>,
+    /// The named statements as they stood, written after the collections:
+    /// a table other than this one at the swap -- a definition, a drop or a
+    /// mark meanwhile -- leaves the image not fitting.
+    statements: Arc<super::Statements>,
     reclaimed: usize,
     /// Where the counter's header is in the side file, and where the body
     /// it measures begins.
@@ -858,6 +862,7 @@ impl Database {
             mapped: self.mapped,
             parts,
             history,
+            statements: self.statements.clone(),
             reclaimed,
             head_at: 0,
             body_at: 0,
@@ -882,6 +887,7 @@ impl Database {
             .then(|| self.history.record());
         let same = self.order.len() == b.parts.len()
             && history == b.history
+            && Arc::ptr_eq(&self.statements, &b.statements)
             && b.parts.iter().zip(&tails).all(|(p, t)| {
                 t.as_ref().is_some_and(|t| !t.schema)
                     && self.collections.get(&p.name).is_some_and(|c| c.id == p.cid)
@@ -1120,6 +1126,11 @@ impl Beside {
                 side.write(&record_head(REC_GRAPH, p.cid, payload.len()))?;
                 side.write(&payload)?;
             }
+        }
+        for st in self.statements.iter() {
+            let body = st.encode();
+            side.write(&record_head(super::REC_STATEMENT, 0, body.len()))?;
+            side.write(&body)?;
         }
         // The image on disk now, so that the fsync under the lock covers
         // only what is added there.

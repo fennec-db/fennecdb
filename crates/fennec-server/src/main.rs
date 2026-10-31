@@ -422,6 +422,9 @@ fn start_tracing(options: fennec_http::trace::Options, service: &str) {
 }
 
 fn main() {
+    // Before any open: each named statement a file holds is read back into
+    // its tree, its digest checked.
+    fennec_http::install_statement_reader();
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
     let mut stdin_close = false;

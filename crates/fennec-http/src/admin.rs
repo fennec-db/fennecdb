@@ -210,7 +210,15 @@ pub fn schema_description(fennecql: &str) -> Result<String, String> {
     let mut d = String::from(r#"{"format":1,"fennecql":"#);
     fennec_core::json::escape_into(&mut d, fennecql);
     d.push('}');
-    fennec_abi::read(&d).map_err(|e| format!("the schema does not read: {e}"))?;
+    let read = fennec_abi::read(&d).map_err(|e| format!("the schema does not read: {e}"))?;
+    // Refused here, with nothing placed, rather than by each node as it
+    // applies the definition: nothing defines one until calls are scoped.
+    if !read.statements.is_empty() {
+        return Err(format!(
+            "the schema does not read: {}",
+            fennec_core::named::NOT_BUILT
+        ));
+    }
     Ok(d)
 }
 
@@ -451,4 +459,19 @@ fn sizes(tenants: &Tenants) -> Response {
 fn names(tenants: &Tenants) -> Response {
     let list: Vec<String> = tenants.names().iter().map(|n| format!("\"{n}\"")).collect();
     Response::json(200, format!("[{}]", list.join(",")))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A tenant's schema declaring a named statement is refused at the
+    /// router, before anything is placed: nothing defines one yet.
+    #[test]
+    fn a_tenants_schema_declaring_a_statement_is_refused_before_it_is_placed() {
+        let schema = "create collection a (x int)";
+        assert!(super::schema_description(schema).is_ok());
+        let e =
+            super::schema_description(&format!("{schema}; create statement s() as get a select x"))
+                .unwrap_err();
+        assert!(e.contains(fennec_core::named::NOT_BUILT), "{e}");
+    }
 }

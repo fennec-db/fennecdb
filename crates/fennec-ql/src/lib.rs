@@ -18,15 +18,34 @@ pub use parser::{
     parse_select_list, reading, spans, Reading, Refusal, Rest, SelectList, MAX_EXPR_DEPTH,
 };
 
-/// The grammar's epoch: raised by every change that could read a text
-/// stored before it as another tree. A named statement is stored as its
-/// text, with the epoch it was parsed under and its tree's digest
-/// (`fennec_core::named::Definition::digest`); an open parses it again and
-/// marks it broken where the digest is another, rather than run a tree its
-/// author never wrote. The corpus rule keeps that from happening
-/// (`docs/design/fennecql.md`): no text that parsed reads otherwise, so the
-/// epoch moves only where a change means to, and says so.
-pub const GRAMMAR_EPOCH: u32 = 1;
+/// The grammar's epoch (`fennec_core::named::GRAMMAR_EPOCH`, beside the
+/// encoder of the tree whose digest a stored statement is held to): raised
+/// by every change that could read a text stored before it as another
+/// tree.
+#[cfg(feature = "statements")]
+pub use fennec_core::named::GRAMMAR_EPOCH;
+
+/// A named statement's stored text read back into its tree: what every
+/// open, adoption and replica's apply in a process that [`install`]ed it
+/// reads a statement's record with, its digest then held to the stored one.
+#[cfg(feature = "statements")]
+pub fn definition(text: &str) -> Result<fennec_core::named::Definition> {
+    match parse_one(text)? {
+        Statement::CreateStatement(d) => Ok(*d),
+        _ => Err(fennec_core::error::Error::Query(
+            "a named statement's text is its `create statement`".into(),
+        )),
+    }
+}
+
+/// Installs [`definition`] as the process's reader of stored named
+/// statements (`fennec_core::named::read_with`): a server's, the shell's
+/// and the native library's first call. Without named statements it does
+/// nothing, so every binary calls it alike.
+pub fn install() {
+    #[cfg(feature = "statements")]
+    fennec_core::named::read_with(definition);
+}
 
 use fennec_core::error::Result;
 use fennec_core::query::Statement;
@@ -42,12 +61,48 @@ use fennec_core::value::DataType;
 /// since it carries the parser and not the reader of a description's JSON
 /// collections.
 pub fn schema_text(src: &str) -> Result<Vec<Schema>> {
+    schema_read(
+        src,
+        #[cfg(feature = "statements")]
+        &mut Vec::new(),
+    )
+}
+
+/// A description's FennecQL text, `text`, read into its collections and,
+/// with named statements, the `create statement`s it holds after the
+/// collections each names: what `declared::plan_statements` plans.
+pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Result<()> {
+    d.collections = schema_read(
+        text,
+        #[cfg(feature = "statements")]
+        &mut d.statements,
+    )?;
+    Ok(())
+}
+
+fn schema_read(
+    src: &str,
+    #[cfg(feature = "statements")] statements: &mut Vec<fennec_core::named::Definition>,
+) -> Result<Vec<Schema>> {
     // The description's own refusals and words (`declared::bad`): one place
     // for both forms, and fewer texts in the browser module.
     use fennec_core::declared::{bad, cat};
     let mut out: Vec<Schema> = Vec::new();
     for s in parse(src)? {
         match s {
+            // After the collections it names, which it is checked against
+            // as a definition is against a database's.
+            #[cfg(feature = "statements")]
+            Statement::CreateStatement(def) => {
+                if statements.iter().any(|s| s.name == def.name) {
+                    return Err(bad(&def.name, "is declared twice"));
+                }
+                if let Err(e) = def.depends(&|c| out.iter().find(|s| s.name == c)) {
+                    let why = cat(&["names what is not declared before it: ", &e.to_string()]);
+                    return Err(bad(&def.name, &why));
+                }
+                statements.push(*def);
+            }
             Statement::CreateCollection { schema, .. } => {
                 if out.iter().any(|o| o.name == schema.name) {
                     return Err(bad(&schema.name, "is declared twice"));

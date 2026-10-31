@@ -316,9 +316,15 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 database and called by name with typed arguments, running with its own
 text's authority — PostgreSQL's function used as an API, with FennecQL for
 its body. Its forms are read, and every one is refused, as <i>named
-statements are not built yet</i>, until the slices that store, check and
-scope them land: a statement defined with nothing to check it, or called
-with nothing to scope it, is never run.</p>
+statements are not built yet</i>, until the slice that scopes a call lands:
+a statement called with nothing to scope it is never run, and none is
+defined that nothing could call. What keeps one is built: a definition is
+a record of its database's file, kept by every compact, sent to its
+replicas and read back by every open, which checks that its text still
+reads as the statement it was; a schema change taking away a field, a
+collection or an index one reads is refused naming it. A file holding
+them opens in every build, the browser module's included, which keeps
+them as they came.</p>
 
 <pre data-lang="fennecql">create [or replace] statement &lt;name&gt;($p &lt;type&gt; [= &lt;literal&gt;], ...)
        [claims (&lt;c&gt; &lt;type&gt; [from "&lt;claim&gt;"], ...)] [public] [scans] [comment '&lt;text&gt;'] [check &lt;expr&gt;]
@@ -334,9 +340,13 @@ documents, a schema change, a <code>call</code> or a collection whose name
 starts with <code>_</code> is refused as the definition is read. A
 <code>$name</code> outside a definition is refused: a statement sent alone
 numbers its parameters, <code>$1</code>. <code>statements</code> lists
-none, and <code>describe statement</code> finds none. The browser module
-reads none of these forms, refusing them as <i>named statements are a
-server's</i>.</p>
+none, and <code>describe statement</code> finds none. A schema declared in
+code — a <code>schema.fennecql</code> a server or the native library
+applies — may hold <code>create statement</code>s after the collections
+they read: the plan compares each with the database's by what it means,
+never its text, and applying one is refused as not built yet. The browser
+module reads none of these forms, refusing them as <i>named statements are
+a server's</i>.</p>
 
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a

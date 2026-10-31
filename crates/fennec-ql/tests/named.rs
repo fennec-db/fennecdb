@@ -912,3 +912,47 @@ fn a_statement_is_as_large_as_a_select() {
         size_of::<fennec_core::query::Select>() + size_of::<usize>()
     );
 }
+
+/// A definition keeps its own text, as its record stores it: from
+/// `create` to its end, comments and all, cut from what comes after it.
+#[test]
+fn a_definition_keeps_its_own_text() {
+    let one = "create statement s() as get accounts select id";
+    assert_eq!(definition(one).text, one);
+    let commented = "create statement s() -- what it reads\n  as get accounts select id";
+    let text = format!("get éléments select id; {commented} ;\n\n put accounts {{a: 1}}");
+    let stmts = parse(&text).unwrap();
+    let Statement::CreateStatement(d) = &stmts[1] else {
+        panic!("{stmts:?}")
+    };
+    assert_eq!(d.text, commented, "a letter outside ASCII before it");
+    assert_eq!(fennec_ql::definition(&d.text).unwrap(), **d);
+    let block = definition(TRANSFER);
+    assert_eq!(block.text, TRANSFER);
+    // The tree is the statement, whichever lines it was written over.
+    assert_eq!(definition(&TRANSFER.replace('\n', " ")), block);
+    assert!(fennec_ql::definition("get accounts select id").is_err());
+}
+
+/// A schema's text declares statements after the collections they name.
+#[test]
+fn a_schema_text_declares_statements_after_their_collections() {
+    let schema = "create collection accounts (owner text @hash, balance int);\n";
+    let mine = "create statement mine() claims (sub text) as \
+                get accounts select id where owner = $jwt.sub";
+    let mut d = fennec_core::declared::parse(r#"{"format": 1}"#).unwrap();
+    fennec_ql::schema_into(&mut d, &format!("{schema}{mine}")).unwrap();
+    assert_eq!(d.collections.len(), 1);
+    assert_eq!(d.statements.len(), 1);
+    assert_eq!(d.statements[0].text, mine);
+    assert_eq!(
+        fennec_ql::schema_text(&format!("{schema}{mine}"))
+            .unwrap()
+            .len(),
+        1
+    );
+    let e = fennec_ql::schema_text(&format!("{mine};\n{schema}")).unwrap_err();
+    assert!(e.to_string().contains("collection `accounts`"), "{e}");
+    let e = fennec_ql::schema_text(&format!("{schema}{mine};{mine}")).unwrap_err();
+    assert!(e.to_string().contains("declared twice"), "{e}");
+}

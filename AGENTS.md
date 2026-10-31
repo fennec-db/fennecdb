@@ -662,13 +662,21 @@ engine.](docs/design/fennecql.md#declared-schemas)** `declared::plan`
 plans additions alone, never guessing a rename; `make schema-golden`
 writes `integrations/schema-golden.json`.
 
-**[Named statements are read, and nothing runs one
+**[Named statements are stored, and nothing runs one
 yet.](docs/design/named-statements.md#what-is-built)** `create statement`,
 `drop statement` and `call` parse into `fennec_core::named`'s trees, boxed
-so a `Statement` stays a `get`'s size, and are refused before any block
-opens (`Statement::is_named`, `NOT_BUILT`), in `scoped()` and MCP's
-`write` too, until storage and authority land; `$name` is a definition's
-alone, and `call` and `statements` reserve no word: an alias takes either
+so a `Statement` stays a `get`'s size; a call is refused before any block
+opens (`NOT_BUILT`), in `scoped()` and MCP's `write` too, and so is a
+definition but where `Database::allow_definitions` (tests) lets it, until
+authority lands. A definition is record kind 13 (`engine/stored.rs`), one
+write `writes_in` counts, alone or in a block (`Undo::Statements`), its
+table an `Arc` changed by a new one, kept by every image and by `Beside`,
+applied by a replica and passed over by `/_changes`; every build keeps it.
+With the feature an open reads its text back (`fennec_ql::install`) and
+holds its digest, and a schema change's commit holds its `depends`:
+refused naming it, or marked broken -- `Database::internally`, an apply,
+an open -- never failing one, the mark derived, never stored. `$name` is a
+definition's alone, and `call` and `statements` reserve no word: an alias takes either
 (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's and fennec-ql's
 `statements` feature, outside `full` and off in the workspace's
 dependency: the server, the shell and the native library name it, the

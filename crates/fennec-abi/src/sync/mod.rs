@@ -497,11 +497,14 @@ fn remake(db: &mut Database, collection: &str, create: &Statement) -> Result<()>
         Response::Rows(rs) => rs,
         _ => ResultSet::default(),
     };
-    db.execute_with(
-        &fennec_ql::parse_one(&format!("drop collection {collection}"))?,
-        &[],
-    )?;
-    db.execute_with(create, &[])?;
+    // The server's schema, which a replica cannot refuse: a named statement
+    // it breaks is marked broken (`Database::internally`).
+    let drop = fennec_ql::parse_one(&format!("drop collection {collection}"))?;
+    db.internally(|db| -> Result<()> {
+        db.execute_with(&drop, &[])?;
+        db.execute_with(create, &[])?;
+        Ok(())
+    })?;
     let schema = db.collection(collection)?.schema.clone();
     let docs: Vec<Vec<(String, Value)>> = held
         .rows

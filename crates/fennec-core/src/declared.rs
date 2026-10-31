@@ -64,6 +64,11 @@ pub const MIGRATIONS_DDL: &str =
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declared {
     pub collections: Vec<Schema>,
+    /// The named statements the FennecQL text declares, each after the
+    /// collections it names (`fennec_ql::schema_into`), planned by
+    /// [`plan_of`] against the database's.
+    #[cfg(feature = "statements")]
+    pub statements: Vec<crate::named::Definition>,
     /// The collections as FennecQL text (`"fennecql"`), for the caller that
     /// has the parser to read them into `collections`
     /// (`fennec_ql::schema_text`).
@@ -109,13 +114,14 @@ pub struct Plan {
 /// A difference the plan does not apply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refusal {
-    /// What kind: `field_not_declared`,
+    /// What kind: `field_not_declared`, `statement_contract_changed`,
     /// `type_changed`, `required_changed`, `required_added`,
     /// `collate_changed`, `nocase_changed`, `index_changed`,
     /// `index_removed`, and under
     /// [`Mode::Follow`] `collection_missing`, `field_missing`,
-    /// `index_missing`.
+    /// `index_missing`, `statement_missing`, `statement_changed`.
     pub kind: &'static str,
+    /// The collection, or the named statement a `statement_*` kind is of.
     pub collection: String,
     /// The field, or the path into a json field (`meta.lang`); `None` for
     /// the collection itself.
@@ -194,6 +200,8 @@ pub fn parse(src: &str) -> Result<Declared> {
         });
     }
     Ok(Declared {
+        #[cfg(feature = "statements")]
+        statements: Vec::new(),
         collections,
         text,
         migrations,
@@ -835,6 +843,89 @@ pub fn plan(db: &[&Schema], declared: &[Schema], mode: Mode) -> Plan {
     match mode {
         Mode::Apply => planned::<false>(db, declared),
         Mode::Follow => planned::<true>(db, declared),
+    }
+}
+
+/// Adds to `p`, [`plan`]'s of `d`'s collections, the named statements `d`
+/// declares against the statements `held`, in a build with named
+/// statements, and nothing in one without: each compared by
+/// its canonical tree, never its text, after the collections, so a
+/// statement is planned against them as the plan leaves them. One the
+/// database lacks is its `create`; one whose tree differs its `create or
+/// replace` where it keeps the statement's contract, and a refusal naming
+/// the `drop` it needs where not (`statement_contract_changed`); one the
+/// database holds and the code does not declare is left as it is, as a
+/// collection is. [`Mode::Follow`] holds each to be there
+/// (`statement_missing`) and the same (`statement_changed`).
+/// Apart from [`plan`] rather than around it, so the browser module's
+/// apply, which names [`Mode::Apply`] where it calls `plan`, keeps its one
+/// copy of the plan.
+#[cfg_attr(not(feature = "statements"), allow(unused_variables))]
+#[inline]
+pub fn plan_statements(p: &mut Plan, held: &crate::engine::Statements, d: &Declared, mode: Mode) {
+    #[cfg(feature = "statements")]
+    for def in &d.statements {
+        statement_plan(p, held, def, mode);
+    }
+}
+
+#[cfg(feature = "statements")]
+fn statement_plan(
+    p: &mut Plan,
+    held: &crate::engine::Statements,
+    d: &crate::named::Definition,
+    mode: Mode,
+) {
+    let name = &d.name;
+    let at = cat(&["statement `", name, "`"]);
+    match (held.get(name), mode) {
+        (Some(s), _) if d.digest().ok() == Some(s.digest) => {}
+        (None, Mode::Apply) => p.statements.push(d.text.clone()),
+        (None, Mode::Follow) => p.refuse(
+            "statement_missing",
+            name,
+            None,
+            cat(&[&at, " is in the code and not in the database"]),
+            "its owner defines it, or the code leaves it out".into(),
+        ),
+        (Some(_), Mode::Follow) => p.refuse(
+            "statement_changed",
+            name,
+            None,
+            cat(&[&at, " in the database is not the one the code declares"]),
+            "its owner replaces it, or the code declares the one there".into(),
+        ),
+        (Some(s), Mode::Apply) => match s.tree.as_deref().and_then(|t| d.breaks_contract(t)) {
+            Some(why) => p.refuse(
+                "statement_contract_changed",
+                name,
+                None,
+                why,
+                cat(&[
+                    "a migration drops it (`drop statement ",
+                    name,
+                    "`), and the plan defines it again",
+                ]),
+            ),
+            None => p.statements.push(replacing(&d.text)),
+        },
+    }
+}
+
+/// A definition's text as its `create or replace`.
+#[cfg(feature = "statements")]
+fn replacing(text: &str) -> String {
+    let rest = text.get(6..).unwrap_or_default();
+    match text
+        .get(..6)
+        .is_some_and(|c| c.eq_ignore_ascii_case("create"))
+        && !rest
+            .trim_start()
+            .get(..2)
+            .is_some_and(|w| w.eq_ignore_ascii_case("or"))
+    {
+        true => cat(&["create or replace", rest]),
+        false => text.to_string(),
     }
 }
 
