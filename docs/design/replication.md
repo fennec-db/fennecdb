@@ -56,6 +56,27 @@ next begins and an image renamed into place, so a sync tool's copy, taken
 a file at a time while the archive writes, is the archive up to a moment:
 fennecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
 
+A segment is made in three calls -- the file, its magic, its first write
+(`Archive::take`) -- so a copy or a crash between them finds one holding no
+write, and before the magic one that is only a start of it, empty included
+(sealed, of the seal's, or its head frame cut short). Such a segment holds
+no write (`entries`), so a copy whose last segment it is verifies and
+restores to the segment before; and the archiver opening the archive to go
+on removes a last segment holding no write (`position`), going on in the
+one before. Refused as no segment, a cut magic made a copy "not an archive
+segment" (`a_copy_taken_while_the_archive_writes_restores_or_says_why_not`,
+once in CI; in a three-core container beside three busy loops 1 run of
+1 300, and 0 of 1 000 since; with the window widened by a 2 ms sleep between
+the file and its magic, 18 of 100 and 0 of 100), failed an image of the
+archive's end taken then (`consolidate`), and kept an archiver stopped there
+from going on. Left in place, a segment holding no write had the archiver go
+on from its last image, taking the writes after it again into a segment of
+their own, and an image sent then put the next segment after one cut short,
+which no `verify` passes. Making a segment under a temporary name and renaming it in
+was not taken: it covers a copy and a killed archiver, but a machine's crash
+before the segment's first fsync can leave the renamed file empty all the
+same, short of an fsync for each segment made.
+
 ## A node's archive
 
 **A node's tenants are archived over one stream** (`fennec archive

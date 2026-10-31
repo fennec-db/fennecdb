@@ -751,7 +751,8 @@ fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
 
 /// Copies an archive's files one at a time, in the order a directory
 /// listing gives them, each as it stands when its turn comes -- the file
-/// being written may be cut in a record's middle.
+/// being written may be cut in a record's middle, and a segment just made
+/// in its magic.
 fn copy_of_as_it_goes(arch: &Path, to: &Path) -> PathBuf {
     let _ = std::fs::remove_dir_all(to);
     std::fs::create_dir_all(to).unwrap();
@@ -766,6 +767,127 @@ fn copy_of_as_it_goes(arch: &Path, to: &Path) -> PathBuf {
         let _ = std::fs::copy(e.path(), to.join(name));
     }
     to.to_path_buf()
+}
+
+/// Waits until a restore of `a` to its end reaches `seq`.
+fn reached(a: &Archive, probe: &Path, seq: u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while a.restore(probe, Target::End).map_or(0, |r| r.seq) < seq {
+        assert!(Instant::now() < deadline, "the archive did not reach {seq}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A segment caught as it was made -- created, its magic not yet whole,
+/// as a copy taken then or an archiver stopped then finds it -- holds no
+/// write: the archive verifies and restores to the segment before it. An
+/// archiver stopped there, or after the magic and before the first write,
+/// goes on in the segment before, sent the writes after it or an image.
+/// Plain and sealed, where the magic is the seal's and a frame of its own.
+/// `a_copy_taken_while_the_archive_writes_restores_or_says_why_not` met
+/// one as "not an archive segment".
+#[test]
+fn a_segment_cut_as_it_was_made_holds_no_write() {
+    use fennec_http::seal::{self, Key};
+    let d = dir("made");
+    // A buffer this small keeps only the last few writes: an archiver
+    // stopped through many is sent an image.
+    let p = primary(&d.join("p.fennec"), 512);
+    p.exec("create collection c (x int)");
+    let probe = d.join("probe.fennec");
+    let mut n = 0;
+    for key in [None, Some(Key::from_hex(&"ab".repeat(32)).unwrap())] {
+        let sealed = key.is_some();
+        let arch = d.join(format!("archive-{sealed}"));
+        let a = Archive::with_key(&arch, key.clone()).unwrap();
+        let follow = || {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (flag, path, url, key) =
+                (Arc::clone(&stop), arch.clone(), p.url.clone(), key.clone());
+            let done = std::thread::spawn(move || {
+                let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+                Archive::with_key(&path, key)?.follow(&upstream, &flag, &|_| {})
+            });
+            Archiver { stop, done }
+        };
+        let mut put = |count: usize| {
+            for _ in 0..count {
+                p.exec(&format!("put c {{x: {n}}}"));
+                n += 1;
+            }
+        };
+        let archiver = follow();
+        first_image(&arch);
+        // Each archived before the next: never behind the small buffer, the
+        // archiver is sent no image, and the writes are in a segment.
+        for _ in 0..10 {
+            put(1);
+            reached(&a, &probe, p.seq());
+        }
+        archiver.finish();
+
+        // The next segment as it was being made, cut at each length short
+        // of its magic: plain, a start of it; sealed, a start of the seal's
+        // or of the frame after it.
+        let head = std::fs::read(named(&arch, "writes-").remove(0)).unwrap();
+        let cuts: &[usize] = match sealed {
+            false => &[0, 3],
+            true => &[0, 5, seal::MAGIC.len() + 10],
+        };
+        let next = |dir: &Path| dir.join(format!("writes-{:020}.log", p.seq() + 1));
+        for &cut in cuts {
+            let copy = copy_of(&arch, &d.join(format!("copy-{sealed}-{cut}")));
+            std::fs::write(next(&copy), &head[..cut]).unwrap();
+            let c = Archive::with_key(&copy, key.clone()).unwrap();
+            let v = c
+                .verify()
+                .unwrap_or_else(|e| panic!("cut at {cut}, sealed {sealed}: {e}"));
+            assert_eq!(v.last, p.seq(), "cut at {cut}, sealed {sealed}");
+            assert!(v.torn <= cut, "{v:?}");
+            let out = d.join(format!("copy-{sealed}-{cut}.fennec"));
+            assert_eq!(c.restore(&out, Target::End).unwrap().seq, p.seq());
+        }
+
+        // An archiver stopped as it made one goes on in the segment before:
+        // with the one made left, it went on from its last image, and an
+        // image sent put a segment after one cut short.
+        let short = *cuts.last().unwrap();
+        // Sealed, the magic is the seal's and a frame: a 16-byte head and
+        // tag around the log's 8.
+        let whole = if sealed { seal::MAGIC.len() + 40 } else { 8 };
+        for (writes, image, cut) in [(2, false, short), (2, false, whole), (200, true, short)] {
+            let (images, segments) = (files(&arch, "image-"), files(&arch, "writes-"));
+            std::fs::write(next(&arch), &head[..cut]).unwrap();
+            put(writes);
+            let archiver = follow();
+            if image {
+                // Written once the image is taken, writes go in a segment
+                // after it.
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while files(&arch, "image-") == images {
+                    assert!(Instant::now() < deadline, "the archiver was sent no image");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                put(2);
+            }
+            reached(&a, &probe, p.seq());
+            archiver.finish();
+            // Its writes in the segment before, or in one after the image.
+            assert_eq!(
+                (files(&arch, "image-"), files(&arch, "writes-")),
+                (images + image as usize, segments + image as usize),
+                "went on from {cut}, sealed {sealed}"
+            );
+            let v = a
+                .verify()
+                .unwrap_or_else(|e| panic!("went on from {cut}, sealed {sealed}: {e}"));
+            assert_eq!((v.last, v.torn), (p.seq(), 0));
+        }
+        let out = d.join(format!("end-{sealed}.fennec"));
+        a.restore(&out, Target::End).unwrap();
+        let db = fennec_core::fs::open(&out).unwrap();
+        assert_eq!(rows(&db, "get c").len(), n);
+    }
 }
 
 /// An archive sealed with a key: every file in it encrypted, a restore and a

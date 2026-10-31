@@ -83,8 +83,9 @@ pub struct Verified {
     pub last: u64,
     pub to: Option<u64>,
     /// Bytes of a last record cut short at the end of the last segment --
-    /// an archiver stopped mid-write, or a copy taken while it wrote --
-    /// which the next archive run cuts off and a restore passes over.
+    /// an archiver stopped mid-write, or a copy taken while it wrote, the
+    /// segment's own magic too as it was made -- which the next archive
+    /// run cuts off and a restore passes over.
     pub torn: usize,
     /// Changes no segment holds between two images, first to last: a
     /// restore to the end passes over them from the later image, but not
@@ -151,7 +152,18 @@ fn writes(record: &[u8]) -> u64 {
 
 /// A segment's records, and where the last whole one ends -- a crash can
 /// leave a torn one after it.
+///
+/// A segment that is only a start of its magic, empty included, was cut
+/// as it was made: [`Archive::take`] creates the file and writes the magic
+/// in two calls, and a crash or a sync tool's copy between them finds an
+/// empty file. It holds no write, and nothing of it is whole (0). Refused
+/// as no segment, it made a copy taken then "not an archive segment"
+/// (docs/design/replication.md), and an archiver stopped then could not go
+/// on.
 fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
+    if LOG_MAGIC.starts_with(data) && data.len() < LOG_MAGIC.len() {
+        return Ok((Vec::new(), 0));
+    }
     if data.len() < LOG_MAGIC.len() || &data[..LOG_MAGIC.len()] != LOG_MAGIC {
         return Err(corrupt("not an archive segment".into()));
     }
@@ -346,6 +358,16 @@ impl Archive {
     fn read_segment(&self, path: &Path) -> io::Result<Read> {
         let bytes = fs::read(path)?;
         let len = bytes.len();
+        // Sealed, cut inside the seal's magic as it was made: no frame, and
+        // no write (`entries`). Past the magic, a head frame cut short opens
+        // as no frame as well.
+        if self.key.is_some() && seal::MAGIC.starts_with(&bytes) && len < seal::MAGIC.len() {
+            return Ok(Read {
+                plain: Vec::new(),
+                sealed: Some((0, 0)),
+                len,
+            });
+        }
         match (seal::is_sealed(&bytes), &self.key) {
             (true, Some(key)) => {
                 let (plain, end, frames) = seal::open_appended(key, &bytes)
@@ -477,12 +499,23 @@ impl Archive {
         };
         let mut at = self.images()?.last().map_or(0, |i| i.0);
         let mut open = None;
-        if let Some(&first) = self.segments()?.last() {
+        for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
             let read = self.read_segment(&path)?;
             let (list, end) = entries(&read.plain)?;
+            if list.is_empty() {
+                // Made, and stopped before its first write was whole: `take`
+                // creates the file, writes its magic, then the write. It
+                // holds nothing: the archive goes on in the segment before,
+                // as it would have without it. Left, the archive went on
+                // from its last image, its writes after it taken again into
+                // a segment of their own, and a hello's image put the next
+                // segment after one cut short, which no `verify` passes.
+                fs::remove_file(&path)?;
+                continue;
+            }
             let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
-            if !list.is_empty() && last >= at {
+            if last >= at {
                 at = last;
                 // Plain, a record cut short is cut off; sealed, a frame is,
                 // and a frame holds whole records.
@@ -513,6 +546,7 @@ impl Archive {
                         .map(|(k, (_, frames))| (k, frames, Vec::new())),
                 });
             }
+            break;
         }
         Ok((at, history, open))
     }
