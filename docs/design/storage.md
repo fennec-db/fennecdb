@@ -316,8 +316,10 @@ segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
 of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
 appended records that are not writes; a block (kind 9) holds a record for
-each of its writes: a data record, or a create's, a drop's, an index's or
-an alter's (kind 12).
+each of its writes: a data record, or a create's, a drop's, an index's,
+an alter's (kind 12) or a named statement's (kind 13, defined or dropped,
+[named-statements.md](named-statements.md#what-is-built)), which an image
+writes again after the collections.
 A head is written in one place (`head`, the counter's `image_head` aside)
 and read in one (`record_at`), and a walk over a file's records is a
 `Walk` -- a load, a repoint and the search for the last graphs each wrote

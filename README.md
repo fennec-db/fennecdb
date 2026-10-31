@@ -8,7 +8,7 @@ with the server, many clients writing into one file through one writer
 and sharing their disk syncs, a server that usually needs no cache in front of it,
 a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
-Written in Rust with no dependencies, it runs inside a web page as 330 KB of
+Written in Rust with no dependencies, it runs inside a web page as 332 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FennecQL**).
@@ -207,7 +207,7 @@ import { Fennec } from './fennec.js';
 const db = await Fennec.open('./fennec.wasm');
 ```
 
-330 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
+332 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fennecdb/web/client`, 10 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fennecdb.com/docs/javascript#packages)). With live
@@ -339,7 +339,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fennecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fennecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 330 KB gzip wasm + 60 KB gzip client, or the client alone (`@fennecdb/web/client`) · 1880–3013 KB binary · 2.99 MB container image |
+| **Runtime size** | 332 KB gzip wasm + 60 KB gzip client, or the client alone (`@fennecdb/web/client`) · 1880–3013 KB binary · 2.99 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 

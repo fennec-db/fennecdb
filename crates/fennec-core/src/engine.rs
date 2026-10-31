@@ -34,6 +34,9 @@ mod limit;
 #[cfg(not(target_arch = "wasm32"))]
 pub use limit::{Landing, Limit};
 mod maintenance;
+mod stored;
+use stored::REC_STATEMENT;
+pub use stored::{Statements, Stored};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
@@ -370,7 +373,7 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
             })?;
             Ok(n)
         }
-        Some(&(REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS)) => Ok(1),
+        Some(&(REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT)) => Ok(1),
         // The land's own records; the spills' are counted where it is
         // loaded, since it never travels.
         Some(&REC_LAND) => {
@@ -426,6 +429,10 @@ pub enum ChangeKind {
     /// after it, which the documents after it are read by.
     Alter(Schema),
     Drop,
+    /// A named statement defined or dropped: a write, numbered as one, of
+    /// no collection's rows -- what a reader of the changes passes over,
+    /// its cursor with it.
+    Statement,
 }
 
 /// [`Database::changes_in`]'s walk: the schemas by collection id, as the
@@ -441,6 +448,10 @@ struct ChangeWalk<'a> {
 #[cfg(not(target_arch = "wasm32"))]
 impl ChangeWalk<'_> {
     fn record(&mut self, kind: u8, cid: u32, body: &[u8]) -> Result<()> {
+        if kind == REC_STATEMENT {
+            self.hand(None, ChangeKind::Statement);
+            return Ok(());
+        }
         if kind != REC_DATA {
             let what = match kind {
                 REC_DROP => ChangeKind::Drop,
@@ -505,7 +516,7 @@ fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
         let r = record_at(body, &mut pos)?;
         if !matches!(
             r.kind,
-            REC_DATA | REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS
+            REC_DATA | REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT
         ) {
             return Err(Error::Corrupt(
                 "a block holds a record that is no write".into(),
@@ -718,6 +729,10 @@ enum Undo {
     /// An index over several fields dropped, with where it stood: it
     /// comes back as it was.
     Uncomposed(u32, usize, Box<(Composite, Derived<CompositeIndex>)>),
+    /// The named statements changed -- one defined, replaced or dropped,
+    /// or marked broken as the block landed: the table before.
+    #[cfg(feature = "statements")]
+    Statements(Arc<Statements>),
 }
 
 /// What [`Undo::Altered`] puts back.
@@ -864,6 +879,7 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
             | REC_GRAPH
             | REC_ALTER
             | REC_FIELDS
+            | REC_STATEMENT
             | REC_NEXTID
             | REC_HISTORY
             | REC_BLOCK
@@ -902,6 +918,7 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
                 | REC_GRAPH
                 | REC_ALTER
                 | REC_FIELDS
+                | REC_STATEMENT
                 | REC_NEXTID
                 | REC_HISTORY
                 | REC_BLOCK
@@ -3728,6 +3745,19 @@ pub struct Database {
     /// next block's start, where it finds the records in the file.
     #[cfg(not(target_arch = "wasm32"))]
     behind: bool,
+    /// The named statements the database holds, in a cell of their own:
+    /// a definition, a drop or a mark makes a new table, never changes one
+    /// a reader holds ([`Self::statements`]).
+    statements: Arc<Statements>,
+    /// Whether a schema change that breaks a named statement marks it
+    /// broken rather than being refused: a writer that cannot refuse
+    /// ([`Self::internally`]).
+    #[cfg_attr(not(feature = "statements"), allow(dead_code))]
+    internal: bool,
+    /// Whether `create statement` and `drop statement` run here
+    /// ([`Self::allow_definitions`]).
+    #[cfg(feature = "statements")]
+    defines: bool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -3795,6 +3825,10 @@ impl Database {
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
+            statements: Arc::default(),
+            internal: false,
+            #[cfg(feature = "statements")]
+            defines: false,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -4290,6 +4324,13 @@ impl Database {
                 out.write(&payload)?;
             }
         }
+        // After the collections they read, each with its version, epoch
+        // and digest: a compact keeps them as they were.
+        for st in self.statements.iter() {
+            let body = st.encode();
+            out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
+            out.write(&body)?;
+        }
         let body_len = out.at() - body_at;
         out.patch(head_at + 9, &body_len.to_le_bytes())
     }
@@ -4659,7 +4700,13 @@ impl Database {
             let tail = r.at >= body_end;
             if matches!(
                 r.kind,
-                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_DATA | REC_BLOCK
+                REC_CREATE
+                    | REC_DROP
+                    | REC_ALTER
+                    | REC_FIELDS
+                    | REC_STATEMENT
+                    | REC_DATA
+                    | REC_BLOCK
             ) {
                 spills.clear();
             }
@@ -4672,7 +4719,7 @@ impl Database {
                 .filter(|(cid, _)| r.kind == REC_DATA && *cid == r.cid && !tail)
                 .map(|(_, ix)| ix);
             match r.kind {
-                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS => {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT => {
                     seq_seen += tail as u64;
                     self.load_schema(r.kind, r.cid, r.body, &mut by_id, &mut restored)?;
                 }
@@ -4834,6 +4881,8 @@ impl Database {
         // writes after its record; everything else is rebuilt from the
         // documents.
         self.rebuild_indexes_with(&restored, &touched)?;
+        #[cfg(feature = "statements")]
+        self.read_statements();
         *self.appended.get_mut() = whole as u64;
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_landed();
@@ -4852,6 +4901,9 @@ impl Database {
         by_id: &mut ById,
         restored: &mut Vec<(String, String, usize)>,
     ) -> Result<()> {
+        if kind == REC_STATEMENT {
+            return self.take_statement(body);
+        }
         if kind == REC_DROP {
             if let Some(name) = by_id.remove(&cid) {
                 self.collections.remove(&name);
@@ -5556,7 +5608,7 @@ impl Database {
         while pos < records.len() && d.go {
             let r = record_at(records, &mut pos)?;
             match r.kind {
-                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_DATA => {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT | REC_DATA => {
                     d.record(r.kind, r.cid, r.body)?
                 }
                 REC_BLOCK => each_inner(r.body, &mut |kind, cid, inner| match d.go {
@@ -5588,7 +5640,7 @@ impl Database {
                 self.index_batch(batch);
             }
             match rec {
-                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS => {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT => {
                     self.apply_schema(rec, cid, body, &mut notes)?
                 }
                 REC_DATA => self.apply_frames(cid, body, batch, &mut notes)?,
@@ -5628,8 +5680,18 @@ impl Database {
             }
             *self.appended.get_mut() += (pos - start) as u64;
             self.dirty = true;
+            // A replica takes what its primary landed, and marks what it
+            // breaks broken, never refusing it ([`Self::read_statements`]).
+            // Asked only of a replica holding statements: a block of 50 000
+            // writes would be walked for none.
+            #[cfg(feature = "statements")]
+            let schema = !self.statements.is_empty() && notes.iter().any(|n| n.1 == SCHEMA_MARK);
             for (cid, id) in notes.drain(..) {
                 self.note(cid, id);
+            }
+            #[cfg(feature = "statements")]
+            if schema {
+                self.read_statements();
             }
             n += 1;
         }
@@ -5646,6 +5708,10 @@ impl Database {
         notes: &mut Vec<(u32, DocId)>,
     ) -> Result<()> {
         notes.push((cid, SCHEMA_MARK));
+        // Taken as the primary wrote it, its digest checked here.
+        if kind == REC_STATEMENT {
+            return self.take_statement(body);
+        }
         if kind == REC_DROP {
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             self.collections.remove(&name);
@@ -5809,6 +5875,7 @@ impl Database {
         self.order = fresh.order;
         self.next_coll_id = fresh.next_coll_id;
         self.history = fresh.history;
+        self.statements = fresh.statements;
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
         self.adoptions += 1;
@@ -5916,6 +5983,16 @@ impl Database {
         if b.heads.is_empty() {
             self.spare(b);
             return Ok(());
+        }
+        // A schema change that breaks a named statement, against the
+        // schema the block leaves: refused naming it, or marked broken. A
+        // look at a table that is empty for every other block.
+        #[cfg(feature = "statements")]
+        if !self.statements.is_empty() {
+            if let Err(e) = self.statements_hold(&mut b) {
+                self.undo(b);
+                return Err(e);
+            }
         }
         // The lease may have lapsed since the block's first write was let
         // through: a block that lands after it would be a write the tenant's
@@ -6132,6 +6209,8 @@ impl Database {
                         c.fit_composites();
                     }
                 }
+                #[cfg(feature = "statements")]
+                Undo::Statements(t) => self.statements = t,
                 Undo::Uncomposed(cid, at, b) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
@@ -6166,7 +6245,7 @@ impl Database {
         // Before anything of the block runs, or a write before a `call`
         // would have landed beside a refusal.
         #[cfg(feature = "statements")]
-        if let Some(i) = stmts.iter().position(|(s, _)| s.is_named()) {
+        if let Some(i) = stmts.iter().position(|(s, _)| self.refuses_named(s)) {
             return Err((i, not_named()));
         }
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
@@ -6435,7 +6514,7 @@ impl Database {
         self.disarm();
         // Refused before a block opens: nothing of it may run.
         #[cfg(feature = "statements")]
-        if stmt.is_named() {
+        if self.refuses_named(stmt) {
             return Err(not_named());
         }
         // A write is a block of one: a `put` of many documents stopped half
@@ -6568,9 +6647,11 @@ impl Database {
             #[cfg(feature = "statements")]
             Statement::DescribeStatement(name) => Err(no_statement(name)),
             #[cfg(feature = "statements")]
-            Statement::CreateStatement(_)
-            | Statement::DropStatement { .. }
-            | Statement::Call(_) => Err(not_named()),
+            Statement::CreateStatement(def) => self.define_statement(def),
+            #[cfg(feature = "statements")]
+            Statement::DropStatement { name, if_exists } => self.drop_statement(name, *if_exists),
+            #[cfg(feature = "statements")]
+            Statement::Call(_) => Err(not_named()),
         }
     }
 

@@ -63,6 +63,7 @@ mod sparse;
 mod spill;
 mod sql_docs;
 mod storage;
+mod stored;
 mod subquery;
 mod synclog;
 mod ttl;

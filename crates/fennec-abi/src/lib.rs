@@ -373,7 +373,7 @@ use fennec_core::declared;
 pub fn read(request: &str) -> Result<declared::Declared> {
     let mut d = declared::parse(request)?;
     if let Some(text) = d.text.take() {
-        d.collections = fennec_ql::schema_text(&text)?;
+        fennec_ql::schema_into(&mut d, &text)?;
     }
     Ok(d)
 }
@@ -450,7 +450,8 @@ pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -
     let pending = done..texts.len();
     let fresh = done == 0 && db.collection_names().iter().all(|n| declared::own(n));
     if pending.is_empty() {
-        let plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        let mut plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        declared::plan_statements(&mut plan, db.statements(), &d, declared::Mode::Apply);
         if !apply || !plan.refusals.is_empty() || plan.statements.is_empty() {
             return Ok(Outcome {
                 plan,
@@ -471,7 +472,8 @@ pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -
             let row = [Value::Int(i as i64 + 1), Value::Text(texts[i].clone()), at];
             exec(db, "put _migrations {n: $1, text: $2, at: $3}", &row)?;
         }
-        let plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        let mut plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        declared::plan_statements(&mut plan, db.statements(), &d, declared::Mode::Apply);
         if apply && plan.refusals.is_empty() {
             for s in &plan.statements {
                 exec(db, s, &[])?;
@@ -525,8 +527,10 @@ pub fn describe(db: &Database, fennecql: bool) -> String {
 /// owner runs them. Through `&Database`: a reader beside the others.
 pub fn follow(db: &Database, request: &str) -> Result<Outcome> {
     let d = read(request)?;
+    let mut plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Follow);
+    declared::plan_statements(&mut plan, db.statements(), &d, declared::Mode::Follow);
     Ok(Outcome {
-        plan: declared::plan(&schemas(db), &d.collections, declared::Mode::Follow),
+        plan,
         ..Outcome::default()
     })
 }
@@ -894,6 +898,62 @@ mod tests {
             read > 10 && planned > 10,
             "{read} declarations, {planned} plans"
         );
+    }
+
+    /// A schema's named statements planned against the database's by their
+    /// trees: one it lacks its `create`, one written otherwise and the same
+    /// nothing, one changed its `create or replace` where it keeps the
+    /// contract and a refusal where not; following, each held to be there
+    /// and the same. Applied, a definition meets the engine's refusal until
+    /// calls are scoped.
+    #[test]
+    fn a_schemas_statements_are_planned_by_their_trees() {
+        fennec_ql::install();
+        let collections = "create collection accounts (owner text @hash, balance int);\n";
+        let mine = "create statement mine() claims (sub text) as \
+                    get accounts select id where owner = $jwt.sub";
+        let request = |statements: &str| {
+            let text = format!("{collections}{statements}");
+            let mut r = String::from(r#"{"format": 1, "fennecql": "#);
+            fennec_core::json::escape_into(&mut r, &text);
+            r.push('}');
+            r
+        };
+        let mut db = Database::new();
+        exec(&mut db, collections, &[]).unwrap();
+        let plan = |db: &Database, s: &str| schema_plan(db, &request(s));
+        assert_eq!(plan(&db, mine).statements, [mine]);
+        let e = schema(&mut db, &request(mine), true, None).unwrap_err();
+        assert!(e.to_string().contains(fennec_core::named::NOT_BUILT), "{e}");
+        let followed = follow(&db, &request(mine)).unwrap().plan;
+        assert_eq!(followed.refusals[0].kind, "statement_missing");
+
+        db.allow_definitions();
+        exec(&mut db, mine, &[]).unwrap();
+        let written_otherwise = mine.replace(" as ", "\n  -- the caller's\n  as ");
+        assert_eq!(plan(&db, &written_otherwise), declared::Plan::default());
+        let kept = mine.replace("select id", "select id order id");
+        assert_eq!(
+            plan(&db, &kept).statements,
+            [kept.replace("create statement", "create or replace statement")]
+        );
+        assert_eq!(
+            follow(&db, &request(&kept)).unwrap().plan.refusals[0].kind,
+            "statement_changed"
+        );
+        let wider = mine.replace("select id", "select id, balance");
+        let p = plan(&db, &wider);
+        assert!(p.statements.is_empty());
+        assert_eq!(p.refusals[0].kind, "statement_contract_changed");
+        assert_eq!(p.refusals[0].collection, "mine");
+    }
+
+    /// [`schema`]'s plan, nothing applied.
+    fn schema_plan(db: &Database, request: &str) -> declared::Plan {
+        let d = read(request).unwrap();
+        let mut plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        declared::plan_statements(&mut plan, db.statements(), &d, declared::Mode::Apply);
+        plan
     }
 }
 // No files in the browser: compiled out of the module rather than left

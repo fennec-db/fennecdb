@@ -447,10 +447,15 @@ fn ensure_copy(
         (_, false) => "there is none yet",
     };
     report(Event::Copying(why));
+    // A writer that cannot refuse: a named statement reading the
+    // collection is marked broken, never a follower stopped
+    // (`Database::internally`).
     if exists {
-        g.execute(&Statement::DropCollection {
-            name: opts.into.clone(),
-            if_exists: true,
+        g.internally(|db| {
+            db.execute(&Statement::DropCollection {
+                name: opts.into.clone(),
+                if_exists: true,
+            })
         })?;
     }
     let id = write_marker(&mut g, marker.map(|m| m.id), &opts.into, follow, false)?;
@@ -464,9 +469,11 @@ fn ensure_copy(
         Err(e) => {
             // Half a collection is worth nothing to a follower: the next run
             // copies again, and a rerun of this one should not find it.
-            let _ = g.execute(&Statement::DropCollection {
-                name: opts.into.clone(),
-                if_exists: true,
+            let _ = g.internally(|db| {
+                db.execute(&Statement::DropCollection {
+                    name: opts.into.clone(),
+                    if_exists: true,
+                })
             });
             let _ = g.sync();
             return Err(e);

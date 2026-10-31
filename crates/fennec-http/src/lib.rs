@@ -38,6 +38,10 @@ macro_rules! log {
     }};
 }
 
+/// The reader of stored named statements (`fennec_ql::install`), for the
+/// server's binary to install before it opens its file.
+pub use fennec_ql::install as install_statement_reader;
+
 pub mod accept;
 pub mod access;
 pub mod admin;
@@ -237,6 +241,9 @@ impl Server {
     /// `fennec-server` -- wakes the waiting subscriptions. One process, one writer,
     /// one wake-up point.
     pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
+        // What a tenant opened, an image adopted and a replica's apply read
+        // each named statement back with.
+        fennec_ql::install();
         let cfg = cfg.settled();
         let hub = Hub::new();
         {

@@ -272,7 +272,7 @@ struct Names {
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
-    statements(tokenize(src)?, false)
+    statements(src, tokenize(src)?, false)
 }
 
 /// [`parse`], every list of numbers kept as written -- integers integers,
@@ -281,7 +281,7 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
 /// at a time, which is slower than the vector [`parse`] makes, so a text is
 /// read so only where [`parse_for`] finds a json field given one.
 pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
-    statements(crate::lexer::tokenize(src)?, true)
+    statements(src, crate::lexer::tokenize(src)?, true)
 }
 
 /// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
@@ -309,7 +309,8 @@ pub fn parse_one_for(db: &Database, src: &str) -> Result<Statement> {
 /// 128-dim rows parsed 1.4% slower (8.27 -> 8.39 ms) than with the body in
 /// `parse`; the browser module keeps one copy.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
+#[cfg_attr(not(feature = "statements"), allow(unused_variables))]
+fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
     let mut p = Parser {
         toks,
         i: 0,
@@ -322,12 +323,33 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
     };
     let mut out = Vec::new();
     while !p.ended() {
+        #[cfg(feature = "statements")]
+        let first = p.i;
+        // Pushed first and its text filled in place, so a statement is moved
+        // once, as before named statements: the corpus parses in main's time.
         out.push(p.statement()?);
+        #[cfg(feature = "statements")]
+        if let Some(Statement::CreateStatement(d)) = out.last_mut() {
+            d.text = definition_text(src, p.toks[first].pos, p.toks[p.i].pos);
+        }
     }
     if out.is_empty() {
         return Err(Error::Query("empty query".into()));
     }
     Ok(out)
+}
+
+/// A definition's own text: the characters from its first token to the
+/// token after it, less the white space and `;` before that token. Out of
+/// line, and only for a definition: a text holding none slices nothing.
+#[cfg(feature = "statements")]
+#[cold]
+#[inline(never)]
+fn definition_text(src: &str, from: usize, to: usize) -> String {
+    let byte = |chars: usize| src.char_indices().nth(chars).map_or(src.len(), |(b, _)| b);
+    let text = src.get(byte(from)..byte(to)).unwrap_or_default();
+    text.trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .to_string()
 }
 
 /// Where each statement of `src` is, in bytes: its text runs from its
@@ -3831,6 +3853,7 @@ impl Parser {
             check,
             body,
             block,
+            text: String::new(),
         };
         if let Some((which, why)) = def.refused() {
             // A body the text's end cut short may yet read: a `where`, a

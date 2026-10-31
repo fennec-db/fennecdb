@@ -145,6 +145,7 @@ Shell commands
 "#;
 
 fn main() {
+    fennec_ql::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // The subcommand has to be caught before the positional path: the arm

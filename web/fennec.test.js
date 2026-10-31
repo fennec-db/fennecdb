@@ -619,6 +619,27 @@ test('named statements are a server\'s: the module refuses a definition and a ca
   assert.deepEqual(db.run('select a statements from t').rows, []);
 });
 
+test('a file holding named statements opens in the module, which keeps them through its images', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { readFileSync } = await import('node:fs');
+  const { Fennec } = await import('./fennec.js');
+  // Written by a server's build (fennec-core's `stored::` tests): two
+  // definitions in its image, a third after it.
+  const file = readFileSync(new URL('../crates/fennec-core/tests/statements.fennec', import.meta.url));
+  const db = await Fennec.open(wasm);
+  db.load(new Uint8Array(file));
+  const texts = ['create statement transfer(', 'create statement like(', 'create statement stale('];
+  const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t));
+  assert.ok(keeps(db.snapshot()), 'each text as it came');
+  // A schema change taking away what one reads lands here: the module
+  // marks it broken, for the server that opens the file again to refuse.
+  db.run('alter collection accounts drop field balance');
+  const image = db.snapshot();
+  assert.ok(keeps(image));
+  const again = await Fennec.open(wasm);
+  again.load(image);
+  assert.ok(keeps(again.snapshot()));
+});
+
 test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

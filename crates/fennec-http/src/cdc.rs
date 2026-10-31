@@ -539,12 +539,14 @@ fn lines(
         if n == limit {
             return false;
         }
-        // The consumers' own cursors and the writes' keys: passed over,
-        // and the cursor with them.
+        // The consumers' own cursors, the writes' keys and a named
+        // statement defined or dropped, of no collection's rows: passed
+        // over, and the cursor with them.
         if matches!(
             c.collection.as_deref(),
             Some(CONSUMERS | crate::idempotent::KEYS)
-        ) {
+        ) || matches!(c.kind, ChangeKind::Statement)
+        {
             next = c.seq;
             return true;
         }
@@ -573,6 +575,8 @@ fn line(out: &mut String, c: &Change, at: u64) {
         ChangeKind::Create(_) => ("create", None),
         ChangeKind::Alter(_) => ("alter", None),
         ChangeKind::Drop => ("drop", None),
+        // Passed over by `lines`, never written.
+        ChangeKind::Statement => ("statement", None),
     };
     out.push_str(",\"op\":\"");
     out.push_str(op);
