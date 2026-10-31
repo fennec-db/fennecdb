@@ -175,6 +175,14 @@ not. Over HTTP the line is the method and the target, and for
 <code>/query</code> and <code>/batch</code> the body that holds the
 statements. A line is cut at 1 000 bytes, so a bulk <code>put</code> of a
 megabyte shows what it was without being all of it.</p>
+
+<p>A <a href="/docs/fennecql#named-statements">named statement</a>'s call
+— <code>POST /_call/&lt;name&gt;</code>, or a lone <code>call</code> over
+<code>/query</code> — is logged as its shape,
+<code>"statement":"call transfer $1"</code>, never an argument, and with
+<code>"version":[history, change]</code>, the definition that ran, as
+<code>statements</code> lists it. Its span's
+<code>db.stored_procedure.name</code> is the statement's name.</p>
 </details>
 
 <h2 id="statements">What each statement cost</h2>
@@ -194,7 +202,12 @@ alone, a vector's components, as one — so the same statement run with other
 values is one line: how often it ran, its total, mean, least and most time,
 the rows it returned or changed, and its failures. Over HTTP a
 <code>/query</code> or <code>/batch</code> is counted as its FennecQL; a call
-to a collection's path as its method and path. <code>GET
+to a collection's path as its method and path. A request held by
+<a href="/docs/http-reference#wait"><code>Fennec-Wait</code></a> is
+one call of its shape, its time every run's but not the wait, and its rows
+the run that answered it: a run before that wrote nothing and was put back,
+so the rows a held <code>/batch</code>'s reads returned in it, answered to
+no one, are not counted. <code>GET
 /_stats/statements</code> answers JSON, most time first, and
 <code>DELETE</code> forgets it all.</p>
 
@@ -324,7 +337,7 @@ tenant moves. No label names a tenant.</p>
 <table>
 <thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
 <tbody>
-<tr><td><code>fennec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code>, or <code>gone</code>: a request held at its node (<code>Fennec-Wait</code>) whose client reset its connection, answered nothing. A client gone with its end — most timeouts and aborts — reads as one that half-closed and still reads, so its request is answered as the node answers it and counted by that status</td></tr>
+<tr><td><code>fennec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>call</code> (<code>/t/…/_call/…</code>, a tenant's named statement called by its path, forwarded too, never by its name), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code>, or <code>gone</code>: a request held at its node (<code>Fennec-Wait</code>) whose client reset its connection, answered nothing. A client gone with its end — most timeouts and aborts — reads as one that half-closed and still reads, so its request is answered as the node answers it and counted by that status</td></tr>
 <tr><td><code>fennec_router_request_duration_seconds{route}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
 <tr><td><code>fennec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fennec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>
@@ -365,7 +378,7 @@ statements, so a client holding its answer finds it in the next scrape; its
 time ends once the answer is written.</p>
 
 <pre data-lang="text"># what the router adds, at the median, over five minutes
-histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{route="tenant"}[5m])))
+histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{route=~"tenant|call"}[5m])))
   - histogram_quantile(0.5, sum by (le) (rate(fennec_router_upstream_duration_seconds_bucket[5m])))
 
 # worth an alert

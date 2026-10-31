@@ -8,9 +8,8 @@
 //! canonical tree's digest. The engine keeps a definition as a record of
 //! its database (`engine/stored.rs`) and runs a call under the write lock
 //! (`engine/call.rs`); who may call one, with which claims, is the server's
-//! (`fennec_http::access`). The surfaces still to come -- MCP's tools and a
-//! tenant's schema at the router -- refuse them as not built here
-//! ([`NOT_BUILT`]).
+//! (`fennec_http::access`). The surface still to come -- MCP's tools --
+//! refuses them as not built here ([`NOT_BUILT`]).
 
 use crate::codec;
 use crate::error::{Error, Result};
@@ -21,13 +20,12 @@ use crate::query::{
 use crate::value::{DataType, Value};
 
 /// What a surface that takes no named statement yet answers one with --
-/// MCP's tools, which call them by `call_<name>` once built, and a
-/// tenant's schema at the router, which parses no definition yet: the
-/// words of their own a client tells this refusal by. A query error (400
-/// over HTTP), refused before anything of the statement runs.
+/// MCP's tools, which call them by `call_<name>` once built: the words of
+/// their own a client tells this refusal by. A query error (400 over
+/// HTTP), refused before anything of the statement runs.
 pub const NOT_BUILT: &str = "named statements are not built here yet: `call`, `create \
-                             statement` and `drop statement` run through `/query` and \
-                             `/batch`";
+                             statement` and `drop statement` run through `/query`, `/batch` \
+                             and `POST /_call/<name>`";
 
 /// The grammar's epoch: raised by every change that could read a text
 /// stored before it as another tree, or write a tree's canonical bytes

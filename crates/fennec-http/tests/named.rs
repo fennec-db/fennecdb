@@ -5,7 +5,11 @@
 //! the statement's own authority, outside the token's scope, its answer
 //! unmasked and its refusals told; a scoped `/batch` holds one call alone;
 //! `append-only` binds a call's body; `--call-rate` holds a caller; and a
-//! call runs one version whole, under the write lock, at every site.
+//! call runs one version whole, under the write lock, at every site. And
+//! slice 4's `POST /_call/<name>`: answered as `/query` answers the `call
+//! <name> $1` it stands for, its path and body held to their form, judged
+//! before a marked read's refusal, made once under a key and let in across
+//! origins as `/query` is.
 
 use fennec_core::prelude::*;
 use fennec_http::access::Access;
@@ -56,29 +60,19 @@ const STATEMENTS: [&str; 5] = [
 const ACCOUNTS: i64 = 8;
 const START: i64 = 1000;
 
+#[derive(Clone)]
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<Database>>,
 }
 
 fn start(tune: impl FnOnce(&mut Config)) -> Node {
     fennec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
-    let mut cfg = Config {
-        addr: "127.0.0.1:0".into(),
-        token: Some(ROOT.into()),
-        access: Some(Arc::clone(&access)),
-        call_rate: 0,
-        ..Config::default()
-    };
-    tune(&mut cfg);
-    let server = Server::new(Arc::new(RwLock::new(Database::new())), cfg);
-    let listener = server.bind().unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
-    });
-    let node = Node { port, access };
+    let db = Arc::new(RwLock::new(Database::new()));
+    let port = serve(&db, &access, tune);
+    let node = Node { port, access, db };
     for s in SCHEMA.split(';').chain(STATEMENTS) {
         node.ok(ROOT, s);
     }
@@ -91,7 +85,35 @@ fn start(tune: impl FnOnce(&mut Config)) -> Node {
     node
 }
 
+/// A server over `db` on a port of its own, its configuration `tune`d.
+fn serve(db: &Arc<RwLock<Database>>, access: &Arc<Access>, tune: impl FnOnce(&mut Config)) -> u16 {
+    let mut cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        token: Some(ROOT.into()),
+        access: Some(Arc::clone(access)),
+        call_rate: 0,
+        ..Config::default()
+    };
+    tune(&mut cfg);
+    let server = Server::new(Arc::clone(db), cfg);
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    port
+}
+
 impl Node {
+    /// A read-only server (`--read-only`) over this node's database.
+    fn read_only(&self) -> Node {
+        Node {
+            port: serve(&self.db, &self.access, |c| c.read_only = true),
+            access: Arc::clone(&self.access),
+            db: Arc::clone(&self.db),
+        }
+    }
+
     fn send(&self, token: &str, target: &str, body: &str, extra: &str) -> (u16, String, String) {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -180,10 +202,8 @@ fn a_scoped_token_moves_money_through_its_grant_alone() {
     let clients: Vec<_> = (0..ACCOUNTS as u64)
         .map(|t| {
             let token = node.customer(&format!("u{t}"));
-            let port = node.port;
-            let access = Arc::clone(&node.access);
+            let node = node.clone();
             std::thread::spawn(move || {
-                let node = Node { port, access };
                 let mut seed = 0x2545_f491_4f6c_dd1du64 ^ (t + 1);
                 let mut next = |n: u64| {
                     seed ^= seed << 13;
@@ -444,7 +464,8 @@ fn a_caller_is_held_to_the_rate_in_each_database_apart() {
 
 /// A definition replaced while calls run: each call runs one version whole
 /// -- both its rows of one version -- at every site that asks whether a
-/// statement writes before its lock: `/query`, keyed or not, and `/batch`.
+/// statement writes before its lock: `/query`, keyed or not, `/batch` and
+/// `POST /_call/<name>`.
 #[test]
 fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
     let node = start(|_| {});
@@ -459,12 +480,10 @@ fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
         )
     };
     node.ok(ROOT, &pair(1));
-    let port = node.port;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let replacer = {
-        let (stop, access) = (Arc::clone(&stop), Arc::clone(&node.access));
+        let (stop, node) = (Arc::clone(&stop), node.clone());
         std::thread::spawn(move || {
-            let node = Node { port, access };
             let mut v = 1;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 v = 3 - v;
@@ -472,18 +491,23 @@ fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
             }
         })
     };
-    let callers: Vec<_> = (0..3u32)
+    let callers: Vec<_> = (0..4u32)
         .map(|site| {
-            let access = Arc::clone(&node.access);
+            let node = node.clone();
             std::thread::spawn(move || {
-                let node = Node { port, access };
                 for i in 0..60 {
                     let n = site * 1000 + i;
                     let q = line(&format!("call pair {{n: {n}}}"));
                     let (status, _, body) = match site {
                         0 => node.send(ROOT, "/query", &q, ""),
                         1 => node.send(ROOT, "/query", &q, &format!("Idempotency-Key: k{n}\r\n")),
-                        _ => node.send(ROOT, "/batch", &q, ""),
+                        2 => node.send(ROOT, "/batch", &q, ""),
+                        _ => node.send(
+                            ROOT,
+                            "/_call/pair",
+                            &format!(r#"{{"params":{{"n":{n}}}}}"#),
+                            "",
+                        ),
                     };
                     assert_eq!(status, 200, "{site}: {body}");
                 }
@@ -498,5 +522,262 @@ fn a_call_runs_one_version_whole_while_its_definition_is_replaced() {
     let lefts = node.ok(ROOT, "get lefts select n, v order n");
     let rights = node.ok(ROOT, "get rights select n, v order n");
     assert_eq!(lefts, rights);
-    assert_eq!(node.number("get lefts count"), 180);
+    assert_eq!(node.number("get lefts count"), 240);
+}
+
+impl Node {
+    /// A request of any method, `token` or none, with its whole head.
+    fn raw(
+        &self,
+        method: &str,
+        target: &str,
+        token: Option<&str>,
+        body: &str,
+        extra: &str,
+    ) -> (u16, String, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+        write!(
+            s,
+            "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}{extra}\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+        (
+            out[9..12].parse().unwrap(),
+            head.to_string(),
+            body.to_string(),
+        )
+    }
+
+    /// `POST /_call/<name>` with `params`, an object's JSON.
+    fn call(&self, token: &str, name: &str, params: &str) -> (u16, String) {
+        self.post(
+            token,
+            &format!("/_call/{name}"),
+            &format!(r#"{{"params":{params}}}"#),
+        )
+    }
+
+    /// `call <name> $1` over `/query`, `params` the one parameter.
+    fn call_query(&self, token: &str, name: &str, params: &str) -> (u16, String) {
+        let q = format!(r#"{{"query":"call {name} $1","params":[{params}]}}"#);
+        self.post(token, "/query", &q)
+    }
+}
+
+/// `POST /_call/<name>` answers as `/query` answers the `call <name> $1`
+/// it stands for -- the same status and, for a refusal, the same words --
+/// in the order a call is judged: the grant and the statement (404), the
+/// claims (403), the arguments and `check` (400), a guard (412) and a
+/// unique value taken (409), for a scoped caller and the server's token.
+#[test]
+fn a_call_by_its_path_answers_as_query_answers_it() {
+    let node = start(|_| {});
+    let u0 = node.customer("u0");
+    let nameless = node.token(r#"{"role":"customer"}"#);
+    let (status, body) = node.call(&u0, "transfer", r#"{"from":1,"to":2,"amount":10}"#);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"amount\":10"), "{body}");
+    let (status, body) = node.call(&u0, "signup", r#"{"email":"a@x.io"}"#);
+    assert_eq!(status, 200, "{body}");
+    let cases: [(&str, &str, &str, u16); 10] = [
+        (&u0, "purge", r#"{"w":"a"}"#, 404),
+        (&u0, "nothing", "{}", 404),
+        (&nameless, "history", "{}", 403),
+        (ROOT, "history", "{}", 403),
+        (&u0, "transfer", r#"{"from":1,"to":2}"#, 400),
+        (&u0, "transfer", r#"{"from":1,"to":2,"amount":"ten"}"#, 400),
+        (
+            &u0,
+            "transfer",
+            r#"{"from":1,"to":2,"amount":10,"by":3}"#,
+            400,
+        ),
+        (&u0, "transfer", r#"{"from":1,"to":2,"amount":0}"#, 400),
+        (&u0, "transfer", r#"{"from":2,"to":1,"amount":10}"#, 412),
+        (&u0, "signup", r#"{"email":"a@x.io"}"#, 409),
+    ];
+    for (token, name, params, want) in cases {
+        let by_path = node.call(token, name, params);
+        let by_query = node.call_query(token, name, params);
+        assert_eq!(by_path.0, want, "{name} {params}: {}", by_path.1);
+        assert_eq!(by_path, by_query, "{name} {params}");
+    }
+    // An ungranted name is the 404 a missing one is.
+    let (_, ungranted) = node.call(&u0, "purge", "{}");
+    let (_, missing) = node.call(&u0, "nothing", "{}");
+    assert_eq!(ungranted.replace("purge", "nothing"), missing);
+    // The refused calls moved nothing: one transfer of 10 landed.
+    let moved = node.number("get accounts where id = 1 select balance");
+    assert_eq!(moved, START - 10);
+}
+
+/// A call's body holds `params` alone, an object of the arguments by
+/// name, and a statement of none takes no body at all; the path takes a
+/// POST alone (405, `Allow: POST`), and a name no statement may have is
+/// the 404 a missing one is.
+#[test]
+fn a_calls_path_and_body_are_held_to_their_form() {
+    let node = start(|_| {});
+    let u0 = node.customer("u0");
+    for body in ["", "{}", r#"{"params":{}}"#, r#"{"params":null}"#] {
+        let (status, answer) = node.post(&u0, "/_call/history", body);
+        assert_eq!(status, 200, "{body:?}: {answer}");
+    }
+    for (body, why) in [
+        (r#"{"params":[1,2]}"#, "`params` is an object"),
+        (
+            r#"{"params":{},"as":{"sub":"u1"}}"#,
+            "`params` alone, not `as`",
+        ),
+        ("[1]", "expected a JSON object"),
+    ] {
+        let (status, answer) = node.post(&u0, "/_call/history", body);
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert!(answer.contains(why), "{body}: {answer}");
+    }
+    let (status, head, _) = node.raw("GET", "/_call/history", Some(&u0), "", "");
+    assert_eq!(status, 405, "{head}");
+    assert!(head.contains("Allow: POST"), "{head}");
+    for target in ["/_call", "/_call/history/x"] {
+        let (status, _, body) = node.raw("POST", target, Some(&u0), "", "");
+        assert_eq!(status, 404, "{target}: {body}");
+    }
+    let (_, missing) = node.call(&u0, "nothing", "{}");
+    for name in ["9lives", "a-b", "x%20y"] {
+        let (status, body) = node.call(&u0, name, "{}");
+        assert_eq!(status, 404, "{name}: {body}");
+        let name = name.replace("%20", " ");
+        assert_eq!(body.replace(&name, "nothing"), missing, "{name}");
+    }
+    // No token: 401, before anything of the call is asked.
+    let (status, _, body) = node.raw("POST", "/_call/history", None, "", "");
+    assert_eq!(status, 401, "{body}");
+}
+
+/// A call marked for a replica (`Fennec-Read: replica`) is judged first --
+/// its grant 404, its arguments 400 -- and then refused as the write it
+/// is, 403 in words that say so, before anything of it runs.
+#[test]
+fn a_marked_call_is_judged_before_it_is_refused() {
+    let node = start(|_| {});
+    let u0 = node.customer("u0");
+    let marked = "Fennec-Read: replica\r\n";
+    let send = |name: &str, params: &str| {
+        let body = format!(r#"{{"params":{params}}}"#);
+        node.send(&u0, &format!("/_call/{name}"), &body, marked)
+    };
+    let (status, _, body) = send("purge", r#"{"w":"a"}"#);
+    assert_eq!(status, 404, "{body}");
+    let (status, _, body) = send("transfer", r#"{"from":1,"to":2}"#);
+    assert_eq!(status, 400, "{body}");
+    let before = node.balances();
+    let (status, _, body) = send("transfer", r#"{"from":1,"to":2,"amount":10}"#);
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("Fennec-Read: replica only reads"), "{body}");
+    assert_eq!(node.number("get entries count"), 0);
+    assert_eq!(before, node.balances());
+}
+
+/// A read-only server judges a call before its 403 whichever way it came
+/// -- by its path, over `/query` and in a `/batch` -- the grant and the
+/// statement (404), the claims (403), the arguments and `check` (400) and
+/// `append-only` (403), the same status in the same words, a `/batch`'s
+/// with where it stopped; a call that passes is refused as the write it
+/// is, nothing of it run.
+#[test]
+fn a_read_only_server_judges_a_call_alike_at_every_way_in() {
+    let node = start(|_| {}).read_only();
+    let u0 = node.customer("u0");
+    let nameless = node.token(r#"{"role":"customer"}"#);
+    let admin = node.token(r#"{"sub":"ops","role":"admin"}"#);
+    let cases: [(&str, &str, &str, u16, &str); 7] = [
+        (&u0, "purge", r#"{"w":"a"}"#, 404, "purge"),
+        (ROOT, "nothing", "{}", 404, "nothing"),
+        (&nameless, "history", "{}", 403, "sub"),
+        (&u0, "transfer", r#"{"from":1,"to":2}"#, 400, "amount"),
+        (
+            &u0,
+            "transfer",
+            r#"{"from":1,"to":2,"amount":0}"#,
+            400,
+            "check",
+        ),
+        (&admin, "purge", r#"{"w":"a"}"#, 403, "append-only"),
+        (
+            &u0,
+            "transfer",
+            r#"{"from":1,"to":2,"amount":10}"#,
+            403,
+            "read-only",
+        ),
+    ];
+    for (token, name, params, want, says) in cases {
+        let by_path = node.call(token, name, params);
+        let by_query = node.call_query(token, name, params);
+        let line = format!(r#"{{"query":"call {name} $1","params":[{params}]}}"#);
+        let by_batch = node.post(token, "/batch", &line);
+        assert_eq!(by_path.0, want, "{name} {params}: {}", by_path.1);
+        assert!(by_path.1.contains(says), "{name} {params}: {}", by_path.1);
+        assert_eq!(by_path, by_query, "{name} {params}");
+        assert_eq!(by_batch.0, want, "{name} {params}: {}", by_batch.1);
+        // A line's refusal is the same words, with its kind's first where
+        // it stopped the batch, as every `/batch` line's is.
+        let words = by_path.1.trim_start_matches(r#"{"error":""#);
+        let words = words.trim_end_matches(r#""}"#);
+        assert!(by_batch.1.contains(words), "{}: {}", by_path.1, by_batch.1);
+    }
+    assert_eq!(node.number("get entries count"), 0);
+}
+
+/// An `Idempotency-Key` makes a call once: sent again it is the answer
+/// kept, replayed, and the money moved once; the key with another body is
+/// 422, the request's hash being over its path and body.
+#[test]
+fn an_idempotency_key_makes_a_call_once() {
+    let node = start(|_| {});
+    let u0 = node.customer("u0");
+    let body = r#"{"params":{"from":1,"to":2,"amount":10}}"#;
+    let key = "Idempotency-Key: t-1\r\n";
+    let (status, first_head, first) = node.send(&u0, "/_call/transfer", body, key);
+    assert_eq!(status, 200, "{first}");
+    assert!(!first_head.contains("Idempotent-Replayed"), "{first_head}");
+    let (status, head, again) = node.send(&u0, "/_call/transfer", body, key);
+    assert_eq!(status, 200, "{again}");
+    assert!(head.contains("Idempotent-Replayed: true"), "{head}");
+    assert_eq!(first, again);
+    assert_eq!(node.number("get entries count"), 1);
+    let other = r#"{"params":{"from":1,"to":2,"amount":20}}"#;
+    let (status, _, body) = node.send(&u0, "/_call/transfer", other, key);
+    assert_eq!(status, 422, "{body}");
+    let balance = node.number("get accounts where id = 1 select balance");
+    assert_eq!(balance, START - 10);
+}
+
+/// A page on another origin calls as it queries: the preflight of a call
+/// is answered before any token, and the call's answer carries the
+/// headers `/query`'s does.
+#[test]
+fn a_page_on_another_origin_calls_as_it_queries() {
+    let node = start(|cfg| cfg.cors = Some("https://app.example".into()));
+    let u0 = node.customer("u0");
+    let preflight = "Origin: https://app.example\r\nAccess-Control-Request-Method: POST\r\n\
+                     Access-Control-Request-Headers: authorization, idempotency-key\r\n";
+    let (status, head, _) = node.raw("OPTIONS", "/_call/transfer", None, "", preflight);
+    assert_eq!(status, 204, "{head}");
+    let allowed = "Access-Control-Allow-Origin: https://app.example";
+    assert!(head.contains(allowed), "{head}");
+    assert!(head.contains("idempotency-key"), "{head}");
+    let body = r#"{"params":{"from":1,"to":2,"amount":10}}"#;
+    let origin = "Origin: https://app.example\r\n";
+    let (status, head, body) = node.send(&u0, "/_call/transfer", body, origin);
+    assert_eq!(status, 200, "{body}");
+    assert!(head.contains(allowed), "{head}");
+    assert!(head.contains("Fennec-Seq"), "{head}");
 }

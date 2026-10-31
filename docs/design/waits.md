@@ -20,7 +20,16 @@ no other worker to wait for, so the builders refuse `wait` there
 filter reading the time other than as a field compared with `now()` plus
 or minus integers and parameters (`bucket(now(), ..)`, `run_at + 1000 <=
 now()`, `= now()`), is refused before it runs (400, `holdable`,
-`engine::placeable`). Two things wake one: a write to a collection it
+`engine::placeable`). A call -- `POST /_call/<name>`, or `call` over
+`/query` or `/batch` -- is held by its body, read under a short read lock:
+each `set` and `del` held as it would be alone, the call's arguments and
+claims bound in, an `insert` refused, and a body of reads answered as it
+ran. Whether it wrote is asked of the database -- the change counter and
+the open block's writes (`waits::Mark`) -- never of its answer, which is
+its last statement's: a body whose first `set` wrote and whose last found
+no row, held, ran that `set` again at every look
+([named-statements.md](named-statements.md#what-is-built), slice 4). Two
+things wake one: a write to a collection it
 reads -- `Hub::landed` under the write lock, with the collections the
 block wrote (below), a load when nothing is held -- and the time reaching
 a row's moment, which nothing announces:

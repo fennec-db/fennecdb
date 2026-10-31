@@ -114,6 +114,13 @@ pub struct Config {
     /// that say why ([`read_only_refused`]) rather than as a server taking
     /// none. Never set on a server's own configuration.
     pub marked: bool,
+    /// Set for a tenant's request its freeze or its lapsed lease runs
+    /// read-only ([`handle_admitted`]), whose refused write is told to come
+    /// back (503): a call is refused so before it is judged, since the
+    /// definitions it would be judged by are this copy's, which a failover
+    /// may have left behind -- the new primary's may hold a statement this
+    /// copy answers 404 for. Never set on a server's own configuration.
+    pub come_back: bool,
     /// Since there is no TLS, binding outside loopback without auth is refused.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
@@ -195,6 +202,7 @@ impl Default for Config {
             cors: None,
             read_only: false,
             marked: false,
+            come_back: false,
             insecure: false,
             max_connections: 100,
             max_body: 64 << 20,
@@ -292,6 +300,11 @@ impl Server {
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
     /// tenant gets its own watcher as it is opened.
     pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+        // As [`Server::new`]: a node built as a library -- a test's, a
+        // bench's -- read every tenant's statements as text that did not
+        // read, each marked broken, where `fennec-server`'s own main had
+        // installed the reader.
+        fennec_ql::install();
         let mut cfg = cfg.settled();
         if cfg.router_mark.is_none() {
             cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
@@ -1151,9 +1164,21 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     trace::attr("db.operation.name", op);
                     // FennecQL's shape holds no literal; a REST request's is
                     // its target, whose query string's values are words the
-                    // shape keeps, so it has its route alone.
-                    if mcp || matches!(req.segments().as_slice(), ["query"] | ["batch"]) {
+                    // shape keeps, so it has its route alone. A call's is
+                    // `call <name> $1`, however it came.
+                    let segments = req.segments();
+                    if mcp || matches!(segments.as_slice(), ["query"] | ["batch"] | ["_call", _]) {
                         trace::attr("db.query.text", shape.to_string());
+                    }
+                    // OpenTelemetry's stable attribute for "the name of a
+                    // stored procedure within the database".
+                    if op == "call" {
+                        let name = shape
+                            .strip_prefix("call ")
+                            .and_then(|s| s.split(' ').next());
+                        if let Some(name) = name {
+                            trace::attr("db.stored_procedure.name", name.to_string());
+                        }
                     }
                 });
             }
@@ -1222,6 +1247,10 @@ fn respond(
                     break;
                 }
                 let t = std::time::Instant::now();
+                // Counted as its last run: each noted its text again, and a
+                // claim held for two runs was counted as `set ...; set ...`,
+                // a shape of its own beside the claim's.
+                statements::clear();
                 let answer = run();
                 ran += t.elapsed();
                 // Its tenant's rate of writes let none through: it stays
@@ -1429,7 +1458,8 @@ fn describe(req: &Request) -> String {
 /// What a request does, for a span's `db.operation.name`: a FennecQL
 /// statement's first word, or the one a REST route stands for.
 fn operation(req: &Request, shape: &str) -> &'static str {
-    const WORDS: [&str; 14] = [
+    const WORDS: [&str; 15] = [
+        "call",
         "get",
         "put",
         "insert",
@@ -1447,6 +1477,7 @@ fn operation(req: &Request, shape: &str) -> &'static str {
     ];
     match (req.method, req.segments().as_slice()) {
         (Method::Post, ["batch"]) => "batch",
+        (Method::Post, ["_call", _]) => "call",
         (Method::Post, ["query"]) => {
             let first = shape.split_whitespace().next().unwrap_or("");
             WORDS
@@ -1606,9 +1637,14 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
     let refused = refusal(t);
     let resp = match refused {
         None => handle(&t.db, cfg, req),
+        // A call, too, is refused unjudged ([`Config::come_back`]): judged
+        // against this copy's definitions, an old primary after a failover
+        // answered 404 or 409 for a statement the new one holds, where the
+        // client should come back.
         Some(_) => {
             let read_only = Config {
                 read_only: true,
+                come_back: true,
                 ..cfg.clone()
             };
             handle(&t.db, &read_only, req)
@@ -1821,6 +1857,22 @@ fn is_mcp(req: &Request) -> bool {
     req.path.contains("_mcp") && req.segments() == ["_mcp"]
 }
 
+/// Whether `req`'s path is a call's, `/_call/<name>` -- `Some(Some(name))`
+/// -- or another below `/_call`, `Some(None)`: an underscore's path, as
+/// `/_mcp`'s and `/_schema`'s are, kept out of every collection's way
+/// (PostgREST's `/rpc/` for the same reason). Scanned for before its
+/// segments are made, as [`is_mcp`] is.
+fn called(req: &Request) -> Option<Option<&str>> {
+    if !req.path.contains("_call") {
+        return None;
+    }
+    match req.segments().as_slice() {
+        ["_call", name] => Some(Some(name)),
+        ["_call", ..] => Some(None),
+        _ => None,
+    }
+}
+
 /// Whether [`handle`] takes `req` past its token -- the MCP endpoint's own
 /// checks where it sends it there -- asked before a request waits for
 /// anything, so that a refused one waits for nothing. Only a request
@@ -1895,6 +1947,32 @@ pub(crate) fn read_only_refused(cfg: &Config) -> Response {
     }
 }
 
+/// A call `stmt` that read-only mode refuses, judged first -- the
+/// statement, the claims, the arguments, `check`, `append-only` for a
+/// scoped caller -- as a call's answers are ordered: a read-only server's
+/// or a marked read's 403 comes after them, at `/query`, `/_call` and
+/// `/batch` alike. Not under a tenant's freeze or lapsed lease
+/// ([`Config::come_back`]), which refuses it unjudged, to come back.
+fn judged_read_only(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    who: &Who,
+    stmt: &Statement,
+    params: &[Value],
+) -> fennec_core::error::Result<()> {
+    let Statement::Call(c) = stmt else {
+        return Ok(());
+    };
+    if cfg.come_back {
+        return Ok(());
+    }
+    let g = held::read(db);
+    match who.scope() {
+        Some(_) => access::judge_call(who, &g, stmt, params),
+        None => g.callee(c, params).map(drop),
+    }
+}
+
 /// Turns a request into a response: auth, preflight, routing, execution.
 pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
     // The MCP endpoint asks where a request comes from before its token,
@@ -1921,6 +1999,19 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // Batch: several statements, one lock, one round trip.
     if req.method == Method::Post && req.segments() == ["batch"] {
         return handle_batch(db, cfg, req, &who);
+    }
+
+    // A named statement called by its path, the `call <name> $1` it stands
+    // for: a POST alone, a path of its own so that a proxy or the router
+    // tells one call from another without reading a body.
+    if let Some(name) = called(req) {
+        return match (req.method, name) {
+            (Method::Post, Some(name)) => handle_call(db, cfg, req, &who, name),
+            (_, Some(_)) => {
+                Response::error(405, "a call is a POST: POST /_call/<name>").header("Allow", "POST")
+            }
+            (_, None) => Response::error(404, "a call is POST /_call/<name>"),
+        };
     }
 
     // A schema declared in code (`fennec_core::declared`).
@@ -2441,6 +2532,45 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
+    run_query(db, cfg, req, who, body, stmt, params)
+}
+
+/// `POST /_call/<name>`: the `call <name> $1` it stands for, its body's
+/// `params` the one parameter, run as `/query` runs that statement -- the
+/// rate, the grant, the claims, the key, the wait, the lock and the
+/// answer alike, so a call answers the same whichever way it came, in the
+/// order `docs/design/named-statements.md`'s *Surfaces* sets out. Parsed
+/// nothing: the body's tree is the definition's.
+fn handle_call(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    req: &Request,
+    who: &Who,
+    name: &str,
+) -> Response {
+    let body = match std::str::from_utf8(&req.body) {
+        Ok(b) => b,
+        Err(_) => return Response::error(400, "the body is not UTF-8"),
+    };
+    let (stmt, params) =
+        match api::parse_call(name, body).and_then(|(s, p)| api::exactly_call(db, body, s, p)) {
+            Ok(v) => v,
+            Err(e) => return error_response(&e),
+        };
+    run_query(db, cfg, req, who, body, stmt, params)
+}
+
+/// A statement read from `/query`'s body, or `/_call/<name>`'s call, run
+/// and answered. `body` is the text a read's tag is worked out over.
+fn run_query(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    req: &Request,
+    who: &Who,
+    body: &str,
+    stmt: Arc<Statement>,
+    params: Vec<fennec_core::value::Value>,
+) -> Response {
     // A scoped caller's call is charged against `--call-rate` once its
     // token is known, before anything of the statement is asked.
     if let Some(r) = calls::admitted(cfg.call_rate, who, db, std::iter::once(&*stmt)) {
@@ -2477,6 +2607,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     let mask = mask.as_ref();
     if cfg.read_only && !stmt.is_read_only() {
+        if let Err(e) = judged_read_only(db, cfg, who, &stmt, &params) {
+            return error_response(&e);
+        }
         return read_only_refused(cfg);
     }
     if !stmt.is_read_only() {
@@ -2492,7 +2625,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(w) => w.is_some() && !stmt.is_read_only(),
     };
     if wait {
-        if let Err(e) = waits::holdable(&stmt, &params) {
+        if let Err(e) = waits::holdable(db, who, &stmt, &params) {
             return error_response(&e);
         }
     }
@@ -2679,6 +2812,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         };
         let mut guard = held::write(db);
         let before = waits::now_ms();
+        let mark = waits::Mark::of(&guard);
         let running = trace::span("execute");
         let r = match &unscoped {
             None => access::judge_call(who, &guard, &stmt, &params)
@@ -2691,10 +2825,11 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             Some(sent) => run_bound(who, &mut guard, sent, &params),
         };
         drop(running);
+        noted_call(&guard, &stmt);
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
         }
-        if wait && waits::wrote_nothing(&stmt, &r) {
+        if wait && waits::wrote_nothing(&stmt, &r, &guard, mark) {
             waits::plan(&guard, &[(&stmt, &params)], before);
         }
         seq = Some(At::of(&guard));
@@ -2844,6 +2979,7 @@ fn keyed_query(
         return error_response(&e);
     }
     let before = waits::now_ms();
+    let mark = waits::Mark::of(&guard);
     let running = trace::span("execute");
     // A token whose rules read other collections: its rows shown as
     // [`run_bound`] answers them.
@@ -2856,6 +2992,7 @@ fn keyed_query(
         Some(sent) => run_bound(who, &mut guard, sent, params),
     };
     drop(running);
+    noted_call(&guard, stmt);
     // The answer kept with the key is the one the token is shown.
     let resp = match &result {
         Ok(r) => {
@@ -2871,7 +3008,7 @@ fn keyed_query(
     // Held, a run that wrote nothing keeps no key: the run that writes
     // keeps it with its rows, and one sent again with the key meanwhile
     // waits as this one does.
-    if wait && waits::wrote_nothing(stmt, &result) {
+    if wait && waits::wrote_nothing(stmt, &result, &guard, mark) {
         guard.rollback();
         waits::plan(&guard, &[(stmt, params)], before);
         return with_seq(resp, Some(At::of(&guard)));
@@ -2892,6 +3029,16 @@ fn keyed_query(
         return error_response(&e);
     }
     with_seq(resp, seq)
+}
+
+/// Notes a lone call for its slow line ([`metrics::called`]): its name, and
+/// the version of it the write lock `db` held as it ran -- none where no
+/// statement of that name was there to run.
+fn noted_call(db: &Database, stmt: &Statement) {
+    if let Statement::Call(c) = stmt {
+        let version = db.statements().get(&c.name).map(|s| s.version);
+        metrics::called(&c.name, version);
+    }
 }
 
 /// The rows a response returned or changed, for the statements' counts.
@@ -2963,6 +3110,14 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return error_response(&e),
     };
     if cfg.read_only && stmts.iter().any(|(s, _)| !s.is_read_only()) {
+        // Each call judged first, in its line's order, as `/query` and
+        // `/_call` judge a lone one: a call answers the same whichever
+        // way it came. Answered as the batch stopped at that line.
+        for (at, (s, p)) in stmts.iter().enumerate() {
+            if let Err(e) = judged_read_only(db, cfg, who, s, p) {
+                return batch_stop(api::stop_of(&e), 0, at);
+            }
+        }
         return read_only_refused(cfg);
     }
     if stmts.iter().any(|(s, _)| !s.is_read_only()) {
@@ -2985,7 +3140,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     if wait {
         for (s, p) in &stmts {
-            if let Err(e) = waits::holdable(s, p) {
+            if let Err(e) = waits::holdable(db, who, s, p) {
                 return error_response(&e);
             }
         }
@@ -3029,6 +3184,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     let before = waits::now_ms();
+    let mark = waits::Mark::of(&guard);
     let mut results = Vec::with_capacity(stmts.len());
     let running = trace::span("execute");
     running.attr("fennec.statements", stmts.len() as i64);
@@ -3080,12 +3236,17 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     drop(running);
     // Held, a batch whose writes all wrote nothing is put back, its key
-    // kept by none, and waits.
+    // kept by none, and waits. One holding a call is asked the block's
+    // writes: a call's answer is its last statement's alone.
+    let calls = stmts.iter().any(|(s, _)| matches!(s, Statement::Call(_)));
     if wait
-        && stmts
-            .iter()
-            .zip(&results)
-            .all(|((s, _), r)| waits::nothing_written(s, r))
+        && match calls {
+            true => !mark.moved(&guard),
+            false => stmts
+                .iter()
+                .zip(&results)
+                .all(|((s, _), r)| waits::nothing_written(s, r)),
+        }
     {
         guard.rollback();
         held_plan(&guard, before);

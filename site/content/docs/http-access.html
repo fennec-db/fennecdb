@@ -305,7 +305,10 @@ as begin
     returning id, amount
 end
 </pre>
-    <code>call transfer {from: 1, to: 2, amount: 300}</code> lands the
+    <code>call transfer {from: 1, to: 2, amount: 300}</code> — or
+    <code>POST /_call/transfer</code> with <code>{"params": {"from": 1,
+    "to": 2, "amount": 300}}</code> (<a href="/docs/http-reference#call">Calling
+    a named statement</a>) — lands the
     debit, the credit and the entry as one block or not at all, and the token
     cannot send the debit alone. The caller reaches the body only as the
     claims it declares, read from the token: <code>sub</code> here, held to

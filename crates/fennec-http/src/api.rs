@@ -1038,8 +1038,6 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
         Some(_) => return Err(Error::Query("`query` must be text".into())),
         None => return Err(Error::Query("`query` is required".into())),
     };
-    // What the request is counted as, rather than its JSON (`statements`).
-    crate::statements::text(&sql);
     // A list whose elements keep their types, as the browser module reads
     // its parameters: a vector parameter is an array inside it, `[[..]]`.
     let params = match get("params") {
@@ -1048,7 +1046,16 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
         Some(other) => vec![other.clone()],
     };
     crate::timing::lap(crate::timing::Phase::Json);
-    let stmt = parsed(&sql)?;
+    let stmt = parsed(&sql);
+    // What the request is counted as, rather than its JSON (`statements`):
+    // a call by its name alone, `call transfer $1`, however its arguments
+    // were written -- the call is the unit an operator tunes, and the
+    // shape `POST /_call/<name>` is counted as.
+    match stmt.as_deref() {
+        Ok(Statement::Call(c)) => crate::statements::call(&c.name),
+        _ => crate::statements::text(&sql),
+    }
+    let stmt = stmt?;
     crate::timing::lap(crate::timing::Phase::Cache);
     Ok((stmt, params))
 }
@@ -1090,6 +1097,84 @@ pub fn exactly_batch(
         out.push((Arc::unwrap_or_clone(stmt), params));
     }
     Ok(out)
+}
+
+/// The body of `POST /_call/<name>`: `{"params": {...}}`, or none for a
+/// statement of no arguments, as the `call <name> $1` it stands for -- its
+/// arguments the one parameter, an object of them by name. No FennecQL is
+/// parsed: the name is the path's, the engine matches the arguments to the
+/// signature, and the shape counted is the name's
+/// ([`crate::statements::call`]). A name no statement may have
+/// ([`fennec_core::named::valid_name`]) is the 404 a missing one is, in the
+/// same words, and noted as nothing.
+pub fn parse_call(name: &str, body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
+    if !fennec_core::named::valid_name(name) {
+        return Err(Error::NotFound(format!("statement `{name}`")));
+    }
+    crate::statements::call(name);
+    let params = call_params(body, false)?;
+    crate::timing::lap(crate::timing::Phase::Json);
+    let args = match params.is_empty() {
+        true => fennec_core::named::Args::None,
+        false => fennec_core::named::Args::Param(0),
+    };
+    let call = fennec_core::named::Call {
+        name: name.to_string(),
+        args,
+        claims: None,
+    };
+    Ok((Arc::new(Statement::Call(Box::new(call))), params))
+}
+
+/// A call's body read into its one parameter, `exact` reading a list of
+/// numbers as written rather than as a vector's `f32`s ([`exactly_call`]).
+/// `params` alone: anything beside it is refused, never ignored -- an `as`
+/// a caller meant for its claims, run without them, would be a call it did
+/// not make.
+fn call_params(body: &str, exact: bool) -> Result<Vec<Value>> {
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let members = match exact {
+        false => json::parse_object(body)?,
+        true => json::parse_object_listing_exact(body, "params")?,
+    };
+    let mut params = Vec::new();
+    for (k, v) in members {
+        match (k.as_str(), v) {
+            ("params", Value::Null) => {}
+            ("params", v @ Value::Object(_)) => params.push(v),
+            ("params", _) => {
+                return Err(Error::Query(
+                    "`params` is an object: each argument by its name".into(),
+                ))
+            }
+            (other, _) => {
+                return Err(Error::Query(format!(
+                    "a call's body holds `params` alone, not `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(params)
+}
+
+/// [`exactly`] for a call's body: where an argument of a type keeping a
+/// list of numbers as written is handed one, the body read again so.
+pub fn exactly_call(
+    db: &std::sync::RwLock<Database>,
+    body: &str,
+    stmt: Arc<Statement>,
+    params: Vec<Value>,
+) -> Result<(Arc<Statement>, Vec<Value>)> {
+    if !vectored(&stmt, &params) {
+        return Ok((stmt, params));
+    }
+    let need = db.read().unwrap_or_else(|e| e.into_inner()).exactly(&stmt);
+    match need.params.is_empty() {
+        true => Ok((stmt, params)),
+        false => Ok((stmt, call_params(body, true)?)),
+    }
 }
 
 /// Whether a list of numbers is among a statement's literals or its

@@ -5954,6 +5954,13 @@ impl Database {
         self.block.is_some()
     }
 
+    /// The writes the open block holds so far, 0 with none open: whether a
+    /// statement run in it wrote, where its answer cannot say -- a call's
+    /// is its last statement's alone (`fennec_http::waits`).
+    pub fn block_writes(&self) -> usize {
+        self.block.as_ref().map_or(0, |b| b.heads.len())
+    }
+
     /// Opens a block: the writes from here to [`Self::commit`] land whole or
     /// not at all, and [`Self::rollback`] puts them back. The database is
     /// the block's alone meanwhile, as it is a statement's -- whoever opens

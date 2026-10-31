@@ -101,9 +101,33 @@ pub fn text(sql: &str) {
     });
 }
 
-/// Forgets what was noted for a statement that will not be counted: a
-/// stdio session's (`fennec mcp`), which keeps no counts, and whose notes
-/// would otherwise grow with every call.
+/// Notes a call of the statement `name` as the request's FennecQL: `call
+/// <name> $1`, whichever surface made it -- `POST /_call/<name>`, a
+/// document of literals over `/query`, SQL's `CALL` -- its arguments one
+/// parameter, so a call is one shape however it was written and never its
+/// body's statements apart (`docs/design/named-statements.md`, *Counted
+/// and traced by name*). `name` is one a statement may have: no literal, no
+/// space, nothing a shape would cut.
+pub fn call(name: &str) {
+    TEXT.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.is_empty() {
+            t.push_str("; ");
+        }
+        t.push_str("call ");
+        t.push_str(name);
+        t.push_str(" $1");
+    });
+}
+
+/// Forgets what was noted -- the text and the rows -- for a statement that
+/// will not be counted: a stdio session's (`fennec mcp`), which keeps no
+/// counts, and whose notes would otherwise grow with every call; and a
+/// request held by `Fennec-Wait` before each run again (`respond`), so it
+/// is counted as its last run: one shape, and the rows of the run that
+/// answered. A run before it wrote nothing and was put back, its reads --
+/// a held `/batch`'s `get`s -- answered to no one: their rows are not
+/// counted, though its time is the time of every run.
 pub fn clear() {
     TEXT.with(|t| t.borrow_mut().clear());
     ROWS.with(|r| r.set(0));

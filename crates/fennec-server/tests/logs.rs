@@ -120,6 +120,26 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
     assert_eq!(a.status, 200, "{}", a.body);
     assert_eq!(a.header("x-request-id"), Some("req 42"));
 
+    // A call, by its path and over `/query` with its arguments in the
+    // text: its slow line's statement is its shape, never an argument, and
+    // the line names the version that ran.
+    let def = r#"{"query":"create statement stamp($t text) public as insert notes {title: $t} returning id"}"#;
+    assert_eq!(c.ask("POST", "/t/acme/query", def).status, 200);
+    let a = c
+        .try_ask(
+            "POST",
+            "/t/acme/_call/stamp",
+            r#"{"params":{"t":"secret one"}}"#,
+            &[("X-Request-Id", "call 1")],
+        )
+        .unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
+    let body = r#"{"query":"call stamp {t: 'secret two'}"}"#;
+    let a = c
+        .try_ask("POST", "/t/acme/query", body, &[("X-Request-Id", "call 2")])
+        .unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
+
     // An id too long, or not printable, is replaced by one of the server's.
     let long = "x".repeat(129);
     for bad in [long.as_str(), "caf\u{e9}"] {
@@ -149,12 +169,13 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
 
     // The slow lines go to stderr as the answer goes out: waited for.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !server
-        .log
-        .lock()
-        .unwrap()
-        .contains("\"request_id\":\"req 42\"")
-    {
+    while !["req 42", "call 1", "call 2"].iter().all(|id| {
+        server
+            .log
+            .lock()
+            .unwrap()
+            .contains(&format!("\"request_id\":\"{id}\""))
+    }) {
         assert!(Instant::now() < deadline, "no slow line for the request");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -186,6 +207,20 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
         statement.iter().find(|(k, _)| k == "duration_ms").map(|(_, v)| v),
         Some(Value::Float(ms)) if *ms >= 0.0
     ));
+    for id in ["call 1", "call 2"] {
+        let call = of(&slow, "slow", id);
+        assert_eq!(text(&call, "statement"), Some("call stamp $1"), "{call:?}");
+        assert_eq!(text(&call, "kind"), Some("write"), "{call:?}");
+        assert!(
+            matches!(
+                call.iter().find(|(k, _)| k == "version").map(|(_, v)| v),
+                // `[history, change]`, a list of numbers read as a vector.
+                Some(Value::Vector(v)) if v.len() == 2
+            ),
+            "{call:?}"
+        );
+        assert!(!format!("{call:?}").contains("secret"), "{call:?}");
+    }
     let refusal = of(&audited, "refused", &refused_id);
     assert_eq!(text(&refusal, "level"), Some("warn"));
     // The health probe is no statement: no slow line, and the made id is

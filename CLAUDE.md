@@ -684,8 +684,14 @@ line grants (else a missing one's 404; `* call` refused), as itself (`as`
 403), alone in its `/batch`, held to `--call-rate`; `judge_call` holds the
 body to `append-only` under the lock and `run_as` runs it outside
 `within()`, the one statement so, unmasked, its refusals told
-(`told_call`). MCP, the router and a sync replica refuse them (`NOT_BUILT`,
-`NAMED`). `$name` is a definition's alone, and `call` and `statements`
+(`told_call`). `POST /_call/<name>` is the `call <name> $1` it stands for,
+run as `/query` runs it, a read-only server's 403 after its judgment (at
+`/batch` too), a freeze's or a lapsed lease's refusal before it; a
+call is counted as that shape, its slow line naming the version, traced
+with `db.stored_procedure.name`, and the router's route `call`, never its
+name. MCP and a sync replica refuse them (`NOT_BUILT`, `NAMED`); the
+router reads a tenant's with the grammar. Readers upgrade before a primary
+defines one (RELEASING.md, `make upgrade-check`). `$name` is a definition's alone, and `call` and `statements`
 reserve no word (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's
 and fennec-ql's `statements` feature, outside `full`: the server, the shell
 and the native library name it, the module refuses in words of its own,
@@ -701,7 +707,9 @@ of the repository to main's tree.
 can](docs/design/waits.md#fennec-wait)** (`fennec_http::waits`, 30 s at
 most), each run `handle` whole, token and all; a `put`, or the time read
 but as a field against `now()` plus or minus integers or parameters, is
-refused (`holdable`). The builders refuse `wait` on a database in the
+refused (`holdable`). A call is held by its body, an `insert` refused, and
+whether it wrote is asked of the database (`waits::Mark`), never its last
+statement's answer. The builders refuse `wait` on a database in the
 page (`LOCAL_WAIT`).
 
 **[A write wakes the held writes reading what it wrote, a row going to the

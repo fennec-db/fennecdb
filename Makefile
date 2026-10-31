@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -984,6 +984,19 @@ packaging-test:
 	sh site/test_install.sh
 	python3 tools/test_homebrew_formula.py
 	python3 tools/homebrew-formula.py --check packaging/homebrew/Formula/fennecdb.rb
+
+## The upgrade's order for named statements (RELEASING.md): a replica and an
+## archiver built before record kind 13 meet a primary's first `create
+## statement` and stop in words, never misreading it; the old `fennec
+## verify` and `fennec restore` refuse what the old archiver kept, the old
+## server the file this tree's restore wrote; an old router refuses a
+## schema declaring a statement (400); a move onto an old node fails and
+## leaves the tenant on its source (tools/upgrade-order.sh). Builds BASE --
+## 12d6f8db^, the last main before the kind, unless given -- in a scratch
+## worktree: minutes. Not in CI.
+upgrade-check:
+	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
+	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
 
 ## Publishes to Cloudflare Workers (fennecdb.com). Needs `wrangler login`
 ## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.

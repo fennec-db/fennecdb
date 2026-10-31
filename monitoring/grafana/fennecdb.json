@@ -1511,7 +1511,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{instance=~\"$instance\",route=\"tenant\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{instance=~\"$instance\",route=~\"tenant|call\"}[$__rate_interval])))",
           "legendFormat": "p99 request",
           "refId": "A"
         },
@@ -1520,7 +1520,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{instance=~\"$instance\",route=\"tenant\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(fennec_router_request_duration_seconds_bucket{instance=~\"$instance\",route=~\"tenant|call\"}[$__rate_interval])))",
           "legendFormat": "p50 request",
           "refId": "B"
         },

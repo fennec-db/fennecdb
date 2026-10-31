@@ -325,6 +325,9 @@ pub enum Field<'a> {
     Bool(bool),
     /// Written with three decimals: a duration in milliseconds.
     Num(f64),
+    /// Two integers, `[a,b]`: a named statement's version, `[history,
+    /// change]`, as `statements` answers it.
+    Pair(u64, u64),
 }
 
 /// How much an event matters, as the line's `level` says it: what a log
@@ -407,6 +410,9 @@ pub fn line(name: &str, level: Level, fields: &[(&str, Field)]) -> String {
             }
             Field::Num(n) => {
                 line.push_str(&format!(",\"{k}\":{n:.3}"));
+            }
+            Field::Pair(a, b) => {
+                line.push_str(&format!(",\"{k}\":[{a},{b}]"));
             }
         }
     }

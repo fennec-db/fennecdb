@@ -129,14 +129,28 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
     });
     let root = Some("root");
 
+    // Its schema declares a named statement, which the router reads with
+    // the grammar before anything is placed.
     let r = call(
         port,
         "PUT",
         "/_shard/tenants/acme",
-        r#"{"node":"n1"}"#,
+        r#"{"node":"n1","schema":"create collection stamps (at int); create statement stamp($at int) public as insert stamps {at: $at} returning id"}"#,
         root,
     );
     assert_eq!(r.0, 201, "{}", r.1);
+    // A call is counted under `call`, never its name: the one it holds and
+    // one it does not.
+    let r = call(
+        port,
+        "POST",
+        "/t/acme/_call/stamp",
+        r#"{"params":{"at":7}}"#,
+        None,
+    );
+    assert_eq!(r.0, 200, "{}", r.1);
+    let r = call(port, "POST", "/t/acme/_call/nothing", "", None);
+    assert_eq!(r.0, 404, "{}", r.1);
     for _ in 0..3 {
         let r = call(
             port,
@@ -226,7 +240,16 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         text.contains("Content-Type: text/plain; version=0.0.4"),
         "{text}"
     );
+    assert!(!text.contains("stamp"), "{text}");
     for (line, want) in [
+        (
+            "fennec_router_requests_total{route=\"call\",code=\"2xx\"}",
+            "1",
+        ),
+        (
+            "fennec_router_requests_total{route=\"call\",code=\"4xx\"}",
+            "1",
+        ),
         (
             "fennec_router_requests_total{route=\"tenant\",code=\"2xx\"}",
             "4",
@@ -280,7 +303,12 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
             "fennec_router_request_duration_seconds_count{route=\"tenant\"}",
             "7",
         ),
-        ("fennec_router_upstream_duration_seconds_count", "4"),
+        (
+            "fennec_router_request_duration_seconds_count{route=\"call\"}",
+            "2",
+        ),
+        // The two calls among them: a node's time is every forwarded one's.
+        ("fennec_router_upstream_duration_seconds_count", "6"),
         ("fennec_router_upstream_errors_total{node=\"dead\"}", "1"),
         ("fennec_router_moves_total{outcome=\"done\"}", "1"),
         ("fennec_router_moves_total{outcome=\"failed\"}", "1"),

@@ -314,13 +314,21 @@ pub fn route(path: &str) -> String {
     // Under a path of the server's own (`/_schema`, `/_admin`,
     // `/_changes`) the words it knows stay and a name -- a tenant, a
     // consumer -- is `{name}`; elsewhere the first name is a collection's.
+    // A call's name is `{name}` whatever word it is: a statement named
+    // `stats` would otherwise have its route, and its span, by its name.
     let mut own = false;
+    let mut call = false;
     let mut named = false;
     for (i, s) in segs.enumerate() {
         out.push('/');
         if i == 0 && s.starts_with('_') {
             own = true;
+            call = s == "_call";
             out.push_str(s);
+            continue;
+        }
+        if call {
+            out.push_str("{name}");
             continue;
         }
         let word = matches!(
@@ -1542,6 +1550,9 @@ mod tests {
             "/t/{tenant}/{collection}/changes"
         );
         assert_eq!(route("/t/acme/batch"), "/t/{tenant}/batch");
+        // A call's name is never its route, a word the server knows or not.
+        assert_eq!(route("/_call/transfer"), "/_call/{name}");
+        assert_eq!(route("/t/acme/_call/stats"), "/t/{tenant}/_call/{name}");
         assert_eq!(route("/_schema/plan"), "/_schema/plan");
         assert_eq!(
             route("/_admin/tenants/acme/freeze"),

@@ -227,7 +227,7 @@ groups:
           summary: "{{ $labels.instance }} cannot reach node {{ $labels.node }}: its requests are answered 502"
           runbook: deploy/RUNBOOK.md#a-node-lost
       - alert: FennecRouter5xx
-        expr: sum by (instance) (rate(fennec_router_requests_total{route="tenant",code="5xx"}[5m])) / sum by (instance) (rate(fennec_router_requests_total{route="tenant"}[5m])) > 0.01
+        expr: sum by (instance) (rate(fennec_router_requests_total{route=~"tenant|call",code="5xx"}[5m])) / sum by (instance) (rate(fennec_router_requests_total{route=~"tenant|call"}[5m])) > 0.01
         for: 5m
         labels:
           severity: warning

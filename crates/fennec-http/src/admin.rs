@@ -205,20 +205,19 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
 
 /// A tenant's schema as `fennec_abi::read` reads it from FennecQL `create
 /// collection` text, checked: what a router sends a node once it has placed
-/// the tenant, refused before anything is placed when it does not read.
+/// the tenant, refused before anything is placed when it does not read. Its
+/// `create statement`s read with the grammar the router was built with --
+/// the one place a router reads FennecQL, a tenant's creation, never a
+/// request -- each after the collections it names; the node checks each
+/// against the schema as it applies it. A router from before named
+/// statements refuses such a schema as one that does not read (400), with
+/// nothing placed: routers upgrade before a schema declares one
+/// (RELEASING.md).
 pub fn schema_description(fennecql: &str) -> Result<String, String> {
     let mut d = String::from(r#"{"format":1,"fennecql":"#);
     fennec_core::json::escape_into(&mut d, fennecql);
     d.push('}');
-    let read = fennec_abi::read(&d).map_err(|e| format!("the schema does not read: {e}"))?;
-    // Refused here, with nothing placed, rather than by each node as it
-    // applies the definition: nothing defines one until calls are scoped.
-    if !read.statements.is_empty() {
-        return Err(format!(
-            "the schema does not read: {}",
-            fennec_core::named::NOT_BUILT
-        ));
-    }
+    fennec_abi::read(&d).map_err(|e| format!("the schema does not read: {e}"))?;
     Ok(d)
 }
 
@@ -463,15 +462,20 @@ fn names(tenants: &Tenants) -> Response {
 
 #[cfg(test)]
 mod tests {
-    /// A tenant's schema declaring a named statement is refused at the
-    /// router, before anything is placed: nothing defines one yet.
+    /// A tenant's schema declaring a named statement reads at the router,
+    /// with the grammar: after the collection it names, it is the
+    /// description a node is sent; before it, or a text the grammar does
+    /// not read, it is refused before anything is placed.
     #[test]
-    fn a_tenants_schema_declaring_a_statement_is_refused_before_it_is_placed() {
+    fn a_tenants_schema_declaring_a_statement_reads_with_the_grammar() {
         let schema = "create collection a (x int)";
-        assert!(super::schema_description(schema).is_ok());
-        let e =
-            super::schema_description(&format!("{schema}; create statement s() as get a select x"))
-                .unwrap_err();
-        assert!(e.contains(fennec_core::named::NOT_BUILT), "{e}");
+        let statement = "create statement s($x int) as get a select x where x = $x";
+        let d = super::schema_description(&format!("{schema}; {statement}")).unwrap();
+        assert!(d.contains("create statement s"), "{d}");
+        let e = super::schema_description(&format!("{statement}; {schema}")).unwrap_err();
+        assert!(e.starts_with("the schema does not read: "), "{e}");
+        let e = super::schema_description(&format!("{schema}; create statement s( as get a"))
+            .unwrap_err();
+        assert!(e.starts_with("the schema does not read: "), "{e}");
     }
 }

@@ -150,6 +150,10 @@ thread_local! {
     /// after a lapsed lease names (`handle_admitted`). Set by the engine's
     /// watcher, which runs on the thread that commits (`Hub::landed`).
     static LANDED: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The named statement the request this thread serves called alone,
+    /// and the version of it that ran: its slow line names the call by its
+    /// shape and that version ([`called`]).
+    static CALLED: std::cell::RefCell<Option<Called>> = const { std::cell::RefCell::new(None) };
     /// This thread's shard, handed out in turn.
     static MINE: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS.len();
 }
@@ -216,10 +220,24 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// A call's name and the version of it that ran, `(history, change)`.
+type Called = (String, Option<(u64, u64)>);
+
+/// Notes that the request this thread serves called the statement `name`
+/// alone -- `POST /_call/<name>`, or one `call` over `/query` -- and that
+/// the definition at `version` ran, where one did: its slow line's
+/// `statement` is the call's shape, `call <name> $1`, never its arguments,
+/// and the line names the version, which tells two definitions of one name
+/// apart (`docs/design/named-statements.md`, *Counted and traced by name*).
+pub fn called(name: &str, version: Option<(u64, u64)>) {
+    CALLED.with(|c| *c.borrow_mut() = Some((name.to_string(), version)));
+}
+
 /// Counts a statement that took `took`, and logs it when it is slow. `text`
-/// is asked for only then.
+/// is asked for only then, and not for a call ([`called`]).
 pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnOnce() -> String) {
     let wrote = WROTE.with(|w| w.replace(false));
+    let called = CALLED.with(|c| c.borrow_mut().take());
     let shard = &SHARDS[shard()];
     let s = &shard.statements[wrote as usize];
     let micros = took.as_micros().min(u64::MAX as u128) as u64;
@@ -229,7 +247,10 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
     }
     if micros >= SLOW_MICROS.load(Ordering::Relaxed) {
         shard.slow.fetch_add(1, Ordering::Relaxed);
-        let mut text = text();
+        let (mut text, version) = match called {
+            Some((name, version)) => (format!("call {name} $1"), version),
+            None => (text(), None),
+        };
         // A statement can be a bulk `put` of megabytes; the log wants what
         // it was, not all of it.
         if text.len() > 1000 {
@@ -240,7 +261,7 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
             text.truncate(end);
             text.push_str("...");
         }
-        slow_line(micros, wrote, failed, tenant, &text);
+        slow_line(micros, wrote, failed, tenant, &text, version);
     }
 }
 
@@ -248,7 +269,14 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
 /// ([`crate::audit::line`]), so that a log collector reads both with one
 /// parser and joins either to the request by its `request_id`. Text, as it
 /// was, needed a pattern of its own in every collector.
-fn slow_line(micros: u64, wrote: bool, failed: bool, tenant: Option<&str>, text: &str) {
+fn slow_line(
+    micros: u64,
+    wrote: bool,
+    failed: bool,
+    tenant: Option<&str>,
+    text: &str,
+    version: Option<(u64, u64)>,
+) {
     use crate::audit::{Field, Level};
     let mut fields = vec![
         ("duration_ms", Field::Num(micros as f64 / 1000.0)),
@@ -259,6 +287,9 @@ fn slow_line(micros: u64, wrote: bool, failed: bool, tenant: Option<&str>, text:
         fields.push(("tenant", Field::Text(t)));
     }
     fields.push(("statement", Field::Text(text)));
+    if let Some((history, change)) = version {
+        fields.push(("version", Field::Pair(history, change)));
+    }
     let line = crate::audit::line("slow", Level::Warn, &fields);
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
 }

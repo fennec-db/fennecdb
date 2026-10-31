@@ -547,6 +547,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
         r#"{"format":1,"fennecql":""}"#,
     ),
     ("GET", "_stats/statements", ""),
+    ("POST", "_call/peek", r#"{"params":{}}"#),
 ];
 
 /// A token is held to the tenant it names: a JWT minted for one tenant read
