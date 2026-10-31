@@ -357,13 +357,17 @@ default, or of another type is a 400 naming it. A <code>check</code> that
 is false is a 400. The claims a statement declares come from the token, or
 from <code>as {…}</code> for the server's token alone; one the caller lacks
 — missing, <code>null</code>, <code>""</code>, an empty list or of another
-type — is a 403, and nothing runs. A <code>require … else '…'</code> that
+type — is a 403, and nothing runs; so is a list claim of more than 1 000
+values, never cut to them. A <code>require … else '…'</code> that
 is not met puts the block back, a 412 carrying its <code>reason</code>. A
 broken statement, whose text no longer reads or whose collection, field or
-index the schema lacks, is a 409 saying why. A call examines at most
-<code>--call-max-rows</code> rows, 100 000: past it the block is put back
-and the call is a 400 naming the bound, never answered from the rows it
-reached.</p>
+index the schema lacks, is a 409 saying why, once its claims, arguments and
+<code>check</code> were asked. A call examines at most
+<code>--call-max-rows</code> rows, 100 000, counted however its statements
+read them — a scan, an index, an ordered walk, <code>near</code>,
+<code>match</code> and a <code>lookup</code>'s children alike: past it the
+block is put back and the call is a 400 naming the bound, never answered
+from the rows it reached.</p>
 
 <p><code>statements</code> lists them and <code>describe statement</code>
 describes one, its text and what it depends on included, to the server's

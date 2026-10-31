@@ -418,6 +418,30 @@ fn a_caller_past_the_rate_waits_and_a_call_past_its_rows_is_put_back() {
     assert!(body.contains("--call-max-rows"), "{body}");
 }
 
+/// `--call-rate` counts a caller in the database the call runs in: the same
+/// subject held past the rate in one -- a tenant's -- calls another at once.
+/// Counted by the caller alone, tenant A's `sub` spent tenant B's.
+#[test]
+fn a_caller_is_held_to_the_rate_in_each_database_apart() {
+    let tune = |cfg: &mut Config| cfg.call_rate = 1;
+    let (a, b) = (start(tune), start(tune));
+    let me = a.customer("u3");
+    let mut held = false;
+    for _ in 0..50 {
+        match a.query(&me, "call history") {
+            (200, _) => continue,
+            (429, _) => {
+                held = true;
+                break;
+            }
+            (s, body) => panic!("{s}: {body}"),
+        }
+    }
+    assert!(held, "a caller past --call-rate is held");
+    let (status, body) = b.query(&me, "call history");
+    assert_eq!(status, 200, "{body}");
+}
+
 /// A definition replaced while calls run: each call runs one version whole
 /// -- both its rows of one version -- at every site that asks whether a
 /// statement writes before its lock: `/query`, keyed or not, and `/batch`.

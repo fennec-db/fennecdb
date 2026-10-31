@@ -140,8 +140,9 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>rows an MCP tool answers</td><td class="n"><b>100</b></td><td><code>--mcp-max-rows</code>; past it the call is refused (413) with what to narrow, never cut (<a href="/docs/mcp#limits">Agents and MCP</a>)</td></tr>
 <tr><td>bytes an MCP tool answers</td><td class="n"><b>64K</b></td><td><code>--mcp-max-bytes</code>, the answer's JSON; refused past it (413)</td></tr>
 <tr><td>MCP tool calls a second</td><td class="n"><b>20</b></td><td><code>--mcp-calls-per-sec</code>, a scoped token's subject or an address; 429, with when to call again</td></tr>
-<tr><td>rows a <a href="/docs/fennecql#named-statements">named statement</a>'s call examines</td><td class="n"><b>100 000</b></td><td><code>--call-max-rows</code>; counted where the scan and the indexes hand rows to its statements; past it the call is put back and refused (400) naming the bound, never answered from the rows it reached</td></tr>
-<tr><td>named statement calls a second</td><td class="n"><b>100</b></td><td><code>--call-rate</code>, a scoped token's subject and issuer, the server's token not held; <code>0</code> for none; 429, with when to call again (<a href="/docs/http-access#calls">Calling a named statement</a>)</td></tr>
+<tr><td>rows a <a href="/docs/fennecql#named-statements">named statement</a>'s call examines</td><td class="n"><b>100 000</b></td><td><code>--call-max-rows</code>; counted wherever its statements read rows: a scan, an index, an ordered walk, <code>near</code>, <code>match</code> and a <code>lookup</code>'s children; past it the call is put back and refused (400) naming the bound, never answered from the rows it reached</td></tr>
+<tr><td>named statement calls a second</td><td class="n"><b>100</b></td><td><code>--call-rate</code>, a scoped token's subject and issuer in each tenant, the server's token not held; <code>0</code> for none; 429, with when to call again (<a href="/docs/http-access#calls">Calling a named statement</a>)</td></tr>
+<tr><td>values of a list claim a named statement's call reads</td><td class="n"><b>1 000</b></td><td>as a token's list claim a policy reads; past it the call is refused (403), never run with the list cut short</td></tr>
 </tbody>
 </table>
 </div>

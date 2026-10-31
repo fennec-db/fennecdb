@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use super::{Database, NoRow};
 use crate::error::{Error, Result};
-use crate::named::{Args, Call, Definition};
+use crate::named::{Args, Call, Definition, MAX_CLAIM_VALUES};
 use crate::query::{eval, CmpOp, EvalCtx, Expr, Response, ResultSet, Row, Select, Sort, Statement};
 use crate::schema::{IndexKind, Schema};
 use crate::value::Value;
@@ -50,7 +50,13 @@ impl Database {
             .statements
             .get(&call.name)
             .ok_or_else(|| missing(&call.name))?;
-        let Some(def) = &s.tree else {
+        // Judged by the tree it runs, or, where its text reads as another
+        // statement here, by that one's signature: the mark below comes
+        // after the claims, the arguments and `check`, as the design orders
+        // a call's refusals. A text this build reads as nothing at all --
+        // or a process that installed no reader -- holds no claim to judge,
+        // and is refused at once.
+        let Some(def) = s.tree.as_ref().or(s.misread.as_ref()) else {
             return Err(broken(&call.name, s.broken.as_deref()));
         };
         let ctx = EvalCtx {
@@ -76,6 +82,10 @@ impl Database {
         if let Some(why) = &s.broken {
             return Err(broken(&call.name, Some(why)));
         }
+        // Only the tree it was defined as runs: a misread one is marked.
+        let Some(def) = &s.tree else {
+            return Err(broken(&call.name, None));
+        };
         Ok(Callee {
             def: Arc::clone(def),
             values,
@@ -89,15 +99,14 @@ impl Database {
     /// of every statement would make each guard's rows part of the API.
     pub(super) fn call(&mut self, call: &Call, params: &[Value]) -> Result<Response> {
         let Callee { def, values } = self.callee(call, params)?;
-        let before = self.call_left.swap(self.call_max_rows, Relaxed);
+        let mut db = Bounded::new(self);
         let mut last = Ok(Response::Affected(0));
         for s in &def.body {
-            last = self.run_one(s, &values);
+            last = db.run_one(s, &values);
             if last.is_err() {
                 break;
             }
         }
-        self.call_left.store(before, Relaxed);
         last
     }
 
@@ -220,6 +229,44 @@ impl Database {
     }
 }
 
+/// The database while a call's body runs, its rows bounded by
+/// `--call-max-rows`: the bound is set as it is made and given back as it
+/// is dropped -- on a return and on a panic unwinding out of the body alike.
+/// Given back only on a return, a hook's panic left the bound set, and
+/// every later statement of the database, a plain `get` among them, was
+/// refused as a call past its rows until it was opened again: a
+/// connection's panic must unwind alone.
+struct Bounded<'a> {
+    db: &'a mut Database,
+    before: usize,
+}
+
+impl<'a> Bounded<'a> {
+    fn new(db: &'a mut Database) -> Self {
+        let before = db.call_left.swap(db.call_max_rows, Relaxed);
+        Bounded { db, before }
+    }
+}
+
+impl std::ops::Deref for Bounded<'_> {
+    type Target = Database;
+    fn deref(&self) -> &Database {
+        self.db
+    }
+}
+
+impl std::ops::DerefMut for Bounded<'_> {
+    fn deref_mut(&mut self) -> &mut Database {
+        self.db
+    }
+}
+
+impl Drop for Bounded<'_> {
+    fn drop(&mut self) {
+        self.db.call_left.store(self.before, Relaxed);
+    }
+}
+
 /// A statement no database holds, or one a scoped token is not granted:
 /// the same words for both ([`crate::named`]).
 fn missing(name: &str) -> Error {
@@ -306,6 +353,22 @@ fn claims(def: &Definition, given: Option<&Args>, ctx: &EvalCtx) -> Result<Vec<V
             if items.is_empty() || !items.iter().all(|i| usable(i, false)) {
                 return Err(lacks());
             }
+        }
+        // Spread after `in` on every call, as a policy's rule spreads one:
+        // refused past the bound a policy holds it to, never cut to it.
+        let n = match &v {
+            Value::List(items) => items.len(),
+            Value::Vector(items) => items.len(),
+            _ => 0,
+        };
+        if n > MAX_CLAIM_VALUES {
+            return Err(Error::Denied(format!(
+                "statement `{}` reads the caller's `{}` claim, a list of at most {} values, and \
+                 the call carries {n}",
+                def.name,
+                c.claim(),
+                MAX_CLAIM_VALUES
+            )));
         }
         out.push(v);
     }

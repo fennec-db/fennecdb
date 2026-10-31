@@ -177,6 +177,13 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     assert_eq!(call(port, Some(ROOT), "POST", "/query", put), 200);
     let drop = r#"{"query":"drop collection notes"}"#;
     assert_eq!(call(port, Some(ROOT), "POST", "/query", drop), 200);
+    // A definition is one statement, its body's `;`s its own: logged whole,
+    // never as far as its first `;`.
+    let made = r#"{"query":"create collection ledger (n int)"}"#;
+    assert_eq!(call(port, Some(ROOT), "POST", "/query", made), 200);
+    let defined = r#"{"query":"create statement bump() public scans as begin
+      set ledger {n: n + 1} where n >= 0; get ledger select n end"}"#;
+    assert_eq!(call(port, Some(ROOT), "POST", "/query", defined), 200);
 
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = text.lines().collect();
@@ -189,7 +196,7 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         .collect();
     assert_eq!(
         events,
-        ["refused", "refused", "refused", "schema", "refused", "schema"],
+        ["refused", "refused", "refused", "schema", "refused", "schema", "schema", "schema"],
         "{text}"
     );
     for l in &lines {
@@ -211,6 +218,13 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     );
     assert!(lines[3].contains(r#""statement":"create collection notes (title text)""#));
     assert!(lines[5].contains(r#""statement":"drop collection notes""#));
+    assert!(
+        lines[7].contains(
+            r#""statement":"create statement bump() public scans as begin set ledger {n: n + $1} where n >= $2; get ledger select n end""#
+        ),
+        "{}",
+        lines[7]
+    );
     assert!(!text.contains("a secret title"), "no write, no literal");
     std::fs::remove_dir_all(&dir).unwrap();
 }

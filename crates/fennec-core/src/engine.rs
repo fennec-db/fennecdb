@@ -8509,6 +8509,7 @@ impl Database {
                         None => FilterProbe::new(c.store.ids()),
                     };
                     probe.run(usize::MAX, matches)?;
+                    self.examine(probe.tested.max(probe.matched.len()))?;
                     let ids = probe.into_sorted();
                     plan(|| format!("near: the {} rows searched exactly", ids.len()));
                     return sp.search_ids(qv, want, near.ef, &ids);
@@ -8524,6 +8525,9 @@ impl Database {
         let cap = if near.exact { usize::MAX } else { budget + 1 };
         let total = probe.rows.len();
         let whole = probe.run(cap, matches)?;
+        // The rows the filter tested, or an index answered exactly, charged
+        // to a call as a scan's are: `exact` tests every one.
+        self.examine(probe.tested.max(probe.matched.len()))?;
         // Rows an index answered exactly were not probed; that step said so.
         if total > 0 {
             plan(|| {
@@ -9570,6 +9574,8 @@ impl Database {
         let k = whole_k as f32;
         let text = self.run_match(c, sel, m, depth, params, ctx)?;
         let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
+        // Both sides charged to a call: `run_match` charged its own.
+        self.examine(vectors.len())?;
         plan(|| {
             format!(
                 "fuse: reciprocal rank, k = {whole_k}, over {} + {} candidates",
@@ -9648,6 +9654,10 @@ impl Database {
 
         let Some(rr) = &sel.rerank else {
             let hits = search(ix, m, &query, want, accept, within)?;
+            // Charged to a call (`--call-max-rows`) as the rows a scan hands
+            // over are: within its own 10 000, a `match` is no way around
+            // the call's bound.
+            self.examine(hits.len())?;
             plan(|| {
                 format!(
                     "match: the text index on {}{}, {} ranked",
@@ -9695,6 +9705,8 @@ impl Database {
             )));
         }
         let hits = search(ix, m, &query, candidates, accept, within)?;
+        // Every candidate's vector is read from the store.
+        self.examine(hits.len())?;
         plan(|| {
             format!(
                 "match: the text index on {}{}, {} candidates",
@@ -10014,6 +10026,8 @@ impl Database {
                     let n = child.store.len() as u64;
                     let b = cands.map_or(0, Bucket::len) as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
+                        // The bucket's children, charged to a call.
+                        self.examine(b as usize)?;
                         let parents = ids.len();
                         let mut kept = self.retain_via_children(&steps, ids, cands, ctx)?;
                         kept.truncate(stop.unwrap_or(usize::MAX));
@@ -10032,7 +10046,7 @@ impl Database {
         }
 
         let mut out = Vec::new();
-        let (parents, mut probed) = (ids.len(), 0);
+        let (parents, mut probed, mut tested) = (ids.len(), 0, 0usize);
         let stop = stop.unwrap_or(usize::MAX);
         for id in ids {
             if out.len() >= stop {
@@ -10042,10 +10056,16 @@ impl Database {
             // A child only counts if it survives what is below it too: with
             // a `required` level further down, a child that passes its own
             // `where` may still have nothing hanging off it.
-            if steps[0].any(id, |cid| survives(&steps, 0, cid, ctx))? {
+            let kept = steps[0].any(id, |cid| {
+                tested += 1;
+                survives(&steps, 0, cid, ctx)
+            })?;
+            if kept {
                 out.push(id);
             }
         }
+        // The children tested, charged to a call as a scan's rows are.
+        self.examine(tested)?;
         plan(|| {
             let of = match probed < parents {
                 true => format!("{probed} of {parents}"),
@@ -10105,7 +10125,9 @@ impl Database {
                 Parent::Row(row) => t.prefix_of(row),
             };
             if let (true, Some(k)) = (want > 0, prefix) {
+                let mut walked = 0usize;
                 let mut take = |cid| {
+                    walked += 1;
                     if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
                         kept.push(cid);
                     }
@@ -10119,6 +10141,7 @@ impl Database {
                         t.ix.walk(&[t.span(&k)], t.parts.len(), *back, *ties, &mut take)?
                     }
                 }
+                self.examine(walked)?;
             }
             return Ok(kept);
         }
@@ -10126,6 +10149,10 @@ impl Database {
             Parent::Doc(pid) => step.ids(pid, bucket)?,
             Parent::Row(row) => step.ids_of(row, bucket),
         }
+        // A level's children charged to a call (`--call-max-rows`) as a
+        // scan's rows are, before one is tested: a `lookup` is no way
+        // around the call's bound.
+        self.examine(bucket.len())?;
         // The child filter is evaluated over the bucket rather than sent
         // through `matching_ids`. The bucket is already one parent's
         // children, so a second index lookup would have to be intersected
@@ -10391,7 +10418,11 @@ impl Database {
                 ));
             }
             let want = ranked_rows(sel, params, "near", MAX_NEAR_ROWS)?;
-            scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
+            let hits = self.run_near(c, sel, near, want, params, &ctx)?;
+            // Its rows charged to a call (`--call-max-rows`), as a scan's
+            // are; `run_match` charges its own.
+            self.examine(hits.len())?;
+            scored = with_scores(hits);
         } else {
             let (ids, counted) =
                 self.page_ids(c, sel, params, &ctx, wants_facets, all, required)?;
@@ -10752,6 +10783,9 @@ impl Database {
             true => ix.matching(&query),
             false => ix.matching_loose(&query, m.loose())?,
         };
+        // Every row the words reach, which a facet counts over: charged to
+        // a call as a scan's rows are.
+        self.examine(ids.len())?;
         if let Some(f) = filter {
             let test = Filter::new(c, f, ctx);
             let mut kept = Vec::with_capacity(ids.len());

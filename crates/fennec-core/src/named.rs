@@ -62,13 +62,19 @@ pub(crate) fn reader() -> Option<Reader> {
 
 /// The most statements a body holds.
 pub const MAX_BODY: usize = 64;
-/// The most named statements a database holds.
 /// What `--call-max-rows` is unless told: the rows a call's statements
-/// may examine, counted where a scan, an index or an ordered walk hands
-/// them over (`Database::set_call_max_rows`). With `scans` at definition,
-/// it and the write lock are what one call can cost every other writer.
+/// may examine, counted where a scan, an index, an ordered walk, `near`,
+/// `match` or a `lookup`'s probe hands them over
+/// (`Database::set_call_max_rows`). With `scans` at definition, it and the
+/// write lock are what one call can cost every other writer.
 pub const CALL_MAX_ROWS: usize = 100_000;
+/// The most named statements a database holds.
 pub const MAX_STATEMENTS: usize = 1_000;
+/// The most values a list claim hands a call, as a policy's rule is handed
+/// at most as many (`fennec_http::access::MAX_CLAIM_VALUES`, this one): the
+/// body spreads it after `in` on every call. Past it the call is refused,
+/// never run with the list cut.
+pub const MAX_CLAIM_VALUES: usize = 1_000;
 /// The longest definition, in bytes of its text.
 pub const MAX_TEXT: usize = 64 << 10;
 /// The most parameters a signature declares.

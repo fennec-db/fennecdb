@@ -343,8 +343,8 @@ end
     rate (429), the grant (404), <code>as</code> (403), the claims (403), the
     arguments and <code>check</code> (400), <code>append-only</code> (403)
     and a broken statement (409). <code>--call-rate</code> holds a scoped
-    token to 100 calls a second for each subject and issuer, <code>0</code>
-    for none, and answers 429 with <code>Retry-After</code> past it; the
+    token to 100 calls a second for each subject and issuer in each tenant,
+    <code>0</code> for none, and answers 429 with <code>Retry-After</code> past it; the
     server's token is not held. <code>--call-max-rows</code> bounds the rows
     one call examines (<a href="/docs/limits#fixed-limits">Limits</a>).</li>
   <li><b>List claims.</b> A claim that is a JSON array goes after

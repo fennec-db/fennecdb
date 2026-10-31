@@ -488,7 +488,8 @@ const WRITES: u8 = INSERT | UPDATE | DELETE;
 /// written: a token listing a million rooms would cost every request it
 /// makes. 1 000 rooms or teams is far past a person's; past it, the
 /// membership belongs in the rows (a collection per room, or a tenant).
-pub const MAX_CLAIM_VALUES: usize = 1_000;
+/// One number with a call's (`fennec_core::named::MAX_CLAIM_VALUES`).
+pub const MAX_CLAIM_VALUES: usize = fennec_core::named::MAX_CLAIM_VALUES;
 
 struct Rule {
     /// `None` for `*`.

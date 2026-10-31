@@ -2443,7 +2443,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     // A scoped caller's call is charged against `--call-rate` once its
     // token is known, before anything of the statement is asked.
-    if let Some(r) = calls::admitted(cfg.call_rate, who, std::iter::once(&*stmt)) {
+    if let Some(r) = calls::admitted(cfg.call_rate, who, db, std::iter::once(&*stmt)) {
         return r;
     }
     // A read is the same sent twice, and keeps no key.
@@ -2920,7 +2920,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
-    if let Some(r) = calls::admitted(cfg.call_rate, who, stmts.iter().map(|(s, _)| s)) {
+    if let Some(r) = calls::admitted(cfg.call_rate, who, db, stmts.iter().map(|(s, _)| s)) {
         return r;
     }
     // A scoped token's call runs outside its scope (`access::run_as`), and

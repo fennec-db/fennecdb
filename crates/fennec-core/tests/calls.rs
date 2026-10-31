@@ -269,3 +269,165 @@ fn a_definition_is_held_to_its_fields_and_its_plan() {
     );
     assert_eq!(row[at("broken")], Value::Null);
 }
+
+/// `near`, `match` and a `lookup`'s children are charged to a call's rows
+/// as a scan's are: none is a way around `--call-max-rows`, each past it
+/// a query error naming the bound, never a cut answer.
+#[test]
+fn near_match_and_a_lookups_children_count_against_a_calls_rows() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection docs (body text @text, v vector<2> @hnsw, owner int @hash);
+         create collection owners (name text)",
+    )
+    .unwrap();
+    run(&mut db, "put owners {name: 'a'}").unwrap();
+    for i in 0..4 {
+        run(
+            &mut db,
+            &format!("put docs {{body: 'word', v: [1.0, {i}.5], owner: 1}}"),
+        )
+        .unwrap();
+    }
+    run(
+        &mut db,
+        "create statement close() public as get docs select id near v [1.0, 0.0] limit 4;
+         create statement worded() public as get docs select id match body 'word' limit 4;
+         create statement theirs() public as
+           get owners select name lookup docs on owner = id select id",
+    )
+    .unwrap();
+    db.set_call_max_rows(2);
+    for name in ["close", "worded", "theirs"] {
+        let e = run(&mut db, &format!("call {name}")).unwrap_err();
+        assert!(e.to_string().contains("--call-max-rows"), "{name}: {e}");
+    }
+    db.set_call_max_rows(5);
+    for name in ["close", "worded", "theirs"] {
+        run(&mut db, &format!("call {name}")).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
+/// A list claim is held to the bound a policy holds one to: refused past
+/// it, never run with the list cut.
+#[test]
+fn a_list_claim_past_its_bound_is_refused() {
+    let mut db = ledger();
+    run(
+        &mut db,
+        "create statement mine() claims (accounts [int]) as
+           get accounts select id order id",
+    )
+    .unwrap();
+    let list = |n: usize| {
+        let ids: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        format!("call mine as {{accounts: [{}]}}", ids.join(", "))
+    };
+    let e = run(&mut db, &list(fennec_core::named::MAX_CLAIM_VALUES + 1)).unwrap_err();
+    assert!(
+        matches!(&e, Error::Denied(m) if m.contains("at most 1000 values")),
+        "{e}"
+    );
+    let r = run(&mut db, &list(fennec_core::named::MAX_CLAIM_VALUES)).unwrap();
+    assert_eq!(r.rows().unwrap().rows.len(), 2);
+}
+
+/// Panics at a document whose `k` is `boom`.
+struct Boom;
+impl Hook for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn rewrites(&self) -> bool {
+        false
+    }
+    fn before_write(&self, _: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+        if let Some(Value::Text(t)) = doc.get("k") {
+            assert_ne!(t, "boom", "a hook that panics");
+        }
+        Ok(())
+    }
+}
+impl Plugin for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn init(&self, reg: &mut Registry) -> Result<()> {
+        reg.register_hook(std::sync::Arc::new(Boom));
+        Ok(())
+    }
+}
+
+/// A call's row bound is the call's alone, a panic unwinding out of its
+/// body included: the next plain statement scans as ever, as a server's
+/// next request on another connection does.
+#[test]
+fn a_panic_in_a_call_leaves_no_bound_behind() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(&mut db, "create collection ev (k text)").unwrap();
+    for _ in 0..3 {
+        run(&mut db, "put ev {k: 'calm'}").unwrap();
+    }
+    run(
+        &mut db,
+        "create statement boom() public as insert ev {k: 'boom'}",
+    )
+    .unwrap();
+    db.install_plugin(&Boom).unwrap();
+    db.set_call_max_rows(1);
+    let call = fennec_ql::parse_one("call boom").unwrap();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = db.execute(&call);
+    }));
+    assert!(unwound.is_err());
+    db.rollback();
+    let all = fennec_ql::parse_one("get ev select k").unwrap();
+    let rows = db.query(&all, &[]).expect("a plain get, no call's bound");
+    assert_eq!(rows.rows().unwrap().rows.len(), 3);
+    run(&mut db, "set ev {k: 'still'} where k = 'calm'").unwrap();
+}
+
+/// A statement whose text reads as another one here is judged as a call is
+/// -- its claims, its arguments, `check` -- before it is refused as broken
+/// (409): a caller lacking its claims is told nothing of it.
+#[test]
+fn a_misread_statement_is_refused_in_the_order_of_every_call() {
+    use fennec_core::codec::{encode_str, put_uvarint};
+    let db = ledger();
+    let mut file = db.snapshot();
+    let text = "create statement odd($n int) claims (sub text) check $n > 0 as
+      get accounts select id where id = $n";
+    let digest = fennec_ql::definition(text).unwrap().digest().unwrap();
+    let mut body = vec![1u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, db.change_seq() + 1);
+    put_uvarint(&mut body, fennec_core::named::GRAMMAR_EPOCH as u64);
+    body.extend_from_slice(&(digest ^ 1).to_le_bytes());
+    encode_str(&mut body, "odd");
+    put_uvarint(&mut body, 1);
+    encode_str(&mut body, "accounts");
+    encode_str(&mut body, text);
+    file.push(13);
+    put_uvarint(&mut file, 0);
+    put_uvarint(&mut file, body.len() as u64);
+    file.extend_from_slice(&body);
+    let mut db = Database::new();
+    db.load(&file).unwrap();
+    let e = run(&mut db, "call odd {n: 1}").unwrap_err();
+    assert!(matches!(&e, Error::Denied(m) if m.contains("`sub`")), "{e}");
+    let e = run(&mut db, "call odd {n: 1, m: 2} as {sub: 'alice'}").unwrap_err();
+    assert!(matches!(&e, Error::Query(m) if m.contains("`m`")), "{e}");
+    let e = run(&mut db, "call odd {n: 0} as {sub: 'alice'}").unwrap_err();
+    assert!(
+        matches!(&e, Error::Query(m) if m.contains("`check`")),
+        "{e}"
+    );
+    let e = run(&mut db, "call odd {n: 1} as {sub: 'alice'}").unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.contains("reads as another statement")),
+        "{e}"
+    );
+}

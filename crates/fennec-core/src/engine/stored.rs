@@ -60,6 +60,14 @@ pub struct Stored {
     /// runs, and what a replacement is held to.
     #[cfg(feature = "statements")]
     pub tree: Option<Arc<crate::named::Definition>>,
+    /// The tree its text reads to in this build where that is not the tree
+    /// it was defined as (`its text reads as another statement`): what a
+    /// call is judged by -- the claims, the arguments, `check` -- before
+    /// the 409 tells it broken, as a call's refusals are ordered, so a
+    /// caller lacking its claims is told nothing of it. Never run, nor held
+    /// as the contract a replacement keeps.
+    #[cfg(feature = "statements")]
+    pub misread: Option<Arc<crate::named::Definition>>,
 }
 
 impl Stored {
@@ -146,6 +154,8 @@ pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>>
         broken: None,
         #[cfg(feature = "statements")]
         tree: None,
+        #[cfg(feature = "statements")]
+        misread: None,
     }))
 }
 
@@ -343,6 +353,7 @@ impl super::Database {
         let schema_of = |c: &str| collections.get(c).map(|c| &*c.schema);
         let mut marks: Vec<(usize, Option<String>)> = Vec::new();
         let mut trees: Vec<(usize, Arc<crate::named::Definition>)> = Vec::new();
+        let mut misreads: Vec<(usize, Arc<crate::named::Definition>)> = Vec::new();
         for (i, s) in self.statements.iter().enumerate() {
             if s.broken.as_deref().is_some_and(|b| b.starts_with(MISREAD)) {
                 continue;
@@ -350,8 +361,9 @@ impl super::Database {
             if let (None, Some(read)) = (&s.tree, crate::named::reader()) {
                 match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
                     Ok((digest, d)) if digest == s.digest => trees.push((i, Arc::new(d))),
-                    Ok(_) => {
+                    Ok((_, d)) => {
                         marks.push((i, Some(misread(s, "reads as another statement"))));
+                        misreads.push((i, Arc::new(d)));
                         continue;
                     }
                     Err(e) => {
@@ -379,6 +391,9 @@ impl super::Database {
         }
         for (i, tree) in trees {
             t.0[i].tree = Some(tree);
+        }
+        for (i, tree) in misreads {
+            t.0[i].misread = Some(tree);
         }
     }
 
@@ -474,6 +489,7 @@ impl super::Database {
             text: def.text.clone(),
             broken: None,
             tree,
+            misread: None,
         };
         self.statement_record(&stored.encode(), |t| t.put(stored))?;
         Ok(crate::query::Response::Ok(match replaced {
