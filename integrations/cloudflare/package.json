@@ -37,7 +37,7 @@
     "provenance": true
   },
   "devDependencies": {
-    "wrangler": "^4.144.0"
+    "wrangler": "^4.156.0"
   },
   "allowScripts": {
     "workerd@1.20260926.1": true,
