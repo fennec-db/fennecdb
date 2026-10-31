@@ -36,6 +36,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A segment is closed at this size and the next begins.
@@ -107,12 +108,58 @@ pub struct Archive {
     /// taken ([`Self::consolidate`]): an archiver of many tenants looks
     /// only at those written since.
     fresh: AtomicBool,
+    /// Where this made its directory, its place among the directories made
+    /// in `parent` (0 once synced, or not made here): until the directory
+    /// it is in is synced ([`Self::sync_dir`]), a crash could lose the name
+    /// and every file in it along.
+    made: AtomicU64,
+    parent: Arc<Parent>,
+}
+
+/// The directory archives are made in, synced once for every one made in
+/// it before: a node's tenants made in a pass have their names synced into
+/// its root by the first segment written after, not once a tenant, which
+/// was two fsyncs on the stream thread for each tenant's first segment
+/// rather than one. An archive of its own has a parent of its own.
+#[derive(Default)]
+pub(crate) struct Parent {
+    /// Directories made in it so far.
+    made: AtomicU64,
+    /// How many of them the last sync of it covered.
+    synced: Mutex<u64>,
+}
+
+impl Parent {
+    /// A directory made in it, made before this is called: its place.
+    fn made(&self) -> u64 {
+        self.made.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The directory `dir` is in synced, unless a sync since the `n`th
+    /// directory was made in it covered it. The count is read before the
+    /// sync, so a sync covers only the directories made before it began.
+    fn sync(&self, dir: &Path, n: u64) -> io::Result<()> {
+        let mut synced = self.synced.lock().unwrap_or_else(|e| e.into_inner());
+        if *synced >= n {
+            return Ok(());
+        }
+        let covers = self.made.load(Ordering::SeqCst);
+        sync_dir_of(dir)?;
+        *synced = covers;
+        Ok(())
+    }
 }
 
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Makes the names made, renamed or removed in the directory `path` is in
+/// durable: fennec-core's `sync_dir`, as the rewrite's rename uses it.
+fn sync_dir_of(path: &Path) -> io::Result<()> {
+    fennec_core::fs::sync_dir(path).map_err(|e| io::Error::other(e.to_string()))
 }
 
 fn corrupt(msg: String) -> io::Error {
@@ -335,13 +382,43 @@ impl Archive {
 
     /// An archive whose files are sealed with `key`, or plain without one.
     pub fn with_key(dir: impl AsRef<Path>, key: Option<Key>) -> io::Result<Archive> {
+        Archive::in_parent(dir, key, &Arc::default())
+    }
+
+    /// [`Self::with_key`] in a directory whose sync it shares with the
+    /// other archives made in it ([`Parent`]): a node's tenants in its root.
+    pub(crate) fn in_parent(
+        dir: impl AsRef<Path>,
+        key: Option<Key>,
+        parent: &Arc<Parent>,
+    ) -> io::Result<Archive> {
+        let made = !dir.as_ref().is_dir();
         fs::create_dir_all(dir.as_ref())?;
         Ok(Archive {
             dir: dir.as_ref().to_path_buf(),
             key,
             roll: AtomicBool::new(false),
             fresh: AtomicBool::new(true),
+            made: AtomicU64::new(if made { parent.made() } else { 0 }),
+            parent: Arc::clone(parent),
         })
+    }
+
+    /// Makes every file made, renamed in or removed in the archive's
+    /// directory so far durable (`fennec_core::fs::sync_dir`), and the
+    /// directory's own name where this made it ([`Parent::sync`]). Until
+    /// then a crash can lose a name or bring one back, in any order on some
+    /// file systems, so it runs before a step that stands on the ones
+    /// before it rather than after each (docs/design/replication.md, "A
+    /// node's archive").
+    fn sync_dir(&self) -> io::Result<()> {
+        sync_dir_of(&self.dir.join("history"))?;
+        let n = self.made.load(Ordering::SeqCst);
+        if n != 0 {
+            self.parent.sync(&self.dir, n)?;
+            self.made.store(0, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// A file of the kind this archive is, as it was written.
@@ -434,7 +511,9 @@ impl Archive {
     }
 
     /// Writes `bytes` under `path` whole or not at all: a side file,
-    /// fsynced, then renamed over.
+    /// fsynced, then renamed over. The rename is not synced: what depends
+    /// on the name syncs the directory first ([`Self::sync_dir`]): an fsync
+    /// more a tenant made a node's first pass 44% longer (`keep_began`).
     fn put(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let tmp = path.with_extension("tmp");
         let mut f = File::create(&tmp)?;
@@ -499,7 +578,7 @@ impl Archive {
         };
         let mut at = self.images()?.last().map_or(0, |i| i.0);
         let mut open = None;
-        let mut removed = None;
+        let mut removed = false;
         for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
             let read = self.read_segment(&path)?;
@@ -513,7 +592,7 @@ impl Archive {
                 // a segment of their own, and a hello's image put the next
                 // segment after one cut short, which no `verify` passes.
                 fs::remove_file(&path)?;
-                removed = Some(path);
+                removed = true;
                 continue;
             }
             let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
@@ -550,11 +629,11 @@ impl Archive {
             }
             break;
         }
-        if let Some(path) = removed {
+        if removed {
             // Durable before the archiver writes on in the segment before:
             // brought back by a crash, the removed one is a segment holding
             // no write with segments after it, which `verify` refuses.
-            fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string()))?;
+            self.sync_dir()?;
         }
         Ok((at, history, open))
     }
@@ -682,12 +761,16 @@ impl Archive {
             lineage,
             following: true,
         };
+        if image.is_some()
+            && w.images
+            && seq <= w.at
+            && !theirs.continues(w.history.current(), w.at, seq)
+            && !self.ends_on_image_of(w, &theirs, seq)?
+        {
+            return Ok(Took::Diverged);
+        }
+        let had = w.images;
         match image {
-            Some(_)
-                if w.images && seq <= w.at && !theirs.continues(w.history.current(), w.at, seq) =>
-            {
-                return Ok(Took::Diverged)
-            }
             Some(bytes) => {
                 self.add_image(seq, bytes)?;
                 if let Some(s) = &mut w.segment {
@@ -706,10 +789,84 @@ impl Archive {
         // says hello to every tenant each time it connects, and a thousand
         // fsyncs of the same bytes were seconds of `F_FULLFSYNC` on macOS.
         if w.history != theirs {
+            // An image taken where the archive held one: durable before the
+            // history naming its lineage. Landed alone, that history said
+            // the writes the archive holds past its fork were the new
+            // lineage's, and the primary sent the writes after them from
+            // there, two histories mixed with nothing to tell. A first
+            // image needs nothing, so a node's first pass pays no sync a
+            // tenant: without its history a new archive asks for an image
+            // again, and an image without one is read for it
+            // (`ends_on_image_of`).
+            if image.is_some() && had {
+                self.sync_dir()?;
+            }
             self.put(&self.dir.join("history"), &theirs.encode())?;
+            // With no image, the writes after it go on in the open segment:
+            // the history durable before any of them, or a crash left a new
+            // lineage's writes under the old one's, which the primary's
+            // next hello took for another database's. With one, the next
+            // segment's sync (`take`) covers it.
+            if image.is_none() {
+                self.sync_dir()?;
+            }
             w.history = theirs;
         }
         Ok(Took::Went)
+    }
+
+    /// Whether the archive ends at an image, no segment reaching it, whose
+    /// own history `theirs` goes on from: a crash landed a hello's image and
+    /// not the `history` written after it, which a new archive lacks or an
+    /// old one has a lineage behind. Without this, the primary sending that
+    /// image again, nothing written since, was refused as another database.
+    /// Read only where the `history` file would refuse it, so a hello pays
+    /// nothing for it; an image `consolidate` took is not asked, since a
+    /// segment reaches it and its history is its base image's.
+    ///
+    /// It also takes a sibling fork: the history file moved by `lineage`
+    /// (a promotion here) with nothing written after it, and a hello from
+    /// another promotion of the image's lineage at or past `w.at`. Safe, as
+    /// the image at `w.at` with no segment after it is all the archive
+    /// holds: every change in it is the image's lineage's, which `theirs`
+    /// holds too, and the moved file is the one trace of the other fork, no
+    /// write of which is here to be mixed with `theirs`. It is the archive a
+    /// crash before `lineage`'s sync leaves, which the `history` file takes
+    /// anyway; the other fork saying hello later is refused, as any is.
+    fn ends_on_image_of(&self, w: &Writer, theirs: &History, seq: u64) -> io::Result<bool> {
+        if w.segment.is_some() {
+            return Ok(false);
+        }
+        let Some(&(_, time)) = self.images()?.iter().rev().find(|i| i.0 == w.at) else {
+            return Ok(false);
+        };
+        // Held to its change as `verify` holds it: a history read from an
+        // image of another change says nothing of `w.at`.
+        let db = self.open_image(w.at, time)?;
+        Ok(theirs.continues(db.history().current(), w.at, seq))
+    }
+
+    /// The image of change `seq` taken at `time`, opened, and refused where
+    /// it holds another change than its name says: what it would vouch for,
+    /// a restore's start or the history a hello is held to, it does not.
+    fn open_image(&self, seq: u64, time: u64) -> io::Result<fennec_core::engine::Database> {
+        let path = self.image_path(seq, time);
+        let opened = match &self.key {
+            None => fennec_core::fs::open_read_only(&path),
+            Some(_) => {
+                let mut db = fennec_core::engine::Database::new();
+                db.load(&self.read_whole(&path)?).map(|_| db)
+            }
+        };
+        let db = opened.map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+        if db.change_seq() != seq {
+            return Err(corrupt(format!(
+                "{}: the image is at change {}, not {seq}",
+                path.display(),
+                db.change_seq()
+            )));
+        }
+        Ok(db)
     }
 
     /// The history the writes are on moved -- a promotion -- before the
@@ -720,6 +877,9 @@ impl Archive {
             following: true,
         };
         self.put(&self.dir.join("history"), &h.encode())?;
+        // Durable before the writes after it, which go on in the open
+        // segment, as a hello's with no image (a promotion is rare).
+        self.sync_dir()?;
         w.history = h;
         Ok(())
     }
@@ -770,6 +930,18 @@ impl Archive {
                             None
                         }
                     };
+                    // The directory synced before the segment's first write:
+                    // its name then lasts as long as its writes do, where an
+                    // fsync of the file alone left a segment written for an
+                    // hour to a crash on some file systems, and so do the
+                    // names made before it -- the image a hello brought and
+                    // the history after it, the segment before. Landed
+                    // without them, it began after a gap no image ends, which
+                    // no restore passes. A crash before the sync leaves at
+                    // most this segment holding no write, which `position`
+                    // removes. One sync a segment: one each 64 MB, or each
+                    // image taken.
+                    self.sync_dir()?;
                     w.segment.insert(Segment {
                         path,
                         file: Some(file),
@@ -826,6 +998,9 @@ impl Archive {
         // another file's (`fennec_core::fs`): gone before the rename.
         fennec_core::fs::forget_sync_log(out)?;
         fs::rename(&tmp, out)?;
+        // Durable once it returns: lost to a crash, the file a server is
+        // started on next was whatever was there before.
+        sync_dir_of(out)?;
         Ok(r)
     }
 
@@ -888,6 +1063,8 @@ impl Archive {
             }
             Ok((r.seq, db.snapshot()))
         });
+        // Not synced: brought back by a crash, `consolidating.fennec` is no
+        // image or segment by name, and the next consolidate writes it over.
         let _ = fs::remove_file(&tmp);
         let (seq, bytes) = image?;
         // The segments may have gone on while this read them: the image is
@@ -897,6 +1074,10 @@ impl Archive {
         } else {
             self.time_of(seq)?.unwrap_or(time)
         };
+        // Not synced here: what stands on it syncs first -- `prune` before
+        // it lets go of what the image replaces, the next segment (`roll`)
+        // before its first write. Lost alone, the segments it was taken from
+        // are still there, and the next round takes it again.
         self.put(&self.image_path(seq, time), &bytes)?;
         self.roll.store(true, Ordering::SeqCst);
         Ok(Some(seq))
@@ -934,23 +1115,39 @@ impl Archive {
             None => return Ok((0, 0)),
         };
         let oldest = images[base].0;
-        let mut removed = (0, 0);
+        let segments = self.segments()?;
+        // A segment's writes end where the next one's begin.
+        let gone: Vec<u64> = (0..segments.len().saturating_sub(1))
+            .filter(|&k| segments[k + 1] - 1 <= oldest)
+            .map(|k| segments[k])
+            .collect();
+        if base == 0 && gone.is_empty() {
+            return Ok((0, 0));
+        }
         if base > 0 {
             self.keep_began(images[0].1)?;
         }
+        // What is kept durable before what it stands for goes: the image a
+        // restore now starts from, which a hello or `consolidate` renamed in
+        // with no sync of its own, and `began`. Lost to a crash after the
+        // files before it went, nothing before the next image restored.
+        self.sync_dir()?;
         for &(seq, time) in &images[..base] {
             fs::remove_file(self.image_path(seq, time))?;
-            removed.0 += 1;
         }
-        let segments = self.segments()?;
-        for k in 0..segments.len().saturating_sub(1) {
-            // A segment's writes end where the next one's begin.
-            if segments[k + 1] - 1 <= oldest {
-                fs::remove_file(self.segment_path(segments[k]))?;
-                removed.1 += 1;
-            }
+        // The images gone for good before a segment goes: one a crash
+        // brought back, the segments after it gone, began changes no segment
+        // holds and no image ends, which `verify` refuses.
+        if base > 0 && !gone.is_empty() {
+            self.sync_dir()?;
         }
-        Ok(removed)
+        // Not synced after: a segment a crash brings back holds writes
+        // before the oldest image, which a restore and `verify` pass over,
+        // and the next prune lets go of again.
+        for &first in &gone {
+            fs::remove_file(self.segment_path(first))?;
+        }
+        Ok((base, gone.len()))
     }
 
     /// Beside `follow`: an image of the archive's end every `every` once a
@@ -1001,24 +1198,7 @@ impl Archive {
             ));
         };
         for &(seq, time) in &images {
-            let path = self.image_path(seq, time);
-            let db = match &self.key {
-                None => fennec_core::fs::open_read_only(&path)
-                    .map_err(|e| corrupt(format!("{}: {e}", path.display())))?,
-                Some(_) => {
-                    let mut db = fennec_core::engine::Database::new();
-                    db.load(&self.read_whole(&path)?)
-                        .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
-                    db
-                }
-            };
-            if db.change_seq() != seq {
-                return Err(corrupt(format!(
-                    "{}: the image is at change {}, not {seq}",
-                    path.display(),
-                    db.change_seq()
-                )));
-            }
+            self.open_image(seq, time)?;
         }
         let segments = self.segments()?;
         let (mut covered, mut to, mut torn) = (first, None, 0);
@@ -1261,7 +1441,10 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         return Err(io::Error::other("the primary promised an image"));
     };
     if out.is_dir() {
-        Archive::with_key(out, key.cloned())?.add_image(seq, &bytes)?;
+        // Durable once said taken, as a backup into a file.
+        let archive = Archive::with_key(out, key.cloned())?;
+        archive.add_image(seq, &bytes)?;
+        archive.sync_dir()?;
     } else {
         let history = History {
             lineage,
@@ -1278,6 +1461,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(out)?;
         fs::rename(&tmp, out)?;
+        sync_dir_of(out)?;
     }
     Ok(seq)
 }
@@ -1298,6 +1482,7 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     File::open(&tmp)?.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
     fs::rename(&tmp, out)?;
+    sync_dir_of(out)?;
     Ok(seq)
 }
 
@@ -1312,5 +1497,33 @@ mod tests {
         let probes: std::collections::HashSet<PathBuf> =
             (0..1000).map(|_| verify_probe()).collect();
         assert_eq!(probes.len(), 1000);
+    }
+
+    /// The archives made in one parent before its sync are covered by it,
+    /// and the ones after it are not: each archive's first `sync_dir` syncs
+    /// the parent only where no sync since it was made has.
+    #[test]
+    fn one_sync_of_the_parent_covers_the_archives_made_before_it() {
+        let root = std::env::temp_dir().join(format!("fennec-parent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let parent = Arc::default();
+        let a = Archive::in_parent(root.join("a"), None, &parent).unwrap();
+        let b = Archive::in_parent(root.join("b"), None, &parent).unwrap();
+        a.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 2, "a's sync covers b");
+        assert_eq!(b.made.load(Ordering::SeqCst), 2);
+        let c = Archive::in_parent(root.join("c"), None, &parent).unwrap();
+        // b's own sync finds the parent synced since b was made, and syncs
+        // only its own directory; c's syncs the parent again.
+        b.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 2);
+        assert_eq!(b.made.load(Ordering::SeqCst), 0);
+        c.sync_dir().unwrap();
+        assert_eq!(*parent.synced.lock().unwrap(), 3);
+        // An archive whose directory was there makes nothing to sync.
+        let again = Archive::in_parent(root.join("a"), None, &parent).unwrap();
+        assert_eq!(again.made.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_dir_all(&root);
     }
 }

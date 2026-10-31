@@ -235,6 +235,67 @@ into the connection loop, four turns a side read 21.5-22.0 against
 15.7-21.5: main ran in a 15-16 us mode three times in twelve, this build
 never). Nothing below `fennec-http` changed.
 
+An archive's names are made durable before what stands on them, not each
+as it is made (`Archive::sync_dir`, through fennec-core's `fs::sync_dir`):
+until its directory is synced a crash can lose a file made or renamed in,
+or bring one removed back, in any order on some file systems. A new segment
+syncs the directory after its magic and before its first write, so its name
+lasts as long as its writes do -- an fsync of the file alone left a segment
+written for an hour to a crash -- and the names before it are on disk
+first: a segment landed without the image a hello brought began after
+changes no segment holds and no image ends, which no restore passes, and a
+crash before the sync leaves a segment holding no write, which `position`
+removes. `prune` syncs before it lets anything go (the image a restore now
+starts from, renamed in by a hello or `consolidate` with no sync of its own,
+and `began`) and again between the images and the segments, since an image
+brought back with the segments after it gone is one `verify` refuses; a
+segment brought back holds writes before the oldest image, which a restore
+passes over. A history moved with no image is synced at once, the writes
+after it going on in the open segment, and an image taken where the
+archive held one is synced before the history naming its lineage: landed
+alone, that history had the primary send a fork's writes on after the old
+lineage's. A first image is not, since an fsync more a tenant made a node's
+first pass 44% longer (`keep_began`): a hello's image whose history a crash
+lost is read for it where the history file would refuse the primary
+(`ends_on_image_of`; `an_image_whose_history_a_crash_lost_goes_on` leaves
+that state by hand and was refused as another database without it), and a
+history without its first image asks for one again. That image is held to
+its change first, as `verify` holds every image
+(`an_image_of_another_change_than_its_name_is_refused`), and a sibling fork
+is taken too: a `lineage` move with nothing written after the image leaves
+no write of that fork in the archive to mix with the primary's, the state
+a crash before that move's sync leaves anyway, and the fork saying hello
+later is refused as any is. A restore, a backup and an unsealed file are
+synced into place before they return, and a node's root once as it is
+made; a tenant's directory is synced into the root by the first segment
+written after it was made, once for every tenant made before that sync
+(`archive::Parent`), where each tenant's first segment paid two fsyncs on
+the one stream thread, the root's beside its own. `consolidating.fennec`,
+the side files and a line moved aside are not synced, each harmless
+brought back or lost, or moved again by the next hello. A directory sync
+that fails is known to be retried, as a segment's failed fsync already is:
+it fails the step it stands before, and `follow` (`Archive::follow`,
+`NodeArchive::follow`, a tenant's hello as the node's stream) connects
+again and syncs again from where `position` finds the archive, never going
+on past it. The database file stops writes on a failed fsync instead
+(`Database::fail`), since a file system may drop what a failed fsync left
+and report a retry durable; an archive goes on, and a name a crash then
+loses is for `verify` to find. A 1 GiB flat-out `take` of 1 KB records, 17
+segments, four turns a side: the sync took 4.75-5.23 ms a segment
+(`F_FULLFSYNC`) against
+260-290 ms writing one, and the runs 4.40-4.89 s against 4.41-4.82 without
+it; a feed pays it each 64 MB or each image taken (`--image-every`, an hour
+unless given). On a node (`make node-archive-bench`, its defaults, three
+turns a side against main, macOS): every tenant's first image took
+14.1-14.8 s against 15.3-15.8, the writes as they were taken 13.9-14.6 ms
+at p50 against 14.6-15.3, a reconnect 0.15-0.48 s against 0.13-0.35, the
+syncer's passes 46.4-52.6 ms at p50 against 47.4-49.4 and a close 4.0 ms
+both, each within the other's spread. With the root synced a tenant, before
+`Parent`, the passes were 50.6-53.0 ms against 46.4-49.2 and a reconnect
+0.21-0.35 s against 0.12-0.13; traced, the archiver synced nothing in a
+reconnect, and in the passes only at each tenant's first segment, sixteen
+in their first 0.2 s, so both were noise or that start alone.
+
 ## Change data capture
 
 **`/_changes` reads the writes on disk, documents and all** (`cdc.rs`,

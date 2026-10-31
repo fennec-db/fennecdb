@@ -1061,3 +1061,113 @@ fn verify_names_a_gap_an_image_alone_ends() {
     let v = Archive::new(&arch).unwrap().verify().unwrap();
     assert_eq!(v.gaps, vec![(stopped + 1, p.seq())], "{v:?}");
 }
+
+/// A hello's image is renamed in, then the `history` naming its lineage,
+/// and the directory is synced only before the first segment after them
+/// (`Archive::sync_dir`): a crash before it can land the image without the
+/// history -- the state left here by hand, the file removed. The primary,
+/// written nothing since, sends the same change's image again, and the
+/// archive reads the history off the image it holds and goes on, where it
+/// refused the primary as another database.
+#[test]
+fn an_image_whose_history_a_crash_lost_goes_on() {
+    let d = dir("history-lost");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    p.exec("put c {x: 1}");
+    let arch = d.join("archive");
+    let a = archiver(&arch, &p.url);
+    first_image(&arch);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !arch.join("history").exists() {
+        assert!(Instant::now() < deadline, "no history written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    a.finish();
+    std::fs::remove_file(arch.join("history")).unwrap();
+    let at = p.seq();
+
+    // Stopped once it said hello: what it heard is the image taken again.
+    let stop = AtomicBool::new(false);
+    let heard = std::sync::Mutex::new(Vec::new());
+    let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
+    Archive::new(&arch)
+        .unwrap()
+        .follow(&upstream, &stop, &|line| {
+            heard.lock().unwrap().push(line.to_string());
+            stop.store(true, Ordering::SeqCst);
+        })
+        .unwrap();
+    let heard = heard.into_inner().unwrap();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert!(
+        heard[0].starts_with(&format!("image at change {at} (")),
+        "{heard:?}"
+    );
+    assert!(arch.join("history").exists());
+
+    let a = archiver(&arch, &p.url);
+    p.exec("put c {x: 2}");
+    archived(&arch, p.seq());
+    a.finish();
+    let (db, _) = restored(&arch, &d.join("back.fennec"), Target::End);
+    assert_eq!(rows(&db, "get c").len(), 2);
+    Archive::new(&arch).unwrap().verify().unwrap();
+}
+
+/// The image the archive ends at is held to its change before its history
+/// is read for a hello (`ends_on_image_of`), as `verify` holds every image:
+/// one holding another change than its name says is refused as the corrupt
+/// file it is, never read for what it does not vouch for.
+#[test]
+fn an_image_of_another_change_than_its_name_is_refused() {
+    let d = dir("image-misnamed");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    p.exec("put c {x: 1}");
+    let arch = d.join("archive");
+    let a = archiver(&arch, &p.url);
+    first_image(&arch);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !arch.join("history").exists() {
+        assert!(Instant::now() < deadline, "no history written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    a.finish();
+    let before = p.seq();
+    p.exec("put c {x: 2}");
+    let at = p.seq();
+
+    // The image of `before` under `at`'s name, alone, with no history: the
+    // primary sends `at`'s image, which no history there takes.
+    let image = std::fs::read_dir(&arch)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with("image-") && n.ends_with(".fennec"))
+        .unwrap();
+    let time = image
+        .trim_end_matches(".fennec")
+        .rsplit('-')
+        .next()
+        .unwrap();
+    let other = d.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(
+        arch.join(&image),
+        other.join(format!("image-{at:020}-{time}.fennec")),
+    )
+    .unwrap();
+
+    let stop = AtomicBool::new(false);
+    let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
+    let err = Archive::new(&other)
+        .unwrap()
+        .follow(&upstream, &stop, &|line| panic!("went on: {line}"))
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    assert!(
+        err.to_string()
+            .contains(&format!("the image is at change {before}, not {at}")),
+        "{err}"
+    );
+}
