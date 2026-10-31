@@ -327,10 +327,11 @@ there it is off unless asked. The native library has the same call,
 
 <h2 id="compaction">Compaction</h2>
 
-<p>An update writes the whole record again at the end of the file, and a
-delete writes a tombstone; the version left behind is dead until a
-<code>compact</code> writes the live records into a new file. The server
-runs one on its own: every 5 s it looks at each file it serves, the
+<p>A file only grows until it is compacted. An update writes the whole record
+again at the end of the file, and a delete writes a tombstone; the version
+left behind is dead until a <code>compact</code> writes the live records into
+a new file, and that is what stops the file from growing. The server runs
+one on its own: every 5 s it looks at each file it serves, the
 database, each open tenant and a replica alike, and compacts one once half
 of it is dead and the dead part is at least 64 MB -- or sooner, once a
 third of what the compact writes is dead, where the file has reached three
