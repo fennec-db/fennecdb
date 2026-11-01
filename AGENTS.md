@@ -184,7 +184,10 @@ it.
 **[A long read is pinned, and read with no lock held](docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a stray read reruns under the
-lock.
+lock. A stream's seed is one (`sse::seed`), its scope bound under the
+pin's lock, the ring held back to it till the first look (`hold_changes`);
+it reads again under the lock where the ring passed it or an image was
+adopted (`Database::adoptions`), as every look reseeds.
 
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica
