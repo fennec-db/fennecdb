@@ -180,6 +180,42 @@ jobs:
       - name: Both sync runners ran every scenario
         run: node integrations/sync-scenarios-check.mjs
 
+  # Windows, which no release is built for yet: the programs and the native
+  # library build, and `<file>.lock` (`LockFileEx` there) refuses a second
+  # holder -- in this process, in another, a second `fennec-server --file`
+  # and a shell beside one -- and goes with a holder that closes or is
+  # killed. The shell's tests rename a checkpoint, a compact and a restore
+  # over a file another handle has open. Without the lock a second server
+  # took the file beside the first.
+  windows:
+    name: windows (single writer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-latest-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: windows-latest-cargo-
+
+      - name: Build fennec-server, fennec and the native library
+        run: cargo build -p fennec-server -p fennec-cli -p fennec-ffi
+
+      - name: The lock, in this process and another
+        run: cargo test -p fennec-abi --lib lock::tests
+
+      # Beside fennec-server's binary, which the build above put there.
+      - name: A second process over a served file is refused
+        run: cargo test -p fennec-cli --test lock
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved

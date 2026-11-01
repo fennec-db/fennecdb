@@ -17,9 +17,10 @@ harness (`publish = false`), where `rusqlite` and `postgres` live.
 
 **Limits error, they do not truncate.** `near`, `match` and `fuse` results
 cap at 10 000 rows (`limit + offset`), expression depth at 512 levels, a
-`lookup` chain at 8 and an `in (get ...)` at 100 000 values and 4 levels;
-all of them return a query error, because a silently cut result is a wrong
-answer believed right. Full table in `site/content/docs/limits.html`.
+`lookup` chain at 8, an `in (get ...)` at 100 000 values and 4 levels and
+an `in $n` parameter's list at the inner `get`'s 100 000 values
+(`query::param_list`); all of them return a query error, because a
+silently cut result is a wrong answer believed right. Full table in `site/content/docs/limits.html`.
 
 ## Profiles
 

@@ -154,7 +154,7 @@ func TestLive(t *testing.T) {
 		q    Query
 		want string
 	}{
-		{scoped, Query{QueryText: "get ticks where sym in $1", Params: []Param{{Value: "S01"}}}, "fennec-server answered 400: query error: position 23: expected `[`, found $1"},
+		{scoped, Query{QueryText: "get ticks where sym in $1", Params: []Param{{Value: "S01"}}}, "fennec-server answered 400: `in $1` takes a list, and $1 is of type text"},
 		{scoped, Query{QueryText: `get ticks where sym = "none" limit 1 require 1`}, "fennec-server answered 412: `get ticks` answered 0 rows, and requires 1"},
 		{scoped, Query{QueryText: "get secrets"}, "not on the server (404): collection `secrets`"},
 		{instance(t, url, `{}`, "wrong"), Query{QueryText: "get ticks"}, "refused the data source's token (401)"},

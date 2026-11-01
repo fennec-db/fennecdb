@@ -64,7 +64,12 @@ pub enum What {
 /// otherwise, so the epoch moves only where a change means to, and says
 /// so. Here, beside the encoder whose change raises it, so the engine
 /// writes it into a record; `fennec_ql::GRAMMAR_EPOCH` is this one.
-pub const GRAMMAR_EPOCH: u32 = 1;
+///
+/// 2: SQL's `x = any($n)` and `x <> all($n)` read as `x in $n` and `not (x
+/// in $n)`, where they were a call of a function no build has, refused as
+/// it ran -- a definition holding one is marked broken, to be defined
+/// again.
+pub const GRAMMAR_EPOCH: u32 = 2;
 
 /// What reads a named statement's stored text back into its tree: the
 /// parser's (`fennec_ql::definition`), which this crate does not hold.
@@ -1350,6 +1355,12 @@ impl Canon {
                 self.uint(arith_byte(*op));
                 self.expr(a);
                 self.expr(b);
+            }
+            // A node of its own: no text read before it was one.
+            Expr::InParam(a, i) => {
+                self.node(15);
+                self.expr(a);
+                self.uint(*i as u64);
             }
         }
     }

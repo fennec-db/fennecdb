@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -845,6 +845,15 @@ composite-bench:
 lookup-bench:
 	$(CARGO) build --release -p fennec-core --example lookups
 	./target/release/examples/lookups $(if $(ARGS),$(ARGS),all)
+
+## `in $1` -- one parameter holding the list -- against the same list
+## written out with a parameter a value, `in [$1, $2, ...]`, for 10 and
+## 1 000 ids by `id` and by a `@hash` field of 100 000 rows: in process, and
+## over fennec-server's HTTP, one client and eight
+## (crates/fennec-bench/src/bin/lists.rs).
+lists-bench:
+	$(CARGO) build --release -p fennec-server
+	$(CARGO) run --release -p fennec-bench --bin lists
 
 ## `in (get ...)` against the same `in [..]` written out, and against the
 ## `lookup ... required` that asks the same question from the other side:

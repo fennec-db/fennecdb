@@ -118,6 +118,7 @@ impl Server {
     }
 
     /// A `--dir` node over `dir`, its admin token `adm`.
+    #[cfg(unix)]
     fn node(bin: &Path, dir: &str) -> Server {
         Server::spawn(bin, &["--dir", dir, "--admin-token", "adm"])
     }
@@ -252,6 +253,22 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
     assert!(why.contains(&format!("fennec --read-only {p}")), "{why}");
     refused(&piped(&[&p], &format!("{put}\n")), &p, &pid, "piped");
     refused(&fennec(&[&p, "-c", "get notes"]), &p, &pid, "a read");
+    // So is a second server, the holder named. Let in, as on Windows before
+    // it had a lock, it would have served the file beside the first, and
+    // checkpointed its own image over it as its stdin ended.
+    let second = Command::new(&bin)
+        .args(["--file", &p, "--http", "127.0.0.1:0"])
+        .arg("--exit-on-stdin-close")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let why = text(&second.stderr);
+    assert_eq!(second.status.code(), Some(1), "{why}");
+    assert!(why.contains("it is open already"), "{why}");
+    assert!(
+        why.contains(&format!("(held by fennec-server, {pid}")),
+        "{why}"
+    );
 
     // Read-only, beside it: the file as it stands, and no write.
     assert_eq!(
@@ -278,6 +295,11 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
         let a = server.query(&format!(r#"put notes {{id: {id}, body: "server"}}"#));
         assert!(a.contains("\"affected\":1"), "{a}");
     }
+    // A compact renames its image over the file the server has open, as the
+    // checkpoint at the stop does: on Windows too, where a rename that
+    // refused a target open elsewhere would have stopped every write.
+    let (status, body) = server.run("/query", "compact");
+    assert_eq!(status, 200, "{body}");
     assert_eq!(server.stop(), 0);
 
     // Let go with the server: the shell writes, and the file opens whole.

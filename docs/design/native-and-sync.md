@@ -33,7 +33,8 @@ the library is built in the `ffi` profile, which unwinds. `<file>.lock` is
 held while a file is open (a checkpoint renames a new file over the
 database, which a lock on it would not survive): a second open, here or in
 an app extension, is refused -- by a record lock (`fcntl`'s `F_SETLK`), the
-process's, and a list of this process's lock files. An `flock` was the open
+process's, and a list of this process's lock files; on Windows by
+`LockFileEx`'s over one byte ([engine.md](engine.md#single-writer)). An `flock` was the open
 file's, which a child spawned meanwhile shares until its exec: a close and
 an open again beside a thread spawning children were refused 48-66 times
 in 3 000, and once in CI's `swift test`, whose servers start beside the

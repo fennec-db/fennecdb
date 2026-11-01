@@ -828,7 +828,7 @@ END";
     // Pinned: a change to the encoding that moves this moves every stored
     // statement's, and raises fennec_ql::GRAMMAR_EPOCH with it.
     assert_eq!(base, 0x45b7_05e6_1089_ee98, "{base:#018x}");
-    assert_eq!(fennec_ql::GRAMMAR_EPOCH, 1);
+    assert_eq!(fennec_ql::GRAMMAR_EPOCH, 2);
 }
 
 /// A field added to the tree that a statement does not use leaves its

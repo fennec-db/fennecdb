@@ -569,6 +569,81 @@ test('points in the module: kept as written, a radius, a box and the nearest', {
   db.close();
 });
 
+test('in $1 takes a list parameter in the module, its numbers as written', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection products (sku text @hash, x float, name text)');
+  db.run('put products {id: 16777216, sku: "s1", x: 0.1, name: "a"}');
+  db.run('put products {id: 16777217, sku: "s2", x: 0.2, name: "b"}');
+  db.run('put products {id: 3, sku: "s3", x: 0.3, name: "c"}');
+  const names = (sql, params) => db.rows(sql, params).map((r) => r.name);
+  // A list of numbers goes into the module as a vector's f32s
+  // (`vectorsApart`), where 16777217 is 16777216 and 0.1 is 0.10000000149:
+  // an `in` list is handed again as JSON, read as written.
+  assert.deepEqual(names('get products select name where id in $1', [[16777217, 3]]), ['c', 'b']);
+  assert.deepEqual(names('get products select name where id not in $1', [[16777216]]), ['c', 'b']);
+  assert.deepEqual(names('get products select name where x in $1', [[0.1, 7]]), ['a']);
+  assert.deepEqual(names('select name from products where id = any($1)', [[16777217]]), ['b']);
+  assert.deepEqual(names('get products select name where sku in $1', [['s1', 's3']]), ['c', 'a']);
+  assert.deepEqual(names('get products select name where id in $1', [[]]), []);
+  assert.throws(() => db.rows('get products where id in $1', [5]), /`in \$1` takes a list, and \$1 is of type int/);
+  db.close();
+});
+
+test('a text whose list the module asked for as JSON sends it so at once after', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  // The module's calls counted: each a statement's text and parameters read.
+  let calls = 0;
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (src, imports) => {
+    const made = await instantiate(src, imports);
+    const real = (made instanceof WebAssembly.Instance ? made : made.instance).exports;
+    const query = real.fennec_query;
+    const exports = {
+      ...real,
+      fennec_query(a, b, c, d, e, f, g, h) {
+        calls++;
+        return query(a, b, c, d, e, f, g, h);
+      },
+    };
+    return { instance: { exports } };
+  };
+  let db;
+  try {
+    db = await Fennec.open(wasm);
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+  db.run('create collection p (n int, meta json)');
+  db.run('put p {id: 16777217, n: 1}');
+  const ids = (sql, params) => db.rows(sql, params).map((r) => r.id);
+  const sql = 'get p select id where id in $1';
+  // The first run: sent apart as f32s, refused, sent again as JSON.
+  calls = 0;
+  assert.deepEqual(ids(sql, [[16777217]]), [16777217]);
+  assert.equal(calls, 2);
+  // After, the text sends its list as JSON at once, typed or not.
+  for (const list of [[16777217, 5], new Float64Array([16777217])]) {
+    calls = 0;
+    assert.deepEqual(ids(sql, [list]), [16777217]);
+    assert.equal(calls, 1);
+  }
+  // A place the module names beside those sent as JSON already is added.
+  const two = 'get p select id where id in $1 and meta not in [$2]';
+  ids(two, [[1], 'x']);
+  calls = 0;
+  ids(two, [[16777217], [3]]);
+  assert.equal(calls, 2);
+  calls = 0;
+  ids(two, [[16777217], [3]]);
+  assert.equal(calls, 1);
+  // A run with no list asks once, as it did.
+  calls = 0;
+  assert.deepEqual(ids('get p select id where id = $1', [16777217]), [16777217]);
+  assert.equal(calls, 1);
+  db.close();
+});
+
 test('a write that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

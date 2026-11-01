@@ -66,6 +66,12 @@ pub enum Expr {
     /// `n + 1`, `price * $1`: arithmetic over numbers, and a timestamp
     /// moved by milliseconds ([`arith`]).
     Arith(ArithOp, Box<Expr>, Box<Expr>),
+    /// `id in $1`, `$1` holding a list: its values, each an item, as `id
+    /// in [$1, $2, ...]` with a parameter a value would be. A plan reads
+    /// both through [`Expr::in_list`], so an index meets the list as it
+    /// meets one written out, and `eval` reads the parameter's list
+    /// ([`param_list`]). Last, so no variant before it was renumbered.
+    InParam(Box<Expr>, usize),
 }
 
 impl Expr {
@@ -102,7 +108,7 @@ impl Expr {
                 }
             }
             // The inner `get`'s fields are its own collection's.
-            Expr::InSelect(a, _) => a.referenced_fields(out),
+            Expr::InSelect(a, _) | Expr::InParam(a, _) => a.referenced_fields(out),
             Expr::Call(_, args) => {
                 for a in args {
                     a.referenced_fields(out);
@@ -128,7 +134,7 @@ impl Expr {
                 f(a);
                 f(b);
             }
-            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => f(a),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) | Expr::InParam(a, _) => f(a),
             Expr::In(a, items) => {
                 f(a);
                 items.iter().for_each(f);
@@ -150,7 +156,7 @@ impl Expr {
                 f(a);
                 f(b);
             }
-            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => f(a),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) | Expr::InParam(a, _) => f(a),
             Expr::In(a, items) => {
                 f(a);
                 items.iter_mut().for_each(f);
@@ -208,9 +214,26 @@ impl Expr {
             | Expr::Like(a, b)
             | Expr::Has(a, b)
             | Expr::Arith(_, a, b) => a.has_subquery() || b.has_subquery(),
-            Expr::Not(a) | Expr::IsNull(a) => a.has_subquery(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InParam(a, _) => a.has_subquery(),
             Expr::In(a, items) => a.has_subquery() || items.iter().any(Expr::has_subquery),
             Expr::Call(_, args) => args.iter().any(Expr::has_subquery),
+        }
+    }
+
+    /// An `in`'s left side and its list as a plan reads it: each item
+    /// written in -- a literal's value, a parameter's, `None` for one that
+    /// is neither -- or each value an `in $n`'s parameter holds. `None` for
+    /// any other expression, and for an `in $n` whose parameter holds no
+    /// list, left to `eval`, which refuses it at the first row tested, as
+    /// it does whatever else `Filter` cannot bind. Where a plan reads `in
+    /// [$1, $2]`, it reads `in $1` through this, so the two take one path.
+    pub fn in_list<'a>(&'a self, params: &'a [Value]) -> Option<(&'a Expr, InItems<'a>)> {
+        match self {
+            Expr::In(lhs, items) => Some((lhs, InItems::Written(items.iter(), params))),
+            Expr::InParam(lhs, i) => {
+                Some((lhs, InItems::Listed(param_list(params, *i).ok()?.iter())))
+            }
+            _ => None,
         }
     }
 
@@ -232,7 +255,9 @@ impl Expr {
             | Expr::Like(a, b)
             | Expr::Has(a, b)
             | Expr::Arith(_, a, b) => a.calls_now() || b.calls_now(),
-            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.calls_now(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) | Expr::InParam(a, _) => {
+                a.calls_now()
+            }
             Expr::In(a, items) => a.calls_now() || items.iter().any(Expr::calls_now),
         }
     }
@@ -287,7 +312,9 @@ impl Expr {
             | Expr::Like(a, b)
             | Expr::Has(a, b)
             | Expr::Arith(_, a, b) => a.asks_expired() || b.asks_expired(),
-            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.asks_expired(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) | Expr::InParam(a, _) => {
+                a.asks_expired()
+            }
             Expr::In(a, items) => a.asks_expired() || items.iter().any(Expr::asks_expired),
         }
     }
@@ -310,7 +337,9 @@ impl Expr {
             | Expr::Like(a, b)
             | Expr::Has(a, b)
             | Expr::Arith(_, a, b) => a.answer_expired(past) | b.answer_expired(past),
-            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.answer_expired(past),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) | Expr::InParam(a, _) => {
+                a.answer_expired(past)
+            }
             Expr::In(a, items) => items.iter_mut().fold(a.answer_expired(past), |any, i| {
                 i.answer_expired(past) | any
             }),
@@ -332,7 +361,7 @@ impl Expr {
                 a.each_subquery_mut(f)?;
                 b.each_subquery_mut(f)
             }
-            Expr::Not(a) | Expr::IsNull(a) => a.each_subquery_mut(f),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InParam(a, _) => a.each_subquery_mut(f),
             Expr::In(a, items) => {
                 a.each_subquery_mut(f)?;
                 for i in items {
@@ -368,6 +397,7 @@ impl Expr {
                 .fold(a.max_param(), |m, i| m.max(i.max_param())),
             // The inner `get` binds from the same parameters.
             Expr::InSelect(a, sel) => a.max_param().max(sel.max_param()),
+            Expr::InParam(a, i) => a.max_param().max(*i + 1),
             Expr::Call(_, args) => args.iter().map(|a| a.max_param()).max().unwrap_or(0),
         }
     }
@@ -482,21 +512,17 @@ impl Expr {
                 a.conjunct_in_sets(params, out);
                 b.conjunct_in_sets(params, out);
             }
-            Expr::In(lhs, items) => {
-                let Expr::Field(field) = lhs.as_ref() else {
+            Expr::In(..) | Expr::InParam(..) => {
+                let Some((Expr::Field(field), items)) = self.in_list(params) else {
                     return;
                 };
                 let mut vals = Vec::with_capacity(items.len());
-                for it in items {
-                    match it {
-                        Expr::Lit(v) => vals.push(v),
-                        // An unbound parameter must reach the eval path, which
-                        // is where the error is raised.
-                        Expr::Param(i) => match params.get(*i) {
-                            Some(v) => vals.push(v),
-                            None => return,
-                        },
-                        _ => return,
+                for v in items {
+                    match v {
+                        Some(v) => vals.push(v),
+                        // An unbound parameter, or an expression, must reach
+                        // the eval path, which is where the error is raised.
+                        None => return,
                     }
                 }
                 // An empty list matches nothing, and an empty candidate set
@@ -873,6 +899,190 @@ pub fn unbound(i: usize) -> Error {
     Error::Query(format!("parameter ${} is not bound", i + 1))
 }
 
+/// An `in` list's values as a plan reads them ([`Expr::in_list`]).
+#[derive(Clone)]
+pub enum InItems<'a> {
+    /// `in [..]`: each item a literal or a parameter, else `None`.
+    Written(std::slice::Iter<'a, Expr>, &'a [Value]),
+    /// `in $n`: the parameter's list.
+    Listed(std::slice::Iter<'a, Value>),
+}
+
+impl<'a> Iterator for InItems<'a> {
+    type Item = Option<&'a Value>;
+
+    fn next(&mut self) -> Option<Option<&'a Value>> {
+        match self {
+            InItems::Written(items, params) => items.next().map(|e| match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => params.get(*i),
+                _ => None,
+            }),
+            InItems::Listed(values) => values.next().map(Some),
+        }
+    }
+}
+
+impl InItems<'_> {
+    /// How many items are left. Not `ExactSizeIterator`'s, whose
+    /// `assert_eq!` brought `Debug` for `usize` and `Option<usize>` into
+    /// the browser module, 1.1 KB.
+    pub fn len(&self) -> usize {
+        match self {
+            InItems::Written(items, _) => items.len(),
+            InItems::Listed(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The values `in $<i + 1>` ([`Expr::InParam`]) is answered with: the list
+/// parameter `i` holds, each value as a parameter of its own would hand it.
+/// Refused where it holds no list -- a value alone is `= $n` -- and past
+/// [`MAX_SUBQUERY_VALUES`], as an inner `get`'s list is, never cut short.
+pub fn param_list(params: &[Value], i: usize) -> Result<&[Value]> {
+    let n = i + 1;
+    match params.get(i) {
+        Some(Value::List(l)) if l.len() <= MAX_SUBQUERY_VALUES => Ok(l),
+        Some(Value::List(l)) => Err(Error::Query(format!(
+            "`in ${n}` holds {} values, more than {MAX_SUBQUERY_VALUES}: a list is not cut \
+             short, so send it in parts",
+            l.len()
+        ))),
+        Some(v) => Err(Error::Query(format!(
+            "`in ${n}` takes a list, and ${n} is of type {}: `= ${n}` compares one value",
+            v.type_name()
+        ))),
+        None => Err(unbound(i)),
+    }
+}
+
+impl Expr {
+    /// Each `in $n` in it held to its parameter ([`param_list`]), an inner
+    /// `get`'s at any depth: refused before the plan, as a count parameter
+    /// is ([`Select::check_counts`]). Left to the row a filter tests, a
+    /// list of none, or past the bound, was answered over no rows -- an
+    /// empty collection, `id = 7 and n in $1` finding no 7 -- and refused
+    /// once one was tested.
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        match self {
+            Expr::InParam(_, i) => {
+                param_list(params, *i)?;
+            }
+            Expr::InSelect(_, sel) => sel.lists_held(params)?,
+            Expr::Lit(_) | Expr::Field(_) | Expr::Param(_) => return Ok(()),
+            _ => {}
+        }
+        let mut held = Ok(());
+        self.each_child(&mut |c| {
+            if held.is_ok() {
+                held = c.lists_held(params);
+            }
+        });
+        held
+    }
+}
+
+/// [`Expr::lists_held`] for what a select or a `lookup` level evaluates
+/// row by row: its filter, list, keys, `having` and `order`. Plain loops
+/// over one function: iterators chained into one walk were 8 KB of the
+/// browser module, each adapter a type of its own.
+fn listed_held(
+    filter: &Option<Expr>,
+    columns: &[Column],
+    group: &[Expr],
+    having: &Option<Expr>,
+    order: &[Sort],
+    params: &[Value],
+) -> Result<()> {
+    for e in [filter, having].into_iter().flatten() {
+        e.lists_held(params)?;
+    }
+    for e in group {
+        e.lists_held(params)?;
+    }
+    for c in columns {
+        c.expr.lists_held(params)?;
+    }
+    for s in order {
+        if let Some(e) = &s.expr {
+            e.lists_held(params)?;
+        }
+    }
+    Ok(())
+}
+
+impl Select {
+    /// [`Expr::lists_held`] for every expression it evaluates over its
+    /// rows, a `lookup` level's and a facet's filter among them. `near`'s,
+    /// `match`'s and `rerank`'s, answered once whatever the rows, are left
+    /// to refuse as they run.
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        let (computed, marks) = (&self.computed, &self.marks);
+        listed_held(
+            &self.filter,
+            &self.aggregate,
+            &self.group,
+            &self.having,
+            &self.order,
+            params,
+        )?;
+        listed_held(&None, computed, &[], &None, &[], params)?;
+        for a in marks.iter().flat_map(|m| &m.args) {
+            a.lists_held(params)?;
+        }
+        for f in &self.facets {
+            if let Some(Some(e)) = &f.rest {
+                e.lists_held(params)?;
+            }
+        }
+        let mut level = self.lookup.as_ref();
+        while let Some(l) = level {
+            listed_held(
+                &l.filter,
+                &l.aggregate,
+                &l.group,
+                &l.having,
+                &l.order,
+                params,
+            )?;
+            level = l.next.as_deref();
+        }
+        Ok(())
+    }
+}
+
+impl Statement {
+    /// [`Expr::lists_held`] for every expression it evaluates over rows:
+    /// what each statement is asked, with its parameters, before its plan.
+    /// A `put`'s documents and a call's arguments are answered once
+    /// whatever the rows, and refuse as they run. Out of line:
+    /// [`crate::engine::Database`] asks it where every statement passes.
+    #[inline(never)]
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        let (set, filter, pick): (&[(String, Expr)], _, _) = match self {
+            Statement::Select(s) | Statement::Explain(s) => return s.lists_held(params),
+            Statement::Update {
+                set, filter, pick, ..
+            } => (set, filter, pick),
+            Statement::Delete { filter, pick, .. } => (&[], filter, pick),
+            Statement::Put {
+                else_set: Some(set),
+                ..
+            } => (set, &None, &None),
+            _ => return Ok(()),
+        };
+        for (_, e) in set {
+            e.lists_held(params)?;
+        }
+        let order = pick.as_ref().map_or(&[][..], |p| &p.order[..]);
+        listed_held(filter, &[], &[], &None, order, params)
+    }
+}
+
 pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value> {
     Ok(match expr {
         Expr::Lit(v) => v.clone(),
@@ -957,17 +1167,23 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             };
             let mut found = false;
             for it in items {
-                let v = eval(it, row, ctx)?;
-                let same = match (fold, &v, &l) {
-                    (Some(f), Value::Text(x), Value::Text(y)) => crate::case::eq_folded(x, y, f),
-                    _ => v.cmp_value(&l) == Ordering::Equal,
-                };
-                if same {
+                if in_same(fold, &eval(it, row, ctx)?, &l) {
                     found = true;
                     break;
                 }
             }
             Value::Bool(found)
+        }
+        // The parameter's list where no filter put it in place first: a
+        // select list's item, an `order` key, a stream's test of a row.
+        Expr::InParam(a, i) => {
+            let list = param_list(ctx.params, *i)?;
+            let l = eval(a, row, ctx)?;
+            let fold = match &l {
+                Value::Text(_) => folded(&*row, a),
+                _ => None,
+            };
+            Value::Bool(list.iter().any(|v| in_same(fold, v, &l)))
         }
         // Answered before the query runs, as the list it becomes: one met
         // here is in a filter evaluated on its own.
@@ -1012,6 +1228,15 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
         }
         Expr::Arith(op, a, b) => arith(*op, &eval(a, row, ctx)?, &eval(b, row, ctx)?)?,
     })
+}
+
+/// Whether `v`, an item of an `in` list, is `l`: by the fold `l`'s field
+/// compares by, else as any two values compare.
+fn in_same(fold: Option<crate::case::CaseFold>, v: &Value, l: &Value) -> bool {
+    match (fold, v, l) {
+        (Some(f), Value::Text(x), Value::Text(y)) => crate::case::eq_folded(x, y, f),
+        _ => v.cmp_value(l) == Ordering::Equal,
+    }
 }
 
 /// The fold `e` compares by, when it is a `nocase` field of the row's.
@@ -3164,7 +3389,7 @@ impl Expr {
             | Expr::Like(a, b)
             | Expr::Has(a, b)
             | Expr::Arith(_, a, b) => a.reads_vectors() || b.reads_vectors(),
-            Expr::Not(a) | Expr::IsNull(a) => a.reads_vectors(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InParam(a, _) => a.reads_vectors(),
             Expr::In(a, items) => a.reads_vectors() || items.iter().any(Expr::reads_vectors),
             Expr::InSelect(a, sel) => a.reads_vectors() || sel.reads_vectors(),
             Expr::Call(_, args) => args.iter().any(Expr::reads_vectors),
