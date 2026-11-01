@@ -5,6 +5,7 @@
 //! so many threads that beside the rest the process would pass macOS's
 //! 2 048 threads a process.
 
+mod chunked;
 mod cors;
 mod fanout;
 mod leases;

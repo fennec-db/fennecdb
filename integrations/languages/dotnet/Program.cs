@@ -16,8 +16,9 @@ if (token is not null)
 // One FennecQL statement; a refusal throws with the server's status and message.
 async Task<JsonElement> Query(string query, params object[] args)
 {
-    // Serialised whole rather than PostAsJsonAsync's stream: the server wants
-    // a Content-Length and takes no chunked body.
+    // Serialised whole rather than PostAsJsonAsync's chunked stream: a body
+    // with its Content-Length goes through every hop, the global entry
+    // taking one past a mebibyte only so.
     var json = JsonSerializer.Serialize(new { query, @params = args });
     var res = await http.PostAsync("/query", new StringContent(json, Encoding.UTF8, "application/json"));
     var body = await res.Content.ReadFromJsonAsync<JsonElement>();

@@ -464,7 +464,7 @@ public sealed partial class FennecClient : IDisposable
     }
 
     // One request, its answer read whole: the body of a 2xx, a FennecException otherwise. The body goes as
-    // bytes with its length: the server takes no chunked body (411).
+    // bytes with its length, which every hop takes: the global entry refuses one past a mebibyte without it.
     async Task<(byte[], Head)> SendAsync(HttpMethod method, string path, string? contentType, byte[]? body,
         TimeSpan extra, CancellationToken ct)
     {

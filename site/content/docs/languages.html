@@ -288,7 +288,8 @@ await Query("put docs {title: $1, year: $2}", "Night at the oasis", 2024);
 var rows = await Query("get docs select title, year where year &gt;= $1 order year desc limit $2", 2020, 5);
 var titles = rows.EnumerateArray().Select(r =&gt; r.GetProperty("title").GetString());</pre>
 <p>The body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
-and the server wants a <code>Content-Length</code>.</p>
+which <code>fennec-server</code> and the router read, but the global entry
+takes a body past a mebibyte only with its <code>Content-Length</code>.</p>
 <p><a href="https://github.com/fennec-db/fennecdb/tree/main/examples/dotnet">Full example</a>: Notes, a console app over the server with the builder, records and <code>SubscribeAsync</code>.</p>
 </div>
 
@@ -721,6 +722,6 @@ statement's text.</p>
 
 <p>The server keeps a connection open between requests (HTTP/1.1
 keep-alive) for a client that reuses it, as Go's, .NET's, Java's and
-ureq's do. A body is read by its <code>Content-Length</code>; a chunked one
-is refused.</p>
+ureq's do. A body is read by its <code>Content-Length</code> or its chunks
+(<a href="/docs/http-reference#bodies">Request bodies</a>).</p>
 </details>

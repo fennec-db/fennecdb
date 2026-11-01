@@ -250,8 +250,8 @@ node. A guessed region's router whose <code>503</code> says it never sent
 the request, and names no home, sends it on to the next region, a write
 too. A
 body up to a mebibyte is kept for the next router; a longer one is streamed
-to one, its length kept (a router takes no chunked body), and one sent with
-no length past a mebibyte is refused with <code>411</code>: read whole, it
+to one, its length kept, and one sent with no length past a mebibyte is
+refused with <code>411</code>: read whole, it
 was as large as a client cared to send, in isolates whose 128 MB are
 shared.</p>
 

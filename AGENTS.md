@@ -2,56 +2,52 @@
 
 This file provides guidance to Codex and other coding agents when working with code in this repository. It is written from CLAUDE.md by `make agents-md`: edit that one.
 
-fennecdb -- a minimal embedded database in Rust. Compiles to WASM for the
-browser, has its own query language (FennecQL), and its server
-(`fennec-server`) speaks HTTP; every language reaches it that way, Python,
+fennecdb -- a minimal embedded database in Rust, compiled to WASM for the
+browser, with its own query language (FennecQL) and a server
+(`fennec-server`) speaking HTTP, as every language reaches it: Python,
 JavaScript, Go, .NET, Swift, Kotlin and Dart through official clients. User
 docs are `site/content/docs/`, `README.md` their front door; this file is
-the working summary, the long form of each invariant and convention in
+the working summary, each invariant's and convention's long form in
 `docs/design/` (ordered by its `README.md`); `tools/agents_md.py --check`
-fails once this file passes 64 000 bytes. `AGENTS.md` is written from this
-file (`make agents-md`), and CI fails when the two differ: edit
-`CLAUDE.md`.
+fails once it passes 64 000 bytes. `AGENTS.md` is written from it
+(`make agents-md`), CI failing when the two differ: edit `CLAUDE.md`.
 
 ## Commands
 
 ```bash
-make test          # Rust (fennec-core also without its indexes and without any feature), then the JS tests and sync-scenarios-check
-make wasm          # fennec-wasm for wasm32 to web/fennec.wasm
-make wasm FEATURES="text sorted"   # with those features alone (indexes, language: a group; none: none)
-make wasm-lite     # test build without the indexes (web/fennec-lite.wasm), shipped by nothing; make wasm-min: with no feature at all
-make wasm-sizes    # what each feature adds to the module with none, and what leaving it out saves
-make size-report   # where the module's bytes go (BASE=main, BIN=fennec-server, FEATURES=none)
-make ffi           # the native library for apps (crates/fennec-ffi); TARGET=... another, JNI=1 for Kotlin
-make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
-make packages      # the PyPI, npm and NuGet packages as a release publishes them, installed and used
-make packaging-test    # site/install.sh against a release of its own on localhost, and the Homebrew formula held to its script
-make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
-make agents-md     # AGENTS.md written again from this file
-make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
-make docs-builder     # the SDKs' tests of the site's builder tabs written again (site/builder_tabs.py)
-make schema-golden    # integrations/schema-golden.json written again through the module (web/schema-golden.mjs)
+make test  # Rust (fennec-core also without its indexes and without any feature), the JS tests, sync-scenarios-check
+make wasm  # fennec-wasm to web/fennec.wasm; FEATURES="text sorted": those alone (indexes, language: a group; none: none)
+make wasm-lite  # test build without the indexes (web/fennec-lite.wasm), never shipped; wasm-min: with no feature
+make wasm-sizes  # what each feature adds to the module with none, and what leaving it out saves
+make size-report  # where the module's bytes go (BASE=main, BIN=fennec-server, FEATURES=none)
+make ffi  # the native library (crates/fennec-ffi); TARGET=... another, JNI=1 for Kotlin
+make sync-scenarios-check  # both sync runners passed every scenario (after make test)
+make agents-md  # AGENTS.md rewritten from this file
+make builder-golden  # integrations/builder-golden.json rewritten from the JS builder (web/golden.mjs)
+make docs-builder  # the SDKs' tests of the site's builder tabs (site/builder_tabs.py)
+make schema-golden  # integrations/schema-golden.json rewritten through the module (web/schema-golden.mjs)
 make types-check  # web/fennec.d.ts held to web/fennec.js and a caller's code under tsc --strict, then docs-types
-make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js
-make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, for the comparisons and --follow (pgvector-down)
-make server TOKEN=secret HTTP=127.0.0.1:8080   # the server against ./data.fennec
-make node ADMIN=secret   # a tenant node: fennec-server --dir tenants
-make shard               # the router in front of the nodes (./shard.fennec)
-# Every other target is described by the Makefile's `##` comment above its
-# rule: serve, small, the suites (*-test, grafana-check, deploy-check, drill;
+make studio-highlight  # studio/highlight.js and the Grafana data source's copy rewritten from site/highlight.js
+make pgvector-up  # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432 for comparisons and --follow (pgvector-down)
+make server TOKEN=secret HTTP=127.0.0.1:8080  # the server against ./data.fennec
+make node ADMIN=secret  # a tenant node: fennec-server --dir tenants
+make shard  # the router in front of the nodes (./shard.fennec)
+# Every other target has a `##` comment above its rule in the Makefile:
+# serve, small, a release's (packages, packaging-test, version V=X.Y.Z:
+# RELEASING.md), the suites (*-test, grafana-check, deploy-check, drill;
 # `make wasm` first for react, langchain, ai-sdk and cloudflare) and the
-# measurements (every *-bench, ycsb, beir, ...), none of them in CI.
+# measurements (every *-bench, ycsb, beir, ...), none in CI.
 ```
 
 Single tests:
 
 ```bash
-cargo test -p fennec-core --test all persist::   # one file of a crate's integration tests (one binary)
-cargo test -p fennec-ql near                     # by name substring (integration: fn name only)
-cargo test -p fennec-core codec::tests           # inline unit tests in a module
-cargo test -p fennec-core --no-default-features --features std-fs,language --lib --test features   # without the indexes (`--features std-fs` alone: without any feature)
+cargo test -p fennec-core --test all persist::  # one file of a crate's integration tests (one binary)
+cargo test -p fennec-ql near  # by name substring (integration: fn name only)
+cargo test -p fennec-core codec::tests  # inline unit tests in a module
+cargo test -p fennec-core --no-default-features --features std-fs,language --lib --test features  # without the indexes (`--features std-fs` alone: without any feature)
 cargo test -p fennec-import --test all pg:: -- --ignored  # needs a live PostgreSQL
-node --test web/fennec.test.js                    # JS: builder
+node --test web/fennec.test.js  # JS: builder
 node --test --test-name-pattern 'shape' web/fennec.sync.test.js
 ```
 
@@ -88,16 +84,16 @@ behind `std-fs`; the indexes are `vector`, `text`, `highlight`, `fuzzy`,
 `sparse`, `sorted`, `composite`, `geo`, `hll` and `maps`, and `off` stands
 in for one a build is made without.
 
-The browser client is `web/fennec.js` -- WASM glue (~636 lines), persistence
-and the sync layer -- importing and re-exporting the query builder
+The browser client is `web/fennec.js` -- WASM glue (~636 lines),
+persistence and the sync layer -- re-exporting the query builder
 (`web/builder.js`) and the HTTP client (`web/http.js`), dependency-free ES
-modules; `web/fennec.d.ts` and `web/client.d.ts` hold the types,
-`fennec types <file>` a schema's.
+modules; `web/fennec.d.ts`
+and `web/client.d.ts` hold the types, `fennec types <file>` a schema's.
 [In the page](docs/design/js-client.md#persistence-in-the-page)
 `persist`/`restore` keep an image and the journal's chunks in IndexedDB
-(`fennec_journal`, `fennec_drain`; off until asked for), a `cryptoKey`
-sealing both; `openFile` keeps `fennec-server`'s own file in OPFS, never
-sealed, a new image flushed into `<name>~` before the file is written over.
+(`fennec_journal`, `fennec_drain`; off until asked for), sealed by a
+`cryptoKey`; `openFile` keeps `fennec-server`'s own file in OPFS, never
+sealed, flushing a new image into `<name>~` before writing over the file.
 
 ## Invariants
 
@@ -109,8 +105,10 @@ ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
 -abi, -wasm or -ffi, its tree pinned (`tools/deps_check.py`).
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
-Every cap (`near`, `match`, `fuse`, depth, `lookup`s, `in`) is a query
-error, never a cut result; a new one takes that shape.
+`near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
+a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
+`get` 4 levels deep), each a query error, never a cut result; a new limit
+takes that shape.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -120,9 +118,9 @@ connection's panic unwinds alone.
 
 **[No buffer pool of its own, and the file is mapped.](docs/design/storage.md#the-mapped-file)**
 `fs::open` maps it, a read decoding over its bytes; a rewrite points the
-stores at the new file (`Database::repoint`). "Page cache" is always the
-operating system's, a "buffer pool" a database's own, which fennecdb has
-none of, in code, docs and site alike.
+stores at the new file (`Database::repoint`). In code, docs and site,
+"page cache" is the operating system's, a "buffer pool" a database's own,
+which fennecdb has none of.
 
 **[Writes are handed over to the mapped file.](docs/design/storage.md#handover)**
 Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the
@@ -142,11 +140,10 @@ and 64 MB: `CompactPolicy` is the one rule, run beside the database by
 `Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.
 
 **[A file is compacted before it outgrows the page cache](docs/design/storage.md#compaction-and-the-page-cache)**
-(`CompactPolicy::memory`): its live records fitting the cache's room
-(`cache::room`), once a third of what the compact writes is dead and the
-file reached `ROOM_SHARE` of that room or the process faults
-(`cache::faulting`), a compact's own faults forgotten
-(`cache::forget_faults`).
+(`CompactPolicy::memory`) so its live records fit the cache's room
+(`cache::room`): once a third of what it writes is dead and the file
+reached `ROOM_SHARE` of that room or the process faults
+(`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
 
 **[File format](docs/design/storage.md#file-format):** a record is
 `[kind][collection-id][length][body]`, its length read even when empty;
@@ -160,18 +157,16 @@ before refuses (a graph's, rebuilds from), never one it would misread.
 ### The engine's lock and blocks
 
 **[Single writer, and readers beside it.](docs/design/engine.md#single-writer)**
-Never two processes over one file: whatever writes a served file -- the
-endpoint, a follower, the graph keeper, `--follow`'s mirror -- is a
+Never two processes over one file: whatever writes a served file is a
 `fennec-server` thread, never a binary of its own, and a block is open only
 under its opener's write lock. Whatever opens a file to write it, or
-renames one into its place, holds `<file>.lock` (`fennec_abi::lock`),
-refused while another does, a symbolic link resolved to its file for the
-lock and every rename (`fs::resolved`): `fennec-server --file`,
-each open tenant of a `--dir` node (in its sink, `lock::Holding`, let go
-with the database), fennec-shard's directory, the native library and every
-`fennec` way that writes; `--read-only` and `fennec types` take none, and a
-`backup` or `restore` replaces a file only with `--force`; what escapes
-the lock is in the design file.
+renames one into its place, holds `<file>.lock` (`fennec_abi::lock`; a
+`--dir` node's tenant in its sink, `lock::Holding`, let go with the
+database), refused while another does, a symbolic link resolved to its
+file for the lock and every rename (`fs::resolved`); `--read-only` and
+`fennec types` take none, and `backup` or `restore` replaces a file only
+with `--force`. The design file names every holder and what escapes the
+lock.
 
 **[A block's documents are built beside the
 readers](docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
@@ -182,9 +177,9 @@ it.
 
 **[A long read is pinned, and read with no lock held](docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
-read an index answers, and a pinned index refuses (`PINNED_OUT`), so a stray read reruns under the
-lock. A stream's seed is one (`sse::seed`), its scope bound under the
-pin's lock, the ring held back to it till the first look (`hold_changes`);
+read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
+stray read reruns under the lock. A stream's seed is one (`sse::seed`), its
+scope bound under the pin's lock, the ring held back to it till the first look (`hold_changes`);
 it reads again under the lock where the ring passed it or an image was
 adopted (`Database::adoptions`), as every look reseeds.
 
@@ -214,9 +209,8 @@ database's place removes the log first, durably (`fs::forget_sync_log`).
 
 **[Every way a server stops is the one shutdown.](docs/design/durability.md#the-one-shutdown)**
 A signal's handler, `--exit-on-stdin-close`'s end of stdin
-(`request_shutdown`) and a failure of what runs beside the database -- a thread the
-start cannot make, the listener, `--follow`'s mirror (`stop_with`, its exit
-code) -- set one flag, `SHUTDOWN`; the syncer, a file's
+(`request_shutdown`) and a failure of what runs beside the database
+(`stop_with`, its exit code) set one flag, `SHUTDOWN`; the syncer, a file's
 or a node's, looks every `LOOK` whatever `--sync` is, syncs, checkpoints
 (only once `serving`, and exiting 0, `checkpoints`) and exits holding the
 write lock. A new way down sets that flag and never exits on its own. What
@@ -271,9 +265,10 @@ its collections' only writer. A wire message's length is held to
 each.](docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes from
 the path, never the query; the router forwards bytes, parsing none; the
 registry opens a file under its lock and closes it on its last `Arc` alone,
-never while its follower or anything beside it holds the database, so no two `Database`s share a file. A tenant's role is its file's, not the node's
-`--replica-of`; a move is `freeze` (a gate taken exclusively, so no write lands
-after the export), copy, install, the flip in one statement, the source
+never while its follower or anything beside it holds the database: no two
+`Database`s share a file. A tenant's role is its file's, not the node's
+`--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
+the export), copy, install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
@@ -291,8 +286,7 @@ identity.](docs/design/tenants.md#replicas-tried-again)** `try_again`
 repairs a failed attach under the claim;
 `fennec_router_tenants_unreplicated` counts uncopied. A file left is a
 `leftovers` row (`fennec_router_files_left`) with its ids
-(`fennec_http::instance`: inode, birth, `.follows`; gone before its
-file); the node deletes it, or follows over it at an attach's 409, only
+(`fennec_http::instance`); the node deletes it, or follows over it at an attach's 409, only
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
 slot; no id, never.
 
@@ -318,16 +312,15 @@ client (`CF-Connecting-IP`) in `Fennec-Client`, an HMAC under `ENTRY_TOKEN` a
 router believes only with `--entry-token` and within 60 s (`audit::entry`),
 and drops from all it forwards (`forwarded_headers`); a router refuses an
 entry token empty or equal to another it holds, at the start and as a node
-is added (`set_node`). Every router
-answer carries `Fennec-Shard: 1`; a request that may have reached one goes
-again only as a `GET`, `HEAD`, `OPTIONS` or keyed, or, any request, from a
-guessed region's router's 503 marked `Fennec-Unsent`: it ran nowhere, as
-no router marks a request any hop may have run.
+is added (`set_node`). Every router answer carries `Fennec-Shard: 1`; a request that
+may have reached one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed,
+or, any request, after a guessed region's router's 503 marked
+`Fennec-Unsent`, which ran nowhere.
 
 ### Read replicas
 
 **[Read replicas in other regions answer only marked reads.](docs/design/read-replicas.md#marked-reads)**
-The router parses no FennecQL: only `Fennec-Read: replica` goes near, and
+Only `Fennec-Read: replica` goes near, and
 every server runs a marked request read-only on every route (`marked`, read
 in `serve_connection` alone); a failover never promotes a read replica. One
 is recorded once its node follows; taken off, its record goes first, sent to
@@ -340,31 +333,29 @@ to its tenant's lineage, which every promotion and restore keeps
 `after` waits for that change of that history (`History::continues`). SDKs
 send home's furthest position with each marked read, whose answer moves
 none; home's 504 sets it, lower or not, only over the position that read was
-sent after, never to an earlier term of its lineage. No lock is held across a call to a node, and a refused hold
-makes none (`then`, never `then_some`).
+sent after, never to an earlier term of its lineage. No lock is held across
+a call to a node, and a refused hold makes none (`then`, never `then_some`).
 
 ### Access
 
 **[A scoped token is held to its rules at every level, twice for
 writes.](docs/design/access.md#scoped-tokens)** A new path that runs a
-statement must go through `scoped()` or it reads everything, and a scoped
-write run outside `within()` goes unchecked, a named statement's call
-alone (`run_as`); a write over a row meets
-`before_overwrite` with the row as it was, which judges `update(a, b)` and
-transitions (`new.`, granting `update` alone), and `append-only` binds
-every scoped token. A scoped stream tells deletions only of ids it sent, a
-scoped poll's tag digests its answer (`content_tag`), a scoped `match`
-scores its rows alone (`Match::within`), and the algorithm is the key's,
-never the token's. A claim held as `null`, `""` or a value its rule cannot
-compare (`usable`) is a claim the token lacks: the rule naming it does
-not apply and no filter is bound to it. A claim a rule orders by holds
-the other side to its kind under any number of `not`s (`kind_held`), a row
-with no value answering as the rule written out, and an inner `get`'s rules
-are bound for the `not`s it stands under (`hold`); one inside a call or
-arithmetic -- `like`'s pattern aside -- or compared in order inside a
-value, is refused at startup (`claims_held`). A tenant claim naming no
-tenant reaches none, a `sub` of `""` is no subject, and a policy writing a
-`$<n>` of its own is refused at startup.
+statement must go through `scoped()` or it reads everything; a scoped write
+outside `within()` goes unchecked, so only a named statement's call runs
+one there (`run_as`). A write over a row meets `before_overwrite` with the
+row as it was, judging `update(a, b)` and transitions (`new.`, granting
+`update` alone); `append-only` binds every scoped token. Scoped, a stream
+tells deletions only of ids it sent, a poll's tag digests its answer
+(`content_tag`) and `match` scores its rows alone (`Match::within`); the
+algorithm is the key's, never the token's. A claim held as `null`, `""` or
+a value its rule cannot compare (`usable`) is one the token lacks: its rule
+does not apply, binding no filter. A claim a rule orders by holds the other
+side to its kind under any number of `not`s (`kind_held`), a row with no
+value answering as the rule written out; an inner `get`'s rules are bound
+for the `not`s it stands under (`hold`). Refused at startup: a claim in a
+call or arithmetic (`like`'s pattern aside) or compared in order inside a
+value (`claims_held`), and a policy writing its own `$<n>`. A tenant claim
+naming no tenant reaches none; a `sub` of `""` is no subject.
 
 **[A field a read rule withholds is held out of what a statement
 does.](docs/design/access.md#field-lists)** `fields::hold` and
@@ -388,13 +379,12 @@ the `Check` hook (`Tenants::check_scoped_writes`).
 
 **[A token is taken only from the issuers, for the audiences and clients,
 a server was told.](docs/design/access.md#whom-a-token-is-for)**
-`Demands::whom` asks `iss`, `aud` (a text or a list) and `azp` (else
-`client_id`) in `Access::check`, after the signature and before a token is
-kept, so every route meets it through `authenticate`; a refusal is 401
-naming the check, never the token's value, clears no wait, and its audit
-line names the check (`audit::refusal`). A server told none takes every
-token its keys sign (said at the start under `--jwt-keys`), and a `--jwt-*`
-flag without keys is refused. A policy names top-level claims alone, quoted
+`Demands::whom` asks `iss`, `aud` and `azp` (else `client_id`) in
+`Access::check`, after the signature and before a token is kept, so every
+route meets it through `authenticate`; a refusal is 401 naming the check,
+never the token's value, as its audit line does (`audit::refusal`), and
+clears no wait. A server told none takes every token its keys sign (said at
+the start under `--jwt-keys`); a `--jwt-*` flag without keys is refused. A policy names top-level claims alone, quoted
 where not a word (`claim_name`): a path into a nested object, or an
 unquoted name running into `-` or `:`, is refused at startup, never read; a
 role is the word after the last `for` or a quoted name (`role_of`).
@@ -428,13 +418,13 @@ too.](docs/design/quotas.md#retry-after-in-bodies)** Write one with
 
 **[fennec studio is a page with no authority of its
 own.](docs/design/http.md#studio)** Its files are served before any token
-under a strict CSP, and it sends the pasted token as any client does. An app
-embedding it hands a frozen `window.fennecHost.session` over, taken for the
-page's own origin alone and never stored, with no sign-in or sign-out beside
-it. Each statement is written in
-`studio/statements*.js`: values as parameters, a name only as FennecQL writes
-one, the typed `where` inside parentheses it cannot close;
-`transport.test.mjs` holds the in-page answers to a server's.
+under a strict CSP; it sends the pasted token as any client does. An app
+embedding it hands over a frozen `window.fennecHost.session`, taken for the
+page's own origin alone, never stored, with no sign-in or sign-out beside
+it. Its statements are written in `studio/statements*.js`: values as
+parameters, a name only as FennecQL writes one, the typed `where` inside
+parentheses it cannot close; `transport.test.mjs` holds the in-page answers
+to a server's.
 
 **[An agent's MCP tool is a statement, held to the token as `/query`
 is.](docs/design/http.md#mcp)** A model's filter goes in parsed, never as
@@ -443,8 +433,7 @@ never cut. The origin is asked before the token, and with no token only a
 `Host` naming localhost or an address is answered; `write` never changes a
 schema or compacts. A named statement the token may call is a `call_<name>`
 tool, its answer held to the bounds before a write's block lands
-(`mcp::land`). `<file>.lock` (`fennec_abi::lock`) is taken by `fennec
-mcp --file`, `fennec-server --file`, the native library and the shell alike.
+(`mcp::land`).
 
 **[An `Idempotency-Key` makes a write
 once.](docs/design/http.md#idempotency-keys)** The write and its key's
@@ -455,8 +444,7 @@ none.
 **[Refusals and schema changes are logged; a refusal
 waits.](docs/design/http.md#audit)** Only `audit::verified`, where a token
 checks out, clears the wait; a new check must call it, and nothing infers
-it from an answer. A node believes `Fennec-Router` from the router alone; a
-test opening the log is a `[[test]]` of its own.
+it from an answer. A node believes `Fennec-Router` from the router alone.
 
 **[Every request has an id, in its answer and every line it
 wrote.](docs/design/http.md#request-ids)** `tests/datadog.rs` and
@@ -483,6 +471,10 @@ write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
 (`http::write_parts`).
 
+**[A chunked body grows as it comes, held to the
+ceiling](docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
+read two ways is refused (`chunked_framing`, `end_refused`).
+
 **[A plain `get` is written as JSON from the stored
 documents.](docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`
@@ -493,10 +485,10 @@ byte for byte (`tests/query_json.rs`).
 spawn through `accept::spawn`, which hands back a refused thread's stream
 for `accept::refuse` to answer on the accepting thread, non-blocking,
 counted by `reason` and marked `Fennec-Unserved`: unrun to the entry and
-relays, as a standby's 409 marked `Fennec-Follows` is. Its writing shut after
-the answer, it goes to the one lingering thread (`accept::linger`) to be
-read off until the client ends it, closed at once only with no such thread,
-no room (`most_held`) or an answer not sent whole. A new accept loop calls
+relays, as a standby's 409 marked `Fennec-Follows` is. Its writing then
+shut, the one lingering thread (`accept::linger`) reads it off till the
+client ends it; only no such thread, no room (`most_held`) or an answer not
+sent whole closes it at once. A new accept loop calls
 `accept::ready()` and `accept::widen` before its first accept.
 
 ### The HNSW graph
@@ -538,8 +530,8 @@ each beside its walk.
 
 **[A server keeps its graphs in its
 file.](docs/design/hnsw.md#graphs-in-the-tail)** `link::keep` appends a
-changed graph (kind 4) under the read lock (`Database::save_graphs`); it
-moves no counter and no replica is sent it.
+changed graph (kind 4) under the read lock (`Database::save_graphs`),
+moving no counter, sent to no replica.
 
 **[A vector written again is one node.](docs/design/hnsw.md#aliases)**
 Every insert, batch and deferral goes through `VectorIndex::place`: a
@@ -679,45 +671,43 @@ text's authority.](docs/design/named-statements.md#what-is-built)**
 `create statement`, `drop statement` and `call` parse into
 `fennec_core::named`'s trees, boxed so a `Statement` stays a `get`'s size.
 A definition is record kind 13 (`engine/stored.rs`), one write `writes_in`
-counts, alone or in a block (`Undo::Statements`), its table an `Arc`
-changed by a new one, kept by every image and by `Beside`, applied by a
-replica and passed over by `/_changes`; every build keeps it. With the
-feature an open reads its text back (`fennec_ql::install`) and holds its
-digest, and a schema change's commit holds its `depends`: refused naming
-it, or marked broken -- `Database::internally`, an apply, an open -- never
-failing one, the mark derived, never stored; a replacement keeps the old
-tree's contract, and a writing body reads through an index or says `scans`
-(`body_checked`). A call is never read-only by its statement: asked under
-the lock it then runs under, never apart from it (`call_reads`,
-`Database::reads`), one whose body writes runs in its caller's block under
-the write lock (`Database::call`), one that reads through the read
-executor over `&Database` (`read_call`, pinned by `pin_call`), which
-refuses a body that writes and takes no write lock, block or counter: a
-replica, a read-only server, a marked read and a query across tenants
-answer it. Each is judged statement, claims, arguments, `check`, broken
-(`callee`), answers its last statement and is put back past
-`--call-max-rows`, its rows its thread's (`call::LEFT`). A scoped token calls what a `call`
-line grants (else a missing one's 404; `* call` refused), as itself (`as`
-403), alone in its `/batch`, held to `--call-rate`; `judge_call` holds the
-body to `append-only` under the lock and `run_as` runs it outside
-`within()`, the one statement so, unmasked, its refusals told
-(`told_call`). `POST /_call/<name>` is the `call <name> $1` it stands for,
-run as `/query` runs it, a read-only server's 403 for one that writes after
-its judgment (at `/batch` too), a freeze's or a lapsed lease's refusal
-before it unless this copy reads it; a
-call is counted as that shape, its slow line naming the version, traced
-with `db.stored_procedure.name`, and the router's route `call`, never its
-name. A sync replica refuses them (`NAMED`); the
-router reads a tenant's with the grammar. Readers upgrade before a primary
-defines one (RELEASING.md, `make upgrade-check`). `$name` is a definition's alone, and `call` and `statements`
-reserve no word (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's
-and fennec-ql's `statements` feature, outside `full`: the server, the shell
-and the native library name it, the module refuses in words of its own,
-and a path only a definition takes stays out of the hot parse, `#[cold]`.
-`Definition::canonical` writes a field only where it holds something and an
-operator by a byte of its own; a change reading a stored text otherwise
-raises `GRAMMAR_EPOCH`, and `make fennecql-corpus` holds every FennecQL text
-of the repository to main's tree.
+counts, alone or in a block (`Undo::Statements`), kept by every image,
+`Beside` and build, applied by a replica and passed over by `/_changes`.
+With the feature an open reads its text back (`fennec_ql::install`) and
+holds its digest. A schema change's commit holds its `depends`: refused
+naming it, or marked broken (`Database::internally`, an apply, an open),
+never failing; the mark is derived, never stored. A replacement keeps the
+old tree's contract; a writing body reads through an index or says `scans`
+(`body_checked`). Whether a call writes is asked under the lock it then
+runs under, never of its statement or apart (`call_reads`,
+`Database::reads`): a writing body runs in its caller's block under the
+write lock (`Database::call`), a reading one over `&Database` (`read_call`,
+pinned by `pin_call`), refusing a write and taking no write lock, block or
+counter, so a replica, a read-only server, a marked read and a query across
+tenants answer it. A call is judged statement, claims, arguments, `check`,
+broken (`callee`), answers its last statement and is put back past
+`--call-max-rows`, its rows its thread's (`call::LEFT`). A scoped token
+calls what a `call` line grants (else a missing one's 404; `* call`
+refused), as itself (`as` 403), alone in its `/batch`, held to
+`--call-rate`; `judge_call` holds the body to `append-only` under the lock,
+and `run_as`, the one statement so, runs it outside `within()`, unmasked,
+its refusals told (`told_call`). `POST /_call/<name>` is `call <name> $1`
+run as `/query` runs it: a writing one meets a read-only server's 403 after
+its judgment (at `/batch` too), a freeze's or lapsed lease's refusal before
+it unless this copy reads it. A call is counted, logged and traced as that
+shape (`db.stored_procedure.name`), the router's route `call`, never its
+name. A sync replica refuses them (`NAMED`); the router reads a tenant's
+with the grammar; readers upgrade before a primary defines one
+(RELEASING.md, `make upgrade-check`). `$name` is a definition's alone;
+`call` and `statements` reserve no word (`NAMED_COMMANDS`, never
+`COMMANDS`). The `statements` feature, fennec-core's and fennec-ql's, is
+outside `full`, named by the server, the shell and the native library; the
+module refuses in words of its own, and a path only a definition takes is
+`#[cold]`, out of the hot parse. `Definition::canonical` writes a field
+only where it holds something and an operator by a byte of its own; a
+change reading a stored text otherwise raises `GRAMMAR_EPOCH`, and
+`make fennecql-corpus` holds every FennecQL text of the repository to
+main's tree.
 
 ### Held writes
 
@@ -996,13 +986,13 @@ refused.
 
 **[An app keeps its database through
 `fennec-ffi`.](docs/design/native-and-sync.md#the-native-library)** A text
-is answered through `fennec-abi`, as the browser module's is, to the same
-bytes. A handle indexes a table of `Arc`s, never a pointer; every
-call returns a code under `catch_unwind`, built in the `ffi` profile,
-which unwinds; `include/fennec.h`, by hand, is held to the exports by a
-test. A long read pins, the fsync runs after the lock and a buffered write
-goes behind it (`Native::after`), as a server's; JNI passes text as UTF-8
-bytes; `<file>.lock` is an `fcntl` record lock (Windows: `LockFileEx`), never `flock`.
+is answered through `fennec-abi` to the browser module's bytes. A handle
+indexes a table of `Arc`s, never a pointer; every call returns a code under
+`catch_unwind`, built in the unwinding `ffi` profile; a test holds the
+hand-written `include/fennec.h` to the exports. As a server's, a long read
+pins and the fsync and a buffered write go after the lock
+(`Native::after`); JNI passes text as UTF-8 bytes; `<file>.lock` is an
+`fcntl` record lock (Windows: `LockFileEx`), never `flock`.
 
 **[A replica's sync is a state machine; the network is the
 binding's.](docs/design/native-and-sync.md#sync-core)** `fennec_abi::sync`
@@ -1012,8 +1002,8 @@ has none of it.
 
 **[Both sync runners are held to one scenario
 file.](docs/design/native-and-sync.md#sync-scenarios)** A behaviour of
-either changes in `integrations/sync-scenarios.json` first; `make
-sync-scenarios-check` fails unless both ran every scenario.
+either changes in `integrations/sync-scenarios.json` first;
+`make sync-scenarios-check` fails unless both ran every scenario.
 
 ### The router
 
@@ -1030,68 +1020,65 @@ errno; head and body are one `writev`. One never sent whole, the retry
 spent, is the router's 503 marked `Fennec-Unsent` (`region::unsent`),
 never a 502, and never once a try went whole (`Stage::Retried`); a node's
 mark is dropped (`answer_out`), a relayed router's too once a hop before
-went whole (`relay_send`, `after_cut`'s `ran`): a 502. Every dial goes through `dial::resolve`, caching nothing; every
-body read allocates through `zeroed` and refuses an answer with no length.
-A held request watches its client for the head (`answered_or_gone`,
-`relay_send` at a relay): an end goes on to the node, never taken for
-gone; a reset lets the node's connection go.
+went whole (`relay_send`, `after_cut`'s `ran`): a 502. Every dial goes
+through `dial::resolve`, caching nothing; every body read allocates through
+`zeroed` and refuses an answer with no length. A held request watches its
+client for the head (`answered_or_gone`, `relay_send` at a relay): an end
+goes on to the node, never taken for gone; a reset lets the node's
+connection go.
 
 **[A failover ends what the router has out to the node for the tenants it
 moved.](docs/design/router.md#failover-cuts)** `promote_on` has `Pool::cut`
 shut what is out to the node under the tenant's keyed mark (`mark_of`),
 one word with the connection's state, never an answer begun (`ANSWERING`)
-nor a descriptor reused (`CLOSED` before the close); a
-cut request follows `replayable`'s rule, and a forward reads `Pool::moved`
-before the directory and before its first byte. Only a failover cuts,
-granting the nodes it moved tenants to as it ends (`granted_after`). A
-router following the directory cuts too, as a write lands (`Arrived`)
-naming the node failed over off (`failed_from`, cleared by every other: a
-move cuts nothing), every
-bucket moved first (`cut_all`); it grants nothing, asking a copy that
-refuses a replay unrun again while its client stays, counted once, for
-two thirds of the recorded lease or `--upstream-timeout`, whichever is
-sooner (`copy_pause`).
+nor a descriptor reused (`CLOSED` before the close); a cut request follows
+`replayable`'s rule, and a forward reads `Pool::moved` before the directory
+and before its first byte. Only a failover cuts, granting the nodes it
+moved tenants to as it ends (`granted_after`). A router following the
+directory cuts too, as a write lands (`Arrived`) naming the node failed
+over off (`failed_from`, cleared by every other: a move cuts nothing),
+every bucket moved first (`cut_all`); it grants nothing, asking a copy
+refusing a replay unrun again while its client stays, for the sooner of two
+thirds of the recorded lease and `--upstream-timeout` (`copy_pause`).
 
 **[A query across tenants is the router's admin's, merged as the request
 says.](docs/design/router.md#queries-across-tenants)** Nodes run it
-read-only; the router parses no FennecQL, fails and names a tenant its
-merge cannot hold exactly, and refuses (413) past its bounds, never cuts.
+read-only; the router fails and names a tenant its merge cannot hold
+exactly, and refuses (413) past its bounds, never cuts.
 
 ### Integrations and deploy
 
 **[`integrations/` may use outside packages; the crates may
 not.](docs/design/integrations.md#integrations)** A builder change starts
 in `web/builder.js` and a case in `golden.mjs`, then every SDK's follows,
-held to `integrations/builder-golden.json`; `make types-check` holds
-`fennec.d.ts` to `fennec.js`. A builder tab on the site (a FennecQL page's,
-Your language's tour) is a golden case's chain rendered by
+held to `integrations/builder-golden.json` and `make types-check`. A
+builder tab on the site is a golden case's chain rendered by
 `site/builder_tabs.py`, never written by hand: its statement held to the
 page's or written from the case, the JS and Python tabs run by its
 `--check`, the others tests of their SDKs (`make docs-builder`); a
-builder's API change owes its renderer. Go's and .NET's SDKs bound a
-request by its context or token, never the HTTP client's timeout; a
-store checks its names against FennecQL's and passes values as
+builder's API change owes its renderer. Go's and .NET's SDKs bound a request by its context or token, never the HTTP client's
+timeout; a store checks its names against FennecQL's and passes values as
 parameters.
 
 **[The desktop app is a window on a studio a `fennec-server` serves, one
-server per file.](docs/design/integrations.md#studio-desktop)**
-`integrations/studio-desktop` starts a server only in `server.ts`, its token
+server per file.](docs/design/integrations.md#studio-desktop)** In
+`integrations/studio-desktop` only `server.ts` starts a server, its token
 in an allowlisted environment (never argv), its stdin a pipe the app holds
-(`--exit-on-stdin-close`: no server outlives the app, `kill -9` included); a
-token reaches a page only through `session.ts` (a frozen
-`window.fennecHost`, defined only where `location.origin` is the server's).
-A studio window is `sandbox: true` (the event bridge only) and held to its origin, a window with the RPC bridge to its `views://` folder
-(`holdTo`). A saved server's token is in the Keychain alone with its address
-(`token.ts`), never sent elsewhere or along a redirect; a failure is a
-notice window, never a native alert. Each window has its own data store, a
-removed connection's cleared by `STORE_KINDS` (never
-`clearStorageData("all")`) after its window closes (`checks/storage.mjs`).
-The shipped bundle holds no test hook: an environment read in it is one
-unless behind `__TESTABLE__` (`checks/release.mjs`). The toolchain is fetched into
-`.hutch-home/`, never `~/.hutch` or a shell file, and held to
-`hutch-pin.json` (`scripts/electrobun.mjs`); signing runs only by
-hand from `main`, in an Environment given its reviewer and `main` rule
-before its secrets
+(`--exit-on-stdin-close`: none outlives the app, `kill -9` included); only
+`session.ts` gives a page a token, a frozen `window.fennecHost` defined
+where `location.origin` is the server's alone. A studio window is
+`sandbox: true` (the event bridge only) and held to its origin, one with
+the RPC bridge to its `views://` folder (`holdTo`). A saved server's token
+is in the Keychain alone with its address (`token.ts`), never sent
+elsewhere or along a redirect; a failure is a notice window, never a
+native alert. Each window has its own data store, a removed connection's
+cleared after its window closes by `STORE_KINDS`, never
+`clearStorageData("all")` (`checks/storage.mjs`). The shipped bundle holds
+no test hook, such as an environment read outside `__TESTABLE__`
+(`checks/release.mjs`). The toolchain is fetched into `.hutch-home/`,
+never `~/.hutch` or a shell file, and held to `hutch-pin.json`
+(`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an
+Environment given its reviewer and `main` rule before its secrets
 (`desktop.yml`).
 
 **[Grafana's data source binds a dashboard's values; it never splices
@@ -1110,12 +1097,12 @@ promoted by `POST /_replication/promote` and the units switched at once;
 **[A release is installed from its own files, each checked before it is
 used.](docs/design/integrations.md#install-channels)** Homebrew's formula,
 `install.sh`, the `.deb` and the `.rpm` install `release.yml`'s binaries by
-checksum, building none, so a published release's assets are never replaced
-(`publish` only adds). The formula is `tools/homebrew-formula.py`'s alone,
-held by its `--check` and `--verify`, and pushed by `packages.yml` once
-published, never a pre-release or a version older than the tap's, one run at
-a time, `HOMEBREW_TAP_TOKEN` a `homebrew` environment secret given `git` by
-its environment alone. `install.sh` holds only functions, assignments and
+checksum, building none; a published release's assets are never replaced
+(`publish` only adds). The formula is `tools/homebrew-formula.py`'s alone
+(`--check`, `--verify`), pushed by `packages.yml` once published, never a
+pre-release or a version older than the tap's, one run at a time, its
+`HOMEBREW_TAP_TOKEN` a `homebrew` environment secret given `git` by its
+environment alone. `install.sh` holds only functions, assignments and
 comments before its last line, `main "$@"` (`site/build.py`), takes curl or
 a wget checking certificates, checks the sum before it unpacks, touches no
 shell file and evals nothing (`site/test_install.sh`). A package is
@@ -1128,48 +1115,46 @@ its checksum.
 - `Error` (`fennec-core/src/error.rs`) is the single error type,
   allocation-free, no `Box`; `fennec-http` maps it onto HTTP statuses
   (`api::status_of`).
-- [Unit tests live inline](docs/design/conventions.md#test-binaries) (`#[cfg(test)] mod tests`);
-  cross-crate and protocol tests in `crates/*/tests/`, a file each, one
-  binary a crate through `tests/all.rs` (`autotests = false`: a new file
-  needs its `mod` line). A test reading the process's own counts
-  (`/_metrics`, the statements'), one whose servers hold many threads (past
-  macOS's 2 048 a process), and `tests/audit.rs` and `tests/refusals.rs` are
-  each a `[[test]]` of its own, the other tests' servers asking with no refusal
-  wait (`audit::set_delay(0)`). Measurement programs (`examples/`,
-  `fennec-bench`) are wired to `make`, not CI.
-- [A test that fails and passes on a rerun](docs/design/conventions.md#reruns) is a bug, the
-  test's or the code's: reproduce it in a loop under load (`docker run
-  --cpus=3` beside busy loops is GitHub's runner) and fix it, never retry it
-  away or lengthen a sleep. A test waits for an event, not a time: it holds
-  what it races (`Replica.setOnline(false)` before a write it reads back) and
-  bounds only the wait for what must happen. A step launching Chrome reads
-  Chrome's files first (`warm`, `warm-chrome.mjs`): a longer wait for
-  `waiting for dynamic debugging port` only moves the bound. A CI log names
-  every failing test with its assertion (`node --test
-  --test-reporter=spec`, Gradle's `testLogging`, `dart test`'s GitHub
-  reporter); a failing mobile job uploads `test-reports-android` or
-  `test-results-apple`.
-- [A test reads the clock from below](docs/design/conventions.md#the-clock) (`took >= wait`;
-  `taskpolicy -c background` gives macOS's timer leeway), bounding it from
-  above only where the time is the property, by what it stands against with
-  seconds to spare; elsewhere it asserts the event, the count or the order
-  (`audit::would_wait`, `Router::grants_waiting`, `Router::round_grants`).
-  A timeout given a test's servers or clients bounds every request they
-  make.
-- [A server a test or a harness starts](docs/design/conventions.md#ports) listens on port 0, never
-  a fixed port or one found free and handed over, found by its
-  `listening on: http://<address>` stderr line, a router told its nodes by
-  the addresses they said; only a site needing its address before it binds
-  takes a port the system picks, a stand-in listener holding it till then.
-- [A change a user meets](docs/design/conventions.md#docs-a-change-owes) says so where a user
-  looks, in the same pull request: its page under `site/content/docs/`,
+- [Unit tests live inline](docs/design/conventions.md#test-binaries)
+  (`#[cfg(test)] mod tests`); cross-crate and protocol tests in
+  `crates/*/tests/`, a file each, one binary a crate through `tests/all.rs`
+  (`autotests = false`: a new file needs its `mod` line). A test reading the
+  process's own counts (`/_metrics`, the statements'), one whose servers
+  hold many threads and one opening the audit log (`tests/audit.rs`,
+  `tests/refusals.rs`) are each a `[[test]]` of its own, the other tests'
+  servers asking with no refusal wait (`audit::set_delay(0)`). Measurement
+  programs (`examples/`, `fennec-bench`) are wired to `make`, not CI.
+- [A test that fails and passes on a rerun](docs/design/conventions.md#reruns)
+  is a bug, the test's or the code's: reproduce it in a loop under load
+  (`docker run --cpus=3` beside busy loops is GitHub's runner) and fix it,
+  never retry it away or lengthen a sleep. A test waits for an event, not a
+  time: it holds what it races (`Replica.setOnline(false)` before a write it
+  reads back) and bounds only the wait for what must happen. A step
+  launching Chrome reads Chrome's files first (`warm`, `warm-chrome.mjs`),
+  never waiting longer for its port. A CI log names every failing test with
+  its assertion (`node --test --test-reporter=spec`, Gradle's
+  `testLogging`, `dart test`'s GitHub reporter); a failing mobile job uploads
+  `test-reports-android` or `test-results-apple`.
+- [A test reads the clock from below](docs/design/conventions.md#the-clock)
+  (`took >= wait`), bounding it from above only where the time is the
+  property, by what it stands against with seconds to spare; elsewhere it
+  asserts the event, the count or the order (`audit::would_wait`,
+  `Router::grants_waiting`, `Router::round_grants`). A timeout given a
+  test's servers or clients bounds every request they make.
+- [A server a test or a harness starts](docs/design/conventions.md#ports)
+  listens on port 0, never a fixed port or one found free and handed over,
+  found by its `listening on: http://<address>` stderr line, a router told
+  its nodes by the addresses they said; only a site needing its address
+  before it binds takes a port the system picks, a stand-in listener
+  holding it till then.
+- [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
+  says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs
   index where a visitor would pick fennecdb for it, and the SDK lists
   (`languages.html`, `mobile.html`, `sharding-read-replicas.html`,
   `integrations.html`) when an SDK changes; after sections change, commit
   the next `site` deploy's `search-embeddings` artifact as
-  `site/search-embeddings.json` (`gh run download <run> -n
-  search-embeddings`) where it differs.
+  `site/search-embeddings.json` where it differs.
 - An invariant's rule goes in CLAUDE.md in a few sentences: what must hold,
   what must never be done, what enforces it and what a change owes. Its
   measurements, rejected alternatives and history go in its `docs/design/`
