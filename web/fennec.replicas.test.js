@@ -284,8 +284,9 @@ test('reads near a read replica are answered there, never older than the client 
     assert.deepEqual((await db.from('notes').order('body').rows()).map((r) => r.body), ['a', 'b']);
     read = sent.at(-1);
     assert.equal(read.headers['fennec-read'], 'replica');
-    await assert.rejects(() => home.from('notes').rows(), (e) => e instanceof FennecError && e.status === 502);
-    await assert.rejects(() => db.from('notes').insert({ body: 'c' }), (e) => e instanceof FennecError && e.status === 502);
+    // Home gone, the router never sends them: its own 503 (`Fennec-Unsent`).
+    await assert.rejects(() => home.from('notes').rows(), (e) => e instanceof FennecError && e.status === 503);
+    await assert.rejects(() => db.from('notes').insert({ body: 'c' }), (e) => e instanceof FennecError && e.status === 503);
   } finally {
     await w.close();
   }
@@ -341,7 +342,7 @@ test('a call marked read is answered by the read replica, a call that writes goe
     w.eu1.close();
     assert.deepEqual((await db.call('bodies', null, { read: true })).rows.map((r) => r.body), ['a']);
     assert.equal(sent.at(-1).headers['fennec-read'], 'replica');
-    await assert.rejects(() => connect(w.url).call('bodies'), (e) => e instanceof FennecError && e.status === 502);
+    await assert.rejects(() => connect(w.url).call('bodies'), (e) => e instanceof FennecError && e.status === 503);
   } finally {
     await w.close();
   }
