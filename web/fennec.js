@@ -43,7 +43,7 @@ import {
 import { FennecHttp, connect, sseEvents } from './http.js';
 
 export {
-  FennecError, Query, Call, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
+  FennecError, Query, Call, Param, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, param,
 } from './builder.js';
 export { FennecHttp, connect, sseEvents } from './http.js';
 
@@ -1534,6 +1534,12 @@ class SyncQuery extends Query {
   insert(docs, opts = {}) {
     return this.context.write('insert', this, docs, opts);
   }
+  // FennecQL's `insert`, applied as an insert is: a held id the replica
+  // holds is refused here, before anything is sent, and one only the
+  // server holds is its 409, the rows put back.
+  insertNew(docs, opts = {}) {
+    return this.context.write('insertNew', this, docs, opts);
+  }
   update(patch, opts = {}) {
     if (opts?.wait !== undefined) throw new FennecError(LOCAL_WAIT);
     return this.context.write('update', this, patch, opts);
@@ -1876,6 +1882,8 @@ export class FennecSync {
    *   a temporary id, and is matched with the server's copy by the key;
    *   one naming its id is applied under it. Without either it waits for
    *   the server: with nothing to match it by, the copy would leave two.
+   *   An `insertNew` is sent and applied as `insert`, which refuses an id
+   *   the replica holds as the server refuses one it holds.
    * - An update or a delete works by the filter, the rows it reaches read
    *   first: putting them back is the undo. A row of an insert the server
    *   has not answered has a temporary id the server never saw, so it is
@@ -1889,7 +1897,8 @@ export class FennecSync {
     if (opts?.returning || ((verb === 'update' || verb === 'delete') && q.picks)) {
       throw new FennecError(PICKED);
     }
-    if (verb === 'insert') {
+    if (verb === 'insert' || verb === 'insertNew') {
+      const write = verb === 'insert' ? 'toInsert' : 'toInsertNew';
       const list = Array.isArray(arg) ? arg : [arg];
       if (list.length === 0) return null;
       const docs = list.map((d) => {
@@ -1903,7 +1912,7 @@ export class FennecSync {
       // `require` goes to the server with the write, and is held here too,
       // its reason with it.
       const required = { require: opts?.require, reason: opts?.reason };
-      const line = base.toInsert(docs, required);
+      const line = base[write](docs, required);
       const named = docs.filter((d) => d.id != null).map((d) => d.id);
       if (!key && named.length < docs.length) {
         return { lines: [line], undo: { c, del: [], put: '[]' }, temps: [], count: docs.length };
@@ -1924,7 +1933,7 @@ export class FennecSync {
         const { id: _, ...rest } = d;
         return { id: t, ...rest };
       });
-      this.#local.run(...from(c).toInsert(local, required));
+      this.#local.run(...from(c)[write](local, required));
       this.#nextTemp = next;
       return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
     }
@@ -2047,12 +2056,17 @@ export class FennecSync {
     this.#local.run(PUT_TEMP, [t.temp, t.collection, t.key, t.op, t.until]);
   }
 
-  /** Puts back what writes did, the last first: each step's ids deleted, its rows written back. */
+  /**
+   * Puts back what writes did, the last first: each step's ids deleted,
+   * its rows written back -- but for the ids the server sent since
+   * (`kept`, `#heard`), whose rows stay as the server sent them.
+   */
   #undo(steps) {
     for (const s of steps.reverse()) {
       try {
-        this.#deleteLocal(s.c, s.del);
-        const rows = JSON.parse(s.put);
+        const kept = new Set(s.kept);
+        this.#deleteLocal(s.c, s.del.filter((id) => !kept.has(id)));
+        const rows = JSON.parse(s.put).filter((r) => !kept.has(r.id));
         if (rows.length) this.#local.run(...from(s.c).toInsert(rows));
       } catch (e) {
         this.#onError?.(e);
@@ -2321,6 +2335,7 @@ export class FennecSync {
     if (at < 0) return;
     this.#queue.splice(at, 1);
     this.#undo(JSON.parse(op.undo));
+    this.#rebase(op);
     this.#local.run('del _sync_queue where id = $1', [op.n]);
     const gone = this.#temps.filter((t) => t.op === op.n).map((t) => t.temp);
     this.#deleteLocal('_sync_temps', gone);
@@ -2378,6 +2393,10 @@ export class FennecSync {
     this.#deleteLocal('_sync_temps', dropped.map((t) => t.temp));
     this.#temps = this.#temps.filter((t) => !dropped.includes(t));
     await this.#insertChunked(c, rows);
+    // Every id but the temporary rows kept: a row an unanswered write
+    // deleted is not held, so a seed lacking it names it too. After the
+    // rows, so a seed that fails part way marks nothing.
+    if (this.#queue.length) this.#heard(c, null, keep);
     s.cursor = seq;
     s.seeded = true;
     s.fresh = false;
@@ -2392,11 +2411,68 @@ export class FennecSync {
     this.#reconcile(s, puts);
     this.#deleteLocal(s.collection, msg.dels ?? []);
     await this.#insertChunked(s.collection, puts);
+    if (this.#queue.length) this.#heard(s.collection, [...puts.map((r) => r.id), ...(msg.dels ?? [])]);
     const seq = msg.seq ?? s.cursor;
     this.#dropPassed(s.collection, seq);
     s.cursor = Math.max(seq, s.cursor);
     this.#afterApply(s);
     return true;
+  }
+
+  /**
+   * The server sent ids of `c`, each as it is now or gone: a change's
+   * `ids`, or, for a seed, every id but the temporary rows it `keep`s. What
+   * a write it has not answered would put back of them stood before that:
+   * refused, the write leaves them as the server sent them (its steps'
+   * `kept`), else an insert refused for an id the server holds deleted the
+   * server's row the stream had brought. The native core's rule
+   * (`Sync::heard`). Each write's ids are read once (`touched`), so a
+   * change reaching none of them rewrites nothing; it runs once the rows
+   * are in, as the native core marks them in the change's own block.
+   */
+  #heard(c, ids, keep) {
+    for (const op of this.#queue) {
+      op.touched ??= touchedBy(op.undo);
+      const mine = op.touched.get(c);
+      if (!mine) continue;
+      const hit = ids ? ids.filter((id) => mine.delete(id)) : [...mine].filter((id) => !keep.has(id));
+      if (!ids) for (const id of hit) mine.delete(id);
+      if (!hit.length) continue;
+      const steps = JSON.parse(op.undo);
+      for (const st of steps) if (st.c === c) st.kept = [...(st.kept ?? []), ...hit];
+      op.undo = JSON.stringify(steps);
+      this.#keep(op);
+    }
+  }
+
+  /**
+   * A refused write's rows are put back as the server holds them, but the
+   * next waiting write over each of them read them as the refused one left
+   * them, which the server never held: refused in turn, it would write that
+   * back. So its undo gets a step of its own, run last, putting back each
+   * such row as it is now, or deleting it where it is gone. Only the next
+   * write over a row: the one after read that one's row, right if it lands.
+   * The native core's rule (`Sync::rebase`).
+   */
+  #rebase(refused) {
+    const left = touchedBy(refused.undo);
+    for (const op of this.#queue) {
+      op.touched ??= touchedBy(op.undo);
+      const steps = [];
+      for (const [c, ids] of left) {
+        const mine = op.touched.get(c);
+        if (!mine) continue;
+        const both = [...ids].filter((id) => mine.has(id));
+        if (!both.length) continue;
+        for (const id of both) ids.delete(id);
+        const rows = this.#local.run(...from(c).where('id', 'in', both).toFennecQL()).rows ?? [];
+        const here = new Set(rows.map((r) => r.id));
+        steps.push({ c, del: both.filter((id) => !here.has(id)), put: JSON.stringify(rows) });
+      }
+      if (!steps.length) continue;
+      op.undo = JSON.stringify([...steps, ...JSON.parse(op.undo)]);
+      this.#keep(op);
+    }
   }
 
   /**
@@ -2817,6 +2893,19 @@ function why(status, body) {
 }
 
 /** What another tab needs of a write to send it. */
+/** The ids each collection's steps of an undo would delete or write back, by collection. */
+function touchedBy(undo) {
+  const by = new Map();
+  for (const s of JSON.parse(undo)) {
+    const kept = new Set(s.kept);
+    let ids = by.get(s.c);
+    if (!ids) by.set(s.c, (ids = new Set()));
+    for (const id of s.del) if (!kept.has(id)) ids.add(id);
+    for (const r of JSON.parse(s.put)) if (!kept.has(r.id)) ids.add(r.id);
+  }
+  return by;
+}
+
 function wire(op) {
   return { path: op.path, body: op.body, key: op.key, label: op.label };
 }

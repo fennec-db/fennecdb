@@ -575,9 +575,9 @@ rewritten (a replaced run named in `ycsb/superseded.tsv`), and
 
 **[`insert` never writes over; `put`
 does.](docs/design/writes.md#insert-and-put)** A held id is
-`Error::Duplicate` (409); a scoped rewrite keeps `insert`, and the JS
-builder's `.insert()` sends `put`, which the sync's undo writes rows back
-through.
+`Error::Duplicate` (409); a scoped rewrite keeps `insert`, and the
+builders' `.insert()` sends `put`, which the sync's undo writes rows back
+through, `.insertNew()` `insert`.
 
 **[A `set` reads the row it writes, and every write says what it
 did.](docs/design/writes.md#arithmetic-in-set)** `query::arith` never

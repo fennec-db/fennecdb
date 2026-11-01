@@ -17,10 +17,30 @@ List<Map<String, Object?>> golden() {
   return (jsonDecode(File(path).readAsStringSync()) as List).cast<Map<String, Object?>>();
 }
 
+/// The `$param`s of the case being run, by name: each use of a name is the
+/// one [Param].
+final held = <String, Param>{};
+
+/// An inner query of `in`: the steps of a chain from `from`, unended.
+Query query(List steps) {
+  final first = steps.first as Map;
+  var q = Query.from((first['args'] as List)[0] as String);
+  for (final s in steps.skip(1).cast<Map>()) {
+    q = step(q, s['op'] as String, (s['args'] as List?) ?? const []);
+  }
+  return q;
+}
+
 /// An argument as a Dart caller hands it over: `$date` a DateTime, `$f32` a
-/// Float32List, an object a map.
+/// Float32List, `$param` a [Param] (the same one wherever its name comes
+/// again), `$query` a [Query], an object a map.
 Object? value(Object? v) {
   if (v is Map) {
+    if (v.containsKey(r'$param')) {
+      final p = v[r'$param'] as List;
+      return held.putIfAbsent(p[0] as String, () => Param(value(p[1])));
+    }
+    if (v.containsKey(r'$query')) return query(v[r'$query'] as List);
     if (v.containsKey(r'$date')) return DateTime.parse(v[r'$date'] as String);
     if (v.containsKey(r'$f32')) {
       return Float32List.fromList((v[r'$f32'] as List).map((x) => (x as num).toDouble()).toList());
@@ -92,7 +112,7 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       ('near', _) =>
         q.near(a[0] as String, value(a[1]), ef: opt(a, 2, 'ef') as int?, exact: opt(a, 2, 'exact') as bool? ?? false),
       ('rerank', _) => q.rerank(a[0] as String, value(a[1]), candidates: opt(a, 2, 'candidates') as int?),
-      ('match', _) => q.match(a[0] as String, a[1] as String, fuzzy: opt(a, 2, 'fuzzy'), prefix: opt(a, 2, 'prefix')),
+      ('match', _) => q.match(a[0] as String, value(a[1])!, fuzzy: opt(a, 2, 'fuzzy'), prefix: opt(a, 2, 'prefix')),
       ('fuse', _) => q.fuse(k: opt(a, 0, 'k') as int?, candidates: opt(a, 0, 'candidates') as int?),
       ('highlight', _) => q.highlight(a[0] as String, pre: opt(a, 1, 'pre'), post: opt(a, 1, 'post')),
       ('snippet', _) => q.snippet(a[0] as String, a[1] as int,
@@ -104,7 +124,8 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       // One key as itself, several (or none) as the list they are.
       ('group', 1) => q.group(value(a[0])!),
       ('group', _) => q.group([for (final k in a) value(k)!]),
-      ('order', _) => q.order(a[0] as String, a.length > 1 ? a[1] as String : 'asc', opt(a, 2, 'collate') as String?),
+      // A key is a field's name, or an expression.
+      ('order', _) => q.order(value(a[0])!, a.length > 1 ? a[1] as String : 'asc', opt(a, 2, 'collate') as String?),
       ('limit', _) => q.limit(a[0] as int),
       ('offset', _) => q.offset(a[0] as int),
       ('require', _) => q.require(a[0] as int, reason: opt(a, 1, 'reason') as String?),
@@ -153,13 +174,14 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
 
 /// The statement a chain makes, or the builder's refusal.
 Future<(String?, List<Object?>?, String?)> run(List steps) async {
+  held.clear();
   if ((steps[0] as Map)['op'] == 'call') return runCall(steps);
   ({String text, List<Object?> params})? sent;
   try {
     var q = Query.from(((steps[0] as Map)['args'] as List)[0] as String).bind((text, params) async {
       sent = (text: text, params: params);
       // The binding's answers are made by its own reader; these stand in.
-      if (RegExp(r'^(put|set|del) ').hasMatch(text)) return Answer.of({'kind': 'affected', 'count': 0});
+      if (RegExp(r'^(put|insert|set|del) ').hasMatch(text)) return Answer.of({'kind': 'affected', 'count': 0});
       return Answer.of({
         'kind': 'rows',
         'result': {
@@ -190,6 +212,7 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'toFennecQL' => q.toFennecQL(),
         'toInsert' =>
           q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1), reason: reason(1), returning: returning(1)),
+        'toInsertNew' => q.toInsertNew(value(a[0])!, require: require(1), reason: reason(1), returning: returning(1)),
         'toUpdate' =>
           q.toUpdate(value(a[0])!, all: all(1), require: require(1), reason: reason(1), returning: returning(1)),
         'toUpsert' =>
@@ -207,6 +230,9 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
             ? q.insert(value(a[0])!, ifAbsent: absent(), require: require(1), reason: reason(1))
             : q.insertReturning(value(a[0])!,
                 returning: returning(1)!, ifAbsent: absent(), require: require(1), reason: reason(1)),
+        'insertNew' => returning(1) == null
+            ? q.insertNew(value(a[0])!, require: require(1), reason: reason(1))
+            : q.insertNewReturning(value(a[0])!, returning: returning(1)!, require: require(1), reason: reason(1)),
         'update' => returning(1) == null
             ? q.update(value(a[0])!, all: all(1), require: require(1), reason: reason(1))
             : q.updateReturning(value(a[0])!,

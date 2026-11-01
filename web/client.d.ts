@@ -4,7 +4,7 @@
 // the other.
 
 export {
-  FennecError, FennecHttp, Query, Call, and, bucket, call, connect, countDistinct, distance, expr, first, from, inc, last, not, or, raw, sseEvents,
+  FennecError, FennecHttp, Query, Call, Param, and, bucket, call, connect, countDistinct, distance, expr, first, from, inc, last, not, or, param, raw, sseEvents,
 } from './fennec.js';
 export type {
   Aggregate,

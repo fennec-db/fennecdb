@@ -56,6 +56,36 @@ thread as the app starts, so the first search does not (a `@text` index of
 `[from, to]`, and `disjunctive: true` counts past the filter's own
 condition on the field. The docs: `site/content/docs/mobile.html`.
 
+`insert` writes `put`, over a row holding a document's id; `insertNew`
+(`toInsertNew` for the text, `insertNewReturning` for the rows) writes
+FennecQL's `insert`, refused whole (409, `.duplicate`) where one does, and on
+a sync replica refused at once, before anything is sent, where the replica
+holds the id. `Value.param(300)` is one value bound once: each use writes
+the same `$1`, where the same value given twice is two parameters, so the
+amount a write takes and the amount its filter checks cannot drift apart. A
+query is the list of an `in`, run before the one around it and numbered where
+it stands; `order` takes an expression or a `distance` as well as a field;
+`match(field, text, fuzzy: true)` writes `fuzzy` alone; with `fuse()`, `match`
+and `near` are written in the order they were called:
+
+```swift
+let amount = Value.param(300)
+try await db.from("accounts").where(["name": "ada", "balance": ["gte": amount]])
+    .update(["balance": .expr("balance - ?", amount)], require: 1)
+// set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
+
+let orders = try db.from("orders")
+try await orders.where("customer", "in", db.from("customers").select("id").where("country", "TR")).rows()
+try await orders.order(.expr("n * 2"), "desc").order("item").limit(10).rows()
+try await db.from("journal").insertNew(["entry": "inv-7"] as Value)
+```
+
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `.expr`'s text, and `.raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 ## Sync with a server
 
 ```swift

@@ -112,6 +112,7 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
 typo or two away from it, and <code>prefix</code> lets the last word find
 the words it begins — what a search box needs as someone types into it.</p>
 
+{{builder "docs: products matching a misspelt word" "docs: products matching a word begun" "docs: products matching a misspelt word begun" "docs: products matching a word one edit away" "docs: a search box inside one category"}}
 <pre data-lang="fennecql">get products match title $1 fuzzy limit 10             -- "databse" finds "database"
 get products match title $1 prefix limit 10            -- "datab" finds "database", "databases"
 get products match title $1 fuzzy prefix limit 10      -- both, the last word a misspelt beginning
@@ -198,6 +199,7 @@ meaning.</p>
 a hybrid query: <a href="fennecql-vector.html#a-hybrid-query">A hybrid query</a>
 on Vector search.</p>
 
+{{builder "docs: articles ranked by words and meaning" "docs: articles since a year ranked by words and meaning" "docs: articles ranked by words and meaning, k and candidates"}}
 <pre data-lang="fennecql">get articles match body $1 near embed $2 fuse limit 10
 get articles where year >= 2024 match body $1 near embed $2 fuse limit 10
 get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10

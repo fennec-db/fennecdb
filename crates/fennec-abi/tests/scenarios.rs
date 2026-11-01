@@ -119,14 +119,21 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         }
         _ => {}
     }
-    if let Some(Value::Text(c)) = member(w, "insert") {
+    // `insert` is the builders' `insert`, which sends `put`; `insert_new`
+    // their `insertNew`, FennecQL's `insert`.
+    let put = match (member(w, "insert"), member(w, "insert_new")) {
+        (Some(Value::Text(c)), _) => Some(("put", c)),
+        (_, Some(Value::Text(c))) => Some(("insert", c)),
+        _ => None,
+    };
+    if let Some((verb, c)) = put {
         let Some(Value::List(docs)) = member(w, "docs") else {
             panic!("an insert has docs")
         };
         let body: Vec<String> = docs.iter().map(|d| doc(d, params, &mut bind)).collect();
         return match body.as_slice() {
-            [one] => format!("put {c} {one}{pick}{required}"),
-            _ => format!("put {c} [{}]{pick}{required}", body.join(", ")),
+            [one] => format!("{verb} {c} {one}{pick}{required}"),
+            _ => format!("{verb} {c} [{}]{pick}{required}", body.join(", ")),
         };
     }
     if let Some(Value::Text(c)) = member(w, "upsert") {

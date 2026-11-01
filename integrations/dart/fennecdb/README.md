@@ -33,6 +33,36 @@ ms), and answers how many it built. The builder's `facet(field, ranges:
 [0, 25, 50])` counts by ranges of numbers, each value `[from, to]`, and
 `disjunctive: true` counts past the filter's own condition on the field.
 
+`insert` writes `put`, over a row holding a document's id; `insertNew`
+(`toInsertNew` for the text, `insertNewReturning` for the rows) writes
+FennecQL's `insert`, refused whole (409, `FennecCode.duplicate`) where one
+does, and on a sync replica refused at once, before anything is sent, where
+the replica holds the id. `Param(300)` is one value bound once: each use
+writes the same `$1`, where the same value given twice is two parameters, so
+the amount a write takes and the amount its filter checks cannot drift
+apart. A query is the list of an `in`, run before the one around it and
+numbered where it stands; `order` takes an expression or a `distance` as well
+as a field; `match(field, text, fuzzy: true)` writes `fuzzy` alone; with
+`fuse()`, `match` and `near` are written in the order they were called:
+
+```dart
+final amount = Param(300);
+await db.from('accounts').where({'name': 'ada', 'balance': {'gte': amount}})
+    .update({'balance': Computed.expr('balance - ?', [amount])}, require: 1);
+// set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
+
+final orders = db.from('orders');
+await orders.where('customer', 'in', db.from('customers').select(['id']).where('country', 'TR')).rows();
+await orders.order(Computed.expr('n * 2'), 'desc').order('item').limit(10).rows();
+await db.from('journal').insertNew({'entry': 'inv-7'});
+```
+
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `Computed.expr`'s text, and `Cond.raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 ## Sync with a server
 
 ```dart

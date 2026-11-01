@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { from, call, Call, or, not, raw, inc, expr, distance, Query, FennecError } from './fennec.js';
+import { from, call, Call, or, not, raw, inc, expr, distance, param, Query, FennecError } from './fennec.js';
 
 const q = () => from('articles');
 
@@ -164,15 +164,18 @@ test('count does not combine with the other clauses', async () => {
   }
 });
 
-test('fuse ranks by match and near together', () => {
+test('fuse ranks by match and near together, written in the order called', () => {
   const [sql, p] = q()
     .match('body', 'rust wasm')
     .near('embed', [1, 0, 0])
     .fuse({ k: 20, candidates: 50 })
     .limit(10)
     .toFennecQL();
-  assert.equal(sql, 'get articles near embed $1 match body $2 fuse k 20 candidates 50 limit $3');
-  assert.deepEqual(p, [[1, 0, 0], 'rust wasm', 10]);
+  assert.equal(sql, 'get articles match body $1 near embed $2 fuse k 20 candidates 50 limit $3');
+  assert.deepEqual(p, ['rust wasm', [1, 0, 0], 10]);
+  const [sql2, p2] = q().near('embed', [1, 0, 0]).match('body', 'rust wasm').fuse().toFennecQL();
+  assert.equal(sql2, 'get articles near embed $1 match body $2 fuse');
+  assert.deepEqual(p2, [[1, 0, 0], 'rust wasm']);
   assert.throws(() => q().match('body', 'x').near('embed', [1]).toFennecQL(), FennecError);
   assert.throws(() => q().match('body', 'x').fuse().toFennecQL(), FennecError);
 });
@@ -222,9 +225,10 @@ test('match, on its own and with a filter', () => {
 
 test('match reads its words loosely when asked', () => {
   assert.deepEqual(q().match('body', 'databse', { fuzzy: true }).toFennecQL(), [
-    'get articles match body $1 fuzzy 2',
+    'get articles match body $1 fuzzy',
     ['databse'],
   ]);
+  assert.equal(q().match('body', 'x', { fuzzy: 2 }).toFennecQL()[0], 'get articles match body $1 fuzzy 2');
   assert.equal(
     q().match('body', 'datab', { fuzzy: 1, prefix: true }).limit(5).toFennecQL()[0],
     'get articles match body $1 fuzzy 1 prefix limit $2',
@@ -232,6 +236,46 @@ test('match reads its words loosely when asked', () => {
   assert.equal(q().match('body', 'x', { fuzzy: false }).toFennecQL()[0], 'get articles match body $1');
   assert.throws(() => q().match('body', 'x', { fuzzy: 3 }), /0 to 2 edits/);
   assert.throws(() => q().match('body', 'x', { prefix: 'yes' }), /prefix is true or false/);
+});
+
+test('a param is one parameter wherever it is used', () => {
+  const amount = param(300);
+  assert.deepEqual(
+    from('accounts').where({ name: 'ada', balance: { gte: amount } })
+      .toUpdate({ balance: expr('balance - ?', amount) }, { require: 1 }),
+    ['set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1', [300, 'ada']],
+  );
+  // A query is a value: each text numbers its params afresh.
+  const twice = q().where(or({ a: amount }, { b: amount }));
+  assert.deepEqual(twice.toFennecQL(), ['get articles where a = $1 or b = $1', [300]]);
+  assert.deepEqual(twice.toFennecQL(), ['get articles where a = $1 or b = $1', [300]]);
+  assert.throws(() => param(undefined), /did you mean 'null'/);
+  assert.throws(() => param(amount), /not another param/);
+  // A param is a value, never an operator object.
+  assert.deepEqual(q().where({ a: param({ x: 1 }) }).toFennecQL(), ['get articles where a = $1', [{ x: 1 }]]);
+});
+
+test('insertNew sends insert, which refuses a held id', async () => {
+  assert.deepEqual(from('t').toInsertNew({ id: 1, a: 2 }), ['insert t {id: $1, a: $2}', [1, 2]]);
+  assert.throws(() => from('t').toInsertNew({ a: 1 }, { ifAbsent: true }), /insert\(docs, \{ ifAbsent: true \}\)/);
+  const sent = [];
+  const n = await from('t').bind((s, p) => (sent.push([s, p]), { count: 1 })).insertNew({ a: 1 });
+  assert.equal(n, 1);
+  assert.deepEqual(sent, [['insert t {a: $1}', [1]]]);
+  // `.insert()` keeps sending `put`.
+  assert.deepEqual(from('t').toInsert({ a: 1 }), ['put t {a: $1}', [1]]);
+});
+
+test('an order key may be an expression', () => {
+  assert.deepEqual(
+    from('orders').order(expr('n * ?', 2), 'desc').order('item').limit(3).toFennecQL(),
+    ['get orders order n * $1 desc, item asc limit $2', [2, 3]],
+  );
+  assert.deepEqual(
+    from('places').order(distance('loc', [1, 2])).limit(1).toDelete(),
+    ['del places order distance(loc, $1) asc limit $2', [[1, 2], 1]],
+  );
+  assert.throws(() => from('o').order(expr('n * 2').as('x')), /without as/);
 });
 
 test('rerank rides on match and takes a candidate budget', () => {

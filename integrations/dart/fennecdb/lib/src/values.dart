@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'fennec.dart';
+import 'query.dart' show Param;
 
 /// A value as it goes into the parameters: a [DateTime] as the text
 /// JavaScript's `toISOString` writes -- UTC, to the millisecond -- which the
@@ -11,6 +12,11 @@ Object? normalize(Object? v) => switch (v) {
       DateTime() => iso(v),
       Map() => {for (final e in v.entries) e.key.toString(): normalize(e.value)},
       Iterable() => [for (final x in v) normalize(x)],
+      // A param is bound where a whole value stands, never from inside a
+      // list or a json value; every builder refuses it in these words
+      // (builder-golden.json).
+      Param() => throw FennecException(
+          FennecCode.builder, 'this object cannot be used as a fennecdb value (a param() inside a value)'),
       _ =>
         throw FennecException(FennecCode.builder, 'this object cannot be used as a fennecdb value: ${v.runtimeType}'),
     };

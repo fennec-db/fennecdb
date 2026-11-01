@@ -163,7 +163,9 @@ public sealed class Computed
     }
 
     /// <summary>A value as a FennecQL expression over the row it is written into, each <c>?</c> bound to the next
-    /// parameter: <c>Computed.Expr("now()")</c>, <c>Computed.Expr("price * ?", 1.2)</c>.</summary>
+    /// parameter: <c>Computed.Expr("now()")</c>, <c>Computed.Expr("price * ?", 1.2)</c>. The text is trusted
+    /// FennecQL, written into the statement as it is: the code's own, never a value from a user, which goes in as a
+    /// <c>?</c>'s parameter. Names and this text are where an injection would get through.</summary>
     public static Computed Expr(string sql, params object?[] parameters) => new("expr", null, sql, parameters.ToList());
 
     static bool FiniteNumber(object v) => v switch
@@ -193,9 +195,39 @@ public sealed class Computed
     }
 }
 
+/// <summary>
+/// One value bound once, whichever places it is used in: each use writes the same <c>$n</c>, where the same
+/// value given twice is two parameters -- the amount taken and the amount checked one value, never two a caller
+/// could let drift apart. It goes wherever a value goes: a filter, an <c>in</c> list's element, a document,
+/// <see cref="Computed.Expr"/>, <see cref="Cond.Raw"/>, <see cref="Computed.Distance"/>, <c>Near</c>'s vector and
+/// <c>Match</c>'s text. It is always a value, never a dictionary of operators.
+/// <code>
+/// var amount = new Param(300);
+/// Query.From("accounts")
+///     .Where(new Dictionary&lt;string, object?&gt; { ["name"] = "ada", ["balance"] = new Dictionary&lt;string, object?&gt; { ["gte"] = amount } })
+///     .ToUpdate(new { balance = Computed.Expr("balance - ?", amount) }, require: 1)
+/// // set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1, [300, "ada"]
+/// </code>
+/// </summary>
+public sealed class Param
+{
+    /// <summary>The value bound, as any other value is.</summary>
+    public object? Value { get; }
+
+    /// <summary>A parameter of <paramref name="value"/>; null is a value too.</summary>
+    public Param(object? value)
+    {
+        if (value is Param) throw Builder.Refuse("param() takes a value, not another param()");
+        Value = value;
+    }
+
+    /// <summary>A value as the builder checks it: a param's own.</summary>
+    internal static object? Of(object? v) => v is Param p ? p.Value : v;
+}
+
 internal sealed class Node(string t)
 {
-    public string T { get; } = t; // and, or, not, null, in, cmp, within, dist, raw
+    public string T { get; } = t; // and, or, not, null, in, sub, cmp, within, dist, raw
     public List<Node> Items { get; init; } = [];
     public string Field { get; init; } = "";
     public string Op { get; init; } = "";
@@ -434,6 +466,10 @@ internal static class Builder
         IDictionary dict => Entries(dict).ToDictionary(
             e => Convert.ToString(e.Key, CultureInfo.InvariantCulture)!, e => Normalize(e.Value)),
         IEnumerable list => list.Cast<object?>().Select(Normalize).ToList(),
+        // A param is bound where a value stands, never from inside a list or a json value; a query is a value
+        // only as an `in`'s list. Either would otherwise go out as its properties.
+        Param => throw Refuse("this object cannot be used as a fennecdb value (a param() inside a value)"),
+        Query => throw Refuse("this object cannot be used as a fennecdb value (a query is one only as an `in`'s list)"),
         _ => v,
     };
 
@@ -487,14 +523,16 @@ internal static class Builder
     static Node DistanceCond(string field, object? spec)
     {
         var from = spec is IDictionary d && d.Contains("from") ? d["from"] : null;
-        if (spec is not IDictionary ops || from is null or string or IDictionary || from is not IEnumerable)
+        // A param is held to what its value is; the node keeps the param, bound where it stands.
+        var point = Param.Of(from);
+        if (spec is not IDictionary ops || point is null or string or IDictionary || point is not IEnumerable)
             throw Refuse($"distance takes {{ from: [lon, lat], <op>: metres }} (field: {field})");
         var items = new List<Node>();
         foreach (DictionaryEntry e in ops)
         {
             var k = Convert.ToString(e.Key, CultureInfo.InvariantCulture) ?? "";
             if (k == "from") continue;
-            var number = e.Value is sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal;
+            var number = Param.Of(e.Value) is sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal;
             if (!Ops.TryGetValue(k, out var op) || op is "in" or "has" or "~" || !number)
                 throw Refuse($"distance compares metres with lt, lte, gt, gte, eq or ne: {k} (field: {field})");
             items.Add(new Node("dist") { Field = field, Op = op, Value = e.Value, Values = [from] });
@@ -509,6 +547,10 @@ internal static class Builder
 
     static Node InCond(string field, object? values)
     {
+        // An inner query: run once, before the one around it, its one column the list --
+        // customer in (get customers select id where ...). Its text is made as the outer one renders, so its
+        // parameters are numbered where it stands.
+        if (values is Query q) return new Node("sub") { Field = field, Value = q };
         if (values is null or string or IDictionary || values is not IEnumerable list)
             throw Refuse($"`in` expects an array (field: {field})");
         var items = list.Cast<object?>().ToList();
@@ -554,6 +596,8 @@ internal static class Builder
                 return $"{c.Field} is {(c.Negated ? "not " : "")}null";
             case "in":
                 return $"{c.Field} in [{string.Join(", ", c.Values.Select(bind.Bind))}]";
+            case "sub":
+                return $"{c.Field} in ({((Query)c.Value!).Inner(bind)})";
             case "cmp":
                 return $"{c.Field} {c.Op} {bind.Bind(c.Value)}";
             case "within":
@@ -634,8 +678,21 @@ internal sealed class Binder
 {
     public List<object?> Params { get; } = [];
 
+    // A Param takes its $n at its first use, and every use after writes that one: by the object, never by its
+    // value, so two params of one value stay two parameters.
+    readonly Dictionary<Param, string> _once = new(ReferenceEqualityComparer.Instance);
+
     public string Bind(object? v)
     {
+        if (v is Param p)
+        {
+            if (!_once.TryGetValue(p, out var at))
+            {
+                Params.Add(Builder.Normalize(p.Value));
+                _once[p] = at = $"${Params.Count}";
+            }
+            return at;
+        }
         Params.Add(Builder.Normalize(v));
         return $"${Params.Count}";
     }
@@ -653,8 +710,11 @@ public sealed class Query
 
     sealed record Level(string Collection, IReadOnlyList<string> On, IReadOnlyList<string> Parent,
         IReadOnlyList<SelectItem>? Project, IReadOnlyList<SelectItem>? Group,
-        IReadOnlyList<Node> Cond, bool Required, IReadOnlyList<(string Field, bool Asc, string? Collate)> Order,
+        IReadOnlyList<Node> Cond, bool Required, IReadOnlyList<Key> Order,
         long? Limit, long Offset);
+
+    // One key of an order: a name, or an expression over the row whose values are bound where the order stands.
+    sealed record Key(string? Field, Computed? Expr, bool Asc, string? Collate);
 
     // A highlight when Words is null, a snippet otherwise.
     sealed record Mark(string Field, long? Words, string? Ellipsis, string? Pre, string? Post)
@@ -671,10 +731,14 @@ public sealed class Query
         public IReadOnlyList<SelectItem>? Group { get; init; }
         public IReadOnlyList<Node> Cond { get; init; } = [];
         public VectorClause? Near { get; init; }
-        public (string Field, object? Query, long? Fuzzy, bool Prefix)? Match { get; init; }
+        // Fuzzy is the text it writes: " fuzzy" alone for the parser's default, " fuzzy N" for a number.
+        public (string Field, object? Query, string? Fuzzy, bool Prefix)? Match { get; init; }
+        // Fuse writes its two searches in the order they were first called: match first where it came while no
+        // near was there.
+        public bool MatchFirst { get; init; }
         public VectorClause? Rerank { get; init; }
         public (long? K, long? Candidates)? Fuse { get; init; }
-        public IReadOnlyList<(string Field, bool Asc, string? Collate)> Order { get; init; } = [];
+        public IReadOnlyList<Key> Order { get; init; } = [];
         public long? Limit { get; init; }
         public long Offset { get; init; }
         public string Require { get; init; } = "";
@@ -728,7 +792,8 @@ public sealed class Query
 
     /// <summary><c>field op value</c>, joined to the conditions before with <c>and</c>. The op is a symbol or its
     /// word: <c>=</c>, <c>!=</c>, <c>&lt;</c>, <c>&lt;=</c>, <c>&gt;</c>, <c>&gt;=</c>, <c>~</c>, <c>has</c>,
-    /// <c>in</c> (a list), or <c>eq</c>, <c>ne</c>, <c>lt</c>, <c>gte</c>, <c>like</c>, <c>contains</c> ... A null
+    /// <c>in</c> (a list, or a query selecting one column, <c>customer in (get customers select id ...)</c>), or
+    /// <c>eq</c>, <c>ne</c>, <c>lt</c>, <c>gte</c>, <c>like</c>, <c>contains</c> ... A null
     /// with <c>=</c> or <c>!=</c> is <c>is null</c> and <c>is not null</c>.</summary>
     public Query Where(string field, string op, object? value) => And(Builder.CondOf(field, op, value));
 
@@ -754,30 +819,48 @@ public sealed class Query
         : new(_s with { Cond = [new Node("or") { Items = [new Node("and") { Items = [.. _s.Cond] }, right] }] });
 
     /// <summary><c>near field $n [ef N] [exact]</c>.</summary>
-    public Query Near(string field, object? vector, long? ef = null, bool exact = false) =>
-        new(_s with { Near = new(Builder.Ident(field), vector, ef is { } n ? Builder.Whole(n, "ef") : null, exact) });
+    public Query Near(string field, object? vector, long? ef = null, bool exact = false) => new(_s with
+    {
+        MatchFirst = _s.Match is not null && _s.MatchFirst,
+        Near = new(Builder.Ident(field), vector, ef is { } n ? Builder.Whole(n, "ef") : null, exact),
+    });
 
     /// <summary>
-    /// <c>match field $n [fuzzy N] [prefix]</c>: BM25 over a <c>@text</c> index. <c>fuzzy: 2</c> matches each
+    /// <c>match field $n [fuzzy [N]] [prefix]</c>: BM25 over a <c>@text</c> index. <c>fuzzy: 2</c> matches each
     /// word within the edits its length allows -- none under 5 characters, one up to 8, two from 9 --
     /// <c>fuzzy: 1</c> one at most; <c>prefix: true</c> matches the last word as the start of a word too, as a
-    /// search box is typed into.
+    /// search box is typed into. <c>fuzzy: true</c> is the parser's default, two, written <c>fuzzy</c> alone.
     /// </summary>
     public Query Match(string field, string query, int? fuzzy = null, bool prefix = false) =>
         Matched(field, query, fuzzy, prefix);
 
+    /// <summary><c>match field $n fuzzy [prefix]</c>: <c>fuzzy: true</c> matches each word within the edits its
+    /// length allows, as <c>fuzzy: 2</c> does; <c>false</c> exactly.
+    /// <code>db.From("products").Match("title", input, fuzzy: true, prefix: true).Limit(10)</code></summary>
+    public Query Match(string field, string query, bool fuzzy, bool prefix = false) =>
+        Matched(field, query, fuzzy, prefix);
+
+    /// <summary><c>match</c> of a <see cref="Param"/>'s text, its <c>$n</c> the one each of its uses writes.</summary>
+    public Query Match(string field, Param query, int? fuzzy = null, bool prefix = false) =>
+        Matched(field, query, fuzzy, prefix);
+
+    /// <summary><c>match</c> of a <see cref="Param"/>'s text, <c>fuzzy</c> alone or not.</summary>
+    public Query Match(string field, Param query, bool fuzzy, bool prefix = false) =>
+        Matched(field, query, fuzzy, prefix);
+
     // Match over values of any type, as the JS builder takes them: the golden file hands a fuzzy that is not a
     // number and a prefix that is not a boolean, and the refusal has to be the JS builder's word for word.
-    internal Query Matched(string field, string query, object? fuzzy, object? prefix)
+    internal Query Matched(string field, object? query, object? fuzzy, object? prefix)
     {
         var f = Builder.Ident(field);
-        long? edits = fuzzy switch
+        // true is the parser's default, written as `fuzzy` alone; a number of edits is written out.
+        var edits = fuzzy switch
         {
             null or false => null,
-            true => 2,
-            int n when n is >= 0 and <= 2 => n,
-            long n when n is >= 0 and <= 2 => n,
-            double n when n is 0 or 1 or 2 => (long)n,
+            true => " fuzzy",
+            int n when n is >= 0 and <= 2 => $" fuzzy {n}",
+            long n when n is >= 0 and <= 2 => $" fuzzy {n}",
+            double n when n is 0 or 1 or 2 => $" fuzzy {(long)n}",
             _ => throw Builder.Refuse($"fuzzy is true, false or 0 to 2 edits: {fuzzy}"),
         };
         var p = prefix switch
@@ -786,7 +869,7 @@ public sealed class Query
             true => true,
             _ => throw Builder.Refuse($"prefix is true or false: {prefix}"),
         };
-        return new(_s with { Match = (f, query, edits, p) });
+        return new(_s with { MatchFirst = _s.Near is null || _s.MatchFirst, Match = (f, query, edits, p) });
     }
 
     /// <summary><c>fuse [k N] [candidates N]</c>: with both Match and Near, ranks by both, a document scoring
@@ -952,20 +1035,37 @@ public sealed class Query
             throw Builder.Refuse("a lookup selects its children's fields, or aggregates of them");
         // Over groups a key may name an aggregate of the list.
         var keys = (order ?? []).Select(k =>
-            (Builder.Column(k.Field).Text, Builder.Direction(k.Direction), Builder.Collation(k.Collate))).ToList();
+            new Key(Builder.Column(k.Field).Text, null, Builder.Direction(k.Direction), Builder.Collation(k.Collate))).ToList();
         var level = new Level(collection, child, parent, project, groupKeys, where is null ? [] : [where.Node],
             required, keys, limit is { } l ? Builder.Whole(l, "limit") : null,
             offset is { } o ? Builder.Whole(o, "offset") : 0);
         return new(_s with { Lookups = [.. _s.Lookups, level] });
     }
 
-    /// <summary><c>order field asc|desc</c>: each call adds a key. <paramref name="collate"/> <c>"tr"</c> puts
-    /// text in Turkish order, <c>"und"</c> in Unicode's root order.</summary>
+    /// <summary><c>order field asc|desc</c>: each call adds a key, the next deciding where the one before ties.
+    /// <paramref name="collate"/> <c>"tr"</c> puts text in Turkish order, <c>"und"</c> in Unicode's root
+    /// order.</summary>
     public Query Order(string field, string direction = "asc", string? collate = null) => new(_s with
     {
         // Over groups a key may be an aggregate of the list, by its name.
-        Order = [.. _s.Order, (Builder.Column(field).Text, Builder.Direction(direction), Builder.Collation(collate))],
+        Order = [.. _s.Order, new Key(Builder.Column(field).Text, null, Builder.Direction(direction), Builder.Collation(collate))],
     });
+
+    /// <summary><c>order &lt;expression&gt; asc|desc</c>: a key worked out over the row, ties going in id order --
+    /// <c>Order(Computed.Expr("n * 2"), "desc")</c>, <c>Order(Computed.Distance("loc", new[] { 13.4, 52.5 }))</c>
+    /// -- its values bound where the order stands in the text. It orders the rows an update or a delete picks
+    /// too.</summary>
+    public Query Order(Computed key, string direction = "asc", string? collate = null)
+    {
+        if (key is null or { Kind: not "expr" }) throw Builder.Refuse("inc() is a value to write, not a column");
+        // A select list's name is no key of its own: ordering by it is ordering by the name.
+        if (key.Name is not null)
+            throw Builder.Refuse($"an order key is an expression or a name: order by {key.Name} itself, without as");
+        return new(_s with
+        {
+            Order = [.. _s.Order, new Key(null, key, Builder.Direction(direction), Builder.Collation(collate))],
+        });
+    }
 
     /// <summary>How many rows come back.</summary>
     public Query Limit(long n) => new(_s with { Limit = Builder.Whole(n, "limit") });
@@ -985,6 +1085,25 @@ public sealed class Query
 
     /// <summary>The statement and its parameters, as they would be sent.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToFennecQL()
+    {
+        var bind = new Binder();
+        return (Text(bind), bind.Params);
+    }
+
+    // The text as an inner query of `in`, its values bound by the binder of the statement around it, so they
+    // are numbered where it stands and a Param it shares with that statement keeps its one $n.
+    internal string Inner(Binder bind)
+    {
+        var s = _s;
+        // One column is the list; the engine refuses the rest too.
+        if (s.Project is not { Count: 1 } || s.Count || s.Lookups.Count > 0 || s.Marks.Count > 0 || s.Facets.Count > 0)
+            throw Builder.Refuse($"an inner query of `in` selects exactly one column: from('{s.Collection}').select('id')");
+        if (s.Require.Length > 0)
+            throw Builder.Refuse("an inner query of `in` takes no require: the query around it does");
+        return Text(bind);
+    }
+
+    string Text(Binder bind)
     {
         var s = _s;
         // The engine refuses each of these too; failing here sends nothing.
@@ -1040,7 +1159,6 @@ public sealed class Query
         if (s.Count && (ExtraClause() ?? (s.Require.Length > 0 ? "require" : null)) is { } extra)
             throw Builder.Refuse($"count cannot be used with `{extra}`");
 
-        var bind = new Binder();
         var sql = new StringBuilder($"get {s.Collection}");
         // The marks after the fields Select named, or after every field. Their tags are bound before the
         // where's values, as they come first in the text.
@@ -1060,18 +1178,17 @@ public sealed class Query
             sql.Append(" select ").Append(string.Join(", ", [.. cols ?? ["*"], .. items]));
         if (WhereOf(s.Cond, bind) is { } where) sql.Append(" where ").Append(where);
         if (s.Group is not null) sql.Append(" group ").Append(string.Join(", ", s.Group.Select(k => k.Render(bind))));
-        if (s.Near is { } near)
-        {
-            sql.Append($" near {near.Field} {bind.Bind(near.Vector)}");
-            if (near.N is { } ef) sql.Append($" ef {ef}");
-            if (near.Exact) sql.Append(" exact");
-        }
+        // Near before match unless match was called first: fuse reads both ways, and the text keeps the chain's
+        // order.
+        var matchFirst = s.Match is not null && s.MatchFirst;
+        if (!matchFirst) NearText();
         if (s.Match is { } match)
         {
             sql.Append($" match {match.Field} {bind.Bind(match.Query)}");
-            if (match.Fuzzy is { } edits) sql.Append($" fuzzy {edits}");
+            sql.Append(match.Fuzzy);
             if (match.Prefix) sql.Append(" prefix");
         }
+        if (matchFirst) NearText();
         if (s.Rerank is { } rerank)
         {
             sql.Append($" rerank {rerank.Field} {bind.Bind(rerank.Vector)}");
@@ -1083,7 +1200,7 @@ public sealed class Query
             if (fuse.K is { } k) sql.Append($" k {k}");
             if (fuse.Candidates is { } c) sql.Append($" candidates {c}");
         }
-        AppendOrder(sql, s.Order);
+        AppendOrder(sql, s.Order, bind);
         if (s.Limit is { } limit) sql.Append(" limit ").Append(bind.Bind(limit));
         if (s.Offset > 0) sql.Append(" offset ").Append(bind.Bind(s.Offset));
         // Before a lookup, whose clauses are the children's.
@@ -1106,24 +1223,33 @@ public sealed class Query
                 sql.Append(" select ").Append(string.Join(", ", l.Project.Select(c => c.Render(bind))));
             if (WhereOf(l.Cond, bind) is { } w) sql.Append(" where ").Append(w);
             if (l.Group is not null) sql.Append(" group ").Append(string.Join(", ", l.Group.Select(k => k.Render(bind))));
-            AppendOrder(sql, l.Order);
+            AppendOrder(sql, l.Order, bind);
             if (l.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
             if (l.Offset > 0) sql.Append(" offset ").Append(bind.Bind(l.Offset));
         }
-        return (sql.ToString(), bind.Params);
+        return sql.ToString();
+
+        void NearText()
+        {
+            if (s.Near is not { } near) return;
+            sql.Append($" near {near.Field} {bind.Bind(near.Vector)}");
+            if (near.N is { } ef) sql.Append($" ef {ef}");
+            if (near.Exact) sql.Append(" exact");
+        }
 
         static string Side(IReadOnlyList<string> names) =>
             names.Count > 1 ? $"({string.Join(", ", names)})" : names[0];
     }
 
-    static void AppendOrder(StringBuilder sql, IReadOnlyList<(string Field, bool Asc, string? Collate)> keys)
+    // `name collate tr desc` for each key, an expression's values bound where its text stands.
+    static void AppendOrder(StringBuilder sql, IReadOnlyList<Key> keys, Binder bind)
     {
         for (var i = 0; i < keys.Count; i++)
         {
-            var (field, asc, collate) = keys[i];
-            sql.Append(i == 0 ? " order " : ", ").Append(field);
-            if (collate is not null) sql.Append(" collate ").Append(collate);
-            sql.Append(asc ? " asc" : " desc");
+            var k = keys[i];
+            sql.Append(i == 0 ? " order " : ", ").Append(k.Expr is { } e ? e.Render("order", bind, "") : k.Field);
+            if (k.Collate is not null) sql.Append(" collate ").Append(k.Collate);
+            sql.Append(k.Asc ? " asc" : " desc");
         }
     }
 
@@ -1193,7 +1319,7 @@ public sealed class Query
     string Pick(IReadOnlyList<string>? returning, Binder bind)
     {
         var sql = new StringBuilder();
-        AppendOrder(sql, _s.Order);
+        AppendOrder(sql, _s.Order, bind);
         if (_s.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
         return sql.Append(ReturningClause(returning)).ToString();
     }
@@ -1222,7 +1348,21 @@ public sealed class Query
     /// refusal's <see cref="FennecException.Reason"/>. <paramref name="returning"/> answers the rows written, ids and
     /// all, the fields named or <c>"*"</c> for every one.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false, long? require = null,
-        string? reason = null, IReadOnlyList<string>? returning = null)
+        string? reason = null, IReadOnlyList<string>? returning = null) =>
+        Put("put", docs, ifAbsent, require, reason, returning);
+
+    /// <summary>The <c>insert</c> of a document or a list of them, not sent: one naming an id a row holds is
+    /// refused -- 409, <c>duplicate</c> -- and the statement, a block of one, put back whole, where
+    /// <see cref="ToInsert"/>'s <c>put</c> writes over that row. <paramref name="require"/>,
+    /// <paramref name="reason"/> and <paramref name="returning"/> as <see cref="ToInsert"/>'s; it takes no
+    /// <c>ifAbsent</c>, which passes over a held id where this refuses one.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToInsertNew(object docs, long? require = null,
+        string? reason = null, IReadOnlyList<string>? returning = null) =>
+        Put("insert", docs, false, require, reason, returning);
+
+    // Both are checked as an insert: the same clauses refused, in the same words.
+    (string Text, IReadOnlyList<object?> Parameters) Put(string verb, object docs, bool ifAbsent, long? require,
+        string? reason, IReadOnlyList<string>? returning)
     {
         AssertPlain("insert");
         var list = DocsOf(docs);
@@ -1231,7 +1371,7 @@ public sealed class Query
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var absent = ifAbsent ? " if absent" : "";
         var tail = ReturningClause(returning) + RequireClause(require, reason);
-        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{tail}", bind.Params);
+        return ($"{verb} {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{tail}", bind.Params);
     }
 
     /// <summary>The <c>set</c> of the rows the filter names, not sent; with no filter it is refused unless
@@ -1351,6 +1491,17 @@ public sealed class Query
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
             : ExecAsync(ToInsert(docs, ifAbsent, require, reason, returning), cancellationToken);
+
+    /// <summary>Inserts a document or a list of them, refused whole (409, <c>duplicate</c>,
+    /// <see cref="FennecException"/>) where one names an id a row holds: a row made once, never written over, where
+    /// <see cref="InsertAsync"/> writes over it. The result's <c>Affected</c> is how many were written; none is no
+    /// request. <paramref name="require"/>, <paramref name="reason"/> and <paramref name="returning"/> as
+    /// <see cref="InsertAsync"/>'s.</summary>
+    public Task<ExecResult> InsertNewAsync(object docs, long? require = null, string? reason = null,
+        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        DocsOf(docs).Count == 0
+            ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
+            : ExecAsync(ToInsertNew(docs, require, reason, returning), cancellationToken);
 
     /// <summary>Inserts each document, or, where a row holds its id or <c>@unique</c> value, sets that row by the
     /// patch -- <c>UpsertAsync(new { key, n = 1 }, new Dictionary&lt;string, object?&gt; { ["n"] =

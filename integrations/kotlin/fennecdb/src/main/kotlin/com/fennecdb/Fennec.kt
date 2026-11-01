@@ -435,11 +435,28 @@ internal object Values {
         is List<*> -> v.map { normalize(it) }
         is Array<*> -> v.map { normalize(it) }
         is CharSequence -> v.toString()
+        // A param is bound where a whole value stands, never from inside a
+        // list or a json value; a query is a value only as an `in`'s list.
+        // Either would otherwise be refused as an object of unknown type.
+        is Param -> throw FennecException(
+            FennecException.Code.BUILDER,
+            "this object cannot be used as a fennecdb value (a param() inside a value)",
+        )
+        is Query -> throw FennecException(
+            FennecException.Code.BUILDER,
+            "this object cannot be used as a fennecdb value (a query is one only as an `in`'s list)",
+        )
         else -> instant(v) ?: throw FennecException(
             FennecException.Code.BUILDER,
             "this object cannot be used as a fennecdb value: ${v.javaClass.name}",
         )
     }
+
+    /**
+     * A value kept for the statement that binds it: a [Param] as itself, which
+     * the binder numbers once, every other value as [normalize] has it.
+     */
+    fun held(v: Any?): Any? = if (v is Param) v else normalize(v)
 
     /** `java.time.Instant`, which Android has from API 26: by name, so older ones load this class. */
     private fun instant(v: Any): String? {
