@@ -79,7 +79,11 @@ fn deaf() -> (TcpListener, Vec<TcpStream>) {
 /// 502 left a client unable to send again -- with `extra` headers, on a
 /// connection of its own.
 fn put(addr: &str, extra: &str) -> (u16, String, String) {
-    let body = r#"{"query":"put notes {title: \"t\"}"}"#;
+    send(addr, extra, r#"{"query":"put notes {title: \"t\"}"}"#)
+}
+
+/// [`put`] of `body`.
+fn send(addr: &str, extra: &str, body: &str) -> (u16, String, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let req = format!(
@@ -255,4 +259,97 @@ fn an_answer_the_node_broke_off_stays_a_502() {
     let r = asked.join().unwrap();
     told_may_have_run(&r);
     assert!(r.2.contains("broke off"), "{}", r.2);
+}
+
+/// A node that takes each connection's head and closes it before the
+/// body, so that the router's write fails before its last byte: the body
+/// is past what both sockets' buffers hold, and the close with the body
+/// unread resets the connection. Sent again on a fresh connection, as a
+/// request not sent whole is, it fails the same way: the request ran
+/// nowhere.
+#[test]
+fn a_write_its_node_ended_before_its_last_byte_is_503_unsent() {
+    let node = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front = router_to(
+        &node.local_addr().unwrap().to_string(),
+        Duration::from_secs(10),
+    );
+    std::thread::spawn(move || {
+        for conn in node.incoming() {
+            let mut conn = BufReader::new(conn.unwrap());
+            let mut line = String::new();
+            while conn.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+        }
+    });
+    let title = "x".repeat(32 << 20);
+    let body = format!(r#"{{"query":"put notes {{title: \"{title}\"}}"}}"#);
+    told_unsent(&send(&front, "", &body));
+}
+
+/// A node's answer saying it was never sent the request is no word of the
+/// router's, which alone says so: the mark goes no further.
+#[test]
+fn a_node_s_unsent_mark_is_not_passed_on() {
+    let node = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front = router_to(
+        &node.local_addr().unwrap().to_string(),
+        Duration::from_secs(10),
+    );
+    let asked = std::thread::spawn({
+        let front = front.clone();
+        move || put(&front, "")
+    });
+    let mut conn = BufReader::new(node.accept().unwrap().0);
+    read_request(&mut conn);
+    conn.get_mut()
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nFennec-Unsent: 1\r\nRetry-After: 1\r\n\
+              Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+        )
+        .unwrap();
+    let (status, head, body) = asked.join().unwrap();
+    assert_eq!(status, 503, "{head}\n{body}");
+    assert_eq!(header(&head, "fennec-unsent"), None, "{head}");
+    assert_eq!(header(&head, "fennec-shard"), Some("1"), "{head}");
+}
+
+/// A router relaying to the home region's, which never sent the request
+/// on: its 503 is the answer, passed on with its mark.
+#[test]
+fn a_write_relayed_to_a_router_that_never_sent_it_is_503_unsent() {
+    let unsent = router_to(&refusing(), Duration::from_secs(10));
+    let mut d = Directory::in_memory();
+    d.set_region("us", Some(&[format!("http://{unsent}")]))
+        .unwrap();
+    d.place_home("acme", "us").unwrap();
+    let front = serve(Router::new(d, config(Duration::from_secs(10))));
+    told_unsent(&put(&front, ""));
+}
+
+/// A keyed write the home region's first router took whole and ended on
+/// before its answer goes to the next, running twice harmless; that one's
+/// 503 saying it never sent the request is no answer, the first having
+/// perhaps run it: a 502, which a client sends again under the same key.
+/// Passed on, the mark told a client it could send it under a new one.
+#[test]
+fn a_keyed_write_a_router_took_whole_is_never_told_unsent_by_the_next() {
+    let taking = TcpListener::bind("127.0.0.1:0").unwrap();
+    let first = taking.local_addr().unwrap().to_string();
+    let took = std::thread::spawn(move || {
+        let mut conn = BufReader::new(taking.accept().unwrap().0);
+        read_request(&mut conn)
+    });
+    let unsent = router_to(&refusing(), Duration::from_secs(10));
+    let mut d = Directory::in_memory();
+    let routers = [format!("http://{first}"), format!("http://{unsent}")];
+    d.set_region("us", Some(&routers)).unwrap();
+    d.place_home("acme", "us").unwrap();
+    let front = serve(Router::new(d, config(Duration::from_secs(10))));
+    let r = put(&front, "Idempotency-Key: k-1\r\n");
+    let taken = took.join().unwrap();
+    assert!(taken.contains("Idempotency-Key: k-1"), "{taken}");
+    told_may_have_run(&r);
+    assert!(r.2.contains("may have run"), "{}", r.2);
 }

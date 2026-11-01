@@ -1711,6 +1711,12 @@ impl Answer {
         self.status == 503 && self.header(fennec_http::accept::UNSERVED_HEADER).is_some()
     }
 
+    /// Whether a router asked answered that it never got the request whole
+    /// to where it was going ([`crate::region::UNSENT_HEADER`]).
+    pub fn unsent(&self) -> bool {
+        self.status == 503 && self.header(crate::region::UNSENT_HEADER).is_some()
+    }
+
     /// `None` means the body runs to the close: a stream.
     pub fn content_length(&self) -> Option<usize> {
         self.header("content-length")?.parse().ok()

@@ -100,7 +100,10 @@ pub const FOLLOWS_HEADER: &str = "Fennec-Follows";
 /// mark they asked the next router, which dials the same node, and took
 /// this one for no router at all. A router relaying passes it on, the
 /// request unrun all the way. Never on a request the node may have run,
-/// one sent whole before ([`crate::upstream::unsent`]).
+/// one sent whole before ([`crate::upstream::unsent`]), nor passed on
+/// where a router or a node asked before took it whole
+/// ([`Router::relay_send`]), and never a node's: only a router says it
+/// sent nothing (`Router::answer_out`).
 pub const UNSENT_HEADER: &str = "Fennec-Unsent";
 
 /// The router's own answer to a request it never got whole to where it
@@ -279,7 +282,13 @@ impl Router {
     /// whole request, its failure says so ([`crate::upstream::unsent`]): it
     /// ran nothing, the relaying router's own 503 -- not where one took it
     /// whole and ended before an answer ([`Tried::Again`]), which may have
-    /// run it.
+    /// run it, nor where a node a failover cut it from had (`taken`,
+    /// `after_cut`'s `ran`). Then a router's 503 saying it never sent the
+    /// request ([`UNSENT_HEADER`]) is no answer either: told so, a client
+    /// takes a request that may have run for one that ran nowhere, and
+    /// sends it again under a key of its own. It is the failure of a
+    /// request that may have run, a 502.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn relay_send(
         &self,
         region: &str,
@@ -288,11 +297,12 @@ impl Router {
         headers: &[(&str, &str)],
         held: Duration,
         client: Option<&std::net::TcpStream>,
+        taken: bool,
     ) -> std::io::Result<Answer> {
         let start = self.first_router(region, routers);
         let mut last = None;
         let mut refused = None;
-        let mut whole = false;
+        let mut whole = taken;
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let sent = self.pool.send_tried(
@@ -306,6 +316,15 @@ impl Router {
             );
             match sent {
                 Ok(a) if a.unserved() => refused = Some(a),
+                Ok(a) if whole && a.unsent() => {
+                    self.note_answered(region, i);
+                    let _ = a.read_body(&self.pool, req.method == Method::Head);
+                    return Err(std::io::Error::other(format!(
+                        "router {} sent it nowhere, but it went out whole before and may \
+                         have run",
+                        routers[i]
+                    )));
+                }
                 Ok(a) => {
                     self.note_answered(region, i);
                     return Ok(a);

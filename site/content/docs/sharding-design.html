@@ -99,7 +99,10 @@ the node — its connection refused, or not answered within
 router answers it <code>503</code> with <code>Retry-After</code>, the body's
 <code>retry_after</code> and <code>Fennec-Unsent: 1</code>, and a client sends
 it again as it is, a write without a key too. One that went out whole once,
-even on a connection that ended before its retry, stays a <code>502</code>.</p>
+even on a connection that ended before its retry, stays a <code>502</code>,
+through every router it passed: one relaying to a region's routers answers
+<code>502</code> where a router after one that took the request whole says it
+never sent it, and passes on no node's <code>Fennec-Unsent</code>.</p>
 
 <p id="in-flight"><b>Requests out to a node failed over.</b> A node that dies
 with no reset — a machine lost, a network cut — answers nothing and closes

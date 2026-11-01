@@ -232,7 +232,18 @@ each; `Tried::Again` is one that took it whole and ended, which may have
 run it), and a request a failover cut where no node it was cut from had it
 whole (`after_cut`'s `ran`, kept across cuts: a second cut short of the
 last byte had the 503 a client's end met in a follower's pause say "it ran
-nothing" after a first that was whole). Not `Fennec-Unserved`, which says
+nothing" after a first that was whole). The mark goes no further than a
+request that ran nowhere all the way. A relaying router passes on another
+router's 503 marked so only where no hop before took the request whole:
+after a router of the region that took it whole and ended (`Tried::Again`),
+or a node a failover cut it from whole (`ran`, which `after_cut` hands
+`relay_send` as `taken`), the next router's marked 503 -- it dialled the
+node and was refused -- is the failure of a request that may have run, a
+502 (#445's review: passed on, a keyed write the first router ran was told
+it ran nowhere, and the entry sent it again). A node's answer carrying the
+header loses it (`answer_out`'s `relay`, false for a node and a read
+replica): a node sends nothing on, and only a router says it never sent a
+request. Not `Fennec-Unserved`, which says
 a router served its connection nothing: the entry and a relaying router
 then ask the next router -- which dials the same node -- and take this one
 for no router at all, and every isolate turned to the standby at each
@@ -246,7 +257,15 @@ began and broke off, and a request it took whole, stay 502.
 whose queue is full), a pooled connection the node closed before it went
 and a relay whose routers all refuse it, each a 502 on main; a keyed write
 the node took whole before it went, a 503 where the mark ignores that try;
-and an answer broken off. The path every answered request takes sets one
+and an answer broken off. It holds too a write whose node closed on it
+before its last byte (a 32 MB body past both sockets' buffers, the head
+read and the connection reset), 503 marked; a node's own mark, dropped; a
+relayed router's, passed on; and a keyed write a region's first router took
+whole and ended on, the second's marked 503 then a 502 -- the last two a 503
+with the mark before the review's fix. `after_cut`'s `ran` is held inline
+(`lib.rs`'s tests, calling it with a cut whole and not): the copy's dial
+refused and a relayed router's marked 503 are each a 502 after a whole cut
+and a marked 503 after one short of the last byte. The path every answered request takes sets one
 `bool` more, and the answer is built out of line (`unreached`): `make
 shard-bench ARGS=latency`'s added p50 stayed 20.8 us against main's 20.8,
 eight runs a side in ABBA turns at loads of 1.9-2.5 (20.5-20.9 and

@@ -162,8 +162,12 @@ not resent, and dropped from the end after 10 s it was a 502 for an unrun
 write every 10 s an isolate while the default region stayed down. A
 guessed region's router answering 5xx naming no home (cut off from the
 home's region) sends a read on to the next region, and any request where
-its 503 says it never sent it (`Fennec-Unsent`, [router.md](router.md#pooled-connections));
-the placing router's own answer for a node it could not reach -- a 503
+its 503 says it never sent it (`Fennec-Unsent`, [router.md](router.md#pooled-connections)).
+A write goes on safely there: no router marks a request any hop may have
+run -- a relaying router turns another's marked 503 into a 502 once a
+router before it took the request whole, or a failover cut it from a node
+that had, and drops a node's mark -- so the mark reaching the entry means
+the request ran nowhere. The placing router's own answer for a node it could not reach -- a 503
 marked so where the request never went out, a 502 where it may have run --
 names the home (`region::homed`), and is the answer. A move across leaves the old region's router relaying
 the tenant and the answer naming the new home, a hop and never an error.
