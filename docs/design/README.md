@@ -38,7 +38,7 @@ The conventions hold no invariant of the code, and are listed apart:
 
 A proposal holds no invariant until it is built, and is listed apart:
 
-- [named-statements.md](named-statements.md) -- *proposal, not built*: FennecQL defined once in a database and called by name with typed arguments and an authority of its own, its storage, its authority model against `SECURITY DEFINER`'s, its surfaces and the slices that would build it
+- [named-statements.md](named-statements.md) -- FennecQL defined once in a database and called by name with typed arguments and an authority of its own: its storage, its authority model against `SECURITY DEFINER`'s, its surfaces -- HTTP, the SDKs, MCP's tools, the studio and the shell -- and the slices that built it
 
 ## The original order
 

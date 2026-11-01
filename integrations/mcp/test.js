@@ -46,6 +46,10 @@ const SEED = [
   'put docs [{title: "fox", body: "the quick brown fox jumps", embed: [1, 0, 0], year: 2023}, ' +
     '{title: "dog", body: "a lazy dog sleeps all day", embed: [0, 1, 0], year: 2024}, ' +
     '{title: "cat", body: "the cat watches the fox", embed: [0.9, 0.1, 0], year: 2025}]',
+  // Named statements: each a tool of its own, `call_<name>`.
+  "create statement years($from int, $n int = 2) comment 'Titles from a year on, oldest first' " +
+    'as get docs select title, year where year >= $from order year limit $n',
+  'create statement retitle($id int, $title text) public as set docs {title: $title} where id = $id returning id, title',
 ];
 
 /** fennec-server with every tool on, over a file of its own, seeded. A
@@ -92,11 +96,19 @@ function client(negotiation) {
 async function everyTool(c, { memory = 'memories' } = {}) {
   const { tools } = await c.listTools();
   const names = tools.map((t) => t.name);
-  assert.deepEqual(names, ['schema', 'search', 'query', 'get', 'write', 'remember', 'recall', 'forget']);
+  assert.deepEqual(names, ['schema', 'search', 'query', 'get', 'write', 'remember', 'recall', 'forget', 'call_retitle', 'call_years']);
   for (const t of tools) {
     assert.equal(t.inputSchema.type, 'object', t.name);
     assert.equal(typeof t.description, 'string');
+    // What Claude's tool names take, and OpenAI's (64 at most): no dot.
+    assert.match(t.name, /^[a-zA-Z0-9_-]{1,64}$/);
   }
+  const years = tools.find((t) => t.name === 'call_years');
+  assert.deepEqual(years.inputSchema.required, ['from']);
+  assert.equal(years.inputSchema.properties.n.default, 2);
+  assert.equal(years.annotations.readOnlyHint, true);
+  assert.deepEqual(Object.keys(years.outputSchema.properties.rows.items.properties), ['title', 'year']);
+  assert.equal(tools.find((t) => t.name === 'call_retitle').annotations.destructiveHint, true);
   const call = async (name, args) => {
     const r = await c.callTool({ name, arguments: args });
     // The text a model reads is the structured content, written out.
@@ -135,6 +147,16 @@ async function everyTool(c, { memory = 'memories' } = {}) {
   assert.ok(found, JSON.stringify(r.structuredContent));
   r = await call('forget', { id: found.id });
   assert.deepEqual(r.structuredContent, { forgotten: 1 });
+
+  // A statement's tool: its answer the client holds to its outputSchema.
+  r = await call('call_years', { from: 2024 });
+  assert.equal(r.isError, false, JSON.stringify(r));
+  assert.deepEqual(r.structuredContent.rows, [{ title: 'dog', year: 2024 }, { title: 'cat', year: 2025 }]);
+  r = await call('call_retitle', { id: 3, title: 'cat' });
+  assert.deepEqual(r.structuredContent.rows, [{ id: 3, title: 'cat' }]);
+  r = await call('call_years', { from: 'last year' });
+  assert.equal(r.isError, true);
+  assert.equal(r.structuredContent.status, 400);
 
   // A refusal is the tool's result, for the model to correct.
   r = await call('query', { query: 'del docs' });

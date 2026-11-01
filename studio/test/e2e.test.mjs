@@ -640,6 +640,44 @@ test('the schema: an index through its preview and plan; a drop only once its na
   await p.close();
 });
 
+test('the schema: the named statements, a definition, and a call from its form into the grid', async () => {
+  await query(server.url, "create statement big($owner text, $n int = 2) comment 'An owner''s largest orders' as get orders select owner, total where owner = $owner order total desc limit $n");
+  await query(server.url, "create statement settle($id int) public as set orders {status: 'paid'} where id = $id returning id, status");
+  const p = await page();
+  await signIn(p, TOKEN);
+  await view(p, 'schema', '.sc-create');
+  await p.waitForSelector('tr[data-statement="big"]', { timeout: 10_000 });
+  assert.match(await p.$eval('tr[data-statement="big"]', (e) => e.textContent), /\(\$owner text, \$n int = \.\.\.\)An owner's largest orders/);
+  // Its definition, as `describe statement` gives it.
+  await p.click('button[aria-label="The definition of big"]');
+  await p.waitForFunction(() => /^create statement big\(/.test(document.querySelector('dialog[open] pre')?.textContent ?? ''));
+  await p.click('dialog[open] .dialog-actions .btn:not(.primary)');
+  // The call form: an input a parameter, the statement it sends written
+  // out, the arguments one parameter; run in the editor, its rows the grid's.
+  await p.click('button[aria-label="Call big"]');
+  await p.waitForSelector('dialog[open] #sc-arg-owner');
+  await p.type('#sc-arg-owner', 'carol');
+  await p.waitForFunction(() => /call big \$1\$1 = \{"owner":"carol"\}/.test(document.querySelector('dialog[open] form')?.textContent ?? ''));
+  await p.click('dialog[open] button[type=submit]');
+  const want = await query(server.url, 'call big $1', [{ owner: 'carol' }]);
+  assert.equal(await cell(p, 0, 'total', '.ed'), String(want[0].total));
+  assert.equal(await p.$eval('#query', (e) => e.value), 'call big $1');
+  // A write's call goes under an Idempotency-Key, as the studio's writes
+  // do: its answer kept with the key.
+  const kept = async () => (await query(server.url, 'get _idempotency count'))[0].count;
+  const before = await kept();
+  const [order] = await query(server.url, 'get orders select id where owner = $1 limit 1', ['carol']);
+  await view(p, 'schema', 'button[aria-label="Call settle"]');
+  await p.click('button[aria-label="Call settle"]');
+  await p.waitForSelector('dialog[open] #sc-arg-id');
+  await p.type('#sc-arg-id', String(order.id));
+  await p.click('dialog[open] button[type=submit]');
+  assert.equal(await cell(p, 0, 'status', '.ed'), 'paid');
+  assert.equal(await kept(), before + 1);
+  assert.deepEqual(p.problems, []);
+  await p.close();
+});
+
 test('the live view: rows arrive as they are written, and pause', async () => {
   const p = await page();
   await signIn(p, TOKEN);

@@ -19,10 +19,10 @@ export function call(ctx, path, opts) {
 /**
  * A request to a server with the page's token, to the database the
  * studio has open (`base`) or, `root: true`, to the server itself -- a
- * router's own paths.
+ * router's own paths -- and `headers` beside it (a call's `Idempotency-Key`).
  */
-export async function fetched({ server, base, token }, path, { method = 'GET', body = null, type = 'application/json', root = false } = {}) {
-  const headers = {};
+export async function fetched({ server, base, token }, path, { method = 'GET', body = null, type = 'application/json', root = false, headers: more = {} } = {}) {
+  const headers = { ...more };
   if (token) headers.authorization = `Bearer ${token}`;
   if (body !== null) headers['content-type'] = type;
   const started = performance.now();

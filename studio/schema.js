@@ -15,6 +15,7 @@
 import { h, fill } from './dom.js';
 import * as S from './statements-views.js';
 import { call, refused, statementsBlock, dialog } from './kit.js';
+import { readInput, multiline } from './values.js';
 
 /** An index as `/_schema` describes it, `{kind: 'hnsw', metric: 'cosine', m: 16}`, written as FennecQL names it. */
 function indexText(ix) {
@@ -35,6 +36,8 @@ export function mount(host, ctx) {
   let described = null;
   let texts = new Map();
   let reading = 0;
+  // The database's named statements, as `namedStatements` read them.
+  let named = null;
 
   /** Whether this token may change the schema: the server's own, or an open server. */
   const owner = () => ctx.state.who?.kind === 'full' || ctx.state.who?.kind === 'open';
@@ -45,13 +48,17 @@ export function mount(host, ctx) {
     fill(title, name ?? 'No collection');
     fill(actions);
     if (!name) {
-      fill(body, h('p', { class: 'hint' }, 'Pick a collection on the left.'));
+      const got = await namedStatements();
+      if (mine !== reading) return;
+      named = got;
+      fill(body, h('p', { class: 'hint' }, 'Pick a collection on the left.'), statementsPart());
       return;
     }
     let schema;
     let text;
+    let got;
     try {
-      [schema, text] = await Promise.all([call(ctx, '/_schema'), call(ctx, '/_schema?as=fennecql')]);
+      [schema, text, got] = await Promise.all([call(ctx, '/_schema'), call(ctx, '/_schema?as=fennecql'), namedStatements()]);
       if (!schema.ok) throw refused(schema);
       if (!text.ok) throw refused(text);
     } catch (e) {
@@ -61,7 +68,162 @@ export function mount(host, ctx) {
     if (mine !== reading) return;
     described = schema.json;
     texts = S.createTexts(text.json?.fennecql);
+    named = got;
     draw();
+  }
+
+  // ------------------------------------------------------------- named statements
+
+  /**
+   * The database's named statements as this token may know them: each row
+   * of `statements` to the server's token -- its signature, whether it
+   * writes, its comment and why it is broken -- and to a scoped one the
+   * names `/_whoami` says it may call, `statements` being the server
+   * token's. The database in the page holds none it can run.
+   */
+  async function namedStatements() {
+    if (ctx.state.db.local) return { note: 'Named statements are a server’s: the database in this page is built without them.' };
+    if (!owner()) return { names: ctx.state.who?.calls ?? [] };
+    const q = S.listStatements();
+    try {
+      const r = await call(ctx, '/query', { method: 'POST', body: JSON.stringify({ query: q.text, params: q.params }) });
+      if (!r.ok) throw refused(r);
+      return { rows: Array.isArray(r.json) ? r.json : [] };
+    } catch (e) {
+      return { error: ctx.explain(e) };
+    }
+  }
+
+  function statementsPart() {
+    const head = h('h2', {}, 'Named statements');
+    const hint = (text) => [head, h('p', { class: 'hint' }, text)];
+    if (!named) return null;
+    if (named.note) return hint(named.note);
+    if (named.error) return [head, h('p', { class: 'ed-error' }, named.error)];
+    const callBtn = (n, signature, broken = false) =>
+      h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `Call ${n}`, disabled: broken, onclick: () => callForm(n, signature) }, 'Call');
+    let rows;
+    if (named.names) {
+      if (!named.names.length) return hint('Your token may call no named statement: a call line of the server’s policy grants one.');
+      rows = named.names.map((n) => h('tr', {}, h('td', { class: 'mono' }, n), h('td', { class: 'muted' }, 'granted to your token'), h('td', { class: 'sc-row-actions' }, callBtn(n, null))));
+    } else {
+      if (!named.rows.length) return hint('The database holds none: create statement in the query editor defines one.');
+      rows = named.rows.map((s) =>
+        h(
+          'tr',
+          { dataset: { statement: s.name } },
+          h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.writes ? 'writes' : 'reads')),
+          h('td', { class: 'mono muted' }, s.signature ?? ''),
+          h('td', {}, s.broken ? h('span', { class: 'ed-error' }, `Broken: ${s.broken}`) : (s.comment ?? '')),
+          h(
+            'td',
+            { class: 'sc-row-actions' },
+            callBtn(s.name, s.signature ?? '()', Boolean(s.broken)),
+            h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `The definition of ${s.name}`, onclick: () => definition(s.name) }, 'Definition'),
+          ),
+        ),
+      );
+    }
+    return [head, h('table', { class: 'sc-fields sc-statements' }, h('tbody', {}, rows))];
+  }
+
+  /** A statement's definition, as `describe statement` gives it, and its replacement opened in the editor. */
+  async function definition(n) {
+    const q = S.describeStatement(n);
+    let r;
+    try {
+      r = await call(ctx, '/query', { method: 'POST', body: JSON.stringify({ query: q.text, params: q.params }) });
+      if (!r.ok) throw refused(r);
+    } catch (e) {
+      ctx.say(ctx.explain(e), 'error');
+      return;
+    }
+    const s = (Array.isArray(r.json) ? r.json : [])[0] ?? {};
+    const text = String(s.text ?? '');
+    const d = dialog(
+      `Statement ${n}`,
+      statementsBlock(text.split('\n')),
+      s.broken ? h('p', { class: 'form-error' }, `Broken: ${s.broken}`) : null,
+      h('p', { class: 'hint' }, `Answers ${(s.answers ?? []).join(', ') || 'no field'}; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`),
+      h(
+        'div',
+        { class: 'dialog-actions' },
+        h('button', { type: 'button', class: 'btn', onclick: () => d.close() }, 'Close'),
+        h('button', { type: 'button', class: 'btn primary', onclick: () => (d.close(), ctx.query(S.replacing(text))) }, 'Replace it in the query editor'),
+      ),
+    );
+    d.classList.add('wide');
+  }
+
+  /**
+   * The call form: an input for each argument the signature names, typed
+   * as it is, or -- to a token not shown the signature -- the arguments as
+   * a JSON object; the statement it sends written out below them. It runs
+   * in the query editor, its answer in the grid, under an `Idempotency-Key`
+   * as the studio's writes are.
+   */
+  function callForm(n, signature) {
+    const params = signature === null ? null : S.signatureParams(signature).params;
+    const inputs = new Map();
+    const statement = h('div');
+    const problem = h('p', { class: 'form-error', role: 'alert' });
+    let current = null;
+    const fields = (params ?? [{ name: null, type: 'json' }]).map((p) => {
+      const id = `sc-arg-${p.name ?? 'all'}`;
+      const multi = multiline(p.type);
+      const input = h(multi ? 'textarea' : 'input', { id, class: 'mono', rows: multi ? 3 : undefined, autocomplete: 'off', placeholder: p.name ? (p.optional ? 'its default when empty' : '') : '{"from": 1}' });
+      inputs.set(p.name, input);
+      const label = p.name ? [h('span', { class: 'form-name' }, `$${p.name}`), h('span', { class: 'form-type' }, p.optional ? `${p.type}, optional` : p.type)] : [h('span', { class: 'form-name' }, 'Arguments'), h('span', { class: 'form-type' }, 'a JSON object')];
+      return h('div', { class: 'form-row' }, h('label', { for: id }, ...label), input);
+    });
+    const update = () => {
+      try {
+        let args = {};
+        if (params) {
+          for (const p of params) {
+            const text = inputs.get(p.name).value;
+            if (p.optional && text.trim() === '') continue;
+            args[p.name] = readInput(text, p.type, `$${p.name}`);
+          }
+        } else {
+          try {
+            args = JSON.parse(inputs.get(null).value.trim() || '{}');
+          } catch {
+            throw new S.StatementError('the arguments are a JSON object: {"from": 1}');
+          }
+        }
+        current = S.callStatement(n, args);
+        fill(statement, statementsBlock([current.text]), h('pre', { class: 'statement' }, `$1 = ${JSON.stringify(current.params[0])}`));
+        fill(problem);
+      } catch (e) {
+        current = null;
+        fill(statement);
+        fill(problem, ctx.explain(e));
+      }
+      go.disabled = !current;
+    };
+    const go = h('button', { type: 'submit', class: 'btn primary' }, 'Call');
+    const form = h(
+      'form',
+      {
+        class: 'form',
+        oninput: update,
+        onsubmit: (e) => {
+          e.preventDefault();
+          if (!current) return;
+          d.close();
+          ctx.query(current.text, JSON.stringify(current.params), true, crypto.randomUUID());
+        },
+      },
+      fields,
+      h('h3', {}, 'The statement'),
+      statement,
+      problem,
+      h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', onclick: () => d.close() }, 'Cancel'), go),
+    );
+    const d = dialog(`Call ${n}`, form);
+    update();
+    form.querySelector('input, textarea')?.focus();
   }
 
   function collection() {
@@ -78,7 +240,7 @@ export function mount(host, ctx) {
         : 'Your token reads this schema. Changing it takes the server’s token.',
     );
     if (!c) {
-      fill(body, h('p', { class: 'hint' }, `${name} is the database's own collection, or your token does not read it.`));
+      fill(body, h('p', { class: 'hint' }, `${name} is the database's own collection, or your token does not read it.`), statementsPart());
       return;
     }
     if (owner()) {
@@ -154,6 +316,7 @@ export function mount(host, ctx) {
             h('table', { class: 'sc-fields sc-composites' }, h('thead', {}, h('tr', {}, h('th', {}, 'Index'), h('th', {}, h('span', { class: 'sr' }, 'Changes')))), h('tbody', {}, composites)),
           ]
         : null,
+      statementsPart(),
     );
   }
 

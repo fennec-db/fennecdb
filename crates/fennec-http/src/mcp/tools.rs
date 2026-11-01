@@ -31,9 +31,12 @@ pub(super) enum Tool {
     Remember,
     Recall,
     Forget,
+    /// Every `call_<name>` tool, a named statement's ([`call`]): one name
+    /// in the metrics for all of them, which name no statement.
+    Call,
 }
 
-pub(super) const COUNT: usize = 8;
+pub(super) const COUNT: usize = 9;
 
 impl Tool {
     pub(super) const ALL: [Tool; COUNT] = [
@@ -45,6 +48,7 @@ impl Tool {
         Tool::Remember,
         Tool::Recall,
         Tool::Forget,
+        Tool::Call,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -57,14 +61,17 @@ impl Tool {
             Tool::Remember => "remember",
             Tool::Recall => "recall",
             Tool::Forget => "forget",
+            Tool::Call => "call",
         }
     }
 
-    /// Whether the server's options list it.
+    /// Whether the server's options list it; a statement's tool is listed
+    /// by [`callable`], never by this name.
     fn listed(self, opts: &Options) -> bool {
         match self {
             Tool::Write => opts.write,
             Tool::Remember | Tool::Recall | Tool::Forget => opts.memory.is_some(),
+            Tool::Call => false,
             _ => true,
         }
     }
@@ -188,6 +195,11 @@ pub(super) fn run(ctx: &Ctx, tool: Tool, args: Args) -> Outcome {
         Tool::Remember => remember(ctx, args),
         Tool::Recall => recall(ctx, args),
         Tool::Forget => forget(ctx, args),
+        // Named by its statement, and run by [`call`].
+        Tool::Call => Err(Outcome::refused(
+            500,
+            "a statement's tool names its statement",
+        )),
     };
     done.map_or_else(|refused| refused, Outcome::Done)
 }
@@ -197,8 +209,10 @@ pub(super) fn run(ctx: &Ctx, tool: Tool, args: Args) -> Outcome {
 const READS: &str =
     r#"{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}"#;
 
-/// The tools the options list, as `tools/list` gives them.
-pub(super) fn list_into(out: &mut String, opts: &Options) {
+/// The tools the options list, as `tools/list` gives them, and a tool for
+/// each named statement the token may call ([`callable`]), by name.
+pub(super) fn list_into(out: &mut String, ctx: &Ctx) {
+    let opts = ctx.opts;
     let rows = opts.max_rows;
     let bytes = opts.max_bytes;
     let mut defs: Vec<String> = Vec::new();
@@ -237,6 +251,14 @@ pub(super) fn list_into(out: &mut String, opts: &Options) {
             r#"{"name":"forget","title":"Forget a memory","description":"Deletes the memory with this id, which recall gives: one found wrong or out of date.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}}"#.into(),
         );
     }
+    let g = crate::held::read(ctx.db);
+    for s in g.statements().iter() {
+        if let (Some(writes), Some(def)) = (callable_stored(ctx, s), &s.tree) {
+            let of = |c: &str| g.collection(c).ok().map(|c| &*c.schema);
+            defs.push(statement_tool(def, writes, def.answer(of), opts));
+        }
+    }
+    drop(g);
     out.push('[');
     out.push_str(&defs.join(","));
     out.push(']');
@@ -535,17 +557,36 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         Ok(s) => s,
         Err(e) => return crate::error_response(&e),
     };
-    if ctx.cfg.read_only && !stmt.is_read_only() {
+    let mut g = crate::held::write(ctx.db);
+    // A call writes where its statement does, asked under the lock it runs
+    // under; one that is not there is judged, and refused, as it runs.
+    let reads = match &stmt {
+        Statement::Call(c) => g.call_reads(c) != Some(false),
+        s => s.is_read_only(),
+    };
+    if ctx.cfg.read_only && !reads {
         return crate::http::Response::error(403, "this session is read-only (--read-only)");
     }
-    let mut g = crate::held::write(ctx.db);
+    // A call tool's block, held to its bounds before it lands.
+    let bounded = match super::open(&mut g) {
+        Ok(b) => b,
+        Err(e) => return crate::error_response(&e),
+    };
+    // A scoped token's call is judged under this lock and its body run
+    // outside the token's scope, as `/query` runs it (`access::run_as`).
     let r = match &unscoped {
-        None => crate::access::within(ctx.who, || g.execute_with(&stmt, &params))
+        None => crate::access::judge_call(ctx.who, &g, &stmt, &params)
+            .and_then(|_| crate::access::run_as(ctx.who, &stmt, || g.execute_with(&stmt, &params)))
             .map(|r| crate::shown(ctx.who, mask.as_ref(), &g, r)),
         Some(sent) => {
             crate::run_bound(ctx.who, &mut g, sent, &params).map(|r| crate::visible(ctx.who, r))
         }
     };
+    if bounded {
+        if let Some(refused) = super::land(&mut g, &r) {
+            return refused;
+        }
+    }
     let durability = match (&r, ctx.cfg.sync_on_write) {
         (Ok(_), true) => match g.flush() {
             Ok(d) => d,
@@ -1046,6 +1087,9 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
     let (stmt, params) = api::parse_query(&body)
         .and_then(|(s, p)| api::exactly(ctx.db, &body, s, p))
         .map_err(|e| refusal(&e))?;
+    if let Statement::Call(c) = &*stmt {
+        return Err(called_by_its_tool(&c.name));
+    }
     if !stmt.is_read_only() {
         return Err(Outcome::refused(
             400,
@@ -1190,9 +1234,7 @@ fn write(ctx: &Ctx, args: Args) -> Checked<String> {
     let stmt = fennec_ql::parse_one(text).map_err(|e| Outcome::refused(400, e.to_string()))?;
     match stmt {
         Statement::Put { .. } | Statement::Update { .. } | Statement::Delete { .. } => {}
-        // A named statement's tool is its own, `call_<name>`, once calls
-        // run; nothing runs one yet.
-        Statement::Call(_) => return Err(Outcome::refused(400, fennec_core::named::NOT_BUILT)),
+        Statement::Call(c) => return Err(called_by_its_tool(&c.name)),
         s if s.is_read_only() => {
             return Err(Outcome::refused(400, "write runs a put, insert, set or del: a read goes through query"))
         }
@@ -1206,6 +1248,213 @@ fn write(ctx: &Ctx, args: Args) -> Checked<String> {
         }
     }
     answered(through_query(ctx, text, &params))
+}
+
+// ------------------------------------------------------------ named statements
+
+/// Whether the token's tools hold `call_<name>`, and whether its statement
+/// writes: `None` for a statement there is none of, or that this token's
+/// list leaves out ([`callable_stored`]), told apart by nothing, as a
+/// statement no grant names is the 404 a missing one is.
+pub(super) fn callable(ctx: &Ctx, name: &str) -> Option<bool> {
+    let g = crate::held::read(ctx.db);
+    callable_stored(ctx, g.statements().get(name)?)
+}
+
+/// A statement the token's tools hold, and whether it writes: one that can
+/// run (not broken, its text read here); granted by a `call` line to a
+/// scoped token, and to the server's token where it reads no claim -- the
+/// server's token calls one that does with `as {...}`, which a model is
+/// not handed, so such a tool would refuse every call; and one that writes
+/// only under `--mcp-write`, as every tool that writes.
+fn callable_stored(ctx: &Ctx, s: &fennec_core::engine::Stored) -> Option<bool> {
+    let def = s.tree.as_ref().filter(|_| s.broken.is_none())?;
+    let granted = match ctx.who.scope() {
+        Some(scope) => scope.may_call(&s.name),
+        None => def.claims.is_empty(),
+    };
+    let writes = def.writes();
+    (granted && (ctx.opts.write || !writes)).then_some(writes)
+}
+
+/// A statement's tool, as `tools/list` gives it: named `call_<name>` --
+/// no dot, and at most 64 bytes, which Claude's and OpenAI's tool names
+/// hold to and `call_` and a statement's 59 fit -- described by its
+/// `comment`, its arguments its `inputSchema` and its answer, typed as
+/// `fennec types` types it, its `outputSchema`.
+fn statement_tool(
+    def: &fennec_core::named::Definition,
+    writes: bool,
+    answer: fennec_core::named::Answer,
+    opts: &Options,
+) -> String {
+    use fennec_core::named::Answer;
+    let mut d = String::from("{\"name\":");
+    json::escape_into(&mut d, &format!("call_{}", def.name));
+    d.push_str(",\"title\":");
+    json::escape_into(&mut d, &def.name);
+    let (rows, bytes) = (opts.max_rows, opts.max_bytes);
+    let mut about = match &def.comment {
+        Some(c) => c.trim_end().to_string(),
+        None => format!("Calls the named statement `{}`", def.name),
+    };
+    if !about.ends_with(['.', '!', '?']) {
+        about.push('.');
+    }
+    about.push_str(&match writes {
+        true => format!(
+            " It writes, as one block: an answer of more than {rows} rows or {bytes} bytes is \
+             refused, and what it wrote put back."
+        ),
+        false => {
+            format!(" An answer of more than {rows} rows or {bytes} bytes is refused, not cut.")
+        }
+    });
+    d.push_str(",\"description\":");
+    json::escape_into(&mut d, &about);
+    d.push_str(",\"inputSchema\":{\"type\":\"object\",\"properties\":{");
+    for (i, p) in def.params.iter().enumerate() {
+        if i > 0 {
+            d.push(',');
+        }
+        json::escape_into(&mut d, &p.name);
+        // Its FennecQL type said, and its default, which a missing one or a
+        // `null` takes.
+        let mut members = vec![type_schema(&p.ty, false)];
+        let mut said = p.ty.to_string();
+        if let Some(v) = &p.default {
+            let mut m = String::from("\"default\":");
+            json::value_into(&mut m, v);
+            members.push(m);
+            said.push_str(", ");
+            json::value_into(&mut said, v);
+            said.push_str(" when absent");
+        }
+        let mut m = String::from("\"description\":");
+        json::escape_into(&mut m, &said);
+        members.push(m);
+        members.retain(|m| !m.is_empty());
+        d.push_str(":{");
+        d.push_str(&members.join(","));
+        d.push('}');
+    }
+    d.push('}');
+    let required: Vec<&str> = def
+        .params
+        .iter()
+        .filter(|p| p.default.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    if !required.is_empty() {
+        d.push_str(",\"required\":");
+        json::value_into(
+            &mut d,
+            &Value::List(
+                required
+                    .iter()
+                    .map(|n| Value::Text(n.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    d.push_str(",\"additionalProperties\":false},\"outputSchema\":");
+    match answer {
+        Answer::Wrote => d.push_str(
+            r#"{"type":"object","properties":{"affected":{"type":"integer"}},"required":["affected"]}"#,
+        ),
+        Answer::Untyped(_) => d.push_str(
+            r#"{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object"}}},"required":["rows"]}"#,
+        ),
+        Answer::Rows(items) => {
+            d.push_str(r#"{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"#);
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    d.push(',');
+                }
+                json::escape_into(&mut d, &item.name);
+                d.push_str(":{");
+                d.push_str(&type_schema(&item.ty, !item.required));
+                d.push('}');
+            }
+            d.push_str(r#"}}}},"required":["rows"]}"#);
+        }
+    }
+    // A body of `insert`s alone only adds; a `set` or a `del` changes or
+    // takes away rows that were there.
+    let destroys = def
+        .body
+        .iter()
+        .any(|s| matches!(s, Statement::Update { .. } | Statement::Delete { .. }));
+    d.push_str(&format!(
+        ",\"annotations\":{{\"readOnlyHint\":{},\"destructiveHint\":{destroys},\"idempotentHint\":{},\"openWorldHint\":false}}}}",
+        !writes, !writes
+    ));
+    d
+}
+
+/// The JSON Schema members of a value of `ty` -- as an argument takes it,
+/// or, `nullable`, as an answer writes it, `null` too -- or none where
+/// JSON Schema has no type for it (`json`, `bytes`, `sparse<N>`, `geo`),
+/// any value: an answer's schema a client checks the answer by must never
+/// refuse one the server writes.
+fn type_schema(ty: &DataType, nullable: bool) -> String {
+    let t = |name: &str| match nullable {
+        true => format!("\"type\":[\"{name}\",\"null\"]"),
+        false => format!("\"type\":\"{name}\""),
+    };
+    match ty {
+        DataType::Bool => t("boolean"),
+        DataType::Int => t("integer"),
+        DataType::Float => t("number"),
+        DataType::Text => t("string"),
+        // An argument takes an ISO 8601 text or epoch milliseconds; an
+        // answer writes the text.
+        DataType::Timestamp => t("string") + ",\"format\":\"date-time\"",
+        DataType::Vector(n, _) => {
+            t("array")
+                + &format!(",\"items\":{{\"type\":\"number\"}},\"minItems\":{n},\"maxItems\":{n}")
+        }
+        DataType::List(inner) => t("array") + ",\"items\":{" + &type_schema(inner, nullable) + "}",
+        DataType::Geo if !nullable => {
+            t("array") + ",\"items\":{\"type\":\"number\"},\"minItems\":2,\"maxItems\":2"
+        }
+        _ => String::new(),
+    }
+}
+
+/// `call_<name>`: the statement called as `/query` calls it, `call <name>
+/// $1` with the tool's arguments the one parameter -- the grant, the
+/// claims, `--call-rate`, the lock and the answer as a client's, never a
+/// model's text -- its answer held to the session's rows and bytes where
+/// `/query`'s path answers it ([`super::bounded_call`]): a write's before
+/// its block lands, put back past them.
+pub(super) fn call(ctx: &Ctx, statement: &str, args: Args) -> Outcome {
+    let text = format!("call {statement} $1");
+    let params = [Value::Object(args.to_vec())];
+    let resp = super::bounded_call(ctx.opts, || through_query(ctx, &text, &params));
+    answered(resp).map_or_else(|refused| refused, Outcome::Done)
+}
+
+/// A `call` sent to `query` or `write`: a statement is called by its own
+/// tool alone, whose answer is held to the bounds before a write lands,
+/// and which is listed only where the token may call it.
+fn called_by_its_tool(name: &str) -> Outcome {
+    Outcome::refused(
+        400,
+        format!(
+            "a named statement is called by its own tool, `call_{name}`, listed where this token \
+             may call it: its arguments are that tool's"
+        ),
+    )
+}
+
+/// The bytes of the answer a tool gives for `/query`'s `body`: rows under
+/// `rows`, anything else as it is ([`answered`]).
+pub(super) fn answer_len(body: &[u8]) -> usize {
+    match body.iter().find(|b| !b.is_ascii_whitespace()) {
+        Some(b'[') => body.len() + "{\"rows\":}".len(),
+        _ => body.len(),
+    }
 }
 
 // ------------------------------------------------------------ memory

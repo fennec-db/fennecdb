@@ -2237,6 +2237,12 @@ impl Scope {
         self.subject.as_deref()
     }
 
+    /// Whether a `call` line grants the token's roles the statement `name`:
+    /// the statements MCP lists for it as `call_<name>` tools.
+    pub fn may_call(&self, name: &str) -> bool {
+        self.calls.iter().any(|c| c == name)
+    }
+
     /// When the token's `exp` passes, in milliseconds since the epoch;
     /// `None` for a token that names none (`--jwt-require-exp off`). A
     /// request is checked as it comes, so one held open -- a subscription

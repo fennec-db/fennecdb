@@ -209,6 +209,57 @@ test('the editor cuts a text at each ; outside its strings and comments, and rew
   );
 });
 
+test('a named statement\'s body of several is one statement, sent whole', () => {
+  const texts = (t) => S.splitStatements(t).map((s) => s.text);
+  const transfer =
+    'create statement transfer($from int, $to int, $amount int) claims (sub text) check $amount > 0 as begin\n' +
+    '  set accounts {balance: balance - $amount} where id = $from and owner = $jwt.sub require 1 else \'no; funds\';\n' +
+    '  set accounts {balance: balance + $amount} where id = $to require 1;\n' +
+    '  get accounts select id, case when balance > 0 then \'ok\' else \'end\' end as state where id = $from;\n' +
+    'end';
+  assert.deepEqual(texts(`get a;\n${transfer};\ncall transfer {from: 1, to: 2, amount: 3}`), ['get a', transfer, 'call transfer {from: 1, to: 2, amount: 3}']);
+  // Its `end` may come straight after a statement, in any case, and `or replace` defines too.
+  const replaced = 'CREATE OR REPLACE STATEMENT t() AS BEGIN get a select id; get b select id END';
+  assert.deepEqual(texts(`${replaced}; get c`), [replaced, 'get c']);
+  // A comment or a string holding `end` ends no body; an unended one holds the rest, which the server refuses whole.
+  const open = "create statement t() as begin get a select id -- end;\n; get b select n where n = 'end'; get c";
+  assert.deepEqual(texts(open), [open]);
+  // `begin` is a definition's word alone: elsewhere, a field, it opens nothing.
+  assert.deepEqual(texts('get a where begin = 1; get b select begin as x; get c'), ['get a where begin = 1', 'get b select begin as x', 'get c']);
+  // One statement, one body: the editor sends it to /query whole.
+  assert.deepEqual(S.editorRequest(transfer), { kind: 'query', text: transfer, params: [] });
+});
+
+test('a call names its statement as FennecQL writes one, its arguments one parameter', () => {
+  assert.deepEqual(S.callStatement('transfer', { from: 1, to: 2 }), { text: 'call transfer $1', params: [{ from: 1, to: 2 }] });
+  assert.deepEqual(S.callStatement('ping'), { text: 'call ping $1', params: [{}] });
+  for (const value of NASTY) {
+    assert.deepEqual(S.callStatement('t', { v: value }).text, 'call t $1');
+  }
+  for (const bad of ['', '1t', '_t', 'çay', 't-x', 't x', 't; del a', 'x'.repeat(60), null]) {
+    assert.throws(() => S.callStatement(bad, {}), S.StatementError, String(bad));
+    assert.throws(() => S.describeStatement(bad), S.StatementError, String(bad));
+  }
+  assert.throws(() => S.callStatement('t', [1]), S.StatementError);
+  assert.throws(() => S.callStatement('t', null), S.StatementError);
+  assert.deepEqual(S.describeStatement('transfer'), { text: 'describe statement transfer', params: [] });
+  assert.deepEqual(S.listStatements(), { text: 'statements', params: [] });
+  // The signature `statements` writes, read into the call form's inputs.
+  assert.deepEqual(S.signatureParams('($from int, $to int = ..., $v vector<4, f16>, $tags [text]) claims (sub text, groups [text])'), {
+    params: [
+      { name: 'from', type: 'int', optional: false },
+      { name: 'to', type: 'int', optional: true },
+      { name: 'v', type: 'vector<4, f16>', optional: false },
+      { name: 'tags', type: '[text]', optional: false },
+    ],
+    claims: ['sub', 'groups'],
+  });
+  assert.deepEqual(S.signatureParams('()'), { params: [], claims: [] });
+  assert.deepEqual(S.signatureParams(null), { params: [], claims: [] });
+  assert.equal(S.replacing('create statement t() as get a select id'), 'create or replace statement t() as get a select id');
+  assert.equal(S.replacing('create or replace statement t() as get a select id'), 'create or replace statement t() as get a select id');
+});
+
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {
   for (const v of NASTY) {
     const r = S.editorRequest('get orders where note = $1', JSON.stringify([v]));

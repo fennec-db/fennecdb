@@ -2827,6 +2827,13 @@ fn run_query(
         let mut guard = held::write(db);
         let before = waits::now_ms();
         let mark = waits::Mark::of(&guard);
+        // An MCP call tool's write, in a block of its own so that its
+        // answer is held to the tool's bounds before it lands
+        // ([`mcp::land`]); `false`, and no block, for every other request.
+        let bounded = match mcp::open(&mut guard) {
+            Ok(b) => b,
+            Err(e) => return error_response(&e),
+        };
         let running = trace::span("execute");
         let r = match &unscoped {
             None => access::judge_call(who, &guard, &stmt, &params)
@@ -2839,6 +2846,11 @@ fn run_query(
             Some(sent) => run_bound(who, &mut guard, sent, &params),
         };
         drop(running);
+        if bounded {
+            if let Some(refused) = mcp::land(&mut guard, &r) {
+                return refused;
+            }
+        }
         noted_call(&guard, &stmt);
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
@@ -3019,6 +3031,16 @@ fn keyed_query(
         }
         Err(e) => error_response(e),
     };
+    // An MCP call tool's answer past its bounds, put back before it lands.
+    // The tools send no key, so none reaches here today; held all the same.
+    let past = match &result {
+        Ok(r) if mcp::holding() => mcp::past(mcp::rows_of(r), &resp.body),
+        _ => None,
+    };
+    if let Some(why) = past {
+        guard.rollback();
+        return Response::error(413, &why);
+    }
     // Held, a run that wrote nothing keeps no key: the run that writes
     // keeps it with its rows, and one sent again with the key meanwhile
     // waits as this one does.
@@ -3139,7 +3161,19 @@ fn read_call(
         }
     };
     timing::lap(timing::Phase::Execute);
-    let resp = match access::run_as(who, stmt, || result) {
+    let result = access::run_as(who, stmt, || result);
+    // An MCP call tool's answer past the tool's bounds is refused, never
+    // cut ([`mcp::past`]); a client's is answered whole.
+    let past = match &result {
+        Ok(fennec_core::engine::CallRead::Json(n)) => mcp::past(*n, body.as_bytes()),
+        Ok(fennec_core::engine::CallRead::Answer(r)) => mcp::past_answer(r),
+        Err(_) => None,
+    };
+    if let Some(why) = past {
+        http::give_back(body.into_bytes());
+        return Some(Response::error(413, &why));
+    }
+    let resp = match result {
         Ok(fennec_core::engine::CallRead::Json(n)) => {
             statements::rows(n as u64);
             let resp = Response::json(200, body).versioned(fennec_core::VERSION);

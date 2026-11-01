@@ -279,104 +279,32 @@ fn typed(def: &fennec_core::named::Definition, schemas: &[Schema]) -> Named {
     }
 }
 
-/// What the last statement of a body answers, typed as far as it is: a
-/// plain field as its collection's row types it, `id` and a count as
-/// integers, and anything else as JSON -- the types `describe statement`
-/// and MCP's `outputSchema` give, since the engine infers no expression's
-/// type yet.
+/// What the last statement of a body answers, typed as far as it is
+/// (`Definition::answer`, which MCP's `outputSchema` reads too): a plain
+/// field as its collection's row types it, `id` and a count as integers,
+/// and anything else as JSON, since the engine infers no expression's type
+/// yet.
 fn answer_of(def: &fennec_core::named::Definition, schemas: &[Schema]) -> Answer {
-    use fennec_core::query::{Column, Expr, Statement};
-    let of = |c: &str| schemas.iter().find(|s| s.name == c);
-    let untyped = |name: &str, why: String| Member {
-        name: name.to_string(),
-        ty: DataType::Json,
-        required: false,
-        note: format!("not typed: {why}"),
-    };
-    let int = |name: &str, note: &str| Member {
-        name: name.to_string(),
-        ty: DataType::Int,
-        required: true,
-        note: note.to_string(),
-    };
-    // A name a list or `returning` writes as it is: `id`, a field, or a
-    // path into a json field.
-    let named = |s: Option<&Schema>, name: &str| -> Member {
-        if name == "id" {
-            return int("id", "");
-        }
-        match s.and_then(|s| s.field(name)) {
-            Some(f) => Member {
-                name: name.to_string(),
-                ty: f.ty.clone(),
-                required: f.required,
-                note: crate::langs::note(f),
-            },
-            None => match name.split_once('.') {
-                Some((f, _)) => untyped(name, format!("a path into `{f}`")),
-                None => untyped(name, "no field of its collection".into()),
-            },
-        }
-    };
-    // An item written as more than a field: a group's key that is a field
-    // as that field, a count an integer, and the rest JSON.
-    let column = |s: Option<&Schema>, c: &Column, aggregates: bool| -> Member {
-        match &c.expr {
-            Expr::Field(f) if *f == c.name => named(s, f),
-            Expr::Field(f) => untyped(&c.name, format!("`{f}` given another name")),
-            Expr::Call(f, _) if f == "count" => int(&c.name, "a count"),
-            _ if aggregates => untyped(&c.name, "an aggregate or a group's key".into()),
-            _ => untyped(&c.name, "an expression".into()),
-        }
-    };
-    match def.body.last() {
-        Some(Statement::Select(sel)) => {
-            if sel.flat.is_some() {
-                return Answer::Untyped("a join's rows".into());
-            }
-            let s = of(&sel.collection);
-            if sel.count {
-                return Answer::Rows(vec![int("count", "a count")]);
-            }
-            let mut out = Vec::new();
-            if !sel.aggregate.is_empty() {
-                out.extend(sel.aggregate.iter().map(|c| column(s, c, true)));
-            } else if let Some(list) = &sel.project {
-                for n in list {
-                    if sel.marks.iter().any(|m| m.label() == *n) {
-                        out.push(untyped(n, "a highlight or a snippet".into()));
-                    } else if let Some(c) = sel.computed.iter().find(|c| c.name == *n) {
-                        out.push(column(s, c, false));
-                    } else {
-                        out.push(named(s, n));
-                    }
-                }
-            } else {
-                return Answer::Untyped("a list naming no fields".into());
-            }
-            // The rows a `lookup` attached go under its collection's name.
-            if let Some(l) = &sel.lookup {
-                let why = format!("the rows of `{}` that `lookup` attached", l.collection);
-                out.push(untyped(&l.collection, why));
-            }
-            Answer::Rows(out)
-        }
-        Some(st) => {
-            let collection = match st {
-                Statement::Update { collection, .. }
-                | Statement::Delete { collection, .. }
-                | Statement::Put { collection, .. } => Some(collection.as_str()),
-                _ => None,
-            };
-            match (collection, st.pick().and_then(|p| p.returning.as_ref())) {
-                (Some(c), Some(Some(list))) => {
-                    Answer::Rows(list.iter().map(|n| named(of(c), n)).collect())
-                }
-                (Some(_), _) => Answer::Wrote,
-                (None, _) => Answer::Untyped("a statement answering no rows".into()),
-            }
-        }
-        None => Answer::Untyped("an empty body".into()),
+    use fennec_core::named::{self, What};
+    match def.answer(|c| schemas.iter().find(|s| s.name == c)) {
+        named::Answer::Rows(items) => Answer::Rows(
+            items
+                .into_iter()
+                .map(|i| Member {
+                    note: match &i.what {
+                        What::Id => String::new(),
+                        What::Count => "a count".into(),
+                        What::Field(f) => crate::langs::note(f),
+                        What::Untyped(why) => format!("not typed: {why}"),
+                    },
+                    name: i.name,
+                    ty: i.ty,
+                    required: i.required,
+                })
+                .collect(),
+        ),
+        named::Answer::Wrote => Answer::Wrote,
+        named::Answer::Untyped(why) => Answer::Untyped(why),
     }
 }
 

@@ -8,8 +8,7 @@
 //! canonical tree's digest. The engine keeps a definition as a record of
 //! its database (`engine/stored.rs`) and runs a call under the write lock
 //! (`engine/call.rs`); who may call one, with which claims, is the server's
-//! (`fennec_http::access`). The surface still to come -- MCP's tools --
-//! refuses them as not built here ([`NOT_BUILT`]).
+//! (`fennec_http::access`).
 
 use crate::codec;
 use crate::error::{Error, Result};
@@ -17,15 +16,43 @@ use crate::query::{
     ArithOp, CmpOp, Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick,
     Require, Rerank, Select, Sort, Statement,
 };
+use crate::schema::Schema;
 use crate::value::{DataType, Value};
 
-/// What a surface that takes no named statement yet answers one with --
-/// MCP's tools, which call them by `call_<name>` once built: the words of
-/// their own a client tells this refusal by. A query error (400 over
-/// HTTP), refused before anything of the statement runs.
-pub const NOT_BUILT: &str = "named statements are not built here yet: `call`, `create \
-                             statement` and `drop statement` run through `/query`, `/batch` \
-                             and `POST /_call/<name>`";
+/// What a call of a statement answers, as far as it is typed
+/// ([`Definition::answer`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answer {
+    /// Rows, each with these items, in the order the answer writes them.
+    Rows(Vec<Item>),
+    /// The number of rows its last statement wrote: a write with no
+    /// `returning`, answered `{"affected": n}`.
+    Wrote,
+    /// Rows nothing types yet, and why.
+    Untyped(String),
+}
+
+/// An item of an answer's row: its type, `json` where it is not typed, and
+/// whether it is never null.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Item {
+    pub name: String,
+    pub ty: DataType,
+    pub required: bool,
+    pub what: What,
+}
+
+/// What an [`Item`] is, for a reader to say so beside its type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum What {
+    Id,
+    Count,
+    /// A field of the collection the statement reads or writes, as its
+    /// schema holds it.
+    Field(crate::schema::Field),
+    /// Not typed, and why.
+    Untyped(String),
+}
 
 /// The grammar's epoch: raised by every change that could read a text
 /// stored before it as another tree, or write a tree's canonical bytes
@@ -439,6 +466,113 @@ impl Definition {
             None => {}
         }
         out
+    }
+
+    /// What a call answers, typed as far as it is: a `get`'s list or a
+    /// write's `returning` over one collection, each plain field as `of`
+    /// (its collection's schema) types it, `id` and a count integers, and
+    /// every other item -- computed, aggregated, renamed with `as`, a path
+    /// into a json field, a `lookup`'s rows -- untyped, until the engine
+    /// infers the types of expressions. One place for both readers of it:
+    /// `fennec types`, which writes it in every language, and MCP's
+    /// `call_<name>` tools, whose `outputSchema` it is.
+    pub fn answer<'s>(&self, of: impl Fn(&str) -> Option<&'s Schema>) -> Answer {
+        let untyped = |name: &str, why: String| Item {
+            name: name.to_string(),
+            ty: DataType::Json,
+            required: false,
+            what: What::Untyped(why),
+        };
+        let count = |name: &str| Item {
+            name: name.to_string(),
+            ty: DataType::Int,
+            required: true,
+            what: What::Count,
+        };
+        // A name a list or `returning` writes as it is: `id`, a field, or a
+        // path into a json field.
+        let named = |s: Option<&Schema>, name: &str| -> Item {
+            if name == "id" {
+                return Item {
+                    name: "id".into(),
+                    ty: DataType::Int,
+                    required: true,
+                    what: What::Id,
+                };
+            }
+            match s.and_then(|s| s.field(name)) {
+                Some(f) => Item {
+                    name: name.to_string(),
+                    ty: f.ty.clone(),
+                    required: f.required,
+                    what: What::Field(f.clone()),
+                },
+                None => match name.split_once('.') {
+                    Some((f, _)) => untyped(name, format!("a path into `{f}`")),
+                    None => untyped(name, "no field of its collection".into()),
+                },
+            }
+        };
+        // An item written as more than a field: a group's key that is a field
+        // as that field, a count an integer, and the rest untyped.
+        let column = |s: Option<&Schema>, c: &Column, aggregates: bool| -> Item {
+            match &c.expr {
+                Expr::Field(f) if *f == c.name => named(s, f),
+                Expr::Field(f) => untyped(&c.name, format!("`{f}` given another name")),
+                Expr::Call(f, _) if f == "count" => count(&c.name),
+                _ if aggregates => untyped(&c.name, "an aggregate or a group's key".into()),
+                _ => untyped(&c.name, "an expression".into()),
+            }
+        };
+        match self.body.last() {
+            Some(Statement::Select(sel)) => {
+                if sel.flat.is_some() {
+                    return Answer::Untyped("a join's rows".into());
+                }
+                let s = of(&sel.collection);
+                if sel.count {
+                    return Answer::Rows(vec![count("count")]);
+                }
+                let mut out = Vec::new();
+                if !sel.aggregate.is_empty() {
+                    out.extend(sel.aggregate.iter().map(|c| column(s, c, true)));
+                } else if let Some(list) = &sel.project {
+                    for n in list {
+                        if sel.marks.iter().any(|m| m.label() == *n) {
+                            out.push(untyped(n, "a highlight or a snippet".into()));
+                        } else if let Some(c) = sel.computed.iter().find(|c| c.name == *n) {
+                            out.push(column(s, c, false));
+                        } else {
+                            out.push(named(s, n));
+                        }
+                    }
+                } else {
+                    return Answer::Untyped("a list naming no fields".into());
+                }
+                // The rows a `lookup` attached go under its collection's name.
+                if let Some(l) = &sel.lookup {
+                    let why = format!("the rows of `{}` that `lookup` attached", l.collection);
+                    out.push(untyped(&l.collection, why));
+                }
+                Answer::Rows(out)
+            }
+            Some(st) => {
+                let collection = match st {
+                    Statement::Update { collection, .. }
+                    | Statement::Delete { collection, .. }
+                    | Statement::Put { collection, .. } => Some(collection.as_str()),
+                    _ => None,
+                };
+                match (collection, st.pick().and_then(|p| p.returning.as_ref())) {
+                    (Some(c), Some(Some(list))) => {
+                        Answer::Rows(list.iter().map(|n| named(of(c), n)).collect())
+                    }
+                    (Some(_), _) => Answer::Wrote,
+                    (None, _) => Answer::Untyped("a statement answering no rows".into()),
+                }
+            }
+            None => Answer::Untyped("an empty body".into()),
+        }
     }
 
     /// Why a replacement of `old` by this one is refused, if it is: it keeps

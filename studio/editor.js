@@ -175,18 +175,18 @@ export function mount(host, ctx) {
     redraw();
   };
 
-  /** `text` and its parameters in the editor, run there when `go`. */
-  function load(text, p = '[]', go = false) {
+  /** `text` and its parameters in the editor, run there when `go` -- under `key`, an `Idempotency-Key`, where a call form gives one. */
+  function load(text, p = '[]', go = false, key = null) {
     set(text);
     params.value = p;
     // The example opened, marked in the list as the cell and the tab are.
     exampleList?.querySelectorAll('.ed-item').forEach((b, i) => (examples[i].text === text ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')));
-    if (go) run();
+    if (go) run(key);
   }
 
   // ------------------------------------------------------------- running
 
-  async function run() {
+  async function run(key = null) {
     if (running) return;
     // A selection runs alone, as in any editor of statements.
     const sel = area.selectionStart !== area.selectionEnd ? area.value.slice(area.selectionStart, area.selectionEnd) : null;
@@ -207,7 +207,7 @@ export function mount(host, ctx) {
     try {
       r =
         req.kind === 'query'
-          ? await call(ctx, '/query', { method: 'POST', body: JSON.stringify({ query: req.text, params: req.params }) })
+          ? await call(ctx, '/query', { method: 'POST', body: JSON.stringify({ query: req.text, params: req.params }), headers: key ? { 'idempotency-key': key } : {} })
           : await call(ctx, '/batch', {
               method: 'POST',
               type: 'application/x-ndjson',
@@ -566,8 +566,8 @@ export function mount(host, ctx) {
       }
       area.focus();
     },
-    load(text, p, go) {
-      load(text, p, go);
+    load(text, p, go, key) {
+      load(text, p, go, key);
       area.focus();
     },
     focus: () => area.focus(),

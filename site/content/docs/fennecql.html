@@ -418,9 +418,12 @@ reading near has answered by a read replica (a statement that writes is
 refused there, 403, never landed); without it a call goes home. A refusal is
 the SDK's error with the call's status and, for a <code>require … else
 '…'</code>, its <code>reason</code> (<a href="languages.html#named-statements">Your
-language</a>, <a href="mobile.html#named-statements">Mobile</a>). Not built
-yet: the studio's pages for statements and MCP tools for them (MCP's
-<code>write</code> refuses a <code>call</code>). A <a
+language</a>, <a href="mobile.html#named-statements">Mobile</a>). An
+agent calls each statement its token may call as an MCP tool of its own,
+<code>call_transfer</code>, typed by the signature (<a
+href="mcp.html#statements">MCP</a>); <a href="studio.html#schema">fennec
+studio</a> lists them in its schema view and calls one from a form; the
+shell's <code>.help</code> gives the forms above. A <a
 href="sync.html#limits">sync replica</a> refuses <code>call</code>,
 <code>create statement</code> and <code>drop statement</code>: its app calls
 the server through its HTTP client.</p>

@@ -18,45 +18,275 @@ const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 const ROOT: &str = "root-token";
 const MODERN: &str = "2026-07-28";
 
-/// A call is no MCP tool's to run until each statement has a tool of its
-/// own (`call_<name>`, `docs/design/named-statements.md`'s slice 7), the
-/// statement's words checked there: `query` refuses one whose statement
-/// reads -- answered by `/query` on the same server -- as it refuses a
-/// write, and `write` refuses any call, before anything of it runs.
+/// Statements the tests of `call_<name>` tools define, as the server's
+/// token defines them over `/query`: one that reads, one that reads the
+/// caller's claims, one that writes and answers what it wrote, one that
+/// writes and answers every row, and one that writes a text back.
+const STATEMENTS: &[&str] = &[
+    "create statement years($from int, $n int = 2) comment 'Titles from a year on, oldest first' \
+     as get docs select title, year where year >= $from order year limit $n",
+    "create statement mine() claims (sub text) as get docs select title where owner = $jwt.sub",
+    "create statement stamp($x int) public as insert secrets {x: $x} returning id, x",
+    "create statement grow($x int) public scans as begin insert secrets {x: $x}; \
+     get secrets select x end",
+    "create collection pads (t text)",
+    "create statement pad($t text) public as insert pads {t: $t} returning t",
+];
+
+/// `sql` run over `/query` as the server's token, each answered 200.
+fn define(n: &Node, sql: &[&str]) {
+    let auth = format!("Bearer {ROOT}");
+    for q in sql {
+        let body = format!(r#"{{"query":"{q}"}}"#);
+        let a = n.post_raw("POST", "/query", &[("Authorization", &auth)], &body);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+}
+
+/// A 2026-07-28 `tools/list` as `token`: each tool by name.
+fn listed(n: &Node, token: &str) -> Vec<(String, Value)> {
+    let v = n.modern(Some(token), 2, "tools/list", "{}").json();
+    match at(&v, &["result", "tools"]) {
+        Value::List(t) => t
+            .iter()
+            .map(|t| (text(at(t, &["name"])).to_string(), t.clone()))
+            .collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn named<'a>(tools: &'a [(String, Value)], name: &str) -> Option<&'a Value> {
+    tools.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+}
+
+/// Each statement the token may call is a tool of its own, `call_<name>`:
+/// its arguments its typed `inputSchema`, its answer its `outputSchema`,
+/// one that writes only under `--mcp-write`, one reading claims none of the
+/// server's token's -- `as` is not a model's -- and every name one Claude's
+/// and OpenAI's tool names take. A statement's tool is called as `/query`
+/// calls it, its arguments values; `query` and `write` send a call to it.
 #[test]
-fn a_call_is_no_tools_to_run_yet() {
-    let n = start(Options {
+fn a_statement_is_a_tool_of_its_own_typed_by_its_signature() {
+    let n = start(opts());
+    define(&n, STATEMENTS);
+    let tools = listed(&n, ROOT);
+    let names: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["schema", "search", "query", "get", "call_years"]);
+    let years = named(&tools, "call_years").unwrap();
+    assert_eq!(
+        at(years, &["description"]),
+        &Value::Text(
+            "Titles from a year on, oldest first. An answer of more than 100 rows or 65536 \
+             bytes is refused, not cut."
+                .into()
+        )
+    );
+    let json = |t: &str| fennec_core::json::parse_json(t).unwrap();
+    assert_eq!(
+        at(years, &["inputSchema"]),
+        &json(
+            r#"{"type":"object","properties":{"from":{"type":"integer","description":"int"},"n":{"type":"integer","default":2,"description":"int, 2 when absent"}},"required":["from"],"additionalProperties":false}"#
+        )
+    );
+    assert_eq!(
+        at(years, &["outputSchema"]),
+        &json(
+            r#"{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"title":{"type":["string","null"]},"year":{"type":["integer","null"]}}}}},"required":["rows"]}"#
+        )
+    );
+    assert_eq!(
+        at(years, &["annotations", "readOnlyHint"]),
+        &Value::Bool(true)
+    );
+
+    let (err, s) = n.call(Some(ROOT), "call_years", r#"{"from":2024}"#);
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["rows", "0", "title"]), &Value::Text("dog".into()));
+    assert_eq!(at(&s, &["rows", "1", "year"]), &Value::Int(2025));
+    assert_eq!(at(&s, &["rows", "2"]), &Value::Null);
+    let (_, s) = n.call(Some(ROOT), "call_years", r#"{"from":2023,"n":1}"#);
+    assert_eq!(at(&s, &["rows", "0", "title"]), &Value::Text("fox".into()));
+    // Refused as `/query` refuses the call, for the model to correct.
+    for (args, status) in [
+        (r#"{"from":"2024"}"#, 400),
+        (r#"{}"#, 400),
+        (r#"{"from":2024,"to":2025}"#, 400),
+    ] {
+        let (err, s) = n.call(Some(ROOT), "call_years", args);
+        assert!(err, "{args}: {s:?}");
+        assert_eq!(at(&s, &["status"]), &Value::Int(status), "{args}: {s:?}");
+    }
+    // One the list leaves out is the tool no statement is: a protocol error.
+    for tool in ["call_nope", "call_mine", "call_stamp", "call_"] {
+        let a = n.modern(
+            Some(ROOT),
+            3,
+            "tools/call",
+            &format!(r#"{{"name":"{tool}","arguments":{{}}}}"#),
+        );
+        assert_eq!(error_code(&a), -32602, "{tool}: {}", a.body);
+    }
+    // With --mcp-write, the statements that write; an insert's alone adds.
+    let w = start(Options {
         write: true,
         ..opts()
     });
+    define(&w, STATEMENTS);
+    for (tool, args) in [
+        ("query", r#"{"query":"call years {from: 2024}"}"#),
+        ("write", r#"{"statement":"call stamp {x: 1}"}"#),
+    ] {
+        let (err, s) = w.call(Some(ROOT), tool, args);
+        assert!(err, "{tool}: {s:?}");
+        assert!(text(at(&s, &["error"])).contains("its own tool"), "{s:?}");
+    }
+    let tools = listed(&w, ROOT);
+    for (name, _) in &tools {
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        assert!(ok, "{name}");
+    }
+    let stamp = named(&tools, "call_stamp").expect("call_stamp");
+    assert!(named(&tools, "call_grow").is_some() && named(&tools, "call_mine").is_none());
+    assert_eq!(
+        at(stamp, &["annotations"]),
+        &fennec_core::json::parse_json(
+            r#"{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}"#
+        )
+        .unwrap()
+    );
+    let (err, s) = w.call(Some(ROOT), "call_stamp", r#"{"x":7}"#);
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["rows", "0", "x"]), &Value::Int(7));
+    // A handshake client lists and calls them alike.
+    let l = w.legacy(Some("2025-11-25"), 4, "tools/list", "{}");
+    assert!(l.body.contains(r#""name":"call_stamp""#), "{}", l.body);
+    let c = w.legacy(
+        Some("2025-11-25"),
+        5,
+        "tools/call",
+        r#"{"name":"call_years","arguments":{"from":2025}}"#,
+    );
+    assert!(c.body.contains(r#""title":"cat""#), "{}", c.body);
+}
+
+/// A statement's tool is held to `--mcp-max-rows` and `--mcp-max-bytes`
+/// where `/query`'s path answers it: one that writes before its block
+/// lands -- past them, refused (413) and put back, so a model is never told
+/// half an answer nor leaves a write it was not told of -- and one that
+/// reads as it reads.
+#[test]
+fn a_call_tool_past_its_bound_is_refused_and_its_writes_put_back() {
+    let n = start(Options {
+        write: true,
+        max_rows: 2,
+        max_bytes: 120,
+        ..opts()
+    });
+    define(&n, STATEMENTS);
+    let count = |c: &str| {
+        let auth = format!("Bearer {ROOT}");
+        let body = format!(r#"{{"query":"get {c} count"}}"#);
+        let a = n.post_raw("POST", "/query", &[("Authorization", &auth)], &body);
+        int(at(&a.json(), &["0", "count"]))
+    };
+    // 42 and 1: two rows, within the bound.
+    let (err, s) = n.call(Some(ROOT), "call_grow", r#"{"x":1}"#);
+    assert!(!err, "{s:?}");
+    assert_eq!(count("secrets"), 2);
+    // A third row is past it: refused, and the insert put back.
+    let (err, s) = n.call(Some(ROOT), "call_grow", r#"{"x":2}"#);
+    assert!(err, "{s:?}");
+    assert_eq!(at(&s, &["status"]), &Value::Int(413));
+    assert!(text(at(&s, &["error"])).contains("--mcp-max-rows"), "{s:?}");
+    assert_eq!(count("secrets"), 2);
+    // An answer past the bytes, the same.
+    let (err, s) = n.call(Some(ROOT), "call_pad", r#"{"t":"short"}"#);
+    assert!(!err, "{s:?}");
+    let long = "x".repeat(200);
+    let (err, s) = n.call(Some(ROOT), "call_pad", &format!(r#"{{"t":"{long}"}}"#));
+    assert!(err && int(at(&s, &["status"])) == 413, "{s:?}");
+    assert!(
+        text(at(&s, &["error"])).contains("--mcp-max-bytes"),
+        "{s:?}"
+    );
+    assert_eq!(count("pads"), 1);
+    // A read past the rows is refused as it reads; a client's call through
+    // `/query` is answered whole, held to no tool's bound.
+    define(&n, &["put docs {title: 'owl', year: 2026, owner: 'carol'}"]);
+    let (err, s) = n.call(Some(ROOT), "call_years", r#"{"from":2023,"n":3}"#);
+    assert!(err && int(at(&s, &["status"])) == 413, "{s:?}");
     let auth = format!("Bearer {ROOT}");
-    let headers = [("Authorization", auth.as_str())];
-    for q in [
-        "create statement years() as get docs select year order year",
-        "create statement stamp() public as insert secrets {x: 1}",
-    ] {
-        let body = format!(r#"{{"query":"{q}"}}"#);
-        let a = n.post_raw("POST", "/query", &headers, &body);
-        assert_eq!(a.status, 200, "{q}: {}", a.body);
-    }
-    let a = n.post_raw("POST", "/query", &headers, r#"{"query":"call years"}"#);
-    assert_eq!(a.status, 200, "{}", a.body);
-    for (tool, args, says) in [
-        ("query", r#"{"query":"call years"}"#, "query runs reads"),
-        ("write", r#"{"statement":"call years"}"#, "not built"),
-        ("write", r#"{"statement":"call stamp"}"#, "not built"),
-    ] {
-        let (err, s) = n.call(Some(ROOT), tool, args);
-        assert!(err, "{tool} {args}: {s:?}");
-        assert!(text(at(&s, &["error"])).contains(says), "{tool}: {s:?}");
-    }
     let a = n.post_raw(
         "POST",
         "/query",
-        &headers,
-        r#"{"query":"get secrets count"}"#,
+        &[("Authorization", &auth)],
+        r#"{"query":"call years {from: 2023, n: 3}"}"#,
     );
-    assert!(a.body.contains(r#""count":1"#), "{}", a.body);
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(at(&a.json(), &["2", "title"]), &Value::Text("cat".into()));
+    let a = n.post_raw(
+        "POST",
+        "/query",
+        &[("Authorization", &auth)],
+        r#"{"query":"call grow {x: 3}"}"#,
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(count("secrets"), 3);
+}
+
+/// A scoped token's agent is handed the statements a `call` line grants
+/// it, calls them as itself -- its claims the statement's -- and is told of
+/// no other: an ungranted one is the unknown tool a missing one is.
+#[test]
+fn a_scoped_agent_calls_what_its_policy_grants() {
+    let policy = "\
+docs         read  where owner = $jwt.sub
+years, mine  call
+";
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            access: Some(access),
+            mcp: Some(Arc::new(Options {
+                write: true,
+                ..opts()
+            })),
+            ..Config::default()
+        },
+        DOCS,
+    );
+    define(&n, STATEMENTS);
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let tools = listed(&n, &alice);
+    let calls: Vec<&str> = tools
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| n.starts_with("call_"))
+        .collect();
+    assert_eq!(calls, ["call_mine", "call_years"]);
+    let (err, s) = n.call(Some(&alice), "call_mine", "{}");
+    assert!(!err, "{s:?}");
+    assert_eq!(
+        at(&s, &["rows"]),
+        &fennec_core::json::parse_json(r#"[{"title":"fox"},{"title":"cat"}]"#).unwrap()
+    );
+    // The statement's authority: rows of every owner, which its `get docs`
+    // would not show it.
+    let (err, s) = n.call(Some(&alice), "call_years", r#"{"from":2024}"#);
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["rows", "0", "title"]), &Value::Text("dog".into()));
+    let a = n.modern(
+        Some(&alice),
+        3,
+        "tools/call",
+        r#"{"name":"call_stamp","arguments":{"x":1}}"#,
+    );
+    assert_eq!(error_code(&a), -32602, "{}", a.body);
 }
 
 fn setup(db: &mut Database, sql: &[&str]) {

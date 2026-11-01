@@ -22,18 +22,40 @@ export { StatementError };
  * statement. Each is `{text, at}`, `at` the offset its text starts at.
  * Strings and comments as FennecQL's lexer reads them: a string runs over
  * lines to its quote, and `#` starts a comment as `--` does.
+ *
+ * A named statement's body of several is one statement, `;`s and all, as
+ * the parser reads it: `create [or replace] statement ... as begin`, then
+ * statements to the `end` that begins one -- a `case`'s own `end` closing
+ * the `case` -- sent whole, never as its pieces.
  */
 export function splitStatements(source) {
   const text = String(source);
   const out = [];
   let start = 0;
   let quote = null;
+  // The words of the piece so far, outside strings and comments: whether it
+  // defines a statement, and whether its body's `begin` is open.
+  let words = [];
+  let body = false;
+  let cases = 0;
   const push = (end) => {
     const piece = text.slice(start, end);
     if (!blank(piece)) {
       const lead = piece.length - piece.trimStart().length;
       out.push({ text: piece.trim(), at: start + lead });
     }
+  };
+  const word = (w) => {
+    const lw = w.toLowerCase();
+    if (body) {
+      if (lw === 'case') cases++;
+      else if (lw === 'end' && cases > 0) cases--;
+      else if (lw === 'end') body = false;
+    } else if (lw === 'begin' && words.at(-1) === 'as' && defining(words)) {
+      body = true;
+      cases = 0;
+    }
+    words.push(lw);
   };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -46,14 +68,25 @@ export function splitStatements(source) {
     else if (c === '#' || (c === '-' && text[i + 1] === '-')) {
       const nl = text.indexOf('\n', i);
       i = nl < 0 ? text.length : nl;
-    } else if (c === ';') {
+    } else if (c === ';' && !body) {
       push(i);
       start = i + 1;
+      words = [];
+    } else if (WORD.test(c) && (i === 0 || !WORD.test(text[i - 1]))) {
+      let j = i;
+      while (j < text.length && WORD.test(text[j])) j++;
+      word(text.slice(i, j));
+      i = j - 1;
     }
   }
   push(text.length);
   return out;
 }
+
+const WORD = /[\p{L}\p{N}_$]/u;
+
+/** Whether a piece's first words begin a named statement's definition. */
+const defining = (w) => w[0] === 'create' && (w[1] === 'statement' || (w[1] === 'or' && w[2] === 'replace' && w[3] === 'statement'));
 
 /** Whether a piece of text holds only blanks and comments. */
 function blank(piece) {
@@ -355,4 +388,75 @@ export function createTexts(fennecql) {
     out.get(m[1]).push(line);
   }
   return out;
+}
+
+// ------------------------------------------------------------------ named statements
+//
+// A statement's name is written as FennecQL writes one -- ASCII letters,
+// digits and `_`, a letter first, at most 59 bytes, the engine's rule
+// (`named::valid_name`) -- and its arguments go as one parameter, an object
+// by name: `call <name> $1`, the text every SDK sends.
+
+const STATEMENT = /^[A-Za-z][A-Za-z0-9_]{0,58}$/;
+
+/** `n` when it is a name a named statement may have; refused otherwise. */
+export function statementName(n) {
+  if (typeof n !== 'string' || !STATEMENT.test(n)) {
+    throw new StatementError(`${JSON.stringify(n)} is no statement's name: ASCII letters, digits and _, a letter first`);
+  }
+  return n;
+}
+
+/** `statements`: each named statement the database holds, to the server's token. */
+export const listStatements = () => ({ text: 'statements', params: [] });
+
+/** `describe statement <name>`: its row, its text and what it depends on. */
+export function describeStatement(n) {
+  return { text: `describe statement ${statementName(n)}`, params: [] };
+}
+
+/** `call <name> $1`, the arguments an object of values by name. */
+export function callStatement(n, args = {}) {
+  statementName(n);
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+    throw new StatementError('a call’s arguments are an object of values by name: {"from": 1}');
+  }
+  return { text: `call ${n} $1`, params: [args] };
+}
+
+/**
+ * The parameters of a signature as `statements` writes it -- `($from int,
+ * $to int = ..., $tags [text]) claims (sub text)` -- each `{name, type,
+ * optional}`, and the claims it reads, by name.
+ */
+export function signatureParams(signature) {
+  const s = String(signature ?? '');
+  if (s[0] !== '(') return { params: [], claims: [] };
+  const pieces = [];
+  let depth = 0;
+  let from = 1;
+  let end = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if ('(<['.includes(c)) depth++;
+    else if (')>]'.includes(c) && --depth === 0) {
+      end = i;
+      break;
+    } else if (c === ',' && depth === 1) {
+      pieces.push(s.slice(from, i));
+      from = i + 1;
+    }
+  }
+  pieces.push(s.slice(from, end));
+  const params = pieces
+    .map((p) => /^\s*\$([A-Za-z][A-Za-z0-9_]*)\s+(.+?)(\s*=\s*\.\.\.)?\s*$/.exec(p))
+    .filter(Boolean)
+    .map(([, n, type, dflt]) => ({ name: n, type, optional: Boolean(dflt) }));
+  const claims = /^\)\s*claims\s*\((.*)\)\s*$/.exec(s.slice(end));
+  return { params, claims: claims ? claims[1].split(',').map((c) => c.trim().split(/\s+/)[0]).filter(Boolean) : [] };
+}
+
+/** A definition's text as its replacement: `create or replace statement ...`. */
+export function replacing(text) {
+  return String(text).replace(/^(\s*create)\s+statement\b/i, '$1 or replace statement');
 }
