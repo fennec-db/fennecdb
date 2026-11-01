@@ -8,6 +8,10 @@ use std::io::{self, Read, Write};
 
 pub const PROTOCOL_V3: i32 = 196_608; // 3.0
 
+/// `SSLRequest`'s code, sent where a protocol version would stand: 1234 in
+/// the high half, 5679 in the low. The server answers one byte, `S` or `N`.
+pub const SSL_REQUEST: i32 = 80_877_103;
+
 /// The protocol's message ceiling; the same as PostgreSQL's.
 pub const MAX_MESSAGE: usize = 1 << 30;
 
@@ -81,8 +85,9 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Message> {
 /// allocation `vec![0u8; len]` makes -- `alloc_zeroed`, the system's zero
 /// pages, each taken up as its bytes arrive -- with its failure an error
 /// where `vec!`'s aborts. Under the ceiling a length is up to a gigabyte,
-/// sent by the server, buggy or not, or by anyone on the path (fennecdb
-/// speaks no TLS), and where the system refuses that much -- a host that
+/// sent by the server, buggy or not, or by anyone on the path (under any
+/// `sslmode` short of `verify-full`), and where the system refuses that
+/// much -- a host that
 /// does not overcommit, Linux's heuristic refusing more than its memory and
 /// swap on a small machine -- the refusal aborted `fennec import`, and
 /// `fennec-server --follow` with every request it served; now it is an

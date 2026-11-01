@@ -290,7 +290,9 @@ usage: fennec-server [options]
                             its copy when there is no whole one, then its
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
-                            but the follower's
+                            but the follower's. TLS is the URL's ?sslmode=,
+                            libpq's (prefer by default; verify-full checks
+                            the server's name), and its &sslrootcert=
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>
@@ -310,8 +312,9 @@ usage: fennec-server [options]
 A token or key set empty in the environment is unset; one given empty as a
 flag is refused at the start.
 
-fennec-server does not speak TLS: put it behind a TLS terminator such as
-nginx or Caddy before using it on an open network.
+fennec-server serves no TLS (it speaks it only to a --follow source): put
+it behind a TLS terminator such as nginx or Caddy before using it on an
+open network.
 ";
 
 fn fail(msg: &str) -> ! {

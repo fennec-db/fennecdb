@@ -25,7 +25,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 .PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -660,9 +660,9 @@ entry-bench:
 collate-bench:
 	$(CARGO) run --release -p fennec-bench --bin collate
 
-## Verifies the import's PostgreSQL arm against a live server
+## Verifies the import's PostgreSQL arm against a live server, TLS on in it
 import-test: pgvector-up
-	@$(CARGO) test -p fennec-import --test all -- --ignored pg:: follow:: && \
+	@$(MAKE) pgvector-tls && $(CARGO) test -p fennec-import --test all -- --ignored pg:: follow:: && \
 	  $(CARGO) test -p fennec-server --test all -- --ignored follow::; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
@@ -698,7 +698,21 @@ pgvector-up:
 pgvector-down:
 	-docker rm -f fennecbench-pg
 
-## Builds the server image (static with musl, ~4 MB)
+## TLS on in the server `make pgvector-up` started (PG=<container> another),
+## with fennec-wire's test certificates -- a CA of their own, `localhost` --
+## for `make import-test`'s TLS test. Off in `pgvector-up` itself: a libpq
+## client's `prefer` would take it, and the benchmarks' figures with it.
+PG ?= fennecbench-pg
+pgvector-tls:
+	@docker cp crates/fennec-wire/tests/certs/server.pem $(PG):/var/lib/postgresql/server.pem
+	@docker cp crates/fennec-wire/tests/certs/server.key $(PG):/var/lib/postgresql/server.key
+	@docker exec $(PG) sh -c 'chown postgres:postgres /var/lib/postgresql/server.* && chmod 600 /var/lib/postgresql/server.key'
+	@docker exec $(PG) psql -qU postgres -d postgres \
+	  -c "alter system set ssl_cert_file = '/var/lib/postgresql/server.pem'" \
+	  -c "alter system set ssl_key_file = '/var/lib/postgresql/server.key'" \
+	  -c "alter system set ssl = on" -c "select pg_reload_conf()" >/dev/null
+
+## Builds the server image (static with musl, ~7 MB)
 docker:
 	docker build -t fennecdb .
 

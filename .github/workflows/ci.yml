@@ -30,6 +30,12 @@ jobs:
       - name: AGENTS.md is CLAUDE.md under its own title, CLAUDE.md under 64 000 bytes
         run: python3 tools/agents_md.py --check
 
+      # docs/design/crates.md#zero-dependencies: only fennec-tls (rustls,
+      # ring, webpki-roots) and fennec-bench take crates from outside the
+      # workspace, and the browser module's crates reach none, nor fennec-tls.
+      - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
+        run: python3 tools/deps_check.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

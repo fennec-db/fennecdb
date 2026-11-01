@@ -1,0 +1,27 @@
+[package]
+name = "fennec-tls"
+description = "TLS for fennecdb's dials and listeners: a thin layer over rustls and ring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# The one crate besides fennec-bench that takes dependencies from outside the
+# workspace (docs/design/crates.md#zero-dependencies): TLS is written by no one
+# by hand. rustls without its default features, whose aws-lc-rs wants cmake
+# and a C toolchain of its own; ring for the cryptography, `std` for the
+# streams and `tls12` for the PostgreSQL servers and proxies that speak no
+# 1.3. webpki-roots is Mozilla's trust store, compiled in, so a static musl
+# binary in a scratch image verifies a public certificate with no file of
+# the system's. `tools/deps_check.py` holds every other crate to the rule.
+[dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.11"
+
+[dev-dependencies]
+# A private CA and the certificates it signs, made as a test runs: here
+# alone, so no other crate takes rcgen.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }

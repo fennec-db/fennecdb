@@ -91,10 +91,62 @@ untyped columns are resolved from the first 1000 rows.</p>
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, hand-written in
-<code>fennec-wire</code>'s client over <code>fennec-http</code>'s own crypto. pgvector's
+<code>fennec-wire</code>'s client over <code>fennec-http</code>'s own crypto;
+TLS is <a href="https://github.com/rustls/rustls">rustls</a>'s, with ring,
+behind <code>fennec-tls</code>, the one shipped crate that takes
+dependencies. pgvector's
 <code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns
 are recognised along with their dimensions.</p>
 </details>
+
+<h3 id="tls">TLS</h3>
+
+<p>The connection string's <code>sslmode</code> says whether the connection
+is encrypted and what of the server's certificate is checked, as libpq's
+does, and <code>sslrootcert</code> names a PEM file of the CAs to check it
+against:</p>
+
+<pre><code>fennec import 'postgres://app@db.example.com/shop?sslmode=verify-full' --table products --to shop.fennec
+fennec import 'postgres://app@10.0.0.5/shop?sslmode=verify-ca&amp;sslrootcert=/etc/pg/ca.pem' --table products --to shop.fennec</code></pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th><code>sslmode</code></th><th>Encrypted</th><th>What is checked</th></tr></thead>
+<tbody>
+<tr><td><code>disable</code></td><td>no</td><td>—</td></tr>
+<tr><td><code>prefer</code>, the default</td><td>where the server takes TLS</td><td>nothing</td></tr>
+<tr><td><code>require</code></td><td>yes, or no connection</td><td>nothing; with <code>sslrootcert</code>, as <code>verify-ca</code></td></tr>
+<tr><td><code>verify-ca</code></td><td>yes</td><td>the certificate is signed by <code>sslrootcert</code>'s CAs; the name is not checked</td></tr>
+<tr><td><code>verify-full</code></td><td>yes</td><td>the certificate is signed by a trusted CA and names the host dialed</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><b><code>require</code> does not verify the server</b>, as libpq's does
+not: it keeps the rows from someone listening on the path, not from someone
+standing in for the server, who would read them, and the password's proof
+too. Only <code>verify-full</code> keeps that out; use it on any network you
+do not own.</p>
+
+<p>Without <code>sslrootcert</code>, <code>verify-full</code> trusts the
+public CAs of Mozilla's store, compiled into the binary, so a static binary
+in an empty container needs no file of the system's (libpq would read
+<code>~/.postgresql/root.crt</code>: name it if your CA is there). A server
+whose certificate a private CA signed — Amazon RDS, Azure, Cloud SQL —
+needs that CA's file in <code>sslrootcert</code>. <code>sslrootcert=system</code>
+is the public store, taken only by <code>verify-full</code>, and
+<code>verify-ca</code> takes a file: with every public CA trusted and no
+name checked, any certificate a public CA signed would pass.
+<code>PGSSLMODE</code> and <code>PGSSLROOTCERT</code> are read where the
+string names neither. <code>allow</code>, client certificates
+(<code>sslcert</code>, <code>sslkey</code>) and every other parameter are
+refused rather than passed over.</p>
+
+<p>The same string goes to <code>fennec import</code>, its
+<code>--follow</code> and <code>fennec-server --follow</code>. A build
+without the <code>tls</code> feature (<code>--no-default-features</code>)
+speaks plain text under <code>prefer</code>, as libpq built without SSL
+does, and refuses the modes that ask for TLS.</p>
 
 <h2>Type mapping</h2>
 
@@ -197,6 +249,8 @@ following docs: ctrl-c stops, and the same command resumes
     follower is killed.</li>
   <li><b>Drop the slot when you stop for good,</b> or PostgreSQL keeps its log
     for it.</li>
+  <li><b>TLS is the connection string's</b>, <code>sslmode</code> and all,
+    as for the copy (<a href="#tls">TLS</a>).</li>
 </ul>
 
 <details class="deep"><summary>How --follow reads, resumes and confirms</summary>
@@ -387,14 +441,17 @@ href="#following">Following changes</a>).</p>
 <p>100 000 rows × 3 dimensions, index build included, take about 3.1 s from
 either source.</p>
 
-<pre data-lang="bash">make import-test        # the PostgreSQL arm and --follow — needs Docker
+<pre data-lang="bash">make import-test        # the PostgreSQL arm and --follow, TLS on in the server — needs Docker
 cargo test -p fennec-import --test all -- --ignored pg:: follow::
 </pre>
 
 <details class="deep"><summary>What the import adds to the binary</summary>
 <p>Import is a default feature of the <code>fennec</code> binary and accounts
-for 275 KB of it. <code>--no-default-features</code> removes it, and
-<code>fennec backup</code>, <code>archive</code>, <code>restore</code> and
-<code>fennec mcp</code> with it (502 KB); with the <code>cli</code> profile as
-well, the binary drops from 3013 KB to 1880 KB (<code>make small</code>).</p>
+for 275 KB of it, and its TLS, the <code>tls</code> feature, for 1035 KB more
+(<code>--no-default-features --features import,backup,mcp</code> keeps the
+import without it, <code>prefer</code> then plain text).
+<code>--no-default-features</code> removes both, and <code>fennec
+backup</code>, <code>archive</code>, <code>restore</code> and <code>fennec
+mcp</code> with them (1876 KB); with the <code>cli</code> profile as well,
+the binary drops from 4355 KB to 2091 KB (<code>make small</code>).</p>
 </details>

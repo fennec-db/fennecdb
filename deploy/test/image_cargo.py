@@ -26,7 +26,10 @@ as the Dockerfiles' is a cache mount:
 - the library changed and built for one binary alone, then the other's
   outputs made newer than it, as a clock set back between the two builds
   leaves them: that binary, its own sources unchanged, fails the check,
-  which names the library it linked.
+  which names the library it linked;
+- a workspace crate with a build script is refused, and a registry
+  crate's build script -- libc's, as ring's and rustls's under
+  fennec-tls -- is taken, its compile held to its record.
 
 Each fails with its part taken out: times kept in the copy (`rsync -t`,
 COPY's way), the check, a unit's record kept only once the whole build
@@ -183,6 +186,25 @@ def main():
                (code, out, named), (1, "", True), err)
         code, out, err = build(tree)
         expect("the build after it", (code, out), (0, "5 three"), err)
+
+        # A build script: a workspace crate's is refused, its run unfollowed;
+        # a registry crate's -- libc's, as fennec-tls's ring and rustls have
+        # theirs -- is taken, its compile held to its record. The registry
+        # is reached over the network, so these come last.
+        write(tree, {
+            "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = ["a", "b", "c", "d", "e"]\n',
+            "d/Cargo.toml": '[package]\nname = "d"\nversion = "0.1.0"\nedition = "2021"\n',
+            "d/build.rs": "fn main() {}\n",
+            "d/src/main.rs": 'fn main() { println!("d"); }\n',
+            "e/Cargo.toml": ('[package]\nname = "e"\nversion = "0.1.0"\nedition = "2021"\n'
+                             '[dependencies]\nlibc = "0.2"\n'),
+            "e/src/main.rs": 'fn main() { println!("e {}", unsafe { libc::getpid() } > 0); }\n',
+        })
+        code, out, err = build(tree, "d")
+        expect("a workspace crate's build script",
+               (code, out, "has a build script" in err), (1, "", True), err)
+        code, out, err = build(tree, "e")
+        expect("a registry crate's build script", (code, out), (0, "e true"), err)
     finally:
         shutil.rmtree(tree)
         subprocess.run(["docker", "volume", "rm", "-f", VOLUME], capture_output=True)

@@ -525,7 +525,8 @@ before anything is allocated, and under it the body's buffer is the
 length believed, allocated so its failure is an error (`proto::zeroed`,
 as the router's `zeroed`, and for its reasons: no copy at any size, a
 lying length costing the pages its bytes reach): a length from the
-server, or from anyone on the path (fennecdb speaks no TLS), that a system
+server, or from anyone on the path (under any `sslmode` short of
+`verify-full`), that a system
 refused -- one that does not overcommit, Linux's heuristic on a machine
 smaller than the gigabyte -- aborted `fennec import`, and `fennec-server
 --follow` with everything it served, and is a broken stream now, which
@@ -546,3 +547,29 @@ before the pg wire went gave 3.7 and 3.7 the same day); a server killed
 while the table was written to held every row 370 ms after it started
 again. The
 follower adds 178 KB to `fennec-server`.
+
+TLS to the source (`sslmode`, `fennec_wire::client::SslMode`) is asked
+for as libpq asks: an `SSLRequest` before the startup message, so the
+user's and the database's names, and SCRAM's exchange, go out only once
+the handshake is done -- and under `verify-full` only to the server the
+certificate names. The modes are libpq's five but `allow`, with its
+default, `prefer`, and its rules: `prefer` goes on in plain text on an
+`N` and dials again without TLS when the handshake fails; a named CA file
+makes `require` a `verify-ca`; `verify-ca` takes a file, never the public
+roots, since with every public CA trusted and no name checked any
+certificate a public CA signed passes; `sslrootcert=system` (the roots
+compiled in, webpki-roots) is `verify-full`'s alone. Where libpq reads
+`~/.postgresql/root.crt` when no CA is named, `verify-full` trusts the
+public roots: a static binary in a scratch image has no home and no store.
+The answer to the request is one byte read alone off the socket, so bytes
+someone put after an `S` go into the handshake, which refuses them, never
+into what is read as the server's (CVE-2021-23222, libpq's). A build
+without the `tls` feature takes `prefer` as plain text and refuses the
+rest, as libpq built without SSL does. The wait for the next replication
+message is `TlsStream::readable` over TLS: it takes whole records in under
+the wait, where a peek at the socket woke for a record holding no
+plaintext -- a TLS 1.3 session ticket, a key update -- and left the read
+to wait out the socket's 30 s timeout. `make import-test` runs the live
+tests with TLS on in the server (`make pgvector-tls`, fennec-wire's test
+CA), so every one of them, `--follow`'s included, goes over TLS under
+`prefer`, and one under `verify-full`.

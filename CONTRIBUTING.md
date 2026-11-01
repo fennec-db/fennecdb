@@ -51,10 +51,14 @@ node --test web/fennec.test.js
 
 **Zero dependencies.** `fennec-core`, `fennec-ql`, `fennec-wasm`, `fennec-http`,
 `fennec-server`, `fennec-wire`, `fennec-import` and `fennec-shard` take no external
-crates — own codec, own JSON, own HNSW, own SCRAM client. The WASM output has to stay small and auditable. `fennec-bench`
-is the single exception (`publish = false`); that is where `rusqlite` and
-`postgres` live. A PR that adds a dependency to any other crate needs to argue
-the case first, in an issue.
+crates — own codec, own JSON, own HNSW, own SCRAM client. The WASM output has to stay small and auditable. Two
+crates are exceptions: `fennec-bench` (`publish = false`), where `rusqlite` and
+`postgres` live, and `fennec-tls`, where rustls, ring and webpki-roots live --
+TLS, which nobody should write by hand, taken by the others behind a `tls`
+feature and never by `fennec-core`, `fennec-ql`, `fennec-abi` or `fennec-wasm`.
+`python3 tools/deps_check.py` (CI) holds both. A PR that adds a dependency to
+any other crate, or another to `fennec-tls`, needs to argue the case first, in
+an issue.
 
 **Dependency direction.** `core -> ql -> http -> wire -> import -> server`,
 `import -> cli`, and

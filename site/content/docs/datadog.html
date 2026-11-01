@@ -276,7 +276,7 @@ metrics, and the JSON lines as logs.</p>
 <p>fennec-server and fennec-shard send OpenTelemetry traces to an OTLP
 endpoint: a span a request, and under it the wait for the lock, the
 statement, the disk and the replicas (<a href="/docs/monitoring#tracing">the
-spans</a>). fennecdb speaks no TLS, so it sends them to an agent or collector
+spans</a>). The exporter speaks no TLS, so it sends them to an agent or collector
 on the same host, which forwards them over TLS. The Datadog Agent takes them
 on its OTLP receiver:</p>
 

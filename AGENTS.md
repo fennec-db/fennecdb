@@ -75,7 +75,7 @@ fennec-http (REST/JSON + SSE, tenant registry, replication, /_metrics)
      |                     \
 fennec-wire (a PostgreSQL     fennec-shard (tenant router: directory,
      |      client: framing,             placement, move)
-     |      SCRAM, COPY out, pgoutput)
+     |      SCRAM, TLS, COPY, pgoutput)
 fennec-import (SQLite file reader + PG COPY source + --follow)
      |                                  \
 fennec-server (HTTP, the syncer and       fennec-cli (`fennec` shell,
@@ -104,17 +104,17 @@ sealed, a new image flushed into `<name>~` before the file is written over.
 ### The crates
 
 **[Zero dependencies is a hard rule](docs/design/crates.md#zero-dependencies)**
-for every crate but `fennec-bench`; `fennec-core` dev-depends on `fennec-ql`.
+but for `fennec-bench` and the user's exception, `fennec-tls` (rustls,
+ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
+-abi or -wasm, nor more by that door (`tools/deps_check.py`).
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
-`near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
-a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
-`get` 4 levels deep),
-each a query error, never a cut result; a new limit takes that shape.
+Every cap (`near`, `match`, `fuse`, depth, `lookup`s, `in`) is a query
+error, never a cut result; a new one takes that shape.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
-`fennec-cli` uses `cli` (`panic = abort`); `fennec-server` stays on
-`release`: a connection's panic unwinds alone.
+`fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
+connection's panic unwinds alone.
 
 ### Storage
 

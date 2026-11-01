@@ -14,7 +14,10 @@ usage: fennec import <source> --table <name> [options]
 
 source
   file.sqlite                          a SQLite database file
-  postgres://user[:password]@host[:port]/database
+  postgres://user[:password]@host[:port]/database[?sslmode=..&sslrootcert=..]
+                                       TLS as libpq's sslmode: disable, prefer
+                                       (the default), require, verify-ca or
+                                       verify-full; sslrootcert, a CA PEM file
 
 options
   --table <name>          source table (required)

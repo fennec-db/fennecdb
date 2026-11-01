@@ -133,7 +133,7 @@ they may read and write.</p>
 <pre data-lang="bash">fennec-server --file data.fennec --http 0.0.0.0:8080 --http-token "$TOKEN"</pre>
 
 <div class="note trap">
-  <p><b>There is no TLS yet.</b> On a network, put a TLS terminator such as
+  <p><b>It serves no TLS yet</b> (it speaks TLS only to a <a href="import.html#tls">PostgreSQL it follows</a>). On a network, put a TLS terminator such as
   Caddy, nginx or a load balancer in front.</p>
 </div>
 
@@ -493,7 +493,7 @@ other monitoring systems</a>.</p>
 
 <h2 id="containers">Run it in a container</h2>
 
-<p>The image is under 3 MB: the binary and nothing else.</p>
+<p>The image is 7 MB: the binary and nothing else.</p>
 
 <pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
   -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
@@ -513,10 +513,10 @@ other monitoring systems</a>.</p>
 
 <details class="deep"><summary>How the image is built, and what sets its memory and restart cost</summary>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
-<code>scratch</code>. There are no dependencies and the binary runs its own
+<code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>2.99 MB</b> on
-amd64 and 2.44 MB on arm64 — since no target is written in, both come out of
+binary — no shell, no package manager, no libc. The image is <b>7.00 MB</b> on
+amd64 and 5.98 MB on arm64 — since no target is written in, both come out of
 the same file. <code>make docker</code> builds it, and
 <code>docker compose up -d</code> starts the compose file's.</p>
 

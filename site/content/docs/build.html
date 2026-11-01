@@ -104,7 +104,7 @@ target runs the tests and builds the module; the comments in the
 <tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>
 <tr><td><code>make sweep</code></td><td>The ef/recall trade-off</td></tr>
 <tr><td><code>make compare</code></td><td>Against SQLite and pgvector (run <code>make pgvector-up</code> first)</td></tr>
-<tr><td><code>make small</code></td><td>The 1880 KB binary: <code>--profile cli --no-default-features</code></td></tr>
+<tr><td><code>make small</code></td><td>The 2091 KB binary: <code>--profile cli --no-default-features</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -117,7 +117,8 @@ persistence.</p>
 
 <p><a href="https://github.com/fennec-db/fennecdb/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>
 is the short version of what a change has to respect: no dependencies in the
-engine, the crates' dependency direction, limits that error rather than
+engine (TLS's, in <code>fennec-tls</code> alone, the one exception), the
+crates' dependency direction, limits that error rather than
 truncate, an append-only file format. The reasoning behind each is in these
 docs, starting with <a href="concepts.html">How it works</a> and <a
 href="file-format.html">File format</a>.</p>
