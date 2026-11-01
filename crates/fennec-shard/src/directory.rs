@@ -116,19 +116,29 @@ const SCHEMA: [&str; 12] = [
     // `PUT` was answered, a detached or deleted tenant's copy that stayed,
     // a move's source that would not go, an old primary's file on a node
     // silent as its tenant's replica went elsewhere. Keyed
-    // `<tenant>/<node>`, with why and the directory's change it was noted
-    // at. Reported to an operator -- every repair's `left`,
-    // `fennec_router_files_left` -- and forgotten once a repair's look finds
-    // the file gone or the directory gives it its tenant; never taken off
-    // by the router, which cannot tell the file it left from a later one
-    // at the same place. Ignored, it was an orphan that every create of the
-    // name on that node met as 409, unsaid. Read where asked, never mapped;
-    // a router from before it neither reads nor writes it.
+    // `<tenant>/<node>`, with why, the directory's change it was noted at,
+    // and the identities the node gave the file as the router's calls made
+    // or changed it (`instances`, `LEFTOVER_FIELDS`). Reported to an
+    // operator -- every repair's `left`, `fennec_router_files_left` -- and
+    // forgotten once a repair's look finds the file gone, the directory
+    // gives it its tenant, or its node takes it back by one of those
+    // identities, the node judging. Ignored, it was an orphan that every
+    // create of the name on that node met as 409, unsaid. Read where
+    // asked, never mapped; a router from before it neither reads nor
+    // writes it.
     LEFTOVERS,
 ];
 
 const LEFTOVERS: &str = "create collection if not exists leftovers \
-     (key text @hash, tenant text, node text, why text, noted int)";
+     (key text @hash, tenant text, node text, why text, noted int, instances text)";
+
+/// The fields `leftovers` took after it was first written: `instances`,
+/// the identities a file left was noted under, space-separated 16-hex
+/// texts ([`fennec_http::instance`]), added and selected as
+/// `READER_FIELDS` are. A router from before it notes a file with none --
+/// and so does this one where the node, from before identities, named
+/// none -- which nothing takes back.
+const LEFTOVER_FIELDS: [&str; 1] = ["instances"];
 
 /// The fields `nodes` took after directories were first written, added to
 /// one written before them as the engine adds a field: its nodes read them
@@ -252,7 +262,8 @@ pub struct Reader {
 }
 
 /// A tenant's file a router may have left on a node, placed by nothing
-/// (`leftovers`): reported, for an operator to look at and remove by hand.
+/// (`leftovers`): reported, and taken back by its node where it still
+/// carries one of `instances`, or by an operator's hand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leftover {
     pub tenant: String,
@@ -263,6 +274,11 @@ pub struct Leftover {
     /// begun before then forgets nothing of it
     /// ([`Directory::forget_leftover`]).
     pub noted: i64,
+    /// The identities the node gave the file as the router's calls made or
+    /// changed it, or the router proposed for a call that went unanswered
+    /// ([`fennec_http::instance`]): none where its node named none -- one
+    /// from before identities -- or the router learned none.
+    pub instances: Vec<u64>,
 }
 
 /// A tenant the directory's maps, brought up to what a router it follows
@@ -369,6 +385,7 @@ impl Directory {
                     ("tenants", &TENANT_FIELDS[..]),
                     ("readers", &READER_FIELDS[..]),
                     ("lineages", &LINEAGE_FIELDS[..]),
+                    ("leftovers", &LEFTOVER_FIELDS[..]),
                 ] {
                     for f in fields {
                         if g.collection(coll)?.schema.field_pos(f).is_none() {
@@ -1159,11 +1176,16 @@ impl Directory {
     /// Every file a router noted as left on a node ([`Leftover`]), by key.
     pub fn leftovers(&self) -> Result<Vec<Leftover>> {
         let g = read(&self.db);
-        let found = rows(
-            &g,
-            "leftovers",
-            "get leftovers select tenant, node, why, noted order key",
-        )?;
+        // `instances` where the collection has it: a standby's, following a
+        // primary from before it, has not.
+        let sql = match g
+            .collection("leftovers")
+            .is_ok_and(|c| c.schema.field_pos("instances").is_some())
+        {
+            true => "get leftovers select tenant, node, why, noted, instances order key",
+            false => "get leftovers select tenant, node, why, noted order key",
+        };
+        let found = rows(&g, "leftovers", sql)?;
         Ok(found
             .into_iter()
             .map(|(_, row)| Leftover {
@@ -1174,8 +1196,24 @@ impl Directory {
                     Value::Int(n) => n,
                     _ => 0,
                 },
+                // A text this router cannot read names none: a file kept.
+                instances: row.get(4).map_or(Vec::new(), |v| {
+                    let ids: Option<Vec<u64>> = text(v)
+                        .split_whitespace()
+                        .map(fennec_http::instance::parse)
+                        .collect();
+                    ids.unwrap_or_default()
+                }),
             })
             .collect())
+    }
+
+    /// `tenant`'s file on `node`, where it is noted as left there.
+    pub fn leftover(&self, tenant: &str, node: &str) -> Result<Option<Leftover>> {
+        Ok(self
+            .leftovers()?
+            .into_iter()
+            .find(|l| l.tenant == tenant && l.node == node))
     }
 
     /// How many files a router noted as left on nodes:
@@ -1184,27 +1222,52 @@ impl Directory {
         self.leftovers().map_or(0, |l| l.len())
     }
 
-    /// Notes `tenant`'s file on `node` as left there, and why ([`Leftover`]):
-    /// noted again, at the change it is noted at now, so a look begun before
-    /// forgets nothing of it. A directory from before `leftovers`, led now
-    /// by a router that keeps them -- the standby of an older primary,
-    /// promoted -- is given the collection first.
-    pub fn note_leftover(&mut self, tenant: &str, node: &str, why: &str) -> Result<()> {
+    /// Notes `tenant`'s file on `node` as left there, why, and the
+    /// identities it may carry ([`Leftover`]): noted again, at the change it
+    /// is noted at now, so a look begun before forgets nothing of it, and
+    /// under these identities alone -- a file noted again is the one the
+    /// router's latest call left. A directory from before `leftovers`, or
+    /// before `instances`, led now by a router that keeps them -- the
+    /// standby of an older primary, promoted -- is given them first.
+    pub fn note_leftover(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        why: &str,
+        instances: &[u64],
+    ) -> Result<()> {
         if read(&self.db).collection("leftovers").is_err() {
             self.run(LEFTOVERS, &[])?;
         }
+        if read(&self.db)
+            .collection("leftovers")?
+            .schema
+            .field_pos("instances")
+            .is_none()
+        {
+            self.run("alter collection leftovers add field instances text", &[])?;
+        }
         let key = Value::Text(format!("{tenant}/{node}"));
+        let ids: Vec<String> = instances
+            .iter()
+            .map(|&id| fennec_http::instance::text(id))
+            .collect();
         let row = vec![
             key.clone(),
             Value::Text(tenant.into()),
             Value::Text(node.into()),
             Value::Text(why.into()),
             Value::Int(read(&self.db).change_seq().min(i64::MAX as u64) as i64),
+            match ids.is_empty() {
+                true => Value::Null,
+                false => Value::Text(ids.join(" ")),
+            },
         ];
         self.write_block(&[
             ("del leftovers where key = $1", vec![key]),
             (
-                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5}",
+                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5, \
+                 instances: $6}",
                 row,
             ),
         ])
@@ -2333,12 +2396,25 @@ mod tests {
             let mut d = Directory::open(&path).unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
             assert_eq!(d.files_left(), 0);
-            d.note_leftover("acme", "n1", "a create taken back")
+            d.note_leftover("acme", "n1", "a create taken back", &[0xa1, 0xa2])
                 .unwrap();
-            d.note_leftover("acme", "n2", "a move undone").unwrap();
-            d.note_leftover("beta", "n1", "first").unwrap();
+            d.note_leftover("acme", "n2", "a move undone", &[0xb])
+                .unwrap();
+            d.note_leftover("beta", "n1", "first", &[0xc]).unwrap();
             let first = d.leftovers().unwrap()[2].noted;
-            d.note_leftover("beta", "n1", "again").unwrap();
+            // Noted again: under the identities of the latest call alone.
+            d.note_leftover("beta", "n1", "again", &[]).unwrap();
+            let ids: Vec<Vec<u64>> = d
+                .leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| l.instances)
+                .collect();
+            assert_eq!(ids, [vec![0xa1, 0xa2], vec![0xb], vec![]]);
+            assert_eq!(
+                d.leftover("acme", "n2").unwrap().map(|l| l.instances),
+                Some(vec![0xb])
+            );
             assert_eq!(
                 whys(&d),
                 [
@@ -2367,8 +2443,31 @@ mod tests {
                 .unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
             assert!(!d.forget_leftover("acme", "n2", None).unwrap());
-            d.note_leftover("gamma", "n3", "why").unwrap();
+            d.note_leftover("gamma", "n3", "why", &[0xd]).unwrap();
             assert_eq!(whys(&d), [owned("gamma", "n3", "why")]);
+            // A collection from before `instances`, a row an older router
+            // noted: read with none, and given the field as one is noted.
+            let old = [
+                "drop collection leftovers",
+                "create collection leftovers (key text @hash, tenant text, node text, why text, \
+                 noted int)",
+                "put leftovers {key: 'old/n1', tenant: 'old', node: 'n1', why: 'w', noted: 1}",
+            ];
+            for sql in old {
+                let stmt = fennec_ql::parse_one(sql).unwrap();
+                d.db().write().unwrap().execute(&stmt).unwrap();
+            }
+            let had = d.leftovers().unwrap();
+            assert_eq!(had.len(), 1);
+            assert_eq!(had[0].instances, Vec::<u64>::new());
+            d.note_leftover("delta", "n1", "why", &[0xe]).unwrap();
+            let ids: Vec<Vec<u64>> = d
+                .leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| l.instances)
+                .collect();
+            assert_eq!(ids, [vec![0xe], vec![]]);
         }
         let _ = std::fs::remove_file(&path);
     }

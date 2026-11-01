@@ -1,5 +1,6 @@
 //! A replica whose attach fails is tried again, and a file the router may
-//! have left on a node is reported, never taken off.
+//! have left on a node is taken back by its node where it still carries the
+//! identity the router noted, and reported otherwise.
 //!
 //! With `--replicas` a create, a move and a repair each give a tenant a
 //! replica on another node: the file made there (`PUT`) and made to follow
@@ -11,10 +12,11 @@
 //! gave it up left a copy following the primary that no directory named.
 //! And the `DELETE`s that take a create back ignored their failure, so the
 //! file stayed on its node, unsaid, and every create of the name there met
-//! it, 409. Such a file is noted now and reported -- every repair's `left`,
-//! `fennec_router_files_left` -- for an operator, and nothing deletes it:
-//! taken back, the router lost a tenant moved back onto the node and one
-//! made again there.
+//! it, 409. Such a file is noted now -- every repair's `left`,
+//! `fennec_router_files_left` -- with the identities its node gave it, and
+//! a repair has the node take it back where the file still carries one:
+//! taken back by what it held, the router lost a tenant moved back onto the
+//! node and one made again there (roadmap row 47).
 //!
 //! Each node the router reaches here through a proxy the test arms: it
 //! refuses a request whose line names what it is armed with (503), holds
@@ -115,6 +117,9 @@ struct Rules {
     /// The answers swallowed and held until released.
     holding: usize,
     released: bool,
+    /// Whether what no rule takes is answered as a node from before
+    /// identities answers it ([`Proxy::before_identities`]).
+    old: bool,
 }
 
 type Shared = Arc<(Mutex<Rules>, Condvar)>;
@@ -180,6 +185,13 @@ impl Proxy {
         self.rules.0.lock().unwrap().released = true;
         self.rules.1.notify_all();
     }
+
+    /// Has the node answer as one from before identities does: a proposed
+    /// `Fennec-Instance` not passed on, no `instance` in an answer, and a
+    /// reclaim an endpoint it lacks (404).
+    fn before_identities(&self) {
+        self.rules.0.lock().unwrap().old = true;
+    }
 }
 
 fn serve(mut client: TcpStream, target: &str, rules: &Shared) {
@@ -191,18 +203,34 @@ fn serve(mut client: TcpStream, target: &str, rules: &Shared) {
         .next()
         .unwrap_or("")
         .to_string();
-    let act = {
+    let (act, old) = {
         let mut r = rules.0.lock().unwrap();
         r.seen.push(line.clone());
         let rule = r
             .list
             .iter_mut()
             .find(|rule| rule.times > 0 && line.contains(rule.what));
-        rule.map(|rule| {
+        let act = rule.map(|rule| {
             rule.times = rule.times.saturating_sub(1);
             rule.act
-        })
+        });
+        (act, r.old)
     };
+    if act.is_none() && old && line.contains("/_admin/") {
+        if line.contains("/reclaim ") {
+            let body = r#"{"error":"no such admin endpoint"}"#;
+            let _ = write!(
+                client,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        } else if let Some(answer) = asked_of(target, &unproposed(&bytes)) {
+            let _ = client.write_all(&without_instances(&answer));
+        }
+        let _ = client.shutdown(Shutdown::Both);
+        return;
+    }
     match act {
         Some(Act::Refuse) => {
             let body = r#"{"error":"refused by the test's proxy"}"#;
@@ -251,6 +279,52 @@ fn closing(bytes: &[u8]) -> Vec<u8> {
     sent.extend_from_slice(b"Connection: close\r\n");
     sent.extend_from_slice(&bytes[line..]);
     sent
+}
+
+/// The request `bytes` without the identity a router proposes, which a node
+/// from before identities never reads.
+fn unproposed(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(bytes.len());
+    let head = String::from_utf8_lossy(&bytes[..end]);
+    let kept: Vec<&str> = head
+        .split("\r\n")
+        .filter(|l| !l.to_ascii_lowercase().starts_with("fennec-instance:"))
+        .collect();
+    let mut out = kept.join("\r\n").into_bytes();
+    out.extend_from_slice(&bytes[end..]);
+    out
+}
+
+/// A node's answer without the `instance` fields a node from before
+/// identities never wrote, its length told again.
+fn without_instances(answer: &[u8]) -> Vec<u8> {
+    let Some(end) = answer.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return answer.to_vec();
+    };
+    let head = String::from_utf8_lossy(&answer[..end]);
+    let mut body = String::from_utf8_lossy(&answer[end + 4..]).into_owned();
+    let field = ",\"instance\":";
+    while let Some(at) = body.find(field) {
+        let rest = &body[at + field.len()..];
+        let len = match rest.strip_prefix('"') {
+            Some(text) => text.find('"').map_or(rest.len(), |n| n + 2),
+            None => "null".len(),
+        };
+        body.replace_range(at..at + field.len() + len, "");
+    }
+    let head: Vec<String> = head
+        .split("\r\n")
+        .map(
+            |l| match l.to_ascii_lowercase().starts_with("content-length:") {
+                true => format!("Content-Length: {}", body.len()),
+                false => l.to_string(),
+            },
+        )
+        .collect();
+    format!("{}\r\n\r\n{body}", head.join("\r\n")).into_bytes()
 }
 
 /// Counted as held, until the test lets every held one go.
@@ -480,6 +554,78 @@ fn a_create_whose_follow_was_refused_gets_its_replica_from_a_repair() {
     assert_eq!(files_left(port), 0);
 }
 
+/// The identity in a node's answer.
+fn instance_in(body: &str) -> String {
+    let rest = body.split("\"instance\":\"").nth(1).expect(body);
+    rest.split('"').next().unwrap().to_string()
+}
+
+/// A file's identity changes as what it is does: a follow gives the copy
+/// a new one -- the router's proposal, where it sends one -- and a
+/// promotion takes it away with `.follows`, so a reclaim naming one from
+/// before takes nothing the file has become since. Kept, a copy a router
+/// left that a repair made the tenant's replica, or a failover its
+/// primary, was a live file a router behind its primary took back.
+#[test]
+fn a_follow_and_a_promotion_change_a_files_identity() {
+    let (n1, n2) = (node("id1"), node("id2"));
+    let port = router();
+    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "id1", "");
+    create_acme(port);
+    let token = "adm-id2";
+    let (status, body) = call_as(n2.port, "PUT", "/_admin/tenants/acme", "", Some(token));
+    assert_eq!(status, 201, "{body}");
+    let made = instance_in(&body);
+    let from = format!(r#"{{"from":"http://127.0.0.1:{}"}}"#, n1.port);
+    let (status, body) = call_as(
+        n2.port,
+        "POST",
+        "/_admin/tenants/acme/follow",
+        &from,
+        Some(token),
+    );
+    assert_eq!(status, 200, "{body}");
+    let followed = instance_in(&body);
+    assert_ne!(made, followed);
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+    let reclaim = |ids: &str| {
+        let body = format!(r#"{{"instances":[{ids}]}}"#);
+        call_as(
+            n2.port,
+            "POST",
+            "/_admin/tenants/acme/reclaim",
+            &body,
+            Some(token),
+        )
+    };
+    let (status, body) = reclaim(&format!("\"{made}\""));
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(instance_in(&body), followed);
+    let (status, body) = call_as(
+        n2.port,
+        "POST",
+        "/_admin/tenants/acme/promote",
+        "",
+        Some(token),
+    );
+    assert_eq!(status, 200, "{body}");
+    // The follow's went with `.follows`; nothing of the create's came back.
+    assert_eq!(n2.tenants.instance("acme"), None);
+    let (status, body) = reclaim(&format!("\"{made}\",\"{followed}\""));
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("\"instance\":null"), "{body}");
+    assert!(n2.holds("acme"));
+    // Closed and opened again, still none: the role is the file's.
+    assert_eq!(n2.tenants.close_idle(std::time::Duration::ZERO), 1);
+    assert_eq!(n2.tenants.instance("acme"), None);
+    // A freeze, a move's, gives the primary it is now an identity of its own.
+    let frozen = n2.tenants.freeze_as("acme").unwrap().expect("an identity");
+    assert_ne!(fennec_http::instance::text(frozen), followed);
+    n2.tenants.thaw("acme").unwrap();
+    assert_eq!(n2.tenants.instance("acme"), Some(frozen));
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+}
+
 /// A repair's attach that failed is tried again, as a create's is: it
 /// answered 502 and let the tenant be. The `PUT` is what n2 refuses, so the
 /// try leaves no file there.
@@ -693,13 +839,14 @@ fn made_by_hand(port: u16, tag: &str, tenant: &str) {
 }
 
 /// A create taken back -- its schema refused -- whose `DELETE` its node did
-/// not take leaves the file there, an orphan: noted, reported by every
-/// repair and counted, never taken off, and a create of the name there met
-/// as 409, as on main. Once an operator removes the file by hand, the
-/// repair after finds it gone and forgets it, and the name is made there.
-/// Unnoted, the orphan was there for good with nothing to say so.
+/// not take leaves the file there, an orphan: noted under the identity the
+/// node gave it, counted, and a create of the name there met as 409, as on
+/// main -- until the repair after has the node take it back, the file
+/// still carrying that identity, and the count drops. The name is made
+/// there then. Unnoted, the orphan was there for good with nothing to say
+/// so; noted alone, it was there until an operator removed it.
 #[test]
-fn a_create_taken_back_leaves_its_file_reported_until_it_is_removed_by_hand() {
+fn a_create_taken_back_is_taken_back_by_its_node_and_the_count_drops() {
     let n1 = node("tb1");
     let p1 = Proxy::to(n1.port);
     let (port, router) = router_over(Directory::in_memory(), true);
@@ -717,36 +864,26 @@ fn a_create_taken_back_leaves_its_file_reported_until_it_is_removed_by_hand() {
     );
     assert!(!router.repair_due(), "a file left scheduled a repair");
     assert_eq!(files_left(port), 1);
-    let (status, body) = repair(port);
-    assert_eq!(status, 200, "{body}");
-    assert!(
-        reports(
-            &body,
-            "acme",
-            "n1",
-            "a create taken back, its schema not applied"
-        ),
-        "{body}"
-    );
-    assert!(n1.holds("acme"), "the repair took the file off");
     let (status, body) = call(port, "PUT", "/_shard/tenants/acme", r#"{"node":"n1"}"#);
     assert_eq!(status, 409, "{body}");
     assert!(n1.holds("acme"), "the create took the file off");
-    // The one `DELETE` the create's take-back sent: none since.
-    assert_eq!(p1.seen("DELETE /_admin/tenants/acme "), 1);
-    // Removed by hand: the repair after finds it gone.
-    delete_by_hand(n1.port, "tb1", "acme");
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n1.holds("acme"), "the repair left the file");
     assert_eq!(files_left(port), 0);
+    // Taken back by the node's judgment, never a `DELETE`: the one the
+    // create's take-back sent, none since.
+    assert_eq!(p1.seen("/acme/reclaim"), 1);
+    assert_eq!(p1.seen("DELETE /_admin/tenants/acme "), 1);
     create_acme(port);
 }
 
 /// A create whose `PUT` went unanswered -- the node made the file all the
-/// same -- leaves it noted and reported, not taken off.
+/// same -- leaves it noted under the identity the router proposed, which
+/// the node gave the file: the repair after has it taken back.
 #[test]
-fn a_create_whose_put_went_unanswered_is_reported() {
+fn a_create_whose_put_went_unanswered_is_taken_back() {
     let n1 = node("pu1");
     let p1 = Proxy::to(n1.port);
     p1.release();
@@ -756,14 +893,12 @@ fn a_create_whose_put_went_unanswered_is_reported() {
     let (status, body) = call(port, "PUT", "/_shard/tenants/acme", r#"{"node":"n1"}"#);
     assert_eq!(status, 502, "{body}");
     assert!(n1.holds("acme"));
+    assert_eq!(files_left(port), 1);
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
-    assert!(
-        reports(&body, "acme", "n1", "a create whose PUT went unanswered"),
-        "{body}"
-    );
-    assert!(n1.holds("acme"), "the repair took the file off");
-    assert_eq!(files_left(port), 1);
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n1.holds("acme"), "the repair left the file");
+    assert_eq!(files_left(port), 0);
 }
 
 /// A deleted tenant's replica its node would not take off is noted and
@@ -798,9 +933,10 @@ fn a_deleted_tenants_replica_that_stayed_is_reported() {
 
 /// A move undone -- its target refused the tenant's quota -- whose `DELETE`
 /// the target did not take leaves the image there, beside the tenant still
-/// on its source: reported, not taken off.
+/// on its source: noted under the identity its install answered, and taken
+/// back by the repair after.
 #[test]
-fn a_move_undone_leaves_its_targets_copy_reported() {
+fn a_move_undone_leaves_its_targets_copy_to_be_taken_back() {
     let (n1, n2, n3) = (node("mv1"), node("mv2"), node("mv3"));
     let p3 = Proxy::to(n3.port);
     let port = router();
@@ -821,21 +957,21 @@ fn a_move_undone_leaves_its_targets_copy_reported() {
     let (status, body) = call(port, "POST", "/_shard/tenants/acme/move", r#"{"to":"n3"}"#);
     assert_eq!(status, 502, "{body}");
     assert_eq!(placed(port, "acme"), ("n1".into(), Some("n2".into())));
+    assert!(n3.holds("acme"));
+    assert_eq!(files_left(port), 1);
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
-    assert!(
-        reports(&body, "acme", "n3", "a move undone, its quota not taken"),
-        "{body}"
-    );
-    assert!(n3.holds("acme"), "the repair took the copy off");
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n3.holds("acme"), "the repair left the copy");
     reads(n1.port, "acme", "get notes select title", "\"one\"");
 }
 
 /// A move whose source would not let go of its copy once the move was done
-/// -- its `DELETE` refused -- leaves the copy noted and reported: unnoted,
-/// it stayed on the source, frozen, for good, unsaid.
+/// -- its `DELETE` refused -- leaves the copy noted under the identity its
+/// freeze answered, and the repair after has it taken back: unnoted, it
+/// stayed on the source, frozen, for good, unsaid.
 #[test]
-fn a_moves_source_that_would_not_go_is_reported() {
+fn a_moves_source_that_would_not_go_is_taken_back() {
     let (n1, n2, n3) = (node("ms1"), node("ms2"), node("ms3"));
     let p1 = Proxy::to(n1.port);
     let port = router();
@@ -848,20 +984,23 @@ fn a_moves_source_that_would_not_go_is_reported() {
     let (status, body) = call(port, "POST", "/_shard/tenants/acme/move", r#"{"to":"n3"}"#);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""source_removed":false"#), "{body}");
+    assert!(n1.holds("acme"));
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
-    assert!(reports(&body, "acme", "n1", "a move's source"), "{body}");
-    assert!(n1.holds("acme"), "the repair took the source off");
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n1.holds("acme"), "the repair left the source");
     assert_eq!(placed(port, "acme"), ("n3".into(), Some("n2".into())));
     reads(n3.port, "acme", "get notes select title", "\"one\"");
 }
 
 /// A copy a failed attach made, which the try after did not adopt -- a
 /// node of another zone than the primary's came free meanwhile, which the
-/// rule puts first -- is reported: unnoted, it went on following the
-/// primary beside the replica the directory names, unsaid.
+/// rule puts first -- is taken back: noted under the identities of its
+/// `PUT` and of the follow that landed unanswered, it carries the second.
+/// Unnoted, it went on following the primary beside the replica the
+/// directory names, unsaid.
 #[test]
-fn a_copy_left_where_the_replica_went_elsewhere_is_reported() {
+fn a_copy_left_where_the_replica_went_elsewhere_is_taken_back() {
     let (n0, n1, n2) = (node("to0"), node("to1"), node("to2"));
     let p2 = Proxy::to(n2.port);
     p2.arm("/acme/follow", Act::Swallow, 1);
@@ -883,16 +1022,10 @@ fn a_copy_left_where_the_replica_went_elsewhere_is_reported() {
     reads(n0.port, "acme", "get notes select title", "\"one\"");
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
-    assert!(
-        reports(
-            &body,
-            "acme",
-            "n2",
-            "made by an attach of its replica that failed"
-        ),
-        "{body}"
-    );
-    assert!(n2.holds("acme"), "the repair took the copy off");
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n2.holds("acme"), "the repair left the copy");
+    assert_eq!(files_left(port), 0);
+    reads(n0.port, "acme", "get notes select title", "\"one\"");
 }
 
 /// A replica detached that its node would not take off -- the move's
@@ -1031,8 +1164,11 @@ fn a_file_left_on_a_silent_node_fails_no_repair() {
 /// standby router promoted behind its primary -- its directory taken as
 /// the copy was noted, the tenant still on its first node there -- took
 /// that file back, the node finding it exactly as the router had left it,
-/// lineage and change. Nothing takes a file off now: the standby's repair
-/// reports it, and the tenant stands with its rows.
+/// lineage and change. Judged by identity now: the move back has the node
+/// take its copy there back, the file the router left, and install the
+/// image as a file of another; the standby's repair names the one it noted,
+/// the node refuses it, and the file stays reported for an operator, the
+/// tenant standing with its rows.
 #[test]
 fn a_tenant_moved_back_where_its_copy_was_noted_stays() {
     let (n1, n2, n3) = (node("mb1"), node("mb2"), node("mb3"));
@@ -1057,21 +1193,34 @@ fn a_tenant_moved_back_where_its_copy_was_noted_stays() {
     assert!(n2.holds("acme"));
     // The standby's directory, as it stood then.
     std::fs::copy(&primary, &standby).unwrap();
-    // Moved back onto n2: its copy there taken over, n1's deleted.
+    // Moved back onto n2: its copy there taken back by its node, the file
+    // the router left, never a `DELETE`; the image installed; n1's deleted.
     let (status, body) = call(r1, "POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#);
     assert_eq!(status, 200, "{body}");
+    assert_eq!(p2.seen("/acme/reclaim"), 1);
+    assert_eq!(p2.seen("DELETE /_admin/tenants/acme "), 1);
     assert!(!n1.holds("acme"));
     reads(n2.port, "acme", "get notes select title", "\"one\"");
     // The standby promoted: acme on n1 there, its copy on n2 noted as left.
+    // Its repair names the identity it noted; n2 holds another file there.
     let (r2, _) = router_over(Directory::open(&standby).unwrap(), true);
     let (status, body) = repair(r2);
     assert_eq!(status, 200, "{body}");
+    assert_eq!(p2.seen("/acme/reclaim"), 2, "the standby never asked");
     assert!(reports(&body, "acme", "n2", "a move undone"), "{body}");
+    assert!(
+        reports(&body, "acme", "n2", "holds another file there now"),
+        "{body}"
+    );
     assert!(
         n2.holds("acme"),
         "the standby took the tenant's one file off"
     );
     reads(n2.port, "acme", "get notes select title", "\"one\"");
+    // Noted again with nothing to name: the next repair asks nothing.
+    let (status, body) = repair(r2);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(p2.seen("/acme/reclaim"), 2);
     // The primary's own look finds the tenant there, and forgets its note.
     let (status, body) = repair(r1);
     assert_eq!(status, 200, "{body}");
@@ -1104,7 +1253,9 @@ fn plain_node(tag: &str) -> Node {
 /// every lineage is none: a move's source noted as left, the tenant then
 /// deleted, its name made again on that node with one row -- by hand here,
 /// so the directory places it nowhere -- was taken back as a file of no
-/// write, the row of a tenant made since lost. Reported now, and kept.
+/// write, the row of a tenant made since lost. An identity needs no
+/// lineage: the file made again carries its own, the repair's take-back
+/// naming the source's is refused, and the file is reported and kept.
 #[test]
 fn a_tenant_made_again_where_a_file_of_no_lineage_was_noted_stays() {
     let (n1, n2) = (plain_node("pl1"), plain_node("pl2"));
@@ -1122,9 +1273,94 @@ fn a_tenant_made_again_where_a_file_of_no_lineage_was_noted_stays() {
     made_by_hand(n1.port, "pl1", "acme");
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
+    assert_eq!(p1.seen("/acme/reclaim"), 1, "the repair never asked");
     assert!(reports(&body, "acme", "n1", "a move's source"), "{body}");
+    assert!(
+        reports(&body, "acme", "n1", "holds another file there now"),
+        "{body}"
+    );
     reads(n1.port, "acme", "get notes select title", "\"by hand\"");
     assert_eq!(files_left(port), 1);
+}
+
+/// On nodes without `--replication-token` a file left is taken back all
+/// the same: its identity is the node's, no lineage needed. A move's
+/// source that would not go is noted under what its freeze answered, and
+/// the repair after has it taken back, the count dropping.
+#[test]
+fn a_file_of_no_lineage_left_is_taken_back() {
+    let (n1, n2) = (plain_node("pt1"), plain_node("pt2"));
+    let p1 = Proxy::to(n1.port);
+    let (port, _) = router_over(Directory::in_memory(), false);
+    put_node(port, "n1", &p1.addr, "pt1", "");
+    put_node(port, "n2", &format!("127.0.0.1:{}", n2.port), "pt2", "");
+    create_acme(port);
+    p1.arm("DELETE /_admin/tenants/acme ", Act::Refuse, 1);
+    let (status, body) = call(port, "POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""source_removed":false"#), "{body}");
+    assert!(n1.holds("acme"));
+    assert_eq!(files_left(port), 1);
+    // Asked by hand, the repair runs whole, as on main: acme's replica
+    // refused by nodes that replicate nothing (502), which fails no file.
+    let (_, body) = repair(port);
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert!(!n1.holds("acme"), "the repair left the source");
+    assert_eq!(files_left(port), 0);
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+}
+
+/// A node from before identities names none in its answers, and has none
+/// of its files taken back: here a proxy drops every `instance` a node
+/// answers with and every one the router proposes, as such a node does,
+/// and answers a reclaim as such a node does, 404. A create taken back is
+/// noted with no identity, reported, and asked of no node. A create whose
+/// `PUT` went unanswered is noted under the identity proposed -- the router
+/// cannot know what answered it -- and its reclaim met with the 404 keeps
+/// the file, no `DELETE` sent in its place. Both stay for an operator.
+#[test]
+fn a_node_from_before_identities_has_no_file_taken_back() {
+    let n1 = node("ob1");
+    let p1 = Proxy::to(n1.port);
+    p1.before_identities();
+    let port = router();
+    put_node(port, "n1", &p1.addr, "ob1", "");
+    create_taken_back(
+        port,
+        &p1,
+        "acme",
+        "/acme/schema",
+        "DELETE /_admin/tenants/acme ",
+    );
+    assert!(n1.holds("acme"));
+    p1.release();
+    p1.arm("PUT /_admin/tenants/beta ", Act::Swallow, 1);
+    let (status, body) = call(port, "PUT", "/_shard/tenants/beta", r#"{"node":"n1"}"#);
+    assert_eq!(status, 502, "{body}");
+    assert!(n1.holds("beta"));
+    assert_eq!(files_left(port), 2);
+    let (status, body) = repair(port);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        reports(
+            &body,
+            "acme",
+            "n1",
+            "a create taken back, its schema not applied"
+        ),
+        "{body}"
+    );
+    assert!(reports(&body, "beta", "n1", "answered 404"), "{body}");
+    assert_eq!(
+        p1.seen("/acme/reclaim"),
+        0,
+        "a file of no identity was named"
+    );
+    assert_eq!(p1.seen("/beta/reclaim"), 1);
+    assert_eq!(p1.seen("DELETE /_admin/tenants/beta "), 0);
+    assert!(n1.holds("acme"), "the repair took acme's file off");
+    assert!(n1.holds("beta"), "the repair took beta's file off");
+    assert_eq!(files_left(port), 2);
 }
 
 /// A router without `--replicas` places no replica unasked: a file a

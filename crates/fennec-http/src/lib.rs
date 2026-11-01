@@ -56,6 +56,7 @@ pub mod dial;
 pub mod held;
 pub mod http;
 pub mod idempotent;
+pub mod instance;
 pub mod lease;
 pub mod link;
 pub mod mcp;

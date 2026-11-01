@@ -22,6 +22,7 @@
 //! and a request arriving mid-close waits for the close to finish before it
 //! opens the file again.
 
+use crate::instance;
 use crate::lease::Lease;
 use crate::node_stream::NodeStreams;
 use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
@@ -81,6 +82,24 @@ impl Refused {
     }
 }
 
+/// Why a reclaim kept a file ([`Tenants::reclaim`]).
+#[derive(Debug)]
+pub enum Kept {
+    /// It carries another identity than those named -- a later file at the
+    /// place, or the file made something else since -- or none (`None`):
+    /// one this node cannot vouch for.
+    Other(Option<u64>),
+    /// Refused as anything else is: the node going down (503), the file
+    /// still in use (409).
+    Refused(Refused),
+}
+
+impl From<Refused> for Kept {
+    fn from(r: Refused) -> Kept {
+        Kept::Refused(r)
+    }
+}
+
 pub struct Tenant {
     name: String,
     pub db: Arc<RwLock<Database>>,
@@ -115,6 +134,16 @@ pub struct Tenant {
     /// it: a refusal deletes the copy only while that open still holds the
     /// slot ([`Tenants::delete_refused`]).
     opened: u64,
+    /// The file as this open took it, or as a stamp since bound its
+    /// identity to it ([`crate::instance`]): the file its identity names
+    /// while this process holds it. Changed under the slot alone.
+    bound: Mutex<Option<instance::Binding>>,
+}
+
+impl Tenant {
+    fn bound(&self) -> Option<instance::Binding> {
+        *self.bound.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// The opens of tenants' files in this process, numbered.
@@ -951,6 +980,11 @@ impl Tenants {
         name: &str,
         want: &Expected,
     ) -> std::result::Result<(u64, u64), Refused> {
+        // Its identity goes with its `.follows`, which the promotion
+        // removes, synced: a copy a router noted as left and a failover
+        // promotes is a live tenant from here, and a reclaim naming what it
+        // was took it ([`crate::instance`]). A standby's copy made with its
+        // node, which has no `.follows`, was given no identity.
         let promoted = self.promote_held(name, want);
         // The fork's history reached the feed as its record was appended;
         // the node's stream sends it on before the writes after it.
@@ -1050,6 +1084,21 @@ impl Tenants {
         from: Option<&str>,
         lineage: Option<u32>,
     ) -> std::result::Result<(), Refused> {
+        self.follow_as(name, from, lineage, None).map(|_| ())
+    }
+
+    /// [`Tenants::follow_lineage`], the file given a new identity as it is
+    /// made to follow -- `proposed`, or one minted -- which it answers with
+    /// (its old one put away first, [`Self::put_away`], the new one given
+    /// after, [`Self::stamp`]): before then it may have been a file a router
+    /// left, and noted under the identity it had.
+    pub fn follow_as(
+        &self,
+        name: &str,
+        from: Option<&str>,
+        lineage: Option<u32>,
+        proposed: Option<u64>,
+    ) -> std::result::Result<Option<u64>, Refused> {
         check_name(name)?;
         let Some(repl) = &self.repl else {
             return Err(Refused(
@@ -1091,6 +1140,9 @@ impl Tenants {
                     // Halted before the record is written again, not heard
                     // from: a hello of the stream before, noted after it,
                     // would mark heard a copy that heard nothing since.
+                    // Renewed all the same: a copy a router left following
+                    // this node and adopts is its replica from here.
+                    self.put_away(name)?;
                     let follower = t.repl.as_ref().and_then(|r| r.follower());
                     if let Some(f) = follower {
                         f.halt();
@@ -1110,7 +1162,7 @@ impl Tenants {
                             Refused(500, format!("tenant `{name}` could not follow again: {e}"))
                         })?;
                     }
-                    return recorded;
+                    return recorded.map(|_| self.stamp(name, proposed, held));
                 }
                 // Closed first: one instance over the file, always. What it
                 // served ends -- a primary's file made a replica's feeds a
@@ -1126,6 +1178,7 @@ impl Tenants {
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
+            self.put_away(name)?;
             self.record_following(name, from, lineage).map_err(|e| {
                 Refused(
                     500,
@@ -1134,7 +1187,7 @@ impl Tenants {
             })?;
             let t = self.open_as(name, &path, true)?;
             *held = Held::Open(t);
-            Ok(())
+            Ok(self.stamp(name, proposed, held))
         });
         self.touch(name);
         followed
@@ -1142,20 +1195,123 @@ impl Tenants {
 
     /// Creates an empty tenant. 409 when it exists.
     pub fn create(&self, name: &str) -> std::result::Result<Arc<Tenant>, Refused> {
+        self.create_as(name, None).map(|(t, _)| t)
+    }
+
+    /// [`Self::create`], the file given its identity -- `proposed`, a
+    /// router's, or one minted -- which it answers with
+    /// ([`crate::instance`]): none where the sidecar was not written.
+    pub fn create_as(
+        &self,
+        name: &str,
+        proposed: Option<u64>,
+    ) -> std::result::Result<(Arc<Tenant>, Option<u64>), Refused> {
         check_name(name)?;
-        let t = self.with_slot(name, |held| {
+        let made = self.with_slot(name, |held| {
             let path = self.path(name);
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
             self.refuse_if_shutting_down()?;
+            // An identity a file of the name left -- a binary from before
+            // this one deleting it -- names another file, and goes before
+            // this one is made, where a file system that keeps no birth
+            // time could give it that one's inode ([`instance`]).
+            self.put_away(name)?;
             let t = self.open_file(name, &path)?;
             *held = Held::Open(Arc::clone(&t));
-            Ok(t)
+            let id = (!self.standby())
+                .then(|| self.stamp(name, proposed, held))
+                .flatten();
+            Ok((t, id))
         })?;
         self.make_room(name);
         self.touch(name);
-        Ok(t)
+        Ok(made)
+    }
+
+    /// The identity `name`'s file carries ([`crate::instance`]), asked
+    /// under its slot, where every change of it is made.
+    pub fn instance(&self, name: &str) -> Option<u64> {
+        check_name(name).ok()?;
+        self.identity(name, false)
+    }
+
+    /// Asks a file's identity under its slot, minting one where it has
+    /// none with `mint` (a freeze's, an open file's): one closure for both,
+    /// as each `with_slot` is a copy of the slot's code of its own (1.5 KB
+    /// each), kept out of line for it.
+    #[inline(never)]
+    fn identity(&self, name: &str, mint: bool) -> Option<u64> {
+        self.with_slot(name, |held| {
+            let carried = self.carried(name, held);
+            match held {
+                Held::Open(_) if mint && carried.is_none() => self.stamp(name, None, held),
+                _ => carried,
+            }
+        })
+    }
+
+    /// Whether this node is a standby (`--replica-of`): a copy made on it
+    /// with its node follows by the node's word, with no `.follows`, so a
+    /// promotion leaves standing what it carries -- it is given nothing at a
+    /// create or an install, and no router reads a standby's answers to
+    /// either ([`crate::instance`]).
+    fn standby(&self) -> bool {
+        self.repl.as_ref().is_some_and(|r| r.upstream.is_some())
+    }
+
+    /// The identity under the slot: an open file's where the sidecar names
+    /// it as this process took it -- its own renames since are bound as it
+    /// closes -- a closed one's only where the sidecar names that file; in
+    /// either, only in the role it has ([`instance::carried`]).
+    fn carried(&self, name: &str, held: &Held) -> Option<u64> {
+        match held {
+            Held::Open(t) => instance::held(&self.dir, name, t.bound()),
+            Held::Closed => instance::carried(&self.dir, name, &self.path(name)),
+        }
+    }
+
+    /// Gives a file the slot holds, just made or changed, its identity:
+    /// `proposed`, or one minted, bound to the file as it stands -- which an
+    /// open tenant then holds it as. None where the sidecar was not written.
+    /// Out of line: inlined into its five callers, it was 7 KB of the
+    /// server.
+    #[inline(never)]
+    fn stamp(&self, name: &str, proposed: Option<u64>, held: &Held) -> Option<u64> {
+        let id = proposed.unwrap_or_else(fresh_id);
+        match instance::stamp(&self.dir, name, &self.path(name), id) {
+            Ok(bound) => {
+                if let Held::Open(t) = held {
+                    *t.bound.lock().unwrap_or_else(|e| e.into_inner()) = Some(bound);
+                }
+                Some(id)
+            }
+            Err(e) => {
+                crate::log!("tenant `{name}`'s file was given no identity: {e}");
+                let _ = instance::put_away(&self.dir, name);
+                None
+            }
+        }
+    }
+
+    /// Puts away the identity of a file about to be made to follow, under
+    /// its slot, before `.follows` is written: a router that noted the file
+    /// as left under it takes back nothing it has become since. Durable by
+    /// the follow's own directory sync after it ([`instance::put_away`]).
+    /// Given a new one only once the follow is made ([`Self::stamp`]): a
+    /// follow that failed half way leaves a file of none, which a reclaim
+    /// naming the follow's would otherwise take with whatever it held.
+    /// Refused (500) where it could not be put away: an identity from
+    /// before, kept under the follow's lost stamp, held again once a
+    /// promotion removed `.follows`, a live tenant a reclaim would take.
+    fn put_away(&self, name: &str) -> std::result::Result<(), Refused> {
+        instance::put_away(&self.dir, name).map_err(|e| {
+            Refused(
+                500,
+                format!("tenant `{name}`'s identity could not be put away before it changes: {e}"),
+            )
+        })
     }
 
     fn open_file(&self, name: &str, path: &Path) -> std::result::Result<Arc<Tenant>, Refused> {
@@ -1177,6 +1333,11 @@ impl Tenants {
         // shell over `acme.fennec` beside the node appended its write where
         // the node appended its next, and the file opened no more.
         let lock = hold_tenant(name, path)?;
+        // The file as this process takes it, before anything here can
+        // rename it: its identity is the sidecar's only where the sidecar
+        // names this file ([`instance::held`]). None for a file the open
+        // makes, which its stamp binds.
+        let bound = instance::binding(path).ok();
         let (mut db, feed) = match &self.repl {
             None => {
                 let wrap = fennec_abi::lock::holding(lock);
@@ -1337,6 +1498,7 @@ impl Tenants {
             quota: held,
             ready,
             opened,
+            bound: Mutex::new(bound),
         }))
     }
 
@@ -1505,7 +1667,11 @@ impl Tenants {
                 .insert(t.name.clone(), place);
             streams.detach(&t.name, feed);
         }
+        let (name, bound) = (t.name.clone(), t.bound());
         *held = Held::Closed;
+        // Held from its open: a compact's or a checkpoint's rename is this
+        // process's own, and the file keeps its identity across it.
+        instance::closing(&self.dir, &name, bound, &self.path(&name));
         true
     }
 
@@ -1609,10 +1775,19 @@ impl Tenants {
     /// Stops writes to a tenant and waits for the ones in flight: once it
     /// returns, the database will not change until `thaw`.
     pub fn freeze(&self, name: &str) -> std::result::Result<(), Refused> {
+        self.freeze_as(name).map(|_| ())
+    }
+
+    /// [`Self::freeze`], answering the file's identity: what a router
+    /// moving the tenant notes its source by where the source will not go
+    /// once the move is done. One is minted where the file has none -- made
+    /// before identities -- as nothing but this answer names it: a move
+    /// thawed leaves it known to no router.
+    pub fn freeze_as(&self, name: &str) -> std::result::Result<Option<u64>, Refused> {
         let t = self.get(name)?;
         t.frozen.store(true, Ordering::SeqCst);
         drop(t.gate.write().unwrap_or_else(|e| e.into_inner()));
-        Ok(())
+        Ok(self.identity(name, true))
     }
 
     pub fn thaw(&self, name: &str) -> std::result::Result<(), Refused> {
@@ -1633,6 +1808,18 @@ impl Tenants {
     /// a truncated or corrupt transfer is refused before it reaches the
     /// directory; the file then appears by rename, never half-written.
     pub fn import(&self, name: &str, image: &[u8]) -> std::result::Result<(), Refused> {
+        self.import_as(name, image, None).map(|_| ())
+    }
+
+    /// [`Self::import`], the file given its identity -- `proposed`, or one
+    /// minted -- which it answers with: a move's target, the tenant there
+    /// a file the router may have to take back if the move is undone.
+    pub fn import_as(
+        &self,
+        name: &str,
+        image: &[u8],
+        proposed: Option<u64>,
+    ) -> std::result::Result<Option<u64>, Refused> {
         check_name(name)?;
         let mut check = Database::new();
         let whole = check
@@ -1643,7 +1830,7 @@ impl Tenants {
         }
         drop(check);
 
-        self.with_slot(name, |held| {
+        let id = self.with_slot(name, |held| {
             let path = self.path(name);
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
@@ -1667,8 +1854,13 @@ impl Tenants {
             });
             // A log a tenant of this name left (`fennec_core::fs`) is not
             // this image's: gone, durably, before the rename.
+            // Nor is an identity one left, a binary from before this one
+            // deleting it ([`instance`]): it names another file, and is
+            // unlinked before the rename where a file system that keeps no
+            // birth time could give this one its inode.
             let written = written
                 .and_then(|_| fennec_core::fs::forget_sync_log(&target))
+                .and_then(|_| instance::put_away(&self.dir, name))
                 .and_then(|_| std::fs::rename(&tmp, &target));
             if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
@@ -1678,10 +1870,12 @@ impl Tenants {
                 ));
             }
             self.forget_place(name);
-            Ok(())
+            Ok((!self.standby())
+                .then(|| self.stamp(name, proposed, held))
+                .flatten())
         })?;
         self.touch(name);
-        Ok(())
+        Ok(id)
     }
 
     /// Where a tenant whose file goes or is replaced stood is no more.
@@ -1738,6 +1932,60 @@ impl Tenants {
         Ok(deleted)
     }
 
+    /// Takes back a file a router left here -- made and placed by nothing,
+    /// or meant to go and kept -- only where it carries one of `named`, the
+    /// identities the router learned as its calls made or changed it
+    /// ([`crate::instance`]): unchanged since, it is the file the router
+    /// left; another identity is a later file at the place -- the tenant
+    /// moved back, made again, made to follow or promoted -- and none is a
+    /// file this node cannot vouch for. Judged under the slot's lock, where
+    /// every change of a file's identity is made: first as it stands, so a
+    /// live tenant of another is answered without its streams ended, then
+    /// again once the requests and streams holding an open file let go and
+    /// it is closed, before it goes. Whether the file was there to take.
+    pub fn reclaim(&self, name: &str, named: &[u64]) -> std::result::Result<bool, Kept> {
+        check_name(name)?;
+        let out = self.with_slot(name, |held| {
+            self.refuse_if_shutting_down()?;
+            let path = self.path(name);
+            if matches!(held, Held::Closed) && !path.exists() {
+                return Ok(false);
+            }
+            let is_named = |id: Option<u64>| id.is_some_and(|id| named.contains(&id));
+            let carried = self.carried(name, held);
+            if !is_named(carried) {
+                return Err(Kept::Other(carried));
+            }
+            if let Held::Open(t) = &*held {
+                release(t, name)?;
+                let bound = t.bound();
+                *held = Held::Closed;
+                // Held from its open to here: what its own renames made of
+                // the file is still the file it was.
+                instance::closing(&self.dir, name, bound, &path);
+                let carried = self.carried(name, held);
+                if !is_named(carried) {
+                    return Err(Kept::Other(carried));
+                }
+            }
+            self.delete_held(name, held)
+                .map(|_| true)
+                .map_err(Kept::from)
+        });
+        match &out {
+            Ok(true) => {
+                crate::log!("tenant `{name}`'s file, left by a router, taken back");
+                self.touch(name);
+            }
+            Err(Kept::Other(had)) => crate::log!(
+                "tenant `{name}`'s file kept: it carries {}, not what a router left",
+                had.map_or("no identity".into(), instance::text)
+            ),
+            _ => {}
+        }
+        out
+    }
+
     fn delete_held(&self, name: &str, held: &mut Held) -> std::result::Result<(), Refused> {
         if let Held::Open(t) = &*held {
             release(t, name)?;
@@ -1754,6 +2002,10 @@ impl Tenants {
         // file stays: removed, a process that opened it before the removal
         // and locked it after would hold a lock no later opener sees.
         let _held = hold_tenant(name, &path)?;
+        // Its identity before the file: a removal that fails then leaves a
+        // file of none, which no reclaim takes, rather than a sidecar
+        // naming a file gone.
+        let _ = std::fs::remove_file(instance::path(&self.dir, name));
         std::fs::remove_file(&path)
             .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
         // Once the file is gone: a delete that failed is no departure --
@@ -1872,6 +2124,8 @@ impl Tenants {
                         crate::log!("could not write the checkpoint ({}): {e}", t.name);
                     }
                 }
+                // Its last rewrite this process's, as a close's is.
+                instance::closing(&self.dir, &t.name, t.bound(), &self.path(&t.name));
                 // Leaked on purpose: the process is about to exit, and a lock
                 // released here would let a session write after the final sync.
                 std::mem::forget(g);

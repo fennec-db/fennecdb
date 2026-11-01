@@ -123,9 +123,11 @@ curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
   <li><b><code>fennec_router_tenants_unreplicated</code></b> counts the tenants
     with no copy to fail over to, by region (<a
     href="monitoring.html#router">Monitoring</a>).</li>
-  <li><b>A file the router may have left on a node</b> is reported, never
-    deleted: every repair lists it under <code>left</code>, and
-    <code>fennec_router_files_left</code> counts it.</li>
+  <li><b>A file the router may have left on a node</b> is taken back by its
+    node when it still carries the identity the router noted; any other is
+    reported for an operator. Every repair lists what stays under
+    <code>left</code>, and <code>fennec_router_files_left</code> counts
+    it.</li>
 </ul>
 
 <details class="deep"><summary>How --replicas places a copy for each tenant</summary>
@@ -174,27 +176,73 @@ look is given no replica. A tenant whose region has no other node is not
 tried again: add a node, then <code>POST /_shard/replicas</code>.</p>
 
 <p>A file the router made on a node, or meant to take off one, that no
-placement names — a create taken back (its schema refused, say) whose
-<code>DELETE</code> the node did not take, a create whose <code>PUT</code>
-went unanswered, a move undone whose target kept the copy, a move's source
-that would not go, a copy a failed try made or found, a deleted tenant's
-copy that stayed, an old primary on a node that was silent as its tenant's
-replica went elsewhere — is noted in the directory with why, and reported:
-every repair lists it under <code>left</code>
-(<code>{"tenant","node","why"}</code>), <code>fennec_router_files_left</code>
-counts it, and <code>FennecFilesLeftOnNodes</code> alerts after half an
-hour. The router never deletes one. Neither it nor the node can tell the
-file it left from a later one at the same place: the tenant moved back
-onto that node, or made there again, or a file put there by hand. A create
-of the name on that node is answered 409 while the file is there. A
-repair's look forgets a file it finds gone, or one the directory now
-places, so an operator removes it by hand after looking at it, then runs a
-repair (<code>deploy/RUNBOOK.md</code>, <i>Files left on nodes</i>). Only a
-tenant left without its replica makes a repair answer 502. Tenants left
-without a copy are counted by
+placement names — a create taken back (its schema, quota or placement
+refused, say) whose <code>DELETE</code> the node did not take, a create
+whose <code>PUT</code> went unanswered, a move undone whose target kept the
+copy, a move's source that would not go, a copy a failed replica attach
+made or found — is noted in the directory with why, and with the identity
+of the file. Each file on a node has one: 64 random bits, written as 16 hex
+digits and answered as <code>"instance"</code> by a create, an install, a
+follow and a freeze. It is kept in <code>&lt;tenant&gt;.instance</code> beside the file
+and bound to that file, not to its name, and to whether the file follows
+another node. The node mints it when a create or an install makes the file
+and gives a new one when a follow changes it; a promotion ends the file's
+following, and its identity with it, until a move's freeze gives it
+another. A router may propose one with the <code>Fennec-Instance</code>
+header, which is what it notes for a call that went unanswered. A file put
+in place while the node did not hold it — a restore, a hand, an older
+binary making it again — carries none, and so does a standby's copy of a
+tenant.</p>
+
+<p>Every repair has the node take back each noted file that still carries
+one of the identities noted with it
+(<code>POST /_admin/tenants/&lt;tenant&gt;/reclaim</code> with
+<code>{"instances": [...]}</code>). The node judges, under its tenant
+registry's lock and after the requests and streams holding the file have
+let go. A later file at the same place — the tenant moved back onto that
+node, made there again, followed or promoted since, or a file put there by
+hand — carries another identity, or none, and is never taken: the node
+answers 409. A file taken back is forgotten, and
+<code>fennec_router_files_left</code> falls. A repair runs when an operator
+asks for one, after a failover and as a replica is tried again. None is
+scheduled for a note alone.</p>
+
+<p>What stays is an operator's, and is reported: every repair lists it under
+<code>left</code> (<code>{"tenant","node","why"}</code>),
+<code>fennec_router_files_left</code> counts it, and
+<code>FennecFilesLeftOnNodes</code> alerts after half an hour. Four kinds
+stay:</p>
+
+<ul>
+  <li>a file noted with no identity: a deleted tenant's replica or standby
+    copy that stayed, a detached replica that stayed, an old primary on a
+    node that was silent as its tenant's replica went elsewhere;</li>
+  <li>a file on a node from before identities, which answers 404 to the
+    take-back and never has a file taken;</li>
+  <li>a file whose node says it holds another file there now, kept with
+    "its node holds another file there now" in its <code>why</code> and
+    noted again with no identity;</li>
+  <li>a file a move found on its target that the router did not note (below).</li>
+</ul>
+
+<p>A create of the name on a node holding a file of it is answered 409 until
+a repair takes the file back or it is removed. A repair's look forgets a
+file it finds gone, or one the directory now places, so an operator removes
+the rest by hand after looking at it, then runs a repair
+(<code>deploy/RUNBOOK.md</code>, <i>Files left on nodes</i>). Only a tenant left without its replica makes a
+repair answer 502. Tenants left without a copy are counted by
 <code>fennec_router_tenants_unreplicated{region}</code>, which
 <code>FennecTenantsWithoutReplica</code> in <code>deploy/alerts/</code>
 reads.</p>
+
+<p>A move whose target already holds a file of the tenant (the install
+answered 409) no longer deletes it unseen. The target's node takes it back
+only if it is a file this router noted with an identity. Otherwise the move
+fails 409, the tenant stays on its source, and the file is noted for an
+operator as a file a move found on its target, which the router did not
+note. A replica attach over a noted file is judged the same way, and a node
+holding a noted file the router cannot judge is skipped when that tenant's
+replica is placed.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
 one process, 30 tenants: each is created with its replica in 33 ms, the

@@ -14,7 +14,11 @@
 #   - a router refuses a tenant's schema declaring a statement as one that
 #     does not read (400), placing nothing;
 #   - a move onto an old node fails at its install, and the tenant stays on
-#     its source, answering, with what it held.
+#     its source, answering, with what it held;
+#   - an old node names no identity for a file it makes, and answers this
+#     tree's router asking it to take a file back (`/reclaim`) 404, which
+#     keeps the file: the router reports it and sends no DELETE in its
+#     place (roadmap row 47).
 #
 # This builds `fennec-server`, `fennec` and `fennec-shard` at BASE, the last
 # main before the kind, runs this tree's binaries beside the old ones,
@@ -203,7 +207,8 @@ PIDS+=($!)
 N2=$(address "$WORK/n2.log")
 "$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
     --token root >"$WORK/router.log" 2>&1 &
-PIDS+=($!)
+ROUTER_PID=$!
+PIDS+=($ROUTER_PID)
 ROUTER=$(address "$WORK/router.log")
 for n in "n1 ${N1#http://} a1" "n2 ${N2#http://} a2"; do
     set -- $n
@@ -232,4 +237,34 @@ grep -q '"node":"n1"' "$WORK/admin.out" ||
     fail "the tenant left its source: $(cat "$WORK/admin.out")"
 query "$ROUTER/t/acme" "get notes count" | grep -q '"count":1' ||
     fail "the tenant on its source lost what it held"
+
+# A file left on a node from before identities is never taken back (roadmap
+# row 47): such a node names no identity, so this tree's router notes none
+# for its files -- the row here is put in its directory by hand, as one
+# noted while the node ran a later binary -- and it answers a reclaim 404,
+# which keeps the file: no DELETE in its place, the file reported.
+code=$(curl -sS -o "$WORK/admin.out" -w '%{http_code}' -X PUT \
+    -H 'Authorization: Bearer a2' "$N2/_admin/tenants/zzz")
+[ "$code" = 201 ] || fail "the old node made no tenant ($code): $(cat "$WORK/admin.out")"
+grep -q '"instance"' "$WORK/admin.out" &&
+    fail "the old node named an identity: $(cat "$WORK/admin.out")"
+query "$N2/t/zzz" "create collection notes (title text)" >/dev/null
+query "$N2/t/zzz" "put notes {title: 'kept'}" >/dev/null
+kill "$ROUTER_PID" 2>/dev/null || true
+wait "$ROUTER_PID" 2>/dev/null || true
+"$NEW/fennec" "$WORK/router.fennec" -c "put leftovers {key: 'zzz/n2', tenant: 'zzz', \
+node: 'n2', why: 'a create taken back', noted: 1, instances: '00000000000000ab'}" \
+    >"$WORK/seed.log" 2>&1 || fail "the directory took no row: $(cat "$WORK/seed.log")"
+"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
+    --token root >"$WORK/router2.log" 2>&1 &
+PIDS+=($!)
+ROUTER=$(address "$WORK/router2.log")
+admin "$ROUTER" POST /_shard/replicas >/dev/null
+grep -q '"tenant":"zzz","node":"n2"' "$WORK/admin.out" ||
+    fail "the file left on the old node went unreported: $(cat "$WORK/admin.out")"
+grep -q 'answered 404' "$WORK/admin.out" ||
+    fail "the old node was not asked, or answered otherwise: $(cat "$WORK/admin.out")"
+query "$N2/t/zzz" "get notes count" | grep -q '"count":1' ||
+    fail "the old node's file was taken back"
+echo "old node:     a reclaim answered 404, the file kept and reported"
 echo "ok: the binaries from before stop in words at the first definition"

@@ -287,13 +287,14 @@ asks `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
 promotes only a copy of the tenant's lineage and history
 (`tenants::Expected`, 409) unless `force`d.
 
-**[A failed attach is tried again, a file the router left on a node
-reported.](docs/design/tenants.md#replicas-tried-again)** A failed attach or
-a held tenant has `try_again` run a repair again, rechecked under the claim,
-a copy's node first within the zone rule, none on a node silent at the look.
-A file the router made, or failed to remove, that no placement records is a
-`leftovers` row, reported (a repair's `left`, `fennec_router_files_left`),
-never deleted; `fennec_router_tenants_unreplicated` counts the uncopied.
+**[A failed attach is tried again, a file left taken back by
+identity.](docs/design/tenants.md#replicas-tried-again)** `try_again`
+repairs a failed attach under the claim, a copy's node first;
+`fennec_router_tenants_unreplicated` counts uncopied. A file left is a
+`leftovers` row (`left`, `fennec_router_files_left`) with its node's ids
+(`fennec_http::instance`, bound to file and `.follows`); the node
+deletes it only still carrying one, unheld, under its slot
+(`Tenants::reclaim`), a move's 409 too; no id, never.
 
 ### Regions and the global entry
 
