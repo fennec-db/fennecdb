@@ -700,6 +700,24 @@ fn among(w: &str, words: &[&str]) -> bool {
     words.iter().any(|k| w.eq_ignore_ascii_case(k))
 }
 
+/// `new.<field>` or `old.<field>`, a bound statement's row read: whether
+/// it is `old.`, and the field. `new` and `old` are words, read in any
+/// case as every word of the language is, so PostgreSQL's `NEW.total` is
+/// `new.total` -- one spelling read and the others bare names would let
+/// `Old.a` slip past an `after insert`'s rule as a field; refusing them
+/// would refuse the spelling SQL writes. The field keeps its case.
+#[cfg(feature = "statements")]
+fn row_field(name: &str) -> Option<(bool, &str)> {
+    let (row, field) = name.split_once('.')?;
+    if row.eq_ignore_ascii_case("new") {
+        Some((false, field))
+    } else if row.eq_ignore_ascii_case("old") {
+        Some((true, field))
+    } else {
+        None
+    }
+}
+
 /// Why a call's argument is no value, if it is not: it reads no row, so it
 /// names no field and holds no query.
 #[cfg(feature = "statements")]
@@ -2226,7 +2244,7 @@ impl Parser {
                 if matches!(self.peek(), Tok::RBracket) {
                     break;
                 }
-                docs.push(self.object()?);
+                docs.push(self.document()?);
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
@@ -2236,7 +2254,7 @@ impl Parser {
         } else if insert && !matches!(self.peek(), Tok::LBrace) {
             docs = self.values()?;
         } else {
-            docs.push(self.object()?);
+            docs.push(self.document()?);
             // consecutive objects are accepted too: put docs {..} {..}, and
             // with commas between them, a list without its brackets.
             loop {
@@ -2245,7 +2263,7 @@ impl Parser {
                     (Tok::Comma, Some(Tok::LBrace)) => self.i += 1,
                     _ => break,
                 }
-                docs.push(self.object()?);
+                docs.push(self.document()?);
             }
         }
         if docs.is_empty() && docs_param.is_none() {
@@ -2261,7 +2279,7 @@ impl Parser {
             self.expect_kw("absent")?;
             if self.eat_kw("else") {
                 self.expect_kw("set")?;
-                else_set = Some(self.object()?);
+                else_set = Some(self.document()?);
             }
         }
         let mut conflict = None;
@@ -2313,10 +2331,10 @@ impl Parser {
             if !matches!(self.peek(), Tok::LBrace) {
                 return Err(self.taught(NAMED));
             }
-            let mut docs = vec![self.object()?];
+            let mut docs = vec![self.document()?];
             while matches!(self.peek(), Tok::Comma) {
                 self.skip();
-                docs.push(self.object()?);
+                docs.push(self.document()?);
             }
             return Ok(docs);
         }
@@ -2483,10 +2501,24 @@ impl Parser {
         }))
     }
 
-    /// `{k: v, ...}`: a document's fields, a `set`'s, or an object's
-    /// members. A key may be a path (`meta.lang: "en"`), which sets a key
-    /// inside a json field.
+    /// `{k: v, ...}`: an object's members, or a call's arguments -- keys
+    /// that name no field written. [`Self::document`] reads a write's.
     fn object(&mut self) -> Result<Vec<(String, Expr)>> {
+        self.pairs(false)
+    }
+
+    /// `{k: v, ...}`: a document's fields, or a `set`'s. A key may be a
+    /// path (`meta.lang: "en"`), which sets a key inside a json field --
+    /// and in a bound statement's body is never `new.` or `old.`, the row's
+    /// values ([`Self::pair_named`]), as no name [`Self::path`] reads is.
+    fn document(&mut self) -> Result<Vec<(String, Expr)>> {
+        self.pairs(true)
+    }
+
+    /// One copy for both: the module, which reads no binding, has `written`
+    /// no use, and two inlined copies would be the same bytes twice.
+    #[inline(never)]
+    fn pairs(&mut self, written: bool) -> Result<Vec<(String, Expr)>> {
         self.expect(Tok::LBrace)?;
         let mut pairs = Vec::new();
         loop {
@@ -2499,6 +2531,12 @@ impl Parser {
                     return self.err(format!("expected a field name, found {}", other.describe()))
                 }
             };
+            #[cfg(feature = "statements")]
+            if written && self.def.is_some() {
+                self.pair_named(&key)?;
+            }
+            #[cfg(not(feature = "statements"))]
+            let _ = written;
             self.expect(Tok::Colon)?;
             pairs.push((key, self.expr()?));
             if !matches!(self.peek(), Tok::Comma) {
@@ -3570,7 +3608,7 @@ impl Parser {
         // object holds.
         let set = match self.eat_kw("set") && !matches!(self.peek(), Tok::LBrace) {
             true => self.assignments()?,
-            false => self.object()?,
+            false => self.document()?,
         };
         let (filter, require, pick) = self.write_clauses(at)?;
         Ok(Statement::Update {
@@ -4132,9 +4170,8 @@ impl Parser {
         else {
             return Ok(Expr::Field(name));
         };
-        let (old, field) = match (name.strip_prefix("new."), name.strip_prefix("old.")) {
-            (Some(f), _) => (false, f),
-            (_, Some(f)) => (true, f),
+        let (old, field) = match row_field(&name) {
+            Some(read) => read,
             _ if condition => {
                 self.i -= 1;
                 return self.err(format!(
@@ -4161,7 +4198,13 @@ impl Parser {
             ));
         }
         if condition {
-            return Ok(Expr::Field(name));
+            // Kept lower-case, as the body's places are, so `NEW.s` is
+            // `new.s`'s tree and digest.
+            let row = if old { "old." } else { "new." };
+            return Ok(Expr::Field(match name.starts_with(row) {
+                true => name,
+                false => format!("{row}{field}"),
+            }));
         }
         let field = field.to_string();
         let Some(b) = self.def.as_deref_mut().and_then(|d| d.bound.as_mut()) else {
@@ -4206,7 +4249,7 @@ impl Parser {
     #[inline(never)]
     fn pair_named(&mut self, name: &str) -> Result<()> {
         let bound = self.def.as_deref().is_some_and(|d| d.bound.is_some());
-        if bound && (name.starts_with("new.") || name.starts_with("old.")) {
+        if bound && row_field(name).is_some() {
             self.i -= 1;
             return self.err(format!(
                 "`{name}` is a value of the row the write wrote, read where a value stands \

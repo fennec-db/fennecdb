@@ -212,6 +212,100 @@ fn new_and_old_are_held_to_every_event() {
     );
 }
 
+/// `new` and `old` are words of the language, read in any case as every
+/// word is: PostgreSQL's `NEW.total` is `new.total`, the same tree and the
+/// same digest, and `Old.a` in an `after insert` is refused as `old.a` is
+/// -- never read as a bare name, nor as a field of the row.
+#[test]
+fn new_and_old_are_read_in_any_case() {
+    let lower = definition(
+        "create statement c after set t where new.s = 'paid' and old.s = 'open' as insert u \
+         {a: new.total, b: old.a}",
+    );
+    let spelled = definition(
+        "create statement c after set t where NEW.s = 'paid' and Old.s = 'open' as insert u \
+         {a: NEW.total, b: oLD.a}",
+    );
+    assert_eq!(spelled, lower);
+    assert_eq!(spelled.digest().unwrap(), lower.digest().unwrap());
+    for (text, why, at) in [
+        (
+            "create statement c after insert t as insert u {a: Old.a}",
+            "a row made has no row before it",
+            "Old.a",
+        ),
+        (
+            "create statement c after insert t where OLD.a = 1 as del u where id = 1",
+            "a row made has no row before it",
+            "OLD.a",
+        ),
+        (
+            "create statement c after del t where New.a = 1 as del u where id = 1",
+            "a row taken out leaves none",
+            "New.a",
+        ),
+    ] {
+        refused_at(text, why, at);
+    }
+    // The field keeps its case, as every field does.
+    assert_eq!(
+        binding("create statement c after set t as insert u {a: NEW.Total}").places,
+        [place(false, "Total")]
+    );
+    // Out of a binding, `NEW.a` is the path into the field `NEW` it was.
+    let Ok(Statement::Select(s)) = parse_one("get t where NEW.a = 1") else {
+        panic!("a get")
+    };
+    assert_eq!(
+        s.filter,
+        Some(Expr::Cmp(
+            CmpOp::Eq,
+            field("NEW.a"),
+            Box::new(Expr::Lit(Value::Int(1)))
+        ))
+    );
+}
+
+/// A name a binding's body writes -- a document's key, a `set`'s, SQL's
+/// `set` and column list, an upsert's `else set` -- is never `new.` or
+/// `old.`, in any case or quoting: those are the row's values, and a key is
+/// no value. A constant object's member is data, not a name written; out of
+/// a binding each key is the path into a `json` field it always was.
+#[test]
+fn a_binding_writes_no_field_named_new_or_old() {
+    for (body, at) in [
+        ("set u {new.a: 1} where id = new.id", "new.a: 1"),
+        ("insert u {old.a: 1}", "old.a: 1"),
+        ("insert u {\"new.a\": 1}", "\"new.a\""),
+        ("insert u {'old.a': 1}", "'old.a'"),
+        ("insert u {NEW.a: 1}", "NEW.a: 1"),
+        ("insert u [{b: 1}, {new.a: 1}]", "new.a: 1"),
+        ("insert u {b: 1} {Old.a: 1}", "Old.a: 1"),
+        ("update u set NEW.a = 1 where id = new.id", "NEW.a = 1"),
+        (
+            "put u {id: new.id} if absent else set {new.n: 1}",
+            "new.n: 1",
+        ),
+    ] {
+        refused_at(
+            &format!("create statement c after set t as {body}"),
+            "names no field here",
+            at,
+        );
+    }
+    // SQL's column list names no path anywhere.
+    refused_at(
+        "create statement c after set t as insert into u (Old.a) values (1)",
+        "a name holds no dot",
+        "Old.a",
+    );
+    binding("create statement c after set t as insert u {meta: {\"new.a\": 1}, b: new.b}");
+    let Ok(Statement::Update { set, .. }) = parse_one("set u {new.a: 1} where id = 1") else {
+        panic!("a set")
+    };
+    assert_eq!(set[0].0, "new.a");
+}
+
 /// What the text alone refuses of a binding, each at the word it is about.
 #[test]
 fn a_binding_s_refusals() {
