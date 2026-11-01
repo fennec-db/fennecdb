@@ -878,4 +878,11 @@ main 48 541-49 780 requests a second (median 49 057), p50 20.54-20.79 us
 tick of macOS's 41.7 ns clock apart. `fennec-server`'s `__text` grew 4 800
 bytes and `fennec-shard`'s 7 360 (aarch64-apple-darwin): the decoder, the
 framing's checks and their refusals' words. The browser module carries no fennec-http and is the same
-to the byte.
+to the byte. The review's fixes -- a name held to a token's bytes and a
+value to no control, the buffer grown a step at a time -- were timed the
+same way against main (its base, `d308d398`), eight rounds under a load
+of 2.5 (three runs discarded and redone): p50 medians 21.19 us for main
+and 21.29 for the fix, main's own runs 19.42-30.12; requests a second
+spread too far that evening to read (main 20 763-50 857, medians 41 733
+and 47 045). `fennec-server`'s `__text` is 6 016 bytes over main's with
+them, where 4 800 was before.
