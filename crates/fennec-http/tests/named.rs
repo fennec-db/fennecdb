@@ -781,3 +781,255 @@ fn a_page_on_another_origin_calls_as_it_queries() {
     assert!(head.contains(allowed), "{head}");
     assert!(head.contains("Fennec-Seq"), "{head}");
 }
+
+// ------------------------------------------------------- slice 5: reads
+
+impl Node {
+    /// Where the database stands: its change counter.
+    fn seq(&self) -> u64 {
+        self.db.read().unwrap().change_seq()
+    }
+
+    /// u0 moved 10 from 1 to 2, and 5 from 1 to 3: two entries of hers.
+    fn with_entries(self) -> Node {
+        let u0 = self.customer("u0");
+        for (to, amount) in [(2, 10), (3, 5)] {
+            let params = format!(r#"{{"from":1,"to":{to},"amount":{amount}}}"#);
+            let (status, body) = self.call(&u0, "transfer", &params);
+            assert_eq!(status, 200, "{body}");
+        }
+        self
+    }
+}
+
+/// A call whose statement reads is a read: a read-only server and a read
+/// marked for a replica answer it -- by its path, over `/query` and in a
+/// `/batch`, the same rows the primary answers -- naming the change it read
+/// at, keeping no key and moving no counter; one that writes is still
+/// refused there.
+#[test]
+fn a_call_that_reads_is_answered_where_reads_are() {
+    let node = start(|_| {}).with_entries();
+    let ro = node.read_only();
+    let u0 = node.customer("u0");
+    let before = node.seq();
+    let (status, home) = node.call(&u0, "history", "{}");
+    assert_eq!(status, 200, "{home}");
+    assert!(home.contains(r#""amount":10"#), "{home}");
+    assert!(home.contains(r#""amount":5"#), "{home}");
+    let marked = "Fennec-Read: replica\r\n";
+    let key = "Idempotency-Key: read-1\r\n";
+    for (server, extra) in [(&ro, ""), (&node, marked), (&ro, key), (&node, key)] {
+        let (status, head, body) = server.send(&u0, "/_call/history", r#"{"params":{}}"#, extra);
+        assert_eq!((status, &body), (200, &home), "{extra}");
+        assert!(head.contains("Fennec-Seq"), "{head}");
+        assert!(!head.contains("Idempotent-Replayed"), "{head}");
+        let (status, body) = server.call_query(&u0, "history", "{}");
+        assert_eq!((status, &body), (200, &home));
+        let (status, batch) = server.post(&u0, "/batch", &line("call history"));
+        assert_eq!(status, 200, "{batch}");
+        assert!(batch.contains(r#""amount":10"#), "{batch}");
+    }
+    // The server's token reads with the claims it names, a batch of reads
+    // and calls together.
+    let lines = [
+        line("call history as {sub: 'u0'}"),
+        line("get accounts select balance where id = 1"),
+    ];
+    let (status, both) = ro.post(ROOT, "/batch", &lines.join("\n"));
+    assert_eq!(status, 200, "{both}");
+    assert!(both.contains(r#""amount":5"#), "{both}");
+    assert!(both.contains(r#""balance":985"#), "{both}");
+    let (status, body) = ro.call(&u0, "transfer", r#"{"from":1,"to":2,"amount":1}"#);
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(node.seq(), before);
+    let (status, _) = node.query(ROOT, "get _idempotency count");
+    assert_eq!(status, 404, "a read kept a key");
+}
+
+/// A call that reads takes the read lock alone: it is answered while
+/// another reader holds the database, whichever way it came, where one
+/// under the write lock would wait for that reader.
+#[test]
+fn a_call_that_reads_takes_no_write_lock() {
+    let node = start(|_| {}).with_entries();
+    let u0 = node.customer("u0");
+    let reader = node.db.read().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let asked = {
+        let node = node.clone();
+        std::thread::spawn(move || {
+            let by_path = node.call(&u0, "history", "{}");
+            let by_query = node.call_query(&u0, "history", "{}");
+            let by_batch = node.post(&u0, "/batch", &line("call history"));
+            let _ = tx.send([by_path, by_query, by_batch]);
+        })
+    };
+    let answers = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("a call that reads waited for a lock another reader holds");
+    drop(reader);
+    asked.join().unwrap();
+    for (status, body) in answers {
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
+/// A server whose database follows a primary takes no write of its own,
+/// and answers a call that reads; one that writes is refused as the
+/// replica's every write is.
+#[test]
+fn a_replica_answers_a_call_that_reads() {
+    let node = start(|_| {}).with_entries();
+    node.db.write().unwrap().follow(vec![(5, 0)]).unwrap();
+    let u0 = node.customer("u0");
+    let (status, body) = node.call(&u0, "history", "{}");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""amount":5"#), "{body}");
+    let (status, body) = node.post(&u0, "/batch", &line("call history"));
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = node.call(&u0, "transfer", r#"{"from":1,"to":2,"amount":1}"#);
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("replica"), "{body}");
+}
+
+/// A long call is read on a pin, writes landing beside it; one whose body
+/// an index answers -- declined by the pin, or refused on it -- is read
+/// under the lock: the same rows either way.
+#[test]
+fn a_call_read_on_a_pin_answers_as_under_the_lock() {
+    let node = start(|_| {}).with_entries();
+    let mine = "create statement mine() claims (sub text) as
+                  get accounts select id, balance where owner = $jwt.sub";
+    node.ok(ROOT, mine);
+    let history = node.ok(ROOT, "call history as {sub: 'u0'}");
+    let owned = node.ok(ROOT, "call mine as {sub: 'u0'}");
+    node.db.write().unwrap().set_pin_at(0);
+    let writer = {
+        let node = node.clone();
+        std::thread::spawn(move || {
+            for i in 0..50 {
+                node.ok(ROOT, &format!("put journal {{what: 'w{i}'}}"));
+            }
+        })
+    };
+    let lines = [
+        line("call history as {sub: 'u0'}"),
+        line("call mine as {sub: 'u0'}"),
+    ];
+    for _ in 0..50 {
+        assert_eq!(node.ok(ROOT, "call history as {sub: 'u0'}"), history);
+        assert_eq!(node.ok(ROOT, "call mine as {sub: 'u0'}"), owned);
+        let (status, both) = node.post(ROOT, "/batch", &lines.join("\n"));
+        assert_eq!(status, 200, "{both}");
+    }
+    writer.join().unwrap();
+}
+
+/// A statement made again between reading and writing while it is called
+/// at every site that asks whether a statement writes before its lock --
+/// `/query`, keyed or not, `/batch` and `POST /_call/<name>`: each call
+/// runs as the statement it finds under the lock it runs under, a read as a
+/// read and a write as a write, never refused for the other; on a
+/// read-only server it reads or is refused, and never writes.
+#[test]
+fn a_call_runs_as_the_statement_it_finds_under_its_lock() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    let node = start(|_| {});
+    let ro = node.read_only();
+    node.ok(ROOT, "create collection marks (v int)");
+    let reads = "create statement flip() public as get marks select id, v where v = 0";
+    let writes = "create statement flip() public as insert marks {v: 1} returning id, v";
+    node.ok(ROOT, reads);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = {
+        let (stop, node) = (Arc::clone(&stop), node.clone());
+        std::thread::spawn(move || {
+            let mut i = 0;
+            while !stop.load(Relaxed) {
+                i += 1;
+                let next = if i % 2 == 1 { writes } else { reads };
+                let batch = [line("drop statement flip"), line(next)].join("\n");
+                let (status, body) = node.post(ROOT, "/batch", &batch);
+                assert_eq!(status, 200, "{body}");
+            }
+        })
+    };
+    let wrote = Arc::new(AtomicUsize::new(0));
+    let callers: Vec<_> = (0..5u32)
+        .map(|site| {
+            let (node, ro, wrote) = (node.clone(), ro.clone(), Arc::clone(&wrote));
+            std::thread::spawn(move || {
+                for i in 0..60 {
+                    let q = line("call flip");
+                    let keyed = format!("Idempotency-Key: f{i}\r\n");
+                    let (status, _, body) = match site {
+                        0 => node.send(ROOT, "/query", &q, ""),
+                        1 => node.send(ROOT, "/query", &q, &keyed),
+                        2 => node.send(ROOT, "/batch", &q, ""),
+                        3 => node.send(ROOT, "/_call/flip", "", ""),
+                        _ => ro.send(ROOT, "/_call/flip", "", ""),
+                    };
+                    match status {
+                        403 if site == 4 => assert!(body.contains("read-only"), "{body}"),
+                        200 if body.contains(r#""v":1"#) => {
+                            assert!(site != 4, "a read-only server wrote: {body}");
+                            wrote.fetch_add(1, Relaxed);
+                        }
+                        200 => assert!(body.contains("[]"), "{site}: {body}"),
+                        _ => panic!("{site}: {status} {body}"),
+                    }
+                }
+            })
+        })
+        .collect();
+    for c in callers {
+        c.join().unwrap();
+    }
+    stop.store(true, Relaxed);
+    flipper.join().unwrap();
+    assert_eq!(node.number("get marks count"), wrote.load(Relaxed) as i64);
+}
+
+/// `--max-memory` holds a call as it holds the writes its body makes:
+/// above the ceiling a call that inserts or sets is refused 507 as the
+/// plain `put` it holds is -- by `/query`, by its path and in a `/batch`,
+/// nothing of it landing -- while one that reads or deletes goes on, `del`
+/// being the way out. A call matched no growing statement, so its body's
+/// writes went past the ceiling.
+#[test]
+fn a_call_that_writes_is_held_to_the_data_ceiling() {
+    let node = start(|_| {});
+    let full = Node {
+        port: serve(&node.db, &node.access, |c| c.max_memory = 1),
+        ..node.clone()
+    };
+    let u0 = node.customer("u0");
+    let refused = |(status, body): (u16, String)| {
+        assert_eq!(status, 507, "{body}");
+        assert!(body.contains("data ceiling exceeded"), "{body}");
+    };
+    let balances = node.balances();
+    refused(full.query(ROOT, "put entries {amount: 1, by: 'u0'}"));
+    refused(full.query(&u0, "call note {amount: 1}"));
+    refused(full.query(ROOT, "call note {amount: 1} as {sub: 'u0'}"));
+    refused(full.call(&u0, "note", r#"{"amount":1}"#));
+    refused(full.call(&u0, "transfer", r#"{"from":1,"to":2,"amount":10}"#));
+    refused(full.post(
+        &u0,
+        "/batch",
+        &format!("{}\n", line("call note {amount: 1}")),
+    ));
+    assert_eq!(node.number("get entries count"), 0);
+    assert_eq!(node.balances(), balances);
+    // Reading and deleting are the way out.
+    let (status, body) = full.query(&u0, "call history");
+    assert_eq!(status, 200, "{body}");
+    node.ok(ROOT, "put journal {what: 'a'}");
+    let (status, body) = full.query(ROOT, "call purge {w: 'a'}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(node.number("get journal count"), 0);
+    // Under no ceiling the same call lands.
+    node.ok(&u0, "call note {amount: 1}");
+    assert_eq!(node.number("get entries count"), 1);
+}

@@ -18,6 +18,47 @@ const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 const ROOT: &str = "root-token";
 const MODERN: &str = "2026-07-28";
 
+/// A call is no MCP tool's to run until each statement has a tool of its
+/// own (`call_<name>`, `docs/design/named-statements.md`'s slice 7), the
+/// statement's words checked there: `query` refuses one whose statement
+/// reads -- answered by `/query` on the same server -- as it refuses a
+/// write, and `write` refuses any call, before anything of it runs.
+#[test]
+fn a_call_is_no_tools_to_run_yet() {
+    let n = start(Options {
+        write: true,
+        ..opts()
+    });
+    let auth = format!("Bearer {ROOT}");
+    let headers = [("Authorization", auth.as_str())];
+    for q in [
+        "create statement years() as get docs select year order year",
+        "create statement stamp() public as insert secrets {x: 1}",
+    ] {
+        let body = format!(r#"{{"query":"{q}"}}"#);
+        let a = n.post_raw("POST", "/query", &headers, &body);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    let a = n.post_raw("POST", "/query", &headers, r#"{"query":"call years"}"#);
+    assert_eq!(a.status, 200, "{}", a.body);
+    for (tool, args, says) in [
+        ("query", r#"{"query":"call years"}"#, "query runs reads"),
+        ("write", r#"{"statement":"call years"}"#, "not built"),
+        ("write", r#"{"statement":"call stamp"}"#, "not built"),
+    ] {
+        let (err, s) = n.call(Some(ROOT), tool, args);
+        assert!(err, "{tool} {args}: {s:?}");
+        assert!(text(at(&s, &["error"])).contains(says), "{tool}: {s:?}");
+    }
+    let a = n.post_raw(
+        "POST",
+        "/query",
+        &headers,
+        r#"{"query":"get secrets count"}"#,
+    );
+    assert!(a.body.contains(r#""count":1"#), "{}", a.body);
+}
+
 fn setup(db: &mut Database, sql: &[&str]) {
     for s in sql {
         db.execute(&fennec_ql::parse_one(s).unwrap()).unwrap();

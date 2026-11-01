@@ -36,7 +36,8 @@ the <code>--follow</code> mirror — runs inside this one process rather than
 as programs of its own.</p>
 
 <p>One thread per connection. Read-only statements run at the same time under
-a shared lock; writes take the exclusive one. HNSW search buffers are
+a shared lock — a call of a named statement whose body only reads among
+them; writes take the exclusive one. HNSW search buffers are
 thread-local, so the same index can be searched in parallel — eight
 concurrent full scans on eight cores measured 4.3×.</p>
 

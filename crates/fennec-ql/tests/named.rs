@@ -846,9 +846,11 @@ fn a_field_that_holds_nothing_is_not_written() {
     assert_eq!(d.canonical().unwrap(), want);
 }
 
-/// A definition, a drop and a call are writes wherever they are asked, a
-/// call whatever its body: the read path refuses each, and the write path
-/// runs it. `statements` and `describe statement` are reads.
+/// A definition, a drop and a call are never read-only by their statement,
+/// a call whatever its body: the read path refuses a definition and a drop,
+/// and the write path runs each. A call is its definition's: the read path
+/// answers one whose body reads (the read executor) and refuses one whose
+/// body writes. `statements` and `describe statement` are reads.
 #[test]
 fn they_are_writes_and_their_listing_reads() {
     fennec_ql::install();
@@ -860,16 +862,29 @@ fn they_are_writes_and_their_listing_reads() {
     for text in [
         "create statement s() as get t select a",
         "create or replace statement s() as get t select a order a",
+        "create statement w() public as insert t {a: 2}",
         "call s",
         "CALL s()",
+        "call w",
         "drop statement s",
         "drop statement if exists s",
     ] {
         let s = parse_one(text).unwrap();
         assert!(!s.is_read_only() && s.is_named(), "{text}");
-        assert_eq!(db.query(&s, &[]), Err(write.clone()), "{text}");
+        match text {
+            "call s" | "CALL s()" => {
+                let r = db.query(&s, &[]).unwrap();
+                assert_eq!(r.rows().unwrap().rows.len(), 1, "{text}");
+            }
+            "call w" => assert!(
+                matches!(db.query(&s, &[]), Err(Error::ReadOnly(_))),
+                "{text}"
+            ),
+            _ => assert_eq!(db.query(&s, &[]), Err(write.clone()), "{text}"),
+        }
         db.execute_with(&s, &[]).unwrap();
     }
+    db.execute(&parse_one("drop statement w").unwrap()).unwrap();
     for run in [true, false] {
         let list = parse_one("statements").unwrap();
         let r = match run {

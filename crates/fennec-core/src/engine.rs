@@ -36,7 +36,7 @@ pub use limit::{Landing, Limit};
 #[cfg(feature = "statements")]
 mod call;
 #[cfg(feature = "statements")]
-pub use call::Callee;
+pub use call::{CallRead, Callee};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -3758,12 +3758,14 @@ pub struct Database {
     /// ([`Self::internally`]).
     #[cfg_attr(not(feature = "statements"), allow(dead_code))]
     internal: bool,
-    /// The rows a call's statements may still examine, `usize::MAX`
-    /// outside a call: what `--call-max-rows` bounds
-    /// ([`Self::set_call_max_rows`]). An atomic for `Sync` alone, as the
-    /// sink's `Mutex` is: only the writer that runs the call touches it.
+    /// The calls running over this database, a write's under its lock and
+    /// reads' beside each other: while none runs, a statement asks nothing
+    /// more of `--call-max-rows` ([`Self::set_call_max_rows`]), and while
+    /// one does, the rows left are its thread's (`call::LEFT`). One number
+    /// read a statement, as the rows left were when only the writer ran a
+    /// call; a read beside the others cannot hold them in the database.
     #[cfg(feature = "statements")]
-    call_left: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
     /// `--call-max-rows`.
     #[cfg(feature = "statements")]
     call_max_rows: usize,
@@ -3837,7 +3839,7 @@ impl Database {
             statements: Arc::default(),
             internal: false,
             #[cfg(feature = "statements")]
-            call_left: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
             call_max_rows: crate::named::CALL_MAX_ROWS,
             #[cfg(not(target_arch = "wasm32"))]
@@ -6269,7 +6271,7 @@ impl Database {
                 ),
             ));
         }
-        if let Some(i) = stmts.iter().position(|(s, _)| !s.is_read_only()) {
+        if let Some(i) = stmts.iter().position(|(s, _)| !self.reads(s)) {
             self.may_start().map_err(|e| (i, e))?;
         }
         let outer = self.block.is_some();
@@ -6356,8 +6358,24 @@ impl Database {
             Statement::ListStatements => Ok(self.list_statements()),
             #[cfg(feature = "statements")]
             Statement::DescribeStatement(name) => self.describe_statement(name),
+            // The read executor: refuses a body that writes.
+            #[cfg(feature = "statements")]
+            Statement::Call(c) => self.read_call(&self.callee(c, params)?),
             _ => Err(Error::Query("this statement requires write access".into())),
         }
+    }
+
+    /// Whether `stmt` runs over `&self` ([`Self::query`]) as the database
+    /// stands: a read, or a call whose statement reads -- or which no
+    /// statement here can run, for the read executor to refuse as the call
+    /// is judged ([`Self::call_reads`]). Asked under the lock it then runs
+    /// under, the answer holds for as long as that lock.
+    pub fn reads(&self, stmt: &Statement) -> bool {
+        #[cfg(feature = "statements")]
+        if let Statement::Call(c) = stmt {
+            return self.call_reads(c) != Some(false);
+        }
+        stmt.is_read_only()
     }
 
     /// [`Self::query`]'s answer to a plain `get` -- fields alone, in their
@@ -6522,6 +6540,14 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
+        // A call whose statement reads is a read: no block, no replica's or
+        // lease's refusal, no counter moved -- the read executor's.
+        #[cfg(feature = "statements")]
+        if let Statement::Call(c) = stmt {
+            if self.call_reads(c) != Some(false) {
+                return self.query(stmt, params);
+            }
+        }
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the

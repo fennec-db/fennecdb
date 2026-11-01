@@ -2420,7 +2420,7 @@ pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> R
         // Held against a freeze as any request of the tenant's is: a move
         // waits for the read rather than delete the file under it.
         let _held = t.enter();
-        match writes(&req.body) {
+        match writes(&t.db, &req.body) {
             Some(word) => Response::error(
                 403,
                 &format!("a query across tenants reads, and `{word}` writes"),
@@ -2446,10 +2446,12 @@ pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> R
     resp
 }
 
-/// The first word of a `/query` body's statement where it writes; `None`
-/// for a read, and for a body that does not parse, which the read's own
-/// parse then refuses with its error.
-fn writes(body: &[u8]) -> Option<String> {
+/// The first word of a `/query` body's statement where it writes -- a
+/// call's name with it, where the tenant's statement of that name writes;
+/// `None` for a read, a call whose statement reads (or which none here can
+/// run, refused as it is judged), and a body that does not parse, which
+/// the read's own parse then refuses with its error.
+fn writes(db: &RwLock<Database>, body: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(body).ok()?;
     let obj = fennec_core::json::parse_object_listing(text, "params").ok()?;
     let sql = obj.iter().find_map(|(k, v)| match v {
@@ -2457,6 +2459,9 @@ fn writes(body: &[u8]) -> Option<String> {
         _ => None,
     })?;
     let stmt = api::parsed(sql).ok()?;
+    if let Statement::Call(c) = &*stmt {
+        return (held::read(db).call_reads(c) == Some(false)).then(|| format!("call {}", c.name));
+    }
     match stmt.is_read_only() {
         true => None,
         false => Some(sql.split_whitespace().next().unwrap_or("").to_string()),
@@ -2606,6 +2611,11 @@ fn run_query(
         },
     };
     let mask = mask.as_ref();
+    // A call whose statement reads is a read, answered wherever reads are;
+    // one that writes goes on as the write it is.
+    if let Some(resp) = read_call(db, cfg, req, who, &stmt, &params, key.as_ref()) {
+        return resp;
+    }
     if cfg.read_only && !stmt.is_read_only() {
         if let Err(e) = judged_read_only(db, cfg, who, &stmt, &params) {
             return error_response(&e);
@@ -2630,7 +2640,11 @@ fn run_query(
         }
     }
 
-    if !stmt.is_read_only() {
+    // Asked of a write that may grow the data, under a ceiling: the read
+    // lock taken for every write, ceiling or none, paid for the one a call
+    // that reads takes to ask its statement ([`read_call`]). A call is
+    // asked here too, by its body, only under a ceiling.
+    if cfg.max_memory != 0 && grows(&stmt) {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
             return refused(why);
@@ -3041,6 +3055,108 @@ fn noted_call(db: &Database, stmt: &Statement) {
     }
 }
 
+/// A lone call whose statement reads, answered as a read
+/// (`docs/design/named-statements.md`, slice 5): asked under the read lock
+/// it then runs under ([`Database::call_reads`]) -- so a `drop` and a
+/// `create` landing after the question cannot make it a write there --
+/// judged as `who` ([`access::judged`]) and read by the read executor
+/// ([`Database::read_call`]), pinned where it is long and then read with
+/// no lock held. It takes no write lock, keeps no key and moves no
+/// counter, so a replica, a read-only server and a marked read answer it;
+/// its answer names the change it read at, as a read-only `/batch`'s does.
+/// `None` where its statement writes, for the write path or read-only
+/// mode's refusal to answer; and, under a tenant's freeze or lapsed lease
+/// ([`Config::come_back`]), wherever this copy cannot read it -- none
+/// there, or broken -- for the client to come back rather than be told
+/// this copy's judgment. `None` at once for any other statement.
+fn read_call(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    req: &Request,
+    who: &Who,
+    stmt: &Statement,
+    params: &[Value],
+    key: Option<&idempotent::Key>,
+) -> Option<Response> {
+    let Statement::Call(c) = stmt else {
+        return None;
+    };
+    let mut pin = true;
+    let (result, at, body) = loop {
+        let guard = held::read(db);
+        match guard.call_reads(c) {
+            Some(true) => {}
+            None if !cfg.come_back => {}
+            _ => return None,
+        }
+        // Asked once, of a call found to read: a header `Fennec-Wait` does
+        // not take is the 400 it is for a `get`, and a key an earlier
+        // call kept is answered as it was -- made once, as ever.
+        if pin {
+            if let Err(why) = waits::asked(req) {
+                return Some(Response::error(400, &why));
+            }
+            let ttl = cfg.idempotency_ttl.as_millis() as i64;
+            if let Some(sent) = key.and_then(|k| idempotent::answered(&guard, k, ttl)) {
+                return Some(sent);
+            }
+        }
+        let callee = match access::judged(who, &guard, c, params) {
+            Ok(callee) => callee,
+            Err(e) => return Some(error_response(&e)),
+        };
+        noted_call(&guard, stmt);
+        let running = trace::span("execute");
+        let pinned = match pin {
+            true => guard.pin_call(&callee),
+            false => None,
+        };
+        // Its last statement's rows written out from the stored documents
+        // where it is a plain `get`, as `/query`'s are.
+        let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
+        let Some(p) = pinned else {
+            break (
+                guard.read_call_json(&callee, &mut body),
+                At::of(&guard),
+                body,
+            );
+        };
+        let at = At {
+            seq: p.change_seq(),
+            history: http::history_of(&guard),
+        };
+        drop(guard);
+        running.attr("fennec.pinned", true);
+        match p.read_call_json(&callee, &mut body) {
+            Some(r) => break (r, at, body),
+            // A statement of it reached for an index the pin left out: the
+            // call again under the lock, asked and judged there again.
+            None => {
+                http::give_back(body.into_bytes());
+                running.forget();
+                pin = false;
+            }
+        }
+    };
+    timing::lap(timing::Phase::Execute);
+    let resp = match access::run_as(who, stmt, || result) {
+        Ok(fennec_core::engine::CallRead::Json(n)) => {
+            statements::rows(n as u64);
+            let resp = Response::json(200, body).versioned(fennec_core::VERSION);
+            timing::lap(timing::Phase::Render);
+            return Some(with_seq(resp, Some(at)));
+        }
+        Ok(fennec_core::engine::CallRead::Answer(r)) => {
+            statements::rows(counted(&r));
+            with_seq(api::render_any(&r, fennec_core::VERSION), Some(at))
+        }
+        Err(e) => error_response(&e),
+    };
+    http::give_back(body.into_bytes());
+    timing::lap(timing::Phase::Render);
+    Some(resp)
+}
+
 /// The rows a response returned or changed, for the statements' counts.
 fn counted(resp: &fennec_core::prelude::Response) -> u64 {
     match resp {
@@ -3109,6 +3225,16 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(s) => s,
         Err(e) => return error_response(&e),
     };
+    // Reads and calls whose statements read are a batch of reads, asked
+    // under the read lock it runs under ([`read_batch`]) as a lone call is
+    // ([`read_call`]); one holding a call that writes goes on as a write.
+    let reading = |s: &Statement| s.is_read_only() || matches!(s, Statement::Call(_));
+    if stmts.iter().all(|(s, _)| reading(s)) && stmts.iter().any(|(s, _)| !s.is_read_only()) {
+        let lines = (&stmts[..], &masks[..]);
+        if let Some(r) = read_batch(db, lines, unscoped.as_deref(), who, (true, cfg.come_back)) {
+            return r;
+        }
+    }
     if cfg.read_only && stmts.iter().any(|(s, _)| !s.is_read_only()) {
         // Each call judged first, in its line's order, as `/query` and
         // `/_call` judge a lone one: a call answers the same whichever
@@ -3130,7 +3256,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     let writes = stmts.iter().any(|(s, _)| !s.is_read_only());
     // A batch of reads makes nothing to make once: its key is not asked.
     if !writes {
-        return read_batch(db, (&stmts, &masks), unscoped.as_deref(), who, true);
+        let lines = (&stmts[..], &masks[..]);
+        if let Some(r) = read_batch(db, lines, unscoped.as_deref(), who, (true, false)) {
+            return r;
+        }
     }
     // `Fennec-Wait`: a batch whose writes are `set`s and `del`s, held while
     // it writes nothing ([`waits`]).
@@ -3311,6 +3440,9 @@ fn batch_stop(stop: api::Stop, completed: usize, at: usize) -> Response {
         .header(quota::HEADER, kind.name())
 }
 
+/// A `/batch`'s statements and the parameters of each.
+type Lines = [(Statement, Vec<Value>)];
+
 /// A `/batch` whose every statement only reads, as one snapshot: what a
 /// reconciliation takes -- every read at the one change `Fennec-Seq` names,
 /// no write landing between the first and the last. Under the write lock,
@@ -3321,17 +3453,18 @@ fn batch_stop(stop: api::Stop, completed: usize, at: usize) -> Response {
 /// lock held, and a transfer waits for the pin alone; a batch the pin
 /// cannot answer -- short, or answered by an index -- runs under one read
 /// lock as before. A `require` on a read stops it with 412 and `at`, as in
-/// a block: nothing to put back.
-/// A `/batch`'s statements and the parameters of each.
-type Lines = [(Statement, Vec<Value>)];
-
+/// a block: nothing to put back. A call among its lines is read as a lone
+/// one is ([`read_call`]), asked under the lock the batch runs under:
+/// `None` where one writes there -- or, under a tenant's freeze or lapsed
+/// lease (`come_back`), where this copy cannot read one -- for the batch to
+/// go on as a write.
 fn read_batch(
     db: &Arc<RwLock<Database>>,
     (stmts, masks): (&Lines, &[Option<access::Mask>]),
     unscoped: Option<&Lines>,
     sent_as: &Who,
-    pin: bool,
-) -> Response {
+    (pin, come_back): (bool, bool),
+) -> Option<Response> {
     let guard = held::read(db);
     // A token whose rules read other collections: every statement held to
     // them as they answer under this lock, the batch's one snapshot, and
@@ -3345,11 +3478,15 @@ fn read_batch(
                 (&rebound.0[..], &rebound.1[..], &rebound.2)
             }
             Err((at, e)) => {
-                return api::render_batch_stop(api::stop_of(&e), 0, at, fennec_core::VERSION);
+                let stop = api::stop_of(&e);
+                return Some(api::render_batch_stop(stop, 0, at, fennec_core::VERSION));
             }
         },
     };
     let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|(s, p)| (s, &p[..])).collect();
+    if !all_read(&guard, &pairs, come_back) {
+        return None;
+    }
     if let Some(p) = pin.then(|| guard.pin(&pairs)).flatten() {
         // The pin's own change, of the history the database is on: a pin
         // holds the documents alone.
@@ -3362,21 +3499,63 @@ fn read_batch(
         running.attr("fennec.statements", stmts.len() as i64);
         running.attr("fennec.pinned", true);
         let shown = (who, masks, p.database());
-        if let Some(resp) = answer_reads(&pairs, shown, at, |s, ps| p.query(s, ps)) {
-            return resp;
+        let read = |s: &Statement, ps: &[Value]| match s {
+            Statement::Call(_) => batch_call(who, p.database(), s, ps, |c| p.read_call(c)),
+            _ => p.query(s, ps),
+        };
+        if let Some(resp) = answer_reads(&pairs, shown, at, read) {
+            return Some(resp);
         }
         // A statement reached for an index the pin left out: the whole
         // batch again under the lock, at the one change that holds then --
-        // a token's rules answered again there too.
+        // a token's rules, and its calls, answered again there too.
         running.forget();
         if unscoped.is_some() {
             drop(pairs);
-            return read_batch(db, (&[], &[]), unscoped, sent_as, false);
+            return read_batch(db, (&[], &[]), unscoped, sent_as, (false, come_back));
         }
         let guard = held::read(db);
-        return locked_reads(&guard, &pairs, masks, who);
+        if !all_read(&guard, &pairs, come_back) {
+            return None;
+        }
+        return Some(locked_reads(&guard, &pairs, masks, who));
     }
-    locked_reads(&guard, &pairs, masks, who)
+    Some(locked_reads(&guard, &pairs, masks, who))
+}
+
+/// Whether every line of a read batch reads over `db`: a call's statement
+/// asked under the lock the batch runs under ([`Database::call_reads`]),
+/// one that cannot run here read -- and refused as it is judged -- but
+/// where the client should come back instead ([`Config::come_back`]).
+fn all_read(db: &Database, pairs: &[(&Statement, &[Value])], come_back: bool) -> bool {
+    pairs.iter().all(|(s, _)| match s {
+        Statement::Call(c) => db.call_reads(c).unwrap_or(!come_back),
+        s => s.is_read_only(),
+    })
+}
+
+/// A call among a read batch's lines, judged as `who` over `db` -- the
+/// read lock's database, or a pin's, which holds the statements as they
+/// stood at it -- read by `read`, and its refusals told as a lone call's
+/// are ([`access::run_as`]).
+fn batch_call(
+    who: &Who,
+    db: &Database,
+    stmt: &Statement,
+    params: &[Value],
+    read: impl FnOnce(
+        &fennec_core::engine::Callee,
+    ) -> Option<fennec_core::error::Result<fennec_core::prelude::Response>>,
+) -> Option<fennec_core::error::Result<fennec_core::prelude::Response>> {
+    let Statement::Call(c) = stmt else {
+        unreachable!("a batch's call")
+    };
+    let callee = match access::judged(who, db, c, params) {
+        Ok(callee) => callee,
+        Err(e) => return Some(Err(e)),
+    };
+    noted_call(db, stmt);
+    read(&callee).map(|r| access::run_as(who, stmt, || r))
 }
 
 /// A read batch's statements bound, the mask of each, and the token as
@@ -3428,8 +3607,9 @@ fn locked_reads(
     let running = trace::span("execute");
     running.attr("fennec.statements", pairs.len() as i64);
     let seq = At::of(guard);
-    answer_reads(pairs, (who, masks, guard), seq, |s, ps| {
-        Some(guard.query(s, ps))
+    answer_reads(pairs, (who, masks, guard), seq, |s, ps| match s {
+        Statement::Call(_) => batch_call(who, guard, s, ps, |c| Some(guard.read_call(c))),
+        _ => Some(guard.query(s, ps)),
     })
     .expect("a read under the lock answers")
 }
@@ -3470,6 +3650,18 @@ fn answer_reads(
     ))
 }
 
+/// Whether `stmt` may grow the data, which the ceiling ([`over_ceiling`])
+/// stops. A call may: [`over_ceiling`] asks its body under the lock.
+fn grows(stmt: &Statement) -> bool {
+    matches!(
+        stmt,
+        Statement::Put { .. }
+            | Statement::Update { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::Call(_)
+    )
+}
+
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.
 ///
 /// Only a statement that grows the data is stopped: `del` and `compact` are
@@ -3478,12 +3670,18 @@ fn answer_reads(
 /// for both listeners: fennec-server held only its own writes to it, and a client
 /// writing over HTTP never met it.
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
-    let grows = matches!(
-        stmt,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
-    );
-    if max == 0 || !grows {
+    if max == 0 || !grows(stmt) {
         return None;
+    }
+    // A call grows the data as its body does: one that inserts or sets is
+    // held to the ceiling as that `put` or `set` is, one that reads or
+    // deletes is not -- `del` is the way out. A call matched nothing here,
+    // so its body's writes went past `--max-memory`. One naming no
+    // statement that can run writes nothing, refused as the call is judged.
+    if let Statement::Call(c) = stmt {
+        if !db.call_body(c).is_some_and(|body| body.iter().any(grows)) {
+            return None;
+        }
     }
     let used = db.memory_bytes();
     if used < max {

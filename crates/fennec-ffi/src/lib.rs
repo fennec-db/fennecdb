@@ -455,6 +455,11 @@ pub unsafe extern "C" fn fennec_open_memory(
         if handle.is_null() {
             return Err(misuse("fennec_open_memory needs a handle to write"));
         }
+        // A statement defined here is read back into its tree as one a
+        // file holds is: with no reader, an app that never opened a file
+        // had each statement it defined marked broken ("its text did not
+        // read"), and every call of it refused.
+        fennec_ql::install();
         *handle = keep(Database::new(), false, None);
         Ok(None)
     })
@@ -638,9 +643,26 @@ fn run(
     // pinned under the read lock and read with no lock held, as a server
     // reads one (`Database::pin`) -- a text of several reads as one, at the
     // one change the pin stood at. Under the lock an aggregate over a
-    // million rows held every write for as long as it ran.
-    if fennec_abi::read_only(p) {
-        let db = n.read()?;
+    // million rows held every write for as long as it ran. A call is a read
+    // where its statement reads, asked under the read lock it then runs
+    // under: a `drop` and a `create` landing after the question cannot
+    // make it a write there.
+    let reading = match fennec_abi::read_only(p) {
+        true => Some(n.read()?),
+        false if p.stmts.iter().any(|s| matches!(s, Statement::Call(_))) => {
+            // A synced database runs no named statement, a call that reads
+            // among them: asked of the sync first, as `NAMED`, or a call
+            // the replica held was answered from its part of the rows and
+            // one it did not as a missing statement.
+            if let Some(sync) = n.sync_lock().as_ref() {
+                sync.claims(&p.stmts)?;
+            }
+            let db = n.read()?;
+            fennec_abi::reads(&db, p).then_some(db)
+        }
+        false => None,
+    };
+    if let Some(db) = reading {
         fennec_abi::exact(&db, p, sql, params, vectors)?;
         // One statement, the read every call of an app's makes, with
         // nothing allocated to ask: a short one is declined in 25 to 40 ns.

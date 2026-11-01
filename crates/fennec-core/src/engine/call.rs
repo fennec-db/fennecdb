@@ -1,18 +1,28 @@
 //! A named statement called, listed and checked at its definition
 //! (`docs/design/named-statements.md`, *Calls* and *Definitions*).
 //!
-//! A call is a write wherever it is asked (`Statement::is_read_only`), so
-//! it runs under the write lock, inside the block the caller opened: its
-//! statements land as one record with whatever else that block holds, or
-//! none does. It is judged in one order -- the statement there, the
-//! caller's claims, the arguments, `check`, whether it is broken -- each
-//! answered before the next is asked, and run with the definition the
-//! table holds under that lock: a replacement lands under the same lock,
-//! so a call runs one version whole. Who may call it, and with which
-//! claims, is the server's (`fennec_http::access`); the engine knows
-//! nothing of tokens and runs the text with the claims it is handed.
+//! A call is never read-only by its statement (`Statement::is_read_only`):
+//! whether it writes is its definition's, which a `drop` and a `create` may
+//! change between a question asked before a lock and the lock. So a call is
+//! asked again under the lock it runs under ([`Database::call_reads`]). One
+//! whose body writes runs under the write lock, inside the block the caller
+//! opened: its statements land as one record with whatever else that block
+//! holds, or none does. One whose body only reads runs through the read
+//! executor ([`Database::read_call`]) over `&Database`, which cannot write
+//! by its type -- under the read lock beside the other readers, or pinned
+//! ([`Database::pin`]) -- and refuses a body that writes: a replica, a
+//! read-only server and a marked read answer it, and it takes no write
+//! lock, opens no block and moves no counter. Either way it is judged in
+//! one order -- the statement there, the caller's claims, the arguments,
+//! `check`, whether it is broken -- each answered before the next is
+//! asked, and run with the definition the table holds under that lock: a
+//! replacement lands under the write lock, so a call runs one version
+//! whole. Who may call it, and with which claims, is the server's
+//! (`fennec_http::access`); the engine knows nothing of tokens and runs the
+//! text with the claims it is handed.
 
-use std::sync::atomic::Ordering::Relaxed;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
 use super::{Database, NoRow};
@@ -28,6 +38,13 @@ use crate::value::Value;
 pub struct Callee {
     pub def: Arc<Definition>,
     pub values: Vec<Value>,
+}
+
+/// A call that reads, answered ([`Database::read_call_json`]): its last
+/// statement's rows written out as JSON, this many, or its answer.
+pub enum CallRead {
+    Json(usize),
+    Answer(Response),
 }
 
 impl Database {
@@ -98,16 +115,120 @@ impl Database {
     /// statement's, as PostgreSQL's SQL functions answer theirs: an answer
     /// of every statement would make each guard's rows part of the API.
     pub(super) fn call(&mut self, call: &Call, params: &[Value]) -> Result<Response> {
-        let Callee { def, values } = self.callee(call, params)?;
-        let mut db = Bounded::new(self);
+        let callee = self.callee(call, params)?;
+        // A body of reads in a block -- a `/batch`'s line -- reads as it
+        // would alone, the block's writes before it among what it reads.
+        if !callee.def.writes() {
+            return self.read_call(&callee);
+        }
+        self.bounded(|db| {
+            let mut last = Ok(Response::Affected(0));
+            for s in &callee.def.body {
+                last = db.run_one(s, &callee.values);
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        })
+    }
+
+    /// Whether the statement `call` names only reads, as the table stands
+    /// under the lock this is asked under: `Some(true)` where it reads and
+    /// can run, `Some(false)` where its body writes, and `None` where no
+    /// statement of that name can run here -- none is there, it is broken,
+    /// or its text reads here as another statement -- which the call's
+    /// judgment then answers ([`Self::callee`]) wherever it is asked. A
+    /// replacement keeps whether a statement writes (its contract), so only
+    /// a `drop` and a `create` change the answer, each under the write
+    /// lock: asked under a read lock, it holds for as long as that lock.
+    pub fn call_reads(&self, call: &Call) -> Option<bool> {
+        let s = self.statements.get(&call.name)?;
+        if s.broken.is_some() {
+            return None;
+        }
+        s.tree.as_ref().map(|d| !d.writes())
+    }
+
+    /// The body of the statement `call` names, for a caller to ask what
+    /// it writes -- `--max-memory` holds a call as it holds the writes its
+    /// body makes (`fennec_http::over_ceiling`) -- or `None` where no
+    /// statement of that name can run here, as [`Self::call_reads`]
+    /// answers. Asked under a lock, it holds for as long as that lock.
+    pub fn call_body(&self, call: &Call) -> Option<&[Statement]> {
+        let s = self.statements.get(&call.name)?;
+        if s.broken.is_some() {
+            return None;
+        }
+        s.tree.as_ref().map(|d| &d.body[..])
+    }
+
+    /// The read executor: a call judged ([`Self::callee`]) whose body only
+    /// reads, each statement of it run as [`Self::query`] runs one, with the
+    /// call's values and its rows counted against `--call-max-rows`; the
+    /// answer is the last statement's. Over `&Database`, it cannot write: a
+    /// body that writes is refused ([`Error::ReadOnly`]), never run here,
+    /// for its caller to run it under the write lock or, where writes are
+    /// not taken, to refuse it. It opens no block, asks no lease and moves
+    /// no counter.
+    pub fn read_call(&self, callee: &Callee) -> Result<Response> {
+        if callee.def.writes() {
+            return Err(Error::ReadOnly(format!(
+                "statement `{}` writes, and only a statement that reads runs here",
+                callee.def.name
+            )));
+        }
+        let _bound = Bound::new(self);
         let mut last = Ok(Response::Affected(0));
-        for s in &def.body {
-            last = db.run_one(s, &values);
+        for s in &callee.def.body {
+            last = self.query(s, &callee.values);
             if last.is_err() {
                 break;
             }
         }
         last
+    }
+
+    /// [`Self::read_call`], its last statement written straight onto `out`
+    /// as JSON where [`Self::query_json`] writes it -- a plain `get` -- and
+    /// answered as `read_call` answers it otherwise, `out` as it was. The
+    /// statements before it are its guards, read as `query` reads them. A
+    /// call's answer is its last statement's, and that one decoded into
+    /// values to be written out again cost a call by id a third more than
+    /// the `get` it runs, sent alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_call_json(&self, callee: &Callee, out: &mut String) -> Result<CallRead> {
+        let Some((last, guards)) = callee.def.body.split_last() else {
+            return self.read_call(callee).map(CallRead::Answer);
+        };
+        if callee.def.writes() {
+            return self.read_call(callee).map(CallRead::Answer);
+        }
+        let _bound = Bound::new(self);
+        for s in guards {
+            self.query(s, &callee.values)?;
+        }
+        Ok(match self.query_json(last, &callee.values, out)? {
+            Some(n) => CallRead::Json(n),
+            None => CallRead::Answer(self.query(last, &callee.values)?),
+        })
+    }
+
+    /// `f` -- a call's body run under the write lock -- with this thread's
+    /// rows bounded by `--call-max-rows` and the call counted among the
+    /// database's, both given back as it returns and as a panic unwinds out
+    /// of it alike: given back only on a return, a hook's panic left the
+    /// bound set, and every later statement of the database, a plain `get`
+    /// among them, was refused as a call past its rows until it was opened
+    /// again -- a connection's panic must unwind alone. [`Bound`]'s work,
+    /// for a body that takes the database whole.
+    fn bounded<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        *self.calls.get_mut() += 1;
+        let before = LEFT.with(|l| l.replace(self.call_max_rows));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        LEFT.with(|l| l.set(before));
+        *self.calls.get_mut() -= 1;
+        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
     }
 
     /// What of a call a json field needs read as written
@@ -200,20 +321,29 @@ impl Database {
     /// one.
     #[inline]
     pub(super) fn call_room(&self) -> usize {
-        self.call_left.load(Relaxed)
+        match self.calls.load(Relaxed) {
+            0 => usize::MAX,
+            _ => LEFT.with(Cell::get),
+        }
     }
 
-    /// `n` rows a statement examined, charged to the call running.
+    /// `n` rows a statement examined, charged to the call running on this
+    /// thread, if one is.
     #[inline]
     pub(super) fn examine(&self, n: usize) -> Result<()> {
-        let left = self.call_left.load(Relaxed);
-        if left != usize::MAX {
-            if n > left {
-                return Err(self.past_call_rows());
-            }
-            self.call_left.store(left - n, Relaxed);
+        if self.calls.load(Relaxed) == 0 {
+            return Ok(());
         }
-        Ok(())
+        LEFT.with(|l| {
+            let left = l.get();
+            if left != usize::MAX {
+                if n > left {
+                    return Err(self.past_call_rows());
+                }
+                l.set(left - n);
+            }
+            Ok(())
+        })
     }
 
     /// A call past `--call-max-rows`: a query error naming the bound, its
@@ -229,41 +359,40 @@ impl Database {
     }
 }
 
-/// The database while a call's body runs, its rows bounded by
-/// `--call-max-rows`: the bound is set as it is made and given back as it
-/// is dropped -- on a return and on a panic unwinding out of the body alike.
-/// Given back only on a return, a hook's panic left the bound set, and
-/// every later statement of the database, a plain `get` among them, was
-/// refused as a call past its rows until it was opened again: a
-/// connection's panic must unwind alone.
-struct Bounded<'a> {
-    db: &'a mut Database,
+thread_local! {
+    /// The rows the call running on this thread may still examine,
+    /// `usize::MAX` outside one: `--call-max-rows`, set as a call's body
+    /// starts and given back as it ends ([`Bound`], `Database::bounded`).
+    /// The thread's, not the database's: a call that reads runs under the
+    /// read lock beside other reads -- a plain `get`, another call -- which
+    /// a bound held in the database would charge, or refuse.
+    static LEFT: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+/// A call's body reading over a database, its rows bounded on this thread
+/// by `--call-max-rows` and the call counted among the database's, both
+/// given back as it is dropped -- on a return and on a panic unwinding out
+/// of the body alike.
+struct Bound<'a> {
+    calls: &'a AtomicUsize,
     before: usize,
 }
 
-impl<'a> Bounded<'a> {
-    fn new(db: &'a mut Database) -> Self {
-        let before = db.call_left.swap(db.call_max_rows, Relaxed);
-        Bounded { db, before }
+impl<'a> Bound<'a> {
+    fn new(db: &'a Database) -> Self {
+        db.calls.fetch_add(1, Relaxed);
+        let before = LEFT.with(|l| l.replace(db.call_max_rows));
+        Bound {
+            calls: &db.calls,
+            before,
+        }
     }
 }
 
-impl std::ops::Deref for Bounded<'_> {
-    type Target = Database;
-    fn deref(&self) -> &Database {
-        self.db
-    }
-}
-
-impl std::ops::DerefMut for Bounded<'_> {
-    fn deref_mut(&mut self) -> &mut Database {
-        self.db
-    }
-}
-
-impl Drop for Bounded<'_> {
+impl Drop for Bound<'_> {
     fn drop(&mut self) {
-        self.db.call_left.store(self.before, Relaxed);
+        LEFT.with(|l| l.set(self.before));
+        self.calls.fetch_sub(1, Relaxed);
     }
 }
 

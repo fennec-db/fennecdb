@@ -105,8 +105,21 @@ fn a_call_is_one_shape_whichever_way_it_came() {
     );
     assert_eq!(a.status, 200, "{}", a.body);
     assert!(a.body.contains("\"kind\":\"mail\""), "{}", a.body);
+    // A call whose statement reads is a read, counted as its shape alike,
+    // its rows those its last statement wrote out.
+    c.run("create statement kinds() as get jobs select kind order kind");
+    for (path, body) in [
+        ("/_call/kinds", ""),
+        ("/query", r#"{"query":"call kinds"}"#),
+    ] {
+        let a = c.ask("POST", path, body);
+        assert_eq!(a.status, 200, "{path}: {}", a.body);
+        assert_eq!(a.body, r#"[{"kind":"mail"}]"#, "{path}");
+    }
 
     let json = stats(&mut c);
+    assert_eq!(field(&json, "call kinds $1", "calls"), Some("2"), "{json}");
+    assert_eq!(field(&json, "call kinds $1", "rows"), Some("2"), "{json}");
     assert_eq!(field(&json, "call claim $1", "calls"), Some("5"), "{json}");
     assert_eq!(field(&json, "call claim $1", "rows"), Some("1"), "{json}");
     assert_eq!(

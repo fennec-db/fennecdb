@@ -348,12 +348,19 @@ numbers its parameters, <code>$1</code>.</p>
 /_call/&lt;name&gt;</code></a> — its arguments the body's
 <code>params</code>, answered as <code>/query</code> answers the
 <code>call</code> — through <code>/query</code> and <code>/batch</code>,
-the shell and the native library. It is one block under the write lock: its writes
-land together or not at all, a read in it sees the writes before it, and the
-answer is its last statement's, as <code>/query</code> would give it. A call
-is a write wherever that is asked, so a read-only server, a replica and a
-marked read refuse one whose body only reads, once its grant, claims and
-arguments were asked, and an <code>Idempotency-Key</code> makes it once.
+the shell and the native library. One whose body writes is one block under
+the write lock: its writes land together or not at all, a read in it sees
+the writes before it, and an <code>Idempotency-Key</code> makes it once.
+One whose body only reads is a read: it runs beside the other reads, takes
+no write lock and keeps no key — on a pinned snapshot with no lock held
+where it reads many rows — so a read-only server, a <a
+href="/docs/replication">replica</a> and a request marked
+<code>Fennec-Read: replica</code> answer it (<a
+href="/docs/sharding-read-replicas">read replicas</a>), and a query across
+tenants merges it. They refuse one whose body writes (403), once its grant,
+claims and arguments were asked. Either way the answer is its last
+statement's, as <code>/query</code> would give it, with the change it
+stands at in <code>Fennec-Seq</code>.
 <code>Fennec-Wait</code> holds a call whose body sets or deletes until it
 writes, as it holds those statements sent alone (<a
 href="/docs/http-reference#wait">Holding a write</a>); one whose body

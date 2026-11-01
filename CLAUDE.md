@@ -676,17 +676,24 @@ digest, and a schema change's commit holds its `depends`: refused naming
 it, or marked broken -- `Database::internally`, an apply, an open -- never
 failing one, the mark derived, never stored; a replacement keeps the old
 tree's contract, and a writing body reads through an index or says `scans`
-(`body_checked`). A call is a write at every site, run in its caller's
-block under the write lock (`Database::call`), judged statement, claims,
-arguments, `check`, broken (`callee`), answering its last statement, put
-back past `--call-max-rows` (`examine`). A scoped token calls what a `call`
+(`body_checked`). A call is never read-only by its statement: asked under
+the lock it then runs under, never apart from it (`call_reads`,
+`Database::reads`), one whose body writes runs in its caller's block under
+the write lock (`Database::call`), one that reads through the read
+executor over `&Database` (`read_call`, pinned by `pin_call`), which
+refuses a body that writes and takes no write lock, block or counter: a
+replica, a read-only server, a marked read and a query across tenants
+answer it. Each is judged statement, claims, arguments, `check`, broken
+(`callee`), answers its last statement and is put back past
+`--call-max-rows`, its rows its thread's (`call::LEFT`). A scoped token calls what a `call`
 line grants (else a missing one's 404; `* call` refused), as itself (`as`
 403), alone in its `/batch`, held to `--call-rate`; `judge_call` holds the
 body to `append-only` under the lock and `run_as` runs it outside
 `within()`, the one statement so, unmasked, its refusals told
 (`told_call`). `POST /_call/<name>` is the `call <name> $1` it stands for,
-run as `/query` runs it, a read-only server's 403 after its judgment (at
-`/batch` too), a freeze's or a lapsed lease's refusal before it; a
+run as `/query` runs it, a read-only server's 403 for one that writes after
+its judgment (at `/batch` too), a freeze's or a lapsed lease's refusal
+before it unless this copy reads it; a
 call is counted as that shape, its slow line naming the version, traced
 with `db.stored_procedure.name`, and the router's route `call`, never its
 name. MCP and a sync replica refuse them (`NOT_BUILT`, `NAMED`); the

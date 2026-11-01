@@ -3144,8 +3144,23 @@ pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> 
 /// a call's body included (403). Nothing for any other statement or token:
 /// the server's token's calls are judged as they run.
 pub fn judge_call(who: &Who, db: &Database, stmt: &Statement, params: &[Value]) -> Result<()> {
-    let (Who::Scoped(scope), Statement::Call(c)) = (who, stmt) else {
-        return Ok(());
+    match (who, stmt) {
+        (Who::Scoped(_), Statement::Call(c)) => judged(who, db, c, params).map(drop),
+        _ => Ok(()),
+    }
+}
+
+/// The call `c` judged as `who` is under the lock it runs under, and what
+/// it runs: [`judge_call`]'s judgment for a scoped token, and
+/// [`Database::callee`]'s, its words the engine's, for the server's.
+pub fn judged(
+    who: &Who,
+    db: &Database,
+    c: &fennec_core::named::Call,
+    params: &[Value],
+) -> Result<fennec_core::engine::Callee> {
+    let Who::Scoped(scope) = who else {
+        return db.callee(c, params);
     };
     let callee = db.callee(c, params).map_err(|e| match e {
         // Why it is broken names what the schema lacks: the server's.
@@ -3172,7 +3187,7 @@ pub fn judge_call(who: &Who, db: &Database, stmt: &Statement, params: &[Value]) 
             )));
         }
     }
-    Ok(())
+    Ok(callee)
 }
 
 /// A call's refusal as a scoped token is told it: its kind, and a guard's

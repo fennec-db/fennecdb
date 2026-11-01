@@ -139,6 +139,19 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
         .try_ask("POST", "/t/acme/query", body, &[("X-Request-Id", "call 2")])
         .unwrap();
     assert_eq!(a.status, 200, "{}", a.body);
+    // One whose statement reads: a read's line, naming its version too.
+    let def =
+        r#"{"query":"create statement titled($t text) as get notes select id where title = $t"}"#;
+    assert_eq!(c.ask("POST", "/t/acme/query", def).status, 200);
+    let a = c
+        .try_ask(
+            "POST",
+            "/t/acme/_call/titled",
+            r#"{"params":{"t":"secret one"}}"#,
+            &[("X-Request-Id", "call 3")],
+        )
+        .unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
 
     // An id too long, or not printable, is replaced by one of the server's.
     let long = "x".repeat(129);
@@ -207,10 +220,14 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
         statement.iter().find(|(k, _)| k == "duration_ms").map(|(_, v)| v),
         Some(Value::Float(ms)) if *ms >= 0.0
     ));
-    for id in ["call 1", "call 2"] {
+    for (id, shape, kind) in [
+        ("call 1", "call stamp $1", "write"),
+        ("call 2", "call stamp $1", "write"),
+        ("call 3", "call titled $1", "read"),
+    ] {
         let call = of(&slow, "slow", id);
-        assert_eq!(text(&call, "statement"), Some("call stamp $1"), "{call:?}");
-        assert_eq!(text(&call, "kind"), Some("write"), "{call:?}");
+        assert_eq!(text(&call, "statement"), Some(shape), "{call:?}");
+        assert_eq!(text(&call, "kind"), Some(kind), "{call:?}");
         assert!(
             matches!(
                 call.iter().find(|(k, _)| k == "version").map(|(_, v)| v),
