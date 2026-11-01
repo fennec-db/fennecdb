@@ -168,11 +168,15 @@ does elsewhere. Checked in CI on `windows-latest` (`windows (single
 writer)`): the lock in one process and in another closed or killed
 (`another_process_is_refused_while_one_holds_it`, which fails on Windows
 without it), and fennec-cli's `tests/lock.rs`, a second server and the
-shell beside a served file, a compact, a checkpoint and a restore renamed
-over a file another handle has open.
+shell beside a served file, a compact and a checkpoint renamed over the
+file the server's own handle has open, and a restore over a closed one; a
+reader's handle open across the rename is not run there, held by no handle
+fennec opens setting `share_mode`, so each keeps std's
+`FILE_SHARE_DELETE`.
 
 That rename is std's, which on Windows replaces the target with POSIX
-semantics where the file system has them (NTFS, ReFS), so a handle open on
+semantics where the file system has them (NTFS, ReFS; FAT32 and exFAT
+have none, so a compact or a checkpoint there fails, loudly), so a handle open on
 the old file -- the sink's own, a `--read-only` reader's -- does not refuse
 it. `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` refuses a target open
 elsewhere, and a checkpoint refused would stop every write; its

@@ -629,7 +629,6 @@ mod record {
     const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
     const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
     const ERROR_LOCK_VIOLATION: i32 = 33;
-    const ERROR_IO_PENDING: i32 = 997;
 
     /// The byte locked, 1 GiB in, where SQLite takes its locks on Windows
     /// too: past any line, and an offset every Windows file system takes. A
@@ -660,7 +659,7 @@ mod record {
         }
         let e = std::io::Error::last_os_error();
         match e.raw_os_error() {
-            Some(ERROR_LOCK_VIOLATION | ERROR_IO_PENDING) => Err(super::Refused::Held),
+            Some(ERROR_LOCK_VIOLATION) => Err(super::Refused::Held),
             _ => Err(super::Refused::Io(e)),
         }
     }
