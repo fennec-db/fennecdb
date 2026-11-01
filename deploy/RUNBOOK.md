@@ -650,8 +650,18 @@ identity. Any other fails the move 409 -- the tenant stays on its source --
 and notes `a file found there by a move, which the router did not note`; a
 replica's attach meeting one notes `... by an attach of its replica ...`
 and the replica goes elsewhere. It is looked at as below, and the move is
-run again once it is gone. On a file system keeping no birth time no file
-carries an identity: every file left there is reported, never taken back.
+run again once it is gone.
+
+**Remove `<t>.instance` when you replace a tenant's file by hand.** The
+identity is bound to the file's device, inode and birth time; where the
+node reads no birth time -- every Linux build, and file systems keeping
+none -- to its device and inode alone, and a file copied into place after
+an `rm` may be given
+the inode of the one it replaced -- and with the sidecar kept, its
+identity, which a router's reclaim or follow would then act on. Every way
+the node removes or replaces a file, and `fennec restore` and `fennec
+backup --force`, remove the sidecar first; a hand, the shell's `save` and a
+binary from before identities do not.
 
 **Look at the file before removing it.** A row names where the router may
 have left a file, not that the file there now is the one it left: the

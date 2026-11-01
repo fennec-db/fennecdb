@@ -290,11 +290,11 @@ promotes only a copy of the tenant's lineage and history
 identity.](docs/design/tenants.md#replicas-tried-again)** `try_again`
 repairs a failed attach under the claim;
 `fennec_router_tenants_unreplicated` counts uncopied. A file left is a
-`leftovers` row (`fennec_router_files_left`) with its node's ids
-(`fennec_http::instance`: file, birth time, `.follows`); the node deletes
-it, or follows over it at a move's or attach's 409, only while it carries
-the id recorded (`Tenants::reclaim`, `files`), under its slot; no id,
-never.
+`leftovers` row (`fennec_router_files_left`) with its ids
+(`fennec_http::instance`: inode, birth, `.follows`; gone before its
+file); the node deletes it, or follows over it at an attach's 409, only
+while it holds the id recorded (`Tenants::reclaim`, `files`), under its
+slot; no id, never.
 
 ### Regions and the global entry
 

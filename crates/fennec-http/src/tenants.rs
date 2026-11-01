@@ -1328,17 +1328,10 @@ impl Tenants {
                 Some(id)
             }
             Err(e) => {
-                // A file system keeping no birth time gives every file
-                // none ([`instance::binding`]): said once.
-                static SAID: AtomicBool = AtomicBool::new(false);
-                if e.kind() != std::io::ErrorKind::Unsupported
-                    || !SAID.swap(true, Ordering::Relaxed)
-                {
-                    crate::log!(
-                        "tenant `{name}`'s file was given no identity, and a file a router \
-                         leaves there is reported, never taken back: {e}"
-                    );
-                }
+                crate::log!(
+                    "tenant `{name}`'s file was given no identity, and a file a router \
+                     leaves there is reported, never taken back: {e}"
+                );
                 let _ = instance::put_away(&self.dir, name);
                 None
             }
@@ -2054,8 +2047,10 @@ impl Tenants {
         let _held = hold_tenant(name, &path)?;
         // Its identity before the file: a removal that fails then leaves a
         // file of none, which no reclaim takes, rather than a sidecar
-        // naming a file gone.
-        let _ = std::fs::remove_file(instance::path(&self.dir, name));
+        // naming a file gone -- by its inode alone where the file system
+        // keeps no birth time, which the next file there may be given.
+        // Kept, the delete is refused.
+        self.put_away(name)?;
         std::fs::remove_file(&path)
             .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
         // Once the file is gone: a delete that failed is no departure --

@@ -619,13 +619,47 @@ the node did not hold it -- made again by a binary from before this one,
 which deletes the file and leaves the sidecar; restored by `fennec
 restore`; put there by hand -- is another file under an old identity, so
 the sidecar names the file it was written for, its device, inode and birth
-time (`Metadata::created`). **No birth time, no identity:** on a file system
-keeping none no file is bound and none carries an identity -- a file left
-there is reported, never taken back, said once in the log (`birth`) -- as
-the device and inode alone, which this branch first took, let a file put at
-the name without its sidecar put away (a hand's `rm` and a restore, a
-binary from before) take over the inode and inherit the identity of the
-file a router left there. An open notes the file's binding as it takes it, one
+time (`Metadata::created`), 0 where the file system keeps none.
+
+**No birth time, the device and inode, and the sidecar put away before its
+file goes.** A review of this branch had a file system keeping no birth
+time bind no file, so no file there carried an identity: a later file put
+at the name without its sidecar put away could take over the freed inode
+and inherit the identity of the file a router left there. The deploy
+job's failover drill (`make drill`) then failed: its nodes are musl
+binaries, and std asks `statx` for a birth time under glibc alone, so
+`Metadata::created` is `Unsupported` in every Linux binary a release ships;
+the old primary back from a failover carried no identity, its attach found
+it there and reported it (`left: ... its node cannot tell it from a later
+one`), and the repair never made it us-t1's replica -- self-healing broken
+on every Linux node, and on file systems keeping no birth time (some
+overlayfs, NFS) under glibc too. Bound by
+its device and inode there, a file is told from a later one as long as no
+sidecar outlives its file: an inode is another file's only once the file
+holding it is unlinked or renamed over, and every fennec way that does
+either puts the sidecar away first -- a create and an install (a binary
+from before may have left one), a follow (before `.follows`), a delete and
+a reclaim (refused, 500, where the sidecar would not go), and `fennec
+restore` and `fennec backup --force` (`instance::put_away_beside`, beside
+the path given and, through a link, beside its file). A rename over a file
+cannot give the new one the inode it frees, since both exist as it lands;
+only the next file made there can. The node's own renames -- a `compact`, a
+checkpoint, a follower taking its primary's image -- keep the file what it
+was, and the close binds the identity to what they made (below); lost to a
+crash before the close, the sidecar names the inode before, which only that
+same file's next rename of its own can be given back. **The known edge:** a
+file replaced outside fennec's ways -- by hand (`rm` and a copy, the
+shell's `save`), or by a binary from before this branch -- with the sidecar
+kept, on a file system keeping no birth time, may be given the inode the
+sidecar names and carry the identity of the file a router left. The
+operator docs say so (`deploy/RUNBOOK.md`, the sharding page): remove
+`<tenant>.instance` when you replace a tenant's file by hand. No birth
+marker without the birth time is there to use instead: a file's header is
+its magic alone, and its lineage is its history's, which a tenant moved
+back brings with it (above); a marker written into the file would be a
+record kind a binary before refuses and a replica is sent.
+
+An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
 carries the sidecar's identity only where the sidecar names that binding,
 and a close -- `close_with`, `shutdown_with`, a reclaim's own -- forgets an
@@ -809,8 +843,12 @@ identity, which a reclaim of it took);
 nodes: the old primary followed by the identity its create gave, a follow
 naming another refused 409 and the file unchanged; noted instead, 502 and
 no copy); the failover tests of `regions.rs`, `replicas.rs`, `leases.rs`,
-`lease_stalls.rs` and `read_replicas.rs` as on main; and `instance::tests`, a birth time
-missing or 0 binding no file and a sidecar naming none no identity. In
+`lease_stalls.rs` and `read_replicas.rs` as on main; and `instance::tests`
+(`a_file_system_keeping_no_birth_time_binds_device_and_inode`), a file
+with no birth time bound by its device and inode, another renamed into the
+place carrying none, and a sidecar put away beside a file and through a
+link never brought back by a close; with the device and inode alone, the
+drill (`make drill`) makes the old primary us-t1's replica again. In
 `tests/router.rs` a move onto a file it did not note is refused 409, the
 tenant reading on its source and the file counted, and goes once the file
 is removed. `fennec-http`'s `tests/tenants.rs` holds the node: a reclaim

@@ -196,7 +196,13 @@ another. A router may propose one with the <code>Fennec-Instance</code>
 header, which is what it notes for a call that went unanswered. A file put
 in place while the node did not hold it — a restore, a hand, an older
 binary making it again — carries none, and so does a standby's copy of a
-tenant.</p>
+tenant. <b>Remove <code>&lt;tenant&gt;.instance</code> when you replace a
+tenant's file by hand.</b> Where the node reads no birth time — every Linux
+build of fennecdb, and file systems keeping none — the identity is bound to
+the file's device and inode, and a file put in place may be given the
+inode of the one it replaced; every way the node and <code>fennec restore</code> or
+<code>fennec backup --force</code> remove or replace a file removes it
+first.</p>
 
 <p>Every repair has the node take back each noted file that still carries
 one of the identities noted with it
@@ -222,8 +228,7 @@ stay:</p>
     copy that stayed, a detached replica that stayed, a copy a repair found
     that the router neither placed nor noted;</li>
   <li>a file on a node from before identities, which answers 404 to the
-    take-back and never has a file taken, or on a file system that keeps no
-    birth time, where no file carries an identity;</li>
+    take-back and never has a file taken;</li>
   <li>a file whose node says it holds another file there now, kept with
     "its node holds another file there now" in its <code>why</code> and
     noted again with no identity;</li>

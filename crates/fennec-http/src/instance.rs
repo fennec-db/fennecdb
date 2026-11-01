@@ -22,12 +22,19 @@
 //! file would be a kind every binary before refuses and a replica is sent,
 //! and the identity is this copy's alone. A file the node did not hold as it
 //! changed -- made again by a binary from before this one, which leaves the
-//! sidecar where it deletes the file; put in place by `fennec restore`, an
-//! install's rename or a hand -- is another file under an old identity, so
-//! the sidecar names the file it was written for: its device, inode and
-//! birth time -- on a file system keeping no birth time no file is named,
-//! and none carries an identity, as an inode alone a later file may take
-//! over. An open notes the file's binding, one `stat` (a read of the
+//! sidecar where it deletes the file; put in place by an install's rename
+//! or a hand -- is another file under an old identity, so the sidecar
+//! names the file it was written for: its device, inode and birth time, 0
+//! where its file system keeps none. An inode is given another file only
+//! once the file holding it goes, and every way of fennec's that removes
+//! or replaces a tenant's file puts the sidecar away first -- a create, an
+//! install, a follow, a delete or a reclaim, `fennec restore` and `backup
+//! --force` ([`put_away_beside`]) -- so a later file at the place never
+//! meets one naming its inode, birth time or none; the node's own renames
+//! (a `compact`, a checkpoint) keep the file what it was ([`closing`]).
+//! Left: a file replaced by hand, or by a binary from before, the sidecar
+//! kept, on a file system keeping no birth time -- the operator removes
+//! `<tenant>.instance` with the file. An open notes the file's binding, one `stat` (a read of the
 //! sidecar there added 15-20 us to an empty tenant's 67); a close forgets an
 //! identity naming another file than the one opened, and binds it to what
 //! this process's own renames made of that one (a `compact`, a checkpoint, a
@@ -82,30 +89,38 @@ pub(crate) fn path(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// What names the file a sidecar was written for: its device, inode and
-/// birth time in nanoseconds.
+/// birth time in nanoseconds, 0 where its file system keeps none.
 pub(crate) type Binding = (u64, u64, u64);
 
-/// A file's birth time in nanoseconds, where its file system keeps one: a
-/// file system that keeps none binds no file, and its files carry no
-/// identity -- a file put at the name without its sidecar put away, by a
-/// hand's `rm` and a restore or by a binary from before, could take over
-/// the inode, the device and inode alone naming it then, and inherit the
-/// identity of the file a router left there.
-fn birth(created: io::Result<std::time::SystemTime>) -> Option<u64> {
-    let d = created.ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(d.as_nanos().min(u64::MAX as u128) as u64).filter(|&ns| ns != 0)
+/// A file's birth time in nanoseconds, 0 where its file system keeps none
+/// -- and on Linux wherever std asks no `statx`, which it asks under glibc
+/// alone: every musl binary a release ships reads none -- whose files are
+/// bound by their device and inode alone. Given no identity there, as a
+/// review of this branch had it, the drill's musl nodes reported every old
+/// primary back from a failover and followed none (`make drill`). An
+/// inode is another file's only once its file goes, and every fennec way
+/// that removes or replaces a tenant's file puts the sidecar away first
+/// ([`put_away`], [`put_away_beside`]).
+fn birth(created: io::Result<std::time::SystemTime>) -> u64 {
+    let ns = |d: std::time::Duration| d.as_nanos().min(u64::MAX as u128) as u64;
+    created
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, ns)
 }
 
-/// `file`'s binding as it stands: one `stat`, all an open pays. None
-/// (`Unsupported`) where its file system keeps no birth time ([`birth`]).
+/// `file`'s binding as it stands: one `stat`, all an open pays.
+/// `Unsupported` where neither an inode nor a birth time is kept, which
+/// would name every file.
 pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
     let m = std::fs::metadata(file)?;
-    let born = birth(m.created()).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the file system keeps no birth time",
-        )
-    })?;
+    let born = birth(m.created());
+    #[cfg(test)]
+    let born = if tests::NO_BIRTH.with(|c| c.get()) {
+        0
+    } else {
+        born
+    };
     #[cfg(unix)]
     let (dev, ino) = {
         use std::os::unix::fs::MetadataExt;
@@ -113,6 +128,12 @@ pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
     };
     #[cfg(not(unix))]
     let (dev, ino) = (0, 0);
+    if ino == 0 && born == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the file system names no file: no inode, no birth time",
+        ));
+    }
     Ok((dev, ino, born))
 }
 
@@ -131,8 +152,8 @@ fn read(dir: &Path, name: &str) -> Option<(u64, Binding, bool)> {
     }
     let id = parse(f.next()?)?;
     let mut n = || f.next()?.parse::<u64>().ok();
-    // A binding of no birth time names no file alone ([`birth`]).
-    let bound = (n()?, n()?, n().filter(|&ns| ns != 0)?);
+    // Neither an inode nor a birth time names every file ([`binding`]).
+    let bound = Some((n()?, n()?, n()?)).filter(|b| b.1 != 0 || b.2 != 0)?;
     let following = match f.next()? {
         "f" => true,
         "n" => false,
@@ -183,15 +204,33 @@ pub(crate) fn stamp(dir: &Path, name: &str, file: &Path, id: u64) -> io::Result<
     write(dir, name, id, bound, follows(dir, name)).map(|_| bound)
 }
 
-/// Puts the identity away before the file is made to follow, syncing
-/// nothing itself: the follow syncs the directory as it writes `.follows`
-/// after it. Kept, an identity the follow's stamp did not replace -- lost to
-/// a power loss -- would hold again once a promotion removed `.follows`.
+/// Puts the identity away before the file is made to follow, removed or
+/// replaced, syncing nothing itself: a follow syncs the directory as it
+/// writes `.follows` after it. Kept, an identity the follow's stamp did not
+/// replace -- lost to a power loss -- would hold again once a promotion
+/// removed `.follows`, and one beside a file removed or renamed over would
+/// name an inode the next file there may be given ([`birth`]).
 pub(crate) fn put_away(dir: &Path, name: &str) -> io::Result<()> {
     match std::fs::remove_file(path(dir, name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
+}
+
+/// [`put_away`] for a database file a way other than its node renames
+/// over -- `fennec restore`, `fennec backup --force`: `<tenant>.instance`
+/// beside `<tenant>.fennec`, and through a link the one beside the file it
+/// leads to as well.
+pub fn put_away_beside(file: &Path) -> io::Result<()> {
+    for f in [file.to_path_buf(), fennec_core::fs::resolved(file)] {
+        let name = f.file_stem().and_then(|n| n.to_str());
+        if let (Some(dir), Some(name), true) =
+            (f.parent(), name, f.extension() == Some("fennec".as_ref()))
+        {
+            put_away(dir, name)?;
+        }
+    }
+    Ok(())
 }
 
 /// At a close of a file held since its open: the identity bound to what
@@ -262,6 +301,12 @@ pub fn ids_of(v: fennec_core::prelude::Value) -> Result<Vec<u64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// This test thread's files bound as on a file system keeping no
+        /// birth time.
+        pub(super) static NO_BIRTH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("fennec-instance-{tag}-{}", std::process::id()));
@@ -378,24 +423,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No birth time, no identity: a file system that keeps none binds no
-    /// file, so no sidecar is written for it nor read as naming it.
+    /// No birth time, the device and inode: a file system that keeps none
+    /// -- the drill's containers -- binds a file by those, another file
+    /// renamed into the place is another, and an identity put away as its
+    /// file goes never comes back on a later one given the inode.
     #[test]
-    fn a_file_system_keeping_no_birth_time_binds_no_file() {
+    fn a_file_system_keeping_no_birth_time_binds_device_and_inode() {
         use std::time::{Duration, UNIX_EPOCH};
         let unsupported = || Err(io::Error::from(io::ErrorKind::Unsupported));
-        assert_eq!(birth(unsupported()), None);
-        assert_eq!(birth(Ok(UNIX_EPOCH)), None);
-        assert_eq!(birth(Ok(UNIX_EPOCH - Duration::from_secs(1))), None);
-        assert_eq!(birth(Ok(UNIX_EPOCH + Duration::from_nanos(7))), Some(7));
-        // A sidecar naming no birth time names no file, held or not.
+        assert_eq!(birth(unsupported()), 0);
+        assert_eq!(birth(Ok(UNIX_EPOCH)), 0);
+        assert_eq!(birth(Ok(UNIX_EPOCH - Duration::from_secs(1))), 0);
+        assert_eq!(birth(Ok(UNIX_EPOCH + Duration::from_nanos(7))), 7);
+        NO_BIRTH.with(|c| c.set(true));
         let dir = scratch("unborn");
         let file = dir.join("acme.fennec");
         std::fs::write(&file, b"one").unwrap();
-        let (dev, ino, _) = binding(&file).unwrap();
-        write(&dir, "acme", 5, (dev, ino, 0), false).unwrap();
+        let made = stamp(&dir, "acme", &file, 5).unwrap();
+        assert_eq!(made.2, 0);
+        assert_eq!(carried(&dir, "acme", &file), Some(5));
+        assert_eq!(held(&dir, "acme", Some(made)), Some(5));
+        std::fs::write(&file, b"one two").unwrap();
+        assert_eq!(carried(&dir, "acme", &file), Some(5));
+        // Another file renamed into the place: another inode, none.
+        let other = dir.join("other");
+        std::fs::write(&other, b"one").unwrap();
+        std::fs::rename(&other, &file).unwrap();
         assert_eq!(carried(&dir, "acme", &file), None);
-        assert_eq!(held(&dir, "acme", Some((dev, ino, 0))), None);
+        // A sidecar naming the inode the file there now has: what a later
+        // file given a freed inode would meet, kept. Put away as a delete,
+        // an install or a restore puts it away before the file goes, it
+        // is never there to meet, and no close writes it back.
+        let now = binding(&file).unwrap();
+        write(&dir, "acme", 5, now, false).unwrap();
+        assert_eq!(carried(&dir, "acme", &file), Some(5));
+        put_away_beside(&file).unwrap();
+        assert_eq!(carried(&dir, "acme", &file), None);
+        closing(&dir, "acme", Some(now), &file);
+        assert!(!path(&dir, "acme").exists());
+        // Through a link: beside the link, and beside the file it leads to.
+        #[cfg(unix)]
+        {
+            let linked = dir.join("linked.fennec");
+            std::os::unix::fs::symlink(&file, &linked).unwrap();
+            write(&dir, "acme", 6, now, false).unwrap();
+            write(&dir, "linked", 6, now, false).unwrap();
+            put_away_beside(&linked).unwrap();
+            assert!(!path(&dir, "acme").exists() && !path(&dir, "linked").exists());
+        }
+        // Neither an inode nor a birth time names no file.
+        write(&dir, "acme", 5, (now.0, 0, 0), false).unwrap();
+        assert_eq!(held(&dir, "acme", Some((now.0, 0, 0))), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
