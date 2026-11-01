@@ -640,9 +640,9 @@ refused as its literal is (`Select::check_counts`).
 **[`in (get ...)` is answered before the query, as the list it
 is.](docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
 `Expr::In` in its place on every path, so `eval` never meets one.
-[`in $n`](docs/design/fennecql.md#list-parameters) is answered so with
-its parameter's list, read as written whatever its field
-(`Database::exactly`), never in the cached tree.
+[`in $n`](docs/design/fennecql.md#list-parameters) is planned as its list
+written out (`Expr::in_list`, `eval` elsewhere), read as written whatever
+its field (`Database::exactly`).
 
 **[`alter collection` rewrites no document; positions are not
 places.](docs/design/fennecql.md#alter-collection)** A drop keeps its place

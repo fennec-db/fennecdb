@@ -2057,12 +2057,8 @@ fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
 /// cut, which would hide rows the rule grants.
 fn answer(db: &Database, e: &mut Expr) -> Result<()> {
     e.each_subquery_mut(&mut |x| {
-        // An `in $n`, which no rule writes, is the statement's to answer.
-        if !matches!(x, Expr::InSelect(..)) {
-            return Ok(());
-        }
         let Expr::InSelect(lhs, sel) = std::mem::replace(x, Expr::Lit(Value::Null)) else {
-            unreachable!("matched just above")
+            unreachable!("each_subquery_mut hands an `in (get ...)`")
         };
         let mut sel = *sel;
         if let Some(f) = &mut sel.filter {

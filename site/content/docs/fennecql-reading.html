@@ -155,10 +155,10 @@ del cart_items where cart = $1 and product not in $2
 <p>The statement keeps the parameter's place, never its values, so the
 parse cache (<code>POST /query</code>) holds one text for every list,
 where a list written out was a text per length — and past 1 024 bytes,
-some 150 ids, parsed again at every request. Before the query runs the
-list is put in the filter's place as the list written out would be, its
-values the items, so every index and every plan meets what it meets
-there. A list of numbers handed the quick way, as a vector's
+some 150 ids, parsed again at every request. Every plan reads the list
+as it reads one written out, so every index meets what it meets there;
+a parameter holding no list is refused at the first row the filter
+tests, as any filter's error is. A list of numbers handed the quick way, as a vector's
 <code>f32</code>s, is read again from its JSON first: the server reads the
 body again, and the browser module asks the page to send that parameter
 as JSON.</p>

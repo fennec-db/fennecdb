@@ -451,27 +451,38 @@ parameter and `)`), while `x IN ($1)` stays SQL's list of one value, as
 SQL reads it. The builders still write `in [$1, $2, ...]`, the golden
 file unchanged.
 
-It is answered as the list written out. `Database::answered` puts an
-`Expr::In` of the parameter's values, one `Lit` each, in its place
-(`answer_param_list`), where it answers the inner `get`s:
-`Expr::each_subquery_mut` hands both, and `answered_first` asks whether a
-filter holds either, so every planner that reads an `Expr::In` -- the id,
-hash, `@unique` and composite indexes' buckets, `Filter::bind`, a bare
-`in`'s exactness, `explain` -- meets the list it meets written
-out; `tests/in_param.rs` holds rows and plans equal for both forms over
-the id, a `@unique`, a `@hash`, a `nocase` and an `@sorted(g, n)` field, a
-list of 1 000, an empty one, one holding a null (kept, as `in [$1]`
-handed null keeps it, where an inner `get`'s list leaves nulls out),
-`not in`, a `set` and a `del` that pick their rows, a select item and a
-`group`. `has_subquery` stays the inner `get`'s alone: a poll's tag
-(`etag`) and the pin ask whether another collection is read, and an `in
-$n` reads none; `conjunct_in_sets` reads one's list where it is asked
-before the answer, by the pin. Where no filter put it in place -- a select
-list's item, an `order` key, a stream's test of a written row, a held
-write's look among the rows written -- `eval` reads the list itself
-(`param_list`), comparing as `Expr::In` does (`in_same`, a `nocase`
-field's fold included). The tree holds the place, never the values: the
-parse cache's statement serves every list (`the_parsed_tree_holds_no_value`).
+It is planned as the list written out. Every planner that read an
+`Expr::In`'s items reads them through `Expr::in_list`, which yields an `in
+[$1, $2]`'s literals and parameters or an `in $n`'s list alike
+(`InItems`): `conjunct_in_sets` (the id, hash and `@unique` indexes'
+buckets, and the pin), `Filter::bind` (`Test::In`, `Test::InSet` past
+`IN_SET_AT`, a `nocase` field's fold), the composite index's runs, a bare
+`in`'s exactness and `names_first`; `explain` names what they took.
+`tests/in_param.rs` holds rows and plans equal for both forms over the id,
+a `@unique`, a `@hash`, a `nocase` and an `@sorted(g, n)` field, a list of
+1 000, an empty one, one holding a null (kept, as `in [$1]` handed null
+keeps it, where an inner `get`'s list leaves nulls out), `not in`, a `set`
+and a `del` that pick their rows, a select item and a `group`. Anywhere
+else -- a select list's item, an `order` key, a stream's test of a written
+row, a held write's look among the rows written -- `eval` reads the list
+(`param_list`), comparing as `Expr::In` does (`in_same`, the fold
+included). A parameter holding no list, or more than the bound, is no
+list to a plan (`in_list` answers `None`), so the filter's `eval`
+refuses it at the first row it tests -- what `Filter` cannot bind is
+refused so, never over none; `has_subquery` is the inner `get`'s alone,
+so a poll's tag (`etag`) and the pin, which ask whether another collection
+is read, see an `in $n` as reading none. **Put in its place first, as an
+inner `get`'s list is, it cost a copy of the statement:** 10 ids by `id`
+took 1 353 ns in process against 1 052 written out, and `query_json`, a
+server's plain `get`, 397 against 149 -- the `Select`'s clone alone 157;
+read where it stands, 1 045 and 100 against 1 070 and 151 (a load of 3
+to 10, the figures indicative, the bench's below). A walk checking every
+`in $n`'s list before the query, so one over no row was refused too, was
+1.1 KB of the browser module (`Expr::lists`, `Select::lists`), and
+`ExactSizeIterator` for the items 1.1 KB more (its `len`'s `assert_eq!`
+brought `Debug` for `usize` and `Option<usize>`). The tree holds the place, never
+the values: the parse cache's statement serves every list
+(`the_parsed_tree_holds_no_value`).
 
 Its numbers are read as written. `expr_needs` names an `in $n`'s
 parameter whatever its left side, a json field's or not (`Exactly`):
@@ -510,15 +521,29 @@ would have answered otherwise; and a call standing for the list (`in
 [spread($1)]`), which every walk would have special-cased by its name and
 the canonical tree written as a call.
 
-The browser module grew 3 085 bytes, 1 228 gzip, 932 brotli (811.9,
-333.3, 275.7 KB): the parser's 0.9 KB (`any_param` 349, `list_param` 181,
+The browser module grew 2 634 bytes, 1 255 gzip, 814 brotli (811.4,
+333.4, 275.6 KB; the test builds without the indexes and with no feature
+2.6 KB each): the parser's 0.9 KB (`any_param` 349, `list_param` 181,
 `cmp_expr` inlined into `not_expr` 284), `param_list` and its refusals
-281, the answer's closure 311, `eval`'s arm 244, `holds_list` and
-`Select::holds_list` 431 against `has_subquery`'s 201. Handing the operand
-into `any_param` and back out was 85 bytes more.
-Speed, `make lists-bench`: in process and over HTTP, for 10 and 1 000
-ids by `id` and by a `@hash` field -- its figures go here from a quiet
-machine.
+281, `eval`'s arm 244, `in_list` and its items' `next` 413, `Filter::bind`
+150. Handing the operand into `any_param` and back out was 85 bytes more.
+`make lists-bench` (100 000 rows, a load of 1.7 at the start, the two
+forms in turns, twice): in process, 10 ids by `id` take 0.92-0.96 us
+against 0.96 written out, by a `@hash` field 1.96 against 1.83-1.88; 1 000
+ids 40.5 against 46.8 us by `id` and 105.6-105.8 against 112.2-112.5 by
+the field, the list no `Param` a value read. Over HTTP, one client's p50
+and eight clients' requests a second: 10 ids by `id` 26 us and 129.1-129.5k
+against 25 us and 129.3-129.8k, by the field 28 us and 121.6-122.6k
+against 27-28 us and 120.7-123.7k -- the body read twice for a list of
+numbers (the quick way, then as written: 0.5 us) paid for by the shorter
+text; 1 000 ids by `id` 179 us and 22.3-24.2k against 287-289 us and
+14.5-15.9k, by the field 262-266 us and 14.6-16.0k against 377-383 us and
+10.7-11.7k, the text written out past the parse cache's 1 024 bytes and
+parsed at every request. The written-out form itself, base against branch
+in process, in turns: 10 ids by `id` 1 167 ns either way, by the field
+2 208-2 291 against 2 083-2 167, 1 000 by `id` 59.8-59.9 against
+59.1-59.3 us -- its plans now read their items through `in_list`, at no
+cost.
 
 ## alter collection
 

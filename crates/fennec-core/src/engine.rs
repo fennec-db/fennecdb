@@ -2803,20 +2803,6 @@ fn offsets(text: &str, spans: &[(usize, usize)], shift: usize) -> Vec<Value> {
         .collect()
 }
 
-/// `e`, an `in $n`, made the `in [..]` its parameter's list writes out:
-/// each value an item, a null among them, as `in [$1, $2, ...]` with one
-/// parameter a value hands them -- so the hash, the ordered and the id
-/// index take the list as they take one written out. The list is refused
-/// where [`crate::query::param_list`] refuses it.
-fn answer_param_list(e: &mut Expr, params: &[Value]) -> Result<()> {
-    let Expr::InParam(lhs, i) = std::mem::replace(e, Expr::Lit(Value::Null)) else {
-        unreachable!("each_subquery_mut hands an `in $n` here")
-    };
-    let items = crate::query::param_list(params, i)?;
-    *e = Expr::In(lhs, items.iter().cloned().map(Expr::Lit).collect());
-    Ok(())
-}
-
 /// Whether `v` is not in `seen` yet, by its encoding, which it is then:
 /// equal encodings are equal values, and two that compare equal under
 /// others (`1` and `1.0`) both kept in an `in` list change no answer.
@@ -6735,7 +6721,7 @@ impl Database {
         // The walk first: the collection looked up by name for every write
         // took a `set` by id 1.09 -> 1.14 us.
         let asks = |f: &Expr| {
-            f.answered_first() || (f.calls_now() && self.ordered(collection)) || kind_splits(f)
+            f.has_subquery() || (f.calls_now() && self.ordered(collection)) || kind_splits(f)
         };
         if !filter.as_ref().is_some_and(asks) && self.ttl_of(collection).is_none() {
             return Ok(Cow::Borrowed(stmt));
@@ -6960,7 +6946,7 @@ impl Database {
                 && (opt(&sel.filter)
                     || (sel.lookup.as_ref()).is_some_and(|l| l.chain().any(|s| opt(&s.filter))))
         };
-        if !expiring && !sel.answered_first() && !unsplit && !timed() && !kinded() {
+        if !expiring && !sel.has_subquery() && !unsplit && !timed() && !kinded() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
         let mut sel = sel.clone();
@@ -7064,10 +7050,7 @@ impl Database {
         depth: usize,
     ) -> Result<()> {
         if let Some(f) = filter {
-            f.each_subquery_mut(&mut |e| match e {
-                Expr::InParam(..) => answer_param_list(e, params),
-                e => self.answer_subquery(e, params, depth),
-            })?;
+            f.each_subquery_mut(&mut |e| self.answer_subquery(e, params, depth))?;
             // Only an ordered index plans by a time; a module with no clock
             // handed it leaves the call for the row to meet, and refuse, as
             // it did.
@@ -8246,7 +8229,7 @@ impl Database {
                 {
                     candidates = Some(hit);
                     source = ("the id index, `in`", "id");
-                    bare_in = matches!(f, Expr::In(..));
+                    bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
                 }
                 continue;
             }
@@ -8310,7 +8293,7 @@ impl Database {
                 // `and`ed on, every candidate still has to be tested -- and a
                 // filter holding an equality as well cannot be a bare `in`,
                 // so this cannot be set by the wrong branch.
-                bare_in = matches!(f, Expr::In(..));
+                bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
             }
         }
 
@@ -13256,12 +13239,16 @@ impl<'q> Filter<'q> {
                     },
                 }
             }
-            Expr::In(a, items) => {
+            // `in $n` as the `in [..]` its list writes out (`in_list`).
+            Expr::In(a, _) | Expr::InParam(a, _) => {
+                let Some((_, items)) = e.in_list(ctx.params) else {
+                    return Test::Eval(e);
+                };
                 let s = slot(a);
                 let fold = fold_of(s);
                 let mut values = Vec::with_capacity(items.len());
                 for it in items {
-                    match (value(it), fold) {
+                    match (it.cloned(), fold) {
                         (Some(v), Some(f)) => values.push(folded(f, v)),
                         (Some(v), None) => values.push(v),
                         (None, _) => return Test::Eval(e),
@@ -13822,10 +13809,10 @@ fn composed(
             }
         }
         for (j, e) in terms.iter().enumerate() {
-            let (Expr::In(lhs, items), false) = (e, used[j]) else {
+            let (Some((lhs, items)), false) = (e.in_list(params), used[j]) else {
                 continue;
             };
-            if !matches!(lhs.as_ref(), Expr::Field(n) if n == k) {
+            if !matches!(lhs, Expr::Field(n) if n == k) {
                 continue;
             }
             if items.len() * prefixes.len() > MAX_SPANS {
@@ -13835,12 +13822,7 @@ fn composed(
             // (`year in [2024, 2024.0]`) would read its span twice.
             let mut parts: Vec<Vec<u8>> = Vec::with_capacity(items.len());
             let mut whole = true;
-            for it in items {
-                let v = match it {
-                    Expr::Lit(v) => Some(v),
-                    Expr::Param(p) => params.get(*p),
-                    _ => None,
-                };
+            for v in items {
                 match v.and_then(|v| ix.literal(i, v)) {
                     Some(b) if !parts.contains(&b) => parts.push(b),
                     Some(_) => {}
@@ -14008,7 +13990,9 @@ fn names_first(filter: Option<&Expr>, params: &[Value], field: &str) -> bool {
         f.conjuncts(&mut terms);
     }
     terms.iter().any(|e| match e {
-        Expr::In(lhs, _) => matches!(lhs.as_ref(), Expr::Field(n) if n == field),
+        Expr::In(lhs, _) | Expr::InParam(lhs, _) => {
+            matches!(lhs.as_ref(), Expr::Field(n) if n == field)
+        }
         e => e.range_key(params).is_some_and(|(n, ..)| n == field),
     })
 }

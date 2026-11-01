@@ -67,12 +67,10 @@ pub enum Expr {
     /// moved by milliseconds ([`arith`]).
     Arith(ArithOp, Box<Expr>, Box<Expr>),
     /// `id in $1`, `$1` holding a list: its values, each an item, as `id
-    /// in [$1, $2, ...]` with a parameter a value would be. A filter's is
-    /// made that [`Expr::In`] before the query runs, its values the items
-    /// (`Database::query` answers it with the inner `get`s), so an index
-    /// meets the list as it meets one written out; anywhere else `eval`
-    /// reads the parameter's list ([`param_list`]). Last, so no variant
-    /// before it was renumbered.
+    /// in [$1, $2, ...]` with a parameter a value would be. A plan reads
+    /// both through [`Expr::in_list`], so an index meets the list as it
+    /// meets one written out, and `eval` reads the parameter's list
+    /// ([`param_list`]). Last, so no variant before it was renumbered.
     InParam(Box<Expr>, usize),
 }
 
@@ -207,34 +205,35 @@ impl Expr {
 
     /// Whether an `in (get ...)` is anywhere in it.
     pub fn has_subquery(&self) -> bool {
-        self.holds_list(false)
-    }
-
-    /// Whether a list worked out before the query is anywhere in it: an
-    /// `in (get ...)`, or an `in $n` its parameter's list is put in place
-    /// of ([`Expr::each_subquery_mut`]). An `in $n` reads no collection, so
-    /// what asks [`Self::has_subquery`] for that -- a poll's tag, a pin --
-    /// is not told of it.
-    pub fn answered_first(&self) -> bool {
-        self.holds_list(true)
-    }
-
-    fn holds_list(&self, params: bool) -> bool {
         match self {
             Expr::InSelect(..) => true,
-            Expr::InParam(a, _) => params || a.holds_list(params),
             Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => false,
             Expr::And(a, b)
             | Expr::Or(a, b)
             | Expr::Cmp(_, a, b)
             | Expr::Like(a, b)
             | Expr::Has(a, b)
-            | Expr::Arith(_, a, b) => a.holds_list(params) || b.holds_list(params),
-            Expr::Not(a) | Expr::IsNull(a) => a.holds_list(params),
-            Expr::In(a, items) => {
-                a.holds_list(params) || items.iter().any(|i| i.holds_list(params))
+            | Expr::Arith(_, a, b) => a.has_subquery() || b.has_subquery(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InParam(a, _) => a.has_subquery(),
+            Expr::In(a, items) => a.has_subquery() || items.iter().any(Expr::has_subquery),
+            Expr::Call(_, args) => args.iter().any(Expr::has_subquery),
+        }
+    }
+
+    /// An `in`'s left side and its list as a plan reads it: each item
+    /// written in -- a literal's value, a parameter's, `None` for one that
+    /// is neither -- or each value an `in $n`'s parameter holds. `None` for
+    /// any other expression, and for an `in $n` whose parameter holds no
+    /// list, left to `eval`, which refuses it at the first row tested, as
+    /// it does whatever else `Filter` cannot bind. Where a plan reads `in
+    /// [$1, $2]`, it reads `in $1` through this, so the two take one path.
+    pub fn in_list<'a>(&'a self, params: &'a [Value]) -> Option<(&'a Expr, InItems<'a>)> {
+        match self {
+            Expr::In(lhs, items) => Some((lhs, InItems::Written(items.iter(), params))),
+            Expr::InParam(lhs, i) => {
+                Some((lhs, InItems::Listed(param_list(params, *i).ok()?.iter())))
             }
-            Expr::Call(_, args) => args.iter().any(|a| a.holds_list(params)),
+            _ => None,
         }
     }
 
@@ -347,12 +346,11 @@ impl Expr {
         }
     }
 
-    /// Calls `f` on each `in (get ...)` and each `in $n` in it, outermost
-    /// first and not inside one another: the inner `get`s are `f`'s to
-    /// walk.
+    /// Calls `f` on each `in (get ...)` in it, outermost first and not
+    /// inside one another: the inner `get`s are `f`'s to walk.
     pub fn each_subquery_mut(&mut self, f: &mut dyn FnMut(&mut Expr) -> Result<()>) -> Result<()> {
         match self {
-            Expr::InSelect(..) | Expr::InParam(..) => f(self),
+            Expr::InSelect(..) => f(self),
             Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => Ok(()),
             Expr::And(a, b)
             | Expr::Or(a, b)
@@ -363,7 +361,7 @@ impl Expr {
                 a.each_subquery_mut(f)?;
                 b.each_subquery_mut(f)
             }
-            Expr::Not(a) | Expr::IsNull(a) => a.each_subquery_mut(f),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InParam(a, _) => a.each_subquery_mut(f),
             Expr::In(a, items) => {
                 a.each_subquery_mut(f)?;
                 for i in items {
@@ -514,33 +512,22 @@ impl Expr {
                 a.conjunct_in_sets(params, out);
                 b.conjunct_in_sets(params, out);
             }
-            Expr::In(lhs, items) => {
-                let Expr::Field(field) = lhs.as_ref() else {
+            Expr::In(..) | Expr::InParam(..) => {
+                let Some((Expr::Field(field), items)) = self.in_list(params) else {
                     return;
                 };
                 let mut vals = Vec::with_capacity(items.len());
-                for it in items {
-                    match it {
-                        Expr::Lit(v) => vals.push(v),
-                        // An unbound parameter must reach the eval path, which
-                        // is where the error is raised.
-                        Expr::Param(i) => match params.get(*i) {
-                            Some(v) => vals.push(v),
-                            None => return,
-                        },
-                        _ => return,
+                for v in items {
+                    match v {
+                        Some(v) => vals.push(v),
+                        // An unbound parameter, or an expression, must reach
+                        // the eval path, which is where the error is raised.
+                        None => return,
                     }
                 }
                 // An empty list matches nothing, and an empty candidate set
                 // says so without reading a row.
                 out.push((field, vals));
-            }
-            // Answered as the list it holds before a query runs; asked
-            // before that, by a pin, as that list.
-            Expr::InParam(lhs, i) => {
-                if let (Expr::Field(field), Ok(l)) = (lhs.as_ref(), param_list(params, *i)) {
-                    out.push((field, l.iter().collect()));
-                }
             }
             _ => {}
         }
@@ -910,6 +897,46 @@ fn sql_like(
 #[inline(never)]
 pub fn unbound(i: usize) -> Error {
     Error::Query(format!("parameter ${} is not bound", i + 1))
+}
+
+/// An `in` list's values as a plan reads them ([`Expr::in_list`]).
+#[derive(Clone)]
+pub enum InItems<'a> {
+    /// `in [..]`: each item a literal or a parameter, else `None`.
+    Written(std::slice::Iter<'a, Expr>, &'a [Value]),
+    /// `in $n`: the parameter's list.
+    Listed(std::slice::Iter<'a, Value>),
+}
+
+impl<'a> Iterator for InItems<'a> {
+    type Item = Option<&'a Value>;
+
+    fn next(&mut self) -> Option<Option<&'a Value>> {
+        match self {
+            InItems::Written(items, params) => items.next().map(|e| match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => params.get(*i),
+                _ => None,
+            }),
+            InItems::Listed(values) => values.next().map(Some),
+        }
+    }
+}
+
+impl InItems<'_> {
+    /// How many items are left. Not `ExactSizeIterator`'s, whose
+    /// `assert_eq!` brought `Debug` for `usize` and `Option<usize>` into
+    /// the browser module, 1.1 KB.
+    pub fn len(&self) -> usize {
+        match self {
+            InItems::Written(items, _) => items.len(),
+            InItems::Listed(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// The values `in $<i + 1>` ([`Expr::InParam`]) is answered with: the list
@@ -2694,16 +2721,7 @@ impl Select {
 
     /// Whether an `in (get ...)` is in its filter or a `lookup` level's.
     pub fn has_subquery(&self) -> bool {
-        self.holds_list(false)
-    }
-
-    /// [`Expr::answered_first`] of its filter or a `lookup` level's.
-    pub fn answered_first(&self) -> bool {
-        self.holds_list(true)
-    }
-
-    fn holds_list(&self, params: bool) -> bool {
-        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(|e| e.holds_list(params));
+        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::has_subquery);
         opt(&self.filter)
             || self
                 .lookup
