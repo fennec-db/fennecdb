@@ -82,6 +82,32 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenn
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFennecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 
+A named statement (`create statement transfer(...)`) is called with `db.Call(ctx, name, args, opts...)`: it sends
+`call <name> $1` over `/query` with the arguments as `$1`, so the transport, the errors, `IdempotencyKey`, `Wait`,
+the context and the timeout are those of every statement. The arguments are an object of values by name -- a
+`fennecdb.Params` map, a struct with `json` tags or a `D(...)` -- or `nil` for none; an empty map is one empty
+argument. The answer is a `Result`, as `Exec`'s: the rows the body's last statement read or wrote with `returning`
+in `Rows` (and a facet clause's counts in `Facets`), or what it wrote in `Affected`.
+
+```go
+r, err := db.IdempotencyKey("xfer-7").Call(ctx, "transfer", fennecdb.Params{"from": 1, "to": 2, "amount": 300})
+var e *fennecdb.Error
+if errors.As(err, &e) && e.Status == 412 { fmt.Println(e.Reason) } // "insufficient funds": the statement's own words
+```
+
+- A refusal is the usual `*fennecdb.Error`: 404 no such statement or not granted, 403 a claim the call lacks, 400 an
+  argument missing, extra or of another type, 409 a broken statement or a unique value taken, 412 a `require` not
+  met, its `Reason` the statement's.
+- `fennecdb.Claims(fennecdb.Params{"sub": "alice"})` is `as {...}`, the claims a statement declares (`claims (sub
+  text)`) that the server's own token makes the call with; a scoped token's claims are its own.
+- `db.Read().Call(...)` marks a call that only reads: on a client made `WithReadsNearest` it goes to the read replica
+  (`Fennec-Read: replica`) after the client's writes, and one that writes is refused there (403), never landed.
+  Without `Read()` a call goes home, as every text not known to read does.
+- `fennecdb.NewCall(name, args, opts...).ToCall()` returns the text and parameters and sends nothing, as
+  `q.ToFennecQL()` does. Only the name goes into the text -- ASCII letters, digits and `_`, a letter first, at most 59
+  bytes -- and an arguments value that is not an object is refused (`*fennecdb.QueryError`, nothing sent), both held
+  to `integrations/builder-golden.json`.
+
 `go test` runs against `fennec-server` processes it starts (`cargo build -p fennec-server`, or `FENNEC_SERVER`), and the
 builder against every case of `integrations/builder-golden.json`.
 Full reference: https://fennecdb.com/docs/languages

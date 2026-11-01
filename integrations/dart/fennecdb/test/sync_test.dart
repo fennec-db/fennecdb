@@ -399,6 +399,172 @@ void main() {
     db.close();
   });
 
+  // Named statements over `/query`: `callStatement` sends the builder's
+  // text and parameters, so the answer, the key, the wait and the refusals
+  // are what a text has.
+  test('a call runs a named statement on the server, as a text would', () async {
+    final s = await server('call');
+    await s.run('create collection accounts (balance int)');
+    await s.run('create collection notes (body text, by text @hash, stars int, pinned bool, score float)');
+    await s.run('put accounts [{id: 1, balance: 100}, {id: 2, balance: 0}]');
+    await s.run(r'create statement transfer($from int, $to int, $amount int) public as begin '
+        r"set accounts {balance: balance - $amount} where id = $from and balance >= $amount require 1 else 'insufficient funds'; "
+        r"set accounts {balance: balance + $amount} where id = $to require 1 else 'no such account'; "
+        r'get accounts select id, balance where id = $from end');
+    await s.run(r'create statement bump($id int) public as set accounts {balance: balance + 1} where id = $id');
+    await s.run(
+        r'create statement note($body text, $stars int, $pinned bool, $score float) public as insert notes {body: $body, stars: $stars, pinned: $pinned, score: $score} returning id, body, stars, pinned, score');
+    await s.run("create statement stamp() public as insert notes {body: 'z'} returning id");
+    await s.run(r'create statement mine() claims (sub text) as get notes select body where by = $jwt.sub');
+    final db = Fennec.connect(s.url);
+    Future<int?> balance(int id) async => (await db.from('accounts').where('id', id).first())?['balance'] as int?;
+
+    // Arguments of several types, by name; the answer is the last statement's.
+    final moved = await db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 30});
+    expect(moved.rows.single, {'id': 1, 'balance': 70});
+    final noted = await db.callStatement('note', args: {'body': 'ça va', 'stars': 4, 'pinned': true, 'score': 2.5});
+    expect(
+        noted.rows.single, {'id': noted.rows.single['id'], 'body': 'ça va', 'stars': 4, 'pinned': true, 'score': 2.5});
+    // A write that answers none answers how many it wrote; a statement of none takes none.
+    expect((await db.callStatement('bump', args: {'id': 2})).affected, 1);
+    expect(await balance(2), 31);
+    expect((await db.callStatement('stamp')).rows.single['id'], isNotNull);
+    // A call is also a statement of a batch.
+    final batch = await db.batch([
+      Call('bump', args: {'id': 2}).toCall(),
+      Call('transfer', args: {'from': 1, 'to': 2, 'amount': 10}).toCall(),
+    ]);
+    expect((batch.results[0].affected, batch.results[1].rows.single['balance']), (1, 60));
+
+    // Refusals by their status: a `require` with its reason, the name, the arguments.
+    Future<void> refusal(Future<Object?> call, int status, FennecCode code, {String? reason}) async {
+      try {
+        await call;
+        fail('a call that was to be refused ($status) was answered');
+      } on FennecException catch (e) {
+        expect((e.status, e.code), (status, code), reason: e.message);
+        expect(e.reason, reason, reason: e.message);
+      }
+    }
+
+    await refusal(db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 5000}), 412, FennecCode.unmet,
+        reason: 'insufficient funds');
+    await refusal(db.callStatement('transfer', args: {'from': 1, 'to': 9, 'amount': 5}), 412, FennecCode.unmet,
+        reason: 'no such account');
+    await refusal(db.callStatement('nothing'), 404, FennecCode.notFound);
+    await refusal(db.callStatement('transfer', args: {'from': 1, 'to': 2}), 400, FennecCode.query);
+    await refusal(db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 'ten'}), 400, FennecCode.query);
+    await refusal(
+        db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 1, 'by': 3}), 400, FennecCode.query);
+    // The refused calls moved nothing: 100 - 30 - 10.
+    expect(await balance(1), 60);
+    // The builder's refusal runs nothing, and sends nothing.
+    await expectLater(db.callStatement('transfer; drop collection notes'), throwsA(isA<FennecException>()));
+
+    // A key makes the call once; the key with another call is 422.
+    final keyed = await db.callStatement('bump', args: {'id': 2}, idempotencyKey: 'bump-1');
+    expect(keyed.affected, 1);
+    final before = await balance(2);
+    expect((await db.callStatement('bump', args: {'id': 2}, idempotencyKey: 'bump-1')).affected, 1);
+    expect(await balance(2), before);
+    await refusal(db.callStatement('bump', args: {'id': 1}, idempotencyKey: 'bump-1'), 422, FennecCode.io);
+    // A copy's key is the same key.
+    await db.withIdempotencyKey('bump-2').callStatement('bump', args: {'id': 2});
+    await db.withIdempotencyKey('bump-2').callStatement('bump', args: {'id': 2});
+    expect(await balance(2), before! + 1);
+
+    // `claims` are the `as`, the server's own token's to name: a statement
+    // reading one without it is refused (403), nothing run.
+    await db.from('notes').insert([
+      {'body': 'one', 'by': 'alice'},
+      {'body': 'two', 'by': 'bob'}
+    ]);
+    expect([
+      for (final r in (await db.callStatement('mine', claims: {'sub': 'alice'})).rows) r['body']
+    ], [
+      'one'
+    ]);
+    expect((await db.callStatement('mine', claims: {'sub': 'bob'}, read: true)).rows.single['body'], 'two');
+    await refusal(db.callStatement('mine'), 403, FennecCode.denied);
+    await refusal(db.callStatement('mine', claims: {'sub': null}), 403, FennecCode.denied);
+    db.close();
+  });
+
+  // `read` marks the call as it marks a text: a server told a request only
+  // reads (`Fennec-Read: replica`) answers one that does, and refuses one that
+  // writes, which lands nothing.
+  test('a call sent as a read is answered if it reads, refused if it writes', () async {
+    final s = await server('callread');
+    await s.run('create collection notes (body text)');
+    await s.run(r'create statement history() public as get notes select body order id');
+    await s.run(r'create statement note($body text) public as insert notes {body: $body} returning id');
+    final db = Fennec.connect(s.url, reads: Reads.nearest);
+    expect((await db.callStatement('note', args: {'body': 'a'})).rows, hasLength(1));
+    expect((await db.callStatement('history', read: true)).rows.single['body'], 'a');
+    try {
+      await db.callStatement('note', args: {'body': 'b'}, read: true);
+      fail('a write sent as a read was answered');
+    } on FennecException catch (e) {
+      expect(e.status, 403);
+    }
+    expect(await db.from('notes').count(), 1);
+    // Unmarked, on the same connection, it writes.
+    expect((await db.callStatement('note', args: {'body': 'b'})).rows, hasLength(1));
+    expect(await db.from('notes').count(), 2);
+    db.close();
+  });
+
+  // The wait a copy carries goes with a call as with a text. A call that
+  // writes is not held, so it is answered at once.
+  test('a call carries the wait a text would', () async {
+    final s = await server('callwait');
+    await s.run('create collection jobs (kind text, status text @hash, owner text)');
+    await s.run(
+        r"create statement claim($owner text) public as set jobs {status: 'taken', owner: $owner} where status = 'open' limit 1 returning kind");
+    final db = Fennec.connect(s.url);
+    await db.execute('put jobs {kind: "mail", status: "open"}');
+    final claimed = await db.callStatement('claim', args: {'owner': 'w1'}, wait: const Duration(seconds: 5));
+    expect(claimed.rows.single['kind'], 'mail');
+    // Nothing left: held no longer than the wait.
+    final began = DateTime.now();
+    final empty = await db.callStatement('claim', args: {'owner': 'w2'}, wait: const Duration(milliseconds: 300));
+    expect(empty.rows, isEmpty);
+    expect(DateTime.now().difference(began).inMilliseconds, greaterThanOrEqualTo(290));
+    await expectLater(db.callStatement('claim', args: {'owner': 'w3'}, wait: const Duration(seconds: -1)),
+        throwsA(isA<FennecException>().having((e) => e.code, 'code', FennecCode.misuse)));
+    db.close();
+  });
+
+  // A replica holds its shapes and none of its server's statements: its own
+  // database refuses a call, in the engine's words, as a FennecException; the
+  // server is called through its HTTP client, and what it wrote comes back
+  // through the shape's stream.
+  test("a synced database refuses a call, and the server's client makes it", () async {
+    final s = await server('callrefused');
+    await s.run(r'create statement close_task($key text) public as set tasks {status: "closed"} where key = $key');
+    final db = await Fennec.openSynced(url: s.url, shapes: [open], path: await scratch('callrefused'));
+    await db.replica!.ready();
+    await offline(db);
+    await expectLater(
+        db.callStatement('close_task', args: {'key': 'a'}),
+        throwsA(isA<FennecException>().having((e) => e.code, 'code', FennecCode.query).having(
+            (e) => e.message,
+            'message',
+            contains('a synced database runs no named statement: `call`, `create statement` and `drop statement` '
+                'go to the server through its HTTP client'))));
+    // Refused before anything was queued or sent.
+    expect((await db.replica!.refresh()).pending, 0);
+    expect(await titles(db), ['one', 'two']);
+    db.replica!.setOnline(true);
+    await eventually('online', () async => (await db.replica!.refresh()).state == SyncState.online);
+    // Through the client the server runs it, and the shape follows.
+    final remote = Fennec.connect(s.url);
+    expect((await remote.callStatement('close_task', args: {'key': 'a'})).affected, 1);
+    remote.close();
+    await eventually('the row leaves the shape', () async => (await titles(db)).join(',') == 'two');
+    await db.close();
+  });
+
   test('a claim held at the server takes the job enqueued meanwhile, and ends on time', () async {
     final s = await server('held');
     await s.run('create collection jobs (kind text, run_at timestamp @sorted, owner text)');

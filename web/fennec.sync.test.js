@@ -165,6 +165,38 @@ test('the seed fills the local replica with the shape', opts, async () => {
   }
 });
 
+// A named statement is the server's: the replica holds its shapes' rows, not
+// the statements, so its local database refuses a call in the sync's words
+// and the call goes through the HTTP client -- what it wrote comes back
+// through the shapes' streams like any server write.
+test('a call goes to the server through the remote, and the replica refuses it', opts, async () => {
+  const s = await server();
+  await s.run("create statement close_task($key text) public as set tasks {status: 'closed'} where key = $key require 1 else 'no such task'");
+  const db = await open(s.url);
+  try {
+    await db.ready();
+    const refused = /a synced database runs no named statement/;
+    await assert.rejects(db.local.call('close_task', { key: 'a' }), refused);
+    assert.throws(() => db.local.run('call close_task {key: "a"}'), refused);
+    assert.equal((await s.run('get tasks where status = "open" count'))[0].count, 2);
+
+    const done = await db.remote.call('close_task', { key: 'a' }, { idempotencyKey: 'close-a' });
+    assert.equal(done.kind, 'affected');
+    assert.equal(done.count, 1);
+    await until(async () => (await db.from('tasks').count()) === 1, 'the closed task leaves the shape');
+    // Once: the key replays the first answer, and a task that is not there is the statement's reason.
+    const again = await db.remote.call('close_task', { key: 'a' }, { idempotencyKey: 'close-a' });
+    assert.equal(again.replayed, true);
+    await assert.rejects(
+      db.remote.call('close_task', { key: 'zzz' }),
+      (e) => e instanceof FennecError && e.status === 412 && e.reason === 'no such task',
+    );
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 test('a collated field syncs in its collation, the replica handed the data it needs', opts, async () => {
   const s = await server();
   await s.run('create collection people (key text @hash, name text collate und @sorted)');

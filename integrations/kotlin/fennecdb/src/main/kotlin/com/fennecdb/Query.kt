@@ -1381,3 +1381,74 @@ class Query private constructor(private val s: State) {
         reason: String? = null,
     ): Rows = kotlinx.coroutines.runBlocking { deleteReturning(returning, all, require, reason) }
 }
+
+/**
+ * A call of a named statement: `call <name> $1`, its arguments the one
+ * parameter -- a map, by name -- and [claims] after them `as $2`, the claims
+ * the server's token makes the call with (a scoped token's own are its
+ * token's, and it may not say them) or an embedder's, held to the types the
+ * statement declares. Not bound to a collection, so a call stands beside
+ * [Query.from]:
+ *
+ * ```kotlin
+ * val st = Call.of("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300)).toCall()
+ * // st.text == "call transfer $1", st.params == [{from=1, to=2, amount=300}]
+ * ```
+ *
+ * [Fennec.call] and [FennecRemote.call] run it. No arguments is a statement
+ * of none: `call stamp`; an empty map is still one argument, `call stamp $1`.
+ * The values are parameters as a query's are -- a [java.util.Date] its ISO
+ * text, a [FloatArray] its numbers -- and never the text: the name is the one
+ * thing of a call written into it, so it is held to the engine's rule (ASCII
+ * letters, digits and `_`, a letter first, at most 59 bytes) and is the
+ * injection boundary. Immutable: the values are copied as they are given, so
+ * a map changed afterwards changes no call made of it.
+ */
+class Call private constructor(
+    /** The statement's name. */
+    val name: String,
+    private val args: Map<String, Any?>?,
+    private val claims: Map<String, Any?>?,
+) {
+    companion object {
+        /** A call of [name] with [args] -- none, or a map by name -- and, `as`, [claims]. */
+        @JvmStatic
+        @JvmOverloads
+        fun of(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Call = made(name, args, claims)
+
+        /**
+         * What [of] checks, for a value the types cannot hold to an object:
+         * the golden test hands it a list or a text, as JavaScript's builder
+         * is.
+         */
+        internal fun made(name: String, args: Any?, claims: Any?): Call {
+            if (!valid(name)) throw refuse("invalid statement name: ${Builder.quote(name)}")
+            return Call(name, given(args, "arguments"), given(claims, "claims"))
+        }
+
+        // The engine's rule (`named::valid_name`), a path segment with nothing to escape.
+        private fun valid(name: String): Boolean =
+            name.length in 1..59 && (name[0] in 'a'..'z' || name[0] in 'A'..'Z') &&
+                name.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' }
+
+        // A call's arguments or claims: a map of values by name, or none; copied, so the call holds what was given.
+        @Suppress("UNCHECKED_CAST")
+        private fun given(v: Any?, what: String): Map<String, Any?>? = when (v) {
+            null -> null
+            is Map<*, *> -> Values.normalize(v) as Map<String, Any?>
+            else -> throw refuse("a call's $what are an object of values by name")
+        }
+    }
+
+    /** The call's FennecQL and its parameters, as they would be run: `call transfer $1`, or `call mine $1 as $2`. */
+    fun toCall(): Statement {
+        val bind = Binder()
+        val sb = StringBuilder("call ").append(name)
+        if (args != null) sb.append(' ').append(bind.bind(args))
+        if (claims != null) sb.append(" as ").append(bind.bind(claims))
+        return Statement(sb.toString(), bind.params)
+    }
+}
+
+/** A call of a named statement, not run: [Call.of]. */
+fun call(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Call = Call.of(name, args, claims)

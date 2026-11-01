@@ -86,3 +86,50 @@ The query builder makes the text the JavaScript builder makes of the same
 chain, to the byte: `integrations/builder-golden.json` holds the chains,
 and `make dart-test` runs every one. To see the text and parameters a chain
 builds, for logging or a test, `toFennecQL()` returns them and runs nothing.
+
+## Named statements
+
+A statement the server holds by name (`create statement transfer(...)`) is
+called with `callStatement`, not `call`: a Dart method named `call` makes
+its object callable as a function.
+
+```dart
+final db = Fennec.connect('https://api.example.com', token: serverToken);
+final moved = await db.callStatement('transfer',
+    args: {'from': 1, 'to': 2, 'amount': 300}, idempotencyKey: 'transfer-42');
+final mine = await db.callStatement('history', claims: {'sub': 'alice'}, read: true);
+```
+
+It sends `call transfer $1` over `/query` -- the arguments one parameter, a
+map of values by name, and only the name written into the text, checked
+against letters, digits and `_` (a letter first, 59 bytes at most) -- and
+answers as `run` does: the rows of a `get` or a `returning`, else `affected`
+rows. `claims` is the `as`, the values a statement declaring `claims (sub
+text)` reads as `$jwt.sub`, which the server's own token alone may name (a
+scoped token's are its token's). `idempotencyKey` makes the call once and
+`wait` is `withWait`'s, as a copy's would be (`db.withIdempotencyKey(k)
+.callStatement(...)` too). `read: true` marks a call that only reads as
+`asRead()` marks a text: on `Reads.nearest` it is answered by the read
+replica near the app, after the connection's writes; without it a call goes
+home, as every text not known to read does, and a call that writes sent
+with `read` is refused (403), never landed. A refusal is a `FennecException`
+by its `status`: 404 no such statement (or none this token may call), 403 a
+claim missing, 400 an argument missing, extra or of another type, 409 a
+broken statement or a unique value taken, 412 a `require` not met, with its
+`reason`.
+
+`Call('transfer', args: {...}, claims: {...}).toCall()` is the text and
+parameters alone, offline -- a `Statement`, as the builder's `toInsert` is, so
+a `batch` takes it -- held to the same `builder-golden.json`: `Call` takes
+what a query's values take (a `DateTime` as its ISO text, a `Float32List` as
+numbers), `args: {}` is still one argument (`call stamp $1`), `null` none, and
+anything but a map, or a name that is not a name, is a `FennecException` of
+code `builder`.
+
+The embedded `Fennec` has `callStatement(name, args:, claims:)` too: the file's
+own statements, called by the app with its signed-in user's `claims`, held to
+the declared types as a token's are. It takes no `wait` and no key, those
+being a server's, and a replica (`Fennec.openSynced`) refuses it -- it holds
+its shapes and none of its server's statements -- as a `FennecException`
+(`FennecCode.query`): call the server through `Fennec.connect`, and what the
+call wrote reaches the replica through its shapes' streams.

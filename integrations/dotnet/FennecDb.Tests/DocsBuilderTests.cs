@@ -1090,6 +1090,29 @@ public sealed class DocsBuilderTests
         Sends(sent, "del articles where year < $1", "[2000]");
     }
 
+    [Fact(DisplayName = "docs: a transfer called")]
+    public async Task ATransferCalled()
+    {
+        using var db = Db(out var sent);
+        await db.CallAsync(
+            "transfer",
+            new Dictionary<string, object?> { ["from"] = 1, ["to"] = 2, ["amount"] = 300 }
+        );
+        Sends(sent, "call transfer $1", "[{\"from\": 1, \"to\": 2, \"amount\": 300}]");
+    }
+
+    [Fact(DisplayName = "docs: a statement called for a signed-in user")]
+    public async Task AStatementCalledForASignedInUser()
+    {
+        using var db = Db(out var sent);
+        await db.CallAsync(
+            "history",
+            new Dictionary<string, object?> { ["account"] = 1 },
+            claims: new Dictionary<string, object?> { ["sub"] = "alice" }
+        );
+        Sends(sent, "call history $1 as $2", "[{\"account\": 1}, {\"sub\": \"alice\"}]");
+    }
+
     [Fact(DisplayName = "docs: a page of documents with their comments")]
     public async Task APageOfDocumentsWithTheirComments()
     {
@@ -1169,6 +1192,14 @@ public sealed class DocsBuilderTests
         using var db = Db(out var sent);
         await db.From("docs").Where("year", "<", 2000).DeleteAsync();
         Sends(sent, "del docs where year < $1", "[2000]");
+    }
+
+    [Fact(DisplayName = "docs: a statement of no arguments called")]
+    public async Task AStatementOfNoArgumentsCalled()
+    {
+        using var db = Db(out var sent);
+        await db.CallAsync("stamp");
+        Sends(sent, "call stamp", "[]");
     }
 
     [Fact(DisplayName = "escapes: every character a literal escapes, in a filter")]

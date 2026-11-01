@@ -231,6 +231,39 @@
             try await db.close()
         }
 
+        /// A replica holds its shapes' rows, not its server's statements: a
+        /// local `call` is refused in the sync's words -- a statement the
+        /// server has, one it has not, with claims -- as `create statement`
+        /// is, nothing queued for the server; its HTTP client runs the
+        /// call, and what it writes comes back through the shape.
+        @Test func aSyncedDatabaseRefusesACallAndTheServersClientRunsIt() async throws {
+            let s = try await Server("callrefused")
+            defer { s.stop() }
+            try await s.run("create statement titles() public as get tasks select title where status = 'open' order title")
+            try await s.run("create statement add($key text, $title text) public as insert tasks {key: $key, title: $title, status: 'open'} returning id")
+            let db = try await Fennec.sync(url: s.url, shapes: [open], path: try scratch("sync-call"))
+            await db.replica!.ready()
+
+            var refusals: [FennecError?] = []
+            refusals.append(await refusal { try await db.call("titles") })
+            refusals.append(await refusal { try await db.call("add", ["key": "d", "title": "four"]) })
+            refusals.append(await refusal { try await db.call("nosuch", claims: ["sub": "alice"]) })
+            refusals.append(await refusal { try await db.run("create statement more() public as get tasks select key") })
+            for refused in refusals {
+                #expect(refused?.code == .query)
+                #expect(refused?.message.contains("a synced database runs no named statement") == true, "\(refused?.message ?? "")")
+            }
+            #expect(await db.replica!.refresh().pending == 0)
+            #expect(try await titles(db) == ["one", "two"])
+
+            // The server's client runs it; the shape brings the row.
+            let remote = Fennec.connect(url: s.url)
+            #expect(try await remote.call("add", ["key": "d", "title": "four"]).rows.count == 1)
+            #expect(try await remote.call("titles", read: true).rows.compactMap { $0["title"]?.string } == ["four", "one", "two"])
+            try await eventually("the call's row in the shape") { try await titles(db) == ["four", "one", "two"] }
+            try await db.close()
+        }
+
         /// The Swift tab's "over HTTP" lines on languages.html, as written
         /// there but for the server's address, and the read the home page's
         /// Swift session ends with.

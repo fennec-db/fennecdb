@@ -9,6 +9,7 @@ import {
   FennecError,
   and,
   bucket,
+  call,
   connect,
   countDistinct,
   distance,
@@ -24,11 +25,14 @@ import {
   raw,
   restore,
   sync,
+  type CallAnswer,
   type Json,
   type Point,
   type Row,
   type Sparse,
+  type Statements,
   type Timestamp,
+  type TypedCall,
   type TypedFrom,
   type Vector,
 } from '../fennec.js';
@@ -426,6 +430,42 @@ export async function remote() {
   void client.Fennec;
   // @ts-expect-error -- nor the sync layer
   void client.sync;
+
+  // A named statement's call: an object of arguments by name, the options
+  // of `run` and `claims`; the builder's `call` makes the text.
+  await bare.call('transfer', { from: 1, to: 2, amount: 300 }, { idempotencyKey: 'k', wait: 100, read: true, claims: { sub: 'a' } });
+  await bare.call('stamp');
+  expect<[string, unknown[]]>(call('transfer', { from: 1 }, { claims: { sub: 'a' } }).toCall());
+  await bare.batch([call('stamp'), 'get articles', ['call mine $1', [{}]]]);
+  // @ts-expect-error -- arguments are an object by name, not a list
+  void bare.call('transfer', [1, 2, 300]);
+  // @ts-expect-error -- read is a boolean
+  void bare.call('history', {}, { read: 'yes' });
+  // A page's database refuses a call; its options are the claims.
+  await local.call('stamp', null, { claims: { sub: 'a' } }).catch(() => {});
+  // @ts-expect-error -- a server's wait
+  void local.call('stamp', null, { wait: 1 });
+  // What `fennec types` writes for the statements of a schema, and the call
+  // typed by it.
+  type Mine = {
+    transfer: { args: { from: number; to: number; amount: number }; row: { id: number; balance: number } };
+    stamp: { args: {}; row: unknown };
+    since: { args: { at?: Timestamp }; row: { id: number } };
+  };
+  const calls: TypedCall<Mine> = bare.call.bind(bare);
+  const moved = await calls('transfer', { from: 1, to: 2, amount: 300 });
+  if ('rows' in moved) expect<number>(moved.rows[0].balance);
+  await calls('stamp');
+  await calls('since');
+  await calls('since', { at: '2026-11-01T00:00:00Z' as Timestamp }, { read: true });
+  // @ts-expect-error -- no such statement
+  void calls('ghost');
+  // @ts-expect-error -- an argument missing
+  void calls('transfer', { from: 1, to: 2 });
+  // @ts-expect-error -- an argument of another type
+  void calls('transfer', { from: '1', to: 2, amount: 300 });
+  expect<Statements>({} as Mine);
+  expect<CallAnswer<{ id: number }>>({ rows: [{ id: 1 }] });
 
   // A shape's subscription, and the stream reader under it.
   const unsub = bare.subscribe(

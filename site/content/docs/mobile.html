@@ -239,7 +239,61 @@ code</a>).</p>
 <p><code>fennec types --lang swift|kotlin|dart schema.fennecql</code> writes
 a row of each collection as the language reads it: a <code>Codable</code>
 struct, a data class with <code>from(row)</code>, a class with
-<code>fromJson</code>.</p>
+<code>fromJson</code> — and, for each <a href="#named-statements">named
+statement</a> the file holds, a <code>…Args</code> type for its arguments and
+a <code>…Row</code> for its answer, as far as the answer is typed (plain fields
+of one collection and a count).</p>
+
+<h2 id="named-statements">Named statements</h2>
+
+<p>A <a href="fennecql.html#named-statements">named statement</a> — a block of
+FennecQL defined once in a database and called by name with typed arguments,
+<code>create statement transfer(...)</code> — is called with the SDK's
+<code>call</code> (Dart's <code>callStatement</code>, since a method named
+<code>call</code> would make the object callable): the arguments are an
+object by name, sent as the one parameter of <code>call transfer $1</code>,
+never as text, and only the name — ASCII letters, digits and
+<code>_</code> — is checked into it. On the server's connection it is a
+request like any other, and takes <code>idempotencyKey</code>, <code>wait</code>
+and <code>read</code>, which marks a statement that only reads so a
+connection reading near has a read replica answer it; a statement that
+writes is refused there (403), never landed. <code>claims</code> is the
+call's <code>as</code>, the server's token alone may say it.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift" data-label="Transfer.swift">let db = Fennec.connect(url: "https://api.example.com", token: jwt)
+let moved = try await db.call("transfer", ["from": 1, "to": 2, "amount": 300] as Value,
+                              idempotencyKey: UUID().uuidString)
+let mine = try await db.call("history", claims: ["sub": "alice"] as Value, read: true).rows</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin" data-label="Transfer.kt">val db = Fennec.connect("https://api.example.com", token = jwt)
+val moved = db.call("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300),
+                    idempotencyKey = UUID.randomUUID().toString())
+val mine = db.call("history", claims = mapOf("sub" to "alice"), read = true).rows</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart" data-label="transfer.dart">final db = Fennec.connect('https://api.example.com', token: jwt);
+final moved = await db.callStatement('transfer',
+    args: {'from': 1, 'to': 2, 'amount': 300}, idempotencyKey: uuid.v4());
+final mine = (await db.callStatement('history', claims: {'sub': 'alice'}, read: true)).rows;</pre>
+</div>
+
+</div>
+
+<p>The database in the app's file runs a statement it holds itself —
+<code>db.call("history", claims: …)</code>, with the library, its
+<code>claims</code> the signed-in user's, held to the types the statement
+declares as a token's are; it takes no key and no <code>wait</code>. A database
+opened as a replica of a server's shapes (<a href="#sync">below</a>) holds its
+shapes' rows and none of the server's statements, so a call would run against
+a part of the rows: it is refused, in the SDK's error, and the app calls the
+server through its connection — what the call wrote comes back through the
+shapes' streams like any server write.</p>
 
 <h2 id="live">Live queries</h2>
 

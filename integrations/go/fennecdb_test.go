@@ -882,3 +882,255 @@ func TestWaitBoundsAReadAfterAChangeNotYetThere(t *testing.T) {
 		t.Fatalf("the read waited %v", took)
 	}
 }
+
+// ------------------------------------------------------------ named statements
+
+// transferStatement defines the money moving statement over accounts, as
+// the server's tests do, under a name of its own, and gives back the name
+// and two accounts of 1000 each.
+func transferStatement(t *testing.T, db *fennecdb.Client) (name string, from, to int) {
+	t.Helper()
+	ctx := context.Background()
+	accounts := fresh("accounts")
+	name = fresh("transfer")
+	must(db.Exec(ctx, "create collection "+accounts+" (owner text, balance int)")).of(t)
+	must(db.Exec(ctx, "create statement "+name+"($from int, $to int, $amount int) public as begin "+
+		"set "+accounts+" {balance: balance - $amount} where id = $from and balance >= $amount require 1 else 'insufficient funds'; "+
+		"set "+accounts+" {balance: balance + $amount} where id = $to require 1 else 'no such account'; "+
+		"get "+accounts+" select id, balance where id = $from end")).of(t)
+	r := must(db.From(accounts).Insert(ctx, fennecdb.D("owner", "a", "balance", 1000), fennecdb.D("owner", "b", "balance", 1000), fennecdb.Returning("id"))).of(t)
+	return name, int(r.Rows[0]["id"].(float64)), int(r.Rows[1]["id"].(float64))
+}
+
+// A call is `call <name> $1` over /query: arguments of several types go as
+// parameters, a body that ends in a read answers its rows, and one that
+// writes alone answers what it did.
+func TestACallRunsANamedStatement(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	transfer, a, b := transferStatement(t, db)
+
+	// Params, a struct and a Doc are one argument object.
+	r := must(db.Call(ctx, transfer, fennecdb.Params{"from": a, "to": b, "amount": 300})).of(t)
+	if len(r.Rows) != 1 || r.Rows[0]["balance"] != 700.0 || r.Rows[0]["id"] != float64(a) || r.Seq == 0 || r.Replayed {
+		t.Fatalf("%+v", r)
+	}
+	type move struct {
+		From   int `json:"from"`
+		To     int `json:"to"`
+		Amount int `json:"amount"`
+	}
+	r = must(db.Call(ctx, transfer, move{From: b, To: a, Amount: 100})).of(t)
+	if len(r.Rows) != 1 || r.Rows[0]["balance"] != 1200.0 {
+		t.Fatalf("%+v", r)
+	}
+	r = must(db.Call(ctx, transfer, fennecdb.D("from", a, "to", b, "amount", 100))).of(t)
+	if len(r.Rows) != 1 || r.Rows[0]["balance"] != 700.0 {
+		t.Fatalf("%+v", r)
+	}
+
+	// Every type a signature names, read back as it was written.
+	kinds, record := fresh("kinds"), fresh("record")
+	must(db.Exec(ctx, "create collection "+kinds+" (s text @hash, i int, f float, b bool, tags [text], meta json, at timestamp, v vector<3>)")).of(t)
+	must(db.Exec(ctx, "create statement "+record+"($s text, $i int, $f float, $b bool, $tags [text], $meta json, $at timestamp, $v vector<3>) public as "+
+		"insert "+kinds+" {s: $s, i: $i, f: $f, b: $b, tags: $tags, meta: $meta, at: $at, v: $v} returning s, i, f, b, tags, meta, at, v")).of(t)
+	at := time.Date(2026, 9, 19, 12, 34, 56, 789_000_000, time.UTC)
+	r = must(db.Call(ctx, record, fennecdb.Params{
+		"s": "çağ \"quoted\" \\ \n", "i": -42, "f": 2.5, "b": true, "tags": []string{"a", "b"},
+		"meta": map[string]any{"lang": "tr", "rank": 2}, "at": at, "v": []float32{0.1, 0.2, 0.3},
+	})).of(t)
+	want := fennecdb.Row{
+		"s": "çağ \"quoted\" \\ \n", "i": -42.0, "f": 2.5, "b": true, "tags": []any{"a", "b"},
+		"meta": map[string]any{"lang": "tr", "rank": 2.0}, "at": "2026-09-19T12:34:56.789Z", "v": []any{0.1, 0.2, 0.3},
+	}
+	if r.Affected != 1 || len(r.Rows) != 1 || !reflect.DeepEqual(r.Rows[0], want) {
+		t.Fatalf("%+v\nwant %v", r, want)
+	}
+
+	// A write that answers no rows answers its count; a read, with the
+	// counts a facet clause made.
+	purge, see := fresh("purge"), fresh("see")
+	must(db.Exec(ctx, "create statement "+purge+"($w text) public as del "+kinds+" where s = $w")).of(t)
+	must(db.Exec(ctx, "create statement "+see+"($w text) public as get "+kinds+" select s where s = $w facet s")).of(t)
+	seen := must(db.Call(ctx, see, fennecdb.Params{"w": "çağ \"quoted\" \\ \n"})).of(t)
+	if len(seen.Rows) != 1 || len(seen.Facets) != 1 || seen.Facets.Of("s")[0].Count != 1 {
+		t.Fatalf("%+v", seen)
+	}
+	if d := must(db.Call(ctx, purge, fennecdb.Params{"w": "çağ \"quoted\" \\ \n"})).of(t); d.Affected != 1 || d.Rows != nil {
+		t.Fatalf("%+v", d)
+	}
+	if d := must(db.Call(ctx, purge, fennecdb.Params{"w": "nobody"})).of(t); d.Affected != 0 {
+		t.Fatalf("%+v", d)
+	}
+
+	// No arguments is `call stamp`; an empty object is one, refused where the
+	// statement takes none.
+	stamp := fresh("stamp")
+	must(db.Exec(ctx, "create statement "+stamp+"() public as insert "+kinds+" {s: 'z'} returning s")).of(t)
+	if r := must(db.Call(ctx, stamp, nil)).of(t); len(r.Rows) != 1 || r.Rows[0]["s"] != "z" {
+		t.Fatalf("%+v", r)
+	}
+	if r := must(db.Call(ctx, stamp, fennecdb.Params{})).of(t); len(r.Rows) != 1 {
+		t.Fatalf("%+v", r)
+	}
+	if _, err := db.Call(ctx, stamp, fennecdb.Params{"extra": 1}); statusOf(t, err).Status != 400 {
+		t.Fatalf("%v", err)
+	}
+	// What the builder refuses is never sent.
+	if _, err := db.Call(ctx, stamp, []int{1}); err == nil || err.Error() != "fennecdb: a call's arguments are an object of values by name" {
+		t.Fatalf("%v", err)
+	}
+	if n := must(db.Query(ctx, "get "+kinds+" where s = 'z' count")).of(t); n[0]["count"] != 2.0 {
+		t.Fatalf("%v", n)
+	}
+}
+
+// A refusal is the usual *Error: a require's reason is the statement's own
+// words, and the status says what was wrong with the call.
+func TestACallsRefusalsAreTypedErrors(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	transfer, a, b := transferStatement(t, db)
+
+	_, err := db.Call(ctx, transfer, fennecdb.Params{"from": a, "to": b, "amount": 5000})
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fennecdb.CodeUnmet || e.Reason != "insufficient funds" || e.At != -1 {
+		t.Fatalf("%+v", e)
+	}
+	_, err = db.Call(ctx, transfer, fennecdb.Params{"from": a, "to": 987654, "amount": 5})
+	if e := statusOf(t, err); e.Status != 412 || e.Reason != "no such account" {
+		t.Fatalf("%+v", e)
+	}
+	// Both landed nothing: the first refusal put the block back.
+	if r := must(db.Call(ctx, transfer, fennecdb.Params{"from": a, "to": b, "amount": 0})).of(t); r.Rows[0]["balance"] != 1000.0 {
+		t.Fatalf("%+v", r)
+	}
+
+	_, err = db.Call(ctx, fresh("nobody"), nil)
+	if e := statusOf(t, err); e.Status != 404 || e.Code != fennecdb.CodeNotFound {
+		t.Fatalf("an unknown statement: %+v", e)
+	}
+	for name, args := range map[string]fennecdb.Params{
+		"missing": {"from": a, "to": b},
+		"extra":   {"from": a, "to": b, "amount": 1, "more": 2},
+		"typed":   {"from": "one", "to": b, "amount": 1},
+	} {
+		_, err = db.Call(ctx, transfer, args)
+		if e := statusOf(t, err); e.Status != 400 || e.Code != fennecdb.CodeBadRequest {
+			t.Fatalf("%s: %+v", name, e)
+		}
+	}
+	// No arguments for a statement that takes some is a missing one.
+	if _, err = db.Call(ctx, transfer, nil); statusOf(t, err).Status != 400 {
+		t.Fatalf("%v", err)
+	}
+
+	// A claim the statement reads and the call lacks is 403.
+	notes, mine := fresh("notes"), fresh("mine")
+	must(db.Exec(ctx, "create collection "+notes+" (body text, by text @hash)")).of(t)
+	must(db.Exec(ctx, "create statement "+mine+"() claims (sub text) as get "+notes+" select body where by = $jwt.sub")).of(t)
+	_, err = db.Call(ctx, mine, nil)
+	if e := statusOf(t, err); e.Status != 403 || !strings.Contains(e.Message, "sub") {
+		t.Fatalf("a claim missing: %+v", e)
+	}
+	// A unique value taken is 409, and the call lands nothing.
+	profiles, signup := fresh("profiles"), fresh("signup")
+	must(db.Exec(ctx, "create collection "+profiles+" (email text @unique, owner text)")).of(t)
+	must(db.Exec(ctx, "create statement "+signup+"($email text) claims (sub text) as insert "+profiles+" {email: $email, owner: $jwt.sub} returning id")).of(t)
+	alice := fennecdb.Claims(fennecdb.Params{"sub": "alice"})
+	must(db.Call(ctx, signup, fennecdb.Params{"email": "a@x.io"}, alice)).of(t)
+	_, err = db.Call(ctx, signup, fennecdb.Params{"email": "a@x.io"}, alice)
+	if e := statusOf(t, err); e.Status != 409 || e.Code != fennecdb.CodeConflict {
+		t.Fatalf("a unique value taken: %+v", e)
+	}
+	if n := must(db.Query(ctx, "get "+profiles+" count")).of(t); n[0]["count"] != 1.0 {
+		t.Fatalf("%v", n)
+	}
+}
+
+// Claims are `as {...}`: the claims a statement declares, said by the
+// server's own token.
+func TestACallWithClaims(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	notes, mine, sign := fresh("notes"), fresh("mine"), fresh("sign")
+	must(db.Exec(ctx, "create collection "+notes+" (body text, by text @hash)")).of(t)
+	must(db.Exec(ctx, "create statement "+mine+"() claims (sub text) as get "+notes+" select body where by = $jwt.sub order body")).of(t)
+	must(db.Exec(ctx, "create statement "+sign+"($body text) claims (sub text) as insert "+notes+" {body: $body, by: $jwt.sub} returning body, by")).of(t)
+
+	type who struct {
+		Sub string `json:"sub"`
+	}
+	r := must(db.Call(ctx, sign, fennecdb.Params{"body": "one"}, fennecdb.Claims(fennecdb.Params{"sub": "alice"}))).of(t)
+	if len(r.Rows) != 1 || r.Rows[0]["by"] != "alice" {
+		t.Fatalf("%+v", r)
+	}
+	must(db.Call(ctx, sign, fennecdb.Params{"body": "two"}, fennecdb.Claims(who{Sub: "alice"}))).of(t)
+	must(db.Call(ctx, sign, fennecdb.Params{"body": "other"}, fennecdb.Claims(fennecdb.D("sub", "bob")))).of(t)
+	r = must(db.Call(ctx, mine, nil, fennecdb.Claims(fennecdb.Params{"sub": "alice"}))).of(t)
+	if len(r.Rows) != 2 || r.Rows[0]["body"] != "one" || r.Rows[1]["body"] != "two" {
+		t.Fatalf("%+v", r)
+	}
+	// nil claims are none, and the claim is then missing.
+	_, err := db.Call(ctx, mine, nil, fennecdb.Claims(nil))
+	if e := statusOf(t, err); e.Status != 403 {
+		t.Fatalf("%+v", e)
+	}
+	// Claims that are not an object never reach the server.
+	if _, err := db.Call(ctx, mine, nil, fennecdb.Claims("alice")); err == nil || err.Error() != "fennecdb: a call's claims are an object of values by name" {
+		t.Fatalf("%v", err)
+	}
+}
+
+// A call under a key lands once, as a text does: sent again it is answered
+// as the first time, Replayed, and the key with another call is a 422.
+func TestACallUnderAnIdempotencyKeyLandsOnce(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	transfer, a, b := transferStatement(t, db)
+	key := db.IdempotencyKey(fresh("xfer-key"))
+	args := fennecdb.Params{"from": a, "to": b, "amount": 100}
+	first := must(key.Call(ctx, transfer, args)).of(t)
+	again := must(key.Call(ctx, transfer, args)).of(t)
+	if first.Replayed || !again.Replayed || again.Rows[0]["balance"] != 900.0 || !reflect.DeepEqual(first.Rows, again.Rows) {
+		t.Fatalf("first %+v, again %+v", first, again)
+	}
+	// Executed once: 900, not 800.
+	if r := must(db.Call(ctx, transfer, fennecdb.Params{"from": a, "to": b, "amount": 0})).of(t); r.Rows[0]["balance"] != 900.0 {
+		t.Fatalf("%+v", r)
+	}
+	_, err := key.Call(ctx, transfer, fennecdb.Params{"from": a, "to": b, "amount": 7})
+	if e := statusOf(t, err); e.Status != 422 || e.Code != fennecdb.CodeKeyReused {
+		t.Fatalf("a key with another call: %+v", e)
+	}
+}
+
+// Read marks a call as a read: on a client reading near it carries the
+// replica mark (a plain server runs a marked request read-only, as a router
+// sends it to a read replica), answers a statement that reads, and refuses
+// one that writes (403) with nothing landed. Without Read a call goes home
+// and writes.
+func TestACallThatReadsIsMarkedAndOneThatWritesIsRefusedThere(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	notes, mine, stamp := fresh("notes"), fresh("mine"), fresh("stamp")
+	must(db.Exec(ctx, "create collection "+notes+" (body text, by text @hash)")).of(t)
+	must(db.Exec(ctx, "create statement "+mine+"() claims (sub text) as get "+notes+" select body where by = $jwt.sub")).of(t)
+	must(db.Exec(ctx, "create statement "+stamp+"() public as insert "+notes+" {body: 'z', by: 'alice'} returning body")).of(t)
+	count := func() float64 { return must(db.Query(ctx, "get "+notes+" count")).of(t)[0]["count"].(float64) }
+
+	near := fennecdb.New(primary, fennecdb.WithToken(rootToken), fennecdb.WithReadsNearest())
+	if r := must(near.Call(ctx, stamp, nil)).of(t); len(r.Rows) != 1 || count() != 1 {
+		t.Fatalf("a call without Read goes home and writes: %+v", r)
+	}
+	r := must(near.Read().Call(ctx, mine, nil, fennecdb.Claims(fennecdb.Params{"sub": "alice"}))).of(t)
+	if len(r.Rows) != 1 || r.Rows[0]["body"] != "z" {
+		t.Fatalf("%+v", r)
+	}
+	_, err := near.Read().Call(ctx, stamp, nil)
+	if e := statusOf(t, err); e.Status != 403 || !strings.Contains(e.Message, "only reads") {
+		t.Fatalf("a write sent as a read: %+v", e)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("a refused write landed: %v rows", n)
+	}
+}

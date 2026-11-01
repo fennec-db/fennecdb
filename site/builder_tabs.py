@@ -97,7 +97,10 @@ def case(name):
         raise SystemExit(f"builder tabs: no case {name!r} in integrations/builder-golden.json")
     if "error" in c:
         raise SystemExit(f"builder tabs: case {name!r} is a refusal, not a statement")
-    if c["steps"][-1]["op"] not in ENDPOINTS:
+    # A call's chain is `call` and `toCall`: its tab is the client's method,
+    # `db.call(...)`, which sends that text.
+    ends = ("toCall",) if c["steps"][0]["op"] == "call" else ENDPOINTS
+    if c["steps"][-1]["op"] not in ends:
         raise SystemExit(f"builder tabs: case {name!r} ends with {c['steps'][-1]['op']}, "
                          "and a tab shows a query an app runs: end it at an endpoint (rows, count, ...)")
     return c
@@ -269,6 +272,9 @@ class Lang:
 
     name = code = ""
     indent = "    "
+    # What ends a call's last argument when they go one to a line: Go's
+    # lists need a comma, Swift's and C#'s take none.
+    TRAILING = ""
     # Where the code's names come from, its block's label: the import, with
     # the helpers called where a language imports each by name.
     IMPORT, HELPERS = "", ()
@@ -281,6 +287,8 @@ class Lang:
 
     def render(self, c):
         steps = c["steps"]
+        if steps[0]["op"] == "call":
+            return self.render_call(steps[0]["args"])
         calls = [self.start(steps[0]["args"][0])]
         for s in steps[1:]:
             a = s.get("args", [])
@@ -289,6 +297,20 @@ class Lang:
                 a = [x for e in a for x in (e if isinstance(e, list) else [e])]
             calls.append(self.step(s["op"], a))
         return self.layout(calls)
+
+    def render_call(self, a):
+        """`db.call(name, args, claims)`: the call's arguments as `call_args`
+        writes them, on one line, else one to a line."""
+        callee, args = self.call_args(a[0], a[1] if len(a) > 1 else None,
+                                      _opt(a, 2).get("claims"))
+        one = self.wrap(f"{callee}({', '.join(args)})")
+        if len(one) <= WIDTH and "\n" not in one:
+            return one
+        body = ",\n".join(self.indent + x for x in args) + self.TRAILING
+        return self.wrap(f"{callee}(\n{body}\n)")
+
+    def call_args(self, name, args, claims):
+        raise NotImplementedError
 
     def layout(self, calls):
         """One line if it fits; else a call a line, and a call too long for
@@ -416,6 +438,14 @@ class JS(Lang):
     def start(self, collection):
         return Call("db.from", [self.s(collection)])
 
+    def call_args(self, name, args, claims):
+        out = [self.s(name)]
+        if args is not None or claims is not None:
+            out.append(self.v(args))
+        if claims is not None:
+            out.append(self.obj({"claims": self.v(claims)}))
+        return "db.call", out
+
     def step(self, op, a):
         if op in ("select", "group"):
             return Call(op, [self.col(x) for x in a])
@@ -527,6 +557,14 @@ class Python(Lang):
     def start(self, collection):
         return Call("db.collection", [self.s(collection)])
 
+    def call_args(self, name, args, claims):
+        out = [self.s(name)]
+        if args is not None:
+            out.append(self.v(args))
+        if claims is not None:
+            out.append(f"claims={self.v(claims)}")
+        return "db.call", out
+
     def step(self, op, a):
         if op in ("select", "group"):
             return Call(op, [self.col(x) for x in a])
@@ -568,6 +606,7 @@ class Go(Lang):
     name, code = "Go", "go"
     IMPORT = 'import fennecdb "github.com/fennec-db/fennecdb/integrations/go"'
     indent = "\t"
+    TRAILING = ","
 
     def s(self, v):
         return quoted(v, '"')
@@ -698,6 +737,15 @@ class Go(Lang):
 
     def start(self, collection):
         return Call("db.From", [self.s(collection)])
+
+    def call_args(self, name, args, claims):
+        def params(x):
+            return "fennecdb.Params{" + ", ".join(f"{self.s(k)}: {self.v(e)}" for k, e in x.items()) + "}"
+
+        out = ["ctx", self.s(name), params(args) if args is not None else "nil"]
+        if claims is not None:
+            out.append(f"fennecdb.Claims({params(claims)})")
+        return "db.Call", out
 
     def step(self, op, a):
         if op in ("select", "group"):
@@ -876,6 +924,15 @@ class CSharp(Lang):
     def start(self, collection):
         return Call("db.From", [self.s(collection)])
 
+    def call_args(self, name, args, claims):
+        # A dictionary, not an anonymous type: `from` is a word of C#'s.
+        out = [self.s(name)]
+        if args is not None:
+            out.append(self.dict(args))
+        if claims is not None:
+            out.append(f"claims: {self.dict(claims)}")
+        return "db.CallAsync", out
+
     def step(self, op, a):
         if op in ("select", "group"):
             return Call(op.title(), [self.col(x) for x in a])
@@ -1039,6 +1096,14 @@ class Swift(Lang):
     def start(self, collection):
         return Call("db.from", [self.s(collection)])
 
+    def call_args(self, name, args, claims):
+        out = [self.s(name)]
+        if args is not None:
+            out.append(self.v(args))
+        if claims is not None:
+            out.append(f"claims: {self.v(claims)}")
+        return "db.call", out
+
     def step(self, op, a):
         if op in ("select", "group"):
             return Call(op, [self.col(x) for x in a])
@@ -1168,6 +1233,14 @@ class Kotlin(Lang):
     def start(self, collection):
         return Call("db.from", [self.s(collection)])
 
+    def call_args(self, name, args, claims):
+        out = [self.s(name)]
+        if args is not None:
+            out.append(self.v(args))
+        if claims is not None:
+            out.append(f"claims = {self.v(claims)}")
+        return "db.call", out
+
     def step(self, op, a):
         if op in ("select", "group"):
             return Call(op, [self.col(x) for x in a])
@@ -1289,6 +1362,14 @@ class Dart(Lang):
 
     def start(self, collection):
         return Call("db.from", [self.s(collection)])
+
+    def call_args(self, name, args, claims):
+        out = [self.s(name)]
+        if args is not None:
+            out.append(f"args: {self.v(args)}")
+        if claims is not None:
+            out.append(f"claims: {self.v(claims)}")
+        return "db.callStatement", out
 
     def step(self, op, a):
         if op == "select":
@@ -1690,6 +1771,13 @@ import Testing
             }}
         }}
 
+        @discardableResult
+        func call(_ name: String, _ args: (any FennecValue)? = nil, claims: (any FennecValue)? = nil) async throws -> Answer {{
+            let (text, params) = try Call.call(name, args, claims: claims).toCall()
+            await sent.record(text, params)
+            return .affected(0)
+        }}
+
         func sends(_ text: String, _ params: String) async throws {{
             let got = await sent.last
             #expect(got?.0 == text)
@@ -1744,6 +1832,11 @@ class DocsBuilderTest {{
             }}
         }}
 
+        suspend fun call(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Answer {{
+            sent = Call.of(name, args, claims).toCall()
+            return Answer.Affected(0)
+        }}
+
         fun sends(text: String, params: String) {{
             assertEquals(text, sent?.text)
             val got = Json.parse(Json.write(sent?.params))
@@ -1794,6 +1887,11 @@ class _Recording {{
           }}
         }});
       }});
+
+  Future<Answer> callStatement(String name, {{Object? args, Object? claims}}) async {{
+    sent = Call(name, args: args, claims: claims).toCall();
+    return Answer.of({{'kind': 'affected', 'count': 0}});
+  }}
 
   void sends(String text, String params) {{
     expect(sent?.text, text);

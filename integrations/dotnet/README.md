@@ -64,6 +64,36 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFennecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 
+### Named statements
+
+A statement defined once in the database (`create statement transfer(...) as begin ... end`) is called by name with
+typed arguments. `CallAsync` sends `call <name> $1` over `/query`, so the transport, the errors, the key and the wait
+are a statement's:
+
+```csharp
+var moved = await db.CallAsync("transfer", new { from = 1, to = 2, amount = 300 }, idempotencyKey: "xfer-7");
+var balance = moved.Rows![0].GetProperty("balance").GetInt64();   // the last statement of its body answers
+```
+
+`CallAsync(name, args, claims:, idempotencyKey:, wait:, read:, cancellationToken:)` returns an `ExecResult`: `Rows`
+where the body answers rows, `Affected` where it does not, `Seq`, and `Replayed` for an answer kept for its key.
+
+- `args` is an object of values by name -- a dictionary, an anonymous object, a record -- or null for a statement of
+  none; an empty object is still one argument. `claims` is the same, the call's `as`: the claims it is made with, for a
+  statement declaring them, which the server's token alone may say (a scoped token's are its own).
+- `read: true` says the statement only reads: on a client with `ReadsNearest` it goes to the read replica near the
+  client after the client's writes, and one that writes is refused there (403), never landed. Without it a call goes
+  home. `idempotencyKey` makes the call once; `wait` holds one whose body can be held, as `WithWait` does; the
+  `CancellationToken` and the client's `Timeout` bound it.
+- A refusal is a `FennecException`: 404 for no such statement (or one the token is not granted), 403 for a claim the
+  token lacks, 400 for an argument missing, extra or of another type, 412 for a `require` not met, its `Reason` the
+  statement's own words, 409 for a broken statement or a unique value taken.
+- `Query.Call(name, args, claims)` is the builder alone: `.ToCall()` returns the text and parameters, `call
+  transfer $1`, and sends nothing. The values are parameters; the name, the one thing written into the text, must be
+  ASCII letters, digits and `_`, a letter first, 59 bytes at most. A name that is not one, or arguments or claims
+  that are not an object of values by name (a list, a text), throw `FennecQueryException` with the JS builder's
+  message, before anything is sent.
+
 `dotnet test FennecDb.Tests` runs against `fennec-server` processes it starts (`cargo build -p fennec-server`, or
 `FENNEC_SERVER`), and the builder against every case of `integrations/builder-golden.json`.
 Full reference: https://fennecdb.com/docs/languages

@@ -351,6 +351,28 @@ class Fennec {
   /// The query builder over a collection: `db.from('todos').where('done', false).rows()`.
   Query from(String collection) => Query.from(collection).bind(run);
 
+  /// Calls the named statement [name] in this file: `call <name> $1` with
+  /// [args], a map of values by name, as `$1` -- [Call] makes the text, so
+  /// only the name is ever written into it -- and what the statement answers,
+  /// as [run] does: its rows, or how many it wrote. [claims] are the call's
+  /// `as`: the values a statement declaring `claims (sub text)` reads as
+  /// `$jwt.sub`, an app's signed-in user, held to the declared types as a
+  /// token's are; one missing, null or of another type is refused. There is
+  /// no `wait` here, nor a key: those are a server's ([FennecRemote.callStatement]).
+  /// A replica ([Fennec.openSynced]) holds its shapes and none of its server's
+  /// statements, and refuses a call: it goes to the server through
+  /// [Fennec.connect]. Named `callStatement` because a method named `call`
+  /// would make the database callable as a function.
+  ///
+  /// ```dart
+  /// await db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 300});
+  /// final mine = (await db.callStatement('history', claims: {'sub': user.id})).rows;
+  /// ```
+  Future<Answer> callStatement(String name, {Object? args, Object? claims}) async {
+    final s = Call(name, args: args, claims: claims).toCall();
+    return run(s.text, s.params);
+  }
+
   /// [run], the live queries' own runs not asking for a look.
   Future<Answer> runQuiet(String text, List<Object?> params, {required bool quiet}) async {
     if (_closed) throw FennecException(FennecCode.misuse, 'the database was closed');

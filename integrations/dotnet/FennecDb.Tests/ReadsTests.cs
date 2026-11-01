@@ -247,6 +247,48 @@ public sealed class ReadsTests
         Assert.Equal(10, db.Seq);
     }
 
+    /// <summary>A call goes near only as the caller says it only reads (<c>read: true</c>), after the client's writes,
+    /// and moves nothing of the client's; sent without, it goes home like any statement not known to read, with
+    /// the key and the wait it was given.</summary>
+    [Fact]
+    public async Task ACallIsSentNearOnlyWhenTheCallerSaysItReads()
+    {
+        var script = new Script(
+            (200, """{"affected":1}""", "12"),
+            (200, """[{"n":1}]""", "15"),
+            (200, """[{"n":1}]""", "16"),
+            (200, """[{"id":1}]""", "17"));
+        using var db = new FennecClient("http://script.invalid",
+            new() { HttpClient = new HttpClient(script), ReadsNearest = true });
+        await db.ExecAsync("put t {n: 1}");
+        var near = await db.CallAsync("history", new { n = 1 }, read: true);
+        Assert.Single(near.Rows!);
+        Assert.Equal(12, db.Seq);
+        await db.CallAsync("history", new { n = 1 });
+        var write = await db.CallAsync("note", new { n = 1 }, new { sub = "u" }, idempotencyKey: "k-1",
+            wait: TimeSpan.FromMilliseconds(500));
+        Assert.Equal(17, write.Seq);
+        var seen = script.Seen;
+        Assert.Equal("replica", seen[1]["fennec-read"]);
+        Assert.Equal("12", seen[1]["fennec-after"]);
+        Assert.Equal(H1, seen[1]["fennec-history"]);
+        Assert.False(seen[2].ContainsKey("fennec-read") || seen[2].ContainsKey("idempotency-key"));
+        Assert.Equal(("k-1", "500"), (seen[3]["idempotency-key"], seen[3]["fennec-wait"]));
+        Assert.False(seen[3].ContainsKey("fennec-read"));
+        // The key and the wait of a call are its own: the client's other requests carry neither.
+        await db.QueryAsync("get t count");
+        Assert.False(script.Seen[4].ContainsKey("idempotency-key") || script.Seen[4].ContainsKey("fennec-wait"));
+    }
+
+    [Fact]
+    public async Task ACallKnownToReadMarksNothingOnAClientReadingHome()
+    {
+        var script = new Script();
+        using var db = new FennecClient("http://script.invalid", new() { HttpClient = new HttpClient(script) });
+        await db.CallAsync("history", new { n = 1 }, read: true);
+        Assert.All(script.Seen, h => Assert.False(h.ContainsKey("fennec-read")));
+    }
+
     [Fact]
     public async Task AClientReadsHomeUnlessItAsksForNearest()
     {

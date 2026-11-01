@@ -107,6 +107,40 @@
             }
         }
 
+        /// `call`'s `read` is the mark every text the caller knows reads has:
+        /// a call that reads is answered by the replica near the app, after
+        /// the app's own writes -- shown by its answer while home cannot be
+        /// reached --, one that writes is refused there (403) and never
+        /// landed, and a call without `read` goes home unmarked.
+        @Test func aCallThatReadsGoesNearAndOneThatWritesIsRefusedThere() async throws {
+            let w = try await ReadReplicas.start("callnear")
+            defer { w.stop() }
+            let sent = Wire.Log(script: nil)
+            let db = connection(w.url, reads: .nearest, log: sent)
+            try await db.execute("create statement history() public as get notes select id, body order id")
+            try await db.execute("create statement add($body text) public as insert notes {body: $body} returning id")
+
+            #expect(try await db.call("add", ["body": "a"]).rows == [["id": 1]])
+            #expect(sent.last["fennec-read"] == nil && sent.last["fennec-after"] == nil)
+            let a = try #require(db.seq)
+            let near = try await db.call("history", read: true)
+            #expect(near.rows.compactMap { $0["body"]?.string } == ["a"])
+            #expect(sent.last["fennec-read"] == "replica" && sent.last["fennec-after"] == String(a))
+            _ = try await db.call("history")
+            #expect(sent.last["fennec-read"] == nil && sent.last["fennec-after"] == nil)
+
+            let marked = await refusal { try await db.call("add", ["body": "b"], read: true) }
+            #expect(marked?.status == 403)
+            #expect(sent.last["fennec-read"] == "replica")
+            #expect(try await db.call("history").rows.count == 1)
+
+            try await eventually("the read replica holds the note") { try await w.replicaCount() == 1 }
+            await w.eu1.kill()
+            #expect(try await db.call("history", read: true).rows.compactMap { $0["body"]?.string } == ["a"])
+            let homeless = await refusal { try await db.call("history") }
+            #expect(homeless?.status == 502)
+        }
+
         /// A connection reading home marks nothing, `asRead()` or not.
         @Test func aConnectionReadsHomeUnlessItAsksForNearest() async throws {
             let sent = Wire.Log(script: [])

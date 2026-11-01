@@ -336,6 +336,46 @@ class ReadsTest {
         }
     }
 
+    /**
+     * `call(..., read = true)` on a connection reading near is answered by
+     * the read replica near the app, after the connection's last write, home
+     * gone or not; a call that writes sent so is refused (403) there and
+     * lands nowhere, and one sent without it goes home, as every text not
+     * known to read does.
+     */
+    @Test
+    fun aReadCallGoesNearAndAWritingOneIsRefusedThere() = runBlocking {
+        val w = ReadReplicas.start()
+        val sent = Wire(w.near)
+        try {
+            val db = Fennec.connect("${sent.url}/t/acme", reads = FennecRemote.Reads.NEAREST)
+            db.execute("create statement history() public as get notes select body order id")
+            db.execute("create statement stamp() public as insert notes {body: 'z'} returning id")
+            // Without `read` a call goes home: unmarked, or it would be refused.
+            assertEquals(1, db.call("stamp").rows.size)
+            assertNull(sent.last["fennec-read"])
+            assertNull(sent.last["fennec-after"])
+            eventually("the read replica holds the write") { w.replicaCount() == 1L }
+
+            assertEquals(listOf("z"), db.call("history", read = true).rows.map { it.string("body") })
+            assertEquals("replica", sent.last["fennec-read"])
+            assertEquals("${db.seq}", sent.last["fennec-after"])
+            // A call that writes, sent as a read: refused, landed nowhere.
+            assertEquals(403, assertFailsWith<FennecException> { db.call("stamp", read = true) }.status)
+            assertEquals(1L, Fennec.connect("${w.near}/t/acme").from("notes").count())
+            assertEquals(1L, w.replicaCount())
+
+            // Home gone: the call that reads is still answered, by the replica; the one that writes is not.
+            w.eu1.kill()
+            assertEquals(listOf("z"), db.call("history", read = true).rows.map { it.string("body") })
+            assertEquals("replica", sent.last["fennec-read"])
+            assertEquals(502, assertFailsWith<FennecException> { db.call("stamp") }.status)
+        } finally {
+            sent.close()
+            w.stop()
+        }
+    }
+
     /** A connection reading home marks nothing, `asRead()` or not. */
     @Test
     fun aConnectionReadsHomeUnlessItAsksForNearest() = runBlocking {

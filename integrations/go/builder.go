@@ -23,6 +23,7 @@ package fennecdb
 // builder throws at the first.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1934,6 +1935,12 @@ func structDoc(v any) (Doc, error) {
 	if err != nil {
 		return nil, err
 	}
+	return docFromJSON(raw)
+}
+
+// docFromJSON reads a JSON object into a Doc, its keys in the order
+// written and its numbers as they were.
+func docFromJSON(raw []byte) (Doc, error) {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
 	if _, err := dec.Token(); err != nil {
@@ -2526,4 +2533,176 @@ func (b *Builder) Delete(ctx context.Context, options ...Opt) (Result, error) {
 		return Result{}, err
 	}
 	return b.exec(ctx, text, params)
+}
+
+// ------------------------------------------------------------------ calls
+
+// Params is an object of values by name: a call's arguments, or its claims.
+//
+//	db.Call(ctx, "transfer", fennecdb.Params{"from": 1, "to": 2, "amount": 300})
+type Params = map[string]any
+
+// Call is a call of a named statement, not sent: `call <name> $1` with the
+// arguments the one parameter, and `as $2` after them when claims are given.
+// NewCall makes one and ToCall its text and parameters; Client.Call makes
+// one and sends it. A *Call never changes once made, and the values it holds
+// are parameters, never the text -- the name is the one thing written into
+// it, which is why it is checked.
+type Call struct {
+	err    error
+	name   string
+	args   map[string]any // nil: none; an empty map is one empty argument
+	claims map[string]any
+}
+
+// CallOpt is an option of a call.
+type CallOpt func(*callOpts)
+
+type callOpts struct {
+	claims any
+}
+
+// Claims are the claims the call is made with (`as $n`): an object of
+// values by name -- Params, a struct with json tags, a Doc -- or nil for
+// none. Only the server's own token says them: a scoped token's claims are
+// its own.
+func Claims(claims any) CallOpt {
+	return func(o *callOpts) { o.claims = claims }
+}
+
+// statementName is the engine's rule for a named statement's name: ASCII
+// letters, digits and `_`, a letter first, at most 59 bytes -- a path
+// segment with nothing to escape.
+func statementName(name string) bool {
+	if name == "" || len(name) > 59 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		letter := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		if !(letter || i > 0 && (c == '_' || c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// NewCall is a call of the statement name with args, an object of values
+// by name -- Params, a struct with json tags, a Doc. nil is no arguments
+// (`call stamp`); an empty map is one empty argument (`call stamp $1`). The
+// values are parameters as an insert's are: a time.Time its ISO text, a
+// []float32 its numbers. A name or an object that is not one is refused as
+// the query builder's steps are: ToCall and Err tell, and nothing is sent.
+func NewCall(name string, args any, options ...CallOpt) *Call {
+	c := &Call{}
+	if !statementName(name) {
+		c.err = refuse("invalid statement name: %s", jsQuote(name))
+		return c
+	}
+	c.name = name
+	var o callOpts
+	for _, opt := range options {
+		opt(&o)
+	}
+	if c.args, c.err = callObject(args, "arguments"); c.err != nil {
+		return c
+	}
+	c.claims, c.err = callObject(o.claims, "claims")
+	return c
+}
+
+// callObject is an object of values by name as the parameter it goes as:
+// nil where there is none (nil, a nil map or pointer), a refusal for
+// anything that does not marshal to an object. A Doc, a map and a struct
+// are read as a document is.
+func callObject(v any, what string) (map[string]any, error) {
+	refused := refuse("a call's %s are an object of values by name", what)
+	if v == nil {
+		return nil, nil
+	}
+	var obj any
+	switch d := v.(type) {
+	case Doc:
+		doc, err := docOf(d)
+		if err != nil {
+			return nil, err
+		}
+		obj = doc
+	case map[string]any:
+		if d == nil {
+			return nil, nil
+		}
+		obj = d
+	default:
+		rv := reflect.ValueOf(v)
+		for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
+			if rv.IsNil() {
+				return nil, nil
+			}
+			rv = rv.Elem()
+		}
+		switch rv.Kind() {
+		case reflect.Map:
+			if rv.Type().Key().Kind() != reflect.String {
+				return nil, refused
+			}
+			if rv.IsNil() {
+				return nil, nil
+			}
+			m := make(map[string]any, rv.Len())
+			for it := rv.MapRange(); it.Next(); {
+				m[it.Key().String()] = it.Value().Interface()
+			}
+			obj = m
+		case reflect.Struct:
+			// As encoding/json writes it, which a type's own MarshalJSON
+			// may make anything of.
+			raw, err := json.Marshal(rv.Interface())
+			if err != nil {
+				return nil, err
+			}
+			if raw = bytes.TrimSpace(raw); len(raw) == 0 || raw[0] != '{' {
+				return nil, refused
+			}
+			doc, err := docFromJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			obj = doc
+		default:
+			return nil, refused
+		}
+	}
+	out, _ := normalize(obj).(map[string]any)
+	if out == nil {
+		return nil, refused
+	}
+	return out, nil
+}
+
+// Name is the statement's name; "" for a call that was refused.
+func (c *Call) Name() string { return c.name }
+
+// Err is the first thing NewCall refused, or nil.
+func (c *Call) Err() error { return c.err }
+
+// ToCall is the call's FennecQL and its parameters, not sent: `call stamp`,
+// `call transfer $1`, `call mine $1 as $2`, and `call stamp as $1` with
+// claims alone. The parameters are fresh each time, so a caller changing
+// them changes nothing of the call.
+func (c *Call) ToCall() (string, []any, error) {
+	if c.err != nil {
+		return "", nil, c.err
+	}
+	params := []any{}
+	text := "call " + c.name
+	if c.args != nil {
+		params = append(params, normalize(c.args))
+		text += fmt.Sprintf(" $%d", len(params))
+	}
+	if c.claims != nil {
+		params = append(params, normalize(c.claims))
+		text += fmt.Sprintf(" as $%d", len(params))
+	}
+	return text, params, nil
 }

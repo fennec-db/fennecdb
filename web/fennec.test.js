@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { from, or, not, raw, inc, expr, distance, Query, FennecError } from './fennec.js';
+import { from, call, Call, or, not, raw, inc, expr, distance, Query, FennecError } from './fennec.js';
 
 const q = () => from('articles');
 
@@ -614,6 +614,11 @@ test('named statements are a server\'s: the module refuses a definition and a ca
   assert.throws(() => db.run('get t where a = $_'), /expected a number after `\$`/);
   assert.throws(() => db.run('CREATE FUNCTION f() RETURNS int'), (e) => !/named statement/.test(e.message));
   assert.throws(() => db.run('describe statement s'), (e) => !/named statement/.test(e.message));
+  // The method sends the same text, and the module refuses it in the same
+  // words; `wait` is a server's before that.
+  await assert.rejects(db.call('s', { a: 1 }), theirs);
+  await assert.rejects(db.call('s', null, { wait: 100 }), /wait holds a write at a server/);
+  await assert.rejects(db.call('s; get t'), /invalid statement name/);
   // Their words reserve nothing: each is SQL's alias still.
   assert.deepEqual(db.run('select a from t call').rows, []);
   assert.deepEqual(db.run('select a statements from t').rows, []);
@@ -1782,6 +1787,85 @@ test('the HTTP transport sends the text the builder generated', async () => {
       query: 'get articles select title where year >= $1 near embed $2 limit $3',
       params: [2024, [1, 2], 5],
     });
+  } finally {
+    s.close();
+  }
+});
+
+// A named statement's call: `call <name> $1`, the arguments the one
+// parameter; the builder's text is held to the golden file, this holds what
+// the client does with it.
+test('a call sends call <name> $1 over /query, its options as run takes them', async () => {
+  const s = await stub((req) => (req.body.query.startsWith('call stamp') ? [200, { affected: 1 }] : [200, [{ id: 1 }]]));
+  try {
+    const db = connect(s.url);
+    assert.deepEqual(await db.call('transfer', { from: 1, to: 2, amount: 300 }), { rows: [{ id: 1 }] });
+    assert.equal(s.seen[0].url, '/query');
+    assert.deepEqual(s.seen[0].body, { query: 'call transfer $1', params: [{ from: 1, to: 2, amount: 300 }] });
+    assert.equal(s.seen[0].headers['idempotency-key'], undefined);
+    assert.equal(s.seen[0].headers['fennec-read'], undefined);
+
+    // No arguments, claims, and the options of `run`: a key, a wait.
+    const w = await db.call('stamp', undefined, { idempotencyKey: 'k1', wait: 250, claims: { sub: 'alice' } });
+    assert.equal(w.kind, 'affected');
+    assert.deepEqual(s.seen[1].body, { query: 'call stamp as $1', params: [{ sub: 'alice' }] });
+    assert.equal(s.seen[1].headers['idempotency-key'], 'k1');
+    assert.equal(s.seen[1].headers['fennec-wait'], '250');
+    // The client's own key is a call's too.
+    await db.withIdempotencyKey('k2').call('stamp');
+    assert.equal(s.seen[2].headers['idempotency-key'], 'k2');
+    assert.deepEqual(s.seen[2].body, { query: 'call stamp', params: [] });
+
+    // Values are parameters, never text; a name is held to the engine's rule
+    // before anything is sent.
+    await db.call('since', { at: new Date('2026-09-19T12:34:56.789Z'), embed: new Float32Array([0.5, 1]) });
+    assert.deepEqual(s.seen[3].body.params, [{ at: '2026-09-19T12:34:56.789Z', embed: [0.5, 1] }]);
+    await assert.rejects(db.call('stamp; del docs'), /invalid statement name/);
+    await assert.rejects(db.call('stamp', [1]), /an object of values by name/);
+    assert.equal(s.seen.length, 4);
+
+    // A call is a batch's statement as a query is, for the server's token.
+    const { statementOf } = await import('./builder.js');
+    assert.deepEqual(statementOf(call('mine', { limit: 1 }), 0), ['call mine $1', [{ limit: 1 }]]);
+    assert.ok(call('stamp') instanceof Call);
+  } finally {
+    s.close();
+  }
+});
+
+test('a call marked read goes near on a client reading near, and home otherwise', async () => {
+  const s = await stub(() => [200, [{ n: 1 }]]);
+  try {
+    const near = connect(s.url, { reads: 'nearest' });
+    await near.call('history', { id: 1 }, { read: true });
+    assert.equal(s.seen[0].headers['fennec-read'], 'replica');
+    // Not marked: home, as every statement not known to read is.
+    await near.call('history', { id: 1 });
+    assert.equal(s.seen[1].headers['fennec-read'], undefined);
+    // A client reading home sends no mark either way.
+    await connect(s.url).call('history', { id: 1 }, { read: true });
+    assert.equal(s.seen[2].headers['fennec-read'], undefined);
+  } finally {
+    s.close();
+  }
+});
+
+test('a call refused is a FennecError with the status and the statement\'s reason', async () => {
+  const bodies = {
+    transfer: [412, { error: 'unmet: `set accounts` wrote 0 rows, and requires 1 (`insufficient funds`)', at: 1, reason: 'insufficient funds' }],
+    ghost: [404, { error: 'no statement `ghost`' }],
+    mine: [403, { error: 'the claim `sub` is missing' }],
+  };
+  const s = await stub((req) => bodies[req.body.query.split(' ')[1]]);
+  try {
+    const db = connect(s.url);
+    await assert.rejects(db.call('transfer', { from: 1, to: 2, amount: 300 }), (e) => {
+      assert.ok(e instanceof FennecError);
+      assert.deepEqual([e.status, e.at, e.reason], [412, 1, 'insufficient funds']);
+      return true;
+    });
+    await assert.rejects(db.call('ghost'), (e) => e instanceof FennecError && e.status === 404);
+    await assert.rejects(db.call('mine'), (e) => e instanceof FennecError && e.status === 403 && e.reason === undefined);
   } finally {
     s.close();
   }

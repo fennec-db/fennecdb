@@ -145,9 +145,28 @@ import Testing
         func record(_ text: String, _ params: [Value]) { sent = (text, params) }
     }
 
+    /// A chain that starts with `call`: the name, the arguments (null or
+    /// none: no arguments), `{claims}`; its one statement `toCall`. A list
+    /// or a text as the arguments is a `Value` the builder refuses.
+    static func calls(_ steps: [Value]) throws -> (String?, [Value]?, String?) {
+        let a = steps[0]["args"]?.array ?? []
+        let call = try Call.call(
+            a[0].string!, a.count > 1 ? value(a[1]) : nil, claims: opt(a, 2, "claims").map(value))
+        for s in steps.dropFirst() {
+            guard s["op"]?.string == "toCall" else {
+                Issue.record("no call step \(s["op"]?.string ?? "")")
+                continue
+            }
+            let made = try call.toCall()
+            return (made.text, made.params, nil)
+        }
+        return (nil, nil, "a chain ends with a statement")
+    }
+
     static func run(_ steps: [Value]) async -> (String?, [Value]?, String?) {
         let recorder = Recorder()
         do {
+            if steps[0]["op"]?.string == "call" { return try calls(steps) }
             var q = try Query.from(steps[0]["args"]![0]!.string!).bind { text, params in
                 await recorder.record(text, params)
                 if text.hasPrefix("put ") || text.hasPrefix("set ") || text.hasPrefix("del ") { return .affected(0) }

@@ -173,6 +173,65 @@ class FennecRemote private constructor(
         )
     }
 
+    /**
+     * Calls the named statement [name] on the server with [args], a map of
+     * values by name: the builder's `call <name> $1` ([Call.toCall]) through
+     * [runList], so the transport, the errors, the key and the wait are a
+     * text's. The answer is a text's too: the rows of a statement ending in a
+     * `get` or a `returning`, or how many documents it wrote.
+     *
+     * [claims] are what the server's token says the call is made as (`as
+     * $2`); a scoped token's own are its token's, and it may not say them
+     * (403). [idempotencyKey] makes a call that writes run once however often
+     * it is sent, as [runList]'s does; [wait] holds a call that writes
+     * nothing for at most that many milliseconds, as [withWait]'s copy does
+     * (30 000 at most). [read] marks a call known to only read, as [asRead]
+     * does: on a connection reading near it is answered by the read replica
+     * near the app, and one that writes is refused (403), never landed;
+     * without it a call goes home, as every text not known to read does.
+     * A refusal is a [FennecException]: status 404 no such statement or not
+     * granted, 403 a claim missing, 400 an argument missing, extra or of
+     * another type, 409 a broken statement or a unique value taken, and 412 a
+     * `require` not met with its [FennecException.reason].
+     *
+     * ```kotlin
+     * db.call("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300), idempotencyKey = "t-9")
+     * val mine = db.call("history", read = true).rows
+     * ```
+     */
+    suspend fun call(
+        name: String,
+        args: Map<String, Any?>? = null,
+        claims: Map<String, Any?>? = null,
+        idempotencyKey: String? = null,
+        wait: Long? = null,
+        read: Boolean = false,
+    ): Answer {
+        val st = Call.of(name, args, claims).toCall()
+        return asCalled(wait, read).runList(st.text, st.params, idempotencyKey)
+    }
+
+    /** [call], on the calling thread. */
+    @JvmOverloads
+    fun callBlocking(
+        name: String,
+        args: Map<String, Any?>? = null,
+        claims: Map<String, Any?>? = null,
+        idempotencyKey: String? = null,
+        wait: Long? = null,
+        read: Boolean = false,
+    ): Answer {
+        val st = Call.of(name, args, claims).toCall()
+        return asCalled(wait, read).send(st.text, st.params, idempotencyKey)
+    }
+
+    /** This connection, or a copy of it that waits and reads as a call asks. */
+    private fun asCalled(wait: Long?, read: Boolean): FennecRemote {
+        var c = if (read) asRead() else this
+        if (wait != null) c = c.withWait(wait)
+        return c
+    }
+
     /** [run], on the calling thread. */
     fun runBlocking(text: String, vararg params: Any?): Answer = send(text, params.toList(), null)
 

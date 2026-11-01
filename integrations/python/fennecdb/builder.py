@@ -19,6 +19,11 @@ be kept and branched from. `to_fennecql()` is the text and its parameters,
 for logging or another transport; `rows()`, `first()`, `count()` and
 `explain()` send it through the client the query came from, and on an
 `AsyncClient` they are awaited.
+
+`call` is a named statement's: `call("transfer", {"from": 1, "to": 2,
+"amount": 300}).to_call()` is `("call transfer $1", [{...}])`, the
+arguments one parameter and the name -- the one thing written into the
+text -- checked.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from typing import Any, Iterable, Mapping, NamedTuple, Sequence, TypeVar
 
 __all__ = [
     "AsyncQuery",
+    "Call",
     "Computed",
     "Cond",
     "FacetCount",
@@ -40,6 +46,7 @@ __all__ = [
     "Rows",
     "and_",
     "bucket",
+    "call",
     "collection",
     "count_distinct",
     "distance",
@@ -1565,4 +1572,77 @@ def _reason_clause(reason: Any) -> str:
 def collection(name: str) -> Query:
     """A query bound to no client: for its text alone, `to_fennecql()`."""
     return Query(name)
+
+
+# A named statement's name: ASCII letters, digits and `_`, starting with a
+# letter, at most 59 bytes -- the engine's rule (`named::valid_name`), a path
+# segment with nothing to escape. The name is the one thing of a call written
+# into its text, so this is its injection boundary. `fullmatch`, not `$`,
+# which also matches before a trailing newline.
+_STATEMENT = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,58}")
+
+
+def _given(v: Any, what: str) -> Mapping | None:
+    """A call's arguments or claims: an object of values by name, or none."""
+    if v is None:
+        return None
+    if not isinstance(v, Mapping):
+        raise _err(f"a call's {what} are an object of values by name")
+    return v
+
+
+class Call:
+    """A call of a named statement: `call <name> $1`, its arguments the one
+    parameter -- a mapping, by name -- and `claims=` after them `as $2`, the
+    claims the server's token makes the call with (a scoped token's own are
+    its token's, and it may not say them). Bound to no collection or client,
+    so `call(...)` stands beside `collection(...)`:
+
+        call("transfer", {"from": 1, "to": 2, "amount": 300}).to_call()
+        # ("call transfer $1", [{"from": 1, "to": 2, "amount": 300}])
+
+    `db.call(name, args)` runs it. No arguments is a statement of none --
+    `call stamp` -- and an empty mapping is still one argument. The values
+    are parameters as a query's are -- a `datetime` its ISO text, an
+    `array.array` its numbers -- and never the text. Immutable."""
+
+    __slots__ = ("_name", "_args", "_claims")
+
+    def __init__(self, name: str, args: Mapping | None = None, *, claims: Mapping | None = None) -> None:
+        if not isinstance(name, str) or not _STATEMENT.fullmatch(name):
+            raise _err(f"invalid statement name: {_quote(name)}")
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_args", _given(args, "arguments"))
+        object.__setattr__(self, "_claims", _given(claims, "claims"))
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        raise AttributeError("a Call is immutable")
+
+    def __delattr__(self, key: str) -> None:
+        raise AttributeError("a Call is immutable")
+
+    def __repr__(self) -> str:
+        return f"Call({self._name!r})"
+
+    @property
+    def name(self) -> str:
+        """The statement's name."""
+        return self._name
+
+    def to_call(self) -> tuple[str, list]:
+        """The call's FennecQL and its parameters, `(text, params)`: what
+        `Client.query` and a `batch` take."""
+        bind = _Binder()
+        sql = f"call {self._name}"
+        if self._args is not None:
+            sql += f" {bind(self._args, 'argument')}"
+        if self._claims is not None:
+            sql += f" as {bind(self._claims, 'claim')}"
+        return sql, bind.params
+
+
+def call(name: str, args: Mapping | None = None, *, claims: Mapping | None = None) -> Call:
+    """A call of the named statement `name`, for its text alone,
+    `to_call()`; `Client.call` sends one."""
+    return Call(name, args, claims=claims)
 

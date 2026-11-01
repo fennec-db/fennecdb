@@ -368,6 +368,51 @@ void main() {
     }
   });
 
+  // A call is a text, so it goes near as one does: only when the caller says
+  // it reads (`read: true`), after the connection's writes, and answered by
+  // the replica; without it, home -- a call that only reads included. One that
+  // writes, sent as a read, is refused there and lands nothing.
+  test('a call that reads goes near with read, one that writes is refused there', () async {
+    final w = await ReadReplicas.start();
+    final sent = await Wire.start(target: w.near);
+    final db = Fennec.connect('${sent.url}/t/acme', reads: Reads.nearest);
+    try {
+      // A definition is a write: home, unmarked.
+      await db.execute(r'create statement history() public as get notes select body order id');
+      await db.execute(r'create statement note($body text) public as insert notes {body: $body} returning id');
+      expect(sent.last['fennec-read'], isNull);
+      expect((await db.callStatement('note', args: {'body': 'a'})).rows.single['id'], isNotNull);
+      expect(sent.last['fennec-read'], isNull);
+      expect(sent.last['fennec-after'], isNull);
+      final a = db.seq!;
+
+      // Without `read` a call that only reads goes home too.
+      expect([for (final r in (await db.callStatement('history')).rows) r['body']], ['a']);
+      expect(sent.last['fennec-read'], isNull);
+      // With it, the replica near answers, after the write it must hold.
+      expect([for (final r in (await db.callStatement('history', read: true)).rows) r['body']], ['a']);
+      expect(sent.last['fennec-read'], 'replica');
+      expect(sent.last['fennec-after'], '$a');
+      expect(sent.last['idempotency-key'], isNull);
+
+      // One that writes, sent as a read, is refused there: never landed.
+      expect(await status(() => db.callStatement('note', args: {'body': 'x'}, read: true)), 403);
+      expect(sent.last['fennec-read'], 'replica');
+      await eventually('the read replica holds the write', () async => await w.replicaCount() == 1);
+      expect((await db.from('notes').count()), 1);
+      expect([for (final r in (await db.callStatement('history', read: true)).rows) r['body']], ['a']);
+
+      // The same call written without the mark lands, at home.
+      expect((await db.callStatement('note', args: {'body': 'b'})).rows.single['id'], isNotNull);
+      expect(sent.last['fennec-read'], isNull);
+      expect(await db.from('notes').count(), 2);
+    } finally {
+      db.close();
+      await sent.close();
+      await w.stop();
+    }
+  });
+
   // A connection reading home marks nothing, `asRead()` or not.
   test('a connection reads home unless it asks for nearest', () async {
     final sent = await Wire.start(script: []);

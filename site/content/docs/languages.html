@@ -602,6 +602,66 @@ options (<code>require=1, reason="..."</code> in Python,
 <code>reason</code> in Dart.</p>
 </details>
 
+<h2 id="named-statements">Named statements</h2>
+
+<p>A <a href="fennecql.html#named-statements">named statement</a> the server
+holds — <code>create statement transfer(...)</code>, defined with the server's
+token — is called by name, its arguments an object by name. Every SDK has the
+call as a method and as a builder: the builder's <code>call(name, args)</code>
+makes the text and parameters without sending them (<code>toCall()</code>,
+<code>to_call()</code>, <code>ToCall()</code>), the method sends them as
+<code>/query</code> sends any text, so the transport, the errors, the
+<code>Idempotency-Key</code> and a wait are a text's. The arguments, and the
+claims after them, are parameters; only the name is written into the text, and
+it is checked against the engine's rule — ASCII letters, digits and
+<code>_</code>, a letter first, 59 bytes at most — before anything is sent.
+All seven make the same text and refuse the same names with the same message,
+held to the golden file as the builder is.</p>
+
+{{builder "docs: a transfer called" "docs: a statement called for a signed-in user" "docs: a statement of no arguments called"}}
+
+<p>The answer is what the SDK's text method answers: the rows of a body that
+ends in a <code>get</code> or says <code>returning</code>, otherwise how many
+rows it wrote. A statement of no arguments takes none; an empty object is
+still one argument. The options are the text method's, spelled as each
+language spells them:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Language</th><th>Method</th><th>Options</th></tr></thead>
+<tbody>
+<tr><td>JavaScript</td><td><code>db.call(name, args, opts)</code></td><td><code>{ claims, idempotencyKey, wait, signal, read }</code></td></tr>
+<tr><td>Python</td><td><code>db.call(name, args=None, ...)</code>, async the same</td><td><code>claims=</code>, <code>idempotency_key=</code>, <code>wait=</code>, <code>read=True</code></td></tr>
+<tr><td>Go</td><td><code>db.Call(ctx, name, args, opts...)</code></td><td><code>fennecdb.Claims(...)</code>; <code>db.IdempotencyKey(k)</code>, <code>db.Wait(d)</code> and <code>db.Read()</code> make the copy that calls; <code>ctx</code> bounds it</td></tr>
+<tr><td>.NET</td><td><code>await db.CallAsync(name, args, ...)</code></td><td><code>claims:</code>, <code>idempotencyKey:</code>, <code>wait:</code>, <code>read:</code>, a <code>CancellationToken</code></td></tr>
+<tr><td>Swift</td><td><code>try await db.call(name, args, ...)</code></td><td><code>claims:</code>, <code>idempotencyKey:</code>, <code>wait:</code>, <code>read:</code></td></tr>
+<tr><td>Kotlin</td><td><code>db.call(name, args, ...)</code> (suspend)</td><td><code>claims</code>, <code>idempotencyKey</code>, <code>wait</code>, <code>read</code></td></tr>
+<tr><td>Dart</td><td><code>await db.callStatement(name, args: ...)</code></td><td><code>claims:</code>, <code>idempotencyKey:</code>, <code>wait:</code>, <code>read:</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b><code>claims</code> is <code>as {…}</code>,</b> the claims a statement
+    declares, for the server's token alone: a scoped token's own come from
+    the token, and one that says them is refused (403).</li>
+  <li><b><code>read</code> marks a statement that only reads,</b> as the
+    text method's read mark does: on a client reading near, a read replica
+    near it answers (<a href="sharding-read-replicas.html">read
+    replicas</a>); a statement that writes is refused there (403), never
+    landed. Without it a call goes home, as every text not known to read
+    does.</li>
+  <li><b>A refusal is the SDK's usual error,</b> with the call's status —
+    404 no such statement or none the token may call, 403 a claim missing,
+    400 an argument missing, extra or of another type, 409 a broken
+    statement or a value taken, 412 a <code>require</code> not met — and the
+    <code>reason</code> the <code>require</code> gave.</li>
+  <li><b>Not in a synced database:</b> a replica holds its shapes' rows, not
+    the server's statements, so it refuses <code>call</code> (<a
+    href="sync.html#limits">Sync</a>); call the server through the HTTP
+    client, and what the call wrote comes back through the shapes.</li>
+</ul>
+
 <h2 id="http">From the shell</h2>
 
 <p>The same request from <code>curl</code>:</p>

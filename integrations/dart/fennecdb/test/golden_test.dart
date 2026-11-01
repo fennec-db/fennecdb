@@ -131,8 +131,29 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       _ => throw StateError('no builder step $op'),
     };
 
+/// The statement a chain of a call makes, or the builder's refusal: the
+/// chain is `call` and `toCall`, which no query is bound to.
+(String?, List<Object?>?, String?) runCall(List steps) {
+  try {
+    final a = (steps[0] as Map)['args'] as List;
+    final claims = opt(a, 2, 'claims');
+    final call = Call(a[0] as String, args: a.length > 1 ? value(a[1]) : null, claims: value(claims));
+    for (final s in steps.skip(1).cast<Map>()) {
+      if (s['op'] == 'toCall') {
+        final made = call.toCall();
+        return (made.text, made.params, null);
+      }
+      throw StateError('no builder step ${s['op']} on a call');
+    }
+    return (null, null, 'a chain ends with a statement');
+  } on FennecException catch (e) {
+    return (null, null, e.message);
+  }
+}
+
 /// The statement a chain makes, or the builder's refusal.
 Future<(String?, List<Object?>?, String?)> run(List steps) async {
+  if ((steps[0] as Map)['op'] == 'call') return runCall(steps);
   ({String text, List<Object?> params})? sent;
   try {
     var q = Query.from(((steps[0] as Map)['args'] as List)[0] as String).bind((text, params) async {

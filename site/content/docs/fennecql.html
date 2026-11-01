@@ -403,12 +403,27 @@ archivers, replicas and standbys, the nodes a move or a restore may put it
 on, and the routers: a binary from before refuses the record a definition
 writes, and stops there (<a href="/docs/replication">Replication</a>).</p>
 
-<p>Not built yet: a <code>call</code> method in the SDKs, a call answered
-by a replica, a read-only server or a marked read, the studio's pages for
-statements and MCP tools for them (MCP's <code>write</code> refuses a
-<code>call</code>). A <a href="sync.html#limits">sync replica</a> refuses
-<code>call</code>, <code>create statement</code> and <code>drop
-statement</code>.</p>
+<p>Every SDK has a <code>call</code> method, Dart's <code>callStatement</code>,
+which sends <code>call transfer $1</code> with the arguments as the one
+parameter — a value is never text, and the name is checked against the rule
+above — and the claims after them, <code>as $2</code>, for the server's token.
+Each call below is what an SDK sends for the statement beside it:</p>
+
+{{builder "docs: a transfer called" "docs: a statement called for a signed-in user"}}
+<pre data-lang="fennecql">call transfer {from: 1, to: 2, amount: 300}
+call history {account: 1} as {sub: "alice"}</pre>
+
+<p>A <code>read</code> option marks a statement that only reads, which a client
+reading near has answered by a read replica (a statement that writes is
+refused there, 403, never landed); without it a call goes home. A refusal is
+the SDK's error with the call's status and, for a <code>require … else
+'…'</code>, its <code>reason</code> (<a href="languages.html#named-statements">Your
+language</a>, <a href="mobile.html#named-statements">Mobile</a>). Not built
+yet: the studio's pages for statements and MCP tools for them (MCP's
+<code>write</code> refuses a <code>call</code>). A <a
+href="sync.html#limits">sync replica</a> refuses <code>call</code>,
+<code>create statement</code> and <code>drop statement</code>: its app calls
+the server through its HTTP client.</p>
 
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a

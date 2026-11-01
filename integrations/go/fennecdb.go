@@ -403,8 +403,12 @@ type Result struct {
 	Message  string `json:"message"`
 	// Rows are what a write with returning answered: the rows it wrote, an
 	// update's as written and a delete's as they were, Affected their
-	// number. Nil for any other write.
+	// number. Nil for any other write. A Call answers the rows its last
+	// statement read, or wrote with returning, here too.
 	Rows []Row `json:"-"`
+	// Facets are what a facet clause of a Call's last statement counted;
+	// nil for any other answer.
+	Facets Facets `json:"-"`
 	// Seq is the change the write left the database at (Fennec-Seq): what
 	// After takes on a replica. 0 for an answer replayed for its key.
 	Seq uint64 `json:"-"`
@@ -443,8 +447,57 @@ func resultOf(raw []byte) (Result, error) {
 		r.Rows, r.Affected = rows, int64(len(rows))
 		return r, nil
 	}
+	// A read that asked for facets answers its rows and their counts.
+	if rows, facets, err := split(raw); err == nil && facets != nil {
+		var out []Row
+		if err := json.Unmarshal(rows, &out); err != nil {
+			return r, err
+		}
+		if out == nil {
+			out = []Row{}
+		}
+		r.Rows, r.Facets, r.Affected = out, facets, int64(len(out))
+		return r, nil
+	}
 	err := json.Unmarshal(raw, &r)
 	return r, err
+}
+
+// Call runs the named statement name with args, an object of values by
+// name -- Params, a struct with json tags, a Doc; nil is none -- and hands
+// back its answer as Exec does: the rows its last statement read, or wrote
+// with returning, in Result.Rows, or what it wrote in Result.Affected. The
+// text sent is `call <name> $1`, the arguments a parameter, over /query: the
+// transport, the errors, IdempotencyKey, Wait and the context are those of
+// every statement, and a refusal is an *Error -- 404 for no such statement
+// or one not granted, 403 for a claim the token lacks, 400 for an argument
+// missing, extra or of another type, 412 for a Require not met, its Reason
+// the statement's own.
+//
+//	r, err := db.IdempotencyKey("xfer-7").Call(ctx, "transfer",
+//		fennecdb.Params{"from": 1, "to": 2, "amount": 300})
+//
+// Through db.Read() a statement that only reads goes near on a client made
+// WithReadsNearest, after this client's writes -- one that writes is
+// refused there (403), never landed. Claims(...) are `as {...}`, the claims
+// the call is made with: the server's own token may say them, a scoped
+// token's are its own.
+func (c *Client) Call(ctx context.Context, name string, args any, options ...CallOpt) (Result, error) {
+	text, params, err := NewCall(name, args, options...).ToCall()
+	if err != nil {
+		return Result{}, err
+	}
+	raw, h, err := c.query(ctx, text, params)
+	if err != nil {
+		return Result{}, err
+	}
+	r, err := resultOf(raw)
+	if err != nil {
+		return Result{}, fmt.Errorf("fennecdb: a call answered %q", raw)
+	}
+	r.Seq = h.seq
+	r.Replayed = h.replayed
+	return r, nil
 }
 
 // Statement is one line of a Batch.

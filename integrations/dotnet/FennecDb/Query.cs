@@ -694,6 +694,12 @@ public sealed class Query
     /// <summary>A query bound to no client: for its text alone, <see cref="ToFennecQL"/>.</summary>
     public static Query From(string collection) => new(collection, null);
 
+    /// <summary>A call of a named statement, bound to no collection or client: <c>Query.Call("transfer", new {
+    /// from = 1, to = 2, amount = 300 }).ToCall()</c> is <c>call transfer $1</c> and its one parameter.
+    /// <paramref name="claims"/> are the call's <c>as</c>, the claims the server's token makes it with. See
+    /// <see cref="FennecDb.Call"/>; <see cref="FennecClient.CallAsync"/> runs one.</summary>
+    public static Call Call(string name, object? args = null, object? claims = null) => new(name, args, claims);
+
     /// <summary>The collection the query is over.</summary>
     public string Collection => _s.Collection;
 

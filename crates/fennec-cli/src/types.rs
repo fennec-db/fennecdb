@@ -7,6 +7,18 @@
 //! ```text
 //! fennec types data.fennec > web/fennec-schema.d.ts
 //! ```
+//!
+//! A file's named statements are written beside its collections, in every
+//! language it writes (not `--schema`, not `--fennecql`): each statement's
+//! arguments, from its signature, and its answer as far as it is typed --
+//! a `get`'s `select` list or a write's `returning` over one collection,
+//! each plain field typed as its collection's row types it, `id` and a
+//! `count` integers, and every other item (computed, aggregated, renamed
+//! with `as`, a path into a json field, a `lookup`'s rows) the language's
+//! JSON value, until the engine infers the types of expressions. A body
+//! whose last statement writes with no `returning` answers the rows it
+//! wrote, a count: no row type, and the file says so. A broken statement of
+//! a database is named in a comment and typed no further.
 
 use fennec_core::prelude::*;
 use fennec_core::schema::{Quant, TextIndexSpec, VectorIndexSpec};
@@ -19,7 +31,8 @@ usage: fennec types <file.fennec | schema.fennecql> [-o <out>] [--name <name>]
        fennec types --fennecql <file> [-o <schema.fennecql>]
 
   <file>               a database, or a schema written as FennecQL (.fennecql):
-                       `create collection` and `create index` statements
+                       `create collection`, `create index` and `create
+                       statement` statements
   -o, --out <path>     write to a file (default: stdout)
       --name <name>    the generated type (default: FennecSchema), the Go
                        package (fennecschema) or the C# namespace (FennecSchema)
@@ -32,6 +45,11 @@ usage: fennec types <file.fennec | schema.fennecql> [-o <out>] [--name <name>]
                        (default: @fennecdb/web/schema)
       --fennecql       the schema as FennecQL, which every SDK opens a
                        database with (`schema`) and `fennec types` reads
+
+  Every form but --schema and --fennecql writes the file's named statements
+  too: each one's arguments and, where its answer is typed, a row of it
+  (`FennecStatements` in TypeScript, `<Name>Args` and `<Name>Row` in the
+  other languages).
 ";
 
 pub fn main(args: &[String]) -> i32 {
@@ -98,26 +116,32 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     };
 
-    let schemas = match read(path) {
-        Ok(s) => s,
+    let file = match read(path) {
+        Ok(f) => f,
         Err(e) => return fail(&e),
     };
+    let schemas = &file.schemas;
     let src = match (tables, fennecql, lang) {
-        (true, false, None) => render_tables(path, import, &schemas),
-        (false, true, None) => render_fennecql(path, &schemas),
+        (true, false, None) => render_tables(path, import, schemas),
+        (false, true, None) => render_fennecql(path, schemas),
         (false, false, Some(lang)) => {
             let default = match lang {
                 crate::langs::Lang::Go | crate::langs::Lang::Kotlin => "fennecschema",
                 _ => "FennecSchema",
             };
-            crate::langs::render(lang, path, if named { name } else { default }, &schemas)
+            crate::langs::render(lang, path, if named { name } else { default }, &file)
         }
-        (false, false, None) => render(path, name, &schemas),
+        (false, false, None) => render(path, name, &file),
         _ => return fail("one of --schema, --fennecql and --lang"),
     };
     match out {
         Some(p) => match std::fs::write(p, &src) {
-            Ok(()) => eprintln!("{p}  {} collections", schemas.len()),
+            Ok(()) => match file.statements.len() {
+                n if n > 0 && !tables && !fennecql => {
+                    eprintln!("{p}  {} collections, {n} statements", schemas.len())
+                }
+                _ => eprintln!("{p}  {} collections", schemas.len()),
+            },
             Err(e) => return fail(&format!("could not write {p}: {e}")),
         },
         None => print!("{src}"),
@@ -125,23 +149,291 @@ pub fn main(args: &[String]) -> i32 {
     0
 }
 
-/// The schemas a database holds, or a `.fennecql` file declares.
-pub fn read(path: &str) -> std::result::Result<Vec<Schema>, String> {
-    if path.ends_with(".fennecql") {
+/// What `fennec types` reads of a file: its collections, and its named
+/// statements by name, each as the generators write it.
+pub struct File {
+    pub schemas: Vec<Schema>,
+    pub statements: Vec<Named>,
+}
+
+/// A named statement as every generator writes it.
+pub struct Named {
+    pub name: String,
+    /// `comment '<text>'`: what the generated types say of it.
+    pub comment: Option<String>,
+    /// Its parameters in the signature's order: one with a default may be
+    /// left out or given as `null`, the others neither. Its claims are the
+    /// token's, or the embedder's `as`, and never an argument.
+    pub args: Vec<Member>,
+    /// The token's claims its body reads, each `` `name` type``: what a
+    /// caller's token, or an embedder's `as`, must hold.
+    pub claims: Vec<String>,
+    pub answer: Answer,
+}
+
+/// What a call of a statement answers, as far as it is typed.
+pub enum Answer {
+    /// Rows, each with these members, in the order the answer writes them.
+    Rows(Vec<Member>),
+    /// The number of rows its last statement wrote: a write with no
+    /// `returning`.
+    Wrote,
+    /// Rows no generator types yet, and why.
+    Untyped(String),
+    /// A database's statement that cannot be called, and why: named in a
+    /// comment and typed no further.
+    Broken(String),
+}
+
+/// A member of a generated type: an argument, or an item of an answer's
+/// row. One not `required` reads `null`, or may be left out or given as
+/// `null`; one whose type is not known is `json`, the language's JSON value.
+pub struct Member {
+    pub name: String,
+    pub ty: DataType,
+    pub required: bool,
+    /// The comment beside it: the schema's line, a parameter's type and
+    /// default, or why it is not typed; empty for `id`, which needs none.
+    pub note: String,
+}
+
+/// The collections a database holds and its named statements, or what a
+/// `.fennecql` file declares; the statements by name.
+pub fn read(path: &str) -> std::result::Result<File, String> {
+    let (schemas, mut statements) = if path.ends_with(".fennecql") {
         let text =
             std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
-        return fennec_ql::schema_text(&text).map_err(|e| format!("{path}: {e}"));
+        let (schemas, defs) =
+            fennec_ql::schema_statements(&text).map_err(|e| format!("{path}: {e}"))?;
+        let named: Vec<Named> = defs.iter().map(|d| typed(d, &schemas)).collect();
+        (schemas, named)
+    } else {
+        // The open reads each stored statement's text back into its tree
+        // with the reader installed: the shell's `main` installs it, and a
+        // test reading a file may not have.
+        fennec_ql::install();
+        // Read only: the file is often a running server's, and an open that
+        // may cut or create would write to it.
+        let db = fennec_core::fs::open_read_only(path)
+            .map_err(|e| format!("could not open {path}: {e}"))?;
+        let mut schemas = Vec::new();
+        for n in db.collection_names() {
+            let c = db.collection(&n).map_err(|e| format!("{n}: {e}"))?;
+            schemas.push(fennec_core::schema::Schema::clone(&c.schema));
+        }
+        let mut named = Vec::new();
+        for s in db.statements().iter() {
+            named.push(match (&s.broken, &s.tree) {
+                (None, Some(def)) => typed(def, &schemas),
+                (why, _) => Named {
+                    name: s.name.clone(),
+                    comment: None,
+                    args: Vec::new(),
+                    claims: Vec::new(),
+                    answer: Answer::Broken(match why {
+                        Some(why) => why.clone(),
+                        None => "its text was not read".into(),
+                    }),
+                },
+            });
+        }
+        (schemas, named)
+    };
+    statements.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(File {
+        schemas,
+        statements,
+    })
+}
+
+/// A definition's arguments and answer, typed against the collections it
+/// was defined over.
+fn typed(def: &fennec_core::named::Definition, schemas: &[Schema]) -> Named {
+    let args = def
+        .params
+        .iter()
+        .map(|p| {
+            let mut note = p.ty.to_string();
+            if let Some(d) = &p.default {
+                note.push_str(" = ");
+                fennec_core::json::value_into(&mut note, d);
+            }
+            Member {
+                name: p.name.clone(),
+                ty: p.ty.clone(),
+                required: p.default.is_none(),
+                note,
+            }
+        })
+        .collect();
+    Named {
+        name: def.name.clone(),
+        comment: def.comment.clone(),
+        args,
+        claims: def
+            .claims
+            .iter()
+            .map(|c| format!("`{}` {}", c.claim(), c.ty))
+            .collect(),
+        answer: answer_of(def, schemas),
     }
-    // Read only: the file is often a running server's, and an open that may
-    // cut or create would write to it.
-    let db =
-        fennec_core::fs::open_read_only(path).map_err(|e| format!("could not open {path}: {e}"))?;
-    let mut schemas = Vec::new();
-    for n in db.collection_names() {
-        let c = db.collection(&n).map_err(|e| format!("{n}: {e}"))?;
-        schemas.push(fennec_core::schema::Schema::clone(&c.schema));
+}
+
+/// What the last statement of a body answers, typed as far as it is: a
+/// plain field as its collection's row types it, `id` and a count as
+/// integers, and anything else as JSON -- the types `describe statement`
+/// and MCP's `outputSchema` give, since the engine infers no expression's
+/// type yet.
+fn answer_of(def: &fennec_core::named::Definition, schemas: &[Schema]) -> Answer {
+    use fennec_core::query::{Column, Expr, Statement};
+    let of = |c: &str| schemas.iter().find(|s| s.name == c);
+    let untyped = |name: &str, why: String| Member {
+        name: name.to_string(),
+        ty: DataType::Json,
+        required: false,
+        note: format!("not typed: {why}"),
+    };
+    let int = |name: &str, note: &str| Member {
+        name: name.to_string(),
+        ty: DataType::Int,
+        required: true,
+        note: note.to_string(),
+    };
+    // A name a list or `returning` writes as it is: `id`, a field, or a
+    // path into a json field.
+    let named = |s: Option<&Schema>, name: &str| -> Member {
+        if name == "id" {
+            return int("id", "");
+        }
+        match s.and_then(|s| s.field(name)) {
+            Some(f) => Member {
+                name: name.to_string(),
+                ty: f.ty.clone(),
+                required: f.required,
+                note: crate::langs::note(f),
+            },
+            None => match name.split_once('.') {
+                Some((f, _)) => untyped(name, format!("a path into `{f}`")),
+                None => untyped(name, "no field of its collection".into()),
+            },
+        }
+    };
+    // An item written as more than a field: a group's key that is a field
+    // as that field, a count an integer, and the rest JSON.
+    let column = |s: Option<&Schema>, c: &Column, aggregates: bool| -> Member {
+        match &c.expr {
+            Expr::Field(f) if *f == c.name => named(s, f),
+            Expr::Field(f) => untyped(&c.name, format!("`{f}` given another name")),
+            Expr::Call(f, _) if f == "count" => int(&c.name, "a count"),
+            _ if aggregates => untyped(&c.name, "an aggregate or a group's key".into()),
+            _ => untyped(&c.name, "an expression".into()),
+        }
+    };
+    match def.body.last() {
+        Some(Statement::Select(sel)) => {
+            if sel.flat.is_some() {
+                return Answer::Untyped("a join's rows".into());
+            }
+            let s = of(&sel.collection);
+            if sel.count {
+                return Answer::Rows(vec![int("count", "a count")]);
+            }
+            let mut out = Vec::new();
+            if !sel.aggregate.is_empty() {
+                out.extend(sel.aggregate.iter().map(|c| column(s, c, true)));
+            } else if let Some(list) = &sel.project {
+                for n in list {
+                    if sel.marks.iter().any(|m| m.label() == *n) {
+                        out.push(untyped(n, "a highlight or a snippet".into()));
+                    } else if let Some(c) = sel.computed.iter().find(|c| c.name == *n) {
+                        out.push(column(s, c, false));
+                    } else {
+                        out.push(named(s, n));
+                    }
+                }
+            } else {
+                return Answer::Untyped("a list naming no fields".into());
+            }
+            // The rows a `lookup` attached go under its collection's name.
+            if let Some(l) = &sel.lookup {
+                let why = format!("the rows of `{}` that `lookup` attached", l.collection);
+                out.push(untyped(&l.collection, why));
+            }
+            Answer::Rows(out)
+        }
+        Some(st) => {
+            let collection = match st {
+                Statement::Update { collection, .. }
+                | Statement::Delete { collection, .. }
+                | Statement::Put { collection, .. } => Some(collection.as_str()),
+                _ => None,
+            };
+            match (collection, st.pick().and_then(|p| p.returning.as_ref())) {
+                (Some(c), Some(Some(list))) => {
+                    Answer::Rows(list.iter().map(|n| named(of(c), n)).collect())
+                }
+                (Some(_), _) => Answer::Wrote,
+                (None, _) => Answer::Untyped("a statement answering no rows".into()),
+            }
+        }
+        None => Answer::Untyped("an empty body".into()),
     }
-    Ok(schemas)
+}
+
+/// A comment's text on one line, for a comment beside a type.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What a generated file says of a statement it writes no row type for.
+pub fn no_row(n: &Named) -> Option<String> {
+    match &n.answer {
+        Answer::Rows(_) => None,
+        Answer::Wrote => Some(format!(
+            "`{}` answers the number of rows it wrote: no row type.",
+            n.name
+        )),
+        Answer::Untyped(why) => Some(format!(
+            "`{}` answers rows not typed yet, {}: no row type.",
+            n.name,
+            one_line(why)
+        )),
+        Answer::Broken(why) => Some(format!(
+            "statement `{}` is broken, and no type is written for it: {}",
+            n.name,
+            one_line(why)
+        )),
+    }
+}
+
+/// The summary of a statement's arguments type, its comment after it, and
+/// the claims it reads, which are no argument.
+pub fn args_doc(n: &Named) -> String {
+    let mut doc = match &n.comment {
+        Some(c) => format!("The arguments of `{}`: {}", n.name, one_line(c)),
+        None => format!("The arguments of `{}`.", n.name),
+    };
+    if let Some(c) = claims_doc(n) {
+        doc.push(' ');
+        doc.push_str(&c);
+    }
+    doc
+}
+
+/// What a statement's types say of the claims it reads.
+pub fn claims_doc(n: &Named) -> Option<String> {
+    match n.claims.is_empty() {
+        true => None,
+        false => Some(format!(
+            "The claims it reads come from the token, never the arguments: {}.",
+            n.claims.join(", ")
+        )),
+    }
+}
+
+/// The summary of a statement's row type.
+pub fn row_doc(n: &Named) -> String {
+    format!("A row of what `{}` answers.", n.name)
 }
 
 /// `fennec types --fennecql`: the schema as FennecQL, every option written --
@@ -161,8 +453,9 @@ fn fail(msg: &str) -> i32 {
     2
 }
 
-/// Produces the `.d.ts` body from the schema.
-fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
+/// Produces the `.d.ts` body from the schema and its named statements.
+fn render(path: &str, name: &str, file: &File) -> String {
+    let schemas = &file.schemas;
     let mut out = String::new();
     out.push_str(&format!(
         "// generated from the fennecdb schema: {path}\n\
@@ -170,13 +463,21 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
          // Do not edit by hand -- regenerate when the schema changes.\n\n"
     ));
 
-    // Only the branded types that are actually used are written.
-    let used = |f: fn(&DataType) -> bool| {
-        schemas
-            .iter()
-            .flat_map(|s| s.fields.iter())
-            .any(|fd| f(&fd.ty))
-    };
+    // Only the branded types that are actually used are written: by a
+    // field, an argument or an item of an answer.
+    let members = file.statements.iter().flat_map(|n| {
+        let rows = match &n.answer {
+            Answer::Rows(r) => &r[..],
+            _ => &[],
+        };
+        n.args.iter().chain(rows).map(|m| &m.ty)
+    });
+    let types: Vec<&DataType> = schemas
+        .iter()
+        .flat_map(|s| s.fields.iter().map(|f| &f.ty))
+        .chain(members)
+        .collect();
+    let used = |f: fn(&DataType) -> bool| types.iter().any(|t| f(t));
     // The brands are structural: they are identical to the definitions in
     // `web/fennec.d.ts`, so values pass freely between the two with no import.
     if used(|t| {
@@ -230,6 +531,7 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
         out.push_str(&format!(
             "// (there are no collections in the file)\nexport type {name} = {{}};\n"
         ));
+        ts_statements(&mut out, &file.statements);
         return out;
     }
 
@@ -262,7 +564,84 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
         out.push_str("  };\n");
     }
     out.push_str("};\n");
+    ts_statements(&mut out, &file.statements);
     out
+}
+
+/// `FennecStatements`, after the schema: each named statement's `args`,
+/// what a call takes, and `row`, a row of its answer -- `unknown` where the
+/// answer is a count of the rows written or not typed. Written only where
+/// the file holds a statement; a broken one is a comment before it.
+fn ts_statements(out: &mut String, statements: &[Named]) {
+    let (broken, live): (Vec<&Named>, Vec<&Named>) = statements
+        .iter()
+        .partition(|n| matches!(n.answer, Answer::Broken(_)));
+    if !broken.is_empty() {
+        out.push('\n');
+        for why in broken.iter().filter_map(|n| no_row(n)) {
+            out.push_str(&format!("// {why}\n"));
+        }
+    }
+    if live.is_empty() {
+        return;
+    }
+    let comment = |text: &str| one_line(text).replace("*/", "*\\/");
+    out.push_str(
+        "\n/**\n * The named statements: what a call of each takes (`args`, one with a\n \
+         * default may be left out) and a row of what it answers (`row`, `unknown`\n \
+         * where it answers the rows it wrote, or rows not typed yet).\n */\n\
+         export type FennecStatements = {\n",
+    );
+    let member = |out: &mut String, m: &Member, optional: bool| {
+        if !m.note.is_empty() {
+            out.push_str(&format!("      /** {} */\n", comment(&m.note)));
+        }
+        let nullable = if m.required { "" } else { " | null" };
+        let mark = if optional { "?" } else { "" };
+        out.push_str(&format!(
+            "      {}{mark}: {}{nullable};\n",
+            key(&m.name),
+            ts_type(&m.ty)
+        ));
+    };
+    for (i, n) in live.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut doc = n.comment.as_deref().map(comment).unwrap_or_default();
+        for more in [claims_doc(n), no_row(n)].into_iter().flatten() {
+            if !doc.is_empty() {
+                doc.push(' ');
+            }
+            doc.push_str(&comment(&more));
+        }
+        if !doc.is_empty() {
+            out.push_str(&format!("  /** {doc} */\n"));
+        }
+        out.push_str(&format!("  {}: {{\n", key(&n.name)));
+        match n.args.is_empty() {
+            true => out.push_str("    args: {};\n"),
+            false => {
+                out.push_str("    args: {\n");
+                for m in &n.args {
+                    member(out, m, !m.required);
+                }
+                out.push_str("    };\n");
+            }
+        }
+        match &n.answer {
+            Answer::Rows(rows) => {
+                out.push_str("    row: {\n");
+                for m in rows {
+                    member(out, m, false);
+                }
+                out.push_str("    };\n");
+            }
+            _ => out.push_str("    row: unknown;\n"),
+        }
+        out.push_str("  };\n");
+    }
+    out.push_str("};\n");
 }
 
 /// The builders `--schema`'s file may import: a table's variable takes
@@ -684,7 +1063,11 @@ mod tests {
 
     #[test]
     fn renders_declaration() {
-        let out = render("data.fennec", "FennecSchema", &[schema()]);
+        let file = File {
+            schemas: vec![schema()],
+            statements: Vec::new(),
+        };
+        let out = render("data.fennec", "FennecSchema", &file);
         assert!(out.contains("export type FennecSchema = {"));
         assert!(out.contains("  articles: {"));
         // A required field takes no null, the others do.
@@ -712,8 +1095,14 @@ mod tests {
 
     #[test]
     fn empty_file() {
-        let out = render("empty.fennec", "FennecSchema", &[]);
+        let file = File {
+            schemas: Vec::new(),
+            statements: Vec::new(),
+        };
+        let out = render("empty.fennec", "FennecSchema", &file);
         assert!(out.contains("export type FennecSchema = {};"));
+        // No statements, no `FennecStatements`.
+        assert!(!out.contains("FennecStatements"), "{out}");
     }
 
     #[test]
@@ -734,32 +1123,33 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../integrations/types-golden");
         let from = "schema.fennecql";
-        let schemas = read(dir.join(from).to_str().unwrap()).unwrap();
+        let file = read(dir.join(from).to_str().unwrap()).unwrap();
+        let schemas = &file.schemas;
         let files = [
-            ("fennec-schema.d.ts", render(from, "FennecSchema", &schemas)),
+            ("fennec-schema.d.ts", render(from, "FennecSchema", &file)),
             (
                 "tables.ts",
-                render_tables(from, "@fennecdb/web/schema", &schemas),
+                render_tables(from, "@fennecdb/web/schema", schemas),
             ),
-            ("schema.out.fennecql", render_fennecql(from, &schemas)),
+            ("schema.out.fennecql", render_fennecql(from, schemas)),
             (
                 "fennec_schema.py",
-                lang(Lang::Python, from, "FennecSchema", &schemas),
+                lang(Lang::Python, from, "FennecSchema", &file),
             ),
             (
                 "fennec_schema.go",
-                lang(Lang::Go, from, "fennecschema", &schemas),
+                lang(Lang::Go, from, "fennecschema", &file),
             ),
             (
                 "FennecSchema.cs",
-                lang(Lang::CSharp, from, "FennecSchema", &schemas),
+                lang(Lang::CSharp, from, "FennecSchema", &file),
             ),
-            ("FennecSchema.swift", lang(Lang::Swift, from, "", &schemas)),
+            ("FennecSchema.swift", lang(Lang::Swift, from, "", &file)),
             (
                 "FennecSchema.kt",
-                lang(Lang::Kotlin, from, "fennecschema", &schemas),
+                lang(Lang::Kotlin, from, "fennecschema", &file),
             ),
-            ("fennec_schema.dart", lang(Lang::Dart, from, "", &schemas)),
+            ("fennec_schema.dart", lang(Lang::Dart, from, "", &file)),
         ];
         let write = std::env::var("FENNEC_TYPES_GOLDEN").is_ok_and(|v| v == "write");
         for (name, made) in &files {
@@ -775,8 +1165,8 @@ mod tests {
             );
         }
         // The FennecQL a database is pulled into reads back as the same schemas.
-        let pulled = fennec_ql::schema_text(&render_fennecql(from, &schemas)).unwrap();
-        assert_eq!(pulled, schemas);
+        let pulled = fennec_ql::schema_text(&render_fennecql(from, schemas)).unwrap();
+        assert_eq!(&pulled, schemas);
         // Each file is the language's own, where the language is here to say.
         let ok = |cmd: &mut std::process::Command| {
             cmd.output().map(|o| {
@@ -825,5 +1215,168 @@ mod tests {
                 String::from_utf8_lossy(&o.stdout)
             );
         }
+    }
+
+    /// Every language's file for `file`, as `fennec types` writes it.
+    fn every_file(from: &str, file: &File) -> Vec<String> {
+        use crate::langs::{render as lang, Lang};
+        let mut out = vec![render(from, "FennecSchema", file)];
+        for l in [
+            Lang::Python,
+            Lang::Go,
+            Lang::CSharp,
+            Lang::Swift,
+            Lang::Kotlin,
+            Lang::Dart,
+        ] {
+            out.push(lang(l, from, "FennecSchema", file));
+        }
+        out
+    }
+
+    /// A directory of this test's own, removed when it ends.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("fennec-types-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A database holding named statements writes them as the schema text
+    /// declaring them does: read off the file's records, by name, and
+    /// typed against the collections the file holds.
+    #[test]
+    fn a_database_writes_its_statements_as_its_schema_text_does() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../integrations/types-golden");
+        let text = std::fs::read_to_string(dir.join("schema.fennecql")).unwrap();
+        let scratch = Scratch::new("statements");
+        let path = scratch.0.join("data.fennec");
+        fennec_ql::install();
+        {
+            let mut db = fennec_core::fs::open(&path).unwrap();
+            for st in fennec_ql::parse(&text).unwrap() {
+                db.execute(&st).unwrap();
+            }
+        }
+        let stored = read(path.to_str().unwrap()).unwrap();
+        let declared = read(dir.join("schema.fennecql").to_str().unwrap()).unwrap();
+        let names = |f: &File| {
+            f.statements
+                .iter()
+                .map(|n| n.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!declared.statements.is_empty());
+        assert_eq!(names(&stored), names(&declared));
+        // In name order, whatever order they were written in.
+        let mut sorted = names(&declared);
+        sorted.sort();
+        assert_eq!(names(&declared), sorted);
+        for (a, b) in every_file("data.fennec", &stored)
+            .iter()
+            .zip(every_file("data.fennec", &declared))
+        {
+            assert_eq!(a, &b);
+        }
+    }
+
+    /// A statement a schema change left broken is named in a comment in
+    /// every language, and typed no further; the rest are written.
+    #[test]
+    fn a_broken_statement_is_named_and_not_typed() {
+        let scratch = Scratch::new("broken");
+        let path = scratch.0.join("data.fennec");
+        fennec_ql::install();
+        {
+            let mut db = fennec_core::fs::open(&path).unwrap();
+            for t in [
+                "create collection notes (body text, rank int @hash)",
+                "create statement by_rank($rank int) as get notes select id, body where rank = $rank",
+                "create statement bodies() as get notes select body",
+                "alter collection notes drop rank",
+            ] {
+                let st = fennec_ql::parse(t).unwrap().remove(0);
+                db.internally(|db| db.execute(&st)).unwrap();
+            }
+        }
+        let file = read(path.to_str().unwrap()).unwrap();
+        assert!(matches!(file.statements[1].answer, Answer::Broken(_)));
+        for out in every_file("data.fennec", &file) {
+            assert!(
+                out.contains("statement `by_rank` is broken, and no type is written for it"),
+                "{out}"
+            );
+            assert!(
+                !out.contains("ByRank") && !out.contains("by_rank:"),
+                "{out}"
+            );
+            assert!(
+                out.contains("BodiesRow") || out.contains("bodies: {"),
+                "{out}"
+            );
+        }
+    }
+
+    /// What an answer is typed as: a plain field as its row has it, `id`
+    /// and a count integers, the rest JSON; a write with no `returning` no
+    /// rows at all.
+    #[test]
+    fn an_answer_is_typed_as_far_as_its_items_are_fields() {
+        let (schemas, defs) = fennec_ql::schema_statements(
+            "create collection notes (body text required, rank int @hash, meta json)
+             create statement a($r int) as get notes select id, body, rank, rank * 2 as twice, \
+                 body as text, meta.lang where rank = $r
+             create statement b() as get notes count
+             create statement c() as get notes select rank, count(*) group rank
+             create statement d($r int) public as del notes where rank = $r
+             create statement e($r int) public as del notes where rank = $r returning id, rank",
+        )
+        .unwrap();
+        let typed: Vec<Named> = defs.iter().map(|d| typed(d, &schemas)).collect();
+        let row = |i: usize| match &typed[i].answer {
+            Answer::Rows(r) => r
+                .iter()
+                .map(|m| (m.name.as_str(), m.ty.clone(), m.required))
+                .collect::<Vec<_>>(),
+            _ => panic!("{} answers no rows", typed[i].name),
+        };
+        assert_eq!(
+            row(0),
+            [
+                ("id", DataType::Int, true),
+                ("body", DataType::Text, true),
+                ("rank", DataType::Int, false),
+                ("twice", DataType::Json, false),
+                ("text", DataType::Json, false),
+                ("meta.lang", DataType::Json, false),
+            ]
+        );
+        assert_eq!(row(1), [("count", DataType::Int, true)]);
+        assert_eq!(
+            row(2),
+            [
+                ("rank", DataType::Int, false),
+                ("count", DataType::Int, true)
+            ]
+        );
+        assert!(matches!(typed[3].answer, Answer::Wrote));
+        assert_eq!(
+            row(4),
+            [("id", DataType::Int, true), ("rank", DataType::Int, false)]
+        );
+        // A parameter is required unless it has a default.
+        assert!(typed[0].args[0].required);
     }
 }

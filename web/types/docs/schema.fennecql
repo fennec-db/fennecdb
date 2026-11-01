@@ -13,3 +13,5 @@ create collection shops (name text)
 create collection orders (shop_id int @hash, code text)
 create collection lines (order_id int @hash, item text, quantity int)
 create collection places (name text, kind text @hash, loc geo @geo)
+create collection accounts (owner text @hash, balance int)
+create statement transfer($from int, $to int, $amount int) comment 'Moves money, or says why not.' public as begin set accounts {balance: balance - $amount} where id = $from and balance >= $amount require 1 else 'insufficient funds'; set accounts {balance: balance + $amount} where id = $to require 1 else 'no such account'; get accounts select id, balance where id = $from end

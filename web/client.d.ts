@@ -4,7 +4,7 @@
 // the other.
 
 export {
-  FennecError, FennecHttp, Query, and, bucket, connect, countDistinct, distance, expr, first, from, inc, last, not, or, raw, sseEvents,
+  FennecError, FennecHttp, Query, Call, and, bucket, call, connect, countDistinct, distance, expr, first, from, inc, last, not, or, raw, sseEvents,
 } from './fennec.js';
 export type {
   Aggregate,
@@ -12,6 +12,9 @@ export type {
   BatchResult,
   BatchStatement,
   Bytes,
+  CallAnswer,
+  CallClaims,
+  CallOptions,
   Collation,
   Cond,
   DistanceSpec,
@@ -49,11 +52,13 @@ export type {
   ShapeSeed,
   Sparse,
   Spec,
+  Statements,
   SubscribeOptions,
   TableRef,
   Tables,
   TextKey,
   Timestamp,
+  TypedCall,
   TypedFrom,
   Vector,
   VectorKey,

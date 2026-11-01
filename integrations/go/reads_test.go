@@ -2,6 +2,7 @@ package fennecdb
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // A read near's 504 sets the client's position back only over the one the
@@ -289,5 +291,160 @@ func TestATenantMadeAgainHasItsPositionTakenItsTermLower(t *testing.T) {
 	p.note(90, third)
 	if seq, h := p.get(); seq != 9 || h != second {
 		t.Fatalf("an earlier term of the same lineage taken: %d %s", seq, h)
+	}
+}
+
+// A call is a text sent as every text is: the same path (a tenant's too),
+// token, key and wait, and a read near only when its client is Read -- one
+// reading near sends it marked and after its writes, and the answer of a
+// read moves nothing.
+func TestACallIsSentAsATextIsAndReadsOnlyWhenAskedTo(t *testing.T) {
+	type sent struct {
+		path   string
+		header http.Header
+		body   string
+	}
+	var mu sync.Mutex
+	var seen []sent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, sent{path: r.URL.Path, header: r.Header.Clone(), body: string(raw)})
+		mu.Unlock()
+		switch {
+		case strings.Contains(string(raw), "call transfer"):
+			w.Header().Set("Fennec-Seq", "12")
+			w.Header().Set("Fennec-History", "1-00000000000000aa")
+			if r.Header.Get("Idempotency-Key") == "k2" {
+				w.Header().Set("Idempotent-Replayed", "true")
+			}
+			_, _ = w.Write([]byte(`[{"id":1,"balance":700}]`))
+		case r.Header.Get("Fennec-Read") != "":
+			// A replica's position: it moves nothing of the client's.
+			w.Header().Set("Fennec-Seq", "99")
+			w.Header().Set("Fennec-History", "1-00000000000000aa")
+			_, _ = w.Write([]byte(`[{"body":"x"}]`))
+		default:
+			_, _ = w.Write([]byte(`{"affected":3}`))
+		}
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	db := New(srv.URL, WithToken("tok"), WithTenant("acme"), WithReadsNearest())
+
+	r, err := db.Call(ctx, "transfer", Params{"from": 1, "to": 2, "amount": 300})
+	if err != nil || len(r.Rows) != 1 || r.Seq != 12 || r.Replayed {
+		t.Fatalf("%+v %v", r, err)
+	}
+	rr, err := db.Read().Call(ctx, "history", nil, Claims(Params{"sub": "u1"}))
+	if err != nil || len(rr.Rows) != 1 || rr.Rows[0]["body"] != "x" {
+		t.Fatalf("%+v %v", rr, err)
+	}
+	k, err := db.IdempotencyKey("k2").Call(ctx, "transfer", Params{"from": 1})
+	if err != nil || !k.Replayed {
+		t.Fatalf("%+v %v", k, err)
+	}
+	w, err := db.Wait(300*time.Millisecond).Call(ctx, "purge", Params{})
+	if err != nil || w.Affected != 3 {
+		t.Fatalf("%+v %v", w, err)
+	}
+	if len(seen) != 4 {
+		t.Fatalf("%d requests", len(seen))
+	}
+	for i, want := range []string{
+		`{"query":"call transfer $1","params":[{"amount":300,"from":1,"to":2}]}`,
+		`{"query":"call history as $1","params":[{"sub":"u1"}]}`,
+		`{"query":"call transfer $1","params":[{"from":1}]}`,
+		`{"query":"call purge $1","params":[{}]}`,
+	} {
+		s := seen[i]
+		if s.path != "/t/acme/query" || s.body != want || s.header.Get("Authorization") != "Bearer tok" || s.header.Get("Content-Type") != "application/json" {
+			t.Fatalf("request %d: %s %s %v", i, s.path, s.body, s.header)
+		}
+	}
+	// Only the Read copy's request is marked.
+	for i, marked := range []bool{false, true, false, false} {
+		if got := seen[i].header.Get("Fennec-Read"); marked != (got == "replica") || !marked && got != "" {
+			t.Fatalf("request %d: %v", i, seen[i].header)
+		}
+	}
+	// And sent after home's furthest change, which the write named.
+	if h := seen[1].header; h.Get("Fennec-After") != "12" || h.Get("Fennec-History") != "1-00000000000000aa" {
+		t.Fatalf("the read near: %v", h)
+	}
+	if h := seen[2].header; h.Get("Idempotency-Key") != "k2" || h.Get("Fennec-After") != "" {
+		t.Fatalf("the keyed call: %v", h)
+	}
+	if h := seen[3].header; h.Get("Fennec-Wait") != "300" || h.Get("Idempotency-Key") != "" {
+		t.Fatalf("the held call: %v", h)
+	}
+	// The read's answer named change 99 and moved nothing.
+	if db.Seq() != 12 {
+		t.Fatalf("seq %d", db.Seq())
+	}
+
+	// On a client not reading near, Read marks nothing and a call goes home.
+	seen = nil
+	home := New(srv.URL)
+	if _, err := home.Read().Call(ctx, "history", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0].header.Get("Fennec-Read") != "" || seen[0].path != "/query" || seen[0].body != `{"query":"call history","params":[]}` {
+		t.Fatalf("%+v", seen)
+	}
+	// A call the builder refuses is not sent.
+	seen = nil
+	if _, err := db.Call(ctx, "no way", nil); err == nil || len(seen) != 0 {
+		t.Fatalf("%v, %d sent", err, len(seen))
+	}
+}
+
+// A call is bounded as a text is: by its context, cancelled or timed out,
+// and by the client's timeout, which Wait lengthens by the wait the server
+// may hold the answer for.
+func TestACallIsBoundedByItsContextAndTheClientsTimeout(t *testing.T) {
+	arrived := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The body read to its end, which is what has the server watch for
+		// the client going away.
+		_, _ = io.Copy(io.Discard, r.Body)
+		arrived <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(srv.URL).Call(ctx, "slow", nil)
+		done <- err
+	}()
+	<-arrived
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: %v", err)
+	}
+
+	db := New(srv.URL, WithTimeout(50*time.Millisecond))
+	start := time.Now()
+	if _, err := db.Call(context.Background(), "slow", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed out: %v", err)
+	}
+	if took := time.Since(start); took < 50*time.Millisecond {
+		t.Fatalf("gave up after %v", took)
+	}
+	// The wait is on top of the timeout, as a held write's is.
+	start = time.Now()
+	if _, err := db.Wait(200*time.Millisecond).Call(context.Background(), "slow", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed out holding: %v", err)
+	}
+	if took := time.Since(start); took < 250*time.Millisecond {
+		t.Fatalf("gave up after %v", took)
+	}
+	// And the context's own deadline still cuts it short.
+	short, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	if _, err := db.Wait(time.Minute).Call(short, "slow", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("context deadline: %v", err)
 	}
 }

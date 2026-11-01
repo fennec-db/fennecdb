@@ -231,6 +231,119 @@ void main() {
     expect(FennecRemote.refused(412, {'error': 'unmet'}, null).reason, isNull);
   });
 
+  // The builder's call beside the golden file's cases (golden_test.dart):
+  // what a typed language adds, a value to keep and to change after.
+  test('a call is a value taken as it is made', () {
+    final args = {
+      'at': DateTime.utc(2026, 9, 19, 12, 34, 56, 789),
+      'embed': Float32List.fromList([0.5, -0.25, 1]),
+      'meta': {'lang': 'tr'},
+    };
+    final claims = {'sub': 'alice'};
+    final c = Call('since', args: args, claims: claims);
+    // Changed after, the call still makes what it was made with.
+    args['at'] = 'late';
+    (args['meta'] as Map)['lang'] = 'en';
+    claims['sub'] = 'bob';
+    final made = c.toCall();
+    expect(made.text, 'call since \$1 as \$2');
+    expect(made.params[0], {
+      'at': '2026-09-19T12:34:56.789Z',
+      'embed': Float32List.fromList([0.5, -0.25, 1]),
+      'meta': {'lang': 'tr'},
+    });
+    expect(made.params[1], {'sub': 'alice'});
+    // Each text is its own parameters: the one handed out is not the call's.
+    (made.params[1] as Map)['sub'] = 'mallory';
+    expect(c.toCall().params[1], {'sub': 'alice'});
+    expect(c.name, 'since');
+    // The pair is a statement of a batch.
+    expect(made, isA<Statement>());
+    // Not a map, or a map with no way to be a value: refused as a chain is.
+    for (final (name, bad) in [
+      ('arguments', [1, 2]),
+      ('arguments', 'from 1'),
+      ('arguments', 5),
+      ('arguments', DateTime.utc(2026)),
+    ]) {
+      expect(
+          () => Call('transfer', args: bad),
+          throwsA(isA<FennecException>()
+              .having((e) => e.code, 'code', FennecCode.builder)
+              .having((e) => e.message, 'message', "a call's $name are an object of values by name")),
+          reason: '$bad');
+    }
+    expect(() => Call('mine', claims: 'alice'),
+        throwsA(isA<FennecException>().having((e) => e.code, 'code', FennecCode.builder)));
+    expect(() => Call('mine', args: {'x': Object()}), throwsA(isA<FennecException>()));
+    // The name is the one thing written into the text.
+    expect(() => Call('stamp; del docs'), throwsA(isA<FennecException>()));
+    expect(Call('stamp').toCall().text, 'call stamp');
+    expect(Call('stamp').toCall().params, isEmpty);
+  });
+
+  // A statement of the file's own, called from the app: `callStatement` is
+  // `call <name> $1` through the same door a text takes.
+  test('a call runs a statement in the file, with the claims an app names', () async {
+    final db = await Fennec.memory();
+    await db.execute('create collection accounts (owner text @hash, balance int)');
+    await db.execute('create collection notes (body text, by text @hash)');
+    await db.execute('put accounts [{id: 1, owner: "a", balance: 100}, {id: 2, owner: "b", balance: 0}]');
+    await db.run('create statement transfer(\$from int, \$to int, \$amount int) public as begin '
+        "set accounts {balance: balance - \$amount} where id = \$from and balance >= \$amount require 1 else 'insufficient funds'; "
+        "set accounts {balance: balance + \$amount} where id = \$to require 1 else 'no such account'; "
+        'get accounts select id, balance where id = \$from end');
+    await db.run("create statement stamp() public as insert notes {body: 'z', by: 'x'} returning id");
+    await db.run('create statement mine() claims (sub text) as get notes select body where by = \$jwt.sub');
+
+    // The answer is the last statement's, arguments of several types by name.
+    final moved = await db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 30});
+    expect(moved.rows.single, {'id': 1, 'balance': 70});
+    expect(await db.from('accounts').where('id', 2).first(), containsPair('balance', 30));
+    // A statement of none, and a write that answers rows.
+    expect((await db.callStatement('stamp')).rows.single['id'], isNotNull);
+    expect(await db.from('notes').count(), 1);
+
+    // A require refused says its words, and the call lands nothing.
+    await expectLater(
+        db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 500}),
+        throwsA(isA<FennecException>()
+            .having((e) => e.code, 'code', FennecCode.unmet)
+            .having((e) => e.reason, 'reason', 'insufficient funds')));
+    await expectLater(db.callStatement('transfer', args: {'from': 1, 'to': 9, 'amount': 5}),
+        throwsA(isA<FennecException>().having((e) => e.reason, 'reason', 'no such account')));
+    expect(await db.from('accounts').where('id', 1).first(), containsPair('balance', 70));
+
+    // An argument missing, of another type, or one the statement lacks; a
+    // statement that is not there.
+    for (final bad in [
+      {'from': 1, 'to': 2},
+      {'from': 1, 'to': 2, 'amount': 'ten'},
+      {'from': 1, 'to': 2, 'amount': 1, 'by': 3},
+    ]) {
+      expect(await codeOf(db.callStatement('transfer', args: bad)), FennecCode.query, reason: '$bad');
+    }
+    expect(await codeOf(db.callStatement('nothing')), FennecCode.notFound);
+
+    // `claims` are the `as`: what `$jwt.sub` reads, the embedder's own.
+    await db.from('notes').insert({'body': 'mine', 'by': 'alice'});
+    expect((await db.callStatement('mine', claims: {'sub': 'alice'})).rows.map((r) => r['body']), ['mine']);
+    expect((await db.callStatement('mine', claims: {'sub': 'bob'})).rows, isEmpty);
+    // A claim missing, null or of another type is one the call lacks.
+    for (final c in [
+      null,
+      <String, Object?>{},
+      {'sub': null},
+      {'sub': 5}
+    ]) {
+      expect(await codeOf(db.callStatement('mine', claims: c)), FennecCode.denied, reason: '$c');
+    }
+    // A refusal of the builder is thrown before anything is sent.
+    await expectLater(db.callStatement('mine; drop statement mine'), throwsA(isA<FennecException>()));
+    await db.close();
+    expect(await codeOf(db.callStatement('stamp')), FennecCode.misuse);
+  });
+
   test('a file is there again, and open once', () async {
     final path = scratch();
     var db = await Fennec.open(path);

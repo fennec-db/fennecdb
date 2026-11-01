@@ -241,6 +241,38 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
     /** The query builder over a collection: `db.from("todos").where("done", false).rows()`. */
     fun from(collection: String): Query = Query.from(collection).bind { text, params -> runList(text, params) }
 
+    /**
+     * Calls the named statement [name] (`create statement`) with [args], a map
+     * of values by name: `call <name> $1` through [run], the arguments one
+     * parameter. [claims] are the caller's, a signed-in user's, as a token's
+     * would be -- `as $2` -- and are held to the types the statement declares
+     * (`claims (sub text)`); a statement that declares none is called with
+     * none. The answer is what the statement's last statement answers: the
+     * rows of a `get` or a `returning`, or how many documents it wrote.
+     * Refused with the engine's words ([FennecException.Code.QUERY]) on a
+     * synced database ([Fennec.Companion.sync]): a replica holds its shapes'
+     * rows, not its server's statements, so the call goes to the server
+     * through its HTTP client ([FennecRemote.call]). A local database holds
+     * a write back for nothing, so there is no wait here, nor an idempotency
+     * key: both are the server's.
+     *
+     * ```kotlin
+     * db.call("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300))
+     * db.call("mine", claims = mapOf("sub" to "alice")).rows
+     * ```
+     */
+    suspend fun call(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Answer {
+        val st = Call.of(name, args, claims).toCall()
+        return runList(st.text, st.params)
+    }
+
+    /** [call], on the calling thread. */
+    @JvmOverloads
+    fun callBlocking(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Answer {
+        val st = Call.of(name, args, claims).toCall()
+        return answerBlocking(st.text, st.params)
+    }
+
     internal fun answerBlocking(text: String, params: List<Any?>, quiet: Boolean = false): Answer {
         if (closed.get()) throw FennecException(FennecException.Code.MISUSE, "the database was closed")
         val values = params.map { Values.normalize(it) }

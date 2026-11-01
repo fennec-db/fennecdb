@@ -1331,3 +1331,63 @@ class Query {
     return (await _run(toUpsert(docs, patch, require: require, reason: reason, returning: returning))).rows;
   }
 }
+
+// A named statement's name: ASCII letters, digits and `_`, a letter first, at
+// most 59 bytes -- the engine's rule (`named::valid_name`), a path segment
+// with nothing to escape. The name is the one thing of a call written into
+// its text, so this is its injection boundary.
+final _statementName = RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,58}$');
+
+/// A call of a named statement: `call <name> $1`, its arguments the one
+/// parameter -- a map of values by name -- and, given [claims], `as $2`:
+/// the claims the call is made with, which only the server's own token (or
+/// an embedder, locally) may say; a scoped token's are its token's. Not
+/// bound to a collection nor a connection: for the text and parameters
+/// alone, [toCall], which is what [Fennec.callStatement] and
+/// [FennecRemote.callStatement] run.
+///
+/// ```dart
+/// Call('transfer', args: {'from': 1, 'to': 2, 'amount': 300}).toCall();
+/// // (text: 'call transfer $1', params: [{from: 1, to: 2, amount: 300}])
+/// ```
+///
+/// No [args] is a statement of none, `call stamp`; an empty map is still one
+/// argument, `call stamp $1`. The values are parameters as a query's are --
+/// a [DateTime] its ISO text, a [Float32List] its numbers -- and never the
+/// text. The arguments and the claims are taken as they are when the call is
+/// made, so the map handed in may change after. Anything but a map (or null)
+/// is refused as the JS builder refuses it, [FennecCode.builder].
+class Call {
+  /// The statement's name.
+  final String name;
+  final Map<String, Object?>? _args;
+  final Map<String, Object?>? _claims;
+
+  Call._(this.name, this._args, this._claims);
+
+  /// `call [name]`, with [args] and [claims] maps, or null for none. `name`
+  /// is checked: letters, digits and `_`, a letter first, 59 bytes at most.
+  factory Call(String name, {Object? args, Object? claims}) {
+    if (!_statementName.hasMatch(name)) throw _refuse('invalid statement name: ${_quote(name)}');
+    return Call._(name, _given(args, 'arguments'), _given(claims, 'claims'));
+  }
+
+  // A call's arguments or claims: an object of values by name, or none.
+  static Map<String, Object?>? _given(Object? v, String what) => switch (v) {
+        null => null,
+        Map() => normalize(v) as Map<String, Object?>,
+        _ => throw _refuse("a call's $what are an object of values by name"),
+      };
+
+  /// The call's FennecQL and its parameters, as they would be run -- what
+  /// [FennecRemote.batch] takes beside a query's [Query.toFennecQL].
+  Statement toCall() {
+    final params = <Object?>[];
+    final bind = Query._binder(params);
+    final args = _args, claims = _claims;
+    return (
+      text: 'call $name${args == null ? '' : ' ${bind(args)}'}${claims == null ? '' : ' as ${bind(claims)}'}',
+      params: params,
+    );
+  }
+}
