@@ -19,13 +19,13 @@ file (`make agents-md`), and CI fails when the two differ: edit
 make test          # Rust (fennec-core also without its indexes and without any feature), then the JS tests and sync-scenarios-check
 make wasm          # fennec-wasm for wasm32 to web/fennec.wasm
 make wasm FEATURES="text sorted"   # with those features alone (indexes, language: a group; none: none)
-make wasm-lite     # test build without the indexes (web/fennec-lite.wasm), shipped by nothing; make wasm-min: with no feature at all
+make wasm-lite     # test build without the indexes (web/fennec-lite.wasm, shipped by nothing; wasm-min: no feature)
 make wasm-sizes    # what each feature adds to the module with none, and what leaving it out saves
 make size-report   # where the module's bytes go (BASE=main, BIN=fennec-server, FEATURES=none)
 make ffi           # the native library for apps (crates/fennec-ffi); TARGET=... another, JNI=1 for Kotlin
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
 make packages      # the PyPI, npm and NuGet packages as a release publishes them, installed and used
-make packaging-test    # site/install.sh against a release of its own on localhost, and the Homebrew formula held to its script
+make packaging-test    # site/install.sh against a local release of its own, the Homebrew formula held to it
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
