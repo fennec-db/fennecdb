@@ -103,8 +103,8 @@ pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Resu
             let log = log.lock().unwrap().clone();
             return Err(log);
         }
-        if line.contains("listening on: http://") {
-            if let Some(rest) = line.rsplit_once("http://").map(|(_, r)| r) {
+        if line.contains("listening on: http://") || line.contains("listening on: https://") {
+            if let Some(rest) = line.rsplit_once("://").map(|(_, r)| r) {
                 let addr: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
                 port = addr.rsplit_once(':').and_then(|(_, p)| p.parse().ok());
             }

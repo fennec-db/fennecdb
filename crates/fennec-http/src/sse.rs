@@ -35,7 +35,6 @@ use crate::Config;
 use fennec_core::changes::Hold;
 use fennec_core::prelude::*;
 use std::io::Write;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
@@ -109,11 +108,18 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// Wakes every stream waiting here to look again, the counter where it
+    /// is: the one shutdown ending them ([`crate::conn::end_all`]).
+    fn nudge(&self) {
+        let _g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
+    }
+
     /// Waits until it sees a counter greater than `after`. On timeout it
     /// returns as is -- the caller writes the keep-alive line.
     fn wait(&self, after: u64, timeout: Duration) -> u64 {
         let g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        if *g > after || self.is_closed() {
+        if *g > after || self.is_closed() || crate::conn::ending() {
             return *g;
         }
         let (g, _) = self
@@ -225,10 +231,10 @@ impl Drop for StreamSlot<'_> {
 /// `Content-Length`: an ordinary response knows its body and writes it in
 /// one go, while a stream is a body with no end.
 pub fn serve(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
-    hub: &Hub,
+    hub: &Arc<Hub>,
     req: &Request,
     who: &Who,
 ) {
@@ -396,8 +402,17 @@ pub fn serve(
     // a fresh token, then the stream again.
     let expires = who.scope().and_then(|s| s.expires_ms());
     let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
+    // The one shutdown wakes the stream to end it, its end over TLS a
+    // `close_notify` its client reads as the end it is.
+    out.on_ending({
+        let hub = Arc::clone(hub);
+        move || hub.nudge()
+    });
 
     loop {
+        if crate::conn::ending() {
+            return;
+        }
         if left().is_some_and(|l| l.is_zero()) {
             let _ = event(out, "error", EXPIRED);
             return;
@@ -876,7 +891,7 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// image can land on the pin's own change, where neither the ring nor the
 /// counter shows it, and the pin read what it replaced.
 fn seed(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
     seen: &mut Option<Seen>,
@@ -990,7 +1005,7 @@ fn error_json(e: &Error) -> String {
 
 /// A single SSE event. `data` is single-line JSON, so no line splitting is
 /// needed -- the JSON encoder never produces a `\n`.
-fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
+fn event(out: &mut &crate::conn::Conn, name: &str, data: &str) -> std::io::Result<()> {
     out.write_all(format!("event: {name}\ndata: {data}\n\n").as_bytes())?;
     out.flush()
 }
@@ -999,7 +1014,7 @@ fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
 /// stood as the stream opened, which its head names: the change its seed is
 /// at or after, and the history every event's `seq` is a change of.
 fn write_head(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     cfg: &Config,
     status: u16,
     content_type: &str,

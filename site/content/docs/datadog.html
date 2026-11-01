@@ -147,7 +147,9 @@ attributes Datadog's own.</p>
 <details class="deep"><summary>Which attributes each log line carries</summary>
 <p>Every line has <code>at</code>, <code>event</code>
 (<code>slow</code>, <code>refused</code>, <code>schema</code> or
-<code>admin</code>), <code>level</code>, <code>proto</code>,
+<code>admin</code>), <code>level</code>, <code>proto</code>
+(<code>http</code>, or <code>https</code> on a listener given
+<code>--tls-cert</code>),
 <code>peer</code> — with <code>via</code>, the router, where one forwarded
 the request — and the request's <code>request_id</code>. A slow statement
 adds <code>duration_ms</code>, <code>kind</code> (<code>read</code> or

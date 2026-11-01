@@ -469,7 +469,7 @@ reads its own, and every tenant's, named, are the admin's alone.
 **[A statement is parsed once, and an answer goes out in one
 write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
-(`http::write_parts`).
+(`http::write_parts`), over TLS one plaintext whose records go in one.
 
 **[A chunked body grows as it comes, held to the
 ceiling](docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
@@ -489,7 +489,18 @@ relays, as a standby's 409 marked `Fennec-Follows` is. Its writing then
 shut, the one lingering thread (`accept::linger`) reads it off till the
 client ends it; only no such thread, no room (`most_held`) or an answer not
 sent whole closes it at once. A new accept loop calls
-`accept::ready()` and `accept::widen` before its first accept.
+`accept::ready()` and `accept::widen` before its first accept. A TLS
+listener's is told `fennec_tls::REFUSAL`, an alert (`accept::refuse_tls`):
+no handshake runs on the accepting thread.
+
+**[`--tls-cert` and `--tls-key` make a listener HTTPS
+alone](docs/design/http.md#tls)**, `--metrics` too, each handshake on its
+connection's thread within `Tls::handshake` (`conn::Conn::open`), a plain
+request a 400. Every route reads and writes the `&Conn`; without the flags
+it is the `TcpStream` it was, no allocation or dispatch added. A failed
+handshake is counted by reason and logged a minute apart at most; an end on
+purpose sends `close_notify`, the shutdown's too (`conn::end_all`), never
+after a failed write or `Conn::cut`.
 
 ### The HNSW graph
 
@@ -1023,9 +1034,10 @@ mark is dropped (`answer_out`), a relayed router's too once a hop before
 went whole (`relay_send`, `after_cut`'s `ran`): a 502. Every dial goes
 through `dial::resolve`, caching nothing; every body read allocates through
 `zeroed` and refuses an answer with no length. A held request watches its
-client for the head (`answered_or_gone`, `relay_send` at a relay): an end
-goes on to the node, never taken for gone; a reset lets the node's
-connection go.
+client for the head, over TLS through its session (`answered_or_gone`,
+`Conn::peer`; `relay_send` at a relay): an end, a `close_notify` too, goes
+on to the node, never taken for gone; a reset lets the node's connection
+go.
 
 **[A failover ends what the router has out to the node for the tenants it
 moved.](docs/design/router.md#failover-cuts)** `promote_on` has `Pool::cut`

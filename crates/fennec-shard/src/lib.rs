@@ -40,6 +40,7 @@ pub mod upstream;
 
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
+use fennec_http::conn::Conn;
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
@@ -136,6 +137,10 @@ pub struct Config {
     /// named to a node or a relay ([`fennec_http::audit::entry`]). `None`:
     /// the header is read by no one, and dropped as every router drops it.
     pub entry_token: Option<String>,
+    /// HTTPS alone from clients (`--tls-cert`, `--tls-key`), each
+    /// handshake on its connection's thread ([`fennec_http::conn`]); `None`,
+    /// plain HTTP. To the nodes the router speaks plain HTTP still.
+    pub tls: Option<Arc<fennec_http::conn::Tls>>,
 }
 
 impl Default for Config {
@@ -162,6 +167,7 @@ impl Default for Config {
             health_wait: readers::HEALTH_WAIT,
             reader_timeout: readers::CALL,
             entry_token: None,
+            tls: None,
         }
     }
 }
@@ -787,8 +793,9 @@ impl Router {
             (dir.nodes().len(), dir.tenants())
         };
         fennec_http::log!(
-            "fennec-shard {} listening on: http://{}  [{nodes} node(s), {} tenant(s)]",
+            "fennec-shard {} listening on: {}://{}  [{nodes} node(s), {} tenant(s)]",
             fennec_core::VERSION,
+            fennec_http::conn::scheme(self.cfg.tls.as_deref()),
             listener.local_addr()?,
             tenants.len(),
         );
@@ -811,8 +818,16 @@ impl Router {
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                let answer = self.cors(Response::retry_after(503, "too many connections", 1));
-                fennec_http::accept::refuse(stream, answer, fennec_http::accept::Refusal::Ceiling);
+                let why = fennec_http::accept::Refusal::Ceiling;
+                match self.cfg.tls {
+                    // No handshake on this thread: an alert in the clear.
+                    Some(_) => fennec_http::accept::refuse_tls(stream, why),
+                    None => {
+                        let answer =
+                            self.cors(Response::retry_after(503, "too many connections", 1));
+                        fennec_http::accept::refuse(stream, answer, why);
+                    }
+                }
                 continue;
             }
             let router = Arc::clone(self);
@@ -827,11 +842,13 @@ impl Router {
             // (`fennec_http::accept`'s comment).
             if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                let answer = self.cors(Response::retry_after(
-                    503,
-                    fennec_http::accept::NO_THREAD,
-                    1,
-                ));
+                let answer = self.cfg.tls.is_none().then(|| {
+                    self.cors(Response::retry_after(
+                        503,
+                        fennec_http::accept::NO_THREAD,
+                        1,
+                    ))
+                });
                 fennec_http::accept::no_thread(
                     unserved,
                     answer,
@@ -1786,15 +1803,18 @@ impl Router {
 
     fn connection(&self, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(self.cfg.idle_timeout);
-        let peer = stream.peer_addr().ok();
-        fennec_http::audit::connection("http", peer);
-        fennec_http::trace::connection(stream.local_addr().ok(), peer);
-        let Ok(mut out) = stream.try_clone() else {
+        // The handshake, where it speaks TLS: on this, the connection's own
+        // thread, as a node's.
+        let Some(conn) = Conn::open(stream, self.cfg.tls.as_deref()) else {
             return;
         };
+        let _ = conn.set_read_timeout(self.cfg.idle_timeout);
+        let peer = conn.peer_addr().ok();
+        fennec_http::audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
+        fennec_http::trace::connection(conn.local_addr().ok(), peer);
+        let mut out = &conn;
         let _open = metrics::Connection::open();
-        let mut reader = BufReader::new(stream);
+        let mut reader = BufReader::new(&conn);
         loop {
             let req = match http::read_request(&mut reader, self.cfg.max_body) {
                 Ok(Some(r)) => r,
@@ -1808,8 +1828,8 @@ impl Router {
                         .write(&mut out, false, false)
                         .is_ok()
                     {
-                        drop(out);
-                        fennec_http::accept::end_refused(reader.into_inner());
+                        drop(reader);
+                        conn.end_refused();
                     }
                     return;
                 }
@@ -1869,7 +1889,7 @@ impl Router {
             // answered -- before it is written, as every request is
             // ([`metrics::counted`]) -- and timed once it is; `forward`
             // counts its own, a stream at its head.
-            let answer = |out: &mut TcpStream, route: Route, resp: Response| {
+            let answer = |out: &mut &Conn, route: Route, resp: Response| {
                 fennec_http::audit::http(&req, resp.status, peer);
                 metrics::counted(route, resp.status);
                 let sent = resp
@@ -1887,11 +1907,12 @@ impl Router {
             }
             let keep = match req.segments().first() {
                 Some(&"t") => {
-                    // The client's socket, for a held request to watch: not
+                    // The client, for a held request to watch through its
+                    // TLS where it speaks it ([`Conn::peer`]): not
                     // where the reader holds bytes of its next request, a
                     // client that has gone having sent none (`upstream`'s
                     // `answered_or_gone`).
-                    let watch = reader.buffer().is_empty().then(|| reader.get_ref());
+                    let watch = reader.buffer().is_empty().then_some(&conn);
                     self.forward(&req, &mut out, arrived, peer, relayed, watch)
                 }
                 Some(&"_replication") => {
@@ -1966,11 +1987,11 @@ impl Router {
     fn forward(
         &self,
         req: &Request,
-        out: &mut TcpStream,
+        out: &mut &Conn,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
-        watch: Option<&TcpStream>,
+        watch: Option<&Conn>,
     ) -> bool {
         let head_only = req.method == Method::Head;
         // A forwarded request is traced, the rest of the router's are not:
@@ -1978,7 +1999,7 @@ impl Router {
         fennec_http::trace::begin(req);
         // The router's own answers: a standby's 503, an unknown tenant's
         // 404, a node's 502.
-        let reply = |out: &mut TcpStream, resp: Response| {
+        let reply = |out: &mut &Conn, resp: Response| {
             let resp = self.cors(resp);
             metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
@@ -2218,17 +2239,17 @@ impl Router {
     fn after_cut(
         &self,
         req: &Request,
-        out: &mut TcpStream,
+        out: &mut &Conn,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
-        (watch, held): (Option<&TcpStream>, Duration),
+        (watch, held): (Option<&Conn>, Duration),
         tenant: &str,
         node: &str,
         ended: std::io::Error,
     ) -> bool {
         let head_only = req.method == Method::Head;
-        let reply = |out: &mut TcpStream, resp: Response| {
+        let reply = |out: &mut &Conn, resp: Response| {
             let resp = self.cors(resp);
             metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
@@ -2736,7 +2757,7 @@ impl Router {
     fn answer_out_cold(
         &self,
         req: &Request,
-        out: &mut TcpStream,
+        out: &mut &Conn,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         node: &str,
@@ -2766,7 +2787,7 @@ impl Router {
     fn answer_out(
         &self,
         req: &Request,
-        out: &mut TcpStream,
+        out: &mut &Conn,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         node: &str,
@@ -2778,7 +2799,7 @@ impl Router {
         relay: bool,
     ) -> bool {
         let head_only = req.method == Method::Head;
-        let reply = |out: &mut TcpStream, resp: Response| {
+        let reply = |out: &mut &Conn, resp: Response| {
             let resp = self.cors(resp);
             metrics::counted(tenant_route(req), resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
@@ -2905,8 +2926,14 @@ impl Router {
             return false;
         }
         let _ = out.set_read_timeout(None);
-        if let Ok(mut stream) = answer.into_stream(&self.pool) {
-            let _ = std::io::copy(&mut stream, out);
+        let relayed = answer
+            .into_stream(&self.pool)
+            .and_then(|mut stream| std::io::copy(&mut stream, out));
+        // The node broke off, or the client did: over TLS no
+        // `close_notify` after, so the client reads the stream as cut
+        // short, as it is, where the node's own end is sent as one.
+        if relayed.is_err() {
+            out.cut();
         }
         false
     }
@@ -2930,7 +2957,7 @@ impl Router {
     fn forward_near(
         &self,
         req: &Request,
-        out: &mut TcpStream,
+        out: &mut &Conn,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
@@ -6357,7 +6384,7 @@ mod tests {
     fn after_cut_from_n1(router: &Router, whole: bool) -> (u16, String) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
-        let mut out = l.accept().unwrap().0;
+        let out = Conn::Plain(l.accept().unwrap().0);
         let body = br#"{"query":"put notes {title: \"t\"}"}"#.to_vec();
         let header = |k: &str, v: &str| (k.to_string(), v.to_string());
         let req = Request {
@@ -6377,7 +6404,7 @@ mod tests {
         let asked = (None, Duration::ZERO);
         router.after_cut(
             &req,
-            &mut out,
+            &mut &out,
             Instant::now(),
             None,
             None,

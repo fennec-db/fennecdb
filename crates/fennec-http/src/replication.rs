@@ -688,11 +688,25 @@ impl Feed {
         }
     }
 
+    /// Wakes every stream waiting here to look again: the one shutdown
+    /// ending them ([`crate::conn::end_all`]).
+    fn nudge(&self) {
+        let _r = lock(&self.ring);
+        self.cv.notify_all();
+    }
+
     /// Waits until a write after `cursor` is on disk, the feed starts over,
     /// or `timeout` passes.
     pub(crate) fn wait(&self, cursor: u64, epoch: u64, timeout: Duration) {
+        self.wait_unless(cursor, epoch, timeout, || false)
+    }
+
+    /// [`Self::wait`], unless `ending()`, asked under the lock a nudge
+    /// takes ([`Self::nudge`]): a stream the one shutdown ends never
+    /// sleeps through the nudge that told it so.
+    fn wait_unless(&self, cursor: u64, epoch: u64, timeout: Duration, ending: fn() -> bool) {
         let r = lock(&self.ring);
-        if r.durable > cursor || r.epoch != epoch {
+        if r.durable > cursor || r.epoch != epoch || ending() {
             return;
         }
         let _ = self
@@ -1071,7 +1085,7 @@ impl Replication {
 /// `/_replication/...`, answered here. `None` means the request was a
 /// stream, which took the connection over and has ended.
 pub fn handle(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     repl: &Replication,
     req: &Request,
@@ -1221,7 +1235,12 @@ pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
 /// Feeds a replica: a hello, an image when it needs one, then the writes as
 /// they reach the disk. It takes the connection over and returns when the
 /// replica goes away or has to start again.
-fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, req: &Request) {
+fn stream(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+) {
     let Some(feed) = &repl.feed else {
         let _ = Response::error(409, "this server feeds no replicas").write(out, false, false);
         return;
@@ -1295,7 +1314,7 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     let mut hello = vec![VERSION, image.is_some() as u8];
     hello.extend_from_slice(&u64s(&[seq, feed.durable(), now_ms()]));
     hello.extend_from_slice(&lineage.encode());
-    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, &*out);
+    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, *out);
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {
@@ -1313,7 +1332,16 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     feed.sending(key, seq);
     let _stopped = Stopped(feed, key);
     let mut cursor = seq;
+    // The one shutdown wakes the stream to end it, its end over TLS a
+    // `close_notify`.
+    out.on_ending({
+        let feed = Arc::clone(feed);
+        move || feed.nudge()
+    });
     loop {
+        if crate::conn::ending() {
+            return;
+        }
         match feed.next(cursor, epoch, MESSAGE) {
             Next::Records(first, last, times, records) => {
                 let n = times.len() as u64;
@@ -1330,7 +1358,7 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
             }
             Next::Nothing => {
                 feed.sent(key, cursor, true);
-                feed.wait(cursor, epoch, ALIVE);
+                feed.wait_unless(cursor, epoch, ALIVE, crate::conn::ending);
                 if feed.durable() <= cursor {
                     let alive = u64s(&[feed.seq(), feed.durable(), now_ms()]);
                     if message(&mut w, b'K', &[&alive])

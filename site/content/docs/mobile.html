@@ -466,9 +466,11 @@ between them is the platforms':</p>
 <h3 id="tls">TLS on devices</h3>
 
 <p>iOS (App Transport Security) and Android refuse plain <code>http://</code>
-by default, and so should you: put TLS in front of
-<code>fennec-server</code>. Caddy does it in three lines, certificate
-included:</p>
+by default, and so should you: serve <code>fennec-server</code> over HTTPS.
+It can hold the certificate itself, <code>--tls-cert</code> and
+<code>--tls-key</code> (<a href="/docs/server#tls">HTTPS</a>), and a device
+trusts a public CA's certificate, Let's Encrypt's for one, as it is. A proxy
+is still an option. Caddy does it in three lines, certificate included:</p>
 
 <pre data-lang="text" data-label="Caddyfile">api.example.com {
     reverse_proxy 127.0.0.1:8080
@@ -493,7 +495,7 @@ nginx, the server's <code>X-Accel-Buffering: no</code> does the same. A
 proxy that closes an idle connection sooner than the server's keepalive
 (a comment every 20 s) cuts the stream, which then opens again from its
 cursor -- harmless, a round trip each time. fennecdb's own HTTP client, the
-server's, speaks no TLS and is not used on a device.</p>
+server's, dials plain HTTP in this release and is not used on a device.</p>
 </details>
 
 <h3 id="background">Battery and the background</h3>

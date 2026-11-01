@@ -50,6 +50,7 @@ pub mod archive;
 pub mod audit;
 pub mod calls;
 pub mod cdc;
+pub mod conn;
 pub mod cors;
 pub mod crypto;
 pub mod dial;
@@ -179,6 +180,10 @@ pub struct Config {
     /// The MCP endpoint, `POST /_mcp`, and what its tools may do (`--mcp`);
     /// `None` answers that path 404.
     pub mcp: Option<Arc<mcp::Options>>,
+    /// HTTPS alone on this listener (`--tls-cert`, `--tls-key`): every
+    /// connection's handshake on its own thread ([`conn`]); `None`, plain
+    /// HTTP.
+    pub tls: Option<Arc<conn::Tls>>,
 }
 
 impl Config {
@@ -223,6 +228,7 @@ impl Default for Config {
             router_mark: None,
             studio: None,
             mcp: None,
+            tls: None,
         }
     }
 }
@@ -397,14 +403,17 @@ impl Server {
         } else {
             "no auth"
         };
+        // `https://` where it speaks TLS alone: a harness finds the
+        // server, and its scheme, by this line.
+        let scheme = conn::scheme(self.cfg.tls.as_deref());
         if matches!(self.backend, Backend::Metrics { .. }) {
             crate::log!(
-                "metrics on: http://{}/_metrics  [{auth}]",
+                "metrics on: {scheme}://{}/_metrics  [{auth}]",
                 listener.local_addr()?
             );
         } else {
             crate::log!(
-                "fennec-http {} listening on: http://{}  [{}{}]",
+                "fennec-http {} listening on: {scheme}://{}  [{}{}]",
                 fennec_core::VERSION,
                 listener.local_addr()?,
                 if self.cfg.token.is_some() {
@@ -435,8 +444,15 @@ impl Server {
                 // Told with the CORS headers as every other answer is: a
                 // page on another origin read a refusal without them as
                 // the network failing.
-                let answer = Response::retry_after(503, "too many connections", 1);
-                accept::refuse(stream, cors(answer, &self.cfg), accept::Refusal::Ceiling);
+                let why = accept::Refusal::Ceiling;
+                match self.cfg.tls {
+                    // No handshake on this thread: an alert in the clear.
+                    Some(_) => accept::refuse_tls(stream, why),
+                    None => {
+                        let answer = Response::retry_after(503, "too many connections", 1);
+                        accept::refuse(stream, cors(answer, &self.cfg), why);
+                    }
+                }
                 continue;
             }
 
@@ -454,7 +470,11 @@ impl Server {
             // closed unanswered (`accept`'s comment).
             if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                let answer = cors(Response::retry_after(503, accept::NO_THREAD, 1), &self.cfg);
+                let answer = self
+                    .cfg
+                    .tls
+                    .is_none()
+                    .then(|| cors(Response::retry_after(503, accept::NO_THREAD, 1), &self.cfg));
                 accept::no_thread(unserved, answer, "fennec_connections_refused_total");
             }
         }
@@ -684,15 +704,20 @@ fn is_remote(addr: &str) -> bool {
 /// A single connection: reads consecutive requests on a keep-alive connection.
 fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(cfg.idle_timeout);
-    let peer = stream.peer_addr().ok();
-    audit::connection("http", peer);
-    trace::connection(stream.local_addr().ok(), peer);
-    let Ok(write_half) = stream.try_clone() else {
+    // The handshake, where it speaks TLS: here, on the connection's own
+    // thread, never the accepting one ([`conn`]).
+    let Some(conn) = conn::Conn::open(stream, cfg.tls.as_deref()) else {
         return;
     };
-    let mut reader = BufReader::new(stream);
-    let mut out = write_half;
+    let _ = conn.set_read_timeout(cfg.idle_timeout);
+    let peer = conn.peer_addr().ok();
+    audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
+    trace::connection(conn.local_addr().ok(), peer);
+    // The reader and the answers borrow the one connection, as std's
+    // `&TcpStream` reads and writes: no `dup` for a write half, and over
+    // TLS the one session both need.
+    let mut reader = BufReader::new(&conn);
+    let mut out = &conn;
     // After the socket, so it is dropped first: a client that saw the
     // connection close finds it no longer counted. A scrape is not one of
     // the database's clients.
@@ -730,8 +755,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     .write(&mut out, false, false)
                     .is_ok()
                 {
-                    drop(out);
-                    accept::end_refused(reader.into_inner());
+                    drop(reader);
+                    conn.end_refused();
                 }
                 return;
             }
@@ -1139,15 +1164,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         };
         // A client gone while its request was held: a peek finds the
         // connection closed and nothing more of it read.
-        let gone = || {
-            let s = reader.get_ref();
-            if !reader.buffer().is_empty() || s.set_nonblocking(true).is_err() {
-                return false;
-            }
-            let closed = matches!(s.peek(&mut [0u8; 1]), Ok(0));
-            let _ = s.set_nonblocking(false);
-            closed
-        };
+        let gone = || reader.buffer().is_empty() && conn.gone();
         let hold = tenant.as_ref().map(|t| &t.quota);
         let (resp, waited, held) = respond(run, hub, db, &req, gone, hold);
         if let Some(t) = &tenant {
@@ -1511,7 +1528,7 @@ fn operation(req: &Request, shape: &str) -> &'static str {
 #[cold]
 #[inline(never)]
 fn node_stream(
-    out: &mut TcpStream,
+    out: &mut &conn::Conn,
     tenants: &Tenants,
     cfg: &Config,
     req: &Request,

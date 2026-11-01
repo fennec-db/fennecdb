@@ -91,7 +91,6 @@ use fennec_core::history::History;
 use fennec_core::prelude::Database;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -449,7 +448,7 @@ fn places(body: &[u8]) -> Result<HashMap<String, Followed>, String> {
 /// `/_replication/...` on a node of tenants: the stream of every tenant,
 /// with the node's replication token. `None` when the stream took the
 /// connection over and has ended.
-pub fn handle(out: &mut TcpStream, tenants: &Tenants, req: &Request) -> Option<Response> {
+pub fn handle(out: &mut &crate::conn::Conn, tenants: &Tenants, req: &Request) -> Option<Response> {
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -527,7 +526,7 @@ fn begin(
 }
 
 fn serve(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     tenants: &Tenants,
     streams: &Arc<NodeStreams>,
     listed: HashMap<String, Followed>,
@@ -559,7 +558,7 @@ fn serve(
     let mut s = Session {
         tenants,
         l: &l,
-        w: BufWriter::with_capacity(MESSAGE + 64, Out { s: &*out, l: &l }),
+        w: BufWriter::with_capacity(MESSAGE + 64, Out { s: out, l: &l }),
         greeted: HashSet::new(),
         lineages: HashMap::new(),
         hello_at: HashMap::new(),
@@ -583,22 +582,13 @@ fn serve(
 /// slower than the stream writes -- its disk's fsyncs, say -- the write
 /// would block, and the stream is held up while it does.
 struct Out<'a> {
-    s: &'a TcpStream,
+    s: &'a crate::conn::Conn,
     l: &'a Listener,
 }
 
 impl Write for Out<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match (&*self.s).write(buf) {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let _held = self.l.hold();
-                self.s.set_nonblocking(false)?;
-                let r = (&*self.s).write(buf);
-                self.s.set_nonblocking(true)?;
-                r
-            }
-            r => r,
-        }
+        self.s.write_or_hold(buf, || self.l.hold())
     }
 
     fn flush(&mut self) -> io::Result<()> {

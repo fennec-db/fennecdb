@@ -17,11 +17,15 @@ fennec-abi.workspace = true
 fennec-http = { workspace = true, features = ["studio"] }
 # `--follow`: a PostgreSQL table mirrored into the file this server serves.
 fennec-import.workspace = true
+# `--ping` asking a server that serves HTTPS (`--tls-cert`) over TLS.
+fennec-tls = { workspace = true, optional = true }
 
 [dev-dependencies]
 fennec-ql.workspace = true
 # `tests/follow.rs` writes to the PostgreSQL it follows.
 fennec-wire.workspace = true
+# `tests/https.rs` dials the server's HTTPS.
+fennec-tls.workspace = true
 
 [[bin]]
 name = "fennec-server"
@@ -35,7 +39,7 @@ timing = ["fennec-http/timing"]
 # the only dependencies from outside the workspace a shipped binary takes
 # (docs/design/crates.md#zero-dependencies). Without it, `--no-default-features`,
 # the server takes none.
-tls = ["fennec-import/tls"]
+tls = ["fennec-import/tls", "fennec-http/tls", "dep:fennec-tls"]
 
 [[test]]
 name = "all"

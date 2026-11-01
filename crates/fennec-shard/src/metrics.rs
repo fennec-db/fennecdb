@@ -492,6 +492,7 @@ pub fn counters(out: &mut Text) {
         CONNECTIONS.load(Ordering::Relaxed),
     );
     fennec_http::metrics::connections_refused(out, "fennec_router_connections_refused_total");
+    fennec_http::metrics::handshakes_failed(out, "fennec_router_tls_handshakes_failed_total");
     // The exporter's, when the router traces (`--otlp-endpoint`).
     fennec_http::trace::metrics(out);
 }

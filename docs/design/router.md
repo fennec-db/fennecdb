@@ -122,7 +122,14 @@ first run looking at no client -- was answered nothing while its claim
 took a job on a busy queue. Bytes from the client
 are a next request sent ahead, after which the node alone is waited for,
 as the node lets a client be whose next request it holds; so is a client
-whose next request the router's reader holds already. Blocked in the
+whose next request the router's reader holds already. A client speaking
+TLS is looked at through its session (`Conn::peer`), the `poll` alone on
+its socket: its `close_notify` is a record of bytes, which a peek took for
+a next request, so the router stopped watching a client that had ended
+and its claim took a job answered to nobody
+(`a_held_request_s_close_notify_goes_on_to_the_node`); read as TLS it is
+the end it is, as is one the session took in with the request, looked at
+before the first `poll`. Blocked in the
 head's `read_line`, a claim whose client went through the router took the
 next job, leased to nobody until the lease ran out. A router relaying the
 request watches its client the same way (`relay_send`), so the end goes on

@@ -16,6 +16,7 @@ mod regions;
 mod replicas;
 mod router;
 mod standby;
+mod tls;
 mod tokens;
 mod unsent;
 mod upstream;

@@ -78,7 +78,7 @@ and is alpha software.</p>
   <td>A replica in the page or app: offline reads, queued writes, live queries (<a href="sync.html">Sync</a>)</td>
   <td>Not in core; <a href="https://www.postgresql.org/docs/current/sql-notify.html"><code>LISTEN</code>/<code>NOTIFY</code></a> and <a href="https://www.postgresql.org/docs/current/logicaldecoding.html">logical decoding</a></td></tr>
 <tr><td>Access control</td>
-  <td>A server token; JWT rules added to every statement (<a href="http-access.html#scoped-access">Scoped access</a>). No TLS: a terminator goes in front</td>
+  <td>A server token; JWT rules added to every statement (<a href="http-access.html#scoped-access">Scoped access</a>). HTTPS built in (<a href="server.html#tls"><code>--tls-cert</code></a>), no proxy in front</td>
   <td>Roles, <code>GRANT</code>, <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">row-level security</a></td></tr>
 <tr><td>Schema and migrations</td>
   <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
@@ -105,7 +105,7 @@ and is alpha software.</p>
   <td><code>fuse</code>, reciprocal rank fusion (<a href="fennecql-search.html#hybrid">Hybrid search</a>)</td>
   <td>No operator; fusion written in SQL (<a href="https://www.tigerdata.com/blog/introducing-pg_textsearch-true-bm25-ranking-hybrid-retrieval-postgres">an example</a>)</td></tr>
 <tr><td>Size</td>
-  <td>A 7.00 MB server image (<a href="benchmarks-size.html#binary-size">Binary size</a>)</td>
+  <td>A 7.18 MB server image (<a href="benchmarks-size.html#binary-size">Binary size</a>)</td>
   <td>Not measured here</td></tr>
 <tr><td>Licence and hosting</td>
   <td>Apache-2.0; self-hosted only</td>
@@ -121,8 +121,9 @@ and is alpha software.</p>
 <p>What fennecdb gives up for its size is listed in <a
 href="limits.html">Limits</a>: no SQL dialect (<a href="sql.html">its everyday spellings</a> aside) and a join only on a key (a query reads one
 collection and attaches related rows with <code>lookup</code>), one writer
-a file, no transaction held open across requests, and no TLS on the
-server. PostgreSQL's server has none of those limits.</p>
+a file, no transaction held open across requests, and TLS only on the ports
+clients reach, not yet between servers. PostgreSQL's server has none of those
+limits.</p>
 
 <p>pgvector's HNSW indexes take <code>vector</code> up to 2 000
 dimensions, <code>halfvec</code> up to 4 000, <code>bit</code> up to

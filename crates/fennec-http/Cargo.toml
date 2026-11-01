@@ -14,6 +14,13 @@ categories.workspace = true
 fennec-core = { workspace = true, features = ["std-fs", "full"] }
 fennec-ql = { workspace = true, features = ["statements"] }
 fennec-abi.workspace = true
+# HTTPS served by the listeners (`--tls-cert`, `--tls-key`; `src/conn.rs`),
+# behind `tls`: the binaries name it, the shell (`fennec backup`) does not.
+fennec-tls = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests' clients of an HTTPS listener.
+fennec-tls.workspace = true
 
 [features]
 # `timing`: where a request's time goes, phase by phase, at `GET /_timing`
@@ -23,6 +30,7 @@ timing = []
 # the binaries that serve it -- fennec-server and fennec-shard, `--studio`.
 # The shell, which reaches this crate for `fennec backup`, carries none.
 studio = []
+tls = ["dep:fennec-tls"]
 
 [[test]]
 name = "all"
@@ -53,3 +61,8 @@ path = "tests/join_lists.rs"
 [[test]]
 name = "refused_counts"
 path = "tests/refused_counts.rs"
+
+# Apart: the count of failed handshakes is the process's own.
+[[test]]
+name = "tls_failures"
+path = "tests/tls_failures.rs"

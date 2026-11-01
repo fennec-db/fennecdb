@@ -197,7 +197,7 @@ pub(crate) fn until_fin_taken(s: &TcpStream) {
 
 /// `SO_LINGER` of zero: the socket's close resets the connection. The
 /// crate takes no `libc`, so the option's numbers are each system's.
-fn reset_on_close(s: &TcpStream) {
+pub(crate) fn reset_on_close(s: &TcpStream) {
     use std::os::fd::AsRawFd;
     #[repr(C)]
     struct Linger {

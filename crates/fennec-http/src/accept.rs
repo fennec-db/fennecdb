@@ -160,7 +160,20 @@ pub fn spawn(
 /// has arrived is read off here, up to 64 KiB ([`DRAIN`]), and the socket
 /// closed, as before ([`refuse_at_once`]).
 pub fn refuse(stream: TcpStream, answer: Response, why: Refusal) {
-    refuse_saying(stream, answer, why, true, || {});
+    refuse_saying(stream, Some(answer), why, true, || {});
+}
+
+/// [`refuse`] on a TLS listener: told [`fennec_tls::REFUSAL`], a fatal
+/// `internal_error` alert in the clear, where a plain one is answered 503.
+/// A 503 over TLS would take a handshake, and the accepting thread runs
+/// none -- a client trickling its `ClientHello` would hold every
+/// connection's accept behind it, and each handshake's key exchange costs
+/// it the time of hundreds of accepts. The client sent nothing of its own,
+/// no application data going before a handshake ends, so any request of
+/// its may go again, as one answered `Fennec-Unserved` may; it is held and
+/// counted as [`refuse`] holds and counts.
+pub fn refuse_tls(stream: TcpStream, why: Refusal) {
+    refuse_saying(stream, None, why, true, || {});
 }
 
 /// [`refuse`] where the connection is not held: what has arrived read off
@@ -173,7 +186,7 @@ pub fn refuse(stream: TcpStream, answer: Response, why: Refusal) {
 /// way `accept`'s unit test reaches the read off on this thread.
 #[doc(hidden)]
 pub fn refuse_at_once(stream: TcpStream, answer: Response, why: Refusal) {
-    refuse_saying(stream, answer, why, false, || {});
+    refuse_saying(stream, Some(answer), why, false, || {});
 }
 
 /// Ends a connection whose request was refused before it was read whole --
@@ -203,19 +216,24 @@ pub fn end_refused(stream: TcpStream) {
 /// ([`crate::request_id::log`]).
 fn refuse_saying(
     mut stream: TcpStream,
-    answer: Response,
+    answer: Option<Response>,
     why: Refusal,
     hold: bool,
     say: impl FnOnce(),
 ) {
     REFUSED[why as usize].fetch_add(1, Ordering::Relaxed);
-    let answer = answer.header(UNSERVED_HEADER, REFUSALS[why as usize]);
     crate::request_id::begin(None);
     if stream.set_nonblocking(true).is_ok() {
         // An answer that did not go out whole is no answer to hold the
         // connection open for.
-        let answered = answer.write(&mut stream, false, false).is_ok()
-            && stream.shutdown(Shutdown::Write).is_ok();
+        let told = match answer {
+            Some(answer) => answer
+                .header(UNSERVED_HEADER, REFUSALS[why as usize])
+                .write(&mut stream, false, false)
+                .is_ok(),
+            None => alert(&mut stream),
+        };
+        let answered = told && stream.shutdown(Shutdown::Write).is_ok();
         let unheld = if answered && hold {
             linger(stream)
         } else {
@@ -229,6 +247,20 @@ fn refuse_saying(
     }
     say();
     crate::request_id::end();
+}
+
+/// [`fennec_tls::REFUSAL`] written whole, in one write, or not at all.
+fn alert(stream: &mut TcpStream) -> bool {
+    #[cfg(feature = "tls")]
+    {
+        use std::io::Write as _;
+        matches!(stream.write(&fennec_tls::REFUSAL), Ok(n) if n == fennec_tls::REFUSAL.len())
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = stream;
+        false
+    }
 }
 
 /// The queue of connections the system completes for a listener before it
@@ -490,10 +522,11 @@ fn due() -> bool {
 /// log a minute apart at most, the line carrying the answer's request id:
 /// a process at its thread limit refuses every connection it cannot serve,
 /// and a line each would be a line a request. `counted` names the family
-/// that counts each.
+/// that counts each. `answer` is `None` on a TLS listener, which tells the
+/// connection [`fennec_tls::REFUSAL`] ([`refuse_tls`]).
 #[cold]
 #[inline(never)]
-pub fn no_thread(unserved: Unserved, answer: Response, counted: &str) {
+pub fn no_thread(unserved: Unserved, answer: Option<Response>, counted: &str) {
     let Unserved { stream, error } = unserved;
     debug_assert!(
         stream.is_some(),
@@ -520,10 +553,14 @@ pub fn no_thread(unserved: Unserved, answer: Response, counted: &str) {
             .peer_addr()
             .map_or_else(|_| "?".into(), |p| p.to_string())
     });
+    let told = match answer {
+        Some(_) => "answered 503 with Retry-After",
+        None => "told a TLS internal_error alert, no handshake run",
+    };
     refuse_saying(stream, answer, Refusal::NoThread, true, || {
         if let Some(from) = from {
             crate::log!(
-                "no thread for a connection from {from}: {error}; answered 503 with Retry-After. \
+                "no thread for a connection from {from}: {error}; {told}. \
                  The process is at its thread limit (a cgroup's pids.max, systemd's TasksMax=, \
                  ulimit -u, macOS's 2 048 a process): raise it, or lower --max-connections \
                  below it (said a minute apart at most; {counted} counts each)"

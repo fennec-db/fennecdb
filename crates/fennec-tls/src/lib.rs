@@ -55,9 +55,14 @@ pub enum Error {
     /// The peer's certificate was refused -- its chain, its name, its
     /// dates -- before anything of the caller's was sent.
     Certificate(String),
-    /// The handshake failed otherwise: an alert from the peer, no protocol
-    /// version or ALPN protocol in common, bytes that are not TLS.
+    /// The handshake failed otherwise: no protocol version, cipher suite or
+    /// ALPN protocol in common, bytes that are not TLS.
     Handshake(String),
+    /// The peer ended the handshake with an alert: it refused this side --
+    /// most often a server's certificate -- or was refused a connection
+    /// ([`REFUSAL`]). Told apart from [`Error::Handshake`] for a server to
+    /// count why its handshakes fail; said the same.
+    Alert(String),
     /// A certificate, key or name given to build a config or to dial is
     /// unusable.
     Config(String),
@@ -68,7 +73,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "{e}"),
             Error::Certificate(m) => write!(f, "certificate refused: {m}"),
-            Error::Handshake(m) => write!(f, "TLS handshake failed: {m}"),
+            Error::Handshake(m) | Error::Alert(m) => write!(f, "TLS handshake failed: {m}"),
             Error::Config(m) => write!(f, "{m}"),
         }
     }
@@ -112,7 +117,16 @@ impl Error {
                 "{peer}: {}",
                 rustls::Error::InvalidCertificate(c.clone())
             )),
-            other => Error::Handshake(format!("{peer}: {other}")),
+            other => Error::refused(other, peer),
+        }
+    }
+
+    /// rustls's error of a handshake that failed in the protocol: an alert
+    /// the peer sent, or the rest.
+    fn refused(e: &rustls::Error, peer: &str) -> Error {
+        match e {
+            rustls::Error::AlertReceived(_) => Error::Alert(format!("{peer}: {e}")),
+            _ => Error::Handshake(format!("{peer}: {e}")),
         }
     }
 }
@@ -493,7 +507,93 @@ impl Server {
             sock,
         })
     }
+
+    /// [`Server::accept`] bounded as a whole: past `within` the handshake
+    /// is a timeout however the client trickles its bytes. Each read and
+    /// write waits the time left and no more -- rustls's `complete_io` reads
+    /// again inside one call, so a timeout set once for it was a bound on
+    /// each read, and a client sending a byte short of it held a server's
+    /// thread for as long as it liked. The socket is left with neither
+    /// timeout set, for the caller to set its own.
+    pub fn accept_within(&self, mut sock: TcpStream, within: Duration) -> Result<TlsStream, Error> {
+        let deadline = Instant::now() + within;
+        let mut conn = ServerConnection::new(Arc::clone(&self.config)).map_err(config)?;
+        let late = |sock: &TcpStream| {
+            Error::Io(io::Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "TLS with {}: no handshake within {within:?}",
+                    sock_peer(sock)
+                ),
+            ))
+        };
+        while conn.is_handshaking() || conn.wants_write() {
+            // Rounded up to a millisecond: a zero timeout is refused by the
+            // socket, and is "forever" to the kernel.
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(late(&sock));
+            }
+            let left = left.max(Duration::from_millis(1));
+            if conn.wants_write() {
+                sock.set_write_timeout(Some(left))?;
+                match conn.write_tls(&mut sock) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                        return Err(late(&sock))
+                    }
+                    Err(e) => return Err(Error::of_handshake(e, &sock_peer(&sock))),
+                }
+                continue;
+            }
+            sock.set_read_timeout(Some(left))?;
+            match conn.read_tls(&mut sock) {
+                Ok(0) => {
+                    return Err(Error::Io(io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        format!(
+                            "TLS with {}: the client ended the handshake",
+                            sock_peer(&sock)
+                        ),
+                    )))
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err(late(&sock))
+                }
+                Err(e) => return Err(Error::of_handshake(e, &sock_peer(&sock))),
+            }
+            if let Err(e) = conn.process_new_packets() {
+                // The alert rustls queued for the client, then the error.
+                let _ = conn.write_tls(&mut sock);
+                return Err(Error::refused(&e, &sock_peer(&sock)));
+            }
+        }
+        sock.set_read_timeout(None)?;
+        sock.set_write_timeout(None)?;
+        Ok(TlsStream {
+            conn: Conn::Server(conn),
+            sock,
+        })
+    }
 }
+
+/// A peer's address for an error, or "the client".
+fn sock_peer(sock: &TcpStream) -> String {
+    sock.peer_addr()
+        .map_or_else(|_| "the client".to_string(), |a| a.to_string())
+}
+
+/// A fatal `internal_error` alert, a record of its own in the clear: what
+/// a listener tells a connection it will not serve without running a
+/// handshake for it, the one answer TLS has before keys are agreed. Its
+/// client reports the alert ("tlsv1 alert internal error", rustls's
+/// `AlertReceived(InternalError)`, Go's "remote error: tls: internal
+/// error") and knows it sent nothing of its own: no application data goes
+/// before a handshake ends.
+pub const REFUSAL: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50];
 
 // ------------------------------------------------------------------ stream
 
@@ -639,13 +739,137 @@ impl Read for TlsStream {
     }
 }
 
+/// What a peer did, looked at without waiting ([`TlsStream::peer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peer {
+    /// Nothing arrived, or records carrying no plaintext (a key update).
+    Quiet,
+    /// Plaintext waits to be read: the peer sent more.
+    Sent,
+    /// Its `close_notify`, or its end, came with no plaintext left before
+    /// it: closed, or done writing and still reading.
+    Ended,
+}
+
+impl TlsStream {
+    /// What the peer did, looked at without waiting: what has arrived is
+    /// taken in and read as TLS, so a `close_notify` -- a record of bytes
+    /// -- is the end it is, where a peek at the socket took it for bytes
+    /// of a next request. An error is a reset, or a record the session
+    /// cannot take (its alert sent back first): the peer can be answered
+    /// nothing more. The socket is left blocking.
+    pub fn peer(&mut self) -> io::Result<Peer> {
+        let state = self.processed()?;
+        if state.0 {
+            return Ok(Peer::Sent);
+        }
+        if state.1 {
+            return Ok(Peer::Ended);
+        }
+        self.sock.set_nonblocking(true)?;
+        let got = match &mut self.conn {
+            Conn::Client(c) => c.read_tls(&mut self.sock),
+            Conn::Server(c) => c.read_tls(&mut self.sock),
+        };
+        self.sock.set_nonblocking(false)?;
+        let ended = match got {
+            Ok(n) => n == 0,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                return Ok(Peer::Quiet)
+            }
+            Err(e) => return Err(e),
+        };
+        let (plaintext, closed) = self.processed()?;
+        Ok(if plaintext {
+            Peer::Sent
+        } else if ended || closed {
+            Peer::Ended
+        } else {
+            Peer::Quiet
+        })
+    }
+
+    /// Whether the peer is gone, looked at without waiting ([`Self::peer`]
+    /// says [`Peer::Ended`]): a server's client gone while its request is
+    /// held.
+    pub fn peer_gone(&mut self) -> io::Result<bool> {
+        Ok(self.peer()? == Peer::Ended)
+    }
+
+    /// The records arrived, taken in: whether plaintext waits, and whether
+    /// the peer's `close_notify` came. A record refused has its alert sent
+    /// before the error.
+    fn processed(&mut self) -> io::Result<(bool, bool)> {
+        let state = match &mut self.conn {
+            Conn::Client(c) => c.process_new_packets(),
+            Conn::Server(c) => c.process_new_packets(),
+        };
+        match state {
+            Ok(s) => Ok((s.plaintext_bytes_to_read() > 0, s.peer_has_closed())),
+            Err(e) => {
+                let _ = self.flush_tls();
+                Err(invalid(e))
+            }
+        }
+    }
+
+    /// Whether records are queued that the socket has not taken: a write
+    /// on a non-blocking socket that would have blocked left them, for the
+    /// next write or [`Write::flush`] to send first.
+    pub fn has_unsent(&self) -> bool {
+        match &self.conn {
+            Conn::Client(c) => c.wants_write(),
+            Conn::Server(c) => c.wants_write(),
+        }
+    }
+
+    /// Sends `close_notify`, the end of what this side writes, and whatever
+    /// was queued before it.
+    pub fn close(&mut self) -> io::Result<()> {
+        match &mut self.conn {
+            Conn::Client(c) => c.send_close_notify(),
+            Conn::Server(c) => c.send_close_notify(),
+        }
+        self.flush_tls()
+    }
+
+    /// The socket beneath, the TLS session let go of: once [`Self::close`]
+    /// has sent its end, what is left is to read off what the peer still
+    /// sends before closing it.
+    pub fn into_socket(self) -> TcpStream {
+        self.sock
+    }
+}
+
 impl Write for TlsStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        with_stream!(self, s => s.write(buf))
+        self.write_vectored(&[io::IoSlice::new(buf)])
+    }
+
+    /// The slices taken as one plaintext, so a small answer's head and body
+    /// go in one record, and the records sent at once, in one `writev`
+    /// (rustls's own queue): written a slice at a time, each was a record
+    /// and a send of its own. Unlike rustls's `Stream`, a write never reads:
+    /// one that took nothing there waited for the peer to send. What an
+    /// earlier write left queued goes first; a failure sending what this
+    /// one took is the next call's, the plaintext being taken (rustls's
+    /// rule too), and [`Write::flush`] tells it.
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.flush_tls()?;
+        let n = match &mut self.conn {
+            Conn::Client(c) => c.writer().write_vectored(bufs)?,
+            Conn::Server(c) => c.writer().write_vectored(bufs)?,
+        };
+        let _ = self.flush_tls();
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        with_stream!(self, s => s.flush())
+        match &mut self.conn {
+            Conn::Client(c) => c.writer().flush()?,
+            Conn::Server(c) => c.writer().flush()?,
+        }
+        self.flush_tls()
     }
 }
 
@@ -925,6 +1149,178 @@ mod tests {
         served.join().unwrap();
         let e = s.readable(Duration::from_secs(10)).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    /// A handshake trickled a byte at a time, each well inside the bound,
+    /// is cut at the bound as a whole: a timeout a read held a thread for
+    /// as long as the client kept sending.
+    #[test]
+    fn accept_within_bounds_the_whole_handshake() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let trickle = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // A record header claiming a ClientHello, then a byte a while.
+            let _ = s.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00]);
+            for _ in 0..100 {
+                thread::sleep(Duration::from_millis(100));
+                if s.write_all(&[0x01]).is_err() {
+                    return;
+                }
+            }
+        });
+        let (sock, _) = listener.accept().unwrap();
+        let within = Duration::from_millis(600);
+        let started = Instant::now();
+        let e = server.accept_within(sock, within).unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(&e, Error::Io(io) if io.kind() == ErrorKind::TimedOut),
+            "{e}"
+        );
+        assert!(took >= within, "{took:?}");
+        // The trickle goes on for ten seconds: cut well before it ends.
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        trickle.join().unwrap();
+    }
+
+    /// [`REFUSAL`], written in place of a handshake, is an alert a client
+    /// reports as the server's.
+    #[test]
+    fn a_refusal_is_an_alert_the_client_reports() {
+        let ca = ca("fennec test CA");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let refused = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.write_all(&REFUSAL).unwrap();
+            sock.shutdown(std::net::Shutdown::Write).unwrap();
+            // What the client sends is read off before the close.
+            let _ = sock.read_to_end(&mut Vec::new());
+        });
+        let e = dial(&trusting(&ca), port, "localhost").unwrap_err();
+        assert!(
+            matches!(e, Error::Alert(_)) && e.to_string().contains("InternalError"),
+            "{e}"
+        );
+        refused.join().unwrap();
+    }
+
+    /// A server's look at a held client: there while it sends nothing, gone
+    /// at its `close_notify` or its end, there again while plaintext waits.
+    #[test]
+    fn peer_gone_tells_a_close_from_a_quiet_client() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = trusting(&ca);
+        for how in ["close_notify", "end"] {
+            let dialed = {
+                let client = client.clone();
+                thread::spawn(move || dial(&client, port, "localhost").unwrap())
+            };
+            let (sock, _) = listener.accept().unwrap();
+            let mut s = server.accept(sock).unwrap();
+            let mut c = dialed.join().unwrap();
+            assert_eq!(s.peer().unwrap(), Peer::Quiet, "{how}: quiet is not gone");
+            c.write_all(b"next").unwrap();
+            c.flush().unwrap();
+            // Plaintext waiting is a client there, however it ends after.
+            while !s.readable(Duration::from_millis(10)).unwrap() {}
+            match how {
+                "close_notify" => c.close().unwrap(),
+                _ => c.get_ref().shutdown(std::net::Shutdown::Write).unwrap(),
+            }
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(s.peer().unwrap(), Peer::Sent, "{how}: plaintext waits");
+            let mut got = [0u8; 4];
+            s.read_exact(&mut got).unwrap();
+            let started = Instant::now();
+            while !s.peer_gone().unwrap() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{how}: never gone"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!s
+                .get_ref()
+                .read_timeout()
+                .unwrap()
+                .is_some_and(|d| d.is_zero()));
+        }
+    }
+
+    /// A write's slices are one plaintext, sent with no read: the reader at
+    /// the other end gets them whole, and a write of nothing returns at
+    /// once where rustls's `Stream` waited for the peer to send.
+    #[test]
+    fn a_vectored_write_sends_its_slices_and_never_reads() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dialed = {
+            let client = trusting(&ca);
+            thread::spawn(move || dial(&client, port, "localhost").unwrap())
+        };
+        let (sock, _) = listener.accept().unwrap();
+        let mut s = server.accept(sock).unwrap();
+        let mut c = dialed.join().unwrap();
+        // Would block for good on a read: the client sends nothing.
+        s.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let started = Instant::now();
+        assert_eq!(s.write(&[]).unwrap(), 0);
+        s.flush().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let parts = [
+            io::IoSlice::new(b"HTTP/1.1 200 OK\r\n\r\n"),
+            io::IoSlice::new(b"body"),
+        ];
+        assert_eq!(s.write_vectored(&parts).unwrap(), 23);
+        s.flush().unwrap();
+        assert!(!s.has_unsent());
+        let mut got = [0u8; 23];
+        c.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"HTTP/1.1 200 OK\r\n\r\nbody");
+    }
+
+    /// The certificates the HTTPS listeners' tests serve and trust, in
+    /// `crates/fennec-http/tests/certs` -- fennec-server's, fennec-shard's
+    /// and the JS client's tests read them there too: the server's chain is
+    /// good for `localhost`, `127.0.0.1` and `::1` under `ca.pem`, and
+    /// `other.key` is a key that is not its. `FENNEC_WRITE_CERTS=1 cargo
+    /// test -p fennec-tls http_certs` writes them again (valid 2026 to
+    /// 2126).
+    #[test]
+    fn http_certs() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fennec-http/tests/certs");
+        if std::env::var_os("FENNEC_WRITE_CERTS").is_some() {
+            std::fs::create_dir_all(&dir).unwrap();
+            let ca = ca("fennec test CA");
+            let (chain, key) = leaf(&ca, &["localhost", "127.0.0.1", "::1"]);
+            std::fs::write(dir.join("ca.pem"), ca.cert.pem()).unwrap();
+            std::fs::write(dir.join("server.pem"), chain).unwrap();
+            std::fs::write(dir.join("server.key"), key).unwrap();
+            let other = KeyPair::generate().unwrap();
+            std::fs::write(dir.join("other.key"), other.serialize_pem()).unwrap();
+        }
+        let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+        let server = Server::from_pem(&read("server.pem"), &read("server.key")).unwrap();
+        let ca = Client::trusting(&pem_certs(&read("ca.pem")).unwrap()).unwrap();
+        for name in ["localhost", "127.0.0.1"] {
+            let (port, served) = serve(server.clone(), b"pong");
+            let mut s = dial(&ca, port, name).unwrap();
+            assert_eq!(ping(&mut s), b"pong");
+            served.recv().unwrap().unwrap();
+        }
+        let e = Server::from_pem(&read("server.pem"), &read("other.key")).unwrap_err();
+        assert!(e.to_string().contains("KeyMismatch"), "{e}");
     }
 
     /// The certificates fennec-wire's tests serve and trust, in

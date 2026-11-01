@@ -77,6 +77,7 @@
 //! gives up within a try of a second once a failover has moved a tenant
 //! ([`Pool::connect_watching`]).
 
+use fennec_http::conn::{Conn as Client, Peer};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -893,7 +894,7 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         held: Duration,
-        client: Option<&TcpStream>,
+        client: Option<&Client>,
         flying: Flying,
     ) -> io::Result<Answer> {
         let times = (self.timeout + held, self.timeout, self.timeout);
@@ -926,7 +927,7 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         held: Duration,
-        client: Option<&TcpStream>,
+        client: Option<&Client>,
     ) -> Result<Answer, Tried> {
         let times = (self.timeout + held, self.timeout, self.timeout);
         let replay = Replay::AsAsked;
@@ -1039,7 +1040,7 @@ impl Pool {
         body: &[u8],
         times: (Duration, Duration, Duration),
         replay: Replay,
-        client: Option<&TcpStream>,
+        client: Option<&Client>,
         flying: Flying,
     ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within, write_timeout) = times;
@@ -1133,7 +1134,7 @@ impl Pool {
         set: (Option<Duration>, Duration),
         (head, body): (&[u8], &[u8]),
         want: (Duration, Duration),
-        client: Option<&TcpStream>,
+        client: Option<&Client>,
         flying: Flying,
     ) -> Result<Answer, Failure> {
         let (read_timeout, write_timeout) = want;
@@ -1528,9 +1529,9 @@ mod sys {
 /// `client` -- the held request's own client -- meanwhile: one `poll` of
 /// both until either moves. The node's socket moving, by an answer, a
 /// close or an error, is the head's read's to tell. The client's is looked
-/// at as a pooled connection is ([`peek_now`]): its end is
-/// [`Watched::Ended`], which the caller passes on to the node, and a reset
-/// the client gone. Taken for gone, an end let go of the node's
+/// at through its TLS where it speaks it ([`looked`]): its end -- over TLS
+/// its `close_notify` too -- is [`Watched::Ended`], which the caller passes
+/// on to the node, and a reset the client gone. Taken for gone, an end let go of the node's
 /// connection, and a client that had half-closed after its request -- one
 /// a node answers as any, its first run checking nothing -- was answered
 /// nothing, its claim having taken a job on a busy queue all the same.
@@ -1556,13 +1557,24 @@ mod sys {
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn answered_or_gone(
     node: &TcpStream,
-    client: &TcpStream,
+    client: &Client,
     within: Duration,
 ) -> Result<Watched, Failure> {
     use std::os::fd::AsRawFd;
     use sys::{poll, PollFd, POLLIN};
     let deadline = Instant::now() + within;
     let mut watched = 2;
+    let gone = || Failure(Stage::Abandoned, io::Error::other(ClientGone));
+    // Over TLS the session may hold what the socket shows no more: a
+    // `close_notify` taken in with the request, or plaintext of the next.
+    if client.is_tls() {
+        match client.peer() {
+            Ok(Peer::Quiet) => {}
+            Ok(Peer::Sent) => watched = 1,
+            Ok(Peer::Ended) => return Ok(Watched::Ended),
+            Err(_) => return Err(gone()),
+        }
+    }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -1578,7 +1590,7 @@ fn answered_or_gone(
                 revents: 0,
             },
             PollFd {
-                fd: client.as_raw_fd(),
+                fd: client.socket().as_raw_fd(),
                 events: POLLIN,
                 revents: 0,
             },
@@ -1597,11 +1609,11 @@ fn answered_or_gone(
             return Ok(Watched::Answering);
         }
         if watched == 2 && fds[1].revents != 0 {
-            match peek_now(client) {
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Ok(1..) => watched = 1,
-                Ok(0) => return Ok(Watched::Ended),
-                Err(_) => return Err(Failure(Stage::Abandoned, io::Error::other(ClientGone))),
+            match looked(client) {
+                Ok(Peer::Quiet) => {}
+                Ok(Peer::Sent) => watched = 1,
+                Ok(Peer::Ended) => return Ok(Watched::Ended),
+                Err(_) => return Err(gone()),
             }
         }
     }
@@ -1609,7 +1621,7 @@ fn answered_or_gone(
 
 /// No `poll` declared here: the head is waited for as an unheld request's.
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-fn answered_or_gone(_: &TcpStream, _: &TcpStream, _: Duration) -> Result<Watched, Failure> {
+fn answered_or_gone(_: &TcpStream, _: &Client, _: Duration) -> Result<Watched, Failure> {
     Ok(Watched::Answering)
 }
 
@@ -1635,20 +1647,33 @@ pub enum Paused {
 /// there, and the rest of the pause is waited; so is it where the `poll`
 /// fails other than interrupted, as [`answered_or_gone`] stops watching:
 /// asked again at once, a `poll` that kept failing spun for the pause.
-pub fn pause_watching(client: Option<&TcpStream>, pause: Duration) -> Paused {
+pub fn pause_watching(client: Option<&Client>, pause: Duration) -> Paused {
     let Some(client) = client else {
         std::thread::sleep(pause);
         return Paused::Here;
     };
     let deadline = Instant::now() + pause;
     let rest = || std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    // What a TLS session took in already, as [`answered_or_gone`] looks.
+    let mut look = client.is_tls();
     loop {
+        if std::mem::take(&mut look) {
+            match looked(client) {
+                Ok(Peer::Quiet) => {}
+                Ok(Peer::Sent) => {
+                    rest();
+                    return Paused::Here;
+                }
+                Ok(Peer::Ended) => return Paused::Ended,
+                Err(_) => return Paused::Gone,
+            }
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Paused::Here;
         }
-        match readable(client, left) {
-            Ok(true) => {}
+        match readable(client.socket(), left) {
+            Ok(true) => look = true,
             Ok(false) => continue,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => {
@@ -1656,15 +1681,24 @@ pub fn pause_watching(client: Option<&TcpStream>, pause: Duration) -> Paused {
                 return Paused::Here;
             }
         }
-        match peek_now(client) {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Ok(1..) => {
-                rest();
-                return Paused::Here;
-            }
-            Ok(0) => return Paused::Ended,
-            Err(_) => return Paused::Gone,
-        }
+    }
+}
+
+/// What a watched client did, looked at without waiting once its socket
+/// polled readable: a plain one peeked in one system call ([`peek_now`]),
+/// a TLS one read as TLS ([`Client::peer`]), whose `close_notify` is its
+/// end. Peeked, that record was bytes of a next request: the router
+/// watched a client that had ended no more, and its held claim took a job
+/// answered to nobody.
+fn looked(client: &Client) -> io::Result<Peer> {
+    match client {
+        Client::Plain(s) => match peek_now(s) {
+            Ok(0) => Ok(Peer::Ended),
+            Ok(_) => Ok(Peer::Sent),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(Peer::Quiet),
+            Err(e) => Err(e),
+        },
+        _ => client.peer(),
     }
 }
 
@@ -2094,14 +2128,14 @@ mod tests {
         let (client, client_end) = pair();
         drop(client_end);
         assert_eq!(
-            answered_or_gone(&node, &client, long).ok(),
+            answered_or_gone(&node, &Client::Plain(client), long).ok(),
             Some(Watched::Ended)
         );
         let (node, _node_end) = pair();
         let (client, client_end) = pair();
         client_end.shutdown(std::net::Shutdown::Write).unwrap();
         assert_eq!(
-            answered_or_gone(&node, &client, long).ok(),
+            answered_or_gone(&node, &Client::Plain(client), long).ok(),
             Some(Watched::Ended)
         );
         // Its reset, left for the wait to find: Linux reports a reset to
@@ -2116,7 +2150,7 @@ mod tests {
         assert_eq!(client_end.peek(&mut [0u8]).unwrap(), 1);
         drop(client_end);
         let gone = |r: Result<Watched, Failure>| matches!(r, Err(Failure(Stage::Abandoned, _)));
-        assert!(gone(answered_or_gone(&node, &client, long)));
+        assert!(gone(answered_or_gone(&node, &Client::Plain(client), long)));
         // Bytes of a next request, then its end: whichever the wait sees
         // first, the bytes come before the end, and the node alone is
         // waited for -- to the wait's end, a timeout, as with nothing from
@@ -2129,10 +2163,18 @@ mod tests {
             .write_all(b"GET /t/acme/notes HTTP/1.1\r\n")
             .unwrap();
         drop(client_end);
-        assert!(timed(answered_or_gone(&node, &client, short)));
+        assert!(timed(answered_or_gone(
+            &node,
+            &Client::Plain(client),
+            short
+        )));
         let (node, _node_end) = pair();
         let (client, _client_end) = pair();
-        assert!(timed(answered_or_gone(&node, &client, short)));
+        assert!(timed(answered_or_gone(
+            &node,
+            &Client::Plain(client),
+            short
+        )));
         // The node's answer ends the wait, its client gone or not.
         let (node, mut node_end) = pair();
         let (client, client_end) = pair();
@@ -2140,7 +2182,7 @@ mod tests {
         assert_eq!(arrived(&node).unwrap(), 1);
         drop(client_end);
         assert_eq!(
-            answered_or_gone(&node, &client, long).ok(),
+            answered_or_gone(&node, &Client::Plain(client), long).ok(),
             Some(Watched::Answering)
         );
     }
@@ -2154,10 +2196,16 @@ mod tests {
         let long = Duration::from_secs(30);
         let (client, client_end) = pair();
         drop(client_end);
-        assert_eq!(pause_watching(Some(&client), long), Paused::Ended);
+        assert_eq!(
+            pause_watching(Some(&Client::Plain(client)), long),
+            Paused::Ended
+        );
         let (client, client_end) = pair();
         client_end.shutdown(std::net::Shutdown::Write).unwrap();
-        assert_eq!(pause_watching(Some(&client), long), Paused::Ended);
+        assert_eq!(
+            pause_watching(Some(&Client::Plain(client)), long),
+            Paused::Ended
+        );
         let (mut client, client_end) = pair();
         client.write_all(b"x").unwrap();
         client_end
@@ -2165,16 +2213,25 @@ mod tests {
             .unwrap();
         assert_eq!(client_end.peek(&mut [0u8]).unwrap(), 1);
         drop(client_end);
-        assert_eq!(pause_watching(Some(&client), long), Paused::Gone);
+        assert_eq!(
+            pause_watching(Some(&Client::Plain(client)), long),
+            Paused::Gone
+        );
         let short = Duration::from_millis(50);
         let (client, _client_end) = pair();
         let at = Instant::now();
-        assert_eq!(pause_watching(Some(&client), short), Paused::Here);
+        assert_eq!(
+            pause_watching(Some(&Client::Plain(client)), short),
+            Paused::Here
+        );
         assert!(at.elapsed() >= short);
         let (client, mut client_end) = pair();
         client_end.write_all(b"GET / HTTP/1.1\r\n").unwrap();
         let at = Instant::now();
-        assert_eq!(pause_watching(Some(&client), short), Paused::Here);
+        assert_eq!(
+            pause_watching(Some(&Client::Plain(client)), short),
+            Paused::Here
+        );
         assert!(at.elapsed() >= short);
         let at = Instant::now();
         assert_eq!(pause_watching(None, short), Paused::Here);
