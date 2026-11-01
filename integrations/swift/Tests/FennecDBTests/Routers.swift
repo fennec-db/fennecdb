@@ -130,7 +130,8 @@
     /// A URLSession whose requests' heads are kept, in the order they went:
     /// each passed on as it was, or -- given a script -- answered from it
     /// in turn, an empty list's `[]` once it runs out. Kept as each request
-    /// starts loading, before its answer comes back.
+    /// starts loading, before its answer comes back; a passed-on answer's
+    /// head is kept too, before the connection is handed it.
     final class Wire: URLProtocol, @unchecked Sendable {
         final class Log: @unchecked Sendable {
             private let lock = NSLock()
@@ -152,6 +153,21 @@
 
             /// The last request's head.
             var last: [String: String] { all.last ?? [:] }
+
+            private var answers: [[String: String]] = []
+
+            /// The head of the last answer passed on, its names in lower case.
+            var answered: [String: String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return answers.last ?? [:]
+            }
+
+            fileprivate func answer(_ head: [AnyHashable: Any]) {
+                lock.lock()
+                answers.append(Dictionary(head.map { ("\($0.key)".lowercased(), "\($0.value)") }, uniquingKeysWith: { a, _ in a }))
+                lock.unlock()
+            }
 
             /// Answers for the script's end.
             func add(_ more: Scripted...) {
@@ -240,6 +256,7 @@
                     client?.urlProtocol(self, didFailWithError: error)
                     return
                 }
+                log.answer((response as? HTTPURLResponse)?.allHeaderFields ?? [:])
                 client?.urlProtocol(self, didReceive: response!, cacheStoragePolicy: .notAllowed)
                 if let data { client?.urlProtocol(self, didLoad: data) }
                 client?.urlProtocolDidFinishLoading(self)

@@ -41,7 +41,7 @@
             #expect(try await titles(db) == ["one", "two"])
             #expect(db.replica!.status.state == .online)
             // Reads are the file's: the server gone, they go on.
-            await s.kill()
+            try await s.kill()
             #expect(try await db.from("tasks").count() == 2)
             try await db.close()
         }
@@ -190,7 +190,7 @@
             defer { s.stop() }
             let db = try await Fennec.sync(url: s.url, shapes: [open], path: try scratch("sync-restart"))
             await db.replica!.ready()
-            await s.kill()
+            try await s.kill()
             try await eventually("offline") { db.replica!.status.state == .offline }
             // A write while it is down waits in the file.
             try await db.from("tasks").insert(["title": "while down", "status": "open"] as Value)
@@ -211,7 +211,7 @@
             let path = try scratch("sync-reopen")
             var db = try await Fennec.sync(url: s.url, shapes: [open], path: path)
             await db.replica!.ready()
-            await s.kill()
+            try await s.kill()
             try await db.from("tasks").insert(["title": "kept", "status": "open"] as Value)
             try await db.from("tasks").where("key", "a").update(["title": "ONE"] as Value)
             #expect(await db.replica!.refresh().pending == 2)
