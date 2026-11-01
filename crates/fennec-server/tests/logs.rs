@@ -140,7 +140,8 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
         .unwrap();
     assert_eq!(a.status, 200, "{}", a.body);
     // One whose statement reads: a read's line, naming its version too.
-    let def = r#"{"query":"create statement titled($t text) as get notes select id where title = $t"}"#;
+    let def =
+        r#"{"query":"create statement titled($t text) as get notes select id where title = $t"}"#;
     assert_eq!(c.ask("POST", "/t/acme/query", def).status, 200);
     let a = c
         .try_ask(

@@ -50,7 +50,12 @@ fn a_call_is_no_tools_to_run_yet() {
         assert!(err, "{tool} {args}: {s:?}");
         assert!(text(at(&s, &["error"])).contains(says), "{tool}: {s:?}");
     }
-    let a = n.post_raw("POST", "/query", &headers, r#"{"query":"get secrets count"}"#);
+    let a = n.post_raw(
+        "POST",
+        "/query",
+        &headers,
+        r#"{"query":"get secrets count"}"#,
+    );
     assert!(a.body.contains(r#""count":1"#), "{}", a.body);
 }
 

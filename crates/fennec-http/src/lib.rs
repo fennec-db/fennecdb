@@ -3114,7 +3114,11 @@ fn read_call(
         // where it is a plain `get`, as `/query`'s are.
         let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
         let Some(p) = pinned else {
-            break (guard.read_call_json(&callee, &mut body), At::of(&guard), body);
+            break (
+                guard.read_call_json(&callee, &mut body),
+                At::of(&guard),
+                body,
+            );
         };
         let at = At {
             seq: p.change_seq(),

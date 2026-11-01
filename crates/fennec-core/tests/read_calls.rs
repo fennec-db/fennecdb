@@ -134,7 +134,10 @@ fn a_call_that_reads_is_written_out_as_its_get_is() {
         unreachable!()
     };
     let callee = db.callee(&c, &[]).unwrap();
-    let e = db.read_call_json(&callee, &mut String::new()).err().unwrap();
+    let e = db
+        .read_call_json(&callee, &mut String::new())
+        .err()
+        .unwrap();
     assert_eq!(e.reason(), Some("none that rich"));
 }
 
@@ -155,7 +158,9 @@ fn the_read_executor_refuses_a_body_that_writes() {
         .unwrap_err();
     assert!(!matches!(e, Error::ReadOnly(_)), "{e}");
     assert_eq!(db.change_seq(), before);
-    assert!(db.pin(&[(&one("call pay {amount: 5} as {sub: 'u0'}"), &[])]).is_none());
+    assert!(db
+        .pin(&[(&one("call pay {amount: 5} as {sub: 'u0'}"), &[])])
+        .is_none());
 }
 
 /// A replica takes no write of its own, and answers a call that reads --
@@ -219,7 +224,10 @@ fn a_reading_calls_rows_are_its_threads_alone() {
     });
     assert_eq!(refused.load(Relaxed), 0);
     // And none left behind: a plain scan once they are done.
-    assert_eq!(ids(&db.query(&one("get accounts select id"), &[]).unwrap()).len(), 50);
+    assert_eq!(
+        ids(&db.query(&one("get accounts select id"), &[]).unwrap()).len(),
+        50
+    );
 }
 
 /// A long call is pinned as its body would be: read on the pin with no
@@ -244,7 +252,10 @@ fn a_long_call_is_pinned_as_its_body() {
     };
     let callee = db.callee(c, &[]).unwrap();
     let pin = db.pin_call(&callee).expect("pinned");
-    assert_eq!(ids(&pin.read_call(&callee).expect("held").unwrap()).len(), 31);
+    assert_eq!(
+        ids(&pin.read_call(&callee).expect("held").unwrap()).len(),
+        31
+    );
     // `owner` is hashed: its equality is the index's, which a pin holds
     // none of -- declined, and refused where pinned regardless.
     let mine = one("call mine as {sub: 'u3'}");

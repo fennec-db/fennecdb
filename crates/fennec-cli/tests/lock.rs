@@ -269,10 +269,7 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
         let (status, body) = server.run("/query", def);
         assert_eq!(status, 200, "{def}: {body}");
     }
-    assert_eq!(
-        ids(&fennec(&["--read-only", &p, "-c", "call noted"])),
-        [1]
-    );
+    assert_eq!(ids(&fennec(&["--read-only", &p, "-c", "call noted"])), [1]);
     let out = fennec(&["--read-only", &p, "-c", "call stamp"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("--read-only"));
