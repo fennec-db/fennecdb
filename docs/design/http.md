@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, and connections no thread is made for (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, and connections no thread is made for and chunked bodies (both added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -776,3 +776,134 @@ loads of 6.6 to 16: 124.1-165.2k against 131.6-158.7k, p50 115-201 us
 against 132-225. `fennec-server`'s `__text` grew 5 632 bytes and
 `fennec-shard`'s 5 632 (aarch64-apple-darwin): `linger`, `hold`, `ready`,
 `most_held` and `widen`; a refusal reads the descriptor limit once.
+
+## Chunked bodies
+
+**A chunked body grows as it comes, held to the ceiling; a
+framing read two ways is refused** (`http::read_chunked`, `http::read_onto`,
+`http::chunked_framing`). A request's body came by its `Content-Length`
+alone, `Transfer-Encoding: chunked` refused with 411, and a team whose
+clients sat behind a proxy that re-chunks every body could not reach a
+server at all (roadmap row 76). `read_request` now decodes one into the
+same `Vec` its length would have filled, before any route looks at the
+request, so `/query`, `/batch`, `/_call`, MCP, `/_admin`, `/_replication`
+and the consumers' `POST` and `PATCH` read it as they read any body, an
+`Idempotency-Key` digests the same bytes either way, and the slow log and a
+statement's shape see the statement and never its framing.
+
+What bounds it, each before a byte is allocated: a size is 1 to 16 hex
+digits (`MAX_SIZE_DIGITS`, any `u64`) on a line of at most 1 KiB, its CRLF
+and extensions included (`MAX_CHUNK_LINE`), else 400; the size is held to
+what is left under the ceiling the connection reads to (`--max-body`, or a
+tenant node's import ceiling, the data's refused after as by a length)
+before the chunk is read, 413 the moment one would pass it -- a size of
+`ffffffffffffffff` with no byte behind it is refused, never reserved -- and
+a size within it is believed no further than its bytes come: `read_onto`
+grows the buffer a step of 64 KiB (`BODY_STEP`) at a time, each step
+zeroed and read into with one `read_exact`, its room doubling as a `Vec`'s
+does but never past the ceiling, so a 40 MB body under 64 does not reserve
+80. The first version reserved and zeroed each chunk's declared size
+before a byte of it came, and the review's unauthenticated request of
+about 80 bytes ending in `3fffffff` had a node of a 1 GiB `--max-body` take
+up a gibibyte a connection (RSS from 5 MB to 241-371 MB), the router the
+same under its own ceiling; a `Content-Length` of as much took up nothing,
+its `vec![0; len]` the system's zero pages, each taken up only as a byte
+reaches it, as the router's relay of a node's answer (`zeroed`) and a
+replica's message are. A step costs its memset and a read of 64 KiB at
+most where a chunk was one read; `a_declared_chunk_grows_the_body_only_as_its_bytes_come`
+holds the buffer to a step for a gibibyte declared and ten bytes sent, and
+to twice the bytes and a step after more. `fennec mcp`'s bridge reads a
+server's answer, chunked or by its length, through the same function.
+Extensions are read past and trailers
+read and dropped, the two together at most 64 KiB (`MAX_HEADER_BYTES`,
+431): without a bound on them, a body of one-byte chunks each carrying a
+kilobyte of extension has 64 MB of body read 64 GB off the wire, Go's
+CVE-2023-39326. A trailer is never a header: one naming a token or a
+length after the body would change a head already read. A body of
+one-byte chunks with sizes alone is legal and costs its framing, at most
+21 bytes a byte of body, read and never kept.
+
+The rest is request smuggling's, the way a server in front and this one
+could frame one request two ways, so that the bytes one sent as the next
+request are the other's body (RFC 9112 §6.1, §6.3, §2.2, §5.1-5.2). Each is
+refused, and the connection ended after the refusal as every refusal of a
+request's head is, so nothing after it is read as a request: a `Content-Length` beside
+a `Transfer-Encoding` (400, where the RFC lets a server take the coding and
+close); `chunked` named twice or not last (400); a coding but `chunked`,
+`gzip, chunked` among them (501: decoded, a coded body would go on still
+coded); any coding in HTTP/1.0 (400); a bare LF or bare CR anywhere in the
+head or the framing, which the head's reader had read as a line's end (400,
+no client of the repository's sends one); a line folded onto the one
+before (obs-fold) and whitespace between a field's name and its colon, both
+of which `trim` had read as a header (400); a field's name that is not a
+token, or a value holding a control character (400, RFC 9110 §5.1, §5.5),
+a value trimmed of SP and HTAB alone (OWS, §5.6.3) -- `str::trim`, which
+strips Unicode's whitespace, read `\x0bchunked`, `chunked\x0c` and
+`chunked\u{a0}` as `chunked`, and kept `Transfer-Encoding\x0b` as a header
+of no meaning, where main had refused all four with 411 (the review's), so
+a space no server in front reads as one is now part of the value: a coding
+`chunked\u{a0}` is 501 as any other, a length `5\u{a0}` 400 as any word
+but digits; `a_header_disguised_past_sp_and_htab_is_refused` holds each; two `Content-Length`s that
+differ, or one that is not digits alone -- `usize`'s parse took `+5` (400).
+A chunk's data must be followed by exactly CRLF, so a size smaller than its
+data is 400 rather than the rest read as the next request; what follows the
+trailers' empty line is the next request's, left in the reader, which
+`a_kept_alive_connection_reads_on_right_after_the_trailers` holds with a
+chunked, a plain, a chunked and a plain request in one write.
+
+How the connection ends after such a refusal is `accept::end_refused`'s,
+on the server and the router alike, and is the 503's of a connection no
+thread is made for: the answer written whole, the write side shut, the
+stream handed to the lingering thread (`accept::linger`) to read off what
+the client still sends -- 1 MiB and 2 s at most -- until it ends the
+connection, or, where that thread is not running or holds `most_held`,
+what has arrived read off and the socket closed. The first version closed
+the socket after the answer, as every refusal of a head had: a body the
+refusal left unread had the system reset the connection, and a client
+still writing it, or not yet reading, met the reset in place of the
+answer. The merge queue found it once a header holding a control was
+refused with the head rather than by its route after the body was read:
+`idempotency::a_key_holding_a_control_character_is_refused` got
+`ECONNRESET`. `a_refusal_of_the_head_is_read_whole_while_its_body_is_unread`
+and the router's twin write a head refused, then 512 KiB of body, then
+read: before, the body's write failed `EPIPE` and the answer's read
+`ECONNRESET`; after, each of three refusals reads its 400 or 413 whole,
+held thirty times beside four busy loops. A refusal past the head -- a
+chunk past the ceiling, a malformed size -- ends the same way, with
+whatever of its body follows read off.
+
+The router decodes and forwards with a `Content-Length` rather than refuse
+or stream: it already reads every request through fennec-http's
+`read_request`, so it decodes with no code of its own; `forwarded_headers`
+drops `Transfer-Encoding`, `TE` and `Trailer` as hop-by-hop and every
+forward writes its own length, so a node never meets a chunked body; and
+`replayable` and `Stage` resend a request only with its body in hand, which
+a body streamed on as it came would not be -- the global entry streams a
+long body to one router for that reason and refuses one with no length past
+a mebibyte, which stays so. A body is read whole on both sides anyway: a
+statement runs once all of it is in.
+
+One catch the tests found: the three lookups after the headers became one
+pass over them, and a pass that kept the last `Connection` kept a test
+proxy's `keep-alive` where the lookup had found its `close` put ahead of
+it, and its copies waited on a connection that never closed
+(`read_replicas`). The pass keeps the first, as the lookup did.
+
+A plain request pays for none of it. In turns against main, one kept-alive
+client asking `POST /query` with a `Content-Length` body and six headers,
+100 000 requests a run after 2 000 to warm, eight rounds, the order swapped
+each round, each run begun and ended under a load of 2.5 (none discarded):
+main 48 541-49 780 requests a second (median 49 057), p50 20.54-20.79 us
+(median 20.62); this change 48 750-49 090 (median 48 977), p50 20.67-20.71
+(20.67) -- the medians 0.2% apart inside main's own spread, the p50s one
+tick of macOS's 41.7 ns clock apart. `fennec-server`'s `__text` grew 4 800
+bytes and `fennec-shard`'s 7 360 (aarch64-apple-darwin): the decoder, the
+framing's checks and their refusals' words. The browser module carries no fennec-http and is the same
+to the byte. The review's fixes -- a name held to a token's bytes and a
+value to no control, the buffer grown a step at a time -- were timed the
+same way against main (its base, `d308d398`), eight rounds under a load
+of 2.5 (three runs discarded and redone): p50 medians 21.19 us for main
+and 21.29 for the fix, main's own runs 19.42-30.12; requests a second
+spread too far that evening to read (main 20 763-50 857, medians 41 733
+and 47 045). `fennec-server`'s `__text` is 6 016 bytes over main's with
+them, where 4 800 was before.

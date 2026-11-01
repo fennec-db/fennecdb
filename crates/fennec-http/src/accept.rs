@@ -176,6 +176,28 @@ pub fn refuse_at_once(stream: TcpStream, answer: Response, why: Refusal) {
     refuse_saying(stream, answer, why, false, || {});
 }
 
+/// Ends a connection whose request was refused before it was read whole --
+/// its head or its framing not to be trusted, `http::read_request`'s 400,
+/// 408, 413, 431 or 501 -- once the refusal went out whole, as [`refuse`]
+/// ends one: its write side shut, then handed to the [`linger`]ing thread
+/// to read off what the client still sends until it ends it, or what has
+/// arrived read off here, up to [`DRAIN`], and the socket closed where that
+/// thread is not running or holds [`most_held`]. Closed at once, the body
+/// it had left unread had the system reset the connection, and a client
+/// still writing that body, or with the answer not yet read, met the
+/// reset in place of the refusal: `a_key_holding_a_control_character_is_refused`
+/// got `ECONNRESET` once such a header was refused with the head.
+pub fn end_refused(stream: TcpStream) {
+    if stream.shutdown(Shutdown::Write).is_err() || stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    if let Err(stream) = linger(stream) {
+        let mut buf = [0u8; 8 << 10];
+        let mut left = DRAIN;
+        read_off(&stream, &mut buf, &mut left);
+    }
+}
+
 /// [`refuse`], held where `hold` and a thread takes it, `say` run while the
 /// answer's request id is the thread's, so a line it writes carries it
 /// ([`crate::request_id::log`]).

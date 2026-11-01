@@ -19,8 +19,9 @@
 //! tenant that outgrows a node is the case it would be for.
 //!
 //! **The router does not understand the requests it forwards.** It reads
-//! the head and the `Content-Length` body, picks the node and copies the
-//! answer back. An SSE subscription is copied until either side closes, so
+//! the head and the body whole -- by its `Content-Length`, or a chunked one
+//! decoded by fennec-http's reader, which a forward sends on with its
+//! length -- picks the node and copies the answer back. An SSE subscription is copied until either side closes, so
 //! the stream format lives in one place, the node.
 //!
 //! What it owns is the directory (tenant -> node) and three operations that
@@ -1800,9 +1801,16 @@ impl Router {
                 Ok(None) => return,
                 Err(http::BadRequest(status, msg)) => {
                     fennec_http::request_id::begin(None);
-                    let _ = self
+                    // Its body, if any, is unread: ended as a refused
+                    // connection is, the answer read before the close.
+                    if self
                         .cors(Response::error(status, &msg))
-                        .write(&mut out, false, false);
+                        .write(&mut out, false, false)
+                        .is_ok()
+                    {
+                        drop(out);
+                        fennec_http::accept::end_refused(reader.into_inner());
+                    }
                     return;
                 }
             };

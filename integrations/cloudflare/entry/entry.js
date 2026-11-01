@@ -55,8 +55,8 @@ export const HOMES = 50_000;
 /**
  * A body up to this is read whole before it goes, so it can go to a next
  * router where the first cannot be reached; a longer one is streamed to
- * one router, its length kept (a router refuses a chunked body, 411), and
- * one sent with no length past it is refused here (411). 1 MiB: what
+ * one router, its length kept, and one sent with no length past it is
+ * refused here (411). 1 MiB: what
  * isolates sharing 128 MB hold for a request's retry, against a load's
  * pages of many megabytes and the routers' 64 MiB ceiling.
  */
@@ -522,8 +522,10 @@ async function prepare(request, cfg, tenant) {
   if (method !== 'GET' && method !== 'HEAD' && request.body !== null) {
     const length = request.headers.get('content-length');
     if (length === null) {
-      // A router takes no chunked body, so it is read here: up to what is
-      // kept for a retry, which also bounds what the isolates' 128 MB hold.
+      // Read here, to go on with its length and again to a next router: up
+      // to what is kept for a retry, which also bounds what the isolates'
+      // 128 MB hold. A router would read it chunked, but one streamed past
+      // this could go to no second router.
       body = await readUpTo(request.body, BUFFER_AT);
       if (body === null) throw new Refusal(411, `a body of more than ${BUFFER_AT} bytes is sent with its Content-Length`);
     } else if (Number(length) <= BUFFER_AT) {

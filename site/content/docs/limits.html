@@ -515,7 +515,7 @@ href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
 <ul>
   <li><b>No TLS.</b> Without a token it binds only to the local
     machine.</li>
-  <li><b>Bodies up to 64 MiB,</b> no chunked uploads, and paging by
+  <li><b>Bodies up to 64 MiB,</b> by length or chunked, and paging by
     <code>limit</code> and <code>offset</code>.</li>
   <li><b>Subscriptions are one-way</b> server-sent events, not
     WebSockets.</li>
@@ -531,9 +531,12 @@ href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
     with full access; per-user access with scopes and expiry is a JSON Web
     Token held to a policy (<a href="/docs/http-access#scoped-access">Scoped
     access</a>).</li>
-  <li><code>Transfer-Encoding: chunked</code> is unsupported (411). The body is
-    capped at 64 MiB and the header block at 64 KiB; above that, 413 or
-    431.</li>
+  <li>The body is capped at 64 MiB, by its <code>Content-Length</code> or
+    its chunks (<code>Transfer-Encoding: chunked</code>, each size held to
+    the ceiling before it is read), and the header block at 64 KiB; above
+    that, 413 or 431. A body two servers could frame two ways is 400, a
+    transfer coding but <code>chunked</code> 501
+    (<a href="/docs/http-reference#bodies">Request bodies</a>).</li>
   <li>Pagination is <code>limit</code> and <code>offset</code> — no cursor, no
     <code>Range</code> header — each a number or, in FennecQL, a parameter
     (<code>limit $2 offset $3</code>), so every page is one statement. The response is built in one piece, so a very

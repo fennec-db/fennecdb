@@ -40,8 +40,8 @@ the file:</p>
     writes, an archive keeps them, and <code>/_changes</code> hands them to
     consumers from a buffer of 64 MiB by default: a few uploads, and a
     consumer a moment behind is answered 410 (<a href="#deleting">below</a>).</li>
-  <li><b>Requests have a ceiling.</b> A body is at most 64 MiB, and chunked
-    uploads are refused (<a href="/docs/limits">Limits</a>).</li>
+  <li><b>Requests have a ceiling.</b> A body is at most 64 MiB, sent by
+    its length or chunked (<a href="/docs/limits">Limits</a>).</li>
   <li><b>The store is built for it.</b> Ranges, multipart uploads, lifecycle
     rules, a CDN in front, a price a gigabyte.</li>
 </ul>

@@ -365,15 +365,14 @@ fn response(r: &mut BufReader<TcpStream>) -> io::Result<(u16, Vec<u8>, bool)> {
                 r.read_line(&mut line)?;
                 break;
             }
-            let at = body.len();
-            body.resize(at + size, 0);
-            r.read_exact(&mut body[at..])?;
+            // Grown as the bytes come: a size or a length the server
+            // declares is never zeroed whole before them (`read_onto`).
+            crate::http::read_onto(r, &mut body, size, usize::MAX)?;
             line.clear();
             r.read_line(&mut line)?;
         }
     } else if let Some(n) = length {
-        body.resize(n, 0);
-        r.read_exact(&mut body)?;
+        crate::http::read_onto(r, &mut body, n, usize::MAX)?;
     } else {
         r.read_to_end(&mut body)?;
         keep = false;

@@ -468,6 +468,10 @@ write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
 (`http::write_parts`).
 
+**[A chunked body grows as it comes, held to the
+ceiling](docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
+read two ways is refused (`chunked_framing`, `end_refused`).
+
 **[A plain `get` is written as JSON from the stored
 documents.](docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`

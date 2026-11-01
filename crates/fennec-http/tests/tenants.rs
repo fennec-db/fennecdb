@@ -888,3 +888,122 @@ fn a_later_file_at_the_place_is_not_taken_back() {
     assert!(!n.dir.join("acme.instance").exists());
     assert_eq!(n.tenants.instance("acme"), None);
 }
+
+/// [`call`] with `body` sent `Transfer-Encoding: chunked`, in chunks of
+/// `size`, each a write of its own.
+fn chunked_call(
+    port: u16,
+    method: &str,
+    target: &str,
+    body: &[u8],
+    auth: &str,
+    size: usize,
+) -> Res {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.set_nodelay(true).unwrap();
+    write!(
+        s,
+        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: {auth}\r\n\
+         Transfer-Encoding: chunked\r\n\r\n"
+    )
+    .unwrap();
+    for c in body.chunks(size) {
+        let mut one = format!("{:x}\r\n", c.len()).into_bytes();
+        one.extend_from_slice(c);
+        one.extend_from_slice(b"\r\n");
+        // A refusal before the body is read closes the connection under
+        // the writes still going: its answer is read all the same.
+        if s.write_all(&one).is_err() {
+            break;
+        }
+    }
+    let _ = s.write_all(b"0\r\n\r\n");
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    let split = out
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&out[..split]).into_owned();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    Res {
+        status,
+        head,
+        body: out[split + 4..].to_vec(),
+    }
+}
+
+/// `/_admin`'s bodies -- a tenant's image, read to the import's ceiling
+/// past the data's, and its quota -- and a tenant's statement come chunked
+/// as they come by their length.
+#[test]
+fn admin_and_tenant_bodies_come_chunked() {
+    let n = start(
+        "chunked",
+        Config {
+            max_body: 4 << 10,
+            max_import: 4 << 20,
+            ..admin_cfg()
+        },
+    );
+    create(n.port, "acme");
+    let make = br#"{"query":"create collection docs (title text, pad text)"}"#;
+    let r = chunked_call(n.port, "POST", "/t/acme/query", make, "Bearer x", 7);
+    assert_eq!(r.status, 200, "{}", r.text());
+    let pad = "p".repeat(3000);
+    for i in 0..10 {
+        let r = query(
+            n.port,
+            "acme",
+            &format!("put docs {{title: 't{i}', pad: '{pad}'}}"),
+        );
+        assert_eq!(r.status, 200, "{}", r.text());
+    }
+    // Past the data's ceiling and within the import's, a tenant's
+    // statement is read whole and refused, as by its length.
+    let big = format!(
+        r#"{{"query":"get docs count where pad = '{}'"}}"#,
+        "q".repeat(5000)
+    );
+    let r = chunked_call(
+        n.port,
+        "POST",
+        "/t/acme/query",
+        big.as_bytes(),
+        "Bearer x",
+        1000,
+    );
+    assert_eq!(r.status, 413, "{}", r.text());
+
+    let image = call(n.port, "GET", "/_admin/tenants/acme/file", b"", Some(ADMIN));
+    assert_eq!(image.status, 200);
+    assert!(image.body.len() > 4 << 10, "{}", image.body.len());
+    let r = chunked_call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/copy/file",
+        &image.body,
+        ADMIN,
+        4096,
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = query(n.port, "copy", "get docs count");
+    assert!(r.text().contains(r#""count":10"#), "{}", r.text());
+
+    let r = chunked_call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/copy/quota",
+        br#"{"rows": 10}"#,
+        ADMIN,
+        3,
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = query(n.port, "copy", "put docs {title: 'eleventh'}");
+    assert_eq!(r.status, 507, "{}", r.text());
+}
