@@ -19,8 +19,9 @@
 //! tenant that outgrows a node is the case it would be for.
 //!
 //! **The router does not understand the requests it forwards.** It reads
-//! the head and the `Content-Length` body, picks the node and copies the
-//! answer back. An SSE subscription is copied until either side closes, so
+//! the head and the body whole -- by its `Content-Length`, or a chunked one
+//! decoded by fennec-http's reader, which a forward sends on with its
+//! length -- picks the node and copies the answer back. An SSE subscription is copied until either side closes, so
 //! the stream format lives in one place, the node.
 //!
 //! What it owns is the directory (tenant -> node) and three operations that

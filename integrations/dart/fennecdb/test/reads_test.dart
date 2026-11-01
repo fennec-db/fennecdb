@@ -184,7 +184,7 @@ class ReadReplicas {
     }
   }
 
-  /// [body] as JSON, its length said: the servers refuse a chunked body.
+  /// [body] as JSON, its length said, as the client sends one.
   static void _send(HttpClientRequest req, Object body) {
     final bytes = utf8.encode(jsonEncode(body));
     req.contentLength = bytes.length;

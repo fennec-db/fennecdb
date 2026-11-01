@@ -943,7 +943,7 @@ test('a body sent with no length is read up to what is kept for a retry, and ref
     };
     const small = await fetchOf('/t/acme/query', { method: 'POST', body: streamed(1000), duplex: 'half' });
     assert.equal(small.status, 200);
-    // Sent on with its length: a router takes no chunked body.
+    // Read whole for a retry, and sent on with its length.
     assert.equal(stub.seen.at(-1).headers['content-length'], '1000');
     const seen = stub.seen.length;
     const big = await fetchOf('/t/acme/query', { method: 'POST', body: streamed(BUFFER_AT + 1), duplex: 'half' });

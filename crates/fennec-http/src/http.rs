@@ -6,12 +6,14 @@
 //! project writes its own JSON and its own PostgreSQL wire for the same
 //! reason.
 //!
-//! Unsupported and rejected **explicitly, not silently**:
-//! `Transfer-Encoding: chunked` (411), body over the ceiling (413), header
-//! block over the ceiling (431).
+//! A body comes by its `Content-Length` or `Transfer-Encoding: chunked`,
+//! decoded here into one buffer, so every route reads a body whole whichever
+//! way it came ([`read_chunked`]). Rejected **explicitly, not silently**:
+//! a body over the ceiling (413), a header block over the ceiling (431), and
+//! whatever a server in front could frame otherwise than this one does
+//! (400; a transfer coding but `chunked`, 501).
 
-use std::io::{BufRead, BufReader, IoSlice, Read, Write};
-use std::net::TcpStream;
+use std::io::{BufRead, IoSlice, Write};
 
 /// Ceiling of the header block. A large ceiling would let a single
 /// connection grow memory without bound.
@@ -89,8 +91,12 @@ impl Request {
 pub struct BadRequest(pub u16, pub String);
 
 /// Reads a request. `Ok(None)` means the connection closed cleanly.
-pub fn read_request(
-    reader: &mut BufReader<TcpStream>,
+///
+/// Generic over the reader for the tests' sake (a reader handing out a byte
+/// a read); the server and the router read a `BufReader<TcpStream>`, the
+/// one copy built.
+pub fn read_request<R: BufRead>(
+    reader: &mut R,
     max_body: usize,
 ) -> Result<Option<Request>, BadRequest> {
     let mut head = Vec::new();
@@ -114,7 +120,22 @@ pub fn read_request(
                 Err(BadRequest(400, "truncated request header".into()))
             };
         }
-        let done = line == b"\r\n" || line == b"\n";
+        // Every line of the head ends in CRLF and holds no other CR (RFC
+        // 9112 §2.2): a bare LF or CR that a server in front reads inside a
+        // value, and this one read as a line's end, hides a
+        // `Transfer-Encoding` or a `Content-Length` from that server, and
+        // what it sent as the next request is read here as this one's body.
+        let done = match line.strip_suffix(b"\r\n") {
+            Some(content) if !content.contains(&b'\r') => content.is_empty(),
+            Some(_) => return Err(BadRequest(400, "a bare CR in the request's head".into())),
+            None if line.ends_with(b"\n") => {
+                return Err(BadRequest(
+                    400,
+                    "a line of the head ends in a bare LF".into(),
+                ));
+            }
+            None => return Err(BadRequest(400, "truncated request header".into())),
+        };
         head.extend_from_slice(&line);
         if done {
             break;
@@ -125,7 +146,7 @@ pub fn read_request(
     }
 
     let text = String::from_utf8_lossy(&head);
-    let mut lines = text.split("\r\n").flat_map(|l| l.split('\n'));
+    let mut lines = text.split("\r\n");
     let start = lines.next().unwrap_or_default();
     let mut parts = start.split_whitespace();
     let (method, target, version) = match (parts.next(), parts.next(), parts.next()) {
@@ -135,51 +156,78 @@ pub fn read_request(
     let method = Method::parse(method)
         .ok_or_else(|| BadRequest(501, format!("`{method}` is not supported")))?;
 
-    let mut headers = Vec::new();
+    // The headers that frame the body and the connection are noted as they
+    // are read: one pass, where three lookups after it each walked the list.
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let (mut length, mut coded, mut connection) = (None, false, None);
     for line in lines {
         if line.is_empty() {
             continue;
         }
+        // A line folded onto the one before (obs-fold) and a name with
+        // whitespace before its colon are refused, as RFC 9112 §5.1 and
+        // §5.2 have a server do: trimmed, each was read here as a header a
+        // server in front may have read as none.
+        if line.starts_with([' ', '\t']) {
+            return Err(BadRequest(
+                400,
+                "a header line folded onto the one before".into(),
+            ));
+        }
         let Some((k, v)) = line.split_once(':') else {
             return Err(BadRequest(400, "malformed header line".into()));
         };
-        headers.push((k.trim().to_string(), v.trim().to_string()));
+        if k.is_empty() || k.ends_with([' ', '\t']) {
+            return Err(BadRequest(400, "malformed header line".into()));
+        }
+        let v = v.trim();
+        if k.eq_ignore_ascii_case("content-length") {
+            // One length, of digits alone (RFC 9110 §8.6): `+5`, which
+            // `usize`'s parse took, or a second length unlike the first, is
+            // a body another server measures otherwise.
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(BadRequest(400, "invalid Content-Length".into()));
+            }
+            if length.is_some_and(|at: usize| headers[at].1 != v) {
+                return Err(BadRequest(400, "two Content-Lengths that differ".into()));
+            }
+            length = Some(headers.len());
+        } else if k.eq_ignore_ascii_case("transfer-encoding") {
+            coded = true;
+        } else if k.eq_ignore_ascii_case("connection") && connection.is_none() {
+            // The first, as the lookup it replaced found it: a proxy that
+            // puts its `close` ahead of a client's `keep-alive` is told so.
+            connection = Some(headers.len());
+        }
+        headers.push((k.to_string(), v.to_string()));
     }
 
-    let get = |name: &str| -> Option<&str> {
-        headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+    let body = if coded {
+        chunked_framing(&headers, length.is_some(), version)?;
+        read_chunked(reader, max_body)?
+    } else {
+        let len: usize = match length {
+            Some(at) => headers[at]
+                .1
+                .parse()
+                .map_err(|_| BadRequest(400, "invalid Content-Length".into()))?,
+            None => 0,
+        };
+        if len > max_body {
+            return Err(BadRequest(
+                413,
+                format!("the body is {len} bytes, the ceiling is {max_body}"),
+            ));
+        }
+        let mut body = vec![0u8; len];
+        if len > 0 {
+            reader.read_exact(&mut body).map_err(|e| unread(&e))?;
+        }
+        body
     };
-
-    if get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
-        return Err(BadRequest(
-            411,
-            "a chunked body is not supported: Content-Length is required".into(),
-        ));
-    }
-
-    let len: usize = match get("content-length") {
-        Some(v) => v
-            .trim()
-            .parse()
-            .map_err(|_| BadRequest(400, "invalid Content-Length".into()))?,
-        None => 0,
-    };
-    if len > max_body {
-        return Err(BadRequest(
-            413,
-            format!("the body is {len} bytes, the ceiling is {max_body}"),
-        ));
-    }
-    let mut body = vec![0u8; len];
-    if len > 0 {
-        reader.read_exact(&mut body).map_err(|e| unread(&e))?;
-    }
 
     // HTTP/1.1 defaults to a persistent connection; 1.0 is the other way round.
-    let keep_alive = match get("connection") {
+    let keep_alive = match connection.map(|at| headers[at].1.as_str()) {
         Some(v) if v.eq_ignore_ascii_case("close") => false,
         Some(v) if v.eq_ignore_ascii_case("keep-alive") => true,
         _ => version.eq_ignore_ascii_case("HTTP/1.1"),
@@ -195,6 +243,212 @@ pub fn read_request(
         body,
         keep_alive,
     }))
+}
+
+/// The most hex digits a chunk's size is written in: 16 hold any `u64`,
+/// and a size past the ceiling is refused all the same.
+pub const MAX_SIZE_DIGITS: usize = 16;
+
+/// The longest a chunk's size line is, its extensions and CRLF included.
+pub const MAX_CHUNK_LINE: usize = 1024;
+
+/// Whether a request's `Transfer-Encoding` is one this server reads: the
+/// one coding `chunked`, in HTTP/1.1, with no `Content-Length` beside it
+/// (RFC 9112 §6.1, §6.3). Every other framing is refused, and the
+/// connection closed after the refusal as after every refusal of a request,
+/// so no byte of a body framed otherwise is read as the next request: a
+/// length beside a coding (400) is the shape of request smuggling, the two
+/// headers read by two servers two ways; `chunked` not last or twice (400)
+/// leaves a body with no end one can read; any other coding (`gzip,
+/// chunked`, 501) would be a body handed on still coded; and HTTP/1.0 (400)
+/// has no transfer coding at all.
+fn chunked_framing(
+    headers: &[(String, String)],
+    has_length: bool,
+    version: &str,
+) -> Result<(), BadRequest> {
+    if has_length {
+        return Err(BadRequest(
+            400,
+            "a request with both Content-Length and Transfer-Encoding".into(),
+        ));
+    }
+    if !version.eq_ignore_ascii_case("HTTP/1.1") {
+        return Err(BadRequest(
+            400,
+            "Transfer-Encoding in an HTTP/1.0 request".into(),
+        ));
+    }
+    // Every `Transfer-Encoding` line is one list, in order (RFC 9110
+    // §5.3), its empty elements passed over (§5.6.1).
+    let codings = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, v)| v.split(','))
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    let (mut last, mut chunked, mut other) = (None, 0, None);
+    for c in codings {
+        if c.eq_ignore_ascii_case("chunked") {
+            chunked += 1;
+        } else {
+            other = other.or(Some(c));
+        }
+        last = Some(c);
+    }
+    match (last, other) {
+        (None, _) => Err(BadRequest(400, "Transfer-Encoding names no coding".into())),
+        _ if chunked > 1 => Err(BadRequest(400, "chunked twice in Transfer-Encoding".into())),
+        (Some(c), _) if chunked == 1 && !c.eq_ignore_ascii_case("chunked") => Err(BadRequest(
+            400,
+            "chunked is not the last coding of Transfer-Encoding".into(),
+        )),
+        (_, Some(c)) => Err(BadRequest(
+            501,
+            format!("the transfer coding `{c}` is not supported: only chunked is"),
+        )),
+        (Some(_), None) => Ok(()),
+    }
+}
+
+/// A chunked body (RFC 9112 §7.1), decoded into one buffer. Every size is
+/// held to what is left under `max_body` before a byte of it is allocated,
+/// and the buffer grows to `max_body` at most: a chunk past it is refused
+/// (413), never cut. A size is 1 to [`MAX_SIZE_DIGITS`] hex digits on a
+/// line of at most [`MAX_CHUNK_LINE`] bytes; extensions are read past and
+/// trailers read and dropped, the two together at most [`MAX_HEADER_BYTES`]
+/// (431) -- a body of one-byte chunks each carrying a kilobyte of extension
+/// would have 64 MB of body read 64 GB off the wire (Go's CVE-2023-39326).
+/// Every line ends in CRLF, the CRLF after each chunk's data is there, and
+/// nothing else is: a bare LF or CR, a folded trailer or a size of anything
+/// but hex digits is 400. What follows the trailers' empty line is the next
+/// request's, left in the reader.
+fn read_chunked<R: BufRead>(reader: &mut R, max_body: usize) -> Result<Vec<u8>, BadRequest> {
+    let mut body: Vec<u8> = Vec::new();
+    let mut spare = MAX_HEADER_BYTES;
+    let mut line = Vec::new();
+    loop {
+        let n = chunk_line(reader, &mut line, MAX_CHUNK_LINE, size_line_too_long)?;
+        let content = &line[..n];
+        let digits = content.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if digits == 0 || digits > MAX_SIZE_DIGITS {
+            return Err(BadRequest(400, "a malformed chunk size".into()));
+        }
+        // After the size, nothing, or extensions after whitespace and a
+        // `;`: the size `5 ` or `5x` is no size.
+        let rest = &content[digits..];
+        let ext = &rest[rest
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count()..];
+        if !rest.is_empty() && (ext.first() != Some(&b';') || ext.iter().any(|&b| ctl(b))) {
+            return Err(BadRequest(400, "a malformed chunk size".into()));
+        }
+        spare = spare
+            .checked_sub(rest.len())
+            .ok_or_else(framing_too_large)?;
+        let size = content[..digits].iter().fold(0u64, |size, &d| {
+            size << 4 | u64::from(hex(d).unwrap_or_default())
+        });
+        if size == 0 {
+            break;
+        }
+        let at = body.len();
+        if size > (max_body - at) as u64 {
+            return Err(BadRequest(
+                413,
+                format!("the chunked body passes the ceiling of {max_body} bytes"),
+            ));
+        }
+        let size = size as usize;
+        // Doubled as a `Vec` grows, but never past the ceiling: a body of
+        // 40 MB would otherwise have reserved 80 under a ceiling of 64.
+        if at + size > body.capacity() {
+            let room = (at + size).max(body.capacity() * 2).min(max_body);
+            body.reserve_exact(room - at);
+        }
+        body.resize(at + size, 0);
+        reader.read_exact(&mut body[at..]).map_err(|e| unread(&e))?;
+        let mut end = [0u8; 2];
+        reader.read_exact(&mut end).map_err(|e| unread(&e))?;
+        if &end != b"\r\n" {
+            return Err(BadRequest(
+                400,
+                "a chunk's data is not followed by CRLF".into(),
+            ));
+        }
+    }
+    // The trailer section: fields, a line each, then an empty line. They
+    // are dropped: a trailer is no header, and one naming a token or a
+    // length after the body would be a request's head changed after it was
+    // read.
+    loop {
+        let n = chunk_line(reader, &mut line, spare + 2, framing_too_large)?;
+        if n == 0 {
+            return Ok(body);
+        }
+        spare = spare.checked_sub(n + 2).ok_or_else(framing_too_large)?;
+        let content = &line[..n];
+        if content[0] == b' ' || content[0] == b'\t' {
+            return Err(BadRequest(
+                400,
+                "a trailer line folded onto the one before".into(),
+            ));
+        }
+        match content.iter().position(|&b| b == b':') {
+            Some(at) if at > 0 && content[at - 1] != b' ' && content[at - 1] != b'\t' => {}
+            _ => return Err(BadRequest(400, "malformed trailer line".into())),
+        }
+    }
+}
+
+/// A line of a chunked body's framing, of at most `budget` bytes, read into
+/// `line`: the length of its content before the CRLF it must end in.
+fn chunk_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    budget: usize,
+    long: fn() -> BadRequest,
+) -> Result<usize, BadRequest> {
+    line.clear();
+    match read_line(reader, line, budget) {
+        Ok(_) if line.len() > budget => return Err(long()),
+        Ok(_) => {}
+        Err(Line::Io(e)) => return Err(unread(&e)),
+        Err(Line::Long) => return Err(long()),
+    }
+    match line.strip_suffix(b"\r\n") {
+        Some(content) if !content.contains(&b'\r') => Ok(content.len()),
+        Some(_) => Err(BadRequest(400, "a bare CR in a chunked body".into())),
+        None if line.ends_with(b"\n") => Err(BadRequest(
+            400,
+            "a line of a chunked body ends in a bare LF".into(),
+        )),
+        None => Err(BadRequest(
+            400,
+            "the chunked body ended before its last chunk".into(),
+        )),
+    }
+}
+
+fn size_line_too_long() -> BadRequest {
+    BadRequest(
+        400,
+        format!("a chunk size line past {MAX_CHUNK_LINE} bytes"),
+    )
+}
+
+fn framing_too_large() -> BadRequest {
+    BadRequest(
+        431,
+        format!("a chunked body's extensions and trailers past {MAX_HEADER_BYTES} bytes"),
+    )
+}
+
+/// A control byte a chunk extension may not hold (RFC 9110 §5.6.2), a tab
+/// being whitespace.
+fn ctl(b: u8) -> bool {
+    (b < 0x20 && b != b'\t') || b == 0x7f
 }
 
 /// Why a line could not be read.
@@ -213,11 +467,7 @@ fn unread(e: &std::io::Error) -> BadRequest {
     }
 }
 
-fn read_line(
-    reader: &mut BufReader<TcpStream>,
-    out: &mut Vec<u8>,
-    budget: usize,
-) -> Result<usize, Line> {
+fn read_line<R: BufRead>(reader: &mut R, out: &mut Vec<u8>, budget: usize) -> Result<usize, Line> {
     let mut taken = 0;
     loop {
         let available = reader.fill_buf().map_err(Line::Io)?;
@@ -568,6 +818,7 @@ pub fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufReader, Read};
 
     #[test]
     fn a_history_reads_back_as_it_was_written() {
@@ -607,5 +858,267 @@ mod tests {
                 ("count".to_string(), String::new()),
             ]
         );
+    }
+
+    /// A reader handing out one byte a read: every size line, chunk, CRLF
+    /// and trailer of a body split across reads.
+    struct Trickle<'a>(&'a [u8]);
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match (self.0.split_first(), buf.first_mut()) {
+                (Some((&b, rest)), Some(slot)) => {
+                    *slot = b;
+                    self.0 = rest;
+                    Ok(1)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    /// What one request read of `bytes` is, and every request after it
+    /// until the bytes end or one is refused -- read whole and a byte a
+    /// read, which must read alike.
+    fn read_all(bytes: &[u8], max_body: usize) -> Result<Vec<Request>, (u16, String)> {
+        fn each<R: BufRead>(mut r: R, max_body: usize) -> Result<Vec<Request>, (u16, String)> {
+            let mut all = Vec::new();
+            loop {
+                match read_request(&mut r, max_body) {
+                    Ok(Some(req)) => all.push(req),
+                    Ok(None) => return Ok(all),
+                    Err(BadRequest(status, why)) => return Err((status, why)),
+                }
+            }
+        }
+        let whole = each(bytes, max_body);
+        let trickled = each(BufReader::new(Trickle(bytes)), max_body);
+        match (&whole, &trickled) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a.len(), b.len());
+                for (a, b) in a.iter().zip(b) {
+                    assert_eq!(
+                        (&a.target, &a.headers, &a.body),
+                        (&b.target, &b.headers, &b.body)
+                    );
+                }
+            }
+            (Err(a), Err(b)) => assert_eq!(a.0, b.0, "{} / {}", a.1, b.1),
+            _ => panic!(
+                "read whole, {:?}; a byte a read, {:?}",
+                whole.as_ref().err(),
+                trickled.as_ref().err()
+            ),
+        }
+        whole
+    }
+
+    /// `body` in chunks of `size`, then its last chunk and the empty line.
+    fn chunked(body: &[u8], size: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for c in body.chunks(size) {
+            out.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            out.extend_from_slice(c);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    const CHUNKED: &str = "POST /query HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const NEXT: &[u8] = b"GET /next HTTP/1.1\r\nHost: t\r\n\r\n";
+
+    /// A chunked request read whole: its body, its headers but the coding.
+    fn one_chunked(body: &[u8], max_body: usize) -> Result<Request, (u16, String)> {
+        let mut bytes = CHUNKED.as_bytes().to_vec();
+        bytes.extend_from_slice(body);
+        read_all(&bytes, max_body).map(|mut all| all.remove(0))
+    }
+
+    #[test]
+    fn a_chunked_body_reads_as_its_length_would_and_the_next_request_after_it() {
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        for len in [0, 1, 7, 8191, 8192, 8193, 100_000] {
+            for size in [1, 3, 4096, 65_536] {
+                if size == 1 && len > 10_000 {
+                    continue;
+                }
+                let body = &data[..len];
+                let mut bytes = CHUNKED.as_bytes().to_vec();
+                bytes.extend_from_slice(&chunked(body, size));
+                bytes.extend_from_slice(NEXT);
+                let all = read_all(&bytes, 1 << 20).unwrap();
+                assert_eq!(all.len(), 2, "{len} in chunks of {size}");
+                assert_eq!(all[0].body, body, "{len} in chunks of {size}");
+                assert!(all[0].keep_alive);
+                assert_eq!(all[1].path, "/next");
+                assert!(all[1].body.is_empty());
+
+                let mut plain =
+                    format!("POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: {len}\r\n\r\n")
+                        .into_bytes();
+                plain.extend_from_slice(body);
+                assert_eq!(read_all(&plain, 1 << 20).unwrap()[0].body, all[0].body);
+            }
+        }
+    }
+
+    #[test]
+    fn extensions_and_trailers_are_read_past_and_dropped() {
+        let mut bytes = CHUNKED.as_bytes().to_vec();
+        bytes.extend_from_slice(
+            b"5;name=value;q=\"a b\"\r\nhello\r\n1 \t; x\r\n!\r\n\
+              0000000000000000;last\r\nChecksum: abc\r\nAuthorization: Bearer late\r\n\r\n",
+        );
+        bytes.extend_from_slice(NEXT);
+        let all = read_all(&bytes, 1 << 20).unwrap();
+        assert_eq!(all[0].body, b"hello!");
+        assert_eq!(
+            all[0].header("authorization"),
+            None,
+            "a trailer is no header"
+        );
+        assert_eq!(all[0].header("checksum"), None);
+        assert_eq!(all[1].path, "/next");
+    }
+
+    #[test]
+    fn a_chunk_past_the_ceiling_is_refused_before_it_is_allocated() {
+        // The largest size there is, and no byte of it sent: allocated, it
+        // aborts the process; read for, it is the body ending early (400).
+        let r = one_chunked(b"ffffffffffffffff\r\n", 64 << 20);
+        assert_eq!(r.err().unwrap().0, 413);
+        // Chunks within the ceiling one by one, past it together.
+        let r = one_chunked(b"5\r\nhello\r\n6\r\nworld!\r\n0\r\n\r\n", 10);
+        assert_eq!(r.err().unwrap().0, 413);
+        // At it, read whole, and the buffer never grown past it.
+        let r = one_chunked(b"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n", 10).unwrap();
+        assert_eq!(r.body, b"helloworld");
+        let body = vec![b'x'; 90];
+        let r = one_chunked(&chunked(&body, 30), 100).unwrap();
+        assert_eq!(r.body, body);
+        assert!(r.body.capacity() <= 100, "{}", r.body.capacity());
+    }
+
+    #[test]
+    fn framings_another_server_would_read_otherwise_are_refused() {
+        let hello = "\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let cases: &[(&str, u16)] = &[
+            (
+                "POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked",
+                400,
+            ),
+            (
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5",
+                400,
+            ),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked", 501),
+            (
+                "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked",
+                501,
+            ),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip", 400),
+            (
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked",
+                400,
+            ),
+            (
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+                400,
+            ),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip", 501),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: identity", 501),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked;q=1", 501),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding: ", 400),
+            ("POST / HTTP/1.0\r\nTransfer-Encoding: chunked", 400),
+            // A coding a server in front could miss: a bare LF or CR, a
+            // folded line, whitespace before the colon.
+            ("POST / HTTP/1.1\nTransfer-Encoding: chunked", 400),
+            ("POST / HTTP/1.1\r\nX: a\nTransfer-Encoding: chunked", 400),
+            ("POST / HTTP/1.1\r\nX: a\rTransfer-Encoding: chunked", 400),
+            (
+                "POST / HTTP/1.1\r\nX: a\r\n Transfer-Encoding: chunked",
+                400,
+            ),
+            (
+                "POST / HTTP/1.1\r\nX: a\r\n\tTransfer-Encoding: chunked",
+                400,
+            ),
+            ("POST / HTTP/1.1\r\nTransfer-Encoding : chunked", 400),
+            // A length another server measures otherwise.
+            ("POST / HTTP/1.1\r\nContent-Length: +5", 400),
+            (
+                "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6",
+                400,
+            ),
+            ("POST / HTTP/1.1\r\nContent-Length: 5, 5", 400),
+        ];
+        for (head, status) in cases {
+            let r = read_all(format!("{head}{hello}").as_bytes(), 1 << 20);
+            assert_eq!(r.err().map(|e| e.0), Some(*status), "{head:?}");
+        }
+        // The end of the head in a bare LF, after a line that ended right.
+        let r = read_all(b"GET / HTTP/1.1\r\nHost: t\r\n\n", 1 << 20);
+        assert_eq!(r.err().map(|e| e.0), Some(400));
+        // One length said twice alike is one length.
+        let r = read_all(
+            b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello",
+            1 << 20,
+        );
+        assert_eq!(r.unwrap()[0].body, b"hello");
+        // Of two `Connection`s, the first is read.
+        let r = read_all(
+            b"GET / HTTP/1.1\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n",
+            1 << 20,
+        );
+        assert!(!r.unwrap()[0].keep_alive);
+        // Empty elements of the list are passed over.
+        let r = read_all(
+            format!("POST / HTTP/1.1\r\nTransfer-Encoding: , chunked{hello}").as_bytes(),
+            1 << 20,
+        );
+        assert_eq!(r.unwrap()[0].body, b"hello");
+    }
+
+    #[test]
+    fn a_malformed_chunked_body_is_refused() {
+        let long_ext = format!("5;{}\r\nhello\r\n0\r\n\r\n", "e".repeat(MAX_CHUNK_LINE));
+        let extensions = "1;".to_string() + &"e".repeat(1000) + "\r\nx\r\n";
+        let extensions = extensions.repeat(70) + "0\r\n\r\n";
+        let trailers =
+            "0\r\n".to_string() + &format!("A: {}\r\n", "v".repeat(1000)).repeat(70) + "\r\n";
+        let cases: &[(&str, u16)] = &[
+            ("5\nhello\r\n0\r\n\r\n", 400),
+            ("5\r\nhello\n0\r\n\r\n", 400),
+            ("5\r\nhelloX\r\n0\r\n\r\n", 400),
+            ("5\r\nhello\r\n0\r\n\n", 400),
+            ("5\r;x\r\nhello\r\n0\r\n\r\n", 400),
+            ("x\r\n", 400),
+            ("\r\n", 400),
+            ("-1\r\n", 400),
+            ("0x5\r\nhello\r\n0\r\n\r\n", 400),
+            ("5 \r\nhello\r\n0\r\n\r\n", 400),
+            (" 5\r\nhello\r\n0\r\n\r\n", 400),
+            ("5;a\x01\r\nhello\r\n0\r\n\r\n", 400),
+            // Seventeen digits; sixteen are a size.
+            ("00000000000000005\r\nhello\r\n0\r\n\r\n", 400),
+            (&long_ext, 400),
+            // Ended early: in a chunk, before the last, in the trailers.
+            ("5\r\nhel", 400),
+            ("5\r\nhello\r\n", 400),
+            ("0\r\n", 400),
+            ("0\r\nA: 1\r\n folded\r\n\r\n", 400),
+            ("0\r\nno colon\r\n\r\n", 400),
+            ("0\r\nA : 1\r\n\r\n", 400),
+            ("0\r\nA: 1\n\r\n", 400),
+            (&extensions, 431),
+            (&trailers, 431),
+        ];
+        for (body, status) in cases {
+            let r = one_chunked(body.as_bytes(), 1 << 20);
+            assert_eq!(r.err().map(|e| e.0), Some(*status), "{body:?}");
+        }
+        let r = one_chunked(b"0000000000000005\r\nhello\r\n0\r\n\r\n", 1 << 20);
+        assert_eq!(r.unwrap().body, b"hello");
     }
 }

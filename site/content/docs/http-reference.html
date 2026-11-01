@@ -350,6 +350,47 @@ caught up with its primary yet answers it <code>503</code>.</p>
 </pre>
 
 
+<h2 id="bodies">Request bodies</h2>
+
+<p>A body comes with its <code>Content-Length</code> or
+<code>Transfer-Encoding: chunked</code>, as a client streaming it or a proxy
+that re-chunks it sends one: every route reads the chunks into the one body
+its length would have given, an <code>Idempotency-Key</code> digesting the
+same bytes either way, and <code>fennec-shard</code> sends it on to the
+tenant's node with its length. A connection kept alive reads its next
+request right after the last chunk. Both ways are held to the same ceiling,
+64 MiB (<code>--max-body</code>), a chunk's size refused the moment it
+would pass it.</p>
+
+<details class="deep"><summary>What a chunked body may hold, and what is refused</summary>
+<ul>
+  <li><b>A size</b> is 1 to 16 hex digits on a line of at most 1 KiB; a
+    chunk extension after a <code>;</code> is read past, and the trailer
+    fields after the last chunk are read and dropped — a trailer is never
+    taken as a header. Extensions and trailers together are at most 64 KiB
+    (<code>431</code>).</li>
+  <li><b>A body past the ceiling</b> is <code>413</code> as soon as a size
+    says so, before a byte of that chunk is read; it is refused, never
+    cut.</li>
+  <li><b><code>400</code>, the connection closed after it:</b> a
+    <code>Content-Length</code> beside a <code>Transfer-Encoding</code>,
+    <code>chunked</code> named twice or not last, a transfer coding in an
+    HTTP/1.0 request, a size of anything but hex digits, a line that ends in
+    a bare LF or holds a bare CR, a header or trailer folded onto the line
+    before or with whitespace before its colon, two
+    <code>Content-Length</code>s that differ or one that is not digits
+    alone. Each is a request two servers could frame two ways — one in front
+    and this one — so that bytes one sent as the next request would be read
+    by the other as a body (request smuggling, RFC 9112 §6.3).</li>
+  <li><b><code>501</code>:</b> a transfer coding other than
+    <code>chunked</code>, <code>gzip, chunked</code> among them.</li>
+</ul>
+<p>A body read whole is what a write needs anyway — a statement runs once
+all of it is in, and the router resends a request only with its body in
+hand — so a chunked one costs no more memory than its length would.</p>
+</details>
+
+
 <h2>The data ceiling</h2>
 
 <p>With <code>--max-memory</code>, writes that would grow the data past the
@@ -393,14 +434,14 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <table>
 <thead><tr><th>Status</th><th>Means</th><th>What to do</th></tr></thead>
 <tbody>
-<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter</td><td>fix the request</td></tr>
+<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>)</td><td>fix the request</td></tr>
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
 <tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists</td><td>a lost race for a value</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
 <tr><td class="n">412</td><td>a <code>require</code> not met, its batch put back; <code>reason</code> where its <code>else '…'</code> gave one</td><td>read again, decide again; tell refusals apart by <code>reason</code>, not <code>at</code></td></tr>
-<tr><td class="n">413</td><td>a body past the ceiling, 64 MB</td><td>send less at once</td></tr>
+<tr><td class="n">413</td><td>a body past the ceiling, 64 MB, by its length or its chunks</td><td>send less at once</td></tr>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
 <tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>held</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>retry_after_ms</code></td></tr>
 <tr><td class="n">500</td><td>outcome unknown (<code>"outcome": "unknown"</code>): a write a tenant's node landed and answered after its lease from the router lapsed — its tenant may have been failed over without it, or still be there with it; a <code>/batch</code> that ran a statement at a time says how far it got, its <code>seq</code> the last landed statement's</td><td>send it again with the same <code>Idempotency-Key</code>; without one, wait a lease and a tenth (<code>--auto-failover</code> × 1.1) after the answer — until the tenant settles the node answers reads with the write in them, one sent with <code>Fennec-After</code> too — then read it back, or send a read with <code>Fennec-After</code> and <code>Fennec-History</code> set to its <code>seq</code> and <code>history</code>, which a primary without it answers 504 (for a batch, a 504 does not say which earlier statements survived: read those back)</td></tr>

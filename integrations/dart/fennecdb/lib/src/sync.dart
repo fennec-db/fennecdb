@@ -272,7 +272,8 @@ class Replica {
     (a['headers'] as Map<String, Object?>? ?? const {}).forEach((k, v) => req.headers.set(k, v as String));
     final body = a['body'] as String?;
     if (body != null) {
-      // fennec-server reads a body by its length: a chunked one is refused.
+      // Sent with its length, which every hop takes: the global entry
+      // refuses a body past a mebibyte without one.
       final bytes = utf8.encode(body);
       req.contentLength = bytes.length;
       req.add(bytes);

@@ -276,7 +276,8 @@ class FennecRemote {
           if (h != null) req.headers.set('fennec-history', h);
         }
       }
-      // fennec-server reads a body by its length: a chunked one is refused.
+      // Sent with its length, which every hop takes: the global entry
+      // refuses a body past a mebibyte without one.
       final bytes = utf8.encode(payload);
       req.contentLength = bytes.length;
       req.add(bytes);

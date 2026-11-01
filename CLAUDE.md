@@ -443,8 +443,7 @@ never cut. The origin is asked before the token, and with no token only a
 `Host` naming localhost or an address is answered; `write` never changes a
 schema or compacts. A named statement the token may call is a `call_<name>`
 tool, its answer held to the bounds before a write's block lands
-(`mcp::land`). `<file>.lock` (`fennec_abi::lock`) is taken by `fennec
-mcp --file`, `fennec-server --file`, the native library and the shell alike.
+(`mcp::land`).
 
 **[An `Idempotency-Key` makes a write
 once.](docs/design/http.md#idempotency-keys)** The write and its key's
@@ -482,6 +481,10 @@ reads its own, and every tenant's, named, are the admin's alone.
 write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
 (`http::write_parts`).
+
+**[A chunked body is read whole, held to the ceiling before
+allocating](docs/design/http.md#chunked-bodies)**; a framing read two ways
+is refused (`chunked_framing`).
 
 **[A plain `get` is written as JSON from the stored
 documents.](docs/design/http.md#json-from-stored-rows)**

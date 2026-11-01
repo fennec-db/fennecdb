@@ -42,8 +42,9 @@ collide with a field named <code>all</code>.</p>
 <code>--idle-timeout</code>: a connection silent that long between requests is
 closed with nothing written, and one that went silent part way through a
 request is answered 408); the body ceiling is 64 MiB and the header block
-64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
-411, which beats reading half a body. A field whose name matches a clause name
+64 KiB. A body may come <code>Transfer-Encoding: chunked</code>, held to the
+same ceiling chunk by chunk (<a href="/docs/http-reference#bodies">Request
+bodies</a>). A field whose name matches a clause name
 (<code>select</code>, <code>order</code>, <code>limit</code>,
 <code>offset</code>, <code>count</code>, <code>where</code>,
 <code>group</code>) cannot be filtered

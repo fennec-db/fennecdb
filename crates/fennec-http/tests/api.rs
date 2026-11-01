@@ -1303,7 +1303,7 @@ fn head_sends_headers_without_body() {
 }
 
 #[test]
-fn oversized_and_chunked_bodies_are_refused() {
+fn oversized_bodies_are_refused_by_their_length_or_their_chunks() {
     let h = start(Config {
         max_body: 32,
         ..Config::default()
@@ -1313,11 +1313,24 @@ fn oversized_and_chunked_bodies_are_refused() {
     let r = call(h.port, "POST", "/articles", Some(&big));
     assert_eq!(r.status, 413);
 
-    let r = parse_res(&raw(
-        h.port,
-        "POST /articles HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-    ));
-    assert_eq!(r.status, 411);
+    // Chunked: each chunk within the ceiling and the two past it, or the
+    // two within it, read as its length would have it read.
+    let chunked = |parts: &[&str]| {
+        let mut req = String::from(
+            "POST /articles HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        for p in parts {
+            req.push_str(&format!("{:x}\r\n{p}\r\n", p.len()));
+        }
+        req.push_str("0\r\n\r\n");
+        parse_res(&raw(h.port, &req))
+    };
+    let half = "a".repeat(20);
+    assert_eq!(chunked(&["{\"title\":\"", &half, &half, "\"}"]).status, 413);
+    assert_eq!(
+        chunked(&["{\"title\":", "\"short\"}"]).status,
+        call(h.port, "POST", "/articles", Some("{\"title\":\"short\"}")).status
+    );
 }
 
 #[test]
