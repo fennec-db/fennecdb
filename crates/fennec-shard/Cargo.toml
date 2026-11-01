@@ -18,6 +18,16 @@ fennec-http = { workspace = true, features = ["studio"] }
 # shell take a file's: in the workspace, as fennec-http already takes it.
 fennec-abi.workspace = true
 
+# HTTPS from clients (`--tls-cert`, `--tls-key`): fennec-http's listener
+# code, which takes fennec-tls behind its own `tls`.
+[features]
+default = ["tls"]
+tls = ["fennec-http/tls"]
+
+[dev-dependencies]
+# The client of `tests/tls.rs`, dialing the router's HTTPS.
+fennec-tls.workspace = true
+
 [[bin]]
 name = "fennec-shard"
 path = "src/main.rs"

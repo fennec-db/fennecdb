@@ -35,7 +35,6 @@ use crate::Config;
 use fennec_core::changes::Hold;
 use fennec_core::prelude::*;
 use std::io::Write;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
@@ -225,7 +224,7 @@ impl Drop for StreamSlot<'_> {
 /// `Content-Length`: an ordinary response knows its body and writes it in
 /// one go, while a stream is a body with no end.
 pub fn serve(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
     hub: &Hub,
@@ -876,7 +875,7 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// image can land on the pin's own change, where neither the ring nor the
 /// counter shows it, and the pin read what it replaced.
 fn seed(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
     seen: &mut Option<Seen>,
@@ -990,7 +989,7 @@ fn error_json(e: &Error) -> String {
 
 /// A single SSE event. `data` is single-line JSON, so no line splitting is
 /// needed -- the JSON encoder never produces a `\n`.
-fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
+fn event(out: &mut &crate::conn::Conn, name: &str, data: &str) -> std::io::Result<()> {
     out.write_all(format!("event: {name}\ndata: {data}\n\n").as_bytes())?;
     out.flush()
 }
@@ -999,7 +998,7 @@ fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
 /// stood as the stream opened, which its head names: the change its seed is
 /// at or after, and the history every event's `seq` is a change of.
 fn write_head(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     cfg: &Config,
     status: u16,
     content_type: &str,

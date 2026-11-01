@@ -334,7 +334,7 @@ description: One database from the screen to the server: state your screens foll
   <div class="band-in">
     <h2 class="rise">Security</h2>
     <p class="lede rise">Every request passes the same checks, from the login to
-      the disk.</p>
+      the disk. The server speaks HTTPS itself: no proxy in front.</p>
 
     <figure class="motion rise" data-scenes="security">
       <canvas role="img" aria-label="Two users, ada and ben, send requests carrying tokens signed with the server's key. Each passes the token check and the rules, and each reads back only the rows it owns; the other user's rows stay dark. A write of a row owned by the other user is refused with 403. A request with a token signed with another key is held at the door, refused with 401 after a wait that doubles with each attempt, from 100 ms up to 5 s, and each refusal is written to the audit log. Meanwhile backups leave the file sealed, a lock on each, on their way to a bucket."></canvas>

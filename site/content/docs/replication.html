@@ -583,8 +583,8 @@ rclone sync r2:backups/archive ./archive && fennec verify ./archive
 fennec restore ./archive before.fennec --to 2026-09-22T10:14:59Z</pre>
 
 <details class="deep"><summary>How a bucket copy stays consistent</summary>
-<p>fennecdb's HTTP speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
-archive goes there the way any directory does: a sync tool beside the
+<p>fennecdb has no client for a bucket, and S3, R2 and GCS speak only HTTPS,
+so an archive goes there the way any directory does: a sync tool beside the
 archiver.</p>
 
 <p>Every file but the segment being written is written once: a segment is
@@ -687,8 +687,10 @@ feeding and how far each has been sent.</p>
     can have one: nodes that take its lease stop writing when they lose it,
     and are failed over after (<a href="/docs/sharding-failover#automatic-failover">Automatic
     failover</a>).</li>
-  <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
-    here: across an open network, a tunnel carries it.</li>
+  <li><b>No TLS on the stream yet.</b> A replica's <code>--replica-of</code>
+    dials <code>http://</code> only in this release, so the primary it follows
+    stays on a private network, or a tunnel carries the stream across an open
+    one. TLS on that link is planned (<a href="/docs/server#tls">HTTPS</a>).</li>
   <li><b>No object-storage client.</b> An archive is a directory; a sync
     tool carries it to S3, R2 or GCS (<a href="#object-storage">In object
     storage</a>).</li>

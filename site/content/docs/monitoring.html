@@ -29,6 +29,11 @@ curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
     <code>/_metrics</code> too.</li>
   <li><b>A scrape needs a token:</b> the server's (<code>--http-token</code>)
     or the admin one (<code>--admin-token</code>).</li>
+  <li><b>With <code>--tls-cert</code></b> the <code>--metrics</code> listener
+    speaks HTTPS too, with the same certificate, so a scrape's token never
+    travels in the clear. The Prometheus job sets <code>scheme: https</code>,
+    and <code>tls_config: { ca_file: ca.pem }</code> for a private CA
+    (<a href="/docs/server#tls">HTTPS</a>).</li>
   <li><b>Datadog, New Relic, Elastic, Grafana Cloud</b> read the same
     metrics and logs: <a href="/docs/datadog">Datadog and other monitoring
     systems</a>.</li>

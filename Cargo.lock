@@ -417,6 +417,7 @@ dependencies = [
  "fennec-abi",
  "fennec-core",
  "fennec-ql",
+ "fennec-tls",
 ]
 
 [[package]]
@@ -444,6 +445,7 @@ dependencies = [
  "fennec-http",
  "fennec-import",
  "fennec-ql",
+ "fennec-tls",
  "fennec-wire",
 ]
 
@@ -455,6 +457,7 @@ dependencies = [
  "fennec-core",
  "fennec-http",
  "fennec-ql",
+ "fennec-tls",
 ]
 
 [[package]]

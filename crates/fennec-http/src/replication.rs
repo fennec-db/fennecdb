@@ -1071,7 +1071,7 @@ impl Replication {
 /// `/_replication/...`, answered here. `None` means the request was a
 /// stream, which took the connection over and has ended.
 pub fn handle(
-    out: &mut TcpStream,
+    out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     repl: &Replication,
     req: &Request,
@@ -1221,7 +1221,12 @@ pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
 /// Feeds a replica: a hello, an image when it needs one, then the writes as
 /// they reach the disk. It takes the connection over and returns when the
 /// replica goes away or has to start again.
-fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, req: &Request) {
+fn stream(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+) {
     let Some(feed) = &repl.feed else {
         let _ = Response::error(409, "this server feeds no replicas").write(out, false, false);
         return;
@@ -1295,7 +1300,7 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     let mut hello = vec![VERSION, image.is_some() as u8];
     hello.extend_from_slice(&u64s(&[seq, feed.durable(), now_ms()]));
     hello.extend_from_slice(&lineage.encode());
-    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, &*out);
+    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, *out);
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {

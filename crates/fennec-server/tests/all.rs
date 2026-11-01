@@ -6,6 +6,7 @@
 mod calls;
 mod crash;
 mod follow;
+mod https;
 mod logs;
 mod mcp;
 mod otlp;

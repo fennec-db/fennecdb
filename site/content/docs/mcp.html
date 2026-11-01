@@ -269,9 +269,12 @@ an agent's calls as they hold a client's requests.</p>
     token answers only a <code>Host</code> naming this machine —
     <code>localhost</code> or an address — so a page whose name was rebound to
     127.0.0.1 reaches nothing.</li>
-  <li><b>No TLS.</b> fennecdb speaks none: on an open network put a TLS
-    terminator in front of the server, and give the agent's client the
-    <code>https</code> URL. The stdio bridge speaks plain HTTP only.</li>
+  <li><b>HTTPS is the server's.</b> With <code>--tls-cert</code> and
+    <code>--tls-key</code> the server serves <code>/_mcp</code> over HTTPS
+    (<a href="/docs/server#tls">HTTPS</a>), and an agent's own client is given
+    the <code>https</code> URL. The stdio bridge, <code>fennec mcp --url</code>,
+    still dials plain HTTP only: keep the server it reaches on a private
+    network.</li>
   <li><b>An agent's writes are audited.</b> With <code>--audit</code> each
     call of <code>write</code>, <code>remember</code> or <code>forget</code> is
     a line (<code>"event":"mcp"</code>, the tool, whether it failed), beside

@@ -112,6 +112,11 @@ usage: fennec-server [options]
                             more over it closes the idle ones first
       --insecure            allow listening without a token on a non-loopback
                             address
+      --tls-cert <pem>      serve HTTPS alone, with this certificate chain
+      --tls-key <pem>       (the server's first, then its intermediates) and
+                            its private key, both or neither. --metrics
+                            speaks it too. Read at the start: a renewed
+                            certificate takes a restart
 
       --http-token <value>  require `Authorization: Bearer <value>`. Also read
                             from FENNEC_HTTP_TOKEN: argv shows up in `ps`
@@ -317,9 +322,9 @@ usage: fennec-server [options]
 A token or key set empty in the environment is unset; one given empty as a
 flag is refused at the start.
 
-fennec-server serves no TLS (it speaks it only to a --follow source): put
-it behind a TLS terminator such as nginx or Caddy before using it on an
-open network.
+With --tls-cert and --tls-key fennec-server serves HTTPS itself, no proxy
+in front needed; without them it speaks plain HTTP, for loopback or a TLS
+terminator such as nginx or Caddy.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -381,6 +386,38 @@ fn same_file_as_stdin(_: &str) -> bool {
     false
 }
 
+const HEALTH: &[u8] = b"GET /_health HTTP/1.1\r\nHost: fennec\r\nConnection: close\r\n\r\n";
+
+/// `GET /_health` over TLS, the certificate not checked: the probe asks its
+/// own server, on its own machine, whether it answers, and sends nothing a
+/// listener could misuse -- no token, and `{"ok":true}` is all it reads.
+#[cfg(feature = "tls")]
+fn health_over_tls(addr: &str) -> std::io::Result<String> {
+    let s = std::net::TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(Duration::from_secs(3)))?;
+    s.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let mut s = fennec_tls::Client::unverified()
+        .dial(s, "localhost")
+        .map_err(std::io::Error::from)?;
+    s.write_all(HEALTH)?;
+    s.flush()?;
+    let mut out = Vec::new();
+    // Read to the end of the answer: a close with no `close_notify`, which
+    // TLS reports as an error, after the answer came is its end all the same.
+    match s.read_to_end(&mut out) {
+        Err(e) if out.is_empty() => return Err(e),
+        _ => {}
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+#[cfg(not(feature = "tls"))]
+fn health_over_tls(_: &str) -> std::io::Result<String> {
+    Err(std::io::Error::other(
+        "the server speaks HTTPS, and this build has no TLS to ask it with",
+    ))
+}
+
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
 /// token and takes no lock -- during a long `compact` a probe that queried
 /// would wait too, and a healthy server would look dead.
@@ -394,9 +431,15 @@ fn health_check(addr: &str) -> i32 {
     let asked = (|| -> std::io::Result<String> {
         let mut s = std::net::TcpStream::connect(&addr)?;
         s.set_read_timeout(Some(Duration::from_secs(3)))?;
-        s.write_all(b"GET /_health HTTP/1.1\r\nHost: fennec\r\nConnection: close\r\n\r\n")?;
+        s.write_all(HEALTH)?;
         let mut out = String::new();
         s.read_to_string(&mut out)?;
+        // A server serving HTTPS alone answers a plain request so: asked
+        // again over TLS, with no flag on the probe's command line -- a
+        // container's health check names none.
+        if out.contains(fennec_http::conn::PLAIN_TO_TLS) {
+            return health_over_tls(&addr);
+        }
         Ok(out)
     })();
     match asked {
@@ -474,6 +517,8 @@ fn main() {
     let mut follow_opts = fennec_import::Options::new("");
     let mut follow_named = false;
     let mut studio = false;
+    let mut tls_cert: Option<String> = None;
+    let mut tls_key: Option<String> = None;
     let mut studio_connect: Option<String> = None;
     let mut mcp: Option<fennec_http::mcp::Options> = None;
     let mut tracing = fennec_http::trace::Options::default();
@@ -773,6 +818,8 @@ fn main() {
                 });
             }
             "--insecure" => http_cfg.insecure = true,
+            "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
+            "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
             "--studio" => studio = true,
             "--mcp" => {
                 mcp.get_or_insert_with(Default::default);
@@ -850,6 +897,12 @@ fn main() {
     if ping {
         std::process::exit(health_check(&http_cfg.addr));
     }
+
+    // Both or neither, each read and the key the certificate's, refused
+    // (2) before anything is opened: a server told to speak HTTPS never
+    // falls back to plain HTTP.
+    http_cfg.tls = fennec_http::conn::from_flags(tls_cert.as_deref(), tls_key.as_deref())
+        .unwrap_or_else(|e| fail(&e));
 
     // A token given empty as a flag -- `--http-token "$TOKEN"` with TOKEN
     // unset -- is refused, not taken: each check reads a request carrying
@@ -1050,6 +1103,9 @@ fn main() {
         admin_token: http_cfg.admin_token.clone(),
         insecure: http_cfg.insecure,
         idle_timeout: http_cfg.idle_timeout,
+        // The same certificate: no listener of a server told to speak
+        // HTTPS is plain, so a token a scrape sends never goes in the clear.
+        tls: http_cfg.tls.clone(),
         ..fennec_http::Config::default()
     });
     if let Some(refused) = metrics_cfg

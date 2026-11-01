@@ -469,7 +469,7 @@ reads its own, and every tenant's, named, are the admin's alone.
 **[A statement is parsed once, and an answer goes out in one
 write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
-(`http::write_parts`).
+(`http::write_parts`), over TLS one plaintext whose records go in one.
 
 **[A chunked body grows as it comes, held to the
 ceiling](docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
@@ -489,7 +489,15 @@ relays, as a standby's 409 marked `Fennec-Follows` is. Its writing then
 shut, the one lingering thread (`accept::linger`) reads it off till the
 client ends it; only no such thread, no room (`most_held`) or an answer not
 sent whole closes it at once. A new accept loop calls
-`accept::ready()` and `accept::widen` before its first accept.
+`accept::ready()` and `accept::widen` before its first accept. A TLS
+listener's is told `fennec_tls::REFUSAL`, an alert (`accept::refuse_tls`):
+no handshake runs on the accepting thread.
+
+**[`--tls-cert` and `--tls-key` make a listener HTTPS
+alone](docs/design/http.md#tls)**, `--metrics` too, each handshake on its
+connection's thread within `Tls::handshake` (`conn::Conn::open`), a plain
+request a 400. Every route reads and writes the `&Conn`; without the flags
+it is the `TcpStream` it was, no allocation or dispatch added.
 
 ### The HNSW graph
 

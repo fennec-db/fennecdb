@@ -21,15 +21,18 @@ harness (`publish = false`), where `rusqlite` and `postgres` live.
 `crates/fennec-tls` alone (rcgen beside them as its dev-dependency, to make
 a private CA as a test runs). Every other crate that speaks TLS takes
 `fennec-tls`, optional, behind a feature named `tls`: `fennec-wire`
-(`tls = ["dep:fennec-tls"]`), `fennec-import`, and the binaries
-`fennec-server` and `fennec`, which have it in their defaults. The
+(`tls = ["dep:fennec-tls"]`), `fennec-import`, `fennec-http` (its
+listeners' HTTPS, [http.md](http.md#tls)), and the binaries
+`fennec-server`, `fennec-shard` and `fennec`, which have it in their
+defaults. The
 workspace names `fennec-wire` and `fennec-import` without their default
 features, so a crate gets TLS only by asking, and `cargo build -p X
 --no-default-features` builds every crate but the two exceptions with
 nothing from outside the workspace, as before. The first slice dials
 PostgreSQL (`sslmode`, [replication.md](replication.md#follow)); the
-replication client, the OTLP exporter, the router dialing its nodes, and
-`fennec-server` and `fennec-shard` serving HTTPS come in by the same crate.
+second has `fennec-server` and `fennec-shard` serve HTTPS
+(`--tls-cert`, [http.md](http.md#tls)); the replication client, the OTLP
+exporter and the router dialing its nodes come in by the same crate.
 
 **Why.** The user's decision, on 2026-11-01. Almost no Rust project writes
 TLS itself, and a client of our own -- the handshake and its state machine,
@@ -77,6 +80,11 @@ C compiles beside the workspace's crates, and the cost is the link's
 larger LTO. A million-row `fennec import` (`make pgvector-tls`'s server)
 took 2245 ms at the median on main in plain text, 2173 here with
 `sslmode=disable` and 2357 under `verify-full`, at the same loads.
+Serving HTTPS, the second slice ([http.md](http.md#tls)), measured on
+2026-11-02 the same way: `fennec-server` 5777 -> 5922 KB (rustls's server
+half and the listener's code), without `tls` 4741 -> 4758; `fennec-shard`,
+which took no TLS before, 4256 -> 5113 KB; the image's binary arm64 6.11
+MB, amd64 7.18.
 
 **What must never happen.** A dependency in `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm`, the browser module or `fennec-ffi`, the

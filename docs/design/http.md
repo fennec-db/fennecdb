@@ -473,7 +473,9 @@ and cost a second send each answer. One client asking a row by id over
 10 000 x 128 went 40.4k -> 47.1k requests a second, and eight 14 to 20%
 more (`make requests-bench`). The router writes the answer it forwards
 the same way (`answer_out`, `http::write_parts`): its added p50 went 23.6
--> 20.6-20.8 us (`make shard-bench ARGS=latency`). FennecQL's lexer walks a text's bytes,
+-> 20.6-20.8 us (`make shard-bench ARGS=latency`). Over TLS the parts go
+into the session as one plaintext, so an answer under 16 KiB is one record,
+and the records out in one `writev` ([TLS](#tls)). FennecQL's lexer walks a text's bytes,
 reading a character whole only outside ASCII and a number where it stands,
 and a list of numbers alone becomes its vector without an expression each
 (`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
@@ -590,6 +592,25 @@ is passed over the same way, marked `Fennec-Follows`
 ([regions.md](regions.md#the-global-entry)): asked after a busy primary
 and taken for the answer, it held every later change of the entry's
 isolate at the standby.
+
+On a TLS listener ([TLS](#tls)) the refusal is no 503: an answer there is
+a handshake's away, and the accepting thread runs none -- a key exchange
+and a signature cost it the time of hundreds of accepts, and a client
+trickling its `ClientHello` would hold every connection behind it. Nor does
+the lingering thread run one for it: one thread doing every refusal's
+cryptography is a queue of its own, filling at the moment the process is
+out of threads or room. What goes out is `fennec_tls::REFUSAL`, a fatal
+`internal_error` alert written in the clear before any handshake -- seven
+bytes, non-blocking, the one answer TLS has before keys are agreed --
+through the same path (`accept::refuse_tls`, `no_thread`'s `None`): held
+and read off by the lingering thread, counted by `reason`, said in the log.
+Its client reports the alert ("tlsv1 alert internal error", rustls's
+`AlertReceived(InternalError)`) and knows it sent nothing, no application
+data going before a handshake ends, so any request may go again, as one
+marked `Fennec-Unserved` may. What it cannot carry is `Retry-After`, and
+the global entry, to which a Worker's failed `fetch` is any network error,
+takes it for a request that may have run: a router behind the entry
+fronted over TLS by Cloudflare's edge rather than itself keeps the 503.
 
 The socket is made non-blocking before the write: the accepting thread is
 every connection's, and a client that reads nothing must not hold it. The
@@ -907,3 +928,132 @@ and 21.29 for the fix, main's own runs 19.42-30.12; requests a second
 spread too far that evening to read (main 20 763-50 857, medians 41 733
 and 47 045). `fennec-server`'s `__text` is 6 016 bytes over main's with
 them, where 4 800 was before.
+
+## TLS
+
+**`--tls-cert` and `--tls-key` make a listener HTTPS alone, each handshake
+on its connection's thread** (`fennec_http::conn`). fennec-server's HTTP
+listener, a `--dir` node's and the router's take a certificate chain and
+its key (PEM; PKCS#8, PKCS#1 or SEC1), both or neither, read and matched
+at the start -- a file unread, unparsed or a key not the certificate's is
+refused (2) before anything is opened (`conn::from_flags`), so a server
+told to speak HTTPS never falls back to plain HTTP. With them the listener
+speaks TLS 1.2 and 1.3 through `fennec-tls` (rustls with ring,
+[crates.md](crates.md#tls-the-one-exception)), ALPN `http/1.1` alone (a
+client offering only `h2` is refused in the handshake rather than answered
+in a protocol it did not ask for), no client certificate asked for, and its
+line says `listening on: https://<address>` for a harness to find. A proxy
+in front is no longer needed; one still works.
+
+*Where the handshake runs.* On the connection's own thread, first thing,
+never on the accepting one: the accept loop is every connection's, a full
+handshake -- an ECDHE and a signature -- is most of what a new connection
+costs (eight clients asking a request a connection were answered 15 531
+times a second over TLS and 35 448 in plain HTTP, `make tls-bench`), an
+accept a few microseconds, and a client trickling its
+`ClientHello` would hold every connection behind it. It is bounded as a
+whole, `Tls::handshake` (10 s) from the thread's start, by
+`Server::accept_within`, which reads and writes each record itself with the
+socket's timeout the time left: rustls's `complete_io` reads again inside
+one call, so a timeout set once for it bounded each read, and a client
+sending a byte a little inside it held its thread as long as it liked
+(`accept_within_bounds_the_whole_handshake`). A stalled handshake holds its
+own thread and slot under `--max-connections`, as an idle plain connection
+holds them under `--idle-timeout`, and no other
+(`a_stalled_handshake_holds_up_no_other`).
+
+*A plain request to it* is looked at before rustls reads a byte: a peek at
+the first, 0x16 for a handshake's record, a capital letter for a method.
+rustls answers a method with an alert, which a plain client prints as a
+garbled answer; it gets `400` naming `https://` (`conn::PLAIN_TO_TLS`), in
+the clear, ended as a refused connection is (`end_refused`). `fennec-server
+--ping` -- Docker's `HEALTHCHECK`, which names no flag -- asks again over
+TLS on that answer, the certificate unchecked: a local probe of liveness,
+carrying no token and reading `{"ok":true}`.
+
+*Refused connections* -- past `--max-connections`, or with no thread --
+are told `fennec_tls::REFUSAL`, an alert in the clear, not a 503
+([Connections without a thread](#connections-without-a-thread)).
+
+*One reader, one writer, one session.* A route reads the request through
+a `BufReader` and writes its answers, both before over a `TcpStream` and a
+`dup` of it. A TLS session is one state both need, so both now borrow one
+`Conn`, read and written through `&Conn` as std reads and writes a
+`&TcpStream`: `Conn::Plain` is the socket itself, `Conn::Tls` the session
+in a `RefCell` -- every read and write is the connection's own thread's and
+none nests in another -- beside a `dup` of the socket for what is asked of
+it while the session may be borrowed: its options, its address, and the
+router's `poll` of a held request's client. `sse`, `replication` and
+`node_stream` take `&mut &Conn` where they took `&mut TcpStream`, their
+bodies unchanged. The node's archive stream writes non-blocking and marks
+itself held where a write would block (`Sender::held`,
+[replication.md](replication.md#a-nodes-archive)); over TLS the plaintext
+goes into records at once and only their sending can block, so it is that
+which `Conn::write_or_hold` finishes under the hold. A held request's
+client is looked at for its end (`waits`' `gone`): a peek read a
+`close_notify` as bytes, a client still there, so a TLS one takes in what
+arrived (`TlsStream::peer_gone`). The router's watch of a held request's
+client (`answered_or_gone`) `poll`s the socket beneath: a `close_notify`
+reads there as bytes of a next request, the client watched no longer and
+the claim let go at the node's next run or its wait's end, as a
+half-closed client's is.
+
+*One write.* An answer's head and body went in one `writev`
+([Parse cache](#parse-cache)); over TLS they go into the session as one
+plaintext (`Write::write_vectored`, which rustls's writer takes as one
+payload), so an answer under 16 KiB is one record, and the records it made
+go out in one `writev` (rustls's own queue, 64 records a call). rustls's
+`Stream::write` took a slice a record and, having taken nothing -- a write
+of nothing -- went on to read, waiting for the peer to send:
+`fennec-tls`'s `Write` never reads, sends what an earlier write left
+queued first, and leaves a failure sending what it took to the next call
+or `flush`, as rustls has it, the plaintext being taken
+(`a_vectored_write_sends_its_slices_and_never_reads`). A stream -- SSE,
+the replica's, the router relaying a node's -- writes an event a record,
+sent as it is written.
+
+*`--metrics` speaks TLS too*, with the same certificate. Its listener is
+apart so a scrape need not reach the data, often on a private address,
+where plain would do; but a server told to speak HTTPS keeps no port
+plain, so the token a scrape sends (the HTTP endpoint's) never travels in
+the clear and no configuration has a plain port nobody asked for.
+Prometheus takes `scheme: https` and a `ca_file`; the Datadog Agent's
+OpenMetrics check `tls_verify` and `tls_ca_cert`.
+
+*Plain HTTP costs what it did.* Without the `tls` feature `conn::Tls` and
+the session's type are enums of no variant: `Conn` is one variant wide,
+its size the descriptor's, every `match` on it a branch the compiler drops.
+With it, a plain connection is a match per read and write and no
+allocation (the session is boxed, a TLS connection's alone), and has one
+`dup` fewer than the reader and writer apart took. Measured against
+main's tree in turns (`make tls-bench BASE=...`, macOS arm64, each round
+begun under a 1-minute load of 2.5, the turns rotated, medians of 7, 9
+and 7 rounds): a row by id kept alive at a p50 of 21.0 / 21.2, 20.9 /
+21.1 and 20.9 / 21.0 us, 150 845 / 150 426, 154 304 / 153 736 and 153 458
+/ 151 046 requests a second over eight clients, and 36 215 / 35 448,
+36 497 / 35 330 and 35 893 / 36 075 connections a second -- main's
+first, each within what a run moves by. Both built without `tls`, so
+neither carries rustls's code, the two were the same: 20.9 / 20.9 us,
+154 121 / 154 286 requests and 35 673 / 36 167 connections a second.
+
+*What it costs.* Kept alive, HTTPS asked a row by id at a p50 of 22.5 to
+23.0 us against 21.0 to 21.2 in plain HTTP, and 143 980 to 147 350
+requests a second over eight clients against 150 426 to 153 736 (the
+three runs above): a record sealed and opened each way. A connection a
+request, 15 348 to 15 531 a second against 35 330 to 36 075: the
+handshake.
+`fennec-server`, release, macOS arm64, went 5777 -> 5922 KB (+145 KB:
+rustls's server half beside the client the importer took, and the
+listener's own code); `fennec-shard`, which took no TLS before, 4256 ->
+5113 KB (+857 KB, rustls, ring and Mozilla's roots whole), the price of
+serving its clients with no proxy in front. Built without `tls` the server
+is 4741 -> 4758 KB, one 16 KB page for `Conn`.
+
+*Renewal* is a restart: the files are read once, at the start. A reload
+on a signal, the next connections taking the new certificate, is a
+follow-up. *What still dials plain HTTP*: a replica's `--replica-of`, the
+router's links to its nodes and the regions' relays, and the `fennec mcp`
+bridge -- the dials are the next slice's, so a node, a primary that a
+replica follows, and a server the bridge reaches keep plain HTTP on a
+private network until then, and the router, which ends clients' TLS,
+forwards to its nodes in the clear.

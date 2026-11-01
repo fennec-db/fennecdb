@@ -27,6 +27,10 @@ usage: fennec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token
       --insecure            allow a non-loopback address without --token
+      --tls-cert <pem>      serve clients HTTPS alone, with this certificate
+      --tls-key <pem>       chain and its private key, both or neither; the
+                            nodes are still asked over plain HTTP. Read at
+                            the start: a renewed certificate takes a restart
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com), as fennec-server takes it:
                             on every answer the router gives, its own and
@@ -217,6 +221,8 @@ fn main() {
     let mut global_path: Option<String> = None;
     let mut tracing = fennec_http::trace::Options::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut tls_cert: Option<String> = None;
+    let mut tls_key: Option<String> = None;
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -235,6 +241,8 @@ fn main() {
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--entry-token" => cfg.entry_token = Some(next(&mut i, "--entry-token")),
             "--insecure" => cfg.insecure = true,
+            "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
+            "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
             "--http-cors" => cfg.cors = Some(next(&mut i, "--http-cors")),
             "--studio" => {
                 let s = fennec_http::studio::Studio::new(fennec_http::studio::ASSETS, None)
@@ -377,6 +385,11 @@ fn main() {
         }
         i += 1;
     }
+
+    // Both or neither, each read and the key the certificate's, refused
+    // before anything is opened, as fennec-server refuses them.
+    cfg.tls = fennec_http::conn::from_flags(tls_cert.as_deref(), tls_key.as_deref())
+        .unwrap_or_else(|e| fail(&e));
 
     match tracing.settings("fennec-shard") {
         Err(e) => fail(&e),
