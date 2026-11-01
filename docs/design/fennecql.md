@@ -480,8 +480,15 @@ tested, as what `Filter` cannot bind is, a list of none or past the
 bound was answered over an empty collection, under `id = 7 and n in $1`
 finding no 7, or by a held `del` finding nothing, and refused once a row
 was tested: an answer that hung on the data. A statement handed no
-parameters walks nothing; one handed some walks its expressions once,
-SIZE_AND_TIME. `has_subquery` is the inner `get`'s alone,
+parameters walks nothing; one handed some walks what it evaluates row by
+row once, in plain loops over one function (`listed_held`): 1.9 KB of the
+browser module, where iterators chained into one walk were 8 KB, each
+adapter a type of its own; the parser's refusal of every other `any(...)`
+is 0.4 KB more, 2.3 KB raw, 1.1 KB gzip and 0.7 KB brotli in all. A
+request with no list pays nothing it shows: `= $1` by id 0.38 us in
+process and 16-23 us over HTTP (140-145k requests a second, eight
+clients) before and after, a 1 000-id `in $1` 40.5 us and 177-181 us
+alike (`make lists-bench`, the two builds in turns, twice). `has_subquery` is the inner `get`'s alone,
 so a poll's tag (`etag`) and the pin, which ask whether another collection
 is read, see an `in $n` as reading none. **Put in its place first, as an
 inner `get`'s list is, it cost a copy of the statement:** 10 ids by `id`
@@ -505,7 +512,15 @@ second call) -- once a text: the page keeps the places the module named
 for each (`#asked`, 256 texts, cleared when full) and sends them as JSON
 at once after, looked up only where a list of numbers is among the
 parameters, so a run with none pays nothing, and a place it names beside
-them is added. COST_NUMBERS; a `Value::Vector` handed to `Database::query` is refused
+them is added: 10 ids went 14.1-15.2 us a run -> 10.2-11.0, and `= $1`
+read 4.7-5.3 us either way (node, 200 000 runs back to back, in turns).
+The server reads the body a second time at every request whose numbers
+`exactly` names: 18.0-18.3 us for a body of 1 000 ids, the quick reading
+before it 10.4-10.6 (`make lists-bench`'s readings), of a request's
+177-181 us p50. Avoiding it would read the parameters after the
+statement, which every request's body would pay for, or have the quick
+reader tell whole numbers apart, which every vector's would; a list of
+texts is read once. A `Value::Vector` handed to `Database::query` is refused
 (`refuse_inexact`, its words naming `in $n`). A call's argument is named
 where its parameter is a list (`$ids [int]`) as where it keeps numbers, and
 one handed as a parameter (`call f($1)`) is the parameter's -- `exact_args`

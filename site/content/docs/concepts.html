@@ -517,7 +517,7 @@ file a server can open.</p>
 
 <details class="deep"><summary>The glue without wasm-bindgen, and how persist works</summary>
 <p><code>fennec-wasm</code> exposes a C ABI and there is no
-<code>wasm-bindgen</code>. The glue is about 617 lines of JavaScript inside
+<code>wasm-bindgen</code>. The glue is about 636 lines of JavaScript inside
 <code>web/fennec.js</code>, alongside persistence and the sync layer; the
 query builder and the HTTP client are dependency-free modules of their own
 it imports, which <code>@fennecdb/web/client</code> loads without the rest
