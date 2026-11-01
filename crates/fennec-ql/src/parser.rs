@@ -208,6 +208,12 @@ const JSON_PATH: &str = "a json field's member is read by a path: `meta.source`,
 const FULLTEXT: &str = "full text is the `match` clause over an `@text` field: \
                         `get docs where ... match body $1`";
 
+/// What SQL's `= any(...)` and `<> all(...)` are refused with but where
+/// they hold a parameter alone (`Parser::any_param`).
+const ANY: &str = "a list is tested with `in`: `x in [1, 2]`, `x in (get ...)`, or `x in $1` \
+                   with the list a parameter, which SQL writes `x = any($1)`; `<> all(...)` \
+                   is `not (x in ...)`";
+
 /// What a test of a double-quoted text alone is refused with, after the
 /// text and its name (`Parser::quoted`): SQL's quoted column, FennecQL's
 /// text, so the test answers the same for every row.
@@ -4272,6 +4278,17 @@ impl Parser {
             if op == CmpOp::Eq && self.scalar_ahead() {
                 return self.scalar(Some(left));
             }
+            // SQL's `= any($1)`, by a word of three letters: a comparison
+            // with a value or a parameter asks nothing more.
+            if matches!(self.peek(), Tok::Ident(w) if w.len() == 3) {
+                if let Some((i, all)) = self.any_param(op)? {
+                    if lq {
+                        return Err(self.quoted(at));
+                    }
+                    let e = Expr::InParam(Box::new(left), i);
+                    return Ok(if all { Expr::Not(Box::new(e)) } else { e });
+                }
+            }
             let r = self.i;
             let right = self.arith()?;
             if lq && fixed(&right) {
@@ -4574,8 +4591,14 @@ impl Parser {
 
     /// After `in`: `[a, b]`, FennecQL's list; `(get ...)` or `(select ...)`,
     /// a subquery's; or `(a, b)`, SQL's list, read as `[a, b]` -- which no
-    /// FennecQL text had, a `(` there taking a subquery alone.
+    /// FennecQL text had, a `(` there taking a subquery alone; or `$1`, a
+    /// parameter holding the list ([`Expr::InParam`]), which was refused,
+    /// `[` expected. SQL's `in ($1)` stays a list of one value, as SQL
+    /// reads it: its list parameter is `= any($1)` ([`Self::any_param`]).
     fn in_list(&mut self, left: Expr) -> Result<Expr> {
+        if let Some(i) = self.list_param()? {
+            return Ok(Expr::InParam(Box::new(left), i));
+        }
         let (open, close) = match self.peek() {
             Tok::LParen => (Tok::LParen, Tok::RParen),
             _ => (Tok::LBracket, Tok::RBracket),
@@ -4600,6 +4623,60 @@ impl Parser {
         }
         self.expect(close)?;
         Ok(Expr::In(Box::new(left), items))
+    }
+
+    /// The parameter next, read, where one stands for a list: `$1`, or a
+    /// definition's `$ids`, checked as a value's is.
+    fn list_param(&mut self) -> Result<Option<usize>> {
+        #[cfg(feature = "statements")]
+        let named = matches!(self.peek(), Tok::Named(_));
+        #[cfg(not(feature = "statements"))]
+        let named = false;
+        if !named && !matches!(self.peek(), Tok::Param(_)) {
+            return Ok(None);
+        }
+        match self.primary()? {
+            Expr::Param(i) => Ok(Some(i)),
+            _ => Ok(None),
+        }
+    }
+
+    /// PostgreSQL's list parameter after `=` or `<>`, the operator read:
+    /// `x = any($1)` is `x in $1`, `x <> all($1)` `x not in $1` -- the
+    /// parameter's place, and whether it was `all`. `None`, nothing read,
+    /// where no `(` follows the word: a field named `any`. Any other `any(`
+    /// or `all(` after a comparison is refused naming the `in` to write
+    /// ([`ANY`]), its word not read: no build has a function of either
+    /// name, and the call it was read as was refused only as it ran.
+    /// Handing the operand in and back out instead was 85 bytes more of the
+    /// browser module.
+    #[cold]
+    #[inline(never)]
+    fn any_param(&mut self, op: CmpOp) -> Result<Option<(usize, bool)>> {
+        let any = self.peek_kw("any");
+        let tok = |k: usize| self.toks.get(self.i + k).map(|t| &t.tok);
+        if !(any || self.peek_kw("all")) || tok(1) != Some(&Tok::LParen) {
+            return Ok(None);
+        }
+        let all = match op {
+            CmpOp::Eq if any => Some(false),
+            CmpOp::Ne if !any => Some(true),
+            _ => None,
+        };
+        // Where the text ended inside the parentheses, a next line of the
+        // shell's may hold the `$1)` that makes it a list parameter.
+        let ended = (1..=3).any(|k| matches!(tok(k), None | Some(Tok::Eof)));
+        let at = self.i;
+        if let (Some(all), Some(&Tok::RParen)) = (all, tok(3)) {
+            self.i += 2;
+            if let Some(i) = self.list_param()? {
+                self.i += 1;
+                return Ok(Some((i, all)));
+            }
+            self.i = at;
+        }
+        self.cut |= ended;
+        self.err(ANY)
     }
 
     /// Refuses the double-quoted text at `at` (SQL's quoted column), which
@@ -5151,6 +5228,7 @@ mod tests {
         "insert into notes values {body: 'a'}, {body: 'b'} on conflict do nothing",
         "update notes set topic = 4, body = body || '!' where id = 3 returning *",
         "get notes where topic not in (1, 2) and posted between $1 and $2 and body like 'a%' escape '!' and body is distinct from 'it''s'",
+        "get notes where topic in $1 and id not in $2 and posted = any($3) and body <> all($4)",
         "select topic, count(body) from notes where body ilike '%x%' and id in (select distinct n from tops) group by topic order by topic desc nulls last",
         // SQL's joins, subqueries and schema, the same statements as their
         // FennecQL.
@@ -5205,6 +5283,60 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn in_takes_a_parameter_holding_the_list() {
+        let filter = |text: &str| match parse_one(text) {
+            Ok(Statement::Select(s)) => s.filter.unwrap(),
+            other => panic!("{text}: {other:?}"),
+        };
+        let field = || Box::new(Expr::Field("id".into()));
+        let listed = |i| Expr::InParam(field(), i);
+        assert_eq!(filter("get p where id in $1"), listed(0));
+        assert_eq!(
+            filter("get p where id not in $3"),
+            Expr::Not(Box::new(listed(2)))
+        );
+        assert_eq!(filter("get p where id = any($2)"), listed(1));
+        assert_eq!(
+            filter("get p where id <> all($1)"),
+            Expr::Not(Box::new(listed(0)))
+        );
+        // What was read before reads as it was: a list of one parameter,
+        // and `any(...)` of anything but a parameter a call.
+        assert_eq!(
+            filter("get p where id in [$1]"),
+            Expr::In(field(), vec![Expr::Param(0)])
+        );
+        // A field named `any` is a field.
+        assert_eq!(
+            filter("get p where id = any"),
+            Expr::Cmp(CmpOp::Eq, field(), Box::new(Expr::Field("any".into())))
+        );
+        // Every other `any(` or `all(` after a comparison is refused,
+        // naming the `in` to write, at its word: no build has either
+        // function, and the call it was read as was refused only as it ran.
+        for (text, word) in [
+            ("get p where id = any([1, 2])", "any"),
+            ("get p where id = ANY(get q select id)", "ANY"),
+            ("get p where id <> all([1])", "all"),
+            ("get p where id = any(x)", "any"),
+            ("get p where id > any($1)", "any"),
+            ("get p where id = all($1)", "all"),
+            ("get p where id != any($1)", "any"),
+        ] {
+            let e = parse_one(text).unwrap_err().to_string();
+            let at = format!("position {}:", text.find(word).unwrap());
+            assert!(e.contains(&at), "{text}: {e}");
+            assert!(e.contains("`x in [1, 2]`, `x in (get ...)`"), "{text}: {e}");
+        }
+        // The list's parameter counts as the statement's.
+        assert_eq!(parse_one("get p where id in $4").unwrap().max_param(), 4);
+        let e = parse_one(r#"get p where "id" in $1"#)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not \"id\""), "{e}");
     }
 
     /// Every statement, written over lines cut between any of its words

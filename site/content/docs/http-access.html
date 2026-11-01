@@ -353,7 +353,9 @@ end
   <li><b>List claims.</b> A claim that is a JSON array goes after
     <code>in</code>: <code>room in $jwt.rooms</code> matches the rooms it
     lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,
-    and a text claim there is a list of one. It holds reads, writes
+    and a text claim there is a list of one. SQL's <code>room =
+    any($jwt.rooms)</code> is the same rule, and <code>room &lt;&gt;
+    all($jwt.rooms)</code> is <code>not (room in $jwt.rooms)</code>. It holds reads, writes
     (<code>WITH CHECK</code>: a post into a room the list does not hold is
     403) and subscriptions alike. A list holding a <code>null</code>, a
     <code>""</code>, a list or an object is no claim, and the rule naming

@@ -32,6 +32,7 @@ mod geo_docs;
 mod handover;
 mod having;
 mod highlight;
+mod in_param;
 mod insert;
 mod json;
 mod language_file;

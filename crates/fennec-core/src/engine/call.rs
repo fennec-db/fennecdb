@@ -240,10 +240,14 @@ impl Database {
         let Some(def) = self.statements.get(&c.name).and_then(|s| s.tree.as_deref()) else {
             return;
         };
+        // A list parameter as well: `$ids [int]`, read the quick way, was a
+        // vector's `f32`s made `[int]`, 16777217 the 16777216 of another
+        // row in `id in $ids`.
+        let list = |t: &crate::value::DataType| matches!(t, crate::value::DataType::List(_));
         let params: Vec<(&str, bool)> = def
             .params
             .iter()
-            .map(|p| (&*p.name, p.ty.keeps_numbers()))
+            .map(|p| (&*p.name, p.ty.keeps_numbers() || list(&p.ty)))
             .collect();
         let claims: Vec<(&str, bool)> = def
             .claims
@@ -606,18 +610,22 @@ fn arguments(def: &Definition, args: &Args, ctx: &EvalCtx) -> Result<Vec<Value>>
 /// whether each keeps a list of numbers as written, by place.
 fn exact_args(args: &Args, keeps: &[(&str, bool)], out: &mut super::Exactly) {
     let by_name = |k: &str| keeps.iter().any(|&(n, kept)| kept && n == k);
-    let named =
-        |pairs: &[(String, Expr)]| pairs.iter().any(|(k, e)| e.reads_vectors() && by_name(k));
+    // An argument a parameter hands, `call f($1)`, is that parameter read
+    // as written, as a list of numbers written in is the text.
+    let named = |pairs: &[(String, Expr)], out: &mut super::Exactly| {
+        for (_, e) in pairs.iter().filter(|(k, _)| by_name(k)) {
+            super::given(e, out);
+        }
+    };
     match args {
         Args::Param(i) if keeps.iter().any(|&(_, kept)| kept) => out.params.push(*i),
-        Args::Named(pairs) => out.text |= named(pairs),
+        Args::Named(pairs) => named(pairs, out),
         Args::Placed(placed, pairs) => {
+            named(pairs, out);
             let at = |j: usize| keeps.get(j).is_some_and(|&(_, kept)| kept);
-            out.text |= named(pairs)
-                || placed
-                    .iter()
-                    .enumerate()
-                    .any(|(j, e)| e.reads_vectors() && at(j));
+            for (_, e) in placed.iter().enumerate().filter(|(j, _)| at(*j)) {
+                super::given(e, out);
+            }
         }
         _ => {}
     }
@@ -823,6 +831,17 @@ fn narrowed(
         let mut ins = Vec::new();
         f.conjunct_in_sets(holes, &mut ins);
         if ins.iter().any(|(field, _)| answers(field, false)) {
+            return true;
+        }
+        // `in $ids`, which the holes hand no list: read through the index
+        // whatever list a call hands it, as `in [$a, $b]` is.
+        let mut terms = Vec::new();
+        f.conjuncts(&mut terms);
+        let listed = |e: &Expr| matches!(e, Expr::Field(n) if answers(n, false));
+        if terms
+            .iter()
+            .any(|t| matches!(t, Expr::InParam(l, _) if listed(l)))
+        {
             return true;
         }
         let mut ranges = Vec::new();

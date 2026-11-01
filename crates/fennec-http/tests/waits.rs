@@ -1124,3 +1124,28 @@ fn an_order_goes_to_the_nearest_claim_held_for_it() {
         assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
     }
 }
+
+/// A held `del` whose `in $1` is handed no list, or one past the bound, is
+/// refused as it comes -- never held its wait by a test of it that every
+/// look answered with an error, finding no row to refuse it over.
+#[test]
+fn a_held_write_whose_list_is_none_is_refused_at_once() {
+    let node = start();
+    let mut c = Conn::open(node.port);
+    let long: Vec<String> = (0..=100_000).map(|i| format!("\"w{i}\"")).collect();
+    let long = format!("[[{}]]", long.join(","));
+    for (params, says) in [
+        ("[7]", "`in $1` takes a list, and $1 is of type int"),
+        (long.as_str(), "more than 100000"),
+    ] {
+        let a = c.post(
+            "/query",
+            &line("del jobs where owner in $1", params),
+            &[("Fennec-Wait", "30000")],
+        );
+        assert_eq!(a.status, 400, "{}", a.body);
+        assert!(a.body.contains(says), "{}", a.body);
+    }
+    let s = node.server.waits();
+    assert_eq!((s.held, s.runs), (0, 0), "{s:?}");
+}

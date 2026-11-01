@@ -1236,10 +1236,11 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         out.push_str(s);
         let stmt = fennec_ql::parse_one(&format!("get _ where {out}"))
             .map_err(|e| format!("the filter: {e}"))?;
-        let Statement::Select(sel) = stmt else {
+        let Statement::Select(mut sel) = stmt else {
             unreachable!("a get parses as a select")
         };
-        if let Some(f) = &sel.filter {
+        if let Some(f) = &mut sel.filter {
+            any_as_in(f);
             claims_held(f, true, &claims)?;
         }
         // An inner `get` reads another collection, as the token's own `get`
@@ -1376,6 +1377,10 @@ fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(
             operand(x)?;
             items.iter().try_for_each(operand)
         }
+        // None here: [`rule`] reads `= any($jwt.c)` as the `in [$k]` that
+        // `in $jwt.c` is ([`any_as_in`]). Refused should one come, its list
+        // unchecked else.
+        Expr::InParam(..) => Err("a rule's list claim goes after `in`: `x in $jwt.c`".into()),
         Expr::InSelect(x, sel) => {
             operand(x)?;
             match &sel.filter {
@@ -1384,6 +1389,27 @@ fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(
             }
         }
     }
+}
+
+/// SQL's `x = any($jwt.c)`, which the parser reads as `x in $k`
+/// ([`Expr::InParam`]), made the `in [$k]` that `in $jwt.c` is written as
+/// ([`rule`]), and `x <> all($jwt.c)` the `not` of it: one rule however it
+/// is spelled, its claim a list spread into the `in`'s
+/// ([`bind`]) and held by every check `in $jwt.c` is -- `claims_held`,
+/// `kind_held`, `usable`, [`MAX_CLAIM_VALUES`] -- where the parser's own
+/// node had none of them. An inner `get`'s filter is a rule's too.
+fn any_as_in(e: &mut Expr) {
+    if let Expr::InParam(x, k) = e {
+        let k = *k;
+        let x = std::mem::replace(x, Box::new(Expr::Lit(Value::Null)));
+        *e = Expr::In(x, vec![Expr::Param(k)]);
+    }
+    if let Expr::InSelect(_, sel) = e {
+        if let Some(f) = &mut sel.filter {
+            any_as_in(f);
+        }
+    }
+    e.each_child_mut(&mut any_as_in);
 }
 
 /// Marks in `alone` each claim `e` reads as one value somewhere: anywhere
@@ -1862,6 +1888,15 @@ fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
             sel.filter = sel.filter.as_ref().map(|f| bind_held(f, values, pass));
             Expr::InSelect(b(x), Box::new(sel))
         }
+        // None here, [`any_as_in`] making a rule's the `in [$k]` above, whose
+        // list is spread the same.
+        Expr::InParam(x, k) => Expr::In(
+            b(x),
+            match &values[*k] {
+                Value::List(l) => l.iter().cloned().map(Expr::Lit).collect(),
+                v => vec![Expr::Lit(v.clone())],
+            },
+        ),
         Expr::Call(f, args) => Expr::Call(
             f.clone(),
             args.iter().map(|a| bind_held(a, values, pass)).collect(),
@@ -4142,6 +4177,58 @@ mod tests {
             .collect();
         let claims = format!(r#"{{"sub":"a","rooms":[{}]}}"#, many.join(","));
         assert!(a.scope(&a.mint(&claims).unwrap(), 0).is_err());
+    }
+
+    /// SQL's `= any($jwt.rooms)` is `in $jwt.rooms`, and `<> all(..)` its
+    /// `not`: one rule however it is spelled, bound to the same list and
+    /// held by the same checks -- a list of none, or past the bound, alike.
+    #[test]
+    fn a_list_claim_after_any_is_the_list_after_in() {
+        let rules = |m: &str, n: &str, t: &str| {
+            access(&format!(
+                "messages read where {m}\n\
+                 notes read where {n}\n\
+                 teams read where team in (get members select team where {t})\n\
+                 members read\n"
+            ))
+        };
+        let a = rules(
+            "room in $jwt.rooms",
+            "not (room in $jwt.rooms)",
+            "user in $jwt.rooms",
+        );
+        let b = rules(
+            "room = any($jwt.rooms)",
+            "room <> all($jwt.rooms)",
+            "user = any($jwt.rooms)",
+        );
+        let lists = |x: &Access| x.rules.iter().map(|r| r.lists.clone()).collect::<Vec<_>>();
+        assert_eq!(lists(&a), lists(&b));
+        let many: Vec<String> = (0..=MAX_CLAIM_VALUES)
+            .map(|i| format!("\"r{i}\""))
+            .collect();
+        let many = format!(r#"{{"sub":"a","rooms":[{}]}}"#, many.join(","));
+        for claims in [
+            r#"{"sub":"a","rooms":["r1","r2"]}"#,
+            r#"{"sub":"a","rooms":[123456789, 2]}"#,
+            r#"{"sub":"a","rooms":"r1"}"#,
+            r#"{"sub":"a","rooms":[]}"#,
+            r#"{"sub":"a","rooms":["r1",null]}"#,
+            r#"{"sub":"a"}"#,
+            &many,
+        ] {
+            let scope = |x: &Access| x.scope(&x.mint(claims).unwrap(), 0);
+            let (sa, sb) = match (scope(&a), scope(&b)) {
+                (Ok(sa), Ok(sb)) => (sa, sb),
+                (Err(_), Err(_)) => continue,
+                _ => panic!("{claims}: one spelling refused"),
+            };
+            for c in ["messages", "notes", "teams"] {
+                assert_eq!(sa.readable(c), sb.readable(c), "{c} {claims}");
+                assert_eq!(sa.filter(c, READ), sb.filter(c, READ), "{c} {claims}");
+            }
+        }
+        assert!(b.scope(&b.mint(&many).unwrap(), 0).is_err());
     }
 
     /// A claim held as `null`, `""`, an object, a list where one value is

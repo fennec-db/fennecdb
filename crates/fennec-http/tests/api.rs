@@ -663,6 +663,76 @@ fn points_over_http() {
     );
 }
 
+/// `in $1` over HTTP: one parameter holding a cart's ids, each read as
+/// written -- read the quick way, `[16777217]` is a vector's `f32`s, whose
+/// 16777217 is 16777216, another row -- through `/query` and `/batch`,
+/// and a parameter that is no list refused naming the form.
+#[test]
+fn in_takes_a_list_parameter() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection products (sku int @hash, name text)",
+        "put products {id: 16777216, sku: 9007199254740992, name: \"a\"}",
+        "put products {id: 16777217, sku: 9007199254740993, name: \"b\"}",
+        "put products {id: 3, sku: 3, name: \"c\"}",
+    ] {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    let query = |q: &str, params: &str| {
+        let body = format!(r#"{{"query":"{q}","params":{params}}}"#);
+        call(h.port, "POST", "/query", Some(&body))
+    };
+    for (q, params, want) in [
+        (
+            "get products select name where id in $1",
+            "[[16777217, 3]]",
+            r#"[{"name":"c"},{"name":"b"}]"#,
+        ),
+        (
+            "get products select name where sku in $1",
+            "[[9007199254740993]]",
+            r#"[{"name":"b"}]"#,
+        ),
+        (
+            "get products select name where id not in $1",
+            "[[16777216, 3]]",
+            r#"[{"name":"b"}]"#,
+        ),
+        (
+            "select name from products where id = any($1)",
+            "[[16777217]]",
+            r#"[{"name":"b"}]"#,
+        ),
+        ("get products select name where id in $1", "[[]]", "[]"),
+        (
+            "get products select name where name in $1",
+            r#"[["a", "c"]]"#,
+            r#"[{"name":"c"},{"name":"a"}]"#,
+        ),
+    ] {
+        let r = query(q, params);
+        assert_eq!((r.status, r.body.trim()), (200, want), "{q} {params}");
+    }
+    let r = query("get products where id in $1", "[16777217]");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body
+            .contains("`in $1` takes a list, and $1 is of type int"),
+        "{}",
+        r.body
+    );
+    let batch = "{\"query\":\"del products where id in $1\",\"params\":[[16777217]]}\n\
+                 {\"query\":\"get products select id\"}\n";
+    let r = call(h.port, "POST", "/batch", Some(batch));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.contains(r#"[{"id":3},{"id":16777216}]"#),
+        "{}",
+        r.body
+    );
+}
+
 // ---------------------------------------------------------------- writing
 
 #[test]

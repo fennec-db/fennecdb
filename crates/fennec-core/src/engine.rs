@@ -6711,6 +6711,13 @@ impl Database {
         if !crate::FULL {
             self.refuse_unbuilt(stmt)?;
         }
+        // Every `in $n` held to its list before anything is planned, so
+        // the refusal never hangs on the rows (`lists_held`): every
+        // statement passes here -- a `/batch`'s, a call's body with its
+        // arguments, the module's. One handed no parameters walks nothing.
+        if !params.is_empty() {
+            stmt.lists_held(params)?;
+        }
         let (collection, filter) = match stmt {
             Statement::Select(sel) => {
                 return Ok(match self.answered_top(sel, params)? {
@@ -8238,7 +8245,7 @@ impl Database {
                 {
                     candidates = Some(hit);
                     source = ("the id index, `in`", "id");
-                    bare_in = matches!(f, Expr::In(..));
+                    bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
                 }
                 continue;
             }
@@ -8302,7 +8309,7 @@ impl Database {
                 // `and`ed on, every candidate still has to be tested -- and a
                 // filter holding an equality as well cannot be a bare `in`,
                 // so this cannot be set by the wrong branch.
-                bare_in = matches!(f, Expr::In(..));
+                bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
             }
         }
 
@@ -12003,9 +12010,9 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field or a point keeps a list of numbers as written, and this one was \
-                 read into a vector's f32s: read the text with fennec_ql::parse_for, a parameter \
-                 as JSON"
+                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
+                 and this one was read into a vector's f32s: read the text with \
+                 fennec_ql::parse_for, a parameter as JSON"
                     .into(),
             )),
         }
@@ -12226,6 +12233,9 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
         }
         Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
         Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        // Whatever its field: a list of ids read into `f32`s finds
+        // 16777217 as 16777216, another row.
+        Expr::InParam(_, i) => given(&Expr::Param(*i), out),
         _ => {}
     }
     e.each_child(&mut |c| expr_needs(of, k, c, out));
@@ -13245,12 +13255,16 @@ impl<'q> Filter<'q> {
                     },
                 }
             }
-            Expr::In(a, items) => {
+            // `in $n` as the `in [..]` its list writes out (`in_list`).
+            Expr::In(a, _) | Expr::InParam(a, _) => {
+                let Some((_, items)) = e.in_list(ctx.params) else {
+                    return Test::Eval(e);
+                };
                 let s = slot(a);
                 let fold = fold_of(s);
                 let mut values = Vec::with_capacity(items.len());
                 for it in items {
-                    match (value(it), fold) {
+                    match (it.cloned(), fold) {
                         (Some(v), Some(f)) => values.push(folded(f, v)),
                         (Some(v), None) => values.push(v),
                         (None, _) => return Test::Eval(e),
@@ -13811,10 +13825,10 @@ fn composed(
             }
         }
         for (j, e) in terms.iter().enumerate() {
-            let (Expr::In(lhs, items), false) = (e, used[j]) else {
+            let (Some((lhs, items)), false) = (e.in_list(params), used[j]) else {
                 continue;
             };
-            if !matches!(lhs.as_ref(), Expr::Field(n) if n == k) {
+            if !matches!(lhs, Expr::Field(n) if n == k) {
                 continue;
             }
             if items.len() * prefixes.len() > MAX_SPANS {
@@ -13824,12 +13838,7 @@ fn composed(
             // (`year in [2024, 2024.0]`) would read its span twice.
             let mut parts: Vec<Vec<u8>> = Vec::with_capacity(items.len());
             let mut whole = true;
-            for it in items {
-                let v = match it {
-                    Expr::Lit(v) => Some(v),
-                    Expr::Param(p) => params.get(*p),
-                    _ => None,
-                };
+            for v in items {
                 match v.and_then(|v| ix.literal(i, v)) {
                     Some(b) if !parts.contains(&b) => parts.push(b),
                     Some(_) => {}
@@ -13997,7 +14006,9 @@ fn names_first(filter: Option<&Expr>, params: &[Value], field: &str) -> bool {
         f.conjuncts(&mut terms);
     }
     terms.iter().any(|e| match e {
-        Expr::In(lhs, _) => matches!(lhs.as_ref(), Expr::Field(n) if n == field),
+        Expr::In(lhs, _) | Expr::InParam(lhs, _) => {
+            matches!(lhs.as_ref(), Expr::Field(n) if n == field)
+        }
         e => e.range_key(params).is_some_and(|(n, ..)| n == field),
     })
 }
