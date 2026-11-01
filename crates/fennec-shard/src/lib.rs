@@ -3858,7 +3858,6 @@ impl Router {
             (node(primary)?, node(on)?)
         };
         let base = format!("/_admin/tenants/{tenant}");
-        let from = format!("{{\"from\":{}}}", quote(&format!("http://{}", p.addr)));
         let left = |how: &str, ids: &[u64], why: String| {
             self.left_on(
                 tenant,
@@ -3871,58 +3870,98 @@ impl Router {
         // The tenant's replica there already, which a move has follow its
         // new primary from where it stands: the copy the directory records.
         let recorded = self.read_dir().replica(tenant) == Some(on);
-        // One identity for the file the attach makes, its `PUT`'s and its
-        // follow's: unanswered, it is what the router knows.
+        // One identity for the file the attach makes or adopts, its `PUT`'s
+        // and its follow's: unanswered, it is what the router knows.
         let made = fennec_http::replication::fresh_id();
-        let mut answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
-        if matches!(answer, Ok((409, _))) && !recorded {
-            self.clear_target(tenant, on, "an attach of its replica")
-                .map_err(|Fail(_, why)| why)?;
-            answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
-        }
-        // What the `PUT` did: a file made, carrying what the node said, or
-        // the recorded copy found. A 409 again is a file come since, which
-        // the next try judges.
-        let (how, ids) = match answer {
-            Ok((201, body)) => ("made", instances_at(&fields_of(&body))),
-            Ok((409, _)) if recorded => ("found there", Vec::new()),
-            Ok((status, body)) => {
-                return Err(format!(
-                    "`{on}` answered {status}: {}",
-                    String::from_utf8_lossy(&body).trim()
-                ))
-            }
-            Err(e) => {
-                return Err(left(
-                    "perhaps made",
-                    &[made],
-                    format!("`{on}` did not answer: {e}"),
-                ))
-            }
-        };
-        // The follow keeps the identity on the file the `PUT` made alone:
-        // landing late, on a file made there since, it leaves that one none.
+        // The follow, naming the identities the file must carry where there
+        // are any to name (`"instances"`): the node judges under its slot,
+        // so one landing late on a file made there since is refused.
         let follow = format!("{base}/follow");
-        let ids = match self.as_holder(&r, "POST", &follow, Some(made), from.as_bytes()) {
-            Ok((200, body)) => instances_at(&fields_of(&body)),
-            Ok((status, body)) => {
-                return Err(left(
-                    how,
-                    &ids,
-                    format!(
-                        "`{on}` answered {status}: {}",
-                        String::from_utf8_lossy(&body).trim()
-                    ),
-                ));
+        let follow_over = |named: &[u64]| {
+            let mut body = format!("{{\"from\":{}", quote(&format!("http://{}", p.addr)));
+            if !named.is_empty() {
+                let ids: Vec<String> = named
+                    .iter()
+                    .map(|&id| quote(&fennec_http::instance::text(id)))
+                    .collect();
+                body.push_str(&format!(",\"instances\":[{}]", ids.join(",")));
             }
-            Err(e) => return Err(left(how, &ids, format!("`{on}` did not answer: {e}"))),
+            body.push('}');
+            self.as_holder(&r, "POST", &follow, Some(made), body.as_bytes())
+        };
+        let mut answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
+        // A file found there that this router placed -- an old primary back
+        // from a failover -- follows where its node finds it still carrying
+        // the identity recorded for it (`placed_instance`); any other is
+        // judged as a move's target is.
+        let mut adopted = None;
+        if matches!(answer, Ok((409, _))) && !recorded {
+            let placed = self.read_dir().placed_instance(tenant, on);
+            if let Some(id) = placed {
+                match follow_over(&[id]) {
+                    Ok((200, body)) => adopted = Some(instances_at(&fields_of(&body))),
+                    // Another file: judged below.
+                    Ok((409, b)) if fields_of(&b).iter().any(|(k, _)| k == "instance") => {}
+                    // It may have followed, under the proposal.
+                    Err(e) => {
+                        let why = format!("`{on}` did not answer: {e}");
+                        return Err(left("found there", &[id, made], why));
+                    }
+                    refused => return Err(said(on, &refused)),
+                }
+            }
+            if adopted.is_none() {
+                self.clear_target(tenant, on, "an attach of its replica")
+                    .map_err(|Fail(_, why)| why)?;
+                answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
+            }
+        }
+        let (how, ids) = match adopted {
+            Some(ids) => ("found there", ids),
+            None => {
+                // What the `PUT` did: a file made, carrying what the node
+                // said, or the recorded copy found. A 409 again is a file
+                // come since, which the next try judges.
+                let (how, ids) = match answer {
+                    Ok((201, body)) => ("made", instances_at(&fields_of(&body))),
+                    Ok((409, _)) if recorded => ("found there", Vec::new()),
+                    Ok((status, body)) => {
+                        return Err(format!(
+                            "`{on}` answered {status}: {}",
+                            String::from_utf8_lossy(&body).trim()
+                        ))
+                    }
+                    Err(e) => {
+                        return Err(left(
+                            "perhaps made",
+                            &[made],
+                            format!("`{on}` did not answer: {e}"),
+                        ))
+                    }
+                };
+                match follow_over(&ids) {
+                    Ok((200, body)) => (how, instances_at(&fields_of(&body))),
+                    Ok((status, body)) => {
+                        let why = format!(
+                            "`{on}` answered {status}: {}",
+                            String::from_utf8_lossy(&body).trim()
+                        );
+                        return Err(left(how, &ids, why));
+                    }
+                    Err(e) => return Err(left(how, &ids, format!("`{on}` did not answer: {e}"))),
+                }
+            }
         };
         // Its quota, so a failover onto it finds the tenant held as it was.
         if let Some(w) = self.send_quota(tenant, on) {
             return Err(left(how, &ids, w));
         }
+        // The identity it carries now, which an attach finding it again --
+        // its node back from a failover that promoted another -- names.
         let mut dir = self.write_dir();
-        dir.set_replica(tenant, Some(on)).map_err(|e| message(&e))?;
+        dir.note_placed(tenant, on, ids.first().copied())
+            .and_then(|_| dir.set_replica(tenant, Some(on)))
+            .map_err(|e| message(&e))?;
         // Placed in its primary's zone only where the region had no node
         // free in another (`replica_node`): said here, and counted by
         // `fennec_router_same_zone_copies` for as long as it stays.
@@ -4192,11 +4231,6 @@ impl Router {
             .into_iter()
             .filter(|l| l.tenant == tenant)
             .partition(|l| l.instances.is_empty());
-        // Nor is one the look found holding a copy no row names by an
-        // identity -- an old primary a failover took the tenant off, or a
-        // live file a newer router placed there -- which the attach would
-        // fail on: noted for an operator here, and the replica goes on
-        // another node in this repair.
         // A row whose node answered the look listing no such tenant names a
         // file gone -- removed by an operator -- which the look then forgets.
         let gone = |n: &String| answering.is_some_and(|a| a.contains(n)) && !holding.contains(n);
@@ -4205,9 +4239,18 @@ impl Router {
             .map(|l| l.node)
             .filter(|n| !gone(n))
             .collect();
+        // Nor is one the look found holding a copy this router neither
+        // placed under an identity it recorded -- an old primary a failover
+        // took the tenant off, which the attach has follow -- nor noted
+        // under one: a live file a newer router placed there, which the
+        // attach would fail on. Noted for an operator here, and the replica
+        // goes on another node in this repair.
         for n in holding {
-            let recorded = Self::records_file(&self.read_dir(), tenant, n);
-            if recorded || kept.contains(n) || named.iter().any(|l| &l.node == n) {
+            let dir = self.read_dir();
+            let placed =
+                Self::records_file(&dir, tenant, n) || dir.placed_instance(tenant, n).is_some();
+            drop(dir);
+            if placed || kept.contains(n) || named.iter().any(|l| &l.node == n) {
                 continue;
             }
             self.left_on(
@@ -5083,9 +5126,12 @@ impl Router {
         // it, and a tenant made again under the name has another.
         let lineage = text_at(&made, "lineage").map(str::to_owned);
         // Bound first: an `if let`'s guard lives through its block, the DELETE's round trip too.
+        // Its identity beside the placement, which an attach finding the
+        // file there once a failover took the tenant off names.
         let placed = {
             let mut dir = self.write_dir();
-            dir.place(tenant, &name, State::Active)
+            dir.note_placed(tenant, &name, ids.first().copied())
+                .and_then(|_| dir.place(tenant, &name, State::Active))
                 .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
         };
         if let Err(e) = placed {
@@ -5436,7 +5482,12 @@ impl Router {
         }
 
         // Bound first: an `if let`'s guard lives through its block, where `thaw` locks it again.
-        let placed = self.write_dir().place(tenant, to, State::Active);
+        // The target's identity beside the flip, as a create's is.
+        let placed = {
+            let mut dir = self.write_dir();
+            dir.note_placed(tenant, to, target.first().copied())
+                .and_then(|_| dir.place(tenant, to, State::Active))
+        };
         if let Err(e) = placed {
             self.take_back(
                 tenant,

@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 12] = [
+const SCHEMA: [&str; 13] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     // `failed_from` (`TENANT_FIELDS`): the node a failover took the tenant
@@ -127,7 +127,23 @@ const SCHEMA: [&str; 12] = [
     // asked, never mapped; a router from before it neither reads nor
     // writes it.
     LEFTOVERS,
+    // The identity each file this directory's router placed of a tenant
+    // carried on its node, as the node answered the call that made or
+    // changed it -- a create, a move's install, a replica's follow
+    // (`fennec_http::instance`) -- keyed `<tenant>/<node>`. An attach
+    // finding a file of the tenant there (409) names it, and the node has
+    // the file follow only where it still carries it, judged under its
+    // slot as a reclaim is: a node back from a failover has its old primary
+    // follow the tenant's new one, as before identities, while a file
+    // another router placed since -- a live primary -- carries another or
+    // none. Written unsynced, beside a placement: lost to a crash, the file
+    // is reported instead. Read where asked, never mapped; a router from
+    // before it neither reads nor writes it.
+    FILES,
 ];
+
+const FILES: &str =
+    "create collection if not exists files (key text @hash, tenant text, node text, instance text)";
 
 const LEFTOVERS: &str = "create collection if not exists leftovers \
      (key text @hash, tenant text, node text, why text, noted int, instances text)";
@@ -1208,6 +1224,52 @@ impl Directory {
             .collect())
     }
 
+    /// The identity `tenant`'s file on `node` carried as this router placed
+    /// or changed it (`files`): none where it learned none, or where the
+    /// directory -- a standby's following a primary from before it -- keeps
+    /// no such record.
+    pub fn placed_instance(&self, tenant: &str, node: &str) -> Option<u64> {
+        let g = read(&self.db);
+        g.collection("files").ok()?;
+        let stmt = fennec_ql::parse_one("get files select instance where key = $1").ok()?;
+        match g.query(&stmt, &[Value::Text(format!("{tenant}/{node}"))]) {
+            Ok(Response::Rows(rs)) => rs.rows.into_iter().find_map(|r| match &r.values[0] {
+                Value::Text(t) => fennec_http::instance::parse(t),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Records the identity `tenant`'s file on `node` carries, as its node
+    /// answered the call that made or changed it -- or forgets it, `None`
+    /// -- unsynced: the placement written at once after it syncs it, and
+    /// lost, the file is reported, never followed ([`FILES`]).
+    pub fn note_placed(&mut self, tenant: &str, node: &str, id: Option<u64>) -> Result<()> {
+        if read(&self.db).collection("files").is_err() {
+            self.run(FILES, &[])?;
+        }
+        let key = Value::Text(format!("{tenant}/{node}"));
+        let row = vec![
+            key.clone(),
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            id.map_or(Value::Null, |id| {
+                Value::Text(fennec_http::instance::text(id))
+            }),
+        ];
+        self.write_block_as(
+            &[
+                ("del files where key = $1", vec![key]),
+                (
+                    "put files {key: $1, tenant: $2, node: $3, instance: $4}",
+                    row,
+                ),
+            ],
+            false,
+        )
+    }
+
     /// `tenant`'s file on `node`, where it is noted as left there.
     pub fn leftover(&self, tenant: &str, node: &str) -> Result<Option<Leftover>> {
         Ok(self
@@ -1536,6 +1598,11 @@ impl Directory {
     /// with them: a tenant leaving this directory for a region keeping its
     /// own keeps the ones here, which follow it there.
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
+        // Its files' identities first, unsynced: the removal syncs them.
+        if read(&self.db).collection("files").is_ok() {
+            let of = vec![Value::Text(tenant.into())];
+            self.write_block_as(&[("del files where tenant = $1", of)], false)?;
+        }
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
         self.homes.remove(tenant);
@@ -1585,6 +1652,12 @@ impl Directory {
 
     /// Statements as one block, then one sync, as [`Self::run`] runs one.
     fn write_block(&mut self, stmts: &[(&str, Vec<Value>)]) -> Result<()> {
+        self.write_block_as(stmts, true)
+    }
+
+    /// [`Self::write_block`], synced or not: unsynced only where a synced
+    /// write follows at once ([`Self::note_placed`]).
+    fn write_block_as(&mut self, stmts: &[(&str, Vec<Value>)], synced: bool) -> Result<()> {
         let parsed = stmts
             .iter()
             .map(|(sql, _)| fennec_ql::parse_one(sql))
@@ -1596,7 +1669,9 @@ impl Directory {
             .collect();
         let mut g = write(&self.db);
         g.execute_block(&block).map_err(|(_, e)| e)?;
-        g.sync()?;
+        if synced {
+            g.sync()?;
+        }
         // The maps are updated by the caller, not their ids; the counter
         // moved here.
         self.seq = g.change_seq();

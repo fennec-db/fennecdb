@@ -587,10 +587,11 @@ meant to take off, and did not: a create taken back (its schema, quota or
 placement refused) whose `DELETE` the node did not take, a create whose
 `PUT` went unanswered, a move undone whose target kept the copy, a move's
 source that would not go, a copy a failed try at a replica made or found, a
-deleted or detached tenant's copy that stayed, or an old primary -- found by
-a repair's look, or on a node silent as its tenant was given its replica
-elsewhere: a repair never makes a copy it did not note follow, as its node
-cannot tell it from a live primary a newer router placed there. A create of
+deleted or detached tenant's copy that stayed, a copy a repair found that
+the router neither placed nor noted, or an old primary on a node silent as
+its tenant was given its replica elsewhere. An old primary on a node that
+answers is made the tenant's replica again, but only where its node finds
+it still carrying the identity the router recorded as it placed it. A create of
 the name on that node is answered 409 while the file is there.
 
 Each file on a node carries an identity, 16 hex digits the node mints as a

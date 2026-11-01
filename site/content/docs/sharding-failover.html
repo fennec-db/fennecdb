@@ -151,12 +151,13 @@ is placed. A delete removes both.</p>
 <p>A failover of a node in no pair promotes each of its tenants on its own
 replica, one at a time, and routes it there. The tenants whose replicas it
 held are named as unreplicated. <code>POST /_shard/replicas</code> gives every
-tenant without a replica one, on a node holding a copy the router left there
-first: the node takes that copy back and a new one is made. A copy the
-router cannot name, such as an old primary on a node back from a failover,
-is never written over, since its node cannot tell it from a live primary a
-newer router placed there. It is reported as a file left (below), and the
-replica goes on another node.</p>
+tenant without a replica one, on a node holding a copy of it first: a node
+back from a failover has its old primaries follow the nodes that took them
+over. The node makes such a copy follow only if it still carries the
+identity the router recorded when it placed the file, so a live primary
+another router placed there since is never written over. A copy the router
+cannot name is reported as a file left (below), and the replica goes on
+another node.</p>
 
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
 {"node":"n1","promoted":[{"tenant":"acme","to":"n2"},{"tenant":"beta","to":"n3"}],"failed":[],"unreplicated":["gamma"]}
@@ -218,8 +219,8 @@ stay:</p>
 
 <ul>
   <li>a file noted with no identity: a deleted tenant's replica or standby
-    copy that stayed, a detached replica that stayed, an old primary or any
-    other copy a repair found that the router did not note;</li>
+    copy that stayed, a detached replica that stayed, a copy a repair found
+    that the router neither placed nor noted;</li>
   <li>a file on a node from before identities, which answers 404 to the
     take-back and never has a file taken, or on a file system that keeps no
     birth time, where no file carries an identity;</li>
@@ -245,11 +246,11 @@ answered 409) no longer deletes it unseen. The target's node takes it back
 only if it is a file this router noted with an identity. Otherwise the move
 fails 409, the tenant stays on its source, and the file is noted for an
 operator as a file a move found on its target, which the router did not
-note. A replica's attach that finds a file (409) is judged the same way,
-noted or not, and never follows it as found: only the tenant's recorded
-replica, which a move has follow the tenant's new node, is. A node holding a
-file the router cannot judge is skipped when that tenant's replica is
-placed.</p>
+note. A replica's attach that finds a file (409) has it follow only if the
+node finds it still carrying the identity the router recorded for it, such
+as an old primary back from a failover; any other file is judged the same
+way as a move's. A node holding a file the router cannot judge is skipped
+when that tenant's replica is placed.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
 one process, 30 tenants: each is created with its replica in 33 ms, the

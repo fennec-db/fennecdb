@@ -1084,7 +1084,11 @@ impl Tenants {
         from: Option<&str>,
         lineage: Option<u32>,
     ) -> std::result::Result<(), Refused> {
-        self.follow_as(name, from, lineage, None).map(|_| ())
+        // Naming no identity, it judges none: never `Kept::Other`.
+        match self.follow_as(name, from, lineage, None, None) {
+            Err(Kept::Refused(r)) => Err(r),
+            _ => Ok(()),
+        }
     }
 
     /// [`Tenants::follow_lineage`], the file given an identity as it is made
@@ -1099,19 +1103,30 @@ impl Tenants {
     /// there again: given as proposed, the live replica took the identity a
     /// stale row still names -- a router promoted behind the one that took
     /// it back -- and a reclaim of that row took it.
+    ///
+    /// `named`, where given, is a router's word on the file it means: the
+    /// follow is made only where the file carries one of those identities,
+    /// judged under the slot as a reclaim is ([`Kept::Other`] otherwise),
+    /// and then given its proposal. It is how a router has a file it placed
+    /// -- an old primary back from a failover -- follow the tenant's new
+    /// primary: an identity goes with every change of what the file is (a
+    /// follow puts the old one away, a promotion voids it), so one a router
+    /// recorded never names a live primary another placed since.
     pub fn follow_as(
         &self,
         name: &str,
         from: Option<&str>,
         lineage: Option<u32>,
         proposed: Option<u64>,
-    ) -> std::result::Result<Option<u64>, Refused> {
+        named: Option<&[u64]>,
+    ) -> std::result::Result<Option<u64>, Kept> {
         check_name(name)?;
         let Some(repl) = &self.repl else {
             return Err(Refused(
                 409,
                 "this node replicates nothing (--replication-token)".into(),
-            ));
+            )
+            .into());
         };
         match from {
             Some(url) => {
@@ -1128,7 +1143,8 @@ impl Tenants {
                     "this node is nobody's standby (--replica-of): name the node to follow, \
                      {\"from\": \"http://host:port\"}"
                         .into(),
-                ));
+                )
+                .into());
             }
             _ => {}
         }
@@ -1136,7 +1152,13 @@ impl Tenants {
         let followed = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
-            let kept = proposed.is_none() || self.carried(name, held) == proposed;
+            let had = self.carried(name, held);
+            if let Some(named) = named {
+                if !had.is_some_and(|id| named.contains(&id)) {
+                    return Err(Kept::Other(had));
+                }
+            }
+            let kept = proposed.is_none() || named.is_some() || had == proposed;
             let give = |held: &Held| kept.then(|| self.stamp(name, proposed, held)).flatten();
             if let Held::Open(t) = &*held {
                 if t.read().history().following && self.upstream_of(name) == wanted {
@@ -1171,7 +1193,7 @@ impl Tenants {
                             Refused(500, format!("tenant `{name}` could not follow again: {e}"))
                         })?;
                     }
-                    return recorded.map(|_| give(held));
+                    return Ok(recorded.map(|_| give(held))?);
                 }
                 // Closed first: one instance over the file, always. What it
                 // served ends -- a primary's file made a replica's feeds a
@@ -1179,13 +1201,13 @@ impl Tenants {
                 // database rather than the tenant, is halted, or it would go
                 // on writing the file under the next instance.
                 if t.is_frozen() {
-                    return Err(Refused(409, format!("tenant `{name}` is frozen")));
+                    return Err(Refused(409, format!("tenant `{name}` is frozen")).into());
                 }
                 release(t, name)?;
                 *held = Held::Closed;
             }
             if !path.exists() {
-                return Err(Refused(404, format!("no tenant `{name}` on this node")));
+                return Err(Refused(404, format!("no tenant `{name}` on this node")).into());
             }
             self.put_away(name)?;
             self.record_following(name, from, lineage).map_err(|e| {

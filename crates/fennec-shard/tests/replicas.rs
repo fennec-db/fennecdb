@@ -580,37 +580,21 @@ fn every_tenant_follows_on_another_node_and_a_failover_spreads_a_nodes_tenants()
         assert_eq!(placed(port, t).1.is_none(), lost, "{t}");
     }
 
-    // A repair gives each a replica again, never over n1's old primaries:
-    // no row names them by an identity, so their node cannot tell them from
-    // live primaries a newer router placed there. Each is reported, its
-    // rows in place, and the replica goes on another node.
+    // A repair gives each a replica again, on the node holding a copy
+    // first: n1's old primaries follow the nodes that took them over.
     let (status, body) = call(port, "POST", "/_shard/replicas", "", None);
     assert_eq!(status, 200, "{body}");
     for t in all {
         assert!(placed(port, t).1.is_some(), "{t}: {body}");
     }
-    for t in ["t1", "t2"] {
-        assert_ne!(placed(port, t).1.as_deref(), Some("n1"), "{body}");
-        assert!(
-            body.contains(&format!(
-                r#"{{"tenant":"{t}","node":"n1","why":"a copy a repair"#
-            )),
-            "{body}"
-        );
-    }
+    assert_eq!(placed(port, "t1").1.as_deref(), Some("n1"));
     let (status, body) = query(port, "/t/t1/query", r#"put notes {title: "back"}"#);
     assert_eq!(status, 200, "{body}");
-    let replica = placed(port, "t1").1.unwrap();
     until(
-        by_name(&nodes, &replica).port,
+        nodes[0].port,
         "/t/t1/query",
         "get notes select title",
         "back",
-    );
-    let (_, body) = query(nodes[0].port, "/t/t1/query", "get notes select title");
-    assert!(
-        !body.contains("back"),
-        "n1's old primary was followed: {body}"
     );
 }
 

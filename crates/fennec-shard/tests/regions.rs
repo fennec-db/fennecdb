@@ -342,22 +342,13 @@ fn a_replica_stays_in_its_region_in_another_zone_and_a_failover_keeps_it_there()
         assert_eq!(shown(port, t), ("eb1".into(), Some("eu".into()), None));
         assert_eq!(query(port, t, "put notes {n: 2}").0, 200);
     }
-    // The repair gives each a replica in another zone of eu again, on ea2:
-    // ea1's copies, the old primaries no row names by an identity, are
-    // reported and never written over -- their node cannot tell them from
-    // live primaries a newer router placed there.
+    // The repair gives each a replica in another zone of eu again: ea1,
+    // holding their copies, before ea2.
     let (status, body) = call(port, "POST", "/_shard/replicas", "");
     assert_eq!(status, 200, "{body}");
     for t in ["t1", "t2", "t3"] {
-        assert_eq!(shown(port, t).2.as_deref(), Some("ea2"), "{body}");
-        assert!(
-            body.contains(&format!(
-                r#"{{"tenant":"{t}","node":"ea1","why":"a copy a repair"#
-            )),
-            "{body}"
-        );
-        until(nodes[1].port, t, "get notes count", "2");
-        assert!(nodes[0].tenants.names().iter().any(|n| n == t));
+        assert_eq!(shown(port, t).2.as_deref(), Some("ea1"), "{body}");
+        until(nodes[0].port, t, "get notes count", "2");
     }
     assert!(nodes[3].tenants.names().iter().all(|t| t == "u1"));
 }

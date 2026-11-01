@@ -124,28 +124,21 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
     );
     assert_eq!(placed(port, "acme").0, replica);
 
-    // n1 answers again: its lease names nothing of what moved, and its
-    // copy, the old primary no row names by an identity, is never written
-    // over -- its node cannot tell it from a live primary a newer router
-    // placed there -- the repair giving the tenant its replica on the
-    // third node.
+    // n1 answers again: its lease names nothing of what moved, and a repair
+    // has its copy follow the tenant's new primary.
     nodes[0].proxy.heal();
+    until(nodes[0].port, path, "get notes select title", "after");
     let (direct, body) = query(nodes[0].port, path, r#"put notes {title: "stale"}"#);
     assert_ne!(direct, 200, "the old primary's copy took a write: {body}");
-    let third = if replica == "n2" { "n3" } else { "n2" };
-    // Recorded once the copy follows: waited for, as a loaded CI runner
-    // answers the repair late.
+    // The router records the replica once n1 has answered that it follows
+    // (`attach`), and n1 may hold the row before that answer is back: the
+    // record is waited for as the row was. Read at once, it failed on a
+    // loaded CI runner.
     let deadline = Instant::now() + Duration::from_secs(20);
-    while placed(port, "acme").1.as_deref() != Some(third) {
+    while placed(port, "acme").1.as_deref() != Some("n1") {
         assert!(Instant::now() < deadline, "{:?}", placed(port, "acme"));
         std::thread::sleep(Duration::from_millis(20));
     }
-    until(
-        by_name(&nodes, third).port,
-        path,
-        "get notes select title",
-        "after",
-    );
 }
 
 /// Under leases a node lost is failed over within its region: its tenants

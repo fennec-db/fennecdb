@@ -232,27 +232,30 @@ pub(crate) fn closing(dir: &Path, name: &str, held: Option<Binding>, file: &Path
 pub fn list_in(body: &str) -> Result<Vec<u64>, String> {
     let fields = fennec_core::json::parse_object(body)
         .map_err(|e| format!("the body is not a JSON object: {e}"))?;
-    let mut out = Vec::new();
-    for (k, v) in fields {
-        if k != "instances" {
-            continue;
-        }
-        use fennec_core::prelude::Value;
-        let items = match v {
-            Value::List(items) => items,
-            other => vec![other],
-        };
-        for item in items {
-            match item {
-                Value::Text(t) => out.push(parse(&t).ok_or("an instance is 16 hex digits")?),
-                _ => return Err("an instance is 16 hex digits".into()),
-            }
-        }
+    match fields.into_iter().find(|(k, _)| k == "instances") {
+        Some((_, v)) => ids_of(v),
+        None => Err("name the file's instances: {\"instances\": [\"<16 hex>\"]}".into()),
     }
-    if out.is_empty() {
-        return Err("name the file's instances: {\"instances\": [\"<16 hex>\"]}".into());
+}
+
+/// The identities an `"instances"` value names, a list of texts or one:
+/// what a reclaim, or a follow over a file found, is held to. None named
+/// is refused, never read as any.
+pub fn ids_of(v: fennec_core::prelude::Value) -> Result<Vec<u64>, String> {
+    use fennec_core::prelude::Value;
+    let items = match v {
+        Value::List(items) => items,
+        other => vec![other],
+    };
+    let ids = items.into_iter().map(|item| match item {
+        Value::Text(t) => parse(&t).ok_or("an instance is 16 hex digits"),
+        _ => Err("an instance is 16 hex digits"),
+    });
+    let ids = ids.collect::<Result<Vec<u64>, _>>()?;
+    match ids.is_empty() {
+        true => Err("name the file's instances: {\"instances\": [\"<16 hex>\"]}".into()),
+        false => Ok(ids),
     }
-    Ok(out)
 }
 
 #[cfg(test)]

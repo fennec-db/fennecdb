@@ -639,7 +639,10 @@ fn a_follow_landing_late_gives_a_later_file_no_identity() {
     put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "lf1", "");
     create_acme(port);
     let from = format!("http://127.0.0.1:{}", n1.port);
-    let follow = |id: u64| n2.tenants.follow_as("acme", Some(&from), None, Some(id));
+    let follow = |id: u64| {
+        n2.tenants
+            .follow_as("acme", Some(&from), None, Some(id), None)
+    };
     let (first, later) = (0xa1, 0xb2);
     // An attach: its `PUT` and its follow under one identity.
     n2.tenants.create_as("acme", Some(first)).unwrap();
@@ -657,6 +660,50 @@ fn a_follow_landing_late_gives_a_later_file_no_identity() {
     ));
     assert!(n2.holds("acme"));
     reads(n2.port, "acme", "get notes select title", "\"one\"");
+}
+
+/// An old primary back from a failover is its tenant's copy again, as
+/// before identities: the repair's attach finds its file (409) and has its
+/// node follow the new primary with it only where the file still carries
+/// the identity the router recorded as it placed it, judged under the
+/// node's slot -- here the create's. Reported and kept, as the review's
+/// first answer had it, two nodes left the tenant without a copy for good.
+/// A follow naming another identity than the file carries is refused 409,
+/// naming the one it carries, and changes nothing.
+#[test]
+fn an_old_primary_back_from_a_failover_is_its_tenants_copy_again() {
+    let (n1, n2) = (node("ob1"), node("ob2"));
+    let p1 = Proxy::to(n1.port);
+    let port = router();
+    put_node(port, "n1", &p1.addr, "ob1", "");
+    put_node(port, "n2", &format!("127.0.0.1:{}", n2.port), "ob2", "");
+    create_acme(port);
+    assert_eq!(placed(port, "acme"), ("n1".into(), Some("n2".into())));
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+    let created = n1.tenants.instance("acme").expect("the create's identity");
+    // Another identity named: refused, the file as it was.
+    let from = format!("http://127.0.0.1:{}", n2.port);
+    let other = n1
+        .tenants
+        .follow_as("acme", Some(&from), None, Some(7), Some(&[created ^ 1]));
+    assert!(matches!(other, Err(Kept::Other(Some(id))) if id == created));
+    assert_eq!(n1.tenants.instance("acme"), Some(created));
+    let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(placed(port, "acme"), ("n2".into(), None));
+    let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "two"}"#);
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = repair(port);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        placed(port, "acme"),
+        ("n2".into(), Some("n1".into())),
+        "{body}"
+    );
+    assert!(body.contains(r#""left":[]"#), "{body}");
+    assert_eq!(p1.seen("/acme/follow"), 1);
+    reads(n1.port, "acme", "get notes select title", "\"two\"");
+    assert_ne!(n1.tenants.instance("acme"), Some(created));
 }
 
 /// A repair's attach that failed is tried again, as a create's is: it

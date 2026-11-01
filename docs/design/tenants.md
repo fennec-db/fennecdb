@@ -447,20 +447,39 @@ sees (`GET /_admin/tenants`) and whose node ranks first among those of the
 zone the rule picks (`replica_node`'s `holding`, below the zone). Its `PUT`
 finds the file (409), noted as left there by the try that failed, and the
 node takes it back, the copy the router left, before the replica is made
-anew (`reclaim_noted`, below). A copy found that no row notes by an
-identity -- an old primary's after a failover, or a live primary a newer
-router placed there -- is noted for an operator and never followed over:
-the repair notes each its look found before it picks (`place_replica`),
-and an attach's own 409 goes through a move's judgment (`clear_target`).
-Only the replica the directory records there, which a move has follow the
-tenant's new node, is followed as found. Followed as found, as this branch
+anew (`reclaim_noted`, below).
+
+**A file found is followed only where its node finds the identity the
+router recorded for it.** The router records the identity each file it
+places carries (`files`, keyed `<tenant>/<node>`: the create's, a move's
+install, a replica's follow; written unsynced beside the placement's own
+synced write, so a crash loses at most a record, and the file is then
+reported). An attach finding a file (409) where it recorded one sends a
+follow naming it (`"instances"`), and the node follows only where the
+file still carries it, judged under its slot as a reclaim is
+(`follow_as`'s `named`; 409 naming what it carries otherwise): a node back
+from a failover has its old primary follow the tenant's new one, as on
+main. A stale router's record never names a live primary: an identity
+goes with every change of what a file is -- a follow puts the old one
+away, a promotion voids it, an install or a create mints one -- so a
+primary a newer router placed carries another or none. Any other file
+found goes through a move's judgment (`clear_target`) and is noted for an
+operator, never followed over; the repair notes each its look found that
+neither record names before it picks (`place_replica`). Only the replica
+the directory records there, which a move has follow the tenant's new
+node, is followed unjudged, as on main. Followed as found, as this branch
 first stood, a router promoted behind its primary -- its directory from
-before the primary moved the tenant to n2 and wrote, its source on n1
-kept -- moved the tenant off n1 and gave it its replica on n2, the follow
+before the primary moved the tenant to n2 and wrote, its source on n1 kept
+-- moved the tenant off n1 and gave it its replica on n2, the follow
 writing n1's image over the live primary
-(`an_attach_keeps_a_live_primary_it_did_not_leave`). The cost: a node back
-from a failover no longer has its old primaries follow the new ones; each
-is reported, for an operator to remove, and the replica goes elsewhere. A node
+(`an_attach_keeps_a_live_primary_it_did_not_leave`); reported and never
+followed, as the review's first answer had it, an old primary was a copy
+lost to every failover, and two nodes stayed without one for good
+(`an_old_primary_back_from_a_failover_is_its_tenants_copy_again`). A
+promoted primary carries no identity, so after a second failover its file
+is reported, not followed: minting one at the promotion is a write on the
+failover's path (above). The attach's own follow names the identity its
+`PUT` gave, so one landing late is refused too. A node
 that did not answer the repair's look is given no replica (`replica_node`'s
 `answering`, the repair's alone): it would follow nothing from there, and a
 try at it each repair was a call bounded by the upstream timeout, the
@@ -497,13 +516,14 @@ which the node may have made all the same; a move undone after its image
 was installed on the target (its quota refused there, the flip unrecorded)
 whose target kept the copy, and a move whose source would not go once it
 was done; a replica whose attach failed once its `PUT` was answered, made
-there (201), or a file it found there that no row noted (409); a copy a
-repair's look found that no row notes; a replica detached, or a deleted
-tenant's replica or standby copy, that would not come off; and an old
-primary's file on a node that did not answer the repair's look, the node a
-failover took the tenant off (`failed_from`), where the tenant's replica
-went elsewhere -- answering, the look found its copy and noted it
-(`note_old_primary`). The `DELETE`s that took a create back ignored their
+there (201), or a file it found there that neither `files` nor a row
+names (409); a copy a repair's look found that neither names; a replica
+detached, or a deleted tenant's replica or standby copy, that would not
+come off; and an old primary's file on a node that did not answer the
+repair's look, the node a failover took the tenant off (`failed_from`),
+where the tenant's replica went elsewhere -- answering, the node would
+have kept the replica, its file made to follow where it carries the
+identity recorded (`note_old_primary`). The `DELETE`s that took a create back ignored their
 failure, so the file stayed, unsaid: a create of the name sent again after
 the fence's 503 met the node's 409, and so did every create of it there
 after.
@@ -550,8 +570,11 @@ back, the install's for a move undone, the freeze's for a move's source
 that would not go -- one is minted at the freeze where the file had none,
 made before identities or promoted, known to no router where the move is
 thawed -- the `PUT`'s for an attach that failed, which its follow proposes
-again. A follow keeps a proposal only on the file carrying it as the
-follow begins, else gives none (`follow_as`): one the router gave up on and
+again, and the recorded one with it where the follow was over a file
+found. A follow naming identities (`"instances"`) is made only on a file
+carrying one, and given its proposal; one naming none -- a router's from
+before, a file whose `PUT` named none -- keeps a proposal only on the file
+carrying it as the follow begins, else gives none (`follow_as`): one the router gave up on and
 noted may land late, after the router took that file back and made the
 replica there again, and given its proposal the live replica took the
 identity a stale row names -- a router promoted behind the one that took
@@ -774,7 +797,12 @@ review's: `an_attach_keeps_a_live_primary_it_did_not_leave` (the attach's
 judgment taken out: n2's live primary followed, its writes refused and
 taken over); `a_follow_landing_late_gives_a_later_file_no_identity` (the
 follow's check taken out: the replica made again took the first follow's
-identity, which a reclaim of it took); and `instance::tests`, a birth time
+identity, which a reclaim of it took);
+`an_old_primary_back_from_a_failover_is_its_tenants_copy_again` (two
+nodes: the old primary followed by the identity its create gave, a follow
+naming another refused 409 and the file unchanged; noted instead, 502 and
+no copy); the failover tests of `regions.rs`, `replicas.rs`, `leases.rs`,
+`lease_stalls.rs` and `read_replicas.rs` as on main; and `instance::tests`, a birth time
 missing or 0 binding no file and a sidecar naming none no identity. In
 `tests/router.rs` a move onto a file it did not note is refused 409, the
 tenant reading on its source and the file counted, and goes once the file

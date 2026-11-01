@@ -1401,20 +1401,9 @@ fn a_read_replica_follows_its_tenant_through_a_failover_and_a_move() {
     );
     assert!(status == 403 || status == 503, "{status} {body}");
 
-    // Back, eu1's copy -- the old primary, which no row names by an
-    // identity -- is reported and never followed over; an operator removes
-    // it, and eu1 takes a replica; the tenant moves onto it, and the read
+    // Back, eu1 rejoins as a replica; the tenant moves onto it, and the read
     // replica follows it there.
     w.links[0].heal();
-    let (status, body) = shard(w.primary, "POST", "/_shard/replicas", "");
-    assert_eq!(status, 502, "{body}");
-    assert!(
-        body.contains(r#""node":"eu1","why":"a copy a repair"#),
-        "{body}"
-    );
-    let eu1 = w._nodes[0].port;
-    let (status, body) = admin(eu1, "fail-eu1", "DELETE", "/_admin/tenants/acme", "");
-    assert_eq!(status, 204, "{body}");
     let (status, body) = shard(w.primary, "POST", "/_shard/replicas", "");
     assert_eq!(status, 200, "{body}");
     let (status, body) = shard(

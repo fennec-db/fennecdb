@@ -127,17 +127,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                     200,
                     format!("{{\"gone\":\"{t}\",\"taken\":{took}}}"),
                 )),
-                Err(Kept::Refused(r)) => Err(r),
-                // The name passed `check_name`: nothing in it to escape.
-                Err(Kept::Other(had)) => Ok(Response::json(
-                    409,
-                    format!(
-                        "{{\"error\":\"tenant `{t}`'s file is not the one named: it carries \
-                         {}\",\"instance\":{}}}",
-                        had.map_or("no identity".into(), instance::text),
-                        instance::json(had)
-                    ),
-                )),
+                Err(kept) => judged(t, kept),
             }),
         // The node's admin token, which the router holds, rather than its
         // data token, which reaches every tenant: an app creating tenants
@@ -239,17 +229,18 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 .and_then(|_| from(&req.body))
                 .and_then(|f| proposed(req).map(|id| (f, id)))
             {
-                Ok(((from, lineage), id)) => tenants
-                    .follow_as(t, from.as_deref(), lineage, id)
-                    .map(|id| {
-                        Response::json(
+                Ok(((from, lineage, named), id)) => {
+                    match tenants.follow_as(t, from.as_deref(), lineage, id, named.as_deref()) {
+                        Ok(id) => Ok(Response::json(
                             200,
                             format!(
                                 "{{\"following\":\"{t}\",\"instance\":{}}}",
                                 instance::json(id)
                             ),
-                        )
-                    }),
+                        )),
+                        Err(kept) => judged(t, kept),
+                    }
+                }
                 Err(e) => Err(e),
             }
         }
@@ -292,18 +283,40 @@ fn proposed(req: &Request) -> Result<Option<u64>, Refused> {
     }
 }
 
-/// The `from` of a follow's body, when it has one.
-/// A follow's body: the node to follow, and the lineage its tenant must be
-/// of (`"lineage": "<8 hex>"`), a router's read replica told which tenant
-/// it copies.
-fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
+/// A reclaim's or a follow's refusal: the node's judgment that the file is
+/// not the one named, answered 409 with what it carries (`null`, none) --
+/// which a router tells from any other refusal by that field -- or the
+/// refusal it was.
+fn judged(t: &str, kept: Kept) -> Result<Response, Refused> {
+    match kept {
+        Kept::Refused(r) => Err(r),
+        // The name passed `check_name`: nothing in it to escape.
+        Kept::Other(had) => Ok(Response::json(
+            409,
+            format!(
+                "{{\"error\":\"tenant `{t}`'s file is not the one named: it carries \
+                 {}\",\"instance\":{}}}",
+                had.map_or("no identity".into(), instance::text),
+                instance::json(had)
+            ),
+        )),
+    }
+}
+
+/// A follow's body: the node to follow, the lineage its tenant must be of
+/// (`"lineage": "<8 hex>"`), a router's read replica told which tenant it
+/// copies, and the identities the file must carry (`"instances"`), a
+/// router's word on a file it placed and finds there.
+type FollowBody = (Option<String>, Option<u32>, Option<Vec<u64>>);
+
+fn from(body: &[u8]) -> Result<FollowBody, Refused> {
     let text = String::from_utf8_lossy(body);
     if text.trim().is_empty() {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
     let fields = fennec_core::json::parse_object(&text)
         .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
-    let (mut from, mut lineage) = (None, None);
+    let (mut from, mut lineage, mut named) = (None, None, None);
     for (k, v) in fields {
         match (k.as_str(), v) {
             ("from", fennec_core::prelude::Value::Text(url)) => from = Some(url),
@@ -313,10 +326,11 @@ fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
                         .ok_or_else(|| Refused(400, "`lineage` is 8 hex digits".into()))?,
                 )
             }
+            ("instances", v) => named = Some(instance::ids_of(v).map_err(|e| Refused(400, e))?),
             _ => {}
         }
     }
-    Ok((from, lineage))
+    Ok((from, lineage, named))
 }
 
 /// A promotion's body: the lineage the tenant is of (`"lineage": "<8
