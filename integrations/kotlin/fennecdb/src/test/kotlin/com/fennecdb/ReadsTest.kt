@@ -328,8 +328,8 @@ class ReadsTest {
             assertEquals(listOf("a", "b"), db.from("notes").order("body").rows().map { it.string("body") })
             assertEquals("replica", sent.last["fennec-read"])
             assertEquals("$b", sent.last["fennec-after"])
-            assertEquals(502, assertFailsWith<FennecException> { home.from("notes").rows() }.status)
-            assertEquals(502, assertFailsWith<FennecException> { db.from("notes").insert(mapOf("body" to "c")) }.status)
+            assertEquals(503, assertFailsWith<FennecException> { home.from("notes").rows() }.status)
+            assertEquals(503, assertFailsWith<FennecException> { db.from("notes").insert(mapOf("body" to "c")) }.status)
         } finally {
             sent.close()
             w.stop()
@@ -369,7 +369,7 @@ class ReadsTest {
             w.eu1.kill()
             assertEquals(listOf("z"), db.call("history", read = true).rows.map { it.string("body") })
             assertEquals("replica", sent.last["fennec-read"])
-            assertEquals(502, assertFailsWith<FennecException> { db.call("stamp") }.status)
+            assertEquals(503, assertFailsWith<FennecException> { db.call("stamp") }.status)
         } finally {
             sent.close()
             w.stop()

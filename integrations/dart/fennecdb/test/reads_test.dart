@@ -358,8 +358,8 @@ void main() {
       expect([for (final r in await db.from('notes').order('body').rows()) r['body']], ['a', 'b']);
       expect(sent.last['fennec-read'], 'replica');
       expect(sent.last['fennec-after'], '$b');
-      expect(await status(() => home.from('notes').rows()), 502);
-      expect(await status(() => db.from('notes').insert({'body': 'c'})), 502);
+      expect(await status(() => home.from('notes').rows()), 503);
+      expect(await status(() => db.from('notes').insert({'body': 'c'})), 503);
     } finally {
       db.close();
       home.close();

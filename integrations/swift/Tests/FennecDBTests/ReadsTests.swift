@@ -97,13 +97,13 @@
                 _ = try await home.from("notes").rows()
                 Issue.record("home answered with no node")
             } catch let e as FennecError {
-                #expect(e.status == 502)
+                #expect(e.status == 503)
             }
             do {
                 try await db.from("notes").insert(["body": "c"] as Value)
                 Issue.record("a write was answered with no home")
             } catch let e as FennecError {
-                #expect(e.status == 502)
+                #expect(e.status == 503)
             }
         }
 
@@ -138,7 +138,7 @@
             await w.eu1.kill()
             #expect(try await db.call("history", read: true).rows.compactMap { $0["body"]?.string } == ["a"])
             let homeless = await refusal { try await db.call("history") }
-            #expect(homeless?.status == 502)
+            #expect(homeless?.status == 503)
         }
 
         /// A connection reading home marks nothing, `asRead()` or not.
