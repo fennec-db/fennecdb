@@ -10,8 +10,8 @@ docs are `site/content/docs/`, `README.md` their front door; this file is
 the working summary, the long form of each invariant and convention in
 `docs/design/` (ordered by its `README.md`); `tools/agents_md.py --check`
 fails once this file passes 64 000 bytes. `AGENTS.md` is written from this
-file (`make agents-md`) under its own title and first line, and CI fails
-when the two differ: edit `CLAUDE.md`.
+file (`make agents-md`), and CI fails when the two differ: edit
+`CLAUDE.md`.
 
 ## Commands
 
@@ -37,12 +37,10 @@ make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, for 
 make server TOKEN=secret HTTP=127.0.0.1:8080   # the server against ./data.fennec
 make node ADMIN=secret   # a tenant node: fennec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fennec)
-# Every other target is described by the Makefile's `##` comments above its
+# Every other target is described by the Makefile's `##` comment above its
 # rule: serve, small, the suites (*-test, grafana-check, deploy-check, drill;
-# Docker for several, `make wasm` first for react, langchain, ai-sdk and
-# cloudflare) and the measurements, none of them in CI (every *-bench, bench
-# memory sweep compare beir ycsb wasm-speed wasm-exact-speed text-memory;
-# `make pgvector-up` first where PostgreSQL is the other side).
+# `make wasm` first for react, langchain, ai-sdk and cloudflare) and the
+# measurements (every *-bench, ycsb, beir, ...), none of them in CI.
 ```
 
 Single tests:
@@ -110,8 +108,8 @@ for every crate but `fennec-bench`; `fennec-core` dev-depends on `fennec-ql`.
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
 `near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
-a `lookup` chain at 8, `in (get ...)` at 100 000 values and 4 levels and
-`in $n` at 100 000 values,
+a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
+`get` 4 levels deep),
 each a query error, never a cut result; a new limit takes that shape.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
@@ -172,8 +170,8 @@ lock and every rename (`fs::resolved`): `fennec-server --file`,
 each open tenant of a `--dir` node (in its sink, `lock::Holding`, let go
 with the database), fennec-shard's directory, the native library and every
 `fennec` way that writes; `--read-only` and `fennec types` take none, and a
-`backup` or `restore` replaces a file only with `--force`. A hard link, a
-Docker Desktop bind mount or a file system keeping no locks escapes it.
+`backup` or `restore` replaces a file only with `--force`; what escapes
+the lock is in the design file.
 
 **[A block's documents are built beside the
 readers](docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
@@ -645,10 +643,9 @@ refused as its literal is (`Select::check_counts`).
 **[`in (get ...)` is answered before the query, as the list it
 is.](docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
 `Expr::In` in its place on every path, so `eval` never meets one.
-[`in $n`](docs/design/fennecql.md#list-parameters) is planned as its list
-written out (`Expr::in_list`, `eval` elsewhere), held to its list before
-the plan (`Statement::lists_held`), read as written whatever its field
-(`Database::exactly`).
+[`in $n`](docs/design/fennecql.md#list-parameters) is its list written
+out (`Expr::in_list`), held to it before the plan (`Statement::lists_held`)
+and read exactly (`Database::exactly`).
 
 **[`alter collection` rewrites no document; positions are not
 places.](docs/design/fennecql.md#alter-collection)** A drop keeps its place
