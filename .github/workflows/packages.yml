@@ -231,7 +231,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         if: steps.keys.outputs.set == 'true'
         with:
           gradle-version: '8.10.2'
