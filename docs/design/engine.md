@@ -146,11 +146,50 @@ is a name of its own and takes a lock of its own: no name tells the two
 apart. A record lock does not reach across a file system that does not pass
 it on: a process inside a Docker Desktop container and one on the Mac over
 a bind mount of the file each took the lock (reproduced in #414's review), as two machines
-over a network file system that keeps no locks would. Elsewhere than on a
-Unix `hold` takes no lock at all (no release is built for Windows);
-`LockFileEx` over a range past the holder's line is what it would take
-there, since a Windows lock is mandatory and would refuse the reads of the
-line.
+over a network file system that keeps no locks would.
+
+On Windows the lock is `LockFileEx`'s, exclusive and not waited for, over
+one byte 1 GiB into `<file>.lock` (where SQLite locks there too), declared
+from kernel32 in `lock.rs` since the crates take no `windows-sys`. Up to
+#453 `hold` took none there, so a second `fennec-server --file` over a
+served file opened it and both wrote it. std's `File::try_lock` was not
+taken: it locks the whole file, and a Windows lock is mandatory, so a
+refused opener could not read the holder's line. The byte past it leaves
+the line readable; Windows names no holder, so a refusal names the line's.
+A Windows lock is the handle's rather than the process's: a second handle
+is refused in this process too, and closing one lets no other's go, so
+`key_at` opens the lock file again (for no access, as std's `metadata`
+does) to read its volume and file index for `LOCKED`, which a wait for a
+holder here and a refusal naming this process still need. A drop unlocks
+before the close, since a lock a close leaves is let go when the system
+gets to it; a process's death lets it go as its handles close. The program
+is named without `.exe`, so a refusal tells a server from a shell as it
+does elsewhere. Checked in CI on `windows-latest` (`windows (single
+writer)`): the lock in one process and in another closed or killed
+(`another_process_is_refused_while_one_holds_it`, which fails on Windows
+without it), and fennec-cli's `tests/lock.rs`, a second server and the
+shell beside a served file, a compact and a checkpoint renamed over the
+file the server's own handle has open, and a restore over a closed one; a
+reader's handle open across the rename is not run there, held by no handle
+fennec opens setting `share_mode`, so each keeps std's
+`FILE_SHARE_DELETE`.
+
+That rename is std's, which on Windows replaces the target with POSIX
+semantics where the file system has them (NTFS, ReFS; FAT32 and exFAT
+have none, so a compact or a checkpoint there fails, loudly), so a handle open on
+the old file -- the sink's own, a `--read-only` reader's -- does not refuse
+it. `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` refuses a target open
+elsewhere, and a checkpoint refused would stop every write; its
+`MOVEFILE_WRITE_THROUGH` is the durability `sync_dir` gives on a Unix,
+which on Windows is still a no-op. What Windows lacks besides, none of it
+the single writer's: `sync_dir` (a rename or a removal is durable once
+NTFS writes its log), the mapped file (`fs::open` reads the file into
+memory there; a mapped view would refuse a rename over the file, so
+mapping waits on a swap that unmaps first), the sync log (Linux and Android
+alone by design), the page cache's room (`cache::room`, so
+`CompactPolicy::memory` never fires), `fennec backup`'s key file made
+`0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is the CRT's `SIGINT`, the one
+shutdown), and a release build.
 
 `fennec restore` and `fennec backup` into a file renamed theirs over
 whatever had the name, a database written since included, and exited 0:

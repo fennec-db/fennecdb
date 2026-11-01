@@ -429,6 +429,13 @@ fn main() {
     // Before any open: each named statement a file holds is read back into
     // its tree, its digest checked.
     fennec_http::install_statement_reader();
+    // Said at the start, as a server told no JWT demands says it takes every
+    // token: what a Unix gives and Windows does not yet (docs/design/engine.md).
+    #[cfg(windows)]
+    fennec_http::log!(
+        "windows: a checkpoint's or a compact's rename is durable once NTFS writes its log; \
+         no directory sync, no mapped file and no SIGTERM yet"
+    );
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
     let mut stdin_close = false;

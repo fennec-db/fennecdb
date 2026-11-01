@@ -1000,7 +1000,7 @@ call returns a code under `catch_unwind`, built in the `ffi` profile,
 which unwinds; `include/fennec.h`, by hand, is held to the exports by a
 test. A long read pins, the fsync runs after the lock and a buffered write
 goes behind it (`Native::after`), as a server's; JNI passes text as UTF-8
-bytes; `<file>.lock` is an `fcntl` record lock, never `flock`.
+bytes; `<file>.lock` is an `fcntl` record lock (Windows: `LockFileEx`), never `flock`.
 
 **[A replica's sync is a state machine; the network is the
 binding's.](docs/design/native-and-sync.md#sync-core)** `fennec_abi::sync`
