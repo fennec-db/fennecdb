@@ -40,6 +40,16 @@ dynamic debugging port`): the studio's harness (`warm`) and
 `examples/{shop,analytics}/scripts/warm-chrome.mjs` do; a longer wait only
 moves the bound.
 
+A `waitForFunction` predicate returns `null` for what is not on the page
+yet and never throws. Puppeteer starts the page's poller with `void
+poller.start()`, so a throw -- `document.querySelector('.ed')` is `null`
+until the query editor, a module fetched by its first use, is mounted --
+is a `pageerror` and not a failed wait: the polling ends and the wait runs
+out its timeout with nothing said of why. That was the studio's `cell`
+after a call form's submit: the test's own call answered before the editor
+had mounted, 5 runs in 100 on one core (`docker run --cpus=1`) and none in
+84 with the root checked.
+
 ## The clock
 
 A test reads the clock from below. A sleep never ends early, so `took >=
