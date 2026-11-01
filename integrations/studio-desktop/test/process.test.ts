@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { AlreadyOpen, PortTaken, randomToken, startServer, type Child, type FileServer, type Spawn } from "../src/bun/process.ts";
+import { AlreadyOpen, PortTaken, randomToken, StartFailed, startServer, type Child, type FileServer, type Spawn } from "../src/bun/process.ts";
 import { DEFAULT_SETTINGS, servePlan, taskPlan, windowPlan, type Plan } from "../src/bun/serving.ts";
 import { missing, nodeSpawn, SERVER } from "./node-spawn.ts";
 
@@ -151,13 +151,14 @@ const writes =
 		};
 	};
 
-test("where it listens and its metrics are read before it answers anything: a line after is the data's", async () => {
+test("every listener asked for is waited for, its lines in either order, the first of each taken: a line after is the data's", async () => {
 	const plan = { ...servePlan("/nowhere.fennec", "250", { ...DEFAULT_SETTINGS, metrics: true }), port: 0 };
 	// A statement logged after the start can hold a newline and so a line of its own.
 	const later = ["metrics on: http://127.0.0.1:6666/_metrics  [token]", "fennec-http 0.0.0 listening on: http://127.0.0.1:7777  [x]"];
-	const s = await startServer(writes(["fennec-http 0.0.0 listening on: http://127.0.0.1:5555  [token required]", ...later]), "fennec-server", plan, randomToken());
+	// Each listener's thread writes its own line: the metrics' may come after the data endpoint's.
+	const s = await startServer(writes(["fennec-http 0.0.0 listening on: http://127.0.0.1:5555  [token]", "metrics on: http://127.0.0.1:9100/_metrics  [token]", ...later]), "fennec-server", plan, randomToken());
 	assert.equal(s.port, 5555);
-	assert.equal(s.metrics, null, "none was said before it listened, and none is taken after");
+	assert.equal(s.metrics, "http://127.0.0.1:9100", "said after the data endpoint's line, and waited for");
 	await s.stop();
 	const t = await startServer(writes(["metrics on: http://127.0.0.1:9101/_metrics  [token]", "fennec-http 0.0.0 listening on: http://127.0.0.1:5556  [x]", ...later]), "fennec-server", plan, randomToken());
 	assert.equal(t.metrics, "http://127.0.0.1:9101");
@@ -167,4 +168,13 @@ test("where it listens and its metrics are read before it answers anything: a li
 	const u = await startServer(writes(["metrics on: http://127.0.0.1:9102/_metrics  [token]", "fennec-http 0.0.0 listening on: http://127.0.0.1:5557  [x]"]), "fennec-server", { ...plan, metrics: false }, randomToken());
 	assert.equal(u.metrics, null);
 	await u.stop();
+});
+
+test("a server whose metrics never say where they are is not started: a failure naming them, at the start's bound", async () => {
+	const plan = { ...servePlan("/nowhere.fennec", "250", { ...DEFAULT_SETTINGS, metrics: true }), port: 0 };
+	const lines = ["fennec-http 0.0.0 listening on: http://127.0.0.1:5558  [token]"];
+	await assert.rejects(
+		startServer(writes(lines), "fennec-server", plan, randomToken(), process.env, 50),
+		(e) => e instanceof StartFailed && /listens on http:\/\/127\.0\.0\.1:5558 but did not say where its metrics are/.test(e.message),
+	);
 });

@@ -165,24 +165,39 @@ export async function startServer(
 	const proc = spawn([binary, ...serverArgs(plan)], serverEnvironment(env, token, replicationToken));
 	const tail: string[] = [];
 	const listeners = new Set<(line: string) => void>();
-	let metrics: string | null = null;
-	let announced = false;
+	type Where = { origin: string; port: number };
+	// Where it said it is, as `note` reads it. An object's fields, not `let`s:
+	// TypeScript reads a `let` set only in a callback as never set after it.
+	const said: { data: Where | null; metrics: string | null } = { data: null, metrics: null };
+	let decided = false;
 
-	let announce!: (where: { origin: string; port: number } | { refused: string }) => void;
-	const listening = new Promise<{ origin: string; port: number } | { refused: string }>((resolve) => (announce = resolve));
+	// Started once every listener the plan asked for has said where it is: the
+	// data endpoint's, and `--metrics`'s. (MCP is served on the data endpoint,
+	// POST /mcp, with no listener of its own.) Each line is written by its own
+	// listener's thread as it starts serving (fennec-http's `serve_on`), so the
+	// two come in either order (the metrics' last in 8 starts of 200 beside busy
+	// loops): taking the server as started on the data line alone left a served
+	// database with no metrics whenever their thread ran later.
+	let decide!: (where: Where | { refused: string }) => void;
+	const started = new Promise<Where | { refused: string }>((resolve) => (decide = resolve));
 	const note = (raw: string) => {
 		const line = raw.length > LINE_CHARS ? `${raw.slice(0, LINE_CHARS)}…` : raw;
 		tail.push(line);
 		if (tail.length > LOG_LINES) tail.shift();
-		// The server says both before it answers anything: what a line says once it
-		// does is the data's (a statement logged, a collection named), never where it listens.
-		if (!announced) {
-			metrics ??= plan.metrics ? parseMetrics(line) : null;
+		// Read until the start is decided, the first of each line taken: what a line
+		// says after is the data's (a statement logged, a collection named), never
+		// where the server listens.
+		if (!decided) {
+			if (plan.metrics) said.metrics ??= parseMetrics(line);
 			// Only the server's own line, only on the address that was asked for (listening.ts).
-			const where = parseListening(line, plan.host, plan.port);
-			if (where) {
-				announced = true;
-				announce(where);
+			const where = said.data ? null : parseListening(line, plan.host, plan.port);
+			if (where && "refused" in where) {
+				decided = true;
+				decide(where);
+			} else if (where) said.data = where;
+			if (said.data && (said.metrics || !plan.metrics)) {
+				decided = true;
+				decide(said.data);
 			}
 		}
 		listeners.forEach((f) => f(line));
@@ -194,13 +209,20 @@ export async function startServer(
 	const exited = proc.exited;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<"timeout">((r) => (timer = setTimeout(() => r("timeout"), startTimeoutMs)));
-	const first = await Promise.race([listening, exited.then(() => "exited" as const), timeout]);
+	const first = await Promise.race([started, exited.then(() => "exited" as const), timeout]);
 	clearTimeout(timer);
+	decided = true;
 	if (typeof first === "object" && "refused" in first) {
 		// Not the server this app started, or one that went where it was not asked to: no token goes there.
 		proc.kill("SIGKILL");
 		await exited;
 		throw new StartFailed(`fennec-server says it listens on ${first.refused}, not on ${plan.host}${plan.port ? `:${plan.port}` : ""} as it was asked to`, null);
+	}
+	if (first === "timeout" && said.data) {
+		// It serves, but its metrics never said where they are: not the server the plan asked for.
+		proc.kill("SIGKILL");
+		await exited;
+		throw new StartFailed(`fennec-server listens on ${said.data.origin} but did not say where its metrics are within ${startTimeoutMs / 1000} s`, null);
 	}
 	if (first === "exited" || first === "timeout") {
 		if (first === "timeout") proc.kill("SIGKILL");
@@ -221,9 +243,7 @@ export async function startServer(
 		origin: first.origin,
 		local: `http://127.0.0.1:${first.port}`,
 		port: first.port,
-		get metrics() {
-			return metrics;
-		},
+		metrics: said.metrics,
 		token,
 		replicationToken,
 		pid: proc.pid,

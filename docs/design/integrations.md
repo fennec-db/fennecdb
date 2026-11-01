@@ -224,6 +224,20 @@ the first's go; the first version stopped the second server (SIGSTOP) and requir
 the first to end meanwhile, and on a hosted macOS runner a stopped process made
 `ps` hang, which hung the runner's own cleanup and with it the job (it never
 finished, its timeouts included), three times in a row.
+A database served with `--metrics` says where they are on a line of its own,
+`metrics on:`, which the metrics listener's thread writes as it starts serving,
+as the data endpoint's thread writes `listening on:`: the two come in either
+order. The start first took the server as up on the data line and read the
+metrics' only before it, so a start whose metrics thread ran later had none:
+the process test failed so twice on the hosted runner, and beside 8 or 16 busy
+loops in 2 runs of 400, where the metrics' line came last in 8 starts of 200
+and the start itself, looped, came back without them 4 times in 300. It now waits
+for every line its plan asked for, within the start's 30 s, and a server that
+never names its metrics is stopped and the start fails saying so; a line is
+read for where the server listens only until then, after which what one says
+is the data's. Under the same loads the test then passed 400 runs of 400 and
+the start had its metrics 300 times in 300. MCP has no listener of its own (it
+is POST /mcp on the data endpoint), so nothing else is waited for.
 The exit codes (server.html: 0 stopped as asked, 1 could not start, 2 a flag
 refused) are the notices': a held lock is "open in another program", 2 is "out of
 step", the rest "could not open", and `get-server.sh` refuses a server without
