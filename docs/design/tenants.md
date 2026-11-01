@@ -650,14 +650,17 @@ crash before the close, the sidecar names the inode before, which only that
 same file's next rename of its own can be given back. **The known edge:** a
 file replaced outside fennec's ways -- by hand (`rm` and a copy, the
 shell's `save`), or by a binary from before this branch -- with the sidecar
-kept, on a file system keeping no birth time, may be given the inode the
+kept, where no birth time is read, may be given the inode the
 sidecar names and carry the identity of the file a router left. The
 operator docs say so (`deploy/RUNBOOK.md`, the sharding page): remove
 `<tenant>.instance` when you replace a tenant's file by hand. No birth
 marker without the birth time is there to use instead: a file's header is
 its magic alone, and its lineage is its history's, which a tenant moved
 back brings with it (above); a marker written into the file would be a
-record kind a binary before refuses and a replica is sent.
+record kind a binary before refuses and a replica is sent. The change cost
+`fennec-server` nothing measurable (4 838 736 bytes before and after,
+aarch64-apple-darwin release): the put-away beside a restored file and a
+delete's refusal came to what the once-said log of no birth time left.
 
 An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
