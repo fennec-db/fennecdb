@@ -207,6 +207,55 @@ had Linux fail the body's own `write` with the reset its closed socket sent
 the head back, the request unsent and the 503 unread, told 502
 ([http.md](http.md#connections-without-a-thread)).
 
+**A request never sent whole is the router's own 503, never a 502.** One
+whose retry above is spent short of its last byte -- its dial refused, or
+timed out within `--upstream-timeout`, its write failed before the last
+byte, a pooled connection found closed and no other to be had -- ran
+nowhere. It was answered 502, "did not answer", which is also what a node
+that broke off its answer gets: a 502 says the request may have run, so a
+client could not send an unkeyed write again without risking it twice, and
+it says nothing of when to come back (#404's review, roadmap row 69). It
+is the router's own unavailability: `Response::retry_after`'s
+`Retry-After: 1` and `retry_after`, as every 503
+([quotas.md](quotas.md#retry-after-in-bodies)), `Fennec-Shard: 1` as every
+router answer, and `Fennec-Unsent: 1` (`region::unsent`), which `--http-cors`
+lets a page read. The pool marks the failure (`upstream::unsent`, a wrapper
+keeping its cause's kind and words) only where nothing went out whole. A
+pooled try sent whole that ended before an answer -- a read or a keyed
+write, sent again on a fresh connection -- may have run, so a fresh dial
+refused after it is `Stage::Retried`, a 502, and a cut or a move short of
+the fresh try's last byte a whole cut (`Failure::went_whole`): taken as
+unsent, a keyed write the node ran as it went down, its dial then refused,
+was told it ran nowhere and could go again under a new key. A relay to a
+region's routers is unsent where none took the whole request (`Tried::Unrun`
+each; `Tried::Again` is one that took it whole and ended, which may have
+run it), and a request a failover cut where no node it was cut from had it
+whole (`after_cut`'s `ran`, kept across cuts: a second cut short of the
+last byte had the 503 a client's end met in a follower's pause say "it ran
+nothing" after a first that was whole). Not `Fennec-Unserved`, which says
+a router served its connection nothing: the entry and a relaying router
+then ask the next router -- which dials the same node -- and take this one
+for no router at all, and every isolate turned to the standby at each
+request a dead node's tenants sent. This router took the request and
+answered it, so they pass its 503 on with its mark; the entry sends even
+a write on from a guessed region's router whose 503 names no home, as it
+sends a read (`integrations/cloudflare/entry`). The status counts in
+`fennec_router_upstream_errors_total` as the 502 did. An answer the node
+began and broke off, and a request it took whole, stay 502.
+`tests/unsent.rs` holds a dial refused, one that times out (a listener
+whose queue is full), a pooled connection the node closed before it went
+and a relay whose routers all refuse it, each a 502 on main; a keyed write
+the node took whole before it went, a 503 where the mark ignores that try;
+and an answer broken off. The path every answered request takes sets one
+`bool` more, and the answer is built out of line (`unreached`): `make
+shard-bench ARGS=latency`'s added p50 stayed 20.8 us against main's 20.8,
+eight runs a side in ABBA turns at loads of 1.9-2.5 (20.5-20.9 and
+19.9-22.1). `fennec-shard`'s code grew 2.3 KB and its constants 0.7 KB
+(aarch64-apple-darwin, `__text` 3 001 344 bytes to 3 003 648), the cost
+of the mark, the out-of-line answer and the relay telling a router that
+took the request whole from one that never did; `fennec-server`'s 16 B,
+the header's name in the CORS list.
+
 ## Failover cuts
 
 **A failover ends what the router has out to the node for the tenants it

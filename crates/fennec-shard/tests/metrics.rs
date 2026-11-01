@@ -191,7 +191,8 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(call(port, "GET", "/t/nosuch/", "", None).0, 404);
-    assert_eq!(call(port, "GET", "/t/lost/", "", None).0, 502);
+    // Its node not reached: the router's own 503, counted against the node.
+    assert_eq!(call(port, "GET", "/t/lost/", "", None).0, 503);
     assert_eq!(call(port, "GET", "/elsewhere", "", None).0, 404);
     let r = call(
         port,

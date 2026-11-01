@@ -240,9 +240,15 @@ tunnel's connector answering 502</a> for a router it cannot reach — goes on on
 for a <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> or a request
 carrying an <code>Idempotency-Key</code>, as the router's own rule towards a
 node; any other is a <code>502</code> saying it may have run, and the
-region's next request goes to the next router. A router's own
-<code>502</code> — a node it could not reach — names the home and is its
-answer, passed on, no other region tried. A
+region's next request goes to the next router. A router's own answer for
+a node it could not reach names the home and is its answer, passed on, no
+other region tried: a <code>502</code> where the node may have run the
+request, a <code>503</code> marked <code>Fennec-Unsent</code> where the
+router never sent it, its mark passed on for the client to send it again,
+the router still the one asked first — the next one would dial the same
+node. A guessed region's router whose <code>503</code> says it never sent
+the request, and names no home, sends it on to the next region, a write
+too. A
 body up to a mebibyte is kept for the next router; a longer one is streamed
 to one, its length kept (a router takes no chunked body), and one sent with
 no length past a mebibyte is refused with <code>411</code>: read whole, it

@@ -30,6 +30,13 @@
 //! `Idempotency-Key`, which it makes once. Anything else is the client's
 //! 502: retried here, a `put` that had landed was made twice.
 //!
+//! A forward that never went out whole, once that retry is spent -- its
+//! dial refused or timed out, its write failed before the last byte -- ran
+//! nothing anywhere, and its failure says so ([`unsent`]): the router
+//! answers it with a 503 of its own, never the 502 that says it may have
+//! run. A try sent whole before it ([`Stage::Retried`]) may have run, and
+//! is no such failure.
+//!
 //! A connection's name is looked up within the time its connect may take
 //! ([`fennec_http::dial::resolve`]), on a thread of its own that the dial
 //! walks away from past it: `getaddrinfo` takes no timeout, and a node
@@ -507,9 +514,68 @@ enum Stage {
     /// ([`ended_by`]): never sent again on this node, whose tenant is placed
     /// elsewhere now.
     Cut,
+    /// Sent whole on a pooled connection that ended before an answer --
+    /// sent again on a fresh one, running it twice harmless -- and not sent
+    /// whole there: the first try may have run it ([`Failure::went_whole`]).
+    Retried,
 }
 
 struct Failure(Stage, io::Error);
+
+impl Failure {
+    /// This failure of a try on a fresh connection, after a try on a pooled
+    /// one went out whole and ended before an answer: the node may have run
+    /// the request. Unsent is [`Stage::Retried`], which no client is told
+    /// ran nothing, and a cut or a move short of the last byte a cut of one
+    /// sent whole, which goes on only where [`replayable`] lets it -- as it
+    /// is, or it would not have been tried again. Taken as unsent, a keyed
+    /// write the node ran before it went down, its dial then refused, was
+    /// told to go again as it pleased, a new key and all.
+    #[cold]
+    #[inline(never)]
+    fn went_whole(self) -> Failure {
+        match self {
+            Failure(Stage::Unsent, e) => Failure(Stage::Retried, e),
+            Failure(Stage::Cut, e) if ended_by(&e) != Some(Ended::Cut { whole: true }) => {
+                Failure(Stage::Cut, io::Error::other(Ended::Cut { whole: true }))
+            }
+            f => f,
+        }
+    }
+}
+
+/// The failure of a forward that never went out whole, the pool's retry
+/// spent ([`Stage::Unsent`]): it ran nothing anywhere, which [`unsent`]
+/// tells the router, whose answer says so (`Router::forward`). Its words
+/// are its cause's, and so is its kind.
+#[derive(Debug)]
+struct Unsent(io::Error);
+
+impl std::fmt::Display for Unsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Unsent {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// `e` marked as the failure of a request that never went out whole: it
+/// ran nothing ([`unsent`]).
+#[cold]
+#[inline(never)]
+pub(crate) fn never_sent(e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), Unsent(e))
+}
+
+/// Whether `e` is the failure of a forward that never went out whole, so
+/// that nothing ran it ([`never_sent`]): [`Pool::send_held`]'s, a relay's.
+pub fn unsent(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<Unsent>())
+}
 
 /// What a held request's failure is once its client has reset its
 /// connection ([`client_gone`]): nobody is left to answer, so the router
@@ -533,9 +599,11 @@ pub fn client_gone(e: &io::Error) -> bool {
 /// How a request to one of several routers failed (`Pool::send_tried`):
 /// whether the one asked cannot have run it, so that the next may be
 /// asked, or may have, so that it is not -- run twice, a `put` made a row
-/// twice.
+/// twice -- or may have, and running it twice is harmless (`Again`): the
+/// next is asked, and the request is not one that ran nothing.
 pub enum Tried {
     Unrun(io::Error),
+    Again(io::Error),
     MayHaveRun(io::Error),
 }
 
@@ -553,7 +621,7 @@ pub enum Near {
 impl Tried {
     pub fn into_error(self) -> io::Error {
         match self {
-            Tried::Unrun(e) | Tried::MayHaveRun(e) => e,
+            Tried::Unrun(e) | Tried::Again(e) | Tried::MayHaveRun(e) => e,
         }
     }
 }
@@ -788,17 +856,20 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Answer> {
+        let times = (self.timeout, self.timeout, self.timeout);
         let none = Flying::NONE;
-        self.send_held(
+        self.send_staged(
             addr,
             method,
             target,
             headers,
             body,
-            Duration::ZERO,
+            times,
+            Replay::AsAsked,
             None,
             none,
         )
+        .map_err(|Failure(_, e)| e)
     }
 
     /// [`Pool::send`] of a request the node may hold for `held` before it
@@ -811,6 +882,8 @@ impl Pool {
     /// failure [`client_gone`]. `None` waits as an unheld request does,
     /// with not a system call more. `flying` is what a failover's cut knows
     /// the request by ([`Pool::cut`]), whose failure says so ([`ended_by`]).
+    /// A request that never went out whole, once the pool's retry is spent,
+    /// says so too ([`unsent`]): it ran nothing, the router's own 503.
     #[allow(clippy::too_many_arguments)]
     pub fn send_held(
         &self,
@@ -835,7 +908,10 @@ impl Pool {
             client,
             flying,
         )
-        .map_err(|Failure(_, e)| e)
+        .map_err(|f| match f {
+            Failure(Stage::Unsent, e) => never_sent(e),
+            Failure(_, e) => e,
+        })
     }
 
     /// [`Pool::send_held`], its failure told by whether `addr` may have run
@@ -861,8 +937,9 @@ impl Pool {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
             Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
-                Err(Tried::Unrun(e))
+                Err(Tried::Again(e))
             }
+            Err(Failure(Stage::Retried, e)) => Err(Tried::Again(e)),
             Err(Failure(_, e)) => Err(Tried::MayHaveRun(e)),
         }
     }
@@ -892,7 +969,9 @@ impl Pool {
             addr, method, target, headers, body, times, replay, None, none,
         ) {
             Ok(a) => Ok(a),
-            Err(Failure(Stage::Unsent | Stage::Unread, e)) => Err(Near::Unreached(e)),
+            Err(Failure(Stage::Unsent | Stage::Unread | Stage::Retried, e)) => {
+                Err(Near::Unreached(e))
+            }
             Err(Failure(Stage::Unanswered | Stage::Other | Stage::Abandoned | Stage::Cut, e)) => {
                 Err(Near::Unanswered(e))
             }
@@ -1007,6 +1086,7 @@ impl Pool {
 
         // The node closes its idle connections together, so a closed one
         // found here is let go of and the next one looked at.
+        let mut whole = false;
         while let Some(idle) = self.take(addr, flying.mark) {
             if !open(&idle.conn.stream) {
                 continue;
@@ -1016,19 +1096,25 @@ impl Pool {
             match self.exchange(addr, idle.conn, set, (head, body), want, client, flying) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
-                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => break,
+                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => {
+                    whole = true;
+                    break;
+                }
                 Err(f) => return Err(f),
             }
         }
         let s = match flying.mark {
             0 => self
                 .connect(addr, connect_within, write_timeout)
-                .map_err(|e| Failure(Stage::Unsent, e))?,
-            _ => self.connect_watching(addr, connect_within, write_timeout, flying)?,
+                .map_err(|e| Failure(Stage::Unsent, e)),
+            _ => self.connect_watching(addr, connect_within, write_timeout, flying),
         };
         let set = (None, write_timeout);
         let want = (read_timeout, write_timeout);
-        self.exchange(addr, s, set, (head, body), want, client, flying)
+        match s.and_then(|s| self.exchange(addr, s, set, (head, body), want, client, flying)) {
+            Err(f) if whole => Err(f.went_whole()),
+            tried => tried,
+        }
     }
 
     /// One request, its head and body, and the head of its answer over
@@ -1965,9 +2051,10 @@ mod tests {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",
-            Err(Failure(Stage::Unread | Stage::Other | Stage::Abandoned | Stage::Cut, e)) => {
-                panic!("{e}")
-            }
+            Err(Failure(
+                Stage::Unread | Stage::Other | Stage::Abandoned | Stage::Cut | Stage::Retried,
+                e,
+            )) => panic!("{e}"),
         }
     }
 
@@ -2601,6 +2688,33 @@ mod tests {
             let _ = told.send(sent.err().and_then(|e| ended_by(&e)));
         });
         dialed
+    }
+
+    /// A fresh try's failure after a pooled try went out whole: unsent is
+    /// `Retried`, never told it ran nothing, and a cut or a move short of
+    /// its last byte is a cut of one sent whole; what may have run already
+    /// stays as it is.
+    #[test]
+    fn a_failure_after_a_try_sent_whole_is_one_that_may_have_run() {
+        let stage = |f: Failure| match f {
+            Failure(Stage::Retried, e) => {
+                assert!(!unsent(&e));
+                "retried".to_string()
+            }
+            Failure(Stage::Unanswered, _) => "unanswered".to_string(),
+            Failure(Stage::Cut, e) => format!("{:?}", ended_by(&e)),
+            Failure(_, e) => panic!("{e}"),
+        };
+        let refused = || io::Error::from(io::ErrorKind::ConnectionRefused);
+        let ended = |e: Ended| Failure(Stage::Cut, io::Error::other(e));
+        let after = |f: Failure| stage(f.went_whole());
+        assert_eq!(after(Failure(Stage::Unsent, refused())), "retried");
+        let whole = format!("{:?}", Some(Ended::Cut { whole: true }));
+        assert_eq!(after(ended(Ended::Moved)), whole);
+        assert_eq!(after(ended(Ended::Cut { whole: false })), whole);
+        assert_eq!(after(ended(Ended::Cut { whole: true })), whole);
+        let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+        assert_eq!(after(Failure(Stage::Unanswered, eof)), "unanswered");
     }
 
     /// A forward dialing a node that answers no connect as a failover moves

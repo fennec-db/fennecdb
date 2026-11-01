@@ -93,7 +93,13 @@ ends before an answer goes again only where running it twice is harmless — a
 <code>Idempotency-Key</code>, which the node makes once
 (<a href="/docs/http#idempotency">Retrying a write</a>). Any other write is
 answered <code>502</code>, since the node may have run it: a client that sends
-it again should send it with a key.</p>
+it again should send it with a key. A request the router never got whole to
+the node — its connection refused, or not answered within
+<code>--upstream-timeout</code>, after any retry above — ran nowhere: the
+router answers it <code>503</code> with <code>Retry-After</code>, the body's
+<code>retry_after</code> and <code>Fennec-Unsent: 1</code>, and a client sends
+it again as it is, a write without a key too. One that went out whole once,
+even on a connection that ended before its retry, stays a <code>502</code>.</p>
 
 <p id="in-flight"><b>Requests out to a node failed over.</b> A node that dies
 with no reset — a machine lost, a network cut — answers nothing and closes

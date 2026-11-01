@@ -2042,17 +2042,8 @@ impl Router {
                 forwarding.error(e.to_string());
                 drop(forwarding);
                 metrics::unreachable(&node);
-                // 502, as a node out of reach is: a client takes it to ask
-                // again, and a region cut off from this one answers its own
-                // clients all the while.
-                let why = match &routers {
-                    None => format!("node `{node}` ({addr}) did not answer: {e}"),
-                    Some((region, _)) => format!(
-                        "region `{region}`'s routers did not answer -- it may be cut off from \
-                         this one, and answers through its own: {e}"
-                    ),
-                };
-                return reply(out, region::homed(Response::error(502, &why), &home));
+                let unrun = upstream::unsent(&e);
+                return reply(out, unreached(&node, &addr, &routers, &home, &e, unrun));
             }
         };
         self.answer_out(
@@ -2177,6 +2168,11 @@ impl Router {
             .or(peer.map(|p| p.ip()));
         let mut node = node.to_string();
         let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
+        // Whether a node it was cut from may have run it: once so, so
+        // whatever comes after -- another cut, of a copy that took less of
+        // it -- the request is never told it ran nothing.
+        let whole = upstream::Ended::Cut { whole: true };
+        let mut ran = ended == whole;
         let (mut tries, mut asks) = (1, CUT_ASKS);
         // A follower's asks of a copy refusing it ([`Self::copy_pause`]),
         // and its count among those waiting to ask again.
@@ -2319,14 +2315,14 @@ impl Router {
                             // it ran perhaps on the copy already, which its
                             // key finds. Told it ran nothing, a client would
                             // send it again under a key of its own.
-                            let why = match ended {
-                                upstream::Ended::Cut { whole: true } => format!(
+                            let why = match ran {
+                                true => format!(
                                     "tenant `{tenant}`'s new primary had not taken its writes \
                                      yet as this request's client ended its connection, and \
-                                     node `{node}` may have run it before the failover: ask \
-                                     again with its Idempotency-Key"
+                                     a node it was cut from may have run it before the \
+                                     failover: ask again with its Idempotency-Key"
                                 ),
-                                _ => format!(
+                                false => format!(
                                     "tenant `{tenant}`'s new primary had not taken its writes \
                                      yet as this request's client ended its connection: it ran \
                                      nothing, ask again"
@@ -2363,6 +2359,7 @@ impl Router {
                         // Another cut, of another copy: counted, and asked
                         // anew.
                         again => {
+                            ran |= again == whole;
                             (node, ended, asks) = (to, again, CUT_ASKS);
                             (asking, pausing, counted) = (None, None, false);
                         }
@@ -2372,14 +2369,10 @@ impl Router {
                     forwarding.error(e.to_string());
                     drop(forwarding);
                     metrics::unreachable(&to);
-                    let why = match &routers {
-                        None => format!("node `{to}` ({addr}) did not answer: {e}"),
-                        Some((region, _)) => format!(
-                            "region `{region}`'s routers did not answer -- it may be cut off \
-                             from this one, and answers through its own: {e}"
-                        ),
-                    };
-                    return reply(out, region::homed(Response::error(502, &why), &home));
+                    // Unsent here, it may have run all the same on a node a
+                    // cut ended it on, sent whole.
+                    let unrun = !ran && upstream::unsent(&e);
+                    return reply(out, unreached(&to, &addr, &routers, &home, &e, unrun));
                 }
             }
         }
@@ -5420,6 +5413,45 @@ fn forward_span(req: &Request, node: &str, addr: &str) -> fennec_http::trace::Sp
         }
     }
     forwarding
+}
+
+/// The router's own answer to a forward to `node` at `addr` -- or to a
+/// region's `routers` -- that failed short of an answer with `e`, naming
+/// the tenant's `home` where it is known (`region::homed`). Where the
+/// request never went out whole (`unrun`, [`upstream::unsent`]) it ran
+/// nowhere: a 503 to come back from, marked so ([`region::unsent`]) --
+/// told 502, it read as an answer the node broke off, which may have run,
+/// and a client sent an unkeyed write again only at the risk of making it
+/// twice. Otherwise 502, the node having taken it whole: it may have run.
+/// Either way a client asks again, and a region cut off from this one
+/// answers its own clients all the while.
+#[cold]
+#[inline(never)]
+fn unreached(
+    node: &str,
+    addr: &str,
+    routers: &Option<(String, Vec<String>)>,
+    home: &Option<String>,
+    e: &std::io::Error,
+    unrun: bool,
+) -> Response {
+    let resp = match (routers, unrun) {
+        (None, false) => {
+            Response::error(502, &format!("node `{node}` ({addr}) did not answer: {e}"))
+        }
+        (None, true) => region::unsent(&format!("node `{node}` ({addr}) was not reached: {e}")),
+        (Some((region, _)), unrun) => {
+            let why = format!(
+                "region `{region}`'s routers did not answer -- it may be cut off from this one, \
+                 and answers through its own: {e}"
+            );
+            match unrun {
+                true => region::unsent(&why),
+                false => Response::error(502, &why),
+            }
+        }
+    };
+    region::homed(resp, home)
 }
 
 fn body_fields(req: &Request) -> std::result::Result<Vec<(String, Value)>, String> {

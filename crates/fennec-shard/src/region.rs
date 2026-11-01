@@ -89,6 +89,29 @@ pub const SHARD_HEADER: &str = "Fennec-Shard";
 /// primary never asked again.
 pub const FOLLOWS_HEADER: &str = "Fennec-Follows";
 
+/// The mark on a router's own 503 for a request it never got whole to the
+/// tenant's node or region (`Fennec-Unsent: 1`), its retry spent -- a dial
+/// refused or timed out, a write failed before its last byte: the request
+/// ran nowhere, and a client sends it again whatever it is, after
+/// `Retry-After`. Told 502 before, it read as an answer the node broke,
+/// which may have run. Not `fennec_http::accept::UNSERVED_HEADER`: the
+/// router took the request, and is the one that answered -- the global
+/// entry and a relaying router take the 503 as its answer, where with that
+/// mark they asked the next router, which dials the same node, and took
+/// this one for no router at all. A router relaying passes it on, the
+/// request unrun all the way. Never on a request the node may have run,
+/// one sent whole before ([`crate::upstream::unsent`]).
+pub const UNSENT_HEADER: &str = "Fennec-Unsent";
+
+/// The router's own answer to a request it never got whole to where it
+/// was going (`why`, [`UNSENT_HEADER`]): 503, back in a second.
+#[cold]
+#[inline(never)]
+pub(crate) fn unsent(why: &str) -> Response {
+    let why = format!("{why} -- the request was not sent, and ran nowhere: send it again");
+    Response::retry_after(503, &why, 1).header(UNSENT_HEADER, "1")
+}
+
 /// `resp` naming the tenant's home where it is known: a placing router's
 /// own failure -- a node it could not reach -- is the home's answer, which
 /// the entry passes on rather than try another region.
@@ -252,7 +275,11 @@ impl Router {
     /// gave one -- taken for any router's answer, one at its thread limit
     /// kept the relay from its standby. A held request watches `client` as
     /// [`crate::upstream::Pool::send_held`] does: gone, the router asked is
-    /// let go of, and lets go of the node in turn.
+    /// let go of, and lets go of the node in turn. Where no router took the
+    /// whole request, its failure says so ([`crate::upstream::unsent`]): it
+    /// ran nothing, the relaying router's own 503 -- not where one took it
+    /// whole and ended before an answer ([`Tried::Again`]), which may have
+    /// run it.
     pub(crate) fn relay_send(
         &self,
         region: &str,
@@ -265,6 +292,7 @@ impl Router {
         let start = self.first_router(region, routers);
         let mut last = None;
         let mut refused = None;
+        let mut whole = false;
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let sent = self.pool.send_tried(
@@ -283,13 +311,18 @@ impl Router {
                     return Ok(a);
                 }
                 Err(Tried::Unrun(e)) => last = Some(e),
+                Err(Tried::Again(e)) => (last, whole) = (Some(e), true),
                 Err(t @ Tried::MayHaveRun(_)) => return Err(t.into_error()),
             }
         }
         if let Some(a) = refused {
             return Ok(a);
         }
-        Err(last.unwrap_or_else(|| std::io::Error::other("no router is recorded")))
+        let last = last.unwrap_or_else(|| std::io::Error::other("no router is recorded"));
+        Err(match whole {
+            true => last,
+            false => crate::upstream::never_sent(last),
+        })
     }
 
     /// One call to `region`'s routers -- `""` the global directory's -- its
@@ -356,7 +389,7 @@ impl Router {
                     self.note_answered(region, i);
                     return Ok((status, hs, body));
                 }
-                Err(Tried::Unrun(e)) => last = format!("{url}: {e}"),
+                Err(Tried::Unrun(e) | Tried::Again(e)) => last = format!("{url}: {e}"),
                 Err(Tried::MayHaveRun(e)) => return Err(format!("{url}: {e}")),
             }
         }
