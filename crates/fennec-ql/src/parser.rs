@@ -1682,8 +1682,8 @@ impl Parser {
                     use crate::sqltypes::Why;
                     return self.err(match why {
                         Why::Decimal => format!(
-                            "`{words}`: fennecdb has no decimal -- `int` of cents keeps it \
-                             exact, `float` rounds it"
+                            "`{words}`: fennecdb has no decimal -- `int` of its smallest \
+                             unit keeps it exact, `float` rounds it"
                         ),
                         Why::NoDimension => format!("`{words}` has its dimension: `vector(384)`"),
                         Why::Untyped => format!(
