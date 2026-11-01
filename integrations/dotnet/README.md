@@ -61,6 +61,21 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 - Aggregates go in `Select` as FennecQL spells them (`"count(*)"`, `"sum(total)"`), and `Group` takes one key or
   more; `Computed.Bucket(field, "1m")`, `CountDistinct`, `First(field, by)`, `Last` and `Expr` make a column,
   named with `.As(name)`: `Select(Computed.Bucket("at", "1h").As("hour"), "count(*)").Group("hour")`.
+- `Order` takes an expression too, ties in id order: `Order(Computed.Expr("n * 2"), "desc")`,
+  `Order(Computed.Distance("loc", new[] { 13.4, 52.5 }))`; it picks the rows an update or a delete writes as well.
+- `new Param(300)` is one value bound once, each use writing the same `$1` -- a filter, a document,
+  `Computed.Expr`, `Cond.Raw`, `Computed.Distance`, `Near`'s vector, `Match`'s text -- where the same value given
+  twice is two parameters: with `var amount = new Param(300)`,
+  `Where(new Dictionary<string, object?> { ["balance"] = new Dictionary<string, object?> { ["gte"] = amount } })
+  .UpdateAsync(new { balance = Computed.Expr("balance - ?", amount) }, require: 1)` takes and checks one amount.
+- A query is the list of an `in`, run before the one around it: `Where("customer", "in",
+  db.From("customers").Select("id").Where("country", "TR"))` is `customer in (get customers select id where country
+  = $1)`, or `["in"] = query` in an object condition; it selects exactly one column.
+- `InsertAsync` writes `put`, over a row holding the id; `InsertNewAsync(docs)` writes `insert`, refused whole (409,
+  `duplicate`) where a row holds one -- `require`, `reason` and `returning` as `InsertAsync`'s, and `ToInsertNew`
+  its text.
+- `Match(field, text, fuzzy: true)` writes `fuzzy` alone, the parser's two edits; `fuzzy: 1` one at most. With
+  `Near` and `Fuse()`, the two searches are written in the order they were first called.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFennecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 

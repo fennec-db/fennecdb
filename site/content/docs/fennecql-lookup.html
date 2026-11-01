@@ -324,6 +324,7 @@ transports carry.</p>
 of <code>lookup</code>. The inner <code>get</code> runs once, before the
 query, and the one column it selects is the list.</p>
 
+{{builder "docs: orders of customers in a country"}}
 <pre data-lang="fennecql">get orders where customer in (get customers select id where country = "TR")
 </pre>
 
@@ -343,8 +344,9 @@ query, and the one column it selects is the list.</p>
 </ul>
 
 <details class="deep"><summary>Why an inner get is uncorrelated, and its cost</summary>
+{{builder "docs: open orders of customers of a tier" "docs: orders of customers outside a country counted" "docs: the sessions of banned users deleted" "docs: customers with their returned orders" "docs: orders of customers of an active tier"}}
 <pre data-lang="fennecql">get orders where status = "open" and customer in (get customers select id where tier &gt;= $1)
-get orders where not customer in (get customers select id where country = "TR") count
+get orders where not (customer in (get customers select id where country = "TR")) count
 del sessions where user in (get users select name where banned = true)
 get customers limit 20 lookup orders on customer
   where id in (get returns select order_id) limit 3

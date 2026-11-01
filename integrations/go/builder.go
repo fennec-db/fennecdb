@@ -397,10 +397,48 @@ func normalize(v any) any {
 	return v
 }
 
+// --------------------------------------------- one value in two places
+
+// Parameter is what Param makes: one value bound once, whichever places
+// of a statement use it.
+type Parameter struct {
+	value any
+	err   error
+}
+
+// Param is one parameter, used wherever a value goes -- a condition, an
+// in list's element, a document, Expr's and Raw's ?, Distance's point,
+// Near's vector, Match's words -- and bound once, at its first place in
+// the text, every later use writing that same $n. The same value given
+// twice is two parameters, which a caller could let drift apart; the
+// amount taken and the amount checked are one:
+//
+//	amount := fennecdb.Param(300)
+//	db.From("accounts").
+//		WhereCond(fennecdb.Fields("name", "ada", "balance", fennecdb.Ops("gte", amount))).
+//		ToUpdate(fennecdb.D("balance", fennecdb.Expr("balance - ?", amount)), fennecdb.Require(1))
+//	// set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1, [300 ada]
+//
+// A Param is a value, never an operator map; nil is null.
+func Param(value any) *Parameter {
+	if _, ok := value.(*Parameter); ok {
+		return &Parameter{err: refuse("param() takes a value, not another param()")}
+	}
+	return &Parameter{value: value}
+}
+
+// valueOf is a value as the builder checks it: a Param's own.
+func valueOf(v any) any {
+	if p, ok := v.(*Parameter); ok && p != nil {
+		return p.value
+	}
+	return v
+}
+
 // ------------------------------------------------------------ conditions
 
 type node struct {
-	t       string // and, or, not, null, in, cmp, within, dist, raw
+	t       string // and, or, not, null, in, sub, cmp, within, dist, raw
 	items   []*node
 	field   string
 	op      string
@@ -409,6 +447,7 @@ type node struct {
 	negated bool
 	sql     string
 	params  []any
+	query   *Builder // a sub's: in's inner query
 }
 
 // Cond is a condition: what Or, And, Not, Raw, Cmp and Fields make. A
@@ -600,7 +639,8 @@ func distanceCond(field string, spec any) Cond {
 			from = pairs[i+1]
 		}
 	}
-	if rv := reflect.ValueOf(from); from == nil || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+	// A Param's point is checked as its value, and bound as the Param.
+	if rv := reflect.ValueOf(valueOf(from)); valueOf(from) == nil || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
 		return Cond{err: refuse("distance takes { from: [lon, lat], <op>: metres } (field: %s)", field)}
 	}
 	var items []*node
@@ -610,7 +650,7 @@ func distanceCond(field string, spec any) Cond {
 			continue
 		}
 		op, ok := ops[k]
-		if !ok || op == "in" || op == "has" || op == "~" || !isNumber(v) {
+		if !ok || op == "in" || op == "has" || op == "~" || !isNumber(valueOf(v)) {
 			return Cond{err: refuse("distance compares metres with lt, lte, gt, gte, eq or ne: %s (field: %s)", k, field)}
 		}
 		items = append(items, &node{t: "dist", field: field, op: op, value: v, values: []any{from}})
@@ -636,6 +676,15 @@ func isNumber(v any) bool {
 }
 
 func inCond(field string, values any) Cond {
+	// An inner query -- Ops("in", db.From("customers").Select("id").Where(...))
+	// -- runs once, before the query around it, and its one column is the
+	// list: customer in (get customers select id where ...).
+	if q, ok := values.(*Builder); ok && q != nil {
+		if q.err != nil {
+			return Cond{err: q.err}
+		}
+		return Cond{n: &node{t: "sub", field: field, query: q}}
+	}
 	rv := reflect.ValueOf(values)
 	if values == nil || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
 		return Cond{err: refuse("`in` expects an array (field: %s)", field)}
@@ -691,11 +740,51 @@ func prune(c *node) *node {
 	return c
 }
 
-type binder struct{ params []any }
+// binder numbers a statement's parameters in the order its text holds
+// them. A *Parameter takes its $n at its first use and keeps it, by its
+// identity rather than its value: two Params of one value are two
+// parameters, as the same value given twice is.
+type binder struct {
+	params []any
+	once   map[*Parameter]string
+	err    error // the first Param that was refused, from whatever ends the chain
+}
+
+func newBinder() *binder { return &binder{params: []any{}} }
 
 func (b *binder) bind(v any) string {
+	if p, ok := v.(*Parameter); ok && p != nil {
+		if p.err != nil {
+			if b.err == nil {
+				b.err = p.err
+			}
+			return "$0"
+		}
+		if at, ok := b.once[p]; ok {
+			return at
+		}
+		b.params = append(b.params, normalize(p.value))
+		at := fmt.Sprintf("$%d", len(b.params))
+		if b.once == nil {
+			b.once = map[*Parameter]string{}
+		}
+		b.once[p] = at
+		return at
+	}
 	b.params = append(b.params, normalize(v))
 	return fmt.Sprintf("$%d", len(b.params))
+}
+
+// out is a statement as its To... hands it back: refused where a Param in
+// it was, so a text with a "$0" in it never leaves the builder.
+func (b *binder) out(sql string, err error) (string, []any, error) {
+	if err == nil {
+		err = b.err
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return sql, b.params, nil
 }
 
 func render(c *node, b *binder, parent string) (string, error) {
@@ -729,6 +818,11 @@ func render(c *node, b *binder, parent string) (string, error) {
 			parts[i] = b.bind(v)
 		}
 		return c.field + " in [" + strings.Join(parts, ", ") + "]", nil
+	case "sub":
+		// Its parameters numbered where its text stands, after those of
+		// the query around it before it.
+		s, err := c.query.inner(b)
+		return c.field + " in (" + s + ")", err
 	case "cmp":
 		return c.field + " " + c.op + " " + b.bind(c.value), nil
 	case "within":
@@ -767,8 +861,8 @@ type Opt func(*opts)
 type opts struct {
 	ef, k, candidates, limit, offset *int
 	exact, required, all, ifAbsent   bool
-	fuzzy                            *int
-	prefix                           bool
+	fuzzy                            []int // Fuzzy's edits, none for the default
+	fuzzySet, prefix                 bool
 	collate                          *string
 	on, parentKey                    []string
 	parentSet                        bool
@@ -821,9 +915,14 @@ func Limit(n int) Opt         { return func(o *opts) { o.limit = intp(n) } }
 func Offset(n int) Opt        { return func(o *opts) { o.offset = intp(n) } }
 func Top(n int) Opt           { return func(o *opts) { o.top = intp(n) } }
 
-// Fuzzy is a Match's `fuzzy N`: each word within N edits of a word of the
-// index at most, 0 to 2, and within what its length allows.
-func Fuzzy(n int) Opt { return func(o *opts) { o.fuzzy = intp(n) } }
+// Fuzzy is a Match's `fuzzy`: each word within the edits its length
+// allows -- none under 5 characters, one up to 8, two from 9. Fuzzy() is
+// the parser's default, 2 edits, written `fuzzy` alone; Fuzzy(n) is
+// `fuzzy n`, n edits at most, 0 to 2. Variadic for the default: Go has no
+// optional argument, and more than one number is refused, never dropped.
+func Fuzzy(edits ...int) Opt {
+	return func(o *opts) { o.fuzzy, o.fuzzySet = edits, true }
+}
 
 // Prefix is a Match's `prefix`: the last word matches the words it begins.
 func Prefix() Opt { return func(o *opts) { o.prefix = true } }
@@ -889,21 +988,30 @@ func Sort(field, dir string, options ...Opt) Opt {
 
 // ---------------------------------------------------------------- the query
 
+// sortKey is one key of an order: a name, or an expression over the row
+// whose values are bound where the order clause stands.
 type sortKey struct {
 	field   string
+	expr    *Computed
 	asc     bool
 	collate string
 }
 
-func (k sortKey) String() string {
+func (k sortKey) render(bind *binder) (string, error) {
 	s := k.field
+	if k.expr != nil {
+		var err error
+		if s, err = k.expr.render("order", bind, ""); err != nil {
+			return "", err
+		}
+	}
 	if k.collate != "" {
 		s += " collate " + k.collate
 	}
 	if k.asc {
-		return s + " asc"
+		return s + " asc", nil
 	}
-	return s + " desc"
+	return s + " desc", nil
 }
 
 type lookupLevel struct {
@@ -963,6 +1071,9 @@ type Builder struct {
 	match      *matchClause
 	rerank     *vectorClause
 	fuse       *[2]int // k, candidates; -1 when not given
+	// matchFirst is whether Match was called while no Near was there: a
+	// fuse reads both ways, and the text keeps the chain's order.
+	matchFirst bool
 	order      []sortKey
 	limit      int
 	hasLimit   bool
@@ -1192,9 +1303,12 @@ func (b *Builder) Group(keys ...any) *Builder {
 }
 
 // Where adds `field op value`; successive conditions join with and. The op
-// is a symbol or its word: =, !=, <, <=, >, >=, ~, has, in (a slice), or
-// eq, ne, lt, gte, like, contains ... A nil value with = or != is is null
-// and is not null.
+// is a symbol or its word: =, !=, <, <=, >, >=, ~, has, in (a slice, or an
+// inner query selecting one column), or eq, ne, lt, gte, like, contains ...
+// A nil value with = or != is is null and is not null.
+//
+//	db.From("orders").Where("customer", "in", db.From("customers").Select("id").Where("country", "=", "TR"))
+//	// get orders where customer in (get customers select id where country = $1)
 func (b *Builder) Where(field, op string, value any) *Builder {
 	return b.WhereCond(Cmp(field, op, value))
 }
@@ -1245,39 +1359,60 @@ func (b *Builder) Near(field string, vector any, options ...Opt) *Builder {
 				return err
 			}
 		}
+		if d.match == nil {
+			d.matchFirst = false
+		}
 		d.near = v
 		return nil
 	})
 }
 
 // A Match's field, its words, and how loosely it reads them: the most
-// edits a word may take (-1 for none written) and whether the last word
-// is a prefix.
+// edits a word may take (-1 for none written), whether `fuzzy` goes alone
+// (the default edits), and whether the last word is a prefix.
 type matchClause struct {
-	field  string
-	query  any
-	fuzzy  int
-	prefix bool
+	field      string
+	query      any
+	fuzzy      int
+	fuzzyAlone bool
+	prefix     bool
 }
 
-// Match is `match field $n [fuzzy N] [prefix]`: BM25 over a @text index.
-// Option Fuzzy(2) matches each word within the edits its length allows --
-// none under 5 characters, one up to 8, two from 9 -- Fuzzy(1) one at most;
-// Prefix() matches the last word as the start of a word too, as a search
-// box is typed into.
-func (b *Builder) Match(field, query string, options ...Opt) *Builder {
+// Match is `match field $n [fuzzy [N]] [prefix]`: BM25 over a @text index.
+// The words are text, or a Param holding it. Option Fuzzy() matches each
+// word within the edits its length allows -- none under 5 characters, one
+// up to 8, two from 9 -- Fuzzy(1) one at most; Prefix() matches the last
+// word as the start of a word too, as a search box is typed into:
+//
+//	db.From("products").Match("title", input, fennecdb.Fuzzy(), fennecdb.Prefix()).Limit(10)
+func (b *Builder) Match(field string, query any, options ...Opt) *Builder {
 	return b.step(func(d *Builder) error {
 		f, err := ident(field, "field")
 		if err != nil {
 			return err
 		}
+		// query is an any so that a Param goes in; what it holds is text,
+		// as the string it was typed before.
+		if _, ok := valueOf(query).(string); !ok {
+			return refuse("match takes its words as text: %s", jsJSON(valueOf(query)))
+		}
 		o := gather(options)
 		m := &matchClause{field: f, query: query, fuzzy: -1, prefix: o.prefix}
-		if o.fuzzy != nil {
-			if *o.fuzzy < 0 || *o.fuzzy > 2 {
-				return refuse("fuzzy is true, false or 0 to 2 edits: %d", *o.fuzzy)
+		if o.fuzzySet {
+			switch len(o.fuzzy) {
+			case 0:
+				m.fuzzyAlone = true
+			case 1:
+				if o.fuzzy[0] < 0 || o.fuzzy[0] > 2 {
+					return refuse("fuzzy is true, false or 0 to 2 edits: %d", o.fuzzy[0])
+				}
+				m.fuzzy = o.fuzzy[0]
+			default:
+				return refuse("Fuzzy takes one number of edits, or none for the default: %v", o.fuzzy)
 			}
-			m.fuzzy = *o.fuzzy
+		}
+		if d.near == nil {
+			d.matchFirst = true
 		}
 		d.match = m
 		return nil
@@ -1286,7 +1421,8 @@ func (b *Builder) Match(field, query string, options ...Opt) *Builder {
 
 // Fuse is `fuse [k N] [candidates N]`: with both Match and Near, ranks by
 // both, a document scoring 1 / (k + rank) from each list it is on.
-// Options K and Candidates.
+// Options K and Candidates. The two searches are written in the order they
+// were first called: Match(...).Near(...).Fuse() is match ... near ... fuse.
 func (b *Builder) Fuse(options ...Opt) *Builder {
 	return b.step(func(d *Builder) error {
 		o, f := gather(options), [2]int{-1, -1}
@@ -1420,14 +1556,29 @@ func (b *Builder) Lookup(name string, options ...Opt) *Builder {
 	})
 }
 
-func sortKeyOf(field, dir string, collate *string, aggregates bool) (sortKey, error) {
+// sortKeyOf is a key of Order, or of a lookup's Sort: a name, or for
+// Order an expression over the row -- Expr, Distance -- which a lookup's
+// level takes none of, as the JS builder's takes none.
+func sortKeyOf(field any, dir string, collate *string, aggregates bool) (sortKey, error) {
 	var k sortKey
 	var err error
-	if aggregates {
-		// Over groups a key may be an aggregate of the list, by its name.
-		k.field, _, err = column(field)
-	} else {
-		k.field, err = fieldPath(field)
+	switch f := field.(type) {
+	case string:
+		if aggregates {
+			// Over groups a key may be an aggregate of the list, by its name.
+			k.field, _, err = column(f)
+		} else {
+			k.field, err = fieldPath(f)
+		}
+	case Computed:
+		k.expr, err = orderExpr(f)
+	case *Computed:
+		if f == nil {
+			return k, refuse("invalid field name: null")
+		}
+		k.expr, err = orderExpr(*f)
+	default:
+		err = refuse("invalid field name: %s", jsJSON(field))
 	}
 	if err != nil {
 		return k, err
@@ -1439,10 +1590,29 @@ func sortKeyOf(field, dir string, collate *string, aggregates bool) (sortKey, er
 	return k, err
 }
 
-// Order adds a key: when the keys before it tie, it decides. The direction
-// is "asc" or "desc"; Collate("tr") puts text in Turkish order, "und" in
-// Unicode's root order.
-func (b *Builder) Order(field, dir string, options ...Opt) *Builder {
+// orderExpr is an expression as an order key: one named with As is
+// refused, as an order clause names no column.
+func orderExpr(c Computed) (*Computed, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if c.kind != "expr" {
+		return nil, refuse("inc() is a value to write, not a column")
+	}
+	if c.name != "" {
+		return nil, refuse("an order key is an expression or a name: order by %s itself, without as", c.name)
+	}
+	return &c, nil
+}
+
+// Order adds a key: when the keys before it tie, it decides, and rows tied
+// on every key go in id order. A key is a field, a name the select list
+// gives a column, or an expression over the row, its values bound where
+// the order stands -- Order(fennecdb.Expr("n * 2"), "desc"),
+// Order(fennecdb.Distance("loc", point), "asc"). The direction is "asc" or
+// "desc"; Collate("tr") puts text in Turkish order, "und" in Unicode's
+// root order.
+func (b *Builder) Order(field any, dir string, options ...Opt) *Builder {
 	return b.step(func(d *Builder) error {
 		k, err := sortKeyOf(field, dir, gather(options).collate, true)
 		d.order = append(d.order, k)
@@ -1484,8 +1654,29 @@ func (b *Builder) Require(n int, options ...Opt) *Builder {
 
 // ToFennecQL is the statement and its parameters, as they would be sent.
 func (b *Builder) ToFennecQL() (string, []any, error) {
+	bind := newBinder()
+	return bind.out(b.text(bind))
+}
+
+// inner is the text as the inner query of an in, its values bound by the
+// binder of the query around it.
+func (b *Builder) inner(bind *binder) (string, error) {
 	if b.err != nil {
-		return "", nil, b.err
+		return "", b.err
+	}
+	// One column is the list; the engine refuses the rest too.
+	if len(b.project) != 1 || b.count || len(b.lookups) > 0 || len(b.marks) > 0 || len(b.facets) > 0 {
+		return "", refuse("an inner query of `in` selects exactly one column: from('%s').select('id')", b.collection)
+	}
+	if b.require != "" {
+		return "", refuse("an inner query of `in` takes no require: the query around it does")
+	}
+	return b.text(bind)
+}
+
+func (b *Builder) text(bind *binder) (string, error) {
+	if b.err != nil {
+		return "", b.err
 	}
 	// The engine refuses each of these too; failing here sends nothing.
 	if len(b.group) > 0 && !b.aggregate {
@@ -1496,7 +1687,7 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 				keys[i] = k.expr.sql
 			}
 		}
-		return "", nil, refuse("group %s needs an aggregate in select: 'count(*)'", strings.Join(keys, ", "))
+		return "", refuse("group %s needs an aggregate in select: 'count(*)'", strings.Join(keys, ", "))
 	}
 	if b.aggregate {
 		clash := ""
@@ -1511,40 +1702,40 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			clash = "count"
 		}
 		if clash != "" {
-			return "", nil, refuse("aggregates cannot be combined with %s", clash)
+			return "", refuse("aggregates cannot be combined with %s", clash)
 		}
 		if len(b.group) == 0 && b.require != "" {
-			return "", nil, refuse("require counts the rows a query answers, and an aggregate answers one")
+			return "", refuse("require counts the rows a query answers, and an aggregate answers one")
 		}
 	}
 	if len(b.marks) > 0 {
 		what := b.marks[0].kind()
 		if b.match == nil {
-			return "", nil, refuse("%s needs match: it marks the terms match found", what)
+			return "", refuse("%s needs match: it marks the terms match found", what)
 		}
 		if b.aggregate {
-			return "", nil, refuse("%s marks a row's text; aggregates answer groups", what)
+			return "", refuse("%s marks a row's text; aggregates answer groups", what)
 		}
 	}
 	if len(b.facets) > 0 {
 		if b.near != nil {
-			return "", nil, refuse("facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near")
+			return "", refuse("facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near")
 		}
 		if b.aggregate {
-			return "", nil, refuse("facet cannot be combined with aggregates: group counts by value")
+			return "", refuse("facet cannot be combined with aggregates: group counts by value")
 		}
 	}
 	if b.rerank != nil && b.match == nil {
-		return "", nil, refuse("rerank needs match: it reorders what match found")
+		return "", refuse("rerank needs match: it reorders what match found")
 	}
 	if b.match != nil && b.near != nil && b.fuse == nil {
-		return "", nil, refuse("match and near cannot be combined: both order the result; fuse() ranks by both")
+		return "", refuse("match and near cannot be combined: both order the result; fuse() ranks by both")
 	}
 	if b.fuse != nil && (b.match == nil || b.near == nil) {
-		return "", nil, refuse("fuse combines match and near: the query needs both")
+		return "", refuse("fuse combines match and near: the query needs both")
 	}
 	if b.fuse != nil && b.rerank != nil {
-		return "", nil, refuse("fuse and rerank are two ways to use a vector with match: pick one")
+		return "", refuse("fuse and rerank are two ways to use a vector with match: pick one")
 	}
 	if len(b.lookups) > 0 {
 		clash := ""
@@ -1557,18 +1748,18 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			clash = "rerank"
 		}
 		if clash != "" {
-			return "", nil, refuse("lookup cannot be combined with %s", clash)
+			return "", refuse("lookup cannot be combined with %s", clash)
 		}
 		if b.count && !b.lookups[0].required {
-			return "", nil, refuse("count cannot be used with lookup unless it is required: there is nothing to attach children to")
+			return "", refuse("count cannot be used with lookup unless it is required: there is nothing to attach children to")
 		}
 		if len(b.lookups) > MaxLookupDepth {
-			return "", nil, refuse("lookup chained too deep: at most %d levels", MaxLookupDepth)
+			return "", refuse("lookup chained too deep: at most %d levels", MaxLookupDepth)
 		}
 		seen := []string{b.collection}
 		for _, l := range b.lookups {
 			if slices.Contains(seen, l.collection) {
-				return "", nil, refuse("%s cannot look itself up: both sides would answer to the same name", l.collection)
+				return "", refuse("%s cannot look itself up: both sides would answer to the same name", l.collection)
 			}
 			seen = append(seen, l.collection)
 		}
@@ -1579,10 +1770,9 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			extra = "require"
 		}
 		if extra != "" {
-			return "", nil, refuse("count cannot be used with `%s`", extra)
+			return "", refuse("count cannot be used with `%s`", extra)
 		}
 	}
-	bind := &binder{params: []any{}}
 	var sql strings.Builder
 	sql.WriteString("get " + b.collection)
 	// The marks go after the fields Select named, or after every field, and
@@ -1607,7 +1797,7 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 	for i, c := range b.project {
 		s, err := c.render(bind)
 		if err != nil {
-			return "", nil, err
+			return "", err
 		}
 		items[i] = s
 	}
@@ -1620,7 +1810,7 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 	}
 	where, err := whereOf(b.cond, bind)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	if where != "" {
 		sql.WriteString(" where " + where)
@@ -1629,12 +1819,13 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 		keys := make([]string, len(b.group))
 		for i, k := range b.group {
 			if keys[i], err = k.render(bind); err != nil {
-				return "", nil, err
+				return "", err
 			}
 		}
 		sql.WriteString(" group " + strings.Join(keys, ", "))
 	}
-	if n := b.near; n != nil {
+	near := func() {
+		n := b.near
 		sql.WriteString(" near " + n.field + " " + bind.bind(n.vector))
 		if n.n >= 0 {
 			fmt.Fprintf(&sql, " ef %d", n.n)
@@ -1643,14 +1834,26 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			sql.WriteString(" exact")
 		}
 	}
+	// Near before Match unless Match was called first: a fuse reads both
+	// ways, and the text keeps the chain's order.
+	matchFirst := b.match != nil && b.matchFirst
+	if b.near != nil && !matchFirst {
+		near()
+	}
 	if m := b.match; m != nil {
 		sql.WriteString(" match " + m.field + " " + bind.bind(m.query))
-		if m.fuzzy >= 0 {
+		// The default edits are `fuzzy` alone; a number is written.
+		if m.fuzzyAlone {
+			sql.WriteString(" fuzzy")
+		} else if m.fuzzy >= 0 {
 			fmt.Fprintf(&sql, " fuzzy %d", m.fuzzy)
 		}
 		if m.prefix {
 			sql.WriteString(" prefix")
 		}
+	}
+	if b.near != nil && matchFirst {
+		near()
 	}
 	if r := b.rerank; r != nil {
 		sql.WriteString(" rerank " + r.field + " " + bind.bind(r.vector))
@@ -1667,7 +1870,9 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			fmt.Fprintf(&sql, " candidates %d", f[1])
 		}
 	}
-	writeOrder(&sql, b.order)
+	if err := writeOrder(&sql, b.order, bind); err != nil {
+		return "", err
+	}
 	if b.hasLimit {
 		sql.WriteString(" limit " + bind.bind(b.limit))
 	}
@@ -1716,14 +1921,14 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			items := make([]string, len(l.project))
 			for i, c := range l.project {
 				if items[i], err = c.render(bind); err != nil {
-					return "", nil, err
+					return "", err
 				}
 			}
 			sql.WriteString(" select " + strings.Join(items, ", "))
 		}
 		where, err := whereOf(l.cond, bind)
 		if err != nil {
-			return "", nil, err
+			return "", err
 		}
 		if where != "" {
 			sql.WriteString(" where " + where)
@@ -1732,12 +1937,14 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			keys := make([]string, len(l.group))
 			for i, k := range l.group {
 				if keys[i], err = k.render(bind); err != nil {
-					return "", nil, err
+					return "", err
 				}
 			}
 			sql.WriteString(" group " + strings.Join(keys, ", "))
 		}
-		writeOrder(&sql, l.order)
+		if err := writeOrder(&sql, l.order, bind); err != nil {
+			return "", err
+		}
 		if l.hasLimit {
 			sql.WriteString(" limit " + bind.bind(l.limit))
 		}
@@ -1745,18 +1952,23 @@ func (b *Builder) ToFennecQL() (string, []any, error) {
 			sql.WriteString(" offset " + bind.bind(l.offset))
 		}
 	}
-	return sql.String(), bind.params, nil
+	return sql.String(), nil
 }
 
-func writeOrder(sql *strings.Builder, keys []sortKey) {
+func writeOrder(sql *strings.Builder, keys []sortKey, bind *binder) error {
 	for i, k := range keys {
 		if i == 0 {
 			sql.WriteString(" order ")
 		} else {
 			sql.WriteString(", ")
 		}
-		sql.WriteString(k.String())
+		s, err := k.render(bind)
+		if err != nil {
+			return err
+		}
+		sql.WriteString(s)
 	}
+	return nil
 }
 
 func whereOf(cond []*node, bind *binder) (string, error) {
@@ -1829,7 +2041,9 @@ func (b *Builder) requireFilter(verb string, options []Opt, bind *binder) (strin
 // the rows it picks, and whether it answers them.
 func (b *Builder) pick(o opts, bind *binder) (string, error) {
 	var sql strings.Builder
-	writeOrder(&sql, b.order)
+	if err := writeOrder(&sql, b.order, bind); err != nil {
+		return "", err
+	}
 	if b.hasLimit {
 		sql.WriteString(" limit " + bind.bind(b.limit))
 	}
@@ -2233,6 +2447,32 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err := b.assertPlain("insert"); err != nil {
 		return "", nil, err
 	}
+	list, options := docsAndOpts(docs)
+	return b.put("put", list, gather(options))
+}
+
+// ToInsertNew is the insert of the documents, not sent: a document naming
+// an id a row holds is refused -- 409, CodeConflict -- and the statement,
+// a block of one, put back whole, where ToInsert's put writes over that
+// row. Returning, Require and Reason among them as ToInsert's; IfAbsent is
+// refused, as passing over a held id is put's.
+func (b *Builder) ToInsertNew(docs ...any) (string, []any, error) {
+	if b.err != nil {
+		return "", nil, b.err
+	}
+	list, options := docsAndOpts(docs)
+	o := gather(options)
+	if o.ifAbsent {
+		return "", nil, refuse("insertNew refuses a held id; to pass over one, insert(docs, { ifAbsent: true })")
+	}
+	if err := b.assertPlain("insert"); err != nil {
+		return "", nil, err
+	}
+	return b.put("insert", list, o)
+}
+
+// docsAndOpts tells an insert's documents from the options among them.
+func docsAndOpts(docs []any) ([]any, []Opt) {
 	var options []Opt
 	list := make([]any, 0, len(docs))
 	for _, d := range docs {
@@ -2242,10 +2482,16 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 			list = append(list, d)
 		}
 	}
+	return list, options
+}
+
+// put is ToInsert's and ToInsertNew's text, verb put or insert: one body,
+// one returning and require.
+func (b *Builder) put(verb string, list []any, o opts) (string, []any, error) {
 	if len(list) == 0 {
 		return "", nil, refuse("cannot write an empty document list")
 	}
-	bind := &binder{params: []any{}}
+	bind := newBinder()
 	parts := make([]string, len(list))
 	for i, d := range list {
 		s, err := renderDoc(d, bind, "insert")
@@ -2258,7 +2504,6 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if len(list) > 1 {
 		body = "[" + body + "]"
 	}
-	o := gather(options)
 	if o.ifAbsent {
 		body += " if absent"
 	}
@@ -2270,7 +2515,7 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "put " + b.collection + " " + body + returning + required, bind.params, nil
+	return bind.out(verb+" "+b.collection+" "+body+returning+required, nil)
 }
 
 // ToUpdate is the set of the rows the filter names, not sent; with no
@@ -2281,7 +2526,7 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	if err := b.assertPlain("update"); err != nil {
 		return "", nil, err
 	}
-	bind := &binder{params: []any{}}
+	bind := newBinder()
 	body, err := renderDoc(patch, bind, "update")
 	if err != nil {
 		return "", nil, err
@@ -2299,7 +2544,7 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "set " + b.collection + " " + body + where + pick + required, bind.params, nil
+	return bind.out("set "+b.collection+" "+body+where+pick+required, nil)
 }
 
 // ToUpsert is put ... if absent else set {patch}, not sent: a document
@@ -2315,7 +2560,7 @@ func (b *Builder) ToUpsert(docs []any, patch any, options ...Opt) (string, []any
 	if len(docs) == 0 {
 		return "", nil, refuse("cannot write an empty document list")
 	}
-	bind := &binder{params: []any{}}
+	bind := newBinder()
 	parts := make([]string, len(docs))
 	for i, d := range docs {
 		s, err := renderDoc(d, bind, "insert")
@@ -2341,7 +2586,7 @@ func (b *Builder) ToUpsert(docs []any, patch any, options ...Opt) (string, []any
 	if err != nil {
 		return "", nil, err
 	}
-	return "put " + b.collection + " " + body + " if absent else set " + set + returning + required, bind.params, nil
+	return bind.out("put "+b.collection+" "+body+" if absent else set "+set+returning+required, nil)
 }
 
 // ToDelete is the del of the rows the filter names, not sent; with no
@@ -2352,7 +2597,7 @@ func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 	if err := b.assertPlain("delete"); err != nil {
 		return "", nil, err
 	}
-	bind := &binder{params: []any{}}
+	bind := newBinder()
 	where, err := b.requireFilter("delete", options, bind)
 	if err != nil {
 		return "", nil, err
@@ -2366,7 +2611,7 @@ func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "del " + b.collection + where + pick + required, bind.params, nil
+	return bind.out("del "+b.collection+where+pick+required, nil)
 }
 
 // ------------------------------------------------------------- endpoints
@@ -2493,6 +2738,21 @@ func (b *Builder) Insert(ctx context.Context, docs ...any) (Result, error) {
 		return Result{}, b.err
 	}
 	text, params, err := b.ToInsert(docs...)
+	if err != nil {
+		return Result{}, err
+	}
+	return b.exec(ctx, text, params)
+}
+
+// InsertNew inserts the documents, refusing the statement whole -- an
+// *Error of Status 409, CodeConflict -- where one names an id a row
+// holds, which Insert's put writes over; it hands back how many were
+// written, or with Returning the rows. None is no request.
+func (b *Builder) InsertNew(ctx context.Context, docs ...any) (Result, error) {
+	if list, _ := docsAndOpts(docs); len(list) == 0 {
+		return Result{}, b.err
+	}
+	text, params, err := b.ToInsertNew(docs...)
 	if err != nil {
 		return Result{}, err
 	}

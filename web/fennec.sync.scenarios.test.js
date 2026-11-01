@@ -225,6 +225,11 @@ class Run {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
       return t.from(w.insert).insert(w.docs, opts);
     }
+    // The builders' `insertNew`: FennecQL's `insert`.
+    if (w.insert_new) {
+      w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
+      return t.from(w.insert_new).insertNew(w.docs, opts);
+    }
     // `{"$inc": n}` is inc(n), `{"$expr": text}` expr(text), as the
     // builders' golden file writes them.
     const patch = (s) => {

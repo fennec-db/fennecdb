@@ -43,7 +43,7 @@ import {
 import { FennecHttp, connect, sseEvents } from './http.js';
 
 export {
-  FennecError, Query, Call, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
+  FennecError, Query, Call, Param, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, param,
 } from './builder.js';
 export { FennecHttp, connect, sseEvents } from './http.js';
 
@@ -1534,6 +1534,12 @@ class SyncQuery extends Query {
   insert(docs, opts = {}) {
     return this.context.write('insert', this, docs, opts);
   }
+  // FennecQL's `insert`, applied as an insert is: a held id the replica
+  // holds is refused here, before anything is sent, and one only the
+  // server holds is its 409, the rows put back.
+  insertNew(docs, opts = {}) {
+    return this.context.write('insertNew', this, docs, opts);
+  }
   update(patch, opts = {}) {
     if (opts?.wait !== undefined) throw new FennecError(LOCAL_WAIT);
     return this.context.write('update', this, patch, opts);
@@ -1876,6 +1882,8 @@ export class FennecSync {
    *   a temporary id, and is matched with the server's copy by the key;
    *   one naming its id is applied under it. Without either it waits for
    *   the server: with nothing to match it by, the copy would leave two.
+   *   An `insertNew` is sent and applied as `insert`, which refuses an id
+   *   the replica holds as the server refuses one it holds.
    * - An update or a delete works by the filter, the rows it reaches read
    *   first: putting them back is the undo. A row of an insert the server
    *   has not answered has a temporary id the server never saw, so it is
@@ -1889,7 +1897,8 @@ export class FennecSync {
     if (opts?.returning || ((verb === 'update' || verb === 'delete') && q.picks)) {
       throw new FennecError(PICKED);
     }
-    if (verb === 'insert') {
+    if (verb === 'insert' || verb === 'insertNew') {
+      const write = verb === 'insert' ? 'toInsert' : 'toInsertNew';
       const list = Array.isArray(arg) ? arg : [arg];
       if (list.length === 0) return null;
       const docs = list.map((d) => {
@@ -1903,7 +1912,7 @@ export class FennecSync {
       // `require` goes to the server with the write, and is held here too,
       // its reason with it.
       const required = { require: opts?.require, reason: opts?.reason };
-      const line = base.toInsert(docs, required);
+      const line = base[write](docs, required);
       const named = docs.filter((d) => d.id != null).map((d) => d.id);
       if (!key && named.length < docs.length) {
         return { lines: [line], undo: { c, del: [], put: '[]' }, temps: [], count: docs.length };
@@ -1924,7 +1933,7 @@ export class FennecSync {
         const { id: _, ...rest } = d;
         return { id: t, ...rest };
       });
-      this.#local.run(...from(c).toInsert(local, required));
+      this.#local.run(...from(c)[write](local, required));
       this.#nextTemp = next;
       return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
     }

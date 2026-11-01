@@ -33,6 +33,25 @@ docs.where("year", "<", 2000).delete()        # no filter: refused unless all=Tr
 docs.where("lang", "tr").count()
 ```
 
+`insert` sends `put`, which writes over a row holding a document's id;
+`insert_new` (`to_insert_new` for the text) sends FennecQL's `insert`,
+refused whole (409, `duplicate`) where one does. `in` takes an inner query
+of one column as well as a list, answered before the query around it, its
+parameters numbered where it stands; `order` takes an expression or a
+`distance` as well as a field:
+
+```python
+from fennecdb import distance, expr
+
+docs.insert_new({"id": 7, "title": "Oasis"}, returning=["id"], require=1)
+orders = db.collection("orders")
+in_tr = db.collection("customers").select("id").where("country", "TR")
+orders.where("customer", "in", in_tr).rows()
+orders.where({"customer": {"in": in_tr}}).count()
+orders.order(expr("n * 2"), "desc").order("item").limit(10).rows()
+db.collection("places").order(distance("loc", [13.4, 52.5])).limit(5).rows()
+```
+
 Aggregates go in `select` as FennecQL spells them, and `group` takes one key
 or more; `bucket`, `count_distinct`, `first`, `last` and `expr` make a
 column, named with `.as_(name)` (`as` being Python's keyword):
@@ -76,6 +95,19 @@ debit = docs.where("id", 1).to_update({"stock": inc(-1)}, require=1)
 db.batch([debit, ("put orders {item: $1}", [1])], idempotency_key=order_id)
 db.with_idempotency_key(order_id).collection("orders").insert({"item": 1})
 db.seq                                        # the change the last write left the database at
+```
+
+One value in two places is one parameter with `param`, so the amount a
+write takes and the amount its filter checks cannot drift apart: each use
+of the same `param` writes the same `$n`, where two equal values are two:
+
+```python
+from fennecdb import expr, param
+
+amount = param(300)
+(db.collection("accounts").where({"name": "ada", "balance": {"gte": amount}})
+   .update({"balance": expr("balance - ?", amount)}, require=1))
+# set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
 ```
 
 A job queue's claim is one statement: `order` and `limit` before

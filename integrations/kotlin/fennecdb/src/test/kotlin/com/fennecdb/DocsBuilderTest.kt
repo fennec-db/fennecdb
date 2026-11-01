@@ -725,6 +725,28 @@ class DocsBuilderTest {
         db.sends("get articles match body \$1 rerank embed \$2 candidates 500 limit \$3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    /** docs: products matching a word begun */
+    @Test
+    fun productsMatchingAWordBegun() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .match("title", "datab", prefix = true)
+            .limit(10)
+            .rows()
+        db.sends("get products match title \$1 prefix limit \$2", "[\"datab\", 10]")
+    }
+
+    /** docs: products matching a word one edit away */
+    @Test
+    fun productsMatchingAWordOneEditAway() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .match("title", "databse", fuzzy = 1)
+            .limit(10)
+            .rows()
+        db.sends("get products match title \$1 fuzzy 1 limit \$2", "[\"databse\", 10]")
+    }
+
     /** docs: matches with their marks */
     @Test
     fun matchesWithTheirMarks() = runBlocking {
@@ -900,6 +922,71 @@ class DocsBuilderTest {
             .limit(10)
             .rows()
         db.sends("get articles select title, year where year >= \$1 and tags has \$2 and not (title ~ \$3) near embed \$4 ef 128 limit \$5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
+    }
+
+    /** docs: a hit counted and stamped */
+    @Test
+    fun aHitCountedAndStamped() = runBlocking {
+        val db = Recording()
+        db.from("hits")
+            .where("key", "ip1")
+            .update(mapOf("n" to Computed.expr("n + 1"), "seen" to Computed.expr("now()")))
+        db.sends("set hits {n: n + 1, seen: now()} where key = \$1", "[\"ip1\"]")
+    }
+
+    /** docs: a hit counted from nothing */
+    @Test
+    fun aHitCountedFromNothing() = runBlocking {
+        val db = Recording()
+        db.from("hits")
+            .where("key", "ip1")
+            .update(mapOf("n" to Computed.inc(5)))
+        db.sends("set hits {n: coalesce(n, 0) + \$1} where key = \$2", "[5, \"ip1\"]")
+    }
+
+    /** docs: a document written over its version */
+    @Test
+    fun aDocumentWrittenOverItsVersion() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .where(mapOf("id" to 7, "version" to 3))
+            .update(mapOf("body" to "new text", "version" to Computed.expr("version + 1")))
+        db.sends("set docs {body: \$1, version: version + 1} where id = \$2 and version = \$3", "[\"new text\", 7, 3]")
+    }
+
+    /** docs: a lock taken unless held */
+    @Test
+    fun aLockTakenUnlessHeld() = runBlocking {
+        val db = Recording()
+        db.from("locks")
+            .insert(
+                mapOf("name" to "nightly", "owner" to "w1", "at" to Computed.expr("now()")),
+                ifAbsent = true
+            )
+        db.sends("put locks {name: \$1, owner: \$2, at: now()} if absent", "[\"nightly\", \"w1\"]")
+    }
+
+    /** docs: a held hold released */
+    @Test
+    fun aHeldHoldReleased() = runBlocking {
+        val db = Recording()
+        db.from("holds")
+            .where(mapOf("order_ref" to "o-17", "state" to "held"))
+            .delete(require = 1)
+        db.sends("del holds where order_ref = \$1 and state = \$2 require 1", "[\"o-17\", \"held\"]")
+    }
+
+    /** docs: a lock taken or refused */
+    @Test
+    fun aLockTakenOrRefused() = runBlocking {
+        val db = Recording()
+        db.from("locks")
+            .insert(
+                mapOf("name" to "nightly", "owner" to "w1"),
+                ifAbsent = true,
+                require = 1
+            )
+        db.sends("put locks {name: \$1, owner: \$2} if absent require 1", "[\"nightly\", \"w1\"]")
     }
 
     /** docs: a debit that must find the money, or says why */

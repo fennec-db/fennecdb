@@ -306,8 +306,10 @@ type LookupItem<C extends Fields> = ChildKey<C> | Aggregate<C> | Named<string> |
 
 type ChildKey<C extends Fields> = keyof Row<C> & string;
 
-/** The widened type accepted in write position. */
-export type Writable<T> = T extends Timestamp
+/** The widened type accepted in write position, or a `param()` holding one. */
+export type Writable<T> = Plain<T> | Param<Plain<T>>;
+
+type Plain<T> = T extends Timestamp
   ? Timestamp | string | number | Date
   : T extends Vector
     ? number[] | Float32Array
@@ -380,7 +382,7 @@ export interface Spec<T> {
 
 /** `{ distance: { from: [lon, lat], lte: 500 } }`: metres from a point, compared. */
 export interface DistanceSpec {
-  from: Point;
+  from: Point | Param<Point>;
   '<'?: number;
   lt?: number;
   '<='?: number;
@@ -458,6 +460,26 @@ export function expr(sql: string, ...params: unknown[]): Expression;
 declare const named: unique symbol;
 
 /**
+ * What `param()` makes: a value bound once, wherever it is used -- each use
+ * writes the same `$n`.
+ */
+export class Param<T = unknown> {
+  private constructor(value: T);
+  readonly value: T;
+}
+
+/**
+ * `param(value)`: one parameter used in two places of a statement, bound
+ * once -- `set accounts {balance: balance - $1} where name = $2 and balance
+ * >= $1`:
+ *
+ *   const amount = param(300);
+ *   db.from('accounts').where({ name: 'ada', balance: { gte: amount } })
+ *     .update({ balance: expr('balance - ?', amount) }, { require: 1 })
+ */
+export function param<T>(value: T): Param<T>;
+
+/**
  * An expression for a select list or a group, as well as a value: what
  * `expr()`, `bucket()`, `countDistinct()`, `first()` and `last()` make.
  */
@@ -489,7 +511,7 @@ export function countDistinct(field: string): Expression;
  * `distance(field, point)`: the metres from `point` to a row's point, on
  * Redis's sphere -- `distance('loc', [13.4, 52.5]).as('m')`.
  */
-export function distance(field: string, point: Point): Expression;
+export function distance(field: string, point: Point | Param<Point>): Expression;
 
 /**
  * `first(field [by key])`: the value of the row least by `key` -- by the
@@ -890,10 +912,12 @@ export declare class Query<
   /**
    * Successive calls add a sort key (the second decides when the first ties).
    * `{ collate: 'und' }` orders text as Unicode does for every language,
-   * `{ collate: 'tr' }` as Turkish does, rather than by its bytes.
+   * `{ collate: 'tr' }` as Turkish does, rather than by its bytes. A key may
+   * be an expression over the row, `expr('n * 2')` or `distance('loc', p)`,
+   * ties in id order.
    */
   order(
-    field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F>,
+    field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F> | Expression,
     dir?: 'asc' | 'desc',
     opts?: { collate?: Collation },
   ): Query<F, P, L, Rel, At, Fa>;
@@ -915,6 +939,8 @@ export declare class Query<
 
   /** The text of the write statements, without running them. The write side of `toFennecQL`. */
   toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): [sql: string, params: unknown[]];
+  /** The `insert` text: a document naming a held id is refused, never written over. */
+  toInsertNew(docs: InsertRow<F> | InsertRow<F>[], opts?: UpsertOptions): [sql: string, params: unknown[]];
   /**
    * The `set` text. `order` and `limit` before it pick the rows it writes
    * -- the page a `get` with them answers -- and `{ returning }` answers
@@ -970,6 +996,19 @@ export declare class Query<
     opts: InsertOptions & { returning: readonly K[] },
   ): Promise<Pick<Row<F>, K>[]>;
   insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>;
+  /**
+   * Writes the documents as FennecQL's `insert`: refused whole -- 409,
+   * `duplicate` -- where one names an `id` a row holds, where `insert`'s
+   * `put` writes over it. `{ returning }` and `{ require, reason }` as
+   * `insert`'s; a sync replica refuses a held id it holds before anything
+   * is sent, and puts the rows back where the server refuses one.
+   */
+  insertNew(docs: InsertRow<F> | InsertRow<F>[], opts: UpsertOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
+  insertNew<K extends keyof Row<F> & string>(
+    docs: InsertRow<F> | InsertRow<F>[],
+    opts: UpsertOptions & { returning: readonly K[] },
+  ): Promise<Pick<Row<F>, K>[]>;
+  insertNew(docs: InsertRow<F> | InsertRow<F>[], opts?: UpsertOptions): Promise<number>;
   /**
    * `set`: the rows it changed, or with `{ returning }` the rows as
    * written. With `order` and `limit` before it, a job queue's claim:

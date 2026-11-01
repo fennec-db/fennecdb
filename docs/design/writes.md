@@ -10,8 +10,22 @@ a document naming an id the store holds is `Error::Duplicate` -- 409 over
 HTTP, as `Exists` is for a collection -- and the statement, a block of
 one, is put back whole. JWT scoping keeps
 the flag as it rewrites the statement; made a `put` there, a scoped insert
-would write over. The JS builder's `.insert()` still sends `put`: the sync
-layer writes rows back through it when it undoes an optimistic write.
+would write over. The builders' `.insert()` still sends `put`: the sync
+layer writes rows back through it when it undoes an optimistic write. A
+caller who wants the refusal says so with `.insertNew()` (`insert_new`,
+`InsertNew`, `InsertNewAsync`), which sends `insert` with the options
+`.insert()` takes but `ifAbsent` -- `insert ... if absent` passes over a
+held id, which is `.insert()`'s. A name of its own rather than an option,
+so no `.insert()` changes what it sends and an option's absence can never
+turn the refusal into a write over. A sync replica applies it as it
+applies an insert, `insert` in the line it sends and in the statement it
+runs on its own rows: an id the replica holds is refused there, the
+engine's `Duplicate`, before anything is queued, and one only the server
+holds (outside the shapes, or not synced yet) is the server's 409, a
+refusal like any other 4xx, the optimistic rows put back. The native sync
+core already rendered and applied `insert` (`render_put`'s `insert`);
+`integrations/sync-scenarios.json` holds both runners to it with the
+write `insert_new`.
 
 ## Arithmetic in set
 

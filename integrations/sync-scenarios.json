@@ -1,7 +1,7 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FennecSync (web/fennec.js, run by web/fennec.sync.scenarios.test.js) and the native core every binding drives (crates/fennec-abi/src/sync, run by crates/fennec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fennec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch; `require` and `reason` as the builders' { require: n, reason }; text, a FennecQL text and its `params` as an app runs it on the replica itself -- a native binding's run, the browser's db.local.query -- never in a batch, and here only one the replica refuses whole), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fennec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / insert_new (the builders' insertNew, FennecQL's insert) / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch; `require` and `reason` as the builders' { require: n, reason }; text, a FennecQL text and its `params` as an app runs it on the replica itself -- a native binding's run, the browser's db.local.query -- never in a batch, and here only one the replica refuses whole), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
     "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused, {status, reason} one a require's reason refused), quota (the tenant's quota the status's last error names, null for none), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent), reason (the reason that error gave, a require's).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
@@ -235,6 +235,37 @@
           "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "seven"}]}}},
         {"do": "answer", "status": 409, "body": {"error": "id 7 is held"}, "expect": {
           "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "an insert that refuses a held id is sent as insert, refused here where the replica holds the id, put back where the server does",
+      "covers": "fennecql-writing.html#insert-and-put: the builders' insertNew is FennecQL's insert, applied as an insert is; the replica's own insert refuses an id it holds before anything is sent, as the server refuses one it holds (409)",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 1, "status": "open", "title": "again"}]}, "expect": {
+          "error": "`tasks` holds a document 1 already", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "seven"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>", "body": [{"query": "insert tasks {id: $1, status: $2, title: $3}", "params": [7, "open", "seven"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "seven"}]}, "pending": 1}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 7 already: insert makes new ones, put writes over"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "an insert that refuses a held id gets a key and a temporary id, as an insert does",
+      "covers": "fennecql-writing.html#insert-and-put: a document naming no id makes a new row on the server, matched by its key",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"status": "open", "title": "new"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>", "body": [{"query": "insert tasks {status: $1, title: $2, key: $3}", "params": ["open", "new", "<k1>"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "<k1>", "title": "new"}]}, "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4, "body": {"affected": 1}, "expect": {"pending": 0, "refused": []}},
+        {"do": "change", "seq": 4, "puts": [{"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "new"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "key": "<k1>", "title": "new"}]}}}
       ]
     },
     {

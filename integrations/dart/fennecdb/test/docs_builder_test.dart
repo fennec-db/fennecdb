@@ -520,6 +520,18 @@ void main() {
         'get articles match body \$1 rerank embed \$2 candidates 500 limit \$3', '["ownership", [0.9, 0.1, 0], 10]');
   });
 
+  test('docs: products matching a word begun', () async {
+    final db = _Recording();
+    await db.from('products').match('title', 'datab', prefix: true).limit(10).rows();
+    db.sends('get products match title \$1 prefix limit \$2', '["datab", 10]');
+  });
+
+  test('docs: products matching a word one edit away', () async {
+    final db = _Recording();
+    await db.from('products').match('title', 'databse', fuzzy: 1).limit(10).rows();
+    db.sends('get products match title \$1 fuzzy 1 limit \$2', '["databse", 10]');
+  });
+
   test('docs: matches with their marks', () async {
     final db = _Recording();
     await db.from('articles').select(['title']).highlight('body').match('body', 'ownership').limit(10).rows();
@@ -658,6 +670,44 @@ void main() {
     db.sends(
         'get articles select title, year where year >= \$1 and tags has \$2 and not (title ~ \$3) near embed \$4 ef 128 limit \$5',
         '[2024, "rust", "draft", [0.9, 0.1, 0], 10]');
+  });
+
+  test('docs: a hit counted and stamped', () async {
+    final db = _Recording();
+    await db.from('hits').where('key', 'ip1').update({'n': Computed.expr('n + 1'), 'seen': Computed.expr('now()')});
+    db.sends('set hits {n: n + 1, seen: now()} where key = \$1', '["ip1"]');
+  });
+
+  test('docs: a hit counted from nothing', () async {
+    final db = _Recording();
+    await db.from('hits').where('key', 'ip1').update({'n': Computed.inc(5)});
+    db.sends('set hits {n: coalesce(n, 0) + \$1} where key = \$2', '[5, "ip1"]');
+  });
+
+  test('docs: a document written over its version', () async {
+    final db = _Recording();
+    await db
+        .from('docs')
+        .where({'id': 7, 'version': 3}).update({'body': 'new text', 'version': Computed.expr('version + 1')});
+    db.sends('set docs {body: \$1, version: version + 1} where id = \$2 and version = \$3', '["new text", 7, 3]');
+  });
+
+  test('docs: a lock taken unless held', () async {
+    final db = _Recording();
+    await db.from('locks').insert({'name': 'nightly', 'owner': 'w1', 'at': Computed.expr('now()')}, ifAbsent: true);
+    db.sends('put locks {name: \$1, owner: \$2, at: now()} if absent', '["nightly", "w1"]');
+  });
+
+  test('docs: a held hold released', () async {
+    final db = _Recording();
+    await db.from('holds').where({'order_ref': 'o-17', 'state': 'held'}).delete(require: 1);
+    db.sends('del holds where order_ref = \$1 and state = \$2 require 1', '["o-17", "held"]');
+  });
+
+  test('docs: a lock taken or refused', () async {
+    final db = _Recording();
+    await db.from('locks').insert({'name': 'nightly', 'owner': 'w1'}, ifAbsent: true, require: 1);
+    db.sends('put locks {name: \$1, owner: \$2} if absent require 1', '["nightly", "w1"]');
   });
 
   test('docs: a debit that must find the money, or says why', () async {
@@ -808,7 +858,7 @@ void main() {
 
   test('docs: documents matching a misspelt word', () async {
     final db = _Recording();
-    await db.from('docs').where('year', '>=', 2024).match('title', 'databse', fuzzy: true).limit(10).rows();
+    await db.from('docs').where('year', '>=', 2024).match('title', 'databse', fuzzy: 2).limit(10).rows();
     db.sends('get docs where year >= \$1 match title \$2 fuzzy 2 limit \$3', '[2024, "databse", 10]');
   });
 

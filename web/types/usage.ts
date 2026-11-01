@@ -21,11 +21,13 @@ import {
   not,
   openFile,
   or,
+  param,
   persist,
   raw,
   restore,
   sync,
   type CallAnswer,
+  type Param,
   type Json,
   type Point,
   type Row,
@@ -89,6 +91,27 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('places').where({ loc: { within: [13.3, 52.4] } });
   // @ts-expect-error -- a text field has no distance
   db.from('places').where({ name: { distance: { from: [1, 2], lte: 3 } } });
+
+  // One value in two places, an expression as an order key, an inner query.
+  const at = param<Point>([13.4, 52.5]);
+  await db
+    .from('places')
+    .where({ loc: { distance: { from: at, lte: 3000 } } })
+    .order(distance('loc', at))
+    .limit(1)
+    .rows();
+  const year = param(2024);
+  await db.from('articles').where({ year: { gte: year } }).orWhere('year', year).order(expr('year * 2'), 'desc').rows();
+  // @ts-expect-error -- a param of a number is no year of text
+  db.from('places').where({ name: year });
+  await db.from('reviews').where({ product_id: { in: from('articles').select('year') } }).count();
+  // FennecQL's `insert`, refusing a held id; `ifAbsent` is `insert`'s.
+  const madeNew = await db.from('places').insertNew({ id: 7, name: 'alex' }, { returning: ['id'] });
+  expect<{ id: number }[]>(madeNew);
+  // @ts-expect-error -- insertNew takes no ifAbsent
+  db.from('places').insertNew({ name: 'alex' }, { ifAbsent: true });
+  expect<[string, unknown[]]>(from('places').toInsertNew({ name: 'alex' }));
+  expect<Param<number>>(year);
 
   await db.from('articles').match('body', 'rust wasm').rerank('embed', [0.1, 0.2]).rows();
   await db.from('articles').match('body', 'rust').near('embed', [0.1]).fuse({ candidates: 40 }).rows();

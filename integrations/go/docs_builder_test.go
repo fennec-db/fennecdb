@@ -397,6 +397,68 @@ func TestDocsBuilderTabs(t *testing.T) {
 		sent(t, err, "get products count lookup reviews on product_id required where stars = $1", "[5]")
 	})
 
+	t.Run("docs: orders of customers in a country", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			WhereCond(fennecdb.Cmp("customer", "in", db.From("customers").Select("id").Where("country", "=", "TR"))).
+			Rows(ctx)
+		sent(t, err, "get orders where customer in (get customers select id where country = $1)", "[\"TR\"]")
+	})
+
+	t.Run("docs: open orders of customers of a tier", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			WhereCond(fennecdb.Fields("status", "open", "customer", fennecdb.Ops("in", db.From("customers").Select("id").Where("tier", ">=", 2)))).
+			Rows(ctx)
+		sent(t, err, "get orders where status = $1 and customer in (get customers select id where tier >= $2)", "[\"open\", 2]")
+	})
+
+	t.Run("docs: orders of customers outside a country counted", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			WhereCond(fennecdb.Not(fennecdb.Cmp("customer", "in", db.From("customers").Select("id").Where("country", "=", "TR")))).
+			Count(ctx)
+		sent(t, err, "get orders where not (customer in (get customers select id where country = $1)) count", "[\"TR\"]")
+	})
+
+	t.Run("docs: the sessions of banned users deleted", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("sessions").
+			Where(
+				"user",
+				"in",
+				db.From("users").Select("name").Where("banned", "=", true),
+			).
+			Delete(ctx)
+		sent(t, err, "del sessions where user in (get users select name where banned = $1)", "[true]")
+	})
+
+	t.Run("docs: customers with their returned orders", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("customers").
+			Limit(20).
+			Lookup(
+				"orders",
+				fennecdb.On("customer"),
+				fennecdb.Where(fennecdb.Cmp("id", "in", db.From("returns").Select("order_id"))),
+				fennecdb.Limit(3),
+			).
+			Rows(ctx)
+		sent(t, err, "get customers limit $1 lookup orders on customer where id in (get returns select order_id) limit $2", "[20, 3]")
+	})
+
+	t.Run("docs: orders of customers of an active tier", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			Where(
+				"customer",
+				"in",
+				db.From("customers").Select("id").Where("tier", "in", db.From("tiers").Select("n").Where("active", "=", true)),
+			).
+			Rows(ctx)
+		sent(t, err, "get orders where customer in (get customers select id where tier in (get tiers select n where active = $1))", "[true]")
+	})
+
 	t.Run("docs: articles a page at a time", func(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("articles").
@@ -426,6 +488,25 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Limit(10).
 			Update(ctx, fennecdb.D("owner", "w1"), fennecdb.Returning("*"))
 		sent(t, err, "set jobs {owner: $1} where run_at <= now() order run_at asc limit $2 returning *", "[\"w1\", 10]")
+	})
+
+	t.Run("docs: orders by twice their count", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			Order(fennecdb.Expr("n * 2"), "desc").
+			Order("item", "asc").
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get orders order n * 2 desc, item asc limit $1", "[10]")
+	})
+
+	t.Run("docs: one customer's orders first", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("orders").
+			Order(fennecdb.Expr("case when customer = ? then 0 else 1 end", "bo"), "asc").
+			Order("id", "asc").
+			Rows(ctx)
+		sent(t, err, "get orders order case when customer = $1 then 0 else 1 end asc, id asc", "[\"bo\"]")
 	})
 
 	t.Run("docs: a column worked out", func(t *testing.T) {
@@ -627,6 +708,86 @@ func TestDocsBuilderTabs(t *testing.T) {
 		sent(t, err, "get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
 	})
 
+	t.Run("docs: products matching a misspelt word", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("products").
+			Match("title", "databse", fennecdb.Fuzzy()).
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get products match title $1 fuzzy limit $2", "[\"databse\", 10]")
+	})
+
+	t.Run("docs: products matching a word begun", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("products").
+			Match("title", "datab", fennecdb.Prefix()).
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get products match title $1 prefix limit $2", "[\"datab\", 10]")
+	})
+
+	t.Run("docs: products matching a misspelt word begun", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("products").
+			Match("title", "datbas", fennecdb.Fuzzy(), fennecdb.Prefix()).
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get products match title $1 fuzzy prefix limit $2", "[\"datbas\", 10]")
+	})
+
+	t.Run("docs: products matching a word one edit away", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("products").
+			Match("title", "databse", fennecdb.Fuzzy(1)).
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get products match title $1 fuzzy 1 limit $2", "[\"databse\", 10]")
+	})
+
+	t.Run("docs: a search box inside one category", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("products").
+			Where("category", "=", "books").
+			Match("title", "datbas", fennecdb.Fuzzy(), fennecdb.Prefix()).
+			Limit(20).
+			Rows(ctx)
+		sent(t, err, "get products where category = $1 match title $2 fuzzy prefix limit $3", "[\"books\", \"datbas\", 20]")
+	})
+
+	t.Run("docs: articles ranked by words and meaning", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").
+			Match("body", "rust ownership").
+			Near("embed", []float64{0.12, -0.03, 0.4}).
+			Fuse().
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get articles match body $1 near embed $2 fuse limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
+	})
+
+	t.Run("docs: articles since a year ranked by words and meaning", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").
+			Where("year", ">=", 2024).
+			Match("body", "rust ownership").
+			Near("embed", []float64{0.12, -0.03, 0.4}).
+			Fuse().
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get articles where year >= $1 match body $2 near embed $3 fuse limit $4", "[2024, \"rust ownership\", [0.12, -0.03, 0.4], 10]")
+	})
+
+	t.Run("docs: articles ranked by words and meaning, k and candidates", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").
+			Match("body", "rust ownership").
+			Near("embed", []float64{0.12, -0.03, 0.4}).
+			Fuse(fennecdb.K(60), fennecdb.Candidates(50)).
+			Limit(10).
+			Rows(ctx)
+		sent(t, err, "get articles match body $1 near embed $2 fuse k 60 candidates 50 limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
+	})
+
 	t.Run("docs: matches with their marks", func(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("articles").
@@ -780,6 +941,90 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Limit(10).
 			Rows(ctx)
 		sent(t, err, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
+	})
+
+	t.Run("docs: a hit counted and stamped", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("hits").
+			Where("key", "=", "ip1").
+			Update(
+				ctx,
+				fennecdb.D("n", fennecdb.Expr("n + 1"), "seen", fennecdb.Expr("now()")),
+			)
+		sent(t, err, "set hits {n: n + 1, seen: now()} where key = $1", "[\"ip1\"]")
+	})
+
+	t.Run("docs: a hit counted from nothing", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("hits").
+			Where("key", "=", "ip1").
+			Update(ctx, fennecdb.D("n", fennecdb.Inc(5)))
+		sent(t, err, "set hits {n: coalesce(n, 0) + $1} where key = $2", "[5, \"ip1\"]")
+	})
+
+	t.Run("docs: a document written over its version", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("docs").
+			WhereCond(fennecdb.Fields("id", 7, "version", 3)).
+			Update(
+				ctx,
+				fennecdb.D("body", "new text", "version", fennecdb.Expr("version + 1")),
+			)
+		sent(t, err, "set docs {body: $1, version: version + 1} where id = $2 and version = $3", "[\"new text\", 7, 3]")
+	})
+
+	t.Run("docs: a lock taken unless held", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("locks").
+			Insert(
+				ctx,
+				fennecdb.D("name", "nightly", "owner", "w1", "at", fennecdb.Expr("now()")),
+				fennecdb.IfAbsent(),
+			)
+		sent(t, err, "put locks {name: $1, owner: $2, at: now()} if absent", "[\"nightly\", \"w1\"]")
+	})
+
+	t.Run("docs: a journal entry made", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("journal").
+			InsertNew(
+				ctx,
+				fennecdb.D("entry", fennecdb.Expr("? + \":dr\"", "inv-7"), "amount", fennecdb.Expr("0 - ?", 300)),
+			)
+		sent(t, err, "insert journal {entry: $1 + \":dr\", amount: 0 - $2}", "[\"inv-7\", 300]")
+	})
+
+	t.Run("docs: an amount taken from a balance that holds it", func(t *testing.T) {
+		rec.body = nil
+		amount := fennecdb.Param(300)
+		_, err := db.From("accounts").
+			WhereCond(fennecdb.Fields("name", "ada", "balance", fennecdb.Ops("gte", amount))).
+			Update(
+				ctx,
+				fennecdb.D("balance", fennecdb.Expr("balance - ?", amount)),
+				fennecdb.Require(1),
+			)
+		sent(t, err, "set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1", "[300, \"ada\"]")
+	})
+
+	t.Run("docs: a held hold released", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("holds").
+			WhereCond(fennecdb.Fields("order_ref", "o-17", "state", "held")).
+			Delete(ctx, fennecdb.Require(1))
+		sent(t, err, "del holds where order_ref = $1 and state = $2 require 1", "[\"o-17\", \"held\"]")
+	})
+
+	t.Run("docs: a lock taken or refused", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("locks").
+			Insert(
+				ctx,
+				fennecdb.D("name", "nightly", "owner", "w1"),
+				fennecdb.IfAbsent(),
+				fennecdb.Require(1),
+			)
+		sent(t, err, "put locks {name: $1, owner: $2} if absent require 1", "[\"nightly\", \"w1\"]")
 	})
 
 	t.Run("docs: a debit that must find the money, or says why", func(t *testing.T) {

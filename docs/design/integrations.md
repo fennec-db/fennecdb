@@ -43,7 +43,21 @@ builder again so the file cannot drift, and `make python-test`, `go-test`
 and `dotnet-test` run every case through their own builder, the
 endpoints' statements read off a recording transport. A builder change
 starts in `web/builder.js` and a case in `golden.mjs`, then the three
-follow, and the Swift, Kotlin and Dart builders with them. Go's object conditions are `Fields`/`Ops` and a document a
+follow, and the Swift, Kotlin and Dart builders with them. Six forms a
+page wrote and no builder could (#409's list) came in together, JavaScript,
+Python, Go and .NET first: `param(value)`, a value bound once wherever it
+is used -- the binder keeps each param's `$n` by its identity, so the same
+value given twice stays two parameters, as before -- spelt
+`{"$param": [name, value]}`, one param a name within a case; an inner
+query of `in`, which JavaScript alone took, spelt `{"$query": [steps]}`,
+its parameters numbered where its text stands; `insertNew`, FennecQL's
+`insert` (writes.md); an `order` key that is an expression; a `fuse`
+written in the order its `match` and `near` were first called (the cases
+that called `match` first were turned to call `near` first, keeping their
+text); and `fuzzy: true` as FennecQL's `fuzzy` alone, a number of edits
+still written (`fuzzy 2`, the case that wrote it and the tour taking `2`).
+No case's text changed: the builders not yet taught fail only the new
+cases. Go's object conditions are `Fields`/`Ops` and a document a
 `D(...)`, names and values in turn, since a map has no order and the order
 is the text's; its options are functional, since a struct cannot tell
 `limit 0` from none. CI also builds the five packages as a release
@@ -99,14 +113,22 @@ from a case can be held to it.
   second pass, which also wrote JSON keys bare and split each
   `create`/`alter` group off into a block of its own, since no builder
   writes one). The rest stays as written, with no tabs, where the builders
-  have no form for it or the page leans on its own wording: `fuzzy`
-  without a number (the page teaches the default), `match` before `near`
-  in a `fuse` (the text-search page leads with the words), `insert` (every
-  builder's insert sends `put`), one `$n` in two places (a builder binds
-  each use apart), `in (get ...)` (the JavaScript builder alone takes an
-  inner query, and the golden file has no word for one), an `order` key
-  that is an expression, `explain` with its plan, and a block holding any
-  of these, which is not split to tab the rest.
+  have no form for it or the page leans on its own wording: `explain` with
+  its plan, a `create` or an `alter`, and a block holding any of these,
+  which is not split to tab the rest. `fuzzy` without a number, `match`
+  before `near` in a `fuse`, `insert`, one `$n` in two places, `in (get
+  ...)` and an `order` key that is an expression were on that list until
+  the builders learned them (row 68): seven blocks took tabs then, a
+  `not (x in (...))` and an `order` key's direction written into the page
+  as the builders write them.
+- **A builder a form reaches later has no tab for it yet.** The six forms
+  came to JavaScript, Python, Go and .NET first, and to Swift, Kotlin and
+  Dart in a second change. Between the two, a box whose cases use one
+  (`newer`) leaves those three languages out (`LATER`), and their test
+  files leave the cases out: a tab is code its SDK's tests ran, and a call
+  the SDK has not got would compile nowhere. The widget opens such a box on
+  its FennecQL tab for a reader who chose one of them. The second change
+  empties `LATER`.
 - **A placeholder over no block writes its FennecQL tab.** languages.html's
   tour of the builder has no statement of its own in the prose, so
   `{{builder ...}}` alone on its line makes the FennecQL tab of the cases:

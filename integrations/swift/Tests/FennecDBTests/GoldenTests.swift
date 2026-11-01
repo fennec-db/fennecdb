@@ -119,7 +119,13 @@ import Testing
                 a[0].string!, top: opt(a, 1, "top")?.int, rangeValues: opt(a, 1, "ranges"),
                 disjunctiveValue: opt(a, 1, "disjunctive"))
         case ("order", _):
-            return try q.order(a[0].string!, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
+            // A key that is an expression (`{"$expr": ...}`), which this
+            // builder does not take yet, fails its case rather than the run.
+            guard let field = a[0].string else {
+                Issue.record("an order key that is no field's name")
+                return q
+            }
+            return try q.order(field, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)
         case ("offset", _): return try q.offset(a[0].int!)
         case ("require", _): return try q.require(a[0].int!, reason: opt(a, 1, "reason")?.string)

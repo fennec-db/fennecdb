@@ -9,10 +9,9 @@
 //
 // A case is a chain of steps, `{op, args}`, starting with `from` and
 // ending with what turns it into a statement: `toFennecQL`, `toInsert`,
-// `toUpdate`, `toUpsert`, `toDelete`, or an endpoint -- `rows`, `first`,
-// `count`, `explain`, `insert`, `update`, `upsert`, `delete` -- whose
-// statement is the one it
-// sends. A named statement's call is a chain of its own: `call` (the
+// `toInsertNew`, `toUpdate`, `toUpsert`, `toDelete`, or an endpoint --
+// `rows`, `first`, `count`, `explain`, `insert`, `insertNew`, `update`,
+// `upsert`, `delete` -- whose statement is the one it sends. A named statement's call is a chain of its own: `call` (the
 // statement's name, its arguments or null, and `{claims}`) then `toCall`.
 // Arguments are JSON, and what JSON has no word for is an object of
 // one `$` key, which no field name can start with:
@@ -29,6 +28,10 @@
 //   {"$as": [column, name]}                               column.as(name)
 //   {"$date": "2026-09-19T12:34:56.000Z"}                 a date
 //   {"$f32": [0.5, 0.25]}                                 a Float32Array
+//   {"$param": [name, value]}                             param(value), one per name in a
+//                                                         case: each use the same param
+//   {"$query": [{op, args}, ...]}                         an inner query of `in`: the steps
+//                                                         of a chain from `from`, unended
 //
 // Each language names the steps its own way (`orWhere` is `or_where` in
 // Python and `OrWhere` in Go and C#, `parentKey` is `parent_key` ...) and
@@ -41,40 +44,58 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, FennecError,
+  from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, param, FennecError,
 } from './fennec.js';
 
 export const GOLDEN = fileURLToPath(new URL('../integrations/builder-golden.json', import.meta.url));
 
 // ------------------------------------------------------------------ the run
 
-/** A step's argument as the JS builder takes it. */
-function arg(x) {
-  if (Array.isArray(x)) return x.map(arg);
+/**
+ * A step's argument as the JS builder takes it; `held` is the case's
+ * params by name, so each `$param` of a name is the one `param()`.
+ */
+function arg(x, held) {
+  const a = (v) => arg(v, held);
+  if (Array.isArray(x)) return x.map(a);
   if (x === null || typeof x !== 'object') return x;
-  if ('$or' in x) return or(...x.$or.map(arg));
-  if ('$and' in x) return and(...x.$and.map(arg));
-  if ('$not' in x) return not(arg(x.$not));
-  if ('$raw' in x) return raw(x.$raw[0], ...x.$raw.slice(1).map(arg));
+  if ('$or' in x) return or(...x.$or.map(a));
+  if ('$and' in x) return and(...x.$and.map(a));
+  if ('$not' in x) return not(a(x.$not));
+  if ('$raw' in x) return raw(x.$raw[0], ...x.$raw.slice(1).map(a));
   if ('$inc' in x) return inc(x.$inc);
-  if ('$expr' in x) return expr(x.$expr[0], ...x.$expr.slice(1).map(arg));
+  if ('$expr' in x) return expr(x.$expr[0], ...x.$expr.slice(1).map(a));
   if ('$bucket' in x) return bucket(...x.$bucket);
   if ('$countDistinct' in x) return countDistinct(x.$countDistinct);
-  if ('$distance' in x) return distance(...x.$distance);
+  if ('$distance' in x) return distance(x.$distance[0], a(x.$distance[1]));
   if ('$first' in x) return first(...x.$first);
   if ('$last' in x) return last(...x.$last);
-  if ('$as' in x) return arg(x.$as[0]).as(x.$as[1]);
+  if ('$as' in x) return a(x.$as[0]).as(x.$as[1]);
   if ('$date' in x) return new Date(x.$date);
   if ('$f32' in x) return Float32Array.from(x.$f32);
-  return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, arg(v)]));
+  if ('$param' in x) {
+    const [name, v] = x.$param;
+    if (!held.has(name)) held.set(name, param(a(v)));
+    return held.get(name);
+  }
+  if ('$query' in x) return chain(x.$query, held);
+  return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, a(v)]));
 }
 
-const TEXT = new Set(['toFennecQL', 'toInsert', 'toUpdate', 'toUpsert', 'toDelete', 'toCall']);
-const ENDPOINTS = new Set(['rows', 'first', 'count', 'explain', 'insert', 'update', 'upsert', 'delete']);
+/** An inner query's steps, `from` first, as the builder they make. */
+function chain([first, ...rest], held) {
+  if (first.op !== 'from') throw new Error(`an inner query starts with from, not ${first.op}`);
+  let q = from(...first.args.map((v) => arg(v, held)));
+  for (const { op, args = [] } of rest) q = q[op](...args.map((v) => arg(v, held)));
+  return q;
+}
+
+const TEXT = new Set(['toFennecQL', 'toInsert', 'toInsertNew', 'toUpdate', 'toUpsert', 'toDelete', 'toCall']);
+const ENDPOINTS = new Set(['rows', 'first', 'count', 'explain', 'insert', 'insertNew', 'update', 'upsert', 'delete']);
 
 // What each endpoint is answered, as the HTTP transport hands it over.
 function answer(sql) {
-  if (/^(put|set|del) /.test(sql)) return { kind: 'affected', count: 0 };
+  if (/^(put|insert|set|del) /.test(sql)) return { kind: 'affected', count: 0 };
   if (sql.endsWith(' count')) return { rows: [{ count: 0 }] };
   return { rows: [] };
 }
@@ -84,10 +105,11 @@ export async function run(steps) {
   try {
     const [first, ...rest] = steps;
     if (first.op !== 'from' && first.op !== 'call') throw new Error(`a chain starts with from or call, not ${first.op}`);
-    let q = (first.op === 'call' ? call : from)(...first.args.map(arg));
+    const held = new Map();
+    let q = (first.op === 'call' ? call : from)(...first.args.map((v) => arg(v, held)));
     for (const [i, { op, args = [] }] of rest.entries()) {
       const last = i === rest.length - 1;
-      const a = args.map(arg);
+      const a = args.map((v) => arg(v, held));
       if (TEXT.has(op) || ENDPOINTS.has(op)) {
         if (!last) throw new Error(`${op} ends a chain`);
         if (TEXT.has(op)) {
@@ -118,6 +140,10 @@ const c = (name, ...steps) =>
   cases.push({ name, steps: steps.map(([op, ...args]) => (args.length ? { op, args } : { op })) });
 const Q = ['toFennecQL'];
 const docs = ['from', 'docs'];
+// `param(value)` under a name, the same param wherever the name comes again
+// in a case; an inner query's chain, its steps as a case's.
+const P = (name, v) => ({ $param: [name, v] });
+const sub = (...steps) => ({ $query: steps.map(([op, ...args]) => (args.length ? { op, args } : { op })) });
 
 // Reading: the select list.
 c('a bare get', docs, Q);
@@ -261,7 +287,9 @@ c('a distance needs a comparison', places, ['where', { loc: { distance: { from: 
 c('a distance field is a field', places, ['select', { $distance: ['loc; del places', [1, 2]] }], Q);
 c('match', docs, ['match', 'body', 'business trip'], ['limit', 10], Q);
 c('match with a filter', docs, ['select', 'title'], ['where', 'year', '>=', 2023], ['match', 'body', 'rust'], Q);
-c('match fuzzy', docs, ['match', 'body', 'databse', { fuzzy: true }], ['limit', 10], Q);
+c('match fuzzy', docs, ['match', 'body', 'databse', { fuzzy: 2 }], ['limit', 10], Q);
+c('match fuzzy of the default edits is fuzzy alone', docs, ['match', 'body', 'databse', { fuzzy: true }], ['limit', 10], Q);
+c('match fuzzy alone and prefix', docs, ['match', 'body', 'datbas', { fuzzy: true, prefix: true }], Q);
 c('match fuzzy of one edit', docs, ['match', 'body', 'databse', { fuzzy: 1 }], Q);
 c('match prefix', docs, ['match', 'body', 'datab', { prefix: true }], ['limit', 10], Q);
 c('match fuzzy and prefix', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'datbas', { fuzzy: 2, prefix: true }], ['limit', 5], Q);
@@ -272,9 +300,13 @@ c('fuzzy of negative edits is refused', docs, ['match', 'body', 'x', { fuzzy: -1
 c('fuzzy is true, false or a number of edits', docs, ['match', 'body', 'x', { fuzzy: 'yes' }], Q);
 c('prefix is true or false', docs, ['match', 'body', 'x', { prefix: 1 }], Q);
 c('match and near need fuse', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], Q);
-c('fuse ranks by match and near', docs, ['match', 'body', 'rust wasm'], ['near', 'embed', [1, 0, 0]], ['fuse'], ['limit', 10], Q);
-c('fuse with k and candidates', docs, ['where', 'lang', 'en'], ['match', 'body', 'rust'], ['near', 'embed', [1, 0, 0]], ['fuse', { k: 20, candidates: 50 }], ['limit', 10], Q);
-c('fuse with candidates alone', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], ['fuse', { candidates: 40 }], Q);
+c('fuse ranks by match and near', docs, ['near', 'embed', [1, 0, 0]], ['match', 'body', 'rust wasm'], ['fuse'], ['limit', 10], Q);
+c('fuse with k and candidates', docs, ['where', 'lang', 'en'], ['near', 'embed', [1, 0, 0]], ['match', 'body', 'rust'], ['fuse', { k: 20, candidates: 50 }], ['limit', 10], Q);
+c('fuse with candidates alone', docs, ['near', 'embed', [1]], ['match', 'body', 'x'], ['fuse', { candidates: 40 }], Q);
+c('fuse writes match first where it was called first', docs, ['match', 'body', 'rust wasm'], ['near', 'embed', [1, 0, 0]], ['fuse'], ['limit', 10], Q);
+c('fuse of match first with k and candidates', docs, ['where', 'lang', 'en'], ['match', 'body', 'rust', { fuzzy: 1 }], ['near', 'embed', [1, 0, 0], { ef: 64 }], ['fuse', { k: 20, candidates: 50 }], ['limit', 10], Q);
+c('a later near keeps match first', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], ['near', 'embed', [2]], ['fuse'], Q);
+c('a later match keeps near first', docs, ['near', 'embed', [1]], ['match', 'body', 'x'], ['match', 'body', 'y'], ['fuse'], Q);
 c('fuse without match', docs, ['near', 'embed', [1]], ['fuse'], Q);
 c('fuse and rerank', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], ['fuse'], ['rerank', 'embed', [1]], Q);
 c('a negative fuse k is refused', docs, ['fuse', { k: -1 }], Q);
@@ -291,7 +323,8 @@ c('a snippet with an ellipsis and tags', docs, ['snippet', 'body', 12, { ellipsi
 c('a snippet with tags and no ellipsis', docs, ['snippet', 'body', 5, { pre: '[', post: ']' }], ['match', 'body', 'x'], Q);
 c('a snippet with an ellipsis alone', docs, ['snippet', 'body', 5, { ellipsis: '...' }], ['match', 'body', 'x'], Q);
 c('marks after every field, in the order called', docs, ['highlight', 'title'], ['snippet', 'body', 8], ['where', 'year', 2024], ['match', 'body', 'x'], Q);
-c('marks go with fuse', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'rust'], ['near', 'embed', [1, 0]], ['fuse'], ['limit', 5], Q);
+c('marks go with fuse', docs, ['select', 'title'], ['highlight', 'body'], ['near', 'embed', [1, 0]], ['match', 'body', 'rust'], ['fuse'], ['limit', 5], Q);
+c('marks go with fuse of match first', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'rust'], ['near', 'embed', [1, 0]], ['fuse'], ['limit', 5], Q);
 c('highlight needs match', docs, ['highlight', 'body'], Q);
 c('highlight takes no near alone', docs, ['highlight', 'body'], ['near', 'embed', [1, 0]], Q);
 c('a snippet needs match', docs, ['snippet', 'body', 3], Q);
@@ -432,6 +465,18 @@ c('insert of an empty document', docs, ['toInsert', {}]);
 c('insert of a field that is no name', docs, ['toInsert', { 'a b': 1 }]);
 c('insert takes no where', docs, ['where', 'a', 1], ['insert', { a: 1 }]);
 c('insert takes no lookup', docs, ['lookup', 'notes', { on: 'doc_id' }], ['insert', { a: 1 }]);
+// `insertNew`: FennecQL's `insert`, which refuses a held id where `put`
+// writes over it.
+c('insertNew writes insert', docs, ['toInsertNew', { title: 'a', year: 2024 }]);
+c('insertNew of several', docs, ['toInsertNew', [{ id: 1, title: 'a' }, { id: 2, title: 'b' }]]);
+c('insertNew sends insert', docs, ['insertNew', { id: 7, title: 'a' }]);
+c('insertNew with returning and require', docs, ['insertNew', { title: 'a' }, { returning: ['id'], require: 1, reason: 'taken' }]);
+c('insertNew answers every field', docs, ['toInsertNew', { title: 'a' }, { returning: true }]);
+c('insertNew of no documents', docs, ['toInsertNew', []]);
+c('insertNew takes no where', docs, ['where', 'a', 1], ['insertNew', { a: 1 }]);
+c('insertNew takes no order', docs, ['order', 'a'], ['toInsertNew', { a: 1 }]);
+c('inc in an insertNew is refused', ['from', 'hits'], ['toInsertNew', { n: { $inc: 1 } }]);
+c('insertNew takes an expression', ['from', 'journal'], ['toInsertNew', { entry: { $expr: ['? + ":dr"', 'inv-7'] }, at: { $expr: ['now()'] } }]);
 c('update with a filter numbers the patch first', docs, ['where', 'id', 3], ['where', 'year', '<', 2000], ['update', { title: 'new', 'meta.lang': 'en' }]);
 c('update of every row says so', docs, ['update', { archived: true }, { all: true }]);
 c('an unfiltered update is refused', docs, ['update', { archived: true }]);
@@ -608,7 +653,7 @@ c('docs: a user\'s sessions', sessions, ['where', 'user', 'ada'], ['rows']);
 // languages.html: the builder's tour, from a read to a delete.
 const tour = ['from', 'docs'];
 c('docs: a page of documents with their comments', tour, ['where', 'year', '>=', 2024], ['where', { $or: [{ lang: 'tr' }, { tags: { has: 'rust' } }] }], ['order', 'title', 'asc', { collate: 'tr' }], ['limit', 20], ['lookup', 'comments', { on: 'doc_id', limit: 3 }], ['rows']);
-c('docs: documents matching a misspelt word', tour, ['where', 'year', '>=', 2024], ['match', 'title', 'databse', { fuzzy: true }], ['limit', 10], ['rows']);
+c('docs: documents matching a misspelt word', tour, ['where', 'year', '>=', 2024], ['match', 'title', 'databse', { fuzzy: 2 }], ['limit', 10], ['rows']);
 c('docs: the document of a slug', tour, ['where', 'slug', 'intro'], ['first']);
 c('docs: documents counted since a year', tour, ['where', 'year', '>=', 2024], ['count']);
 c('docs: a document inserted', tour, ['insert', { slug: 'intro', title: 'Ownership in Rust', year: 2026 }]);
@@ -731,6 +776,75 @@ c('claims are an object', ['call', 'mine', null, { claims: 'alice' }], CALL);
 c('docs: a transfer called', ['call', 'transfer', { from: 1, to: 2, amount: 300 }], CALL);
 c('docs: a statement called for a signed-in user', ['call', 'history', { account: 1 }, { claims: { sub: 'alice' } }], CALL);
 c('docs: a statement of no arguments called', ['call', 'stamp'], CALL);
+
+// One value in two places: `param(value)` binds it once, each use writing
+// its `$n`; the same value given twice is two parameters.
+c('a param used twice is one parameter', ['from', 'accounts'], ['where', { name: 'ada', balance: { gte: P('amount', 300) } }], ['toUpdate', { balance: { $expr: ['balance - ?', P('amount', 300)] } }, { require: 1 }]);
+c('a param in both sides of an or', docs, ['where', { $or: [{ author: P('who', 'ada') }, { editor: P('who', 'ada') }] }], ['limit', 10], Q);
+c('two params of one value are two parameters', docs, ['where', 'a', P('x', 1)], ['where', 'b', P('y', 1)], Q);
+c('a value given twice is two parameters', docs, ['where', 'a', 1], ['where', 'b', 1], Q);
+c('a param in raw and expr', docs, ['select', 'title', { $as: [{ $expr: ['score * ?', P('w', 2)] }, 'weighted'] }], ['where', { $raw: ['score > ? and rank < ?', P('w', 2), P('w', 2)] }], Q);
+c('a param as a point, in a filter and an order', ['from', 'orders'], ['where', { pickup: { distance: { from: P('at', [13.4, 52.5]), lte: 3000 } } }], ['order', { $distance: ['pickup', P('at', [13.4, 52.5])] }], ['limit', 1], ['toUpdate', { courier: 'c7' }, { returning: true }]);
+c('a param as near\'s vector and in a filter', docs, ['where', 'embed', '!=', P('v', [1, 0])], ['near', 'embed', P('v', [1, 0])], ['limit', 3], Q);
+c('a param in a document and its filter', docs, ['where', 'title', '!=', P('t', 'x')], ['update', { title: P('t', 'x'), seen: P('t', 'x') }]);
+c('a param of a date is its ISO text', docs, ['where', 'at', '>=', P('d', { $date: '2026-09-19T12:34:56.000Z' })], ['where', 'seen', '>=', P('d', { $date: '2026-09-19T12:34:56.000Z' })], Q);
+c('a param in an inner query and around it', ['from', 'orders'], ['where', { tier: P('t', 2), customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', P('t', 2)]) } }], Q);
+
+// `in (get ...)`: an inner query's one column is the list, its parameters
+// numbered where its text stands.
+c('in takes an inner query', ['from', 'orders'], ['where', { customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'country', 'TR']) } }], Q);
+c('in takes an inner query as an operator', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'])], Q);
+c('an inner query is numbered where it stands', ['from', 'orders'], ['where', 'status', 'open'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', '>=', 2], ['limit', 50])], ['order', 'id', 'desc'], ['limit', 10], Q);
+c('an inner query inside an inner query', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', 'in', sub(['from', 'tiers'], ['select', 'n'], ['where', 'active', true])])], Q);
+c('not of an inner query', ['from', 'orders'], ['where', { $not: { customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'country', 'TR']) } } }], ['count']);
+c('an inner query in an or', ['from', 'orders'], ['where', { $or: [{ vip: true }, { customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', 3]) } }] }], Q);
+c('an inner query in a lookup level', ['from', 'customers'], ['limit', 20], ['lookup', 'orders', { on: 'customer', where: { id: { in: sub(['from', 'returns'], ['select', 'order_id']) } }, limit: 3 }], ['rows']);
+c('an inner query picks the rows a delete writes', ['from', 'sessions'], ['where', 'user', 'in', sub(['from', 'users'], ['select', 'name'], ['where', 'banned', true])], ['delete']);
+c('an inner query picks the rows an update writes', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'], ['where', 'country', 'TR'])], ['update', { region: 'eu' }]);
+c('an inner query selects one column', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'])], Q);
+c('an inner query selects no more than one column', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id', 'name'])], Q);
+c('an inner query takes no require', ['from', 'orders'], ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'], ['require', 1])], Q);
+
+// `order` by an expression over the row: its text, its values bound where
+// it stands, its direction written.
+c('order by an expression', ['from', 'orders'], ['order', { $expr: ['n * 2'] }, 'desc'], ['order', 'item'], ['limit', 10], Q);
+c('order by an expression with a parameter', ['from', 'orders'], ['where', 'n', '>', 1], ['order', { $expr: ['case when customer = ? then 0 else 1 end', 'bo'] }], ['order', 'id'], ['limit', 5], Q);
+c('order by a distance', ['from', 'places'], ['order', { $distance: ['loc', [13.4, 52.5]] }], ['limit', 5], Q);
+c('order by an expression with a collation', ['from', 'people'], ['order', { $expr: ['coalesce(nick, name)'] }, 'asc', { collate: 'tr' }], Q);
+c('order by an expression picks the rows a delete writes', ['from', 'jobs'], ['order', { $expr: ['priority * 10 + attempts'] }, 'desc'], ['limit', 1], ['toDelete', { returning: true }]);
+c('an order key takes no as', ['from', 'orders'], ['order', { $as: [{ $expr: ['n * 2'] }, 'x'] }], Q);
+
+// fennecql-lookup.html: subqueries.
+c('docs: orders of customers in a country', orders, ['where', { customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'country', 'TR']) } }], ['rows']);
+c('docs: open orders of customers of a tier', orders, ['where', { status: 'open', customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', '>=', 2]) } }], ['rows']);
+c('docs: orders of customers outside a country counted', orders, ['where', { $not: { customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'country', 'TR']) } } }], ['count']);
+c('docs: the sessions of banned users deleted', ['from', 'sessions'], ['where', 'user', 'in', sub(['from', 'users'], ['select', 'name'], ['where', 'banned', true])], ['delete']);
+c('docs: customers with their returned orders', ['from', 'customers'], ['limit', 20], ['lookup', 'orders', { on: 'customer', where: { id: { in: sub(['from', 'returns'], ['select', 'order_id']) } }, limit: 3 }], ['rows']);
+c('docs: orders of customers of an active tier', orders, ['where', 'customer', 'in', sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', 'in', sub(['from', 'tiers'], ['select', 'n'], ['where', 'active', true])])], ['rows']);
+// fennecql-reading.html: ordering by an expression.
+c('docs: orders by twice their count', orders, ['order', { $expr: ['n * 2'] }, 'desc'], ['order', 'item'], ['limit', 10], ['rows']);
+c('docs: one customer\'s orders first', orders, ['order', { $expr: ['case when customer = ? then 0 else 1 end', 'bo'] }], ['order', 'id'], ['rows']);
+// fennecql-search.html: typos and words begun, and fuse with the words first.
+const products = ['from', 'products'];
+c('docs: products matching a misspelt word', products, ['match', 'title', 'databse', { fuzzy: true }], ['limit', 10], ['rows']);
+c('docs: products matching a word begun', products, ['match', 'title', 'datab', { prefix: true }], ['limit', 10], ['rows']);
+c('docs: products matching a misspelt word begun', products, ['match', 'title', 'datbas', { fuzzy: true, prefix: true }], ['limit', 10], ['rows']);
+c('docs: products matching a word one edit away', products, ['match', 'title', 'databse', { fuzzy: 1 }], ['limit', 10], ['rows']);
+c('docs: a search box inside one category', products, ['where', 'category', 'books'], ['match', 'title', 'datbas', { fuzzy: true, prefix: true }], ['limit', 20], ['rows']);
+const articles = ['from', 'articles'];
+const embedding = [0.12, -0.03, 0.4];
+c('docs: articles ranked by words and meaning', articles, ['match', 'body', 'rust ownership'], ['near', 'embed', embedding], ['fuse'], ['limit', 10], ['rows']);
+c('docs: articles since a year ranked by words and meaning', articles, ['where', 'year', '>=', 2024], ['match', 'body', 'rust ownership'], ['near', 'embed', embedding], ['fuse'], ['limit', 10], ['rows']);
+c('docs: articles ranked by words and meaning, k and candidates', articles, ['match', 'body', 'rust ownership'], ['near', 'embed', embedding], ['fuse', { k: 60, candidates: 50 }], ['limit', 10], ['rows']);
+// fennecql-writing.html: values worked out over the row, and `require`.
+c('docs: a hit counted and stamped', hits, ['where', 'key', 'ip1'], ['update', { n: { $expr: ['n + 1'] }, seen: { $expr: ['now()'] } }]);
+c('docs: a hit counted from nothing', hits, ['where', 'key', 'ip1'], ['update', { n: { $inc: 5 } }]);
+c('docs: a document written over its version', ['from', 'docs'], ['where', { id: 7, version: 3 }], ['update', { body: 'new text', version: { $expr: ['version + 1'] } }]);
+c('docs: a lock taken unless held', ['from', 'locks'], ['insert', { name: 'nightly', owner: 'w1', at: { $expr: ['now()'] } }, { ifAbsent: true }]);
+c('docs: a journal entry made', ['from', 'journal'], ['insertNew', { entry: { $expr: ['? + ":dr"', 'inv-7'] }, amount: { $expr: ['0 - ?', 300] } }]);
+c('docs: an amount taken from a balance that holds it', ['from', 'accounts'], ['where', { name: 'ada', balance: { gte: P('amount', 300) } }], ['update', { balance: { $expr: ['balance - ?', P('amount', 300)] } }, { require: 1 }]);
+c('docs: a held hold released', ['from', 'holds'], ['where', { order_ref: 'o-17', state: 'held' }], ['delete', { require: 1 }]);
+c('docs: a lock taken or refused', ['from', 'locks'], ['insert', { name: 'nightly', owner: 'w1' }, { ifAbsent: true, require: 1 }]);
 
 // ------------------------------------------------------------------ writing
 

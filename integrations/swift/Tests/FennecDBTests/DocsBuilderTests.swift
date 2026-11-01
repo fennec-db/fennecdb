@@ -612,6 +612,24 @@ import Testing
         try await db.sends("get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    @Test("docs: products matching a word begun") func productsMatchingAWordBegun() async throws {
+        let db = Recording()
+        _ = try await db.from("products")
+            .match("title", "datab", prefix: true)
+            .limit(10)
+            .rows()
+        try await db.sends("get products match title $1 prefix limit $2", "[\"datab\", 10]")
+    }
+
+    @Test("docs: products matching a word one edit away") func productsMatchingAWordOneEditAway() async throws {
+        let db = Recording()
+        _ = try await db.from("products")
+            .match("title", "databse", fuzzy: 1)
+            .limit(10)
+            .rows()
+        try await db.sends("get products match title $1 fuzzy 1 limit $2", "[\"databse\", 10]")
+    }
+
     @Test("docs: matches with their marks") func matchesWithTheirMarks() async throws {
         let db = Recording()
         _ = try await db.from("articles")
@@ -761,6 +779,59 @@ import Testing
             .limit(10)
             .rows()
         try await db.sends("get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
+    }
+
+    @Test("docs: a hit counted and stamped") func aHitCountedAndStamped() async throws {
+        let db = Recording()
+        _ = try await db.from("hits")
+            .where("key", "ip1")
+            .update(["n": .expr("n + 1"), "seen": .expr("now()")] as Value)
+        try await db.sends("set hits {n: n + 1, seen: now()} where key = $1", "[\"ip1\"]")
+    }
+
+    @Test("docs: a hit counted from nothing") func aHitCountedFromNothing() async throws {
+        let db = Recording()
+        _ = try await db.from("hits")
+            .where("key", "ip1")
+            .update(["n": .inc(5)] as Value)
+        try await db.sends("set hits {n: coalesce(n, 0) + $1} where key = $2", "[5, \"ip1\"]")
+    }
+
+    @Test("docs: a document written over its version") func aDocumentWrittenOverItsVersion() async throws {
+        let db = Recording()
+        _ = try await db.from("docs")
+            .where(["id": 7, "version": 3])
+            .update(["body": "new text", "version": .expr("version + 1")] as Value)
+        try await db.sends("set docs {body: $1, version: version + 1} where id = $2 and version = $3", "[\"new text\", 7, 3]")
+    }
+
+    @Test("docs: a lock taken unless held") func aLockTakenUnlessHeld() async throws {
+        let db = Recording()
+        _ = try await db.from("locks")
+            .insert(
+                ["name": "nightly", "owner": "w1", "at": .expr("now()")] as Value,
+                ifAbsent: true
+            )
+        try await db.sends("put locks {name: $1, owner: $2, at: now()} if absent", "[\"nightly\", \"w1\"]")
+    }
+
+    @Test("docs: a held hold released") func aHeldHoldReleased() async throws {
+        let db = Recording()
+        _ = try await db.from("holds")
+            .where(["order_ref": "o-17", "state": "held"])
+            .delete(require: 1)
+        try await db.sends("del holds where order_ref = $1 and state = $2 require 1", "[\"o-17\", \"held\"]")
+    }
+
+    @Test("docs: a lock taken or refused") func aLockTakenOrRefused() async throws {
+        let db = Recording()
+        _ = try await db.from("locks")
+            .insert(
+                ["name": "nightly", "owner": "w1"] as Value,
+                ifAbsent: true,
+                require: 1
+            )
+        try await db.sends("put locks {name: $1, owner: $2} if absent require 1", "[\"nightly\", \"w1\"]")
     }
 
     @Test("docs: a debit that must find the money, or says why") func aDebitThatMustFindTheMoneyOrSaysWhy() async throws {
