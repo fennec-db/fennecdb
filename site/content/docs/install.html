@@ -30,7 +30,10 @@ show that your install lacks is in the next one, and
 </div>
 
 <p>There is no Windows build of the programs yet: run the image, or the script
-inside WSL. The clients run anywhere their language does.</p>
+inside WSL. Built <a href="#source">from source</a> on Windows, they take a
+file's lock as everywhere else, so a second process over a served file is
+refused there too; the server reads its file into memory rather than mapping
+it. The clients run anywhere their language does.</p>
 
 <h2 id="install-script">The install script</h2>
 
