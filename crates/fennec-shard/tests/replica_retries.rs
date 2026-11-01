@@ -562,8 +562,8 @@ fn instance_in(body: &str) -> String {
 
 /// A file's identity changes as what it is does: a follow gives the copy
 /// a new one -- one minted, the router sending none here -- and a
-/// promotion takes it away with `.follows`, so a reclaim naming one from
-/// before takes nothing the file has become since. Kept, a copy a router
+/// promotion takes it away with `.follows` and mints another, so a reclaim
+/// naming one from before takes nothing the file has become since. Kept, a copy a router
 /// left that a repair made the tenant's replica, or a failover its
 /// primary, was a live file a router behind its primary took back.
 #[test]
@@ -609,20 +609,25 @@ fn a_follow_and_a_promotion_change_a_files_identity() {
         Some(token),
     );
     assert_eq!(status, 200, "{body}");
-    // The follow's went with `.follows`; nothing of the create's came back.
-    assert_eq!(n2.tenants.instance("acme"), None);
+    // The follow's went with `.follows`, nothing of the create's came back,
+    // and the promotion gave the primary it is now one of its own, which
+    // it answered with.
+    let promoted = instance_in(&body);
+    assert_ne!(promoted, made);
+    assert_ne!(promoted, followed);
+    let promoted = fennec_http::instance::parse(&promoted).unwrap();
+    assert_eq!(n2.tenants.instance("acme"), Some(promoted));
     let (status, body) = reclaim(&format!("\"{made}\",\"{followed}\""));
     assert_eq!(status, 409, "{body}");
-    assert!(body.contains("\"instance\":null"), "{body}");
+    assert_eq!(instance_in(&body), fennec_http::instance::text(promoted));
     assert!(n2.holds("acme"));
-    // Closed and opened again, still none: the role is the file's.
+    // Closed and opened again, the same: the identity is the file's.
     assert_eq!(n2.tenants.close_idle(std::time::Duration::ZERO), 1);
-    assert_eq!(n2.tenants.instance("acme"), None);
-    // A freeze, a move's, gives the primary it is now an identity of its own.
-    let frozen = n2.tenants.freeze_as("acme").unwrap().expect("an identity");
-    assert_ne!(fennec_http::instance::text(frozen), followed);
+    assert_eq!(n2.tenants.instance("acme"), Some(promoted));
+    // A freeze, a move's, answers the one it carries.
+    let frozen = n2.tenants.freeze_as("acme").unwrap();
     n2.tenants.thaw("acme").unwrap();
-    assert_eq!(n2.tenants.instance("acme"), Some(frozen));
+    assert_eq!(frozen, Some(promoted));
     reads(n2.port, "acme", "get notes select title", "\"one\"");
 }
 
@@ -704,6 +709,45 @@ fn an_old_primary_back_from_a_failover_is_its_tenants_copy_again() {
     assert_eq!(p1.seen("/acme/follow"), 1);
     reads(n1.port, "acme", "get notes select title", "\"two\"");
     assert_ne!(n1.tenants.instance("acme"), Some(created));
+}
+
+/// A tenant failed over twice has the node back from the second failover
+/// its copy again: the first failover's promotion minted the primary it
+/// made an identity, answered and recorded, which that file still carries
+/// when the second takes the tenant off it. With none minted, a promoted
+/// primary was reported and never followed, and two nodes stayed without
+/// a copy after a second failover.
+#[test]
+fn a_tenant_failed_over_twice_has_its_copy_back_each_time() {
+    let (n1, n2) = (node("tw1"), node("tw2"));
+    let port = router();
+    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "tw1", "");
+    put_node(port, "n2", &format!("127.0.0.1:{}", n2.port), "tw2", "");
+    create_acme(port);
+    assert_eq!(placed(port, "acme"), ("n1".into(), Some("n2".into())));
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+    for (off, to, title, node) in [("n1", "n2", "two", &n1), ("n2", "n1", "three", &n2)] {
+        let (status, body) = call(port, "POST", &format!("/_shard/nodes/{off}/failover"), "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(placed(port, "acme"), (to.into(), None));
+        let write = format!(r#"put notes {{title: "{title}"}}"#);
+        let (status, body) = query(port, "/t/acme/query", &write);
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = repair(port);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            placed(port, "acme"),
+            (to.into(), Some(off.into())),
+            "{body}"
+        );
+        assert!(body.contains(r#""left":[]"#), "{body}");
+        reads(
+            node.port,
+            "acme",
+            "get notes select title",
+            &format!("\"{title}\""),
+        );
+    }
 }
 
 /// A repair's attach that failed is tried again, as a create's is: it

@@ -212,11 +212,14 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 // Its lineage, which the router records: another file of
                 // the tenant, promoted by force, is of one of its own.
                 let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
+                // The identity the promotion gave it, which the router
+                // records ([`Tenants::promote_as`]).
+                let instance = instance::json(tenants.instance(t));
                 Response::json(
                     200,
                     format!(
                         "{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\",\
-                         \"lineage\":{lineage}}}"
+                         \"lineage\":{lineage},\"instance\":{instance}}}"
                     ),
                 )
             }),

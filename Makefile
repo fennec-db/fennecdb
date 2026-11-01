@@ -323,7 +323,8 @@ shard:
 ## query across 100 tenants against asking each (ARGS=latency or fanout
 ## for that part alone; ARGS=standby a standby router's request against
 ## the primary's; ARGS=regions a region keeping its own directory failing
-## a node over while cut off from the global router, at leases of 1 and 5 s).
+## a node over while cut off from the global router, at leases of 1 and 5 s;
+## ARGS=failovers a pair's failover and one across two nodes alone).
 shard-bench:
 	$(CARGO) run --release -p fennec-shard --example overhead -- $(or $(ARGS),100000 128)
 

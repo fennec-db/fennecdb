@@ -5651,6 +5651,10 @@ impl Router {
             (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l)?,
             _ => {}
         }
+        // The identity the promotion minted, unsynced beside the placement:
+        // the file an attach finds once a failover takes the tenant off it.
+        let instance = instances_at(&fields).first().copied();
+        dir.note_placed(tenant, to, instance)?;
         dir.place_promoted(tenant, to, said("history").as_deref(), from)
     }
 }

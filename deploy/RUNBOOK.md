@@ -597,10 +597,10 @@ the name on that node is answered 409 while the file is there.
 Each file on a node carries an identity, 16 hex digits the node mints as a
 create or an install makes the file and replaces when a follow changes it
 (`"instance"` in the answers of the create `PUT /_admin/tenants/<t>`, the
-install `PUT .../file`, `follow` and `freeze`; kept in `<t>.instance`
-beside the file, bound to the file and to whether its `<t>.follows` is
-there). A promotion removes `.follows` and the identity goes with it, until
-a move's `freeze` mints another. A file put in place while the node did not
+install `PUT .../file`, `follow`, `promote` and `freeze`; kept in
+`<t>.instance` beside the file, bound to the file and to whether its
+`<t>.follows` is there). A promotion removes `.follows` and the identity
+goes with it, and mints another, which the router records. A file put in place while the node did not
 hold it -- a restore, a hand, an older binary making it again -- carries
 none, and so does a standby's copy made with its node. The router notes
 the identity its call learned with each

@@ -986,6 +986,15 @@ impl Tenants {
         // was took it ([`crate::instance`]). A standby's copy made with its
         // node, which has no `.follows`, was given no identity.
         let promoted = self.promote_held(name, want);
+        // And it is given a fresh one, unsynced, which the promote answers
+        // with and the promoting router records: once this node fails over
+        // in its turn, its file follows the tenant's next primary by it, as
+        // the create's did after the first failover. Lost to a crash, the
+        // file carries none and is reported. No router behind the promoting
+        // one learns it, so none names the live primary by it.
+        if promoted.is_ok() {
+            self.identity(name, true);
+        }
         // The fork's history reached the feed as its record was appended;
         // the node's stream sends it on before the writes after it.
         self.touch(name);

@@ -12,7 +12,7 @@
 //! file's: 64 random bits minted as the file is made (a create, an
 //! import) and as it is made to follow -- a router's follow keeping the one
 //! its `PUT` gave only on the file carrying it as it begins, so one landing
-//! late gives a later file none -- and gone as it is promoted, so a
+//! late gives a later file none -- and minted anew as it is promoted, so a
 //! later file at the place -- or the same one made something else --
 //! carries another or none, and a router naming the one it learned takes
 //! back only the file it left, unchanged since.
@@ -34,10 +34,11 @@
 //! follower taking its primary's image). And it names whether the file was
 //! told to follow, its `.follows` there: an identity holds only while that
 //! stays so. A promotion removes `.follows`, synced, so the identity of the
-//! follow goes with it and the promotion writes nothing of its own -- put
-//! away by an unlink before it alone, it took a pair's failover from 4.0
-//! ms a tenant to 5.2 (`fennec-shard`'s `overhead`), and nobody would learn
-//! a new one before a freeze, which mints one where there is none.
+//! follow goes with it -- put away by an unlink before it, synced, it took a
+//! pair's failover from 4.0 ms a tenant to 5.2 (`fennec-shard`'s
+//! `overhead`) -- and then stamps a fresh one, unsynced, which the promote
+//! answers and the promoting router records: lost to a crash, the file
+//! carries none, reported and never followed.
 //! A follow puts the identity away before it writes `.follows`, its sync
 //! covering the unlink, so no identity it had comes back with a later one.
 //! A file whose binding or role does not hold carries no identity, and none

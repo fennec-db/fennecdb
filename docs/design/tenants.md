@@ -476,9 +476,12 @@ writing n1's image over the live primary
 followed, as the review's first answer had it, an old primary was a copy
 lost to every failover, and two nodes stayed without one for good
 (`an_old_primary_back_from_a_failover_is_its_tenants_copy_again`). A
-promoted primary carries no identity, so after a second failover its file
-is reported, not followed: minting one at the promotion is a write on the
-failover's path (above). The attach's own follow names the identity its
+promotion mints the primary it makes a fresh identity, unsynced, answered
+by the promote and recorded by the promoting router (`promoted`), so the
+node back from a second failover is the tenant's copy again too
+(`a_tenant_failed_over_twice_has_its_copy_back_each_time`); with none, a
+promoted primary was reported and never followed. No router behind the
+promoting one learns it. The attach's own follow names the identity its
 `PUT` gave, so one landing late is refused too. A node
 that did not answer the repair's look is given no replica (`replica_node`'s
 `answering`, the repair's alone): it would follow nothing from there, and a
@@ -556,8 +559,9 @@ back.
 as `.follows` and `.quota` are: minted as a create (`PUT
 /_admin/tenants/<t>`) or an install (`PUT .../file`) makes the file, put
 away before a follow writes `.follows` and given anew once the follow is
-made, gone with `.follows` as a promotion removes it, and answered as
-`"instance"` by the create, the install, the follow and the freeze. A
+made, gone with `.follows` as a promotion removes it and minted anew after
+it, and answered as `"instance"` by the create, the install, the follow,
+the promote and the freeze. A
 standby (`--replica-of`) gives its copies none at a create or an install:
 they follow by the node's word, with no `.follows`, and no router reads a
 standby's answers. A router may propose it
@@ -636,13 +640,16 @@ identity, and readers and writers meet under the slot alone; written beside
 and renamed, a create cost 150 us more in process. It names the file's role
 as well, `f` where `.follows` was there as it was written and `n` where
 not, and an identity holds only in its role. A promotion removes
-`.follows`, synced, so the follow's identity goes with it and the
-promotion writes nothing of its own: putting the identity away by an
-unlink before it took a pair's failover from 4.0 ms a tenant to 5.2
-(`overhead`'s pair alone, eight runs a side in ABBA turns at a load of
-1.5), synced on its own to 8.3-9.5, and a new one stamped after it added
-more again -- one no router learns before a freeze, which mints one where
-a file has none. A follow puts the identity away before `.follows` is
+`.follows`, synced, so the follow's identity goes with it: putting the
+identity away by an unlink before it took a pair's failover from 4.0 ms a
+tenant to 5.2 (`overhead`'s pair alone, eight runs a side in ABBA turns at
+a load of 1.5), synced on its own to 8.3-9.5. It then stamps a fresh one,
+unsynced (`Tenants::promote_as`), which the promote answers: a stamp alone
+is 46 us, and the pair's failover went from 3.8 ms a tenant to 4.2, the
+failover across two nodes from 8.1 to 8.7 (`make shard-bench
+ARGS=failovers`, three runs a side with the stamp and without, at a load
+of 3; an ABBA of eight a side there read 3.8 against 5.3, noisier) --
+against a lapsed lease's seconds. A follow puts the identity away before `.follows` is
 written, its directory sync covering the unlink: kept, the create's, in
 role `n`, would hold again once a promotion removed `.follows` wherever a
 power loss lost the follow's stamp. A create and an install unlink one a
