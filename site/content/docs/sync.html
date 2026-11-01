@@ -465,8 +465,8 @@ it (6 MB at the default), so a burst of writes beside a long seed does not
 send the client to be seeded again; past that the seed is read once more
 under the lock. A shape an index answers, or a short one, is read under the
 lock as before. Beside a subscriber seeded over and over from a million rows,
-single writes at 1 000 a second took 0.8 ms at p99, where they took 207 to
-237 ms while the seed held the lock, and each seed took as long as it did
+single writes at 1 000 a second took 0.8 ms at p99, where they took 212 to
+231 ms while the seed held the lock, and each seed took as long as it did
 (<code>make seed-bench</code>).</p>
 </details>
 
