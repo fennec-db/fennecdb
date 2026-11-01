@@ -6,8 +6,9 @@
 //! answered) -- for [`RUN`], alone and beside a subscriber seeded over and
 //! over: `GET /items/changes`, read to the end of its `seed` event, then on
 //! through the stream's first look -- the `change` event telling the writes
-//! made while the seed was read, all of them read under the lock -- and
-//! [`LINGER`] after it, closed. A write's time runs from the moment it was
+//! made while the seed was read, all of them read under the lock, or the
+//! seed again where they overran the change ring -- and [`LINGER`] after
+//! it, closed. A write's time runs from the moment it was
 //! due, not the moment it went out, so a write the stall held back counts
 //! the wait of every one queued behind it, as an app making them at that
 //! rate meets it. Printed: the writes' rate, p50, p99 and longest over the
@@ -32,11 +33,11 @@ use std::time::{Duration, Instant};
 const ROWS: usize = 1_000_000;
 const RUN: Duration = Duration::from_secs(10);
 
-/// How long a subscriber stays after its first `change` event: the looks
+/// How long a subscriber stays after its first look's event: the looks
 /// after the first, each a write's, are timed beside the writes too.
 const LINGER: Duration = Duration::from_millis(100);
 
-/// How long a subscriber waits for its first `change` event at most: one
+/// How long a subscriber waits for its first look's event at most: one
 /// comes with the next write once the seed is sent.
 const FIRST_LOOK: Duration = Duration::from_secs(5);
 
@@ -104,33 +105,47 @@ fn start(file: &Path) -> (http::Server, String) {
 }
 
 /// A subscriber's seed: the stream opened, read to the end of its `seed`
-/// event, then on to the end of its first `change` -- the stream's first
-/// look after the seed, which reads every write made while the seed was
-/// read, under the lock -- and [`LINGER`] after it, and let go. The seed's
-/// time to its last byte, ms; `buf` left holding the seed alone.
+/// event, then on to the end of the event its first look sends -- a
+/// `change` telling every write made while the seed was read, read under
+/// the lock, or, where those writes overran the change ring, the seed
+/// again -- and [`LINGER`] after it, and let go. The seed's time to its
+/// last byte, ms; `buf` left holding the seed alone.
 fn seed(addr: &str, buf: &mut Vec<u8>) -> f64 {
     let (mut s, took, end) = seed_event(addr, buf);
     let mut after = buf.split_off(end);
-    let mut chunk = vec![0u8; 1 << 16];
+    let mut chunk = vec![0u8; 1 << 20];
     s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
-    const CHANGE: &[u8] = b"event: change\n";
     let first = Instant::now() + FIRST_LOOK;
+    // Only the bytes since the last look are searched, a needle's length
+    // back: a second seed is 57 MB.
+    let (mut from, mut start) = (0, None);
     let mut until = None;
     while until.map_or(Instant::now() < first, |at| Instant::now() < at) {
+        if until.is_none() {
+            start = start.or_else(|| find(&after, from, b"event: "));
+            if start.is_some_and(|at| find(&after, from.max(at), b"\n\n").is_some()) {
+                until = Some(Instant::now() + LINGER);
+                after = Vec::new();
+                continue;
+            }
+            from = after.len().saturating_sub(7);
+        }
         match s.read(&mut chunk) {
             Ok(0) => panic!("the stream ended after its seed"),
             Ok(n) if until.is_none() => after.extend_from_slice(&chunk[..n]),
             _ => {}
         }
-        if until.is_none() {
-            let told = after.windows(CHANGE.len()).position(|w| w == CHANGE);
-            if told.is_some_and(|at| after[at..].windows(2).any(|w| w == b"\n\n")) {
-                until = Some(Instant::now() + LINGER);
-                after = Vec::new();
-            }
-        }
     }
     took
+}
+
+/// Where `needle` is in `hay` at or after `from`.
+fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    let at = hay
+        .get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)?;
+    Some(from + at)
 }
 
 /// A stream opened and read to the end of its `seed` event into `buf`,
