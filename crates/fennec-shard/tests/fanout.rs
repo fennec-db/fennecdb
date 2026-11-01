@@ -584,6 +584,46 @@ fn a_write_across_tenants_is_refused_and_writes_nothing() {
     assert_eq!(r.0, 403, "{}", r.1);
 }
 
+/// A call across tenants is a read where each tenant's statement reads --
+/// answered by every node and merged as any read -- and refused before it
+/// runs where it writes, naming the statement, nothing written.
+#[test]
+fn a_call_across_tenants_reads_and_one_that_writes_is_refused() {
+    let c = cluster(
+        "calls",
+        Setup {
+            limits: Limits {
+                concurrency: 1,
+                ..Limits::default()
+            },
+            ..Setup::default()
+        },
+    );
+    for t in ["acme", "beta", "gamma"] {
+        for def in [
+            "create statement pros() as get users select email where plan = 'pro'",
+            "create statement stamp() public as insert users {email: 'z', plan: 'x'}",
+        ] {
+            let r = c.call("POST", &format!("/t/{t}/query"), &query(def), None);
+            assert_eq!(r.0, 200, "{t}: {}", r.1);
+        }
+    }
+    let (status, a) = c.fan(&query("call pros"), None);
+    assert_eq!(status, 200, "{a}");
+    assert!(a.contains(r#""answered":3"#), "{a}");
+    for email in ["a1", "a3", "b1"] {
+        assert!(rows(&a).contains(&format!(r#""email":"{email}""#)), "{a}");
+    }
+    assert!(!rows(&a).contains("a2"), "{a}");
+    let (status, a) = c.fan(&query("call stamp"), None);
+    assert_eq!(status, 403, "{a}");
+    assert!(a.contains("`call stamp` writes"), "{a}");
+    assert!(a.contains(r#""not_asked":2"#), "{a}");
+    let (status, a) = c.fan(&query("get users where plan = 'x' count"), None);
+    assert_eq!(status, 200, "{a}");
+    assert!(!a.contains(r#""count":1"#), "{a}");
+}
+
 /// The rows and bytes gathered are bounded, and a query past either is
 /// refused, never answered with what fitted.
 #[test]

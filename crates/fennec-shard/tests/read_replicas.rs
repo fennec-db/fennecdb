@@ -1014,6 +1014,17 @@ fn a_marked_read_near_a_read_replica_is_answered_there_and_never_older_than_its_
     );
     assert_eq!(status, 404, "{body}");
 
+    // Statements the replica follows, as it follows the rows.
+    write(
+        w.us,
+        "acme",
+        "create statement bodies() as get notes select body",
+    );
+    write(
+        w.us,
+        "acme",
+        "create statement stamp() public as insert notes {body: 'z'}",
+    );
     // A write through us's router goes home; the read marked after it is
     // answered with it.
     let a = write(w.us, "acme", r#"put notes {body: "a"}"#);
@@ -1049,6 +1060,20 @@ fn a_marked_read_near_a_read_replica_is_answered_there_and_never_older_than_its_
     );
     let (_, body) = read(w.us, "acme", "get notes select body");
     assert!(body.contains(r#""b""#), "{body}");
+    // A call whose statement reads is a marked read like any, answered
+    // there -- the replica's rows, home's newer one not among them -- and
+    // one whose statement writes is refused there in a marked read's
+    // words, never sent home to land.
+    let near = [("Fennec-Read", "replica")];
+    let (status, _, body) = request(w.us, "POST", "/t/acme/_call/bodies", "", &near);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""a""#) && !body.contains(r#""b""#),
+        "{body}"
+    );
+    let (status, _, body) = request(w.us, "POST", "/t/acme/_call/stamp", "", &near);
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("only reads"), "{body}");
     // Naming the write, the replica cannot catch up in the wait, and the
     // read goes home: never older than the client's own write.
     let (status, _, body) = request(

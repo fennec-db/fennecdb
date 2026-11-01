@@ -216,9 +216,19 @@ fn run_text(
 }
 
 /// Whether every statement only reads, for a caller that can then take a
-/// lock others read beside.
+/// lock others read beside. A call is never one by its statement: whether
+/// it reads is its definition's, asked under a lock ([`reads`]).
 pub fn read_only(p: &Prepared) -> bool {
     p.stmts.iter().all(|s| s.is_read_only())
+}
+
+/// Whether every statement runs over `&Database` as `db` stands: a read,
+/// or a call whose statement reads ([`Database::reads`]), for [`query`]
+/// to answer. Asked under the read lock the text then runs under, so that
+/// no `drop` and `create` lands between; a text holding no call is
+/// answered by [`read_only`] with no lock.
+pub fn reads(db: &Database, p: &Prepared) -> bool {
+    p.stmts.iter().all(|s| db.reads(s))
 }
 
 /// [`execute`] over statements that only read ([`read_only`]), through

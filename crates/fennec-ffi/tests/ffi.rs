@@ -811,3 +811,34 @@ fn a_synced_handle_queues_its_writes_for_the_server() {
     assert_eq!(code, FENNEC_READ_ONLY, "{text}");
     assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
 }
+
+/// A call whose statement reads is a read in the native library too, on a
+/// handle no file was opened before: taken beside the other readers, its
+/// answer the last statement's and no change counted -- alone and in a
+/// text of reads -- while one that writes lands as a write.
+#[test]
+fn a_call_that_reads_is_read_beside_the_readers() {
+    let h = memory();
+    query(
+        h,
+        "create collection notes (title text, n int); \
+         put notes {title: 'a', n: 1}; put notes {title: 'b', n: 2}; \
+         create statement titles($over int) as get notes select title where n > $over; \
+         create statement note($t text) public as insert notes {title: $t, n: 9} returning id",
+        "",
+    );
+    let seq = |s: &str| -> u64 {
+        let n = &s["{\"seq\":".len()..];
+        n[..n.find(',').unwrap()].parse().unwrap()
+    };
+    let at = seq(&changes(h, u64::MAX));
+    let r = query(h, "call titles {over: 1}", "");
+    assert!(r.contains(r#"[{"title":"b"}]"#), "{r}");
+    let r = query(h, "get notes count; call titles $1", r#"[{"over": 0}]"#);
+    assert!(r.contains(r#"{"title":"a"},{"title":"b"}"#), "{r}");
+    assert_eq!(seq(&changes(h, u64::MAX)), at);
+    let r = query(h, "call note {t: 'c'}", "");
+    assert!(r.contains(r#""id":3"#), "{r}");
+    assert_eq!(seq(&changes(h, u64::MAX)), at + 1);
+    assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
+}

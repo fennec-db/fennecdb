@@ -935,8 +935,9 @@ fn run(db: &mut Database, src: &str) -> bool {
     };
     // Refused here, before any of the text runs: handed to the engine, the
     // file's sink refused the write as a storage error, after which every
-    // write said "writes are refused after a storage error".
-    if opened_read_only() && stmts.iter().any(|s| !s.is_read_only()) {
+    // write said "writes are refused after a storage error". A call whose
+    // statement reads is a read ([`Database::reads`]): it opens no block.
+    if opened_read_only() && stmts.iter().any(|s| !db.reads(s)) {
         eprintln!("error: {READ_ONLY_REFUSAL}");
         return false;
     }

@@ -261,6 +261,21 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
     let out = fennec(&["--read-only", &p, "-c", &put]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("--read-only"));
+    // A call whose statement reads is a read there; one that writes, not.
+    for def in [
+        "create statement noted() as get notes select id",
+        "create statement stamp() public as insert notes {body: 'x'}",
+    ] {
+        let (status, body) = server.run("/query", def);
+        assert_eq!(status, 200, "{def}: {body}");
+    }
+    assert_eq!(
+        ids(&fennec(&["--read-only", &p, "-c", "call noted"])),
+        [1]
+    );
+    let out = fennec(&["--read-only", &p, "-c", "call stamp"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("--read-only"));
 
     for id in [3, 4] {
         let a = server.query(&format!(r#"put notes {{id: {id}, body: "server"}}"#));

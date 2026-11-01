@@ -264,9 +264,11 @@ fn a_call_whose_lease_lapses_as_it_runs_is_told_to_come_back() {
 /// back (503, `Retry-After`) before it is judged, whichever way it came:
 /// judged against this copy's definitions, an old primary after a failover
 /// answered 404 for a statement only the new primary holds, or 400 for the
-/// arguments its new version takes. A marked read passes the freeze and is
-/// judged, as a read-only server judges it -- 404, then the 403 of a write
-/// -- and once the tenant takes writes again each call is judged as before.
+/// arguments its new version takes. A call whose statement this copy holds
+/// and reads is a read, answered as a `get` is (slice 5). A marked read
+/// passes the freeze and is judged, as a read-only server judges it -- 404,
+/// then the 403 of a write -- and once the tenant takes writes again each
+/// call is judged as before.
 #[test]
 fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
     let n = Node::start("call-unjudged");
@@ -274,6 +276,7 @@ fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
     for q in [
         "create collection notes (title text)",
         "create statement stamp($t text) public as insert notes {title: $t}",
+        "create statement titles() as get notes select title",
     ] {
         let a = c.query(q);
         assert_eq!(a.status, 200, "{q}: {}", a.body);
@@ -291,6 +294,13 @@ fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
                 let a = c.send("POST", &format!("/t/acme/{route}"), false, &line);
                 told_to_come_back(&a, &format!("{why}: /{route} {name}"));
             }
+        }
+        // A call whose statement this copy holds and reads is a read, which
+        // a freeze and a lapsed lease let through as they let a `get`.
+        let line = r#"{"query":"call titles"}"#;
+        for (path, body) in [("_call/titles", ""), ("query", line), ("batch", line)] {
+            let a = c.send("POST", &format!("/t/acme/{path}"), false, body);
+            assert_eq!(a.status, 200, "{why}: {path}: {}", a.body);
         }
     };
     n.tenants.freeze("acme").unwrap();
