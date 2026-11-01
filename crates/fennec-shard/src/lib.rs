@@ -3924,7 +3924,17 @@ impl Router {
                 // come since, which the next try judges.
                 let (how, ids) = match answer {
                     Ok((201, body)) => ("made", instances_at(&fields_of(&body))),
-                    Ok((409, _)) if recorded => ("found there", Vec::new()),
+                    // The recorded copy, named by the identity recorded for
+                    // it: a promotion since -- by a router this one lags --
+                    // minted that file another, so the node refuses the
+                    // follow rather than write over a live primary.
+                    Ok((409, _)) if recorded => (
+                        "found there",
+                        self.read_dir()
+                            .placed_instance(tenant, on)
+                            .into_iter()
+                            .collect(),
+                    ),
                     Ok((status, body)) => {
                         return Err(format!(
                             "`{on}` answered {status}: {}",
