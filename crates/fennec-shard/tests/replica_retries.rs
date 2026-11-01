@@ -25,7 +25,7 @@
 //! for what must happen, a repair's tries 2, 4 and 8 s apart, bounded by
 //! [`WITHIN`].
 
-use fennec_http::tenants::{Replicated, Tenants};
+use fennec_http::tenants::{Kept, Replicated, Tenants};
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
 use std::io::{Read, Write};
@@ -561,7 +561,7 @@ fn instance_in(body: &str) -> String {
 }
 
 /// A file's identity changes as what it is does: a follow gives the copy
-/// a new one -- the router's proposal, where it sends one -- and a
+/// a new one -- one minted, the router sending none here -- and a
 /// promotion takes it away with `.follows`, so a reclaim naming one from
 /// before takes nothing the file has become since. Kept, a copy a router
 /// left that a repair made the tenant's replica, or a failover its
@@ -623,6 +623,39 @@ fn a_follow_and_a_promotion_change_a_files_identity() {
     assert_ne!(fennec_http::instance::text(frozen), followed);
     n2.tenants.thaw("acme").unwrap();
     assert_eq!(n2.tenants.instance("acme"), Some(frozen));
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
+}
+
+/// A follow the router gave up on may land late, after the router took
+/// back the file its `PUT` made and made the tenant's replica there again.
+/// The follow keeps the identity it proposes only on the file carrying it
+/// as it begins: given it as proposed, the live replica took the identity
+/// a stale row still names -- a router promoted behind the one that took
+/// the file back -- and a reclaim of that row took the replica.
+#[test]
+fn a_follow_landing_late_gives_a_later_file_no_identity() {
+    let (n1, n2) = (node("lf1"), node("lf2"));
+    let port = router();
+    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "lf1", "");
+    create_acme(port);
+    let from = format!("http://127.0.0.1:{}", n1.port);
+    let follow = |id: u64| n2.tenants.follow_as("acme", Some(&from), None, Some(id));
+    let (first, later) = (0xa1, 0xb2);
+    // An attach: its `PUT` and its follow under one identity.
+    n2.tenants.create_as("acme", Some(first)).unwrap();
+    assert_eq!(follow(first).unwrap(), Some(first));
+    // Taken back, and the replica made there again by the try after.
+    assert!(n2.tenants.reclaim("acme", &[first]).unwrap());
+    n2.tenants.create_as("acme", Some(later)).unwrap();
+    assert_eq!(follow(later).unwrap(), Some(later));
+    // The first follow lands now: the replica follows on, carrying none.
+    assert_eq!(follow(first).unwrap(), None);
+    assert_eq!(n2.tenants.instance("acme"), None);
+    assert!(matches!(
+        n2.tenants.reclaim("acme", &[first, later]),
+        Err(Kept::Other(None))
+    ));
+    assert!(n2.holds("acme"));
     reads(n2.port, "acme", "get notes select title", "\"one\"");
 }
 
@@ -1059,13 +1092,14 @@ fn a_detached_replica_that_stayed_is_reported() {
     assert!(n2.holds("acme"), "the repair took the copy off");
 }
 
-/// An attach that found a file of the name on its node (409) and failed
-/// after notes it too: here one put there by hand, which the replica
-/// placed on another node -- of another zone by then -- leaves reported,
-/// its row where it was. Noted only where the `PUT` made the file (201),
-/// it went unsaid.
+/// A file of the name a repair's look finds on a node, no row naming it
+/// by an identity -- here one put there by hand, on the node of another
+/// zone the rule puts first -- is noted and never written over: the
+/// replica goes on the other node in the same repair, the file reported
+/// with its row where it was. Found by the attach, it was followed, the
+/// primary's image taking its place, and noted only where that failed.
 #[test]
-fn a_file_an_attach_found_and_failed_on_is_reported() {
+fn a_file_a_repair_found_is_reported_never_followed() {
     let (n1, n2, n3) = (node("fd1"), node("fd2"), node("fd3"));
     let p2 = Proxy::to(n2.port);
     let port = router();
@@ -1074,22 +1108,15 @@ fn a_file_an_attach_found_and_failed_on_is_reported() {
     made_by_hand(n2.port, "fd2", "acme");
     put_node(port, "n2", &p2.addr, "fd2", "b");
     put_node(port, "n3", &format!("127.0.0.1:{}", n3.port), "fd3", "a");
-    p2.arm("/acme/follow", Act::Refuse, usize::MAX);
-    let (status, body) = repair(port);
-    assert_eq!(status, 502, "{body}");
-    assert!(p2.seen("PUT /_admin/tenants/acme ") >= 1);
-    // The zones turn: n3 is the one of another zone than n1's now.
-    put_node(port, "n2", &p2.addr, "fd2", "a");
-    put_node(port, "n3", &format!("127.0.0.1:{}", n3.port), "fd3", "b");
-    until("acme never got its replica on n3", || {
-        placed(port, "acme").1.as_deref() == Some("n3")
-    });
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
+    assert_eq!(placed(port, "acme").1.as_deref(), Some("n3"), "{body}");
     assert!(
-        reports(&body, "acme", "n2", "found there by an attach"),
+        reports(&body, "acme", "n2", "a copy a repair found there"),
         "{body}"
     );
+    assert_eq!(p2.seen("PUT /_admin/tenants/acme "), 0);
+    assert_eq!(p2.seen("/acme/follow"), 0);
     reads(n2.port, "acme", "get notes select title", "\"by hand\"");
 }
 
@@ -1225,6 +1252,62 @@ fn a_tenant_moved_back_where_its_copy_was_noted_stays() {
     let (status, body) = repair(r1);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""left":[]"#), "{body}");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The review's attach: a file an attach's `PUT` found (409) that no row
+/// notes was made to follow as found. A standby router promoted behind its
+/// primary -- its directory taken while the tenant stood on n1 alone --
+/// moved the tenant off the copy the primary's own move had left on n1,
+/// and gave it its replica on n2, of another zone, where the primary had
+/// moved it and written since: the follow had the live primary take the
+/// image of the stale one, its write lost. Judged as a move's target is
+/// now: the file is kept, noted for an operator, never followed.
+#[test]
+fn an_attach_keeps_a_live_primary_it_did_not_leave() {
+    let (n1, n2, n3) = (node("la1"), node("la2"), node("la3"));
+    let (p1, p2) = (Proxy::to(n1.port), Proxy::to(n2.port));
+    let scratch = std::env::temp_dir().join(format!("fennec-retries-la-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let (primary, standby) = (scratch.join("r1.fennec"), scratch.join("r2.fennec"));
+    let (r1, _) = router_over(Directory::open(&primary).unwrap(), false);
+    put_node(r1, "n1", &p1.addr, "la1", "a");
+    put_node(r1, "n2", &p2.addr, "la2", "b");
+    put_node(r1, "n3", &format!("127.0.0.1:{}", n3.port), "la3", "a");
+    create_acme(r1);
+    assert_eq!(placed(r1, "acme"), ("n1".into(), None));
+    // The standby's directory, as it stood then.
+    std::fs::copy(&primary, &standby).unwrap();
+    // The primary moves it to n2, its source on n1 staying, and writes.
+    p1.arm("DELETE /_admin/tenants/acme ", Act::Refuse, 1);
+    let (status, body) = call(r1, "POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#);
+    assert_eq!(status, 200, "{body}");
+    assert!(n1.holds("acme"));
+    let (status, body) = query(r1, "/t/acme/query", r#"put notes {title: "two"}"#);
+    assert_eq!(status, 200, "{body}");
+    // The standby promoted, acme on n1 there: moved to n3, its replica
+    // goes on n2, of another zone than n3's.
+    let (r2, _) = router_over(Directory::open(&standby).unwrap(), true);
+    let (status, body) = call(r2, "POST", "/_shard/tenants/acme/move", r#"{"to":"n3"}"#);
+    assert_eq!(status, 200, "{body}");
+    assert!(p2.seen("PUT /_admin/tenants/acme ") >= 1, "no attach on n2");
+    assert_eq!(
+        p2.seen("/acme/follow"),
+        0,
+        "n2's live primary was followed over"
+    );
+    let (status, body) = query(n2.port, "/t/acme/query", r#"put notes {title: "three"}"#);
+    assert_eq!(status, 200, "n2's primary takes no write: {body}");
+    reads(n2.port, "acme", "get notes select title", "\"two\"");
+    assert!(files_left(r2) >= 1, "the file was not noted");
+    let (_, body) = repair(r2);
+    assert!(
+        reports(&body, "acme", "n2", "found there by an attach"),
+        "{body}"
+    );
+    assert_eq!(p2.seen("/acme/follow"), 0);
+    reads(n2.port, "acme", "get notes select title", "\"three\"");
     let _ = std::fs::remove_dir_all(&scratch);
 }
 

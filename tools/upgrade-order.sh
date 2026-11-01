@@ -18,7 +18,10 @@
 #   - an old node names no identity for a file it makes, and answers this
 #     tree's router asking it to take a file back (`/reclaim`) 404, which
 #     keeps the file: the router reports it and sends no DELETE in its
-#     place (roadmap row 47).
+#     place (roadmap row 47);
+#   - an old router over this tree's nodes, proposing and reading no
+#     identity, creates, replicates, moves and deletes a tenant as before,
+#     each file given one its node minted, and the delete taking it away.
 #
 # This builds `fennec-server`, `fennec` and `fennec-shard` at BASE, the last
 # main before the kind, runs this tree's binaries beside the old ones,
@@ -267,4 +270,63 @@ grep -q 'answered 404' "$WORK/admin.out" ||
 query "$N2/t/zzz" "get notes count" | grep -q '"count":1' ||
     fail "the old node's file was taken back"
 echo "old node:     a reclaim answered 404, the file kept and reported"
+
+# A router from before identities over this tree's nodes (roadmap row 47):
+# it proposes no identity and reads none, and every call it makes is
+# answered as before -- a create and its replica's follow, each file given
+# an identity the node minted in its role (`"instance"`, an answer's field
+# the old router passes over), a move's freeze and install, and a delete
+# taking each file and its `.instance` away.
+for n in n3 n4 n5; do
+    "$NEW/fennec-server" --dir "$WORK/$n" --http 127.0.0.1:0 --admin-token "a$n" \
+        --replication-token r >"$WORK/$n.log" 2>&1 &
+    PIDS+=($!)
+done
+"$OLD/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/old-router2.fennec" \
+    --token root --replicas >"$WORK/old-router2.log" 2>&1 &
+PIDS+=($!)
+OLD_ROUTER=$(address "$WORK/old-router2.log")
+for n in n3 n4 n5; do
+    addr=$(address "$WORK/$n.log")
+    code=$(admin "$OLD_ROUTER" PUT "/_shard/nodes/$n" "{\"addr\":\"${addr#http://}\",\"token\":\"a$n\"}")
+    case "$code" in
+    2??) ;;
+    *) fail "the old router did not take $n ($code): $(cat "$WORK/admin.out")" ;;
+    esac
+done
+code=$(admin "$OLD_ROUTER" PUT /_shard/tenants/beta '{"node":"n3"}')
+case "$code" in
+2??) ;;
+*) fail "the old router placed no tenant on this tree's node ($code): $(cat "$WORK/admin.out")" ;;
+esac
+query "$OLD_ROUTER/t/beta" "create collection notes (title text)" >/dev/null
+query "$OLD_ROUTER/t/beta" "put notes {title: 'held'}" | grep -q '"error"' &&
+    fail "the tenant on this tree's node took no write"
+admin "$OLD_ROUTER" GET /_shard/tenants/beta >/dev/null
+REP=$(grep -o '"replica":"n[45]"' "$WORK/admin.out" | cut -d'"' -f4)
+[ -n "$REP" ] || fail "the old router gave the tenant no replica: $(cat "$WORK/admin.out")"
+grep -q ' n$' "$WORK/n3/beta.instance" ||
+    fail "the create gave its file no identity: $(cat "$WORK/n3/beta.instance" 2>&1)"
+grep -q ' f$' "$WORK/$REP/beta.instance" ||
+    fail "the follow gave its copy no identity: $(cat "$WORK/$REP/beta.instance" 2>&1)"
+TO=n4
+[ "$REP" = n4 ] && TO=n5
+code=$(admin "$OLD_ROUTER" POST /_shard/tenants/beta/move "{\"to\":\"$TO\"}")
+case "$code" in
+2??) ;;
+*) fail "the old router's move between this tree's nodes answered $code: $(cat "$WORK/admin.out")" ;;
+esac
+query "$OLD_ROUTER/t/beta" "get notes count" | grep -q '"count":1' ||
+    fail "the tenant moved by the old router lost what it held"
+[ -e "$WORK/$TO/beta.instance" ] || fail "the install gave its file no identity"
+[ -e "$WORK/n3/beta.fennec" ] || [ -e "$WORK/n3/beta.instance" ] &&
+    fail "the move's source, or its identity, stayed on n3"
+code=$(admin "$OLD_ROUTER" DELETE /_shard/tenants/beta)
+[ "$code" = 204 ] || fail "the old router's delete answered $code: $(cat "$WORK/admin.out")"
+for n in n3 n4 n5; do
+    for f in beta.fennec beta.instance; do
+        [ -e "$WORK/$n/$f" ] && fail "the delete left $n's $f"
+    done
+done
+echo "old router:   a create, its replica, a move and a delete on this tree's nodes"
 echo "ok: the binaries from before stop in words at the first definition"

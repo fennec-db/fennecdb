@@ -1087,11 +1087,18 @@ impl Tenants {
         self.follow_as(name, from, lineage, None).map(|_| ())
     }
 
-    /// [`Tenants::follow_lineage`], the file given a new identity as it is
-    /// made to follow -- `proposed`, or one minted -- which it answers with
-    /// (its old one put away first, [`Self::put_away`], the new one given
-    /// after, [`Self::stamp`]): before then it may have been a file a router
-    /// left, and noted under the identity it had.
+    /// [`Tenants::follow_lineage`], the file given an identity as it is made
+    /// to follow, which it answers with (its old one put away first,
+    /// [`Self::put_away`], the new one given after, [`Self::stamp`]): before
+    /// then it may have been a file a router left, and noted under the
+    /// identity it had. One minted where none is `proposed`; a proposal is
+    /// the identity of the file the router's own `PUT` made, kept only where
+    /// the file carried it as the follow began, and none given otherwise.
+    /// A follow the router gave up on and noted under it may land late,
+    /// after the router took that file back and made the tenant's replica
+    /// there again: given as proposed, the live replica took the identity a
+    /// stale row still names -- a router promoted behind the one that took
+    /// it back -- and a reclaim of that row took it.
     pub fn follow_as(
         &self,
         name: &str,
@@ -1129,6 +1136,8 @@ impl Tenants {
         let followed = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
+            let kept = proposed.is_none() || self.carried(name, held) == proposed;
+            let give = |held: &Held| kept.then(|| self.stamp(name, proposed, held)).flatten();
             if let Held::Open(t) = &*held {
                 if t.read().history().following && self.upstream_of(name) == wanted {
                     // Following that node already: its stream is begun again
@@ -1162,7 +1171,7 @@ impl Tenants {
                             Refused(500, format!("tenant `{name}` could not follow again: {e}"))
                         })?;
                     }
-                    return recorded.map(|_| self.stamp(name, proposed, held));
+                    return recorded.map(|_| give(held));
                 }
                 // Closed first: one instance over the file, always. What it
                 // served ends -- a primary's file made a replica's feeds a
@@ -1187,7 +1196,7 @@ impl Tenants {
             })?;
             let t = self.open_as(name, &path, true)?;
             *held = Held::Open(t);
-            Ok(self.stamp(name, proposed, held))
+            Ok(give(held))
         });
         self.touch(name);
         followed
@@ -1288,7 +1297,17 @@ impl Tenants {
                 Some(id)
             }
             Err(e) => {
-                crate::log!("tenant `{name}`'s file was given no identity: {e}");
+                // A file system keeping no birth time gives every file
+                // none ([`instance::binding`]): said once.
+                static SAID: AtomicBool = AtomicBool::new(false);
+                if e.kind() != std::io::ErrorKind::Unsupported
+                    || !SAID.swap(true, Ordering::Relaxed)
+                {
+                    crate::log!(
+                        "tenant `{name}`'s file was given no identity, and a file a router \
+                         leaves there is reported, never taken back: {e}"
+                    );
+                }
                 let _ = instance::put_away(&self.dir, name);
                 None
             }

@@ -587,8 +587,10 @@ meant to take off, and did not: a create taken back (its schema, quota or
 placement refused) whose `DELETE` the node did not take, a create whose
 `PUT` went unanswered, a move undone whose target kept the copy, a move's
 source that would not go, a copy a failed try at a replica made or found, a
-deleted or detached tenant's copy that stayed, or an old primary on a node
-that was silent as its tenant was given its replica elsewhere. A create of
+deleted or detached tenant's copy that stayed, or an old primary -- found by
+a repair's look, or on a node silent as its tenant was given its replica
+elsewhere: a repair never makes a copy it did not note follow, as its node
+cannot tell it from a live primary a newer router placed there. A create of
 the name on that node is answered 409 while the file is there.
 
 Each file on a node carries an identity, 16 hex digits the node mints as a
@@ -644,8 +646,11 @@ not. Read the end of its `why`:
 A move whose target already holds a file of the tenant (the install
 answered 409) takes it back only if it is one this router noted with an
 identity. Any other fails the move 409 -- the tenant stays on its source --
-and notes `a file a move found on its target, which the router did not
-note`; it is looked at as below, and the move is run again once it is gone.
+and notes `a file found there by a move, which the router did not note`; a
+replica's attach meeting one notes `... by an attach of its replica ...`
+and the replica goes elsewhere. It is looked at as below, and the move is
+run again once it is gone. On a file system keeping no birth time no file
+carries an identity: every file left there is reported, never taken back.
 
 **Look at the file before removing it.** A row names where the router may
 have left a file, not that the file there now is the one it left: the

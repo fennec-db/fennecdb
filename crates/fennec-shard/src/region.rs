@@ -1072,7 +1072,7 @@ impl Router {
         // 409: a file of the tenant there, taken back only where this
         // router left it, the node judging (`clear_target`).
         if matches!(installed, Ok((409, _))) {
-            self.clear_target(tenant, to)?;
+            self.clear_target(tenant, to, "a move")?;
             installed = put(image);
         }
         let answer = expect(installed, 201, to)?;

@@ -32,7 +32,8 @@
 //! A file's `instance` is its identity on this node ([`crate::instance`]),
 //! minted as a create or an install makes it and as a follow or a
 //! promotion changes it -- `Fennec-Instance`, where a router sends one, is
-//! taken for a file its `PUT` or follow makes or changes -- and a reclaim
+//! taken for a file its `PUT` makes, and kept by a follow only on the file
+//! carrying it as the follow begins -- and a reclaim
 //! takes back only the file still carrying one it names.
 //! PUT    /_admin/tenants/<t>/quota     {bytes, rows, streams, requests, writes,
 //!                                      write_bytes}: what is set for the tenant

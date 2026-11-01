@@ -1175,18 +1175,20 @@ fn a_tenant_that_took_no_write_fails_over_onto_the_copy_that_took_its_image() {
     );
 }
 
-/// An old primary's copy that never heard from the tenant's new primary is
-/// never promoted. `t` fails over from n1 onto its replica; n1 comes back
-/// and a repair makes its copy -- the file n1 held as primary -- follow the
-/// new one, whose stream to it is held; then the new primary goes too.
-/// Promoted, n1's copy took back every write since the first failover: a
+/// A copy that never heard from the tenant's new primary is never
+/// promoted. `t` fails over from n1 onto its replica; n1 comes back, and a
+/// repair gives `t` its replica on the third node -- n1's copy, the file it
+/// held as primary, is reported and never made to follow (`attach`): no row
+/// names it by an identity -- whose stream from the new primary is held;
+/// then the new primary goes too. Made to follow, as it was before, n1's
+/// copy took back every write since the first failover once promoted: a
 /// copy of the tenant's lineage, it held writes, so neither a check of its
-/// lineage nor of its change let it be. It lacks the history the new
-/// primary forked, which the router tells the node: `t` stays where its
-/// rows are, and reads them all once that node is back. `u`, on the new
-/// primary with a replica that heard from it, fails over after `t` -- a
-/// node's failover takes its tenants in name order -- and says when `t`
-/// was judged.
+/// lineage nor of its change let it be, and only the history the new
+/// primary forked, which the router tells the node, kept `t`. `t` stays
+/// where its rows are, and reads them all once that node is back. `u`, on
+/// the new primary with a replica that heard from it, fails over after `t`
+/// -- a node's failover takes its tenants in name order -- and says when
+/// `t` was judged.
 #[test]
 fn an_old_primary_s_copy_that_never_heard_from_the_new_one_is_never_promoted() {
     let nodes = [1, 2, 3].map(|i| node(&format!("stale{i}"), true));
@@ -1212,15 +1214,16 @@ fn an_old_primary_s_copy_that_never_heard_from_the_new_one_is_never_promoted() {
     nodes[0].proxy.cut();
     failover_done(port, "t", &r);
     written(port, "t", r#"put notes {id: 2, title: "two"}"#);
-    // Every stream from the new primary held from here: n1's copy, made to
-    // follow it, never hears from it.
+    // Every stream from the new primary held from here: the third node's
+    // copy, made to follow it, never hears from it.
     filter.armed.store(true, Ordering::SeqCst);
     nodes[0].proxy.heal();
+    let third = if r == "n2" { "n3" } else { "n2" };
     let deadline = Instant::now() + WITHIN;
-    while placed(port, "t").1.as_deref() != Some("n1") {
+    while placed(port, "t").1.as_deref() != Some(third) {
         assert!(
             Instant::now() < deadline,
-            "n1's copy was never made t's replica: {:?}",
+            "t's replica never went to {third}: {:?}",
             placed(port, "t")
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -1228,12 +1231,17 @@ fn an_old_primary_s_copy_that_never_heard_from_the_new_one_is_never_promoted() {
     while filter.held() == 0 {
         assert!(
             Instant::now() < deadline,
-            "n1's copy never asked the new primary"
+            "{third}'s copy never asked the new primary"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    // `u` on the new primary, its replica -- on the third node, which holds
-    // the fewest -- holding its row.
+    let (_, rows) = query(nodes[0].port, "/t/t/query", "get notes select title");
+    assert!(
+        !rows.contains("\"two\""),
+        "n1's old copy was followed: {rows}"
+    );
+    // `u` on the new primary, its replica -- on n1, which holds the fewest
+    // -- holding its row.
     tenant_on(port, "u", &r);
     written(port, "u", r#"put notes {id: 1, title: "u"}"#);
     let ru = placed(port, "u").1.expect("u has a replica");
@@ -1361,15 +1369,18 @@ fn a_tenant_restored_in_place_before_its_last_failover_fails_over_again() {
     nodes[0].proxy.cut();
     failover_done(port, "t", &r);
     written(port, "t", r#"put notes {id: 2, title: "two"}"#);
-    // n1 back: its copy follows r.
+    // n1 back: its copy, the old primary no row names by an identity, is
+    // reported and kept, and t's replica goes on the third node.
     nodes[0].proxy.heal();
     until_failed_over(port, "n1", 0.0, "n1 never answered again");
+    let q = if r == "n2" { "n3" } else { "n2" };
     let deadline = Instant::now() + WITHIN;
-    while placed(port, "t").1.as_deref() != Some("n1") {
-        assert!(Instant::now() < deadline, "n1 never became t's replica");
+    while placed(port, "t").1.as_deref() != Some(q) {
+        assert!(Instant::now() < deadline, "{q} never became t's replica");
         std::thread::sleep(Duration::from_millis(20));
     }
-    until(nodes[0].port, "/t/t/query", "get notes select title", "two");
+    let qp = by_name(&nodes, q).port;
+    until(qp, "/t/t/query", "get notes select title", "two");
 
     // t restored on r, its primary, to the moment before the failover.
     let rp = by_name(&nodes, &r).port;
@@ -1378,17 +1389,12 @@ fn a_tenant_restored_in_place_before_its_last_failover_fails_over_again() {
     let (status, b) = raw(rp, "PUT", "/_admin/tenants/t/file", &tok(&r), &image);
     assert_eq!(status, 201, "{}", String::from_utf8_lossy(&b));
     written(port, "t", r#"put notes {id: 3, title: "restored"}"#);
-    // n1's copy takes the restored file whole.
-    until(
-        nodes[0].port,
-        "/t/t/query",
-        "get notes select title",
-        "restored",
-    );
+    // q's copy takes the restored file whole.
+    until(qp, "/t/t/query", "get notes select title", "restored");
 
-    // r goes: n1's copy, which holds every row of its primary, is promoted.
+    // r goes: q's copy, which holds every row of its primary, is promoted.
     by_name(&nodes, &r).proxy.cut();
-    failover_done(port, "t", "n1");
+    failover_done(port, "t", q);
     written(port, "t", r#"put notes {id: 4, title: "after"}"#);
     until(port, "/t/t/query", "get notes select title", "restored");
 }

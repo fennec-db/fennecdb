@@ -322,8 +322,7 @@ struct Granted {
 
 impl Granted {
     fn of(answer: &[u8]) -> Granted {
-        let fields =
-            fennec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
+        let fields = fields_of(answer);
         let mut said = Granted {
             termed: false,
             numbered: false,
@@ -480,21 +479,29 @@ enum Reclaimed {
     Unnoted,
 }
 
-/// Whether a node's JSON answer holds `key` at its top: a reclaim's
-/// judgment names what the file carries, a refusal of anything else not.
-fn field_in(body: &[u8], key: &str) -> bool {
-    fennec_core::json::parse_object(&String::from_utf8_lossy(body))
-        .is_ok_and(|fields| fields.iter().any(|(k, _)| k == key))
+/// The fields at the top of a node's JSON answer, read once: none where it
+/// is not an object. The one reader of what a router takes from a node's
+/// answer -- its `"instance"`, `"lineage"` and the rest ([`text_at`]).
+pub(crate) fn fields_of(body: &[u8]) -> Vec<(String, Value)> {
+    fennec_core::json::parse_object(&String::from_utf8_lossy(body)).unwrap_or_default()
 }
 
-/// The identity a node's answer gives the file its call made or changed
-/// (`"instance"`): none from a node before identities.
-fn instance_in(body: &[u8]) -> Option<u64> {
-    let fields = fennec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
-    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("instance", Value::Text(t)) => fennec_http::instance::parse(&t),
+/// The text at `key` among an answer's fields ([`fields_of`]).
+pub(crate) fn text_at<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a str> {
+    fields.iter().find_map(|(k, v)| match v {
+        Value::Text(t) if k == key => Some(t.as_str()),
         _ => None,
     })
+}
+
+/// The identity an answer gives the file its call made or changed
+/// (`"instance"`), as the identities a file left is noted under: none from
+/// a node before identities.
+fn instances_at(fields: &[(String, Value)]) -> Vec<u64> {
+    text_at(fields, "instance")
+        .and_then(fennec_http::instance::parse)
+        .into_iter()
+        .collect()
 }
 
 /// Why [`Router::place_replica`] gave a tenant no replica.
@@ -1298,6 +1305,31 @@ impl Router {
     /// in ([`fennec_http::lease::HOLDER_HEADER`]).
     fn holder_header(&self) -> String {
         self.holder_of(&self.read_dir()).header()
+    }
+
+    /// `method target` on `n`, naming this router as its lease's holder
+    /// (a follow or a reclaim from a router superseded is refused) and,
+    /// where `id` is given, proposing it as the identity of the file the
+    /// call makes or changes ([`fennec_http::instance::HEADER`]): what the
+    /// router knows of the file where the answer does not come. The one
+    /// place either header is built.
+    fn as_holder(
+        &self,
+        n: &Node,
+        method: &str,
+        target: &str,
+        id: Option<u64>,
+        body: &[u8],
+    ) -> std::io::Result<(u16, Vec<u8>)> {
+        let holder = self.holder_header();
+        let id = id.map(fennec_http::instance::text).unwrap_or_default();
+        let headers = [
+            (fennec_http::lease::HOLDER_HEADER, holder.as_str()),
+            (fennec_http::instance::HEADER, id.as_str()),
+        ];
+        let named = if id.is_empty() { 1 } else { 2 };
+        self.pool
+            .call_with(&n.addr, method, target, &n.token, &headers[..named], body)
     }
 
     /// Grants `node` its lease at once, over what the directory places there
@@ -3732,8 +3764,10 @@ impl Router {
     /// standby. Fewest overall alone had every tenant of one node follow on
     /// the same other: a tie went by name each time, and a failover of the
     /// node put all its tenants there. Among `holding`, the nodes with a
-    /// copy of the tenant already, first: its old primary after a failover
-    /// follows from where it is, and nothing is left behind there.
+    /// copy of the tenant already, first: a copy there is one noted as left
+    /// under an identity -- any other is `kept` ([`Self::place_replica`]) --
+    /// which the attach has its node take back, so nothing is left behind
+    /// there.
     ///
     /// Only a node of `primary`'s region: a failover promotes the replica,
     /// and one in another region would carry the tenant out of its own. And
@@ -3793,24 +3827,30 @@ impl Router {
     }
 
     /// Gives `tenant`, on `primary`, a replica on `on`: the tenant created
-    /// there -- or found there, a copy a failover left -- and made to follow
-    /// `primary`. Recorded once it follows, not before.
+    /// there and made to follow `primary`. Recorded once it follows, not
+    /// before.
     ///
     /// Where it fails once its `PUT` may have made a file, the file is
     /// noted as left on `on` ([`Self::left_on`]) -- made there (201, or
-    /// unanswered), or found there (409) -- under the identities its node
-    /// gave it or the router proposed for a call unanswered: the follow may
-    /// have landed after the router gave it up -- a node's rename of
-    /// `.follows` took 13.3 s under load, past the deploy kit's 10 s -- and
-    /// the copy follows `primary` unrecorded. The repair that tries again
-    /// comes to that node first among those of the zone it would pick
-    /// ([`Self::replica_node`]), and the node takes the copy back for a
-    /// new one where it is the one left ([`Self::reclaim_noted`]).
+    /// unanswered) -- under the identity the router proposed for it, which
+    /// its follow proposes again and the node keeps only on a file carrying
+    /// it as the follow begins: the follow may have landed after the router
+    /// gave it up -- a node's rename of `.follows` took 13.3 s under load,
+    /// past the deploy kit's 10 s -- and the copy follows `primary`
+    /// unrecorded. The repair that tries again comes to that node first
+    /// among those of the zone it would pick ([`Self::replica_node`]), and
+    /// the node takes the copy back for a new one where it is the one left
+    /// ([`Self::reclaim_noted`]).
     ///
-    /// A file noted as left there is never written over unjudged: a follow
-    /// makes it take the primary's image, and a row whose file its node
-    /// cannot vouch for -- noted with no identity, or holding another file
-    /// now -- fails the attach, the node kept out of the tries after.
+    /// A file found there (409) -- but the tenant's replica the directory
+    /// records there, which a move has follow the tenant's new node -- is
+    /// never written over unjudged: taken back
+    /// first only where it is one this router left, the node judging, as a
+    /// move's target is ([`Self::clear_target`]); any other -- noted by no
+    /// row, or one its node cannot vouch for -- fails the attach, noted for
+    /// an operator, the node kept out of the tries after. Followed as found,
+    /// a router promoted behind its primary wrote the image of the tenant's
+    /// primary as it knew it over a live primary there, #371's loss.
     fn attach(&self, tenant: &str, primary: &str, on: &str) -> std::result::Result<(), String> {
         let (p, r) = {
             let dir = self.read_dir();
@@ -3819,46 +3859,33 @@ impl Router {
         };
         let base = format!("/_admin/tenants/{tenant}");
         let from = format!("{{\"from\":{}}}", quote(&format!("http://{}", p.addr)));
-        let holder = self.holder_header();
-        // Each call proposes the identity the file it makes or changes takes
-        // (`Fennec-Instance`): unanswered, it is what the router knows.
-        let call = |method: &str, target: &str, id: u64, body: &[u8]| {
-            let id = fennec_http::instance::text(id);
-            let named = [
-                (fennec_http::lease::HOLDER_HEADER, holder.as_str()),
-                (fennec_http::instance::HEADER, id.as_str()),
-            ];
-            self.pool
-                .call_with(&r.addr, method, target, &r.token, &named, body)
-        };
-        let left = |put: Option<&str>, ids: &[u64], why: String| {
-            if let Some(how) = put {
-                self.left_on(
-                    tenant,
-                    on,
-                    &format!("{how} by an attach of its replica that failed: {why}"),
-                    ids,
-                );
-            }
+        let left = |how: &str, ids: &[u64], why: String| {
+            self.left_on(
+                tenant,
+                on,
+                &format!("{how} by an attach of its replica that failed: {why}"),
+                ids,
+            );
             why
         };
+        // The tenant's replica there already, which a move has follow its
+        // new primary from where it stands: the copy the directory records.
+        let recorded = self.read_dir().replica(tenant) == Some(on);
+        // One identity for the file the attach makes, its `PUT`'s and its
+        // follow's: unanswered, it is what the router knows.
         let made = fennec_http::replication::fresh_id();
-        let mut answer = call("PUT", &base, made, b"");
-        if matches!(answer, Ok((409, _))) {
-            match self.reclaim_noted(tenant, on) {
-                Reclaimed::Unnoted => {}
-                Reclaimed::Gone => answer = call("PUT", &base, made, b""),
-                Reclaimed::Other(why) | Reclaimed::Kept(why) => {
-                    return Err(format!(
-                        "`{on}` holds a file of it noted as left there, kept: {why}"
-                    ))
-                }
-            }
+        let mut answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
+        if matches!(answer, Ok((409, _))) && !recorded {
+            self.clear_target(tenant, on, "an attach of its replica")
+                .map_err(|Fail(_, why)| why)?;
+            answer = self.as_holder(&r, "PUT", &base, Some(made), b"");
         }
-        // What the `PUT` did: a file is there, carrying what the node said.
-        let (put, mut ids) = match answer {
-            Ok((201, body)) => (Some("made"), instance_in(&body).into_iter().collect()),
-            Ok((409, _)) => (Some("found there"), Vec::new()),
+        // What the `PUT` did: a file made, carrying what the node said, or
+        // the recorded copy found. A 409 again is a file come since, which
+        // the next try judges.
+        let (how, ids) = match answer {
+            Ok((201, body)) => ("made", instances_at(&fields_of(&body))),
+            Ok((409, _)) if recorded => ("found there", Vec::new()),
             Ok((status, body)) => {
                 return Err(format!(
                     "`{on}` answered {status}: {}",
@@ -3867,21 +3894,20 @@ impl Router {
             }
             Err(e) => {
                 return Err(left(
-                    Some("perhaps made"),
+                    "perhaps made",
                     &[made],
                     format!("`{on}` did not answer: {e}"),
                 ))
             }
         };
-        let followed = fennec_http::replication::fresh_id();
-        match call("POST", &format!("{base}/follow"), followed, from.as_bytes()) {
-            // Changed: the identity the follow gave it alone.
-            Ok((200, body)) => ids = instance_in(&body).into_iter().collect(),
-            // The follow may have changed it all the same.
+        // The follow keeps the identity on the file the `PUT` made alone:
+        // landing late, on a file made there since, it leaves that one none.
+        let follow = format!("{base}/follow");
+        let ids = match self.as_holder(&r, "POST", &follow, Some(made), from.as_bytes()) {
+            Ok((200, body)) => instances_at(&fields_of(&body)),
             Ok((status, body)) => {
-                ids.push(followed);
                 return Err(left(
-                    put,
+                    how,
                     &ids,
                     format!(
                         "`{on}` answered {status}: {}",
@@ -3889,14 +3915,11 @@ impl Router {
                     ),
                 ));
             }
-            Err(e) => {
-                ids.push(followed);
-                return Err(left(put, &ids, format!("`{on}` did not answer: {e}")));
-            }
-        }
+            Err(e) => return Err(left(how, &ids, format!("`{on}` did not answer: {e}"))),
+        };
         // Its quota, so a failover onto it finds the tenant held as it was.
         if let Some(w) = self.send_quota(tenant, on) {
-            return Err(left(put, &ids, w));
+            return Err(left(how, &ids, w));
         }
         let mut dir = self.write_dir();
         dir.set_replica(tenant, Some(on)).map_err(|e| message(&e))?;
@@ -4025,50 +4048,47 @@ impl Router {
             .map(|&id| quote(&fennec_http::instance::text(id)))
             .collect();
         let body = format!("{{\"instances\":[{}]}}", named.join(","));
-        let holder = self.holder_header();
-        let headers = [(fennec_http::lease::HOLDER_HEADER, holder.as_str())];
         let target = format!("/_admin/tenants/{tenant}/reclaim");
-        let answer = self.pool.call_with(
-            &n.addr,
-            "POST",
-            &target,
-            &n.token,
-            &headers,
-            body.as_bytes(),
-        );
+        let answer = self.as_holder(&n, "POST", &target, None, body.as_bytes());
         match &answer {
             Ok((200, _)) => Reclaimed::Gone,
             // The node's judgment, naming what the file carries: another
-            // file, or one it cannot vouch for.
-            Ok((409, b)) if field_in(b, "instance") => Reclaimed::Other(said(node, &answer)),
+            // file, or one it cannot vouch for (`null`).
+            Ok((409, b)) if fields_of(b).iter().any(|(k, _)| k == "instance") => {
+                Reclaimed::Other(said(node, &answer))
+            }
             _ => Reclaimed::Kept(said(node, &answer)),
         }
     }
 
-    /// A move's install found a file of `tenant` on its target `to` (409).
-    /// Deleted unjudged, as it was, it was the tenant's live file where a
-    /// router promoted behind its primary moved the tenant there again --
-    /// the primary had moved it there and written. Taken back only where it
-    /// is a file this router left there, the node judging
+    /// A move's install, or an attach's `PUT` (`by`), found a file of
+    /// `tenant` on `to` (409). Deleted unjudged by a move, or followed as
+    /// found by an attach, it was the tenant's live file where a router
+    /// promoted behind its primary placed the tenant or its replica there
+    /// again -- the primary had moved it there and written. Taken back only
+    /// where it is a file this router left there, the node judging
     /// ([`Self::reclaim_noted`]); any other -- one a move that died before
-    /// its flip left, or one no row of this router's names -- keeps the
-    /// tenant where it is, the file reported for an operator.
-    pub(crate) fn clear_target(&self, tenant: &str, to: &str) -> Outcome<()> {
+    /// its flip left, an old primary a failover took the tenant off, or one
+    /// no row of this router's names -- is kept, reported for an operator,
+    /// and the call fails.
+    pub(crate) fn clear_target(&self, tenant: &str, to: &str, by: &str) -> Outcome<()> {
         match self.reclaim_noted(tenant, to) {
             Reclaimed::Gone => Ok(()),
             Reclaimed::Unnoted => {
                 self.left_on(
                     tenant,
                     to,
-                    "a file a move found on its target, which the router did not note: its \
-                     node cannot tell it from a later one",
+                    &format!(
+                        "a file found there by {by}, which the router did not note: its node \
+                         cannot tell it from a later one"
+                    ),
                     &[],
                 );
                 Err(Fail(
                     409,
                     format!(
                         "`{to}` holds a file of `{tenant}` this router did not leave there: noted \
-                         for an operator, and the tenant stays where it is"
+                         for an operator, never written over"
                     ),
                 ))
             }
@@ -4165,14 +4185,40 @@ impl Router {
         // A node holding a file of it noted as left there with nothing to
         // take it back by is no place for it: the attach would write over a
         // file this router cannot account for, and fails ([`Self::attach`]).
-        let kept: Vec<String> = self
+        let (unnamed, named): (Vec<_>, Vec<_>) = self
             .read_dir()
             .leftovers()
             .unwrap_or_default()
             .into_iter()
-            .filter(|l| l.tenant == tenant && l.instances.is_empty())
+            .filter(|l| l.tenant == tenant)
+            .partition(|l| l.instances.is_empty());
+        // Nor is one the look found holding a copy no row names by an
+        // identity -- an old primary a failover took the tenant off, or a
+        // live file a newer router placed there -- which the attach would
+        // fail on: noted for an operator here, and the replica goes on
+        // another node in this repair.
+        // A row whose node answered the look listing no such tenant names a
+        // file gone -- removed by an operator -- which the look then forgets.
+        let gone = |n: &String| answering.is_some_and(|a| a.contains(n)) && !holding.contains(n);
+        let mut kept: Vec<String> = unnamed
+            .into_iter()
             .map(|l| l.node)
+            .filter(|n| !gone(n))
             .collect();
+        for n in holding {
+            let recorded = Self::records_file(&self.read_dir(), tenant, n);
+            if recorded || kept.contains(n) || named.iter().any(|l| &l.node == n) {
+                continue;
+            }
+            self.left_on(
+                tenant,
+                n,
+                "a copy a repair found there, which the router did not note: its node cannot \
+                 tell it from a later one",
+                &[],
+            );
+            kept.push(n.clone());
+        }
         let Some(on) = self.replica_node(primary, holding, answering, &kept) else {
             // Free nodes there are, none of them answering: one that does
             // again is tried then.
@@ -4201,9 +4247,11 @@ impl Router {
     }
 
     /// `POST /_shard/replicas`: every tenant in no pair, not moving, without
-    /// a replica, is given one -- on a node that holds a copy already where
-    /// there is one, so a node back from a failover has its old primaries
-    /// follow the new ones rather than lie there. And the files this router
+    /// a replica, is given one -- on a node holding a copy this router left
+    /// there where there is one, its node taking it back first; a copy no
+    /// row names by an identity, a node back from a failover's old primary
+    /// among them, is noted and never written over: its node cannot tell it
+    /// from a live file a newer router placed there. And the files this router
     /// may have left on nodes are reported (`left`), each forgotten that the
     /// look finds gone or the directory gives its tenant now
     /// ([`Self::look_at_leftovers`]).
@@ -4338,8 +4386,8 @@ impl Router {
     /// Notes the file `tenant`'s old primary holds as left there, where the
     /// tenant was just given its replica on `on` and that node -- the one a
     /// failover took it off (`failed_from`) -- did not answer the repair's
-    /// look: answering, it would have kept the replica, its old primary's
-    /// file made to follow, and silent, the file was left unnoted, an
+    /// look: answering, its copy was noted as the look found it
+    /// ([`Self::place_replica`]), and silent, the file was left unnoted, an
     /// orphan holding the writes it took before the failover.
     fn note_old_primary(&self, tenant: &str, on: &str, answering: &[String]) {
         let dir = self.read_dir();
@@ -5014,11 +5062,7 @@ impl Router {
         // The identity the file takes, proposed (`Fennec-Instance`): what the
         // router knows of it where the answer does not come.
         let proposed = fennec_http::replication::fresh_id();
-        let proposal = fennec_http::instance::text(proposed);
-        let headers = [(fennec_http::instance::HEADER, proposal.as_str())];
-        let made = self
-            .pool
-            .call_with(&n.addr, "PUT", &target, &n.token, &headers, b"");
+        let made = self.as_holder(&n, "PUT", &target, Some(proposed), b"");
         // No answer: the node may have made the file all the same, an
         // orphan no placement names, which a create of the name placed there
         // again meets as 409. Noted as left there, under the identity it
@@ -5031,13 +5075,13 @@ impl Router {
                 &[proposed],
             );
         }
-        let made = expect(made, 201, &name)?;
+        let made = fields_of(&expect(made, 201, &name)?);
         // What the node gave the file, which a take-back that fails notes
         // it by: none from a node before identities.
-        let ids: Vec<u64> = instance_in(&made).into_iter().collect();
+        let ids = instances_at(&made);
         // Its lineage beside its placement: its read replicas are bound to
         // it, and a tenant made again under the name has another.
-        let lineage = lineage_in(&made);
+        let lineage = text_at(&made, "lineage").map(str::to_owned);
         // Bound first: an `if let`'s guard lives through its block, the DELETE's round trip too.
         let placed = {
             let mut dir = self.write_dir();
@@ -5355,7 +5399,7 @@ impl Router {
         // The source's identity, frozen: what its file is noted by where it
         // will not go once the move is done.
         let frozen = expect(freeze, 200, &from).map_err(thaw)?;
-        let source: Vec<u64> = instance_in(&frozen).into_iter().collect();
+        let source = instances_at(&fields_of(&frozen));
         let image = expect(
             self.pool
                 .call(&src.addr, "GET", &format!("{base}/file"), &src.token, b""),
@@ -5365,22 +5409,12 @@ impl Router {
         .map_err(thaw)?;
 
         let proposed = fennec_http::replication::fresh_id();
-        let proposal = fennec_http::instance::text(proposed);
-        let put = |image: &[u8]| {
-            let headers = [(fennec_http::instance::HEADER, proposal.as_str())];
-            self.pool.call_with(
-                &dst.addr,
-                "PUT",
-                &format!("{base}/file"),
-                &dst.token,
-                &headers,
-                image,
-            )
-        };
-        let mut installed = put(&image);
+        let file = format!("{base}/file");
+        let put = || self.as_holder(&dst, "PUT", &file, Some(proposed), &image);
+        let mut installed = put();
         if matches!(installed, Ok((409, _))) {
-            self.clear_target(tenant, to).map_err(thaw)?;
-            installed = put(&image);
+            self.clear_target(tenant, to, "a move").map_err(thaw)?;
+            installed = put();
         }
         // Unanswered, the image may be there all the same, under the
         // identity proposed.
@@ -5393,7 +5427,7 @@ impl Router {
             );
         }
         let installed = expect(installed, 201, to).map_err(thaw)?;
-        let target: Vec<u64> = instance_in(&installed).into_iter().collect();
+        let target = instances_at(&fields_of(&installed));
         // Its quota goes with it, before the directory points there: the
         // first write the target takes is held to it.
         if let Some(w) = self.send_quota(tenant, to) {
@@ -5556,14 +5590,8 @@ impl Router {
         from: Option<&str>,
         answer: &[u8],
     ) -> fennec_core::error::Result<()> {
-        let fields =
-            fennec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
-        let said = |key: &str| {
-            fields.iter().find_map(|(k, v)| match v {
-                Value::Text(t) if k == key => Some(t.clone()),
-                _ => None,
-            })
-        };
+        let fields = fields_of(answer);
+        let said = |key: &str| text_at(&fields, key).map(str::to_owned);
         let mut dir = self.write_dir();
         // The lineage first, rarely another: the placement and the history
         // then go in one block, one sync, as the placement alone did.
@@ -5579,11 +5607,7 @@ impl Router {
 /// The lineage a node's answer names (`"lineage": "<8 hex>"`): the one it
 /// made a tenant of, or took one's image in at.
 pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
-    let fields = fennec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
-    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("lineage", Value::Text(l)) => Some(l),
-        _ => None,
-    })
+    text_at(&fields_of(body), "lineage").map(str::to_owned)
 }
 
 /// What `node` said to a call: its status and answer, or that it did not

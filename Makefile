@@ -1003,7 +1003,8 @@ packaging-test:
 ## schema declaring a statement (400); a move onto an old node fails and
 ## leaves the tenant on its source; and an old node, naming no file's
 ## identity, answers a reclaim 404 and keeps the file, which this tree's
-## router reports (tools/upgrade-order.sh). Builds BASE --
+## router reports; and an old router creates, replicates, moves and deletes
+## a tenant on this tree's nodes (tools/upgrade-order.sh). Builds BASE --
 ## 12d6f8db^, the last main before the kind, unless given -- in a scratch
 ## worktree: minutes. Not in CI.
 upgrade-check:

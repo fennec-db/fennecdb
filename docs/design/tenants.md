@@ -447,9 +447,20 @@ sees (`GET /_admin/tenants`) and whose node ranks first among those of the
 zone the rule picks (`replica_node`'s `holding`, below the zone). Its `PUT`
 finds the file (409), noted as left there by the try that failed, and the
 node takes it back, the copy the router left, before the replica is made
-anew (`reclaim_noted`, below); a file found that no row notes -- an old
-primary's after a failover -- is adopted as before, the follow beginning
-its stream again. A node
+anew (`reclaim_noted`, below). A copy found that no row notes by an
+identity -- an old primary's after a failover, or a live primary a newer
+router placed there -- is noted for an operator and never followed over:
+the repair notes each its look found before it picks (`place_replica`),
+and an attach's own 409 goes through a move's judgment (`clear_target`).
+Only the replica the directory records there, which a move has follow the
+tenant's new node, is followed as found. Followed as found, as this branch
+first stood, a router promoted behind its primary -- its directory from
+before the primary moved the tenant to n2 and wrote, its source on n1
+kept -- moved the tenant off n1 and gave it its replica on n2, the follow
+writing n1's image over the live primary
+(`an_attach_keeps_a_live_primary_it_did_not_leave`). The cost: a node back
+from a failover no longer has its old primaries follow the new ones; each
+is reported, for an operator to remove, and the replica goes elsewhere. A node
 that did not answer the repair's look is given no replica (`replica_node`'s
 `answering`, the repair's alone): it would follow nothing from there, and a
 try at it each repair was a call bounded by the upstream timeout, the
@@ -486,11 +497,12 @@ which the node may have made all the same; a move undone after its image
 was installed on the target (its quota refused there, the flip unrecorded)
 whose target kept the copy, and a move whose source would not go once it
 was done; a replica whose attach failed once its `PUT` was answered, made
-there (201) or found there (409); a replica detached, or a deleted tenant's
-replica or standby copy, that would not come off; and an old primary's file
-on a node that did not answer the repair's look, the node a failover took
-the tenant off (`failed_from`), where the tenant's replica went elsewhere
--- answering, the node would have kept the replica, its file made to follow
+there (201), or a file it found there that no row noted (409); a copy a
+repair's look found that no row notes; a replica detached, or a deleted
+tenant's replica or standby copy, that would not come off; and an old
+primary's file on a node that did not answer the repair's look, the node a
+failover took the tenant off (`failed_from`), where the tenant's replica
+went elsewhere -- answering, the look found its copy and noted it
 (`note_old_primary`). The `DELETE`s that took a create back ignored their
 failure, so the file stayed, unsaid: a create of the name sent again after
 the fence's 503 met the node's 409, and so did every create of it there
@@ -537,8 +549,16 @@ identities the router's calls in the operation that left the file learned
 back, the install's for a move undone, the freeze's for a move's source
 that would not go -- one is minted at the freeze where the file had none,
 made before identities or promoted, known to no router where the move is
-thawed -- the `PUT`'s and the follow's for an attach that failed, the
-follow's alone for a file the `PUT` found. A row whose identities the node
+thawed -- the `PUT`'s for an attach that failed, which its follow proposes
+again. A follow keeps a proposal only on the file carrying it as the
+follow begins, else gives none (`follow_as`): one the router gave up on and
+noted may land late, after the router took that file back and made the
+replica there again, and given its proposal the live replica took the
+identity a stale row names -- a router promoted behind the one that took
+the file back -- which a reclaim of that row took
+(`a_follow_landing_late_gives_a_later_file_no_identity`); a proposal of
+its own for the follow, as this branch first had, was such an identity. A
+row whose identities the node
 refuses -- it holds another file there now -- is noted again with none,
 kept for an operator, and an attach or a move never writes over a file
 noted with none: its node is no place for the tenant's replica
@@ -572,8 +592,13 @@ the node did not hold it -- made again by a binary from before this one,
 which deletes the file and leaves the sidecar; restored by `fennec
 restore`; put there by hand -- is another file under an old identity, so
 the sidecar names the file it was written for, its device, inode and birth
-time (`Metadata::created`, 0 where the file system keeps none, the device
-and inode alone then). An open notes the file's binding as it takes it, one
+time (`Metadata::created`). **No birth time, no identity:** on a file system
+keeping none no file is bound and none carries an identity -- a file left
+there is reported, never taken back, said once in the log (`birth`) -- as
+the device and inode alone, which this branch first took, let a file put at
+the name without its sidecar put away (a hand's `rm` and a restore, a
+binary from before) take over the inode and inherit the identity of the
+file a router left there. An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
 carries the sidecar's identity only where the sidecar names that binding,
 and a close -- `close_with`, `shutdown_with`, a reclaim's own -- forgets an
@@ -724,7 +749,7 @@ across an open, and made where a directory lacks the collection.
 Row 47 turned five of those around: a create taken back, a create whose
 `PUT` went unanswered (the proposal the node took), a move undone, a move's
 source (the freeze's identity) and a copy a failed attach made (the
-follow's, which landed) are each taken back by the repair after, `left`
+`PUT`'s, which the follow that landed kept) are each taken back by the repair after, `left`
 empty and the count 0, the create's file by its node's judgment and no
 second `DELETE`, the name made there after. Still reported and kept: a
 deleted tenant's replica and standby copy, a detached replica, an old
@@ -744,7 +769,13 @@ opened again, none, and a freeze mints one);
 `a_node_from_before_identities_has_no_file_taken_back`, the proxy dropping
 every `instance` and `Fennec-Instance` and answering `/reclaim` 404: a
 create taken back noted with none and asked of nobody, and a create whose
-`PUT` went unanswered asked, refused 404, and kept with no `DELETE`. In
+`PUT` went unanswered asked, refused 404, and kept with no `DELETE`. Its
+review's: `an_attach_keeps_a_live_primary_it_did_not_leave` (the attach's
+judgment taken out: n2's live primary followed, its writes refused and
+taken over); `a_follow_landing_late_gives_a_later_file_no_identity` (the
+follow's check taken out: the replica made again took the first follow's
+identity, which a reclaim of it took); and `instance::tests`, a birth time
+missing or 0 binding no file and a sidecar naming none no identity. In
 `tests/router.rs` a move onto a file it did not note is refused 409, the
 tenant reading on its source and the file counted, and goes once the file
 is removed. `fennec-http`'s `tests/tenants.rs` holds the node: a reclaim
