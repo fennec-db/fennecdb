@@ -650,6 +650,13 @@ fn run(
     let reading = match fennec_abi::read_only(p) {
         true => Some(n.read()?),
         false if p.stmts.iter().any(|s| matches!(s, Statement::Call(_))) => {
+            // A synced database runs no named statement, a call that reads
+            // among them: asked of the sync first, as `NAMED`, or a call
+            // the replica held was answered from its part of the rows and
+            // one it did not as a missing statement.
+            if let Some(sync) = n.sync_lock().as_ref() {
+                sync.claims(&p.stmts)?;
+            }
             let db = n.read()?;
             fennec_abi::reads(&db, p).then_some(db)
         }

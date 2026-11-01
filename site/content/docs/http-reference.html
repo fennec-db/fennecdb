@@ -360,9 +360,10 @@ limit are refused with <code>507</code>. Reads, deletes and
 <p>Inside <code>fennec-server</code> started with <code>--max-memory</code>, the
 listener holds its writes to that ceiling: above
 it, a statement that grows the data — a put, a patch, a <code>create
-index</code> — is refused with <code>507</code>, a batch stops there as at an
-error, and reads, deletes and <code>compact</code> go on, since they are the
-way out. The rule and why it is there are under
+index</code>, a <code>call</code> whose statement inserts or sets — is
+refused with <code>507</code>, a batch stops there as at an error, and
+reads, deletes, a call that only reads or deletes and <code>compact</code>
+go on, since they are the way out. The rule and why it is there are under
 <a href="server.html#limits">Server</a>.</p>
 </details>
 

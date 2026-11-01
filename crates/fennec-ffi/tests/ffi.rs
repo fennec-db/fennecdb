@@ -842,3 +842,53 @@ fn a_call_that_reads_is_read_beside_the_readers() {
     assert_eq!(seq(&changes(h, u64::MAX)), at + 1);
     assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
 }
+
+/// A synced handle refuses every named statement through `fennec_query`, a
+/// call that reads among them, in the sync's words (`NAMED`): a call the
+/// replica held was answered from its part of the rows (0), and one it did
+/// not as a missing statement (`FENNEC_NOT_FOUND`), since the read branch
+/// ran before the sync was asked. The sync scenarios ask the sync itself,
+/// so only a call through the library meets that order.
+#[test]
+fn a_synced_handle_refuses_a_call_that_reads() {
+    let h = memory();
+    query(
+        h,
+        "create collection tasks (key text @hash, title text); \
+         create statement titles() as get tasks select title",
+        "",
+    );
+    let config = r#"{"url":"https://example.test","token":"tk","seed":"ab","shapes":[{"collection":"tasks","key":"key"}]}"#;
+    let mut out = std::ptr::null_mut();
+    let code = unsafe {
+        fennec_sync_start(
+            h,
+            config.as_ptr(),
+            config.len(),
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    let (code, actions) = taken(code, out);
+    assert_eq!(code, FENNEC_OK, "{actions}");
+    feed(h, FENNEC_SYNC_OPENED, 1, 200, b"");
+    let seed =
+        b"event: seed\ndata: {\"seq\":3,\"rows\":[{\"id\":1,\"key\":\"x\",\"title\":\"one\"}]}\n\n";
+    feed(h, FENNEC_SYNC_BYTES, 1, 0, seed);
+    for sql in [
+        "call titles",
+        "get tasks count; call titles",
+        "call missing",
+        "create statement more() as get tasks select key",
+    ] {
+        let (code, text) = query_with(h, sql, "", &[]);
+        assert_eq!(code, FENNEC_QUERY, "{sql}: {text}");
+        assert!(
+            text.contains("a synced database runs no named statement"),
+            "{sql}: {text}"
+        );
+    }
+    let (_, status) = by_handle(fennec_sync_status, h);
+    assert!(status.contains(r#""pending":0"#), "{status}");
+    assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
+}

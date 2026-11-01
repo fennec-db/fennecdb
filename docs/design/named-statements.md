@@ -182,7 +182,7 @@ transfer, refund    call     for teller
 | past `--call-max-rows` | 400, naming the bound |
 | the `Idempotency-Key` with another request | 422 |
 | an MCP answer past `--mcp-max-rows` or `--mcp-max-bytes`, put back | 413 |
-| the tenant's quota | 507 |
+| the tenant's quota; above `--max-memory`, a body that inserts or sets, held as the `put` or `set` it holds (`over_ceiling` asks `Database::call_body`), where one that reads or deletes goes on | 507 |
 | a lease lapsed | 500, `outcome: unknown` |
 | a tenant closed, a ceiling: `retry_after`; a tenant frozen for a move or its lease out, before anything of the call is judged | 503 |
 | `Fennec-After` not reached | 504 |

@@ -990,3 +990,46 @@ fn a_call_runs_as_the_statement_it_finds_under_its_lock() {
     flipper.join().unwrap();
     assert_eq!(node.number("get marks count"), wrote.load(Relaxed) as i64);
 }
+
+/// `--max-memory` holds a call as it holds the writes its body makes:
+/// above the ceiling a call that inserts or sets is refused 507 as the
+/// plain `put` it holds is -- by `/query`, by its path and in a `/batch`,
+/// nothing of it landing -- while one that reads or deletes goes on, `del`
+/// being the way out. A call matched no growing statement, so its body's
+/// writes went past the ceiling.
+#[test]
+fn a_call_that_writes_is_held_to_the_data_ceiling() {
+    let node = start(|_| {});
+    let full = Node {
+        port: serve(&node.db, &node.access, |c| c.max_memory = 1),
+        ..node.clone()
+    };
+    let u0 = node.customer("u0");
+    let refused = |(status, body): (u16, String)| {
+        assert_eq!(status, 507, "{body}");
+        assert!(body.contains("data ceiling exceeded"), "{body}");
+    };
+    let balances = node.balances();
+    refused(full.query(ROOT, "put entries {amount: 1, by: 'u0'}"));
+    refused(full.query(&u0, "call note {amount: 1}"));
+    refused(full.query(ROOT, "call note {amount: 1} as {sub: 'u0'}"));
+    refused(full.call(&u0, "note", r#"{"amount":1}"#));
+    refused(full.call(&u0, "transfer", r#"{"from":1,"to":2,"amount":10}"#));
+    refused(full.post(
+        &u0,
+        "/batch",
+        &format!("{}\n", line("call note {amount: 1}")),
+    ));
+    assert_eq!(node.number("get entries count"), 0);
+    assert_eq!(node.balances(), balances);
+    // Reading and deleting are the way out.
+    let (status, body) = full.query(&u0, "call history");
+    assert_eq!(status, 200, "{body}");
+    node.ok(ROOT, "put journal {what: 'a'}");
+    let (status, body) = full.query(ROOT, "call purge {w: 'a'}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(node.number("get journal count"), 0);
+    // Under no ceiling the same call lands.
+    node.ok(&u0, "call note {amount: 1}");
+    assert_eq!(node.number("get entries count"), 1);
+}

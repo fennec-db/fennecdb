@@ -150,6 +150,19 @@ impl Database {
         s.tree.as_ref().map(|d| !d.writes())
     }
 
+    /// The body of the statement `call` names, for a caller to ask what
+    /// it writes -- `--max-memory` holds a call as it holds the writes its
+    /// body makes (`fennec_http::over_ceiling`) -- or `None` where no
+    /// statement of that name can run here, as [`Self::call_reads`]
+    /// answers. Asked under a lock, it holds for as long as that lock.
+    pub fn call_body(&self, call: &Call) -> Option<&[Statement]> {
+        let s = self.statements.get(&call.name)?;
+        if s.broken.is_some() {
+            return None;
+        }
+        s.tree.as_ref().map(|d| &d.body[..])
+    }
+
     /// The read executor: a call judged ([`Self::callee`]) whose body only
     /// reads, each statement of it run as [`Self::query`] runs one, with the
     /// call's values and its rows counted against `--call-max-rows`; the

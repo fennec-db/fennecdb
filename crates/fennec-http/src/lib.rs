@@ -2642,7 +2642,8 @@ fn run_query(
 
     // Asked of a write that may grow the data, under a ceiling: the read
     // lock taken for every write, ceiling or none, paid for the one a call
-    // that reads takes to ask its statement ([`read_call`]).
+    // that reads takes to ask its statement ([`read_call`]). A call is
+    // asked here too, by its body, only under a ceiling.
     if cfg.max_memory != 0 && grows(&stmt) {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
@@ -3649,12 +3650,15 @@ fn answer_reads(
     ))
 }
 
-/// Whether `stmt` grows the data, which the ceiling ([`over_ceiling`])
-/// stops.
+/// Whether `stmt` may grow the data, which the ceiling ([`over_ceiling`])
+/// stops. A call may: [`over_ceiling`] asks its body under the lock.
 fn grows(stmt: &Statement) -> bool {
     matches!(
         stmt,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
+        Statement::Put { .. }
+            | Statement::Update { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::Call(_)
     )
 }
 
@@ -3668,6 +3672,16 @@ fn grows(stmt: &Statement) -> bool {
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
     if max == 0 || !grows(stmt) {
         return None;
+    }
+    // A call grows the data as its body does: one that inserts or sets is
+    // held to the ceiling as that `put` or `set` is, one that reads or
+    // deletes is not -- `del` is the way out. A call matched nothing here,
+    // so its body's writes went past `--max-memory`. One naming no
+    // statement that can run writes nothing, refused as the call is judged.
+    if let Statement::Call(c) = stmt {
+        if !db.call_body(c).is_some_and(|body| body.iter().any(grows)) {
+            return None;
+        }
     }
     let used = db.memory_bytes();
     if used < max {
