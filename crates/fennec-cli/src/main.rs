@@ -80,7 +80,7 @@ Named statements
   call <name> {a: 1, b: 'y'} [as {sub: 'alice'}]   -- or CALL name(1, b => 'y')
   statements | describe statement <name> | drop statement [if exists] <name>
 
-Types    bool  int  float  text  bytes  vector<N>  [type]  json
+Types     bool  int  float  text  bytes  vector<N>  [type]  json
 Paths     meta.source.rank reads into a json field, where a field goes
 Case      email text nocase -- compared by its case fold everywhere, kept as written
 Operators = != < <= > >=   ~ (text contains)   has (list contains)   in [..]

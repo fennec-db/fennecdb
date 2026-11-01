@@ -2830,9 +2830,9 @@ fn run_query(
         // An MCP call tool's write, in a block of its own so that its
         // answer is held to the tool's bounds before it lands
         // ([`mcp::land`]); `false`, and no block, for every other request.
-        let bounded = match mcp::open(&mut guard) {
+        let bounded = match mcp::open(&mut guard, &stmt) {
             Ok(b) => b,
-            Err(e) => return error_response(&e),
+            Err(refused) => return refused,
         };
         let running = trace::span("execute");
         let r = match &unscoped {
@@ -3001,6 +3001,12 @@ fn keyed_query(
     if let Some(sent) = idempotent::answered(&guard, key, ttl) {
         return sent;
     }
+    // An MCP call tool's statement that writes where the session takes no
+    // writes, asked under this lock. The tools send no key, so none
+    // reaches here today; held all the same.
+    if let Some(refused) = mcp::writes_refused(&guard, stmt) {
+        return refused;
+    }
     if let Err(e) = guard.begin() {
         return error_response(&e);
     }
@@ -3109,6 +3115,11 @@ fn read_call(
         match guard.call_reads(c) {
             Some(true) => {}
             None if !cfg.come_back => {}
+            // An MCP call tool's, listed as a read, that writes as the
+            // statement is under this lock where the session takes no
+            // writes: refused here, before the write path counts it. Any
+            // other goes on to the write path.
+            Some(false) => return mcp::writes_refused(&guard, stmt),
             _ => return None,
         }
         // Asked once, of a call found to read: a header `Fennec-Wait` does

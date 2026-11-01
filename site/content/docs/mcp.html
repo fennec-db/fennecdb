@@ -182,10 +182,14 @@ token may call is a tool of its own, <code>call_</code> and its name: a
 curated statement is the safest tool to hand an agent, since the model picks
 the statement and gives its arguments as values, and the statement's text —
 written and checked when it was defined — is all it can do. A scoped token's
-tools are the statements a <code>call</code> line of its policy grants it, each
-called as the token, its claims the statement's; the server's token's are the
-statements that read no claim, since a model is not handed <code>as</code>. A
-statement that writes is a tool only under <code>--mcp-write</code>. The
+tools are the statements a <code>call</code> line of its policy grants it and
+whose claims it holds, each called as the token, its claims the statement's —
+one it lacks a claim for, or holds as <code>null</code>, <code>""</code> or
+another type, is no tool, its arguments never shown; the server's token's are
+the statements that read no claim, since a model is not handed
+<code>as</code>. A statement that writes is a tool only under
+<code>--mcp-write</code>, asked again as the call runs: one made again to write
+since the tools were listed is refused (403) without it. The
 tool's description is the statement's <code>comment</code>; its
 <code>inputSchema</code> its signature, each argument typed, the ones with a
 default left out of <code>required</code>, and nothing else taken; its

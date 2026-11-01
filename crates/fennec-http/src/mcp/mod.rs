@@ -755,13 +755,25 @@ fn call(ctx: &Ctx, id: &Value, params: &[(String, Value)], era: Era) -> Reply {
 
 // ------------------------------------------------------------ a call's bounds
 
+/// What a `call_<name>` tool's call is held to where `/query`'s path runs
+/// it: its answer's rows and bytes, and whether the session takes writes.
+#[derive(Clone, Copy)]
+struct Bound {
+    rows: usize,
+    bytes: usize,
+    /// `--mcp-write`, asked again under the lock the call runs under
+    /// ([`writes_refused`]): the tool list asked it of the statement as it
+    /// was then, and a `drop` and a `create` may land in between.
+    write: bool,
+}
+
 thread_local! {
-    /// The rows and bytes a `call_<name>` tool's answer is held to, set
-    /// while the call runs through `/query`'s path on this thread
-    /// ([`bounded_call`]), which asks it where it answers: a reading call
-    /// as it reads, a writing one before its block lands. None anywhere
-    /// else: a client's call is held to `--call-max-rows` alone.
-    static BOUND: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    /// The bound a `call_<name>` tool's call is held to, set while the
+    /// call runs through `/query`'s path on this thread ([`bounded_call`]),
+    /// which asks it where it answers: a reading call as it reads, a
+    /// writing one before its block lands. None anywhere else: a client's
+    /// call is held to `--call-max-rows` alone.
+    static BOUND: Cell<Option<Bound>> = const { Cell::new(None) };
 }
 
 /// `f`, a call tool's statement through `/query`'s path, with its answer
@@ -773,7 +785,13 @@ pub(super) fn bounded_call<R>(opts: &Options, f: impl FnOnce() -> R) -> R {
             BOUND.with(|b| b.set(None));
         }
     }
-    BOUND.with(|b| b.set(Some((opts.max_rows, opts.max_bytes))));
+    BOUND.with(|b| {
+        b.set(Some(Bound {
+            rows: opts.max_rows,
+            bytes: opts.max_bytes,
+            write: opts.write,
+        }))
+    });
     let _clear = Clear;
     f()
 }
@@ -783,7 +801,11 @@ pub(super) fn bounded_call<R>(opts: &Options, f: impl FnOnce() -> R) -> R {
 /// call tool runs: a model is never told half an answer, nor leaves a
 /// write it was not told of.
 pub(crate) fn past(rows: usize, body: &[u8]) -> Option<String> {
-    let (most_rows, most_bytes) = BOUND.with(Cell::get)?;
+    let Bound {
+        rows: most_rows,
+        bytes: most_bytes,
+        ..
+    } = BOUND.with(Cell::get)?;
     if rows > most_rows {
         return Some(format!(
             "the statement answered {rows} rows, past this server's bound of {most_rows} \
@@ -825,14 +847,47 @@ pub(crate) fn past_answer(resp: &api::Response2) -> Option<String> {
     )
 }
 
+/// Why a call tool's `stmt` may not run here: it writes, as the statement
+/// of its name is under the lock `db` is held by, and the session takes no
+/// writes (`--mcp-write`). The tool list asked that of the statement as it
+/// was, under a lock let go before the call: a `drop` and a `create`
+/// landing between made a reading tool's call a write, which only the lock
+/// it runs under can tell. `None` for any other statement, or where no call
+/// tool runs on this thread; a statement there is none of is refused as the
+/// call runs.
+pub(crate) fn writes_refused(db: &Database, stmt: &Statement) -> Option<Response> {
+    let Statement::Call(c) = stmt else {
+        return None;
+    };
+    let bound = BOUND.with(Cell::get)?;
+    if bound.write || db.call_reads(c) != Some(false) {
+        return None;
+    }
+    Some(Response::error(
+        403,
+        &format!(
+            "statement `{}` writes, and this server takes no writes over MCP (--mcp-write): it \
+             was made again since its tool was listed. List the tools again",
+            c.name
+        ),
+    ))
+}
+
 /// Opens the block a call tool's write runs in, so that its answer is held
 /// to the bounds before it lands ([`land`]): `false`, opening none, where
-/// no call tool runs on this thread.
-pub(crate) fn open(db: &mut Database) -> fennec_core::error::Result<bool> {
-    match BOUND.with(Cell::get) {
-        Some(_) => db.begin().map(|_| true),
-        None => Ok(false),
+/// no call tool runs on this thread. A call tool's statement that writes
+/// where the session takes no writes is refused here, under the write lock
+/// it would run under ([`writes_refused`]).
+pub(crate) fn open(db: &mut Database, stmt: &Statement) -> std::result::Result<bool, Response> {
+    if BOUND.with(Cell::get).is_none() {
+        return Ok(false);
     }
+    if let Some(refused) = writes_refused(db, stmt) {
+        return Err(refused);
+    }
+    db.begin()
+        .map(|_| true)
+        .map_err(|e| crate::error_response(&e))
 }
 
 /// Lands the block [`open`] opened, or puts it back: where the statement

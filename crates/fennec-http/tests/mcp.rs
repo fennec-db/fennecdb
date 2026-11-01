@@ -287,6 +287,118 @@ years, mine  call
         r#"{"name":"call_stamp","arguments":{"x":1}}"#,
     );
     assert_eq!(error_code(&a), -32602, "{}", a.body);
+    // A token granted `mine` that lacks the claim it declares -- held as
+    // `null`, `""`, of another type or not at all -- may never call it, so
+    // it is told nothing of its arguments: no tool, the unknown one.
+    for claims in [
+        r#"{"sub":null}"#,
+        r#"{"sub":""}"#,
+        r#"{"sub":{"id":1}}"#,
+        "{}",
+    ] {
+        let t = n.token(claims);
+        let tools = listed(&n, &t);
+        assert!(named(&tools, "call_years").is_some(), "{claims}");
+        assert!(named(&tools, "call_mine").is_none(), "{claims}");
+        let a = n.modern(
+            Some(&t),
+            4,
+            "tools/call",
+            r#"{"name":"call_mine","arguments":{}}"#,
+        );
+        assert_eq!(error_code(&a), -32602, "{claims}: {}", a.body);
+    }
+}
+
+/// Whether a statement's tool writes is asked again under the lock its call
+/// runs under, never apart from it: a statement listed as a read, made
+/// again as one that writes between the tool list's question and the
+/// call's lock, is refused where the session takes no writes
+/// (`--mcp-write`) -- never run, at whichever lock the call met it.
+#[test]
+fn a_tool_listed_as_a_read_never_writes_once_its_statement_does() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    let n = Arc::new(start(opts()));
+    let reads = "create statement flip() public as get marks select id, v where v = 0";
+    let writes = "create statement flip() public as insert marks {v: 1} returning id, v";
+    define(&n, &["create collection marks (v int)", reads]);
+    assert!(named(&listed(&n, ROOT), "call_flip").is_some());
+    let line = |q: &str| {
+        let mut body = String::from("{\"query\":");
+        fennec_core::json::escape_into(&mut body, q);
+        body + "}"
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = {
+        let (stop, n) = (Arc::clone(&stop), Arc::clone(&n));
+        let (reads, writes) = (line(reads), line(writes));
+        let drop = line("drop statement flip");
+        std::thread::spawn(move || {
+            let auth = format!("Bearer {ROOT}");
+            let mut i = 0;
+            while !stop.load(Relaxed) {
+                i += 1;
+                let next = if i % 2 == 1 { &writes } else { &reads };
+                let batch = format!("{drop}\n{next}");
+                let a = n.post_raw("POST", "/batch", &[("Authorization", &auth)], &batch);
+                assert_eq!(a.status, 200, "{}", a.body);
+            }
+        })
+    };
+    // Called until the swap has landed between the question and the lock
+    // twice -- a refusal here, a write had it been asked apart from the
+    // lock -- which a call in a hundred or so meets; the count of calls
+    // bounds only that wait.
+    let refused = Arc::new(AtomicUsize::new(0));
+    let callers: Vec<_> = (0..4)
+        .map(|_| {
+            let (n, refused) = (Arc::clone(&n), Arc::clone(&refused));
+            std::thread::spawn(move || {
+                for i in 0..2000 {
+                    if refused.load(Relaxed) >= 2 {
+                        break;
+                    }
+                    let a = n.modern(
+                        Some(ROOT),
+                        i,
+                        "tools/call",
+                        r#"{"name":"call_flip","arguments":{}}"#,
+                    );
+                    assert_eq!(a.status, 200, "{}", a.body);
+                    let v = a.json();
+                    // One that writes when the call asked: no tool.
+                    if at(&v, &["error"]) != &Value::Null {
+                        assert_eq!(error_code(&a), -32602, "{}", a.body);
+                        continue;
+                    }
+                    let r = at(&v, &["result"]);
+                    if at(r, &["isError"]) == &Value::Bool(true) {
+                        let why = text(at(r, &["content", "0", "text"]));
+                        assert!(why.contains("--mcp-write"), "{why}");
+                        refused.fetch_add(1, Relaxed);
+                        continue;
+                    }
+                    assert_eq!(
+                        at(r, &["structuredContent", "rows"]),
+                        &Value::List(Vec::new()),
+                        "a tool with no --mcp-write wrote: {}",
+                        a.body
+                    );
+                }
+            })
+        })
+        .collect();
+    let joined: Vec<_> = callers.into_iter().map(|c| c.join()).collect();
+    stop.store(true, Relaxed);
+    flipper.join().unwrap();
+    for j in joined {
+        j.unwrap();
+    }
+    let auth = format!("Bearer {ROOT}");
+    let count = line("get marks count");
+    let a = n.post_raw("POST", "/query", &[("Authorization", &auth)], &count);
+    assert!(a.body.contains(r#""count":0"#), "{}", a.body);
+    assert!(refused.load(Relaxed) >= 2, "no swap met a call's lock");
 }
 
 fn setup(db: &mut Database, sql: &[&str]) {

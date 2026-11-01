@@ -568,9 +568,9 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         return crate::http::Response::error(403, "this session is read-only (--read-only)");
     }
     // A call tool's block, held to its bounds before it lands.
-    let bounded = match super::open(&mut g) {
+    let bounded = match super::open(&mut g, &stmt) {
         Ok(b) => b,
-        Err(e) => return crate::error_response(&e),
+        Err(refused) => return refused,
     };
     // A scoped token's call is judged under this lock and its body run
     // outside the token's scope, as `/query` runs it (`access::run_as`).
@@ -1263,14 +1263,21 @@ pub(super) fn callable(ctx: &Ctx, name: &str) -> Option<bool> {
 
 /// A statement the token's tools hold, and whether it writes: one that can
 /// run (not broken, its text read here); granted by a `call` line to a
-/// scoped token, and to the server's token where it reads no claim -- the
-/// server's token calls one that does with `as {...}`, which a model is
-/// not handed, so such a tool would refuse every call; and one that writes
-/// only under `--mcp-write`, as every tool that writes.
+/// scoped token holding every claim it declares, judged as its call judges
+/// them -- one held as `null`, `""` or a value of another type is missing
+/// -- so a token that may never call it is told nothing of its arguments;
+/// to the server's token where it reads no claim -- the server's token
+/// calls one that does with `as {...}`, which a model is not handed, so
+/// such a tool would refuse every call; and one that writes only under
+/// `--mcp-write`, as every tool that writes. Asked apart from the lock the
+/// call runs under: whether it writes is asked again there
+/// ([`super::open`], `read_call`).
 fn callable_stored(ctx: &Ctx, s: &fennec_core::engine::Stored) -> Option<bool> {
     let def = s.tree.as_ref().filter(|_| s.broken.is_none())?;
     let granted = match ctx.who.scope() {
-        Some(scope) => scope.may_call(&s.name),
+        Some(scope) => {
+            scope.may_call(&s.name) && fennec_core::engine::claims_carried(def, scope.claims())
+        }
         None => def.claims.is_empty(),
     };
     let writes = def.writes();

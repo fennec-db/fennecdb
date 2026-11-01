@@ -2243,6 +2243,12 @@ impl Scope {
         self.calls.iter().any(|c| c == name)
     }
 
+    /// The token's claims, as a call it makes is bound with them: MCP holds
+    /// a statement's tool to the claims it declares before listing it.
+    pub fn claims(&self) -> &[(String, Value)] {
+        &self.roles.0
+    }
+
     /// When the token's `exp` passes, in milliseconds since the epoch;
     /// `None` for a token that names none (`--jwt-require-exp off`). A
     /// request is checked as it comes, so one held open -- a subscription
