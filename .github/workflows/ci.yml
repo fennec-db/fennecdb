@@ -210,7 +210,7 @@ jobs:
         run: cargo build -p fennec-server -p fennec-cli -p fennec-ffi
 
       - name: The lock, in this process and another
-        run: cargo test -p fennec-abi --lib lock::
+        run: cargo test -p fennec-abi --lib lock::tests
 
       # Beside fennec-server's binary, which the build above put there.
       - name: A second process over a served file is refused
