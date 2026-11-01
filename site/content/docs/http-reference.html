@@ -264,17 +264,25 @@ arguments takes no body.</p>
     token or none of that name, in the same words; 403 for a claim it
     declares that the token lacks; 400 for an argument missing, extra,
     <code>null</code> or of another type, or a <code>check</code> that is
-    false; 403 for an <code>append-only</code> update or delete, a read-only
-    server or a request marked <code>Fennec-Read: replica</code>, judged
-    alike over <code>/_call</code>, <code>/query</code> and
-    <code>/batch</code>; 409 for a
+    false; 403 for an <code>append-only</code> update or delete, or, for a
+    statement whose body writes, a read-only server, a replica or a request
+    marked <code>Fennec-Read: replica</code>, judged alike over
+    <code>/_call</code>, <code>/query</code> and <code>/batch</code>; 409 for a
     broken statement, saying why, or a unique value taken; 412 for a
     <code>require</code> not met, with its <code>reason</code>; 400 past
     <code>--call-max-rows</code>; then what any write meets — 422, 507,
     500 <code>outcome: unknown</code>, 503, 504. A tenant being moved, or
     one whose node's lease is out, answers a call 503 to come back before
-    any of it is judged: the copy that answers may not hold the statements
-    the tenant's home does.</li>
+    any of it is judged — the copy that answers may not hold the statements
+    the tenant's home does — but one whose statement it holds and reads,
+    which it answers as it answers a <code>get</code>.</li>
+  <li><b>A statement whose body only reads</b> is called as a read: beside
+    the other reads, under no write lock, on a snapshot where it reads
+    many rows, keeping no key and moving no change — so a read-only
+    server, a replica and a call marked <code>Fennec-Read: replica</code>,
+    sent near through a router, answer it, as they answer a
+    <code>get</code>. Its <code>Fennec-Seq</code> is the change it read
+    at.</li>
   <li><b>An <code>Idempotency-Key</code></b> makes a call once: sent again,
     the first answer is replayed (<code>Idempotent-Replayed: true</code>);
     the key with another path or body is 422.</li>

@@ -147,6 +147,12 @@ request read-only on every route — a statement, REST, <code>/batch</code>, an
 MCP tool, a change-stream consumer's commit — home as much as a replica, so a
 write marked by mistake is refused with <code>403</code> the day it is
 written, never landed; a value the header does not take is <code>400</code>.
+A call of a <a href="/docs/fennecql#named-statements">named statement</a>
+whose body only reads — <code>POST /t/&lt;tenant&gt;/_call/&lt;name&gt;</code>,
+or <code>call &lt;name&gt; $1</code> over <code>/query</code> — is a read
+like any: marked, it goes near and the replica answers it from the
+statements its file follows; one whose body writes is refused there with
+<code>403</code>, never sent home to land.
 A tenant frozen for a move, or on a node whose lease has lapsed, answers a
 marked read, which can only read.</p>
 

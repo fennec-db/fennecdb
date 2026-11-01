@@ -304,8 +304,13 @@ and 17 to 24 us over HTTP (`make requests-bench` the same in turns); `tests/pinn
 holds every pinned answer to the lock's at the pin, past deletes, updates
 of indexed fields, an alter, a drop, a compact under the lock and beside,
 a checkpoint, a handover a write, and three writers and a compactor
-beside three readers. The browser module has one thread and none of it:
-not a byte of it changed.
+beside three readers. A call of a named statement whose body reads is
+pinned as its body is, judged once (`pin_call`, `Pinned::read_call`), the
+pin holding the table of statements as it stood, which a definition never
+changes in place; its rows are bounded on its own thread, never in the
+database the pin and the readers beside it share
+([named-statements.md](named-statements.md#calls)). The browser module has
+one thread and none of it: not a byte of it changed.
 
 ## Blocks
 

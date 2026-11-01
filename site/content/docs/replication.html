@@ -28,7 +28,9 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
 </pre>
 
 <ul>
-  <li><b>Every read works on a replica,</b> subscriptions included.</li>
+  <li><b>Every read works on a replica,</b> subscriptions included, and a
+    call of a <a href="/docs/fennecql#named-statements">named statement</a>
+    whose body only reads.</li>
   <li><b>Writes are refused</b> until it is promoted, by hand.</li>
   <li><b>A failover can lose</b> only what the primary's <code>--sync</code>
     had not yet put on disk.</li>
@@ -39,7 +41,9 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
 each applies them to a file of its own and serves reads from it.</p>
 
 <p>A replica is a whole <code>fennec-server</code>: every read works on it,
-subscriptions included, from its own copy in memory, and a write gets 403.
+subscriptions included, from its own copy in memory, and a write gets 403 —
+a call of a named statement too where its body writes; one whose body only
+reads is a read, run from the statements the replica's file follows.
 <code>GET /_replication</code> says which role a server has, so a client or a
 load balancer can tell a replica from the primary.</p>
 </details>
