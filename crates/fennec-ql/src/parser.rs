@@ -87,15 +87,15 @@ pub const MAX_EXPR_DEPTH: usize = 512;
 
 /// What an index is written as, said where SQL's `create index` is not it.
 const INDEX_FORM: &str = "an index is `create index on <collection> (<field>, ...) @hash`, \
-                          `@sorted` or `@unique`: it names its kind, and has no name";
+                          `@sorted` or `@unique`, with no name";
 
 /// What SQL's `join` is answered with: both ways a key runs, and the
 /// filter by another collection's rows.
 const JOIN: &str = "FennecQL has no `join`: `get orders where ... lookup items on order_id` \
-                    attaches each order's items, `get items where ... lookup orders on id = \
-                    order_id` each item's order -- the clauses after `lookup` are the looked-up \
-                    collection's -- and `where order_id in (get orders select id where ...)` \
-                    filters by another collection";
+                    attaches each order's items, `get items ... lookup orders on id = order_id` \
+                    each item's order (the clauses after `lookup` are its collection's), and \
+                    `where order_id in (get orders select id ...)` filters by another \
+                    collection";
 
 /// What a column's or a table's rule fennecdb holds no rule of is refused
 /// with: dropped, the collection would take writes SQL refuses.
@@ -112,10 +112,10 @@ const REASON_EMPTY: &str = "a `require`'s reason is empty: say why, \
                             `require 1 else 'no such account'`";
 const REASON: &str = "`else` after `require <n>` takes its reason in quotes: \
                       `require 1 else 'no such account'`";
-const REASON_PARAM: &str = "a `require`'s reason is written in the statement, never a parameter, \
-                            as its count is: `require 1 else 'no such account'`";
-const REASON_TICK: &str = "a `require`'s reason holds no backtick, which its refusal quotes the \
-                           statement with: `require 1 else 'no such account'`";
+const REASON_PARAM: &str = "a `require`'s reason is written in the statement, never a \
+                            parameter: `require 1 else 'no such account'`";
+const REASON_TICK: &str = "a `require`'s reason holds no backtick: `require 1 else 'no such \
+                           account'`";
 
 /// The words a clause of a `get` or a join begins with, which no alias SQL
 /// writes without `as` is.
@@ -211,8 +211,7 @@ const FULLTEXT: &str = "full text is the `match` clause over an `@text` field: \
 /// What SQL's `= any(...)` and `<> all(...)` are refused with but where
 /// they hold a parameter alone (`Parser::any_param`).
 const ANY: &str = "a list is tested with `in`: `x in [1, 2]`, `x in (get ...)`, or `x in $1` \
-                   with the list a parameter, which SQL writes `x = any($1)`; `<> all(...)` \
-                   is `not (x in ...)`";
+                   for SQL's `x = any($1)`; `<> all(...)` is `not (x in ...)`";
 
 /// What a test of a double-quoted text alone is refused with, after the
 /// text and its name (`Parser::quoted`): SQL's quoted column, FennecQL's
@@ -647,10 +646,15 @@ fn left_open(s: &Statement) -> bool {
 /// Whether a statement begins with `w` ([`COMMANDS`], [`NAMED_COMMANDS`]).
 #[cfg(feature = "statements")]
 fn is_command(w: &str) -> bool {
-    COMMANDS
-        .iter()
-        .chain(&NAMED_COMMANDS)
-        .any(|c| w.eq_ignore_ascii_case(c))
+    among(w, &COMMANDS) || among(w, &NAMED_COMMANDS)
+}
+
+/// Whether `w` is one of `words`, its case aside: one loop for every list
+/// a word is looked for in, where each list's `iter().any(..)` was a copy
+/// of its own.
+#[inline(never)]
+fn among(w: &str, words: &[&str]) -> bool {
+    words.iter().any(|k| w.eq_ignore_ascii_case(k))
 }
 
 /// Why a call's argument is no value, if it is not: it reads no row, so it
@@ -810,7 +814,7 @@ impl Parser {
     fn semis(&mut self) -> bool {
         let at = self.i;
         while matches!(self.peek(), Tok::Semi) {
-            self.next();
+            self.skip();
         }
         self.i > at
     }
@@ -821,10 +825,15 @@ impl Parser {
     }
     fn next(&mut self) -> Tok {
         let t = self.toks[self.i].tok.clone();
-        if !matches!(t, Tok::Eof) {
+        self.skip();
+        t
+    }
+    /// Steps past the token here, as [`Self::next`] does, with no copy of
+    /// it: a keyword stepped past was a `String` made and dropped.
+    fn skip(&mut self) {
+        if !self.at_eof() {
             self.i += 1;
         }
-        t
     }
     fn pos(&self) -> usize {
         self.toks[self.i].pos
@@ -843,7 +852,7 @@ impl Parser {
 
     fn expect(&mut self, t: Tok) -> Result<()> {
         if self.peek() == &t {
-            self.next();
+            self.skip();
             Ok(())
         } else {
             self.err(format!(
@@ -858,7 +867,7 @@ impl Parser {
     fn eat_kw(&mut self, kw: &str) -> bool {
         if let Tok::Ident(s) = self.peek() {
             if s.eq_ignore_ascii_case(kw) {
-                self.next();
+                self.skip();
                 return true;
             }
         }
@@ -867,6 +876,11 @@ impl Parser {
 
     fn peek_kw(&self, kw: &str) -> bool {
         matches!(self.peek(), Tok::Ident(s) if s.eq_ignore_ascii_case(kw))
+    }
+
+    /// Whether the token here is one of `words` ([`among`]).
+    fn peek_among(&self, words: &[&str]) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if among(s, words))
     }
 
     fn expect_kw(&mut self, kw: &str) -> Result<()> {
@@ -981,7 +995,7 @@ impl Parser {
             "put" | "insert" => self.put(),
             "get" | "select" => self.get(),
             "explain" => {
-                self.next();
+                self.skip();
                 let Statement::Select(sel) = self.statement()? else {
                     return self.err("`explain` takes a `get` or `select`");
                 };
@@ -990,19 +1004,19 @@ impl Parser {
             "set" | "update" => self.set(),
             "del" | "delete" => self.del(),
             "collections" => {
-                self.next();
+                self.skip();
                 Ok(Statement::ListCollections)
             }
             #[cfg(feature = "statements")]
             "statements" => {
-                self.next();
+                self.skip();
                 Ok(Statement::ListStatements)
             }
             #[cfg(not(feature = "statements"))]
             "statements" => self.err(UNBUILT),
             "call" => self.call_statement(),
             "describe" => {
-                self.next();
+                self.skip();
                 // `describe statement <name>`: a name after `statement`,
                 // and no word a statement begins with -- `describe
                 // statement` alone stays the collection named `statement`'s
@@ -1021,13 +1035,13 @@ impl Parser {
                 }
                 #[cfg(feature = "statements")]
                 if named {
-                    self.next();
+                    self.skip();
                     return Ok(Statement::DescribeStatement(self.statement_name()?));
                 }
                 Ok(Statement::Describe(self.ident()?))
             }
             "compact" => {
-                self.next();
+                self.skip();
                 let which = match self.peek() {
                     Tok::Ident(_) => Some(self.ident()?),
                     _ => None,
@@ -1046,8 +1060,8 @@ impl Parser {
             }
             "truncate" => self.err("FennecQL deletes every row with `del <collection>`"),
             "begin" | "start" | "commit" | "rollback" => self.err(
-                "FennecQL has no open transaction: a `/batch` of statements (in the page, a `run` \
-                 of several) lands whole or not at all",
+                "FennecQL has no open transaction: a `/batch` of statements (in the page, a \
+                 `run`) lands whole or not at all",
             ),
             // `from users u where ...`: a word after a name that ends a
             // statement, as SQL's alias does. (One `format!` for both was 20
@@ -1083,8 +1097,8 @@ impl Parser {
     #[inline(never)]
     fn alias(&self, other: &str) -> Error {
         self.error(&format!(
-            "unknown command `{other}`: an alias, if it is one, FennecQL does not take -- a \
-             statement's one collection names its fields bare"
+            "unknown command `{other}`: FennecQL takes no alias -- a statement's one collection \
+             names its fields bare"
         ))
     }
 
@@ -1104,7 +1118,7 @@ impl Parser {
         }
         #[cfg(feature = "statements")]
         if self.peek_kw("or") {
-            self.next();
+            self.skip();
             self.expect_kw("replace")?;
             if self.peek_kw("statement") {
                 return self.create_statement(true);
@@ -1139,10 +1153,7 @@ impl Parser {
         if self.peek_kw("table") {
             return self.create_table();
         }
-        if ["temp", "temporary", "unlogged"]
-            .iter()
-            .any(|w| self.peek_kw(w))
-        {
+        if self.peek_among(&["temp", "temporary", "unlogged"]) {
             return self.err("a collection is kept in the file, whole: `create table`");
         }
         if self.peek_kw("extension") {
@@ -1172,9 +1183,22 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
+        self.collection_of(name, fields, composites, if_not_exists)
+    }
+
+    /// The collection `create collection` and SQL's `create table` make,
+    /// read: one place for both, where each was its own copy.
+    #[inline(never)]
+    fn collection_of(
+        &self,
+        name: String,
+        fields: Vec<Field>,
+        composites: Vec<Composite>,
+        if_not_exists: bool,
+    ) -> Result<Statement> {
         if fields.is_empty() {
             return self.err("a collection must contain at least one field");
         }
@@ -1204,8 +1228,7 @@ impl Parser {
             "sorted" => Ok(false),
             "unique" => Ok(true),
             other => self.err(format!(
-                "an index over several fields is @sorted or @unique, not @{other}: its keys \
-                 are ordered part by part"
+                "an index over several fields is @sorted or @unique, not @{other}"
             )),
         }
     }
@@ -1213,25 +1236,7 @@ impl Parser {
     /// `(owner, created desc)`: an index's fields -- or paths into json
     /// ones -- each ascending unless `desc` follows it.
     fn index_keys(&mut self) -> Result<Vec<(String, bool)>> {
-        self.expect(Tok::LParen)?;
-        let mut keys = Vec::new();
-        loop {
-            let k = self.path()?;
-            let desc = match self.eat_kw("desc") {
-                true => true,
-                false => {
-                    self.eat_kw("asc");
-                    false
-                }
-            };
-            keys.push((k, desc));
-            if !matches!(self.peek(), Tok::Comma) {
-                break;
-            }
-            self.next();
-        }
-        self.expect(Tok::RParen)?;
-        Ok(keys)
+        Ok(self.sql_index_keys(false)?.0)
     }
 
     /// `create index [if not exists] on <collection> (<field>) @hnsw(...)`,
@@ -1254,7 +1259,7 @@ impl Parser {
         // SQL's name: `create index users_email on users (email)`.
         let named = !self.peek_kw("on") && matches!(self.peek(), Tok::Ident(_));
         if named {
-            self.next();
+            self.skip();
         }
         if !self.eat_kw("on") {
             return Err(self.taught(INDEX_FORM));
@@ -1265,12 +1270,12 @@ impl Parser {
             true => Some(self.ident()?.to_ascii_lowercase()),
             false => None,
         };
-        let (keys, sql) = self.sql_index_keys()?;
+        let (keys, sql) = self.sql_index_keys(true)?;
         if !matches!(self.peek(), Tok::At) || unique || named || method.is_some() || sql.is_some() {
             return self.sql_index(collection, keys, sql, unique, method, if_not_exists);
         }
         let mut keys = keys;
-        self.next();
+        self.skip();
         // Several fields: an index over them, ordered part by part.
         if keys.len() > 1 {
             let unique = self.composite_kind()?;
@@ -1280,7 +1285,7 @@ impl Parser {
                 if_not_exists,
             });
         }
-        let (field, desc) = keys.remove(0);
+        let (field, desc) = std::mem::take(&mut keys[0]);
         if desc {
             return self.err(format!(
                 "`{field} desc`: an index of one field is walked both ways, and `desc` orders \
@@ -1312,25 +1317,27 @@ impl Parser {
     /// | desc] [nulls first | last], ...)`, or `(to_tsvector('english',
     /// body))` -- or as FennecQL does, `(owner, created desc)`: the fields
     /// and their directions, and the operator class SQL named the first
-    /// with, or `to_tsvector` for full text.
+    /// with, or `to_tsvector` for full text. Not `sql`, FennecQL's alone,
+    /// as an index over several fields is declared and dropped: one reader
+    /// for both was 0.2 KB of the browser module less than two.
     #[inline(never)]
     #[allow(clippy::type_complexity)]
-    fn sql_index_keys(&mut self) -> Result<(Vec<(String, bool)>, Option<String>)> {
+    fn sql_index_keys(&mut self, sql: bool) -> Result<(Vec<(String, bool)>, Option<String>)> {
         self.expect(Tok::LParen)?;
         let mut keys = Vec::new();
         let mut op = None;
         loop {
             // `to_tsvector('english', body)`: the field, its text indexed.
-            if matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::LParen)) {
+            if sql && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::LParen)) {
                 if !self.eat_kw("to_tsvector") {
                     return self.err(
                         "an index is over fields, a json field's paths among them, and full \
                          text over `to_tsvector(body)`",
                     );
                 }
-                self.next();
+                self.skip();
                 if matches!(self.peek(), Tok::Single(_) | Tok::Str(_)) {
-                    self.next();
+                    self.skip();
                     self.expect(Tok::Comma)?;
                 }
                 keys.push((self.path()?, false));
@@ -1338,12 +1345,13 @@ impl Parser {
                 op.get_or_insert_with(|| "to_tsvector".to_string());
             } else {
                 let k = self.path()?;
-                if let Tok::Ident(w) = self.peek() {
-                    if w.to_ascii_lowercase().ends_with("_ops") {
-                        let w = w.to_ascii_lowercase();
-                        self.next();
-                        op.get_or_insert(w);
-                    }
+                let w = match self.peek() {
+                    Tok::Ident(w) if sql => w.to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                if w.ends_with("_ops") {
+                    self.skip();
+                    op.get_or_insert(w);
                 }
                 let desc = match self.eat_kw("desc") {
                     true => true,
@@ -1353,7 +1361,7 @@ impl Parser {
                     }
                 };
                 // Where a null goes: no order reads an index's.
-                if self.eat_kw("nulls") && !(self.eat_kw("first") || self.eat_kw("last")) {
+                if sql && self.eat_kw("nulls") && !(self.eat_kw("first") || self.eat_kw("last")) {
                     return Err(self.taught("`nulls` is `nulls first` or `nulls last`"));
                 }
                 keys.push((k, desc));
@@ -1361,7 +1369,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         Ok((keys, op))
@@ -1380,14 +1388,14 @@ impl Parser {
     ) -> Result<Statement> {
         if matches!(self.peek(), Tok::At) {
             return self.err(
-                "an index is written as SQL's, `create unique index on t (a)`, or as FennecQL's, \
-                 `create index on t (a) @unique`: not both",
+                "an index is SQL's, `create unique index on t (a)`, or FennecQL's, `create \
+                 index on t (a) @unique`, not both",
             );
         }
         if self.peek_kw("where") || self.peek_kw("include") {
             return self.err(
-                "an index holds every row and its keys alone: a partial index's `where` and \
-                 `include` have none here",
+                "an index holds every row and its keys alone: no partial index's `where` or \
+                 `include`",
             );
         }
         let mut with = Vec::new();
@@ -1400,7 +1408,7 @@ impl Parser {
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
-                self.next();
+                self.skip();
             }
             self.expect(Tok::RParen)?;
         }
@@ -1446,7 +1454,8 @@ impl Parser {
                     const BOUNDS: &str = "pgvector's `m` is from 2 to 100 and `ef_construction` \
                                       from 4 to 1000, at least twice `m`";
                     let mut ef = false;
-                    for (k, v) in std::mem::take(&mut with) {
+                    for (k, v) in &with {
+                        let v = *v;
                         match k.as_str() {
                             "m" if (2..=100).contains(&v) => spec.m = v as usize,
                             "ef_construction" if (4..=1000).contains(&v) => {
@@ -1460,6 +1469,7 @@ impl Parser {
                     if ef && spec.ef_construction < 2 * spec.m {
                         return self.err(BOUNDS);
                     }
+                    with.clear();
                     match metric {
                         Some(m) => {
                             spec.metric = m;
@@ -1484,7 +1494,7 @@ impl Parser {
         }
         Ok(Statement::CreateIndex {
             collection,
-            field: keys.remove(0).0,
+            field: std::mem::take(&mut keys[0].0),
             kind,
             if_not_exists,
         })
@@ -1516,7 +1526,7 @@ impl Parser {
                  go in with `insert t $1`",
             ));
         }
-        self.next();
+        self.skip();
         let mut fields: Vec<Field> = Vec::new();
         let mut id = None;
         let mut primary: Option<Vec<String>> = None;
@@ -1531,12 +1541,9 @@ impl Parser {
                 primary = Some(self.names()?);
                 keys += 1;
             } else if self.peek_kw("unique") {
-                self.next();
+                self.skip();
                 uniques.push(self.names()?);
-            } else if ["foreign", "check", "exclude"]
-                .iter()
-                .any(|w| self.peek_kw(w))
-            {
+            } else if self.peek_among(&["foreign", "check", "exclude"]) {
                 return self.err(NO_RULE);
             } else {
                 let (field, pk, serial) = self.sql_column()?;
@@ -1559,7 +1566,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         if keys > 1 {
@@ -1586,29 +1593,26 @@ impl Parser {
             }
             uniques.push(keys);
         }
-        for keys in uniques {
+        for keys in &mut uniques {
+            let keys = std::mem::take(keys);
             match &keys[..] {
                 [one] => match fields.iter_mut().find(|f| f.name == *one) {
                     Some(f) => f.index = IndexKind::UNIQUE,
                     None => return self.err(format!("`unique ({one})` names no column")),
                 },
-                _ => composites.push(Composite {
-                    keys: keys.into_iter().map(|k| (k, false)).collect(),
-                    unique: true,
-                }),
+                _ => {
+                    let mut parts = Vec::with_capacity(keys.len());
+                    for k in keys {
+                        parts.push((k, false));
+                    }
+                    composites.push(Composite {
+                        keys: parts,
+                        unique: true,
+                    })
+                }
             }
         }
-        if fields.is_empty() {
-            return self.err("a collection must contain at least one field");
-        }
-        let mut schema = Schema::new(name, fields)?;
-        for c in composites {
-            schema.add_composite(c)?;
-        }
-        Ok(Statement::CreateCollection {
-            schema,
-            if_not_exists,
-        })
+        self.collection_of(name, fields, composites, if_not_exists)
     }
 
     /// A column of SQL's `create table`: its field, whether it is the
@@ -1642,14 +1646,16 @@ impl Parser {
             ];
             let (mut words, mut args) = (String::new(), Vec::new());
             loop {
-                match self.peek().clone() {
-                    Tok::Ident(w) if !ENDS.iter().any(|k| w.eq_ignore_ascii_case(k)) => {
+                // The token read in place, and the words lowercased once
+                // they are all read: each was a copy, and a copy of that.
+                match self.peek() {
+                    Tok::Ident(w) if !among(w, &ENDS) => {
                         words.push_str(if words.is_empty() { "" } else { " " });
-                        words.push_str(&w.to_ascii_lowercase());
-                        self.next();
+                        words.push_str(w);
+                        self.skip();
                     }
                     Tok::LParen if !words.is_empty() => {
-                        self.next();
+                        self.skip();
                         while !matches!(self.peek(), Tok::RParen | Tok::Eof) {
                             if let Tok::Int(n) = self.next() {
                                 args.push(n);
@@ -1660,6 +1666,7 @@ impl Parser {
                     _ => break,
                 }
             }
+            words.make_ascii_lowercase();
             if words.is_empty() {
                 return Err(self.taught("a column has a type: `<name> <type>`"));
             }
@@ -1675,8 +1682,8 @@ impl Parser {
                     use crate::sqltypes::Why;
                     return self.err(match why {
                         Why::Decimal => format!(
-                            "`{words}`: fennecdb has no decimal -- `int` of the smallest unit, \
-                             cents, keeps it exact, `float` rounds it"
+                            "`{words}`: fennecdb has no decimal -- `int` of its smallest \
+                             unit keeps it exact, `float` rounds it"
                         ),
                         Why::NoDimension => format!("`{words}` has its dimension: `vector(384)`"),
                         Why::Untyped => format!(
@@ -1691,12 +1698,12 @@ impl Parser {
             let array = self.eat_kw("array");
             // `[3]` is a vector of one to the lexer.
             if matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
-                self.next();
+                self.skip();
                 ty = DataType::List(Box::new(ty));
             } else if matches!(self.peek(), Tok::LBracket) {
-                self.next();
+                self.skip();
                 if matches!(self.peek(), Tok::Int(_)) {
-                    self.next();
+                    self.skip();
                 }
                 self.expect(Tok::RBracket)?;
                 ty = DataType::List(Box::new(ty));
@@ -1730,7 +1737,7 @@ impl Parser {
                 // `generated always as identity`, `by default as identity`:
                 // a sequence; `generated always as (expr) stored`, none.
                 while !self.peek_kw("as") && !matches!(self.peek(), Tok::Eof) {
-                    self.next();
+                    self.skip();
                 }
                 self.expect_kw("as")?;
                 if !self.eat_kw("identity") {
@@ -1746,17 +1753,14 @@ impl Parser {
                         Some(c) => field = field.collated(c),
                         None => {
                             return self.err(format!(
-                                "unknown collation `{c}`: a text compares by its bytes, \
-                                 `nocase` by its case fold, and `und` and `tr` by Unicode's \
-                                 order and Turkish's"
+                                "unknown collation `{c}`: text compares by its bytes, `nocase` \
+                                 by its case fold, `und` and `tr` by Unicode's and Turkish's \
+                                 order"
                             ))
                         }
                     },
                 }
-            } else if ["default", "references", "check"]
-                .iter()
-                .any(|w| self.peek_kw(w))
-            {
+            } else if self.peek_among(&["default", "references", "check"]) {
                 return self.err(NO_RULE);
             } else {
                 break;
@@ -1788,7 +1792,7 @@ impl Parser {
                 continue;
             }
             if matches!(self.peek(), Tok::At) {
-                self.next();
+                self.skip();
                 let kind = self.ident()?.to_ascii_lowercase();
                 match kind.as_str() {
                     "hash" => field = field.indexed(IndexKind::HASH),
@@ -1842,7 +1846,7 @@ impl Parser {
             "d" => 86_400_000,
             other => return self.err(format!("unknown unit `{other}` in @ttl: ms, s, m, h or d")),
         };
-        self.next();
+        self.skip();
         self.expect(Tok::RParen)?;
         match u64::try_from(n)
             .ok()
@@ -1859,7 +1863,7 @@ impl Parser {
         if !matches!(self.peek(), Tok::LParen) {
             return Ok(spec);
         }
-        self.next();
+        self.skip();
         loop {
             if matches!(self.peek(), Tok::RParen) {
                 break;
@@ -1873,7 +1877,7 @@ impl Parser {
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
-                self.next();
+                self.skip();
                 continue;
             }
             self.expect(Tok::Eq)?;
@@ -1911,7 +1915,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         Ok(spec)
@@ -1922,14 +1926,14 @@ impl Parser {
         if !matches!(self.peek(), Tok::LParen) {
             return Ok(spec.resolved());
         }
-        self.next();
+        self.skip();
         loop {
             if matches!(self.peek(), Tok::RParen) {
                 break;
             }
             let key = self.ident()?;
             if matches!(self.peek(), Tok::Eq) {
-                self.next();
+                self.skip();
                 if key.eq_ignore_ascii_case("quant") {
                     let q = self.ident()?;
                     match Quant::parse(&q) {
@@ -1958,7 +1962,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         Ok(spec.resolved())
@@ -1967,7 +1971,7 @@ impl Parser {
     fn data_type(&mut self) -> Result<DataType> {
         // [type] -> list
         if matches!(self.peek(), Tok::LBracket) {
-            self.next();
+            self.skip();
             let inner = self.data_type()?;
             self.expect(Tok::RBracket)?;
             return Ok(DataType::List(Box::new(inner)));
@@ -1990,7 +1994,7 @@ impl Parser {
                 }
                 // Optional storage precision: `vector<768, f16>`.
                 let prec = if matches!(self.peek(), Tok::Comma) {
-                    self.next();
+                    self.skip();
                     match self.ident()?.to_ascii_lowercase().as_str() {
                         "f32" => VecPrec::F32,
                         "f16" => VecPrec::F16,
@@ -2056,16 +2060,21 @@ impl Parser {
             }
             self.expect_kw("on")?;
             let collection = self.ident()?;
-            let keys = self.index_keys()?;
+            let mut keys = self.index_keys()?;
             if keys.len() < 2 {
                 return self.err(
                     "`drop index` takes an index over several fields: a field's own index goes \
                      with a rebuild of the field",
                 );
             }
+            // A loop: a `collect` was a copy of the in-place collect's code.
+            let mut fields = Vec::with_capacity(keys.len());
+            for (k, _) in &mut keys {
+                fields.push(std::mem::take(k));
+            }
             return Ok(Statement::DropComposite {
                 collection,
-                keys: keys.into_iter().map(|(k, _)| k).collect(),
+                keys: fields,
                 if_exists,
             });
         }
@@ -2156,10 +2165,10 @@ impl Parser {
             // `put events $1`: the documents are the parameter's, an object
             // or a list of them, so a page of any size is one text.
             docs_param = Some(*i);
-            self.next();
+            self.skip();
         } else if self.named_documents(&mut docs_param)? {
         } else if matches!(self.peek(), Tok::LBracket) {
-            self.next();
+            self.skip();
             loop {
                 if matches!(self.peek(), Tok::RBracket) {
                     break;
@@ -2168,7 +2177,7 @@ impl Parser {
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
-                self.next();
+                self.skip();
             }
             self.expect(Tok::RBracket)?;
         } else if insert && !matches!(self.peek(), Tok::LBrace) {
@@ -2253,7 +2262,7 @@ impl Parser {
             }
             let mut docs = vec![self.object()?];
             while matches!(self.peek(), Tok::Comma) {
-                self.next();
+                self.skip();
                 docs.push(self.object()?);
             }
             return Ok(docs);
@@ -2265,8 +2274,8 @@ impl Parser {
         };
         if self.peek_kw("select") || self.peek_kw("get") {
             return self.err(
-                "FennecQL inserts documents, not a query's rows: read them with `get`, and write \
-                 them with `insert <collection> $1`, a parameter holding them",
+                "FennecQL inserts documents, not a query's rows: read them with `get`, then \
+                 `insert <collection> $1` with them as the parameter",
             );
         }
         self.expect_kw("values")?;
@@ -2280,7 +2289,7 @@ impl Parser {
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
-                self.next();
+                self.skip();
             }
             if doc.len() != cols.len() {
                 return self.err(format!(
@@ -2294,7 +2303,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 return Ok(docs);
             }
-            self.next();
+            self.skip();
         }
     }
 
@@ -2360,7 +2369,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 return Ok(pairs);
             }
-            self.next();
+            self.skip();
         }
     }
 
@@ -2414,7 +2423,7 @@ impl Parser {
         if reason.bytes().any(|b| b == b'`') {
             return self.err(REASON_TICK);
         }
-        self.next();
+        self.skip();
         Ok(Some(Require {
             n,
             reason: reason.into_boxed_str(),
@@ -2442,14 +2451,14 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RBrace)?;
         Ok(pairs)
     }
 
     fn get(&mut self) -> Result<Statement> {
-        self.next(); // get / select
+        self.skip(); // get / select
                      // The classic SQL order: `select title, year from articles`. fennecdb's
                      // own order is valid in the same position (`get articles select
                      // title`), so the decision is made by backtracking: if the name list
@@ -2467,7 +2476,7 @@ impl Parser {
                 Some(Tok::Ident(_) | Tok::Star)
             )
         {
-            self.next();
+            self.skip();
             distinct = self.subqueries == 0;
             // Read as a list of one field named `distinct` before SQL was,
             // which SQL refuses.
@@ -2526,25 +2535,33 @@ impl Parser {
     /// key the same in every row, which ordered nothing.
     #[inline(never)]
     fn ordinals(&self, sel: &mut Select, (group_by, order_by): (bool, bool)) -> Result<()> {
-        let names: Vec<String> = match (&sel.project, sel.aggregate.is_empty()) {
-            (_, false) => sel.aggregate.iter().map(|c| c.name.clone()).collect(),
-            (Some(p), true) => p.clone(),
-            (None, true) => Vec::new(),
+        // The list's names read in place: a copy of them was made for
+        // every `order by`, a number in it or not.
+        let (aggregate, project) = (&sel.aggregate, &sel.project);
+        let len = match (project, aggregate.len()) {
+            (Some(p), 0) => p.len(),
+            (_, n) => n,
         };
         let item = |k: &Expr| match k {
             Expr::Lit(Value::Int(n)) => Some(*n),
             _ => None,
         };
         let at = |n: i64| -> Result<String> {
-            match names.get((n as usize).wrapping_sub(1)).filter(|_| n > 0) {
+            let i = (n as usize).wrapping_sub(1);
+            let name = match (project, aggregate.get(i)) {
+                _ if n <= 0 => None,
+                (_, Some(c)) => Some(&c.name),
+                (Some(p), None) if aggregate.is_empty() => p.get(i),
+                _ => None,
+            };
+            match name {
                 Some(name) => Ok(name.clone()),
-                None if names.is_empty() => self.err(format!(
+                None if len == 0 => self.err(format!(
                     "a key `{n}` names an item of the list by its place, and `*` names none: \
                      name the columns, or order by the field"
                 )),
                 None => self.err(format!(
-                    "a key `{n}` names an item of the list by its place, and the list holds {}",
-                    names.len()
+                    "a key `{n}` names an item of the list by its place, and the list holds {len}"
                 )),
             }
         };
@@ -2761,11 +2778,7 @@ impl Parser {
         if let (Tok::Ident(w), Some(Tok::Ident(k))) =
             (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok))
         {
-            if !COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
-                && ["where", "group", "order", "limit", "having"]
-                    .iter()
-                    .any(|c| k.eq_ignore_ascii_case(c))
-            {
+            if !among(w, &COMMANDS) && among(k, &["where", "group", "order", "limit", "having"]) {
                 return Err(self.alias(&w.to_ascii_lowercase()));
             }
         }
@@ -2819,11 +2832,11 @@ impl Parser {
                 self.eat_kw("inner");
                 false
             } else if self.peek_kw("left") {
-                self.next();
+                self.skip();
                 self.eat_kw("outer");
                 true
             } else if matches!(self.peek(), Tok::Comma) {
-                self.next();
+                self.skip();
                 let collection = self.ident()?;
                 let alias = self.table_alias()?;
                 tables.push(Table { collection, alias });
@@ -2832,10 +2845,7 @@ impl Parser {
                     on: None,
                 });
                 continue;
-            } else if ["right", "full", "cross", "natural"]
-                .iter()
-                .any(|w| self.peek_kw(w))
-            {
+            } else if self.peek_among(&["right", "full", "cross", "natural"]) {
                 return self.err(
                     "a join is an inner JOIN or a LEFT JOIN, a RIGHT JOIN a LEFT JOIN with its \
                      tables the other way round",
@@ -2922,15 +2932,13 @@ impl Parser {
         match self.peek() {
             Tok::Ident(w)
                 if !w.contains('.')
-                    && !TAKEN
-                        .iter()
-                        .chain(&COMMANDS)
-                        .any(|k| w.eq_ignore_ascii_case(k))
+                    && !among(w, &TAKEN)
+                    && !among(w, &COMMANDS)
                     // In a body, `end` closes it.
                     && !(self.defining() && w.eq_ignore_ascii_case("end")) =>
             {
                 let a = w.clone();
-                self.next();
+                self.skip();
                 Some(a)
             }
             _ => None,
@@ -2949,10 +2957,8 @@ impl Parser {
                 sel.aggregate
                     .iter()
                     .any(|c| is_key(k, &c.expr) || matches!(k, Expr::Field(f) if *f == c.name))
-                    || sel
-                        .project
+                    || (sel.project.as_deref().unwrap_or_default())
                         .iter()
-                        .flatten()
                         .any(|p| matches!(k, Expr::Field(f) if f == p))
             };
             return match sel.group.iter().all(listed) {
@@ -2990,7 +2996,7 @@ impl Parser {
                 "pgvector's distance orders alone, nearest first: `order by emb <-> $1 limit 10`",
             );
         }
-        let Some(Expr::Call(op, args)) = sel.order.remove(0).expr else {
+        let Some(Expr::Call(op, args)) = sel.order.pop().and_then(|s| s.expr) else {
             return Ok(());
         };
         let metric = match op.as_str() {
@@ -3028,7 +3034,7 @@ impl Parser {
     /// `select a, b` or `select *`. `None` means every field.
     fn projection_list(&mut self) -> Result<Option<Vec<String>>> {
         if matches!(self.peek(), Tok::Star) {
-            self.next();
+            self.skip();
             return Ok(None);
         }
         let mut cols = Vec::new();
@@ -3037,7 +3043,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         Ok(Some(cols))
     }
@@ -3100,7 +3106,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         Ok(())
     }
@@ -3179,7 +3185,7 @@ impl Parser {
         // field; `Select::check` holds the two sides to as many.
         let on = self.names()?;
         let parent = if matches!(self.peek(), Tok::Eq) {
-            self.next();
+            self.skip();
             self.names()?
         } else {
             vec!["id".to_string()]
@@ -3253,7 +3259,7 @@ impl Parser {
         }
         // `select product group product`: the keys alone, as a `get`'s.
         if !l.group.is_empty() && l.aggregate.is_empty() {
-            for name in l.project.take().into_iter().flatten() {
+            for name in l.project.take().unwrap_or_default() {
                 let expr = Expr::Field(name.clone());
                 l.aggregate.push(Column { expr, name });
             }
@@ -3266,7 +3272,7 @@ impl Parser {
     fn names(&mut self) -> Result<Vec<String>> {
         let listed = matches!(self.peek(), Tok::LParen);
         if listed {
-            self.next();
+            self.skip();
         }
         let mut out = Vec::new();
         loop {
@@ -3274,7 +3280,7 @@ impl Parser {
             if !listed || !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         if listed {
             self.expect(Tok::RParen)?;
@@ -3351,7 +3357,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 return Ok(out);
             }
-            self.next();
+            self.skip();
         }
     }
 
@@ -3374,7 +3380,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         Ok(out)
     }
@@ -3393,7 +3399,7 @@ impl Parser {
         }
         let mut args = Vec::new();
         while matches!(self.peek(), Tok::Comma) {
-            self.next();
+            self.skip();
             args.push(self.expr()?);
         }
         self.expect(Tok::RParen)?;
@@ -3416,11 +3422,11 @@ impl Parser {
         let mut out = SelectList::default();
         let star = matches!(self.peek(), Tok::Star);
         if star {
-            self.next();
+            self.skip();
             if !matches!(self.peek(), Tok::Comma) {
                 return Ok(out);
             }
-            self.next();
+            self.skip();
         }
         // Each item as written, and where; a mark's is its label, at `MAX`.
         let mut items: Vec<(Expr, Option<String>, usize)> = Vec::new();
@@ -3464,7 +3470,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         let aggregates = items.iter().any(|(e, ..)| e.has_aggregate());
         for (e, name, at) in items {
@@ -3480,8 +3486,8 @@ impl Parser {
                     self.cut |= self.at_eof();
                     self.i = self.toks.iter().position(|t| t.pos >= at).unwrap_or(self.i);
                     return self.err(
-                        "an item that is not a field, or an aggregate of one -- count, sum, \
-                         avg, min, max, first, last -- answers under a name: `<expr> as <name>`",
+                        "an item that is not a field or an aggregate of one answers under a \
+                         name: `<expr> as <name>`",
                     );
                 }
             };
@@ -3504,7 +3510,7 @@ impl Parser {
     }
 
     fn set(&mut self) -> Result<Statement> {
-        self.next(); // set / update
+        self.skip(); // set / update
         let at = self.i;
         let collection = self.ident()?;
         // SQL's `update <name> set a = 1, b = b + 1`, the pairs FennecQL's
@@ -3524,7 +3530,7 @@ impl Parser {
     }
 
     fn del(&mut self) -> Result<Statement> {
-        self.next(); // del / delete
+        self.skip(); // del / delete
         self.eat_kw("from");
         let at = self.i;
         let collection = self.ident()?;
@@ -3622,7 +3628,7 @@ impl Parser {
             return self.err("a parameter's documents");
         };
         let i = self.named(&n)?;
-        self.next();
+        self.skip();
         Ok(i)
     }
 
@@ -3634,7 +3640,7 @@ impl Parser {
     #[inline(never)]
     fn named_param(&mut self, n: &str) -> Result<Expr> {
         let i = self.named(n)?;
-        self.next();
+        self.skip();
         Ok(Expr::Param(i))
     }
 
@@ -3744,7 +3750,7 @@ impl Parser {
                  statement holding one would hand it to every caller",
             );
         }
-        self.next();
+        self.skip();
         let at = self.i;
         let name = self.statement_name()?;
         if !matches!(self.peek(), Tok::LParen) {
@@ -3753,7 +3759,7 @@ impl Parser {
                  `create statement purge() ...`",
             ));
         }
-        self.next();
+        self.skip();
         let mut params: Vec<Param> = Vec::new();
         while !matches!(self.peek(), Tok::RParen) {
             if params.len() == MAX_PARAMS {
@@ -3771,7 +3777,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         let (mut claims, mut public, mut scans) = (None, false, false);
@@ -3785,25 +3791,25 @@ impl Parser {
                 if check.is_some() {
                     return self.err("`claims` goes before `check`, which reads them");
                 }
-                self.next();
+                self.skip();
                 claims = Some(self.claims()?);
             } else if self.peek_kw("public") {
                 if public {
                     return twice(self, "public");
                 }
-                self.next();
+                self.skip();
                 public = true;
             } else if self.peek_kw("scans") {
                 if scans {
                     return twice(self, "scans");
                 }
-                self.next();
+                self.skip();
                 scans = true;
             } else if self.peek_kw("comment") {
                 if comment.is_some() {
                     return twice(self, "comment");
                 }
-                self.next();
+                self.skip();
                 comment = Some(self.quoted_text(
                     "`comment` takes what the statement does, in quotes: `comment 'Moves an \
                      amount between two accounts'`",
@@ -3812,7 +3818,7 @@ impl Parser {
                 if check.is_some() {
                     return twice(self, "check");
                 }
-                self.next();
+                self.skip();
                 self.def = Some(Box::new(Names {
                     params: params.iter().map(|p| p.name.clone()).collect(),
                     claims: claims
@@ -3905,11 +3911,11 @@ impl Parser {
                 ))
             }
         };
-        self.next();
+        self.skip();
         let ty = self.data_type()?;
         let mut default = None;
         if matches!(self.peek(), Tok::Eq) {
-            self.next();
+            self.skip();
             let (mark, at) = (self.depth, self.i);
             let e = self.operand();
             self.depth = mark;
@@ -3970,7 +3976,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         Ok(out)
@@ -3983,7 +3989,7 @@ impl Parser {
         match self.peek() {
             Tok::Single(t) | Tok::Str(t) if !t.is_empty() => {
                 let t = t.clone();
-                self.next();
+                self.skip();
                 Ok(t)
             }
             _ => Err(self.taught(why)),
@@ -4032,7 +4038,7 @@ impl Parser {
     fn call_statement(&mut self) -> Result<Statement> {
         use fennec_core::named::{Args, Call};
         let at = self.i;
-        self.next();
+        self.skip();
         let name = match self.statement_name() {
             Ok(name) => name,
             // `call` at the text's end: a name to come, or the alias of the
@@ -4053,13 +4059,13 @@ impl Parser {
             Tok::LBrace => Args::Named(self.call_document()?),
             Tok::Param(i) => {
                 let i = *i;
-                self.next();
+                self.skip();
                 Args::Param(i)
             }
             Tok::Named(n) => {
                 let n = n.clone();
                 let i = self.named(&n)?;
-                self.next();
+                self.skip();
                 Args::Param(i)
             }
             Tok::LParen => self.sql_arguments()?,
@@ -4071,7 +4077,7 @@ impl Parser {
                 Tok::LBrace => Args::Named(self.call_document()?),
                 Tok::Param(i) => {
                     let i = *i;
-                    self.next();
+                    self.skip();
                     Args::Param(i)
                 }
                 _ => {
@@ -4156,7 +4162,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         Ok(match (placed.is_empty(), named.is_empty()) {
@@ -4274,7 +4280,7 @@ impl Parser {
             _ => None,
         };
         if let Some(op) = op {
-            self.next();
+            self.skip();
             if op == CmpOp::Eq && self.scalar_ahead() {
                 return self.scalar(Some(left));
             }
@@ -4300,7 +4306,7 @@ impl Parser {
             return Ok(Expr::Cmp(op, Box::new(left), Box::new(right)));
         }
         if matches!(self.peek(), Tok::Tilde) {
-            self.next();
+            self.skip();
             let right = self.arith()?;
             if lq && fixed(&right) {
                 return Err(self.quoted(at));
@@ -4310,8 +4316,8 @@ impl Parser {
             // and agents told their users no such rows existed.
             if matches!(&right, Expr::Lit(Value::Text(t)) if regex_like(t)) {
                 return self.err(
-                    "`~` finds the text as written, not a regular expression: `like 'abc%'` \
-                     for a start, `like '%abc'` for an end, `like 'a%b'` for a gap",
+                    "`~` finds the text as written, not a regular expression: `like 'abc%'`, \
+                     `like '%abc'` or `like 'a%b'`",
                 );
             }
             return Ok(Expr::Like(Box::new(left), Box::new(right)));
@@ -4356,15 +4362,15 @@ impl Parser {
     /// after its `=`.
     #[inline(never)]
     fn scalar(&mut self, left: Option<Expr>) -> Result<Expr> {
-        self.next();
+        self.skip();
         let sel = self.inner_get()?;
         self.expect(Tok::RParen)?;
         let one = (!sel.aggregate.is_empty() && sel.group.is_empty())
             || matches!(sel.limit, Some(Count::N(0 | 1)));
         if !one {
             return self.err(
-                "`= (select ...)` compares one value, and the query may answer several rows: \
-                 `x in (select ...)` takes each, or `limit 1` answers one",
+                "`= (select ...)` compares one value, and the query may answer several: `x in \
+                 (select ...)` takes each, `limit 1` answers one",
             );
         }
         let left = match left {
@@ -4405,7 +4411,7 @@ impl Parser {
             return Err(self.taught("`exists` takes a query: `exists (select 1 from orders o where o.customer_id = c.id)`"));
         }
         self.deeper()?;
-        self.next();
+        self.skip();
         // The list, which `exists` reads nothing of: `select 1`, `*`.
         let mut depth = 0usize;
         while depth > 0 || !self.peek_kw("from") {
@@ -4418,7 +4424,7 @@ impl Parser {
                 _ => {}
             }
         }
-        self.next();
+        self.skip();
         let collection = self.ident()?;
         let inner = Table {
             collection: collection.clone(),
@@ -4445,12 +4451,12 @@ impl Parser {
                      `limit 0` asks of no row",
                 );
             }
-            self.next();
+            self.skip();
         }
         if !matches!(self.peek(), Tok::RParen) {
             return Err(self.taught("an `exists` query is `select 1 from <collection> where ...`"));
         }
-        self.next();
+        self.skip();
         let inner = From {
             tables: here,
             joins: Vec::new(),
@@ -4490,14 +4496,13 @@ impl Parser {
         // over it -- which no FennecQL text had after an operand.
         let negated = w.eq_ignore_ascii_case("not")
             && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
-                Some(Tok::Ident(k)) if ["in", "like", "ilike", "between"]
-                    .iter().any(|w| k.eq_ignore_ascii_case(w)));
+                Some(Tok::Ident(k)) if among(k, &["in", "like", "ilike", "between"]));
         // `x not` where the text ends: a test a next line may name, which
         // the shell reads as open where a word of no statement stood.
         let open = w.eq_ignore_ascii_case("not")
             && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Eof));
         if negated || open {
-            self.next();
+            self.skip();
         }
         if open {
             return self.err("`not` after a value takes `in`, `like`, `ilike` or `between`");
@@ -4619,7 +4624,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(close)?;
         Ok(Expr::In(Box::new(left), items))
@@ -4752,7 +4757,7 @@ impl Parser {
                 (Tok::Slash, true) => ArithOp::Div,
                 _ => return Ok(left),
             };
-            self.next();
+            self.skip();
             self.deepen()?;
             let right = match product {
                 true => self.operand()?,
@@ -4769,7 +4774,7 @@ impl Parser {
     fn operand(&mut self) -> Result<Expr> {
         let mut minus = 0;
         while matches!(self.peek(), Tok::Minus) {
-            self.next();
+            self.skip();
             self.deepen()?;
             minus += 1;
         }
@@ -4805,7 +4810,7 @@ impl Parser {
         // same.
         let folds = AGGREGATES.contains(&name.as_str());
         if name == "count" && matches!(self.peek(), Tok::Star) {
-            self.next();
+            self.skip();
         } else if name == "count"
             && self.peek_kw("distinct")
             && !matches!(
@@ -4813,7 +4818,7 @@ impl Parser {
                 Some(Tok::RParen | Tok::Comma)
             )
         {
-            self.next();
+            self.skip();
             let ti = self.i;
             args.push(Expr::Call("distinct".into(), vec![self.expr()?]));
             if self.alone(ti) {
@@ -4849,7 +4854,7 @@ impl Parser {
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
-            self.next();
+            self.skip();
         }
         self.expect(Tok::RParen)?;
         // SQL's `count(*) filter (where c)`: the aggregate of what `case
@@ -4899,7 +4904,7 @@ impl Parser {
     /// column is the list, run before the query around it.
     /// A `get` or a `select` follows the `(` ([`Self::in_list`]).
     fn subquery(&mut self, left: Expr) -> Result<Expr> {
-        self.next();
+        self.skip();
         let sel = self.inner_get()?;
         self.expect(Tok::RParen)?;
         Ok(Expr::InSelect(Box::new(left), Box::new(sel)))
@@ -4914,7 +4919,7 @@ impl Parser {
         }
         match self.peek().clone() {
             Tok::LParen => {
-                self.next();
+                self.skip();
                 // SQL's scalar subquery, `= (select max(at) from t)`.
                 if self.peek_kw("get") || self.peek_kw("select") {
                     return self.err(
@@ -4954,7 +4959,7 @@ impl Parser {
                         return Ok(Expr::Lit(Value::Vector(v)));
                     }
                 }
-                self.next();
+                self.skip();
                 let mut items = Vec::new();
                 loop {
                     if matches!(self.peek(), Tok::RBracket) {
@@ -4964,7 +4969,7 @@ impl Parser {
                     if !matches!(self.peek(), Tok::Comma) {
                         break;
                     }
-                    self.next();
+                    self.skip();
                 }
                 self.expect(Tok::RBracket)?;
                 // Constants alone, moved out in one pass: through iterator
@@ -4995,15 +5000,15 @@ impl Parser {
                 Ok(Expr::Lit(Value::List(vals)))
             }
             Tok::Str(s) | Tok::Single(s) => {
-                self.next();
+                self.skip();
                 Ok(Expr::Lit(Value::Text(s)))
             }
             Tok::Int(i) => {
-                self.next();
+                self.skip();
                 Ok(Expr::Lit(Value::Int(i)))
             }
             Tok::Float(f) => {
-                self.next();
+                self.skip();
                 Ok(Expr::Lit(Value::Float(f)))
             }
             Tok::Param(i) => {
@@ -5015,7 +5020,7 @@ impl Parser {
                         return Err(self.past_params(i, d.params.len()));
                     }
                 }
-                self.next();
+                self.skip();
                 Ok(Expr::Param(i))
             }
             #[cfg(feature = "statements")]
@@ -5024,25 +5029,25 @@ impl Parser {
                 let lower = name.to_ascii_lowercase();
                 match lower.as_str() {
                     "true" => {
-                        self.next();
+                        self.skip();
                         return Ok(Expr::Lit(Value::Bool(true)));
                     }
                     "false" => {
-                        self.next();
+                        self.skip();
                         return Ok(Expr::Lit(Value::Bool(false)));
                     }
                     "null" => {
-                        self.next();
+                        self.skip();
                         return Ok(Expr::Lit(Value::Null));
                     }
                     _ => {}
                 }
-                self.next();
+                self.skip();
                 if lower == "case" && self.peek_kw("when") {
                     return self.case();
                 }
                 if matches!(self.peek(), Tok::LParen) {
-                    self.next();
+                    self.skip();
                     return self.call(lower);
                 }
                 Ok(Expr::Field(name))

@@ -219,6 +219,44 @@ twice, its writes and ANN within 1%. The same source took 19.6 KB of code off
 `fennec-server` (2 407.4 -> 2 387.8 KB, `make size-report
 BIN=fennec-server`) and 17.5 KB off the shell (1 526.9 -> 1 509.4).
 
+**SQL's bytes, won back without cutting SQL** (row 42). SQL spellings
+part 2 grew the module 19.5 KB brotli and SQL is core in every build, so
+its parser was made smaller instead, every text reading as the same tree
+(`make fennecql-corpus`: 9 815 texts, none changed, none refused or taken
+that was not). Raw, gzip and brotli bytes, each against the one before:
+`Parser::skip` steps past a token with no copy, where `next` cloned one
+for each of 113 callers that dropped it -- a keyword a `String` made and
+freed (1 349, 248, 207); in `fennec-ql` the copies and generic
+instantiations a loop or `mem::take` does without -- the list's names
+`ordinals` copied for every `order by`, the in-place `collect`s of `drop
+index` and `create table`, a join's keys cloned, an expression duplicated,
+`Vec::remove` and `swap_remove`, `flatten` (804, 396, 189; 644, 204, 157;
+496, 300, 28; 753, 262, 383); the lists a word is looked for in one
+loop, `among`, where each `iter().any(..)` and `chain` was a copy (555,
+252, 374); `create collection` and `create table` ending in one
+`collection_of`, and lists read by place rather than by value, each kind of
+item an `IntoIter` of its own (1 150, 287, 123); PostgreSQL's types one
+text read by a loop, `sqltypes::POSTGRES`, where a `match` compared each
+name in code (635, 86, 53); one reader of an index's keys, SQL's with its
+flag (228, -1, -47); the refusals' prose shortened, each still naming
+the FennecQL to write (400, 161, -109). 7.0 KB, 2.1 KB gzip, 1.3 KB brotli
+in all (813.7 -> 806.8, 334.4 -> 332.2, 276.2 -> 274.8 by `make
+size-report`). Brotli's own dictionary and window take most of what
+shorter refusals save -- a third of their raw bytes reached gzip and none
+brotli -- and moves of 0.3 KB either way with the layout alone. Tried and
+left out: `Parser::err` inlined (+2.4 KB raw), `Tok::describe`'s fixed
+texts made one `String` (83 bytes) and one reader of `if [not] exists`
+(88): LLVM had merged them already. Measured against main in turns, eight
+runs a side ABBA, each begun at a 1-minute load under 2.5, natively: the
+parse 10 to 19% faster (a read by id 814 -> 713 ns, a filtered `get` 1 609
+-> 1 309, a SQL join 4 128 -> 3 488, `create table` alone within 1%), the
+token no longer copied; parsed and run, a read by id, a filter, a SQL
+filter, join and group within 3% either way, and with every function
+aligned to 64 bytes on both sides within 0.6% or faster -- the join
++1.7% first, +0.5% aligned. The module in Node, interleaved over 21
+rounds: the same statements within 2.2% one order and 4.2% the other,
+their signs turning with it.
+
 ## Chunked memory
 
 **The browser module grows nothing by doubling past a mebibyte.** Its
