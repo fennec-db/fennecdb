@@ -40,6 +40,13 @@ pub struct Callee {
     pub values: Vec<Value>,
 }
 
+/// A call that reads, answered ([`Database::read_call_json`]): its last
+/// statement's rows written out as JSON, this many, or its answer.
+pub enum CallRead {
+    Json(usize),
+    Answer(Response),
+}
+
 impl Database {
     /// `--call-max-rows`: the rows a call's statements may examine, counted
     /// where a scan, an index or an ordered walk hands them over; past it
@@ -167,6 +174,31 @@ impl Database {
             }
         }
         last
+    }
+
+    /// [`Self::read_call`], its last statement written straight onto `out`
+    /// as JSON where [`Self::query_json`] writes it -- a plain `get` -- and
+    /// answered as `read_call` answers it otherwise, `out` as it was. The
+    /// statements before it are its guards, read as `query` reads them. A
+    /// call's answer is its last statement's, and that one decoded into
+    /// values to be written out again cost a call by id a third more than
+    /// the `get` it runs, sent alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_call_json(&self, callee: &Callee, out: &mut String) -> Result<CallRead> {
+        let Some((last, guards)) = callee.def.body.split_last() else {
+            return self.read_call(callee).map(CallRead::Answer);
+        };
+        if callee.def.writes() {
+            return self.read_call(callee).map(CallRead::Answer);
+        }
+        let _bound = Bound::new(self);
+        for s in guards {
+            self.query(s, &callee.values)?;
+        }
+        Ok(match self.query_json(last, &callee.values, out)? {
+            Some(n) => CallRead::Json(n),
+            None => CallRead::Answer(self.query(last, &callee.values)?),
+        })
     }
 
     /// `f` -- a call's body run under the write lock -- with this thread's

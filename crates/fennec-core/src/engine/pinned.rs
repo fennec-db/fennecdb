@@ -123,6 +123,18 @@ impl Pinned {
     pub fn read_call(&self, callee: &Callee) -> Option<Result<Response>> {
         held(self.db.read_call(callee))
     }
+
+    /// [`Database::read_call_json`] as at the pin, `None` as
+    /// [`Self::query_json`].
+    #[cfg(feature = "statements")]
+    pub fn read_call_json(&self, callee: &Callee, out: &mut String) -> Option<Result<CallRead>> {
+        let at = out.len();
+        let r = held(self.db.read_call_json(callee, out));
+        if r.is_none() {
+            out.truncate(at);
+        }
+        r
+    }
 }
 
 impl Database {

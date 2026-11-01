@@ -2640,7 +2640,10 @@ fn run_query(
         }
     }
 
-    if !stmt.is_read_only() {
+    // Asked of a write that may grow the data, under a ceiling: the read
+    // lock taken for every write, ceiling or none, paid for the one a call
+    // that reads takes to ask its statement ([`read_call`]).
+    if cfg.max_memory != 0 && grows(&stmt) {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
             return refused(why);
@@ -3078,7 +3081,7 @@ fn read_call(
         return None;
     };
     let mut pin = true;
-    let (result, at) = loop {
+    let (result, at, body) = loop {
         let guard = held::read(db);
         match guard.call_reads(c) {
             Some(true) => {}
@@ -3107,8 +3110,11 @@ fn read_call(
             true => guard.pin_call(&callee),
             false => None,
         };
+        // Its last statement's rows written out from the stored documents
+        // where it is a plain `get`, as `/query`'s are.
+        let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
         let Some(p) = pinned else {
-            break (guard.read_call(&callee), At::of(&guard));
+            break (guard.read_call_json(&callee, &mut body), At::of(&guard), body);
         };
         let at = At {
             seq: p.change_seq(),
@@ -3116,11 +3122,12 @@ fn read_call(
         };
         drop(guard);
         running.attr("fennec.pinned", true);
-        match p.read_call(&callee) {
-            Some(r) => break (r, at),
+        match p.read_call_json(&callee, &mut body) {
+            Some(r) => break (r, at, body),
             // A statement of it reached for an index the pin left out: the
             // call again under the lock, asked and judged there again.
             None => {
+                http::give_back(body.into_bytes());
                 running.forget();
                 pin = false;
             }
@@ -3128,12 +3135,19 @@ fn read_call(
     };
     timing::lap(timing::Phase::Execute);
     let resp = match access::run_as(who, stmt, || result) {
-        Ok(r) => {
+        Ok(fennec_core::engine::CallRead::Json(n)) => {
+            statements::rows(n as u64);
+            let resp = Response::json(200, body).versioned(fennec_core::VERSION);
+            timing::lap(timing::Phase::Render);
+            return Some(with_seq(resp, Some(at)));
+        }
+        Ok(fennec_core::engine::CallRead::Answer(r)) => {
             statements::rows(counted(&r));
             with_seq(api::render_any(&r, fennec_core::VERSION), Some(at))
         }
         Err(e) => error_response(&e),
     };
+    http::give_back(body.into_bytes());
     timing::lap(timing::Phase::Render);
     Some(resp)
 }
@@ -3631,6 +3645,15 @@ fn answer_reads(
     ))
 }
 
+/// Whether `stmt` grows the data, which the ceiling ([`over_ceiling`])
+/// stops.
+fn grows(stmt: &Statement) -> bool {
+    matches!(
+        stmt,
+        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
+    )
+}
+
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.
 ///
 /// Only a statement that grows the data is stopped: `del` and `compact` are
@@ -3639,11 +3662,7 @@ fn answer_reads(
 /// for both listeners: fennec-server held only its own writes to it, and a client
 /// writing over HTTP never met it.
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
-    let grows = matches!(
-        stmt,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
-    );
-    if max == 0 || !grows {
+    if max == 0 || !grows(stmt) {
         return None;
     }
     let used = db.memory_bytes();

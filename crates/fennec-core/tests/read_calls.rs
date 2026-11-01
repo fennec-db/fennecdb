@@ -5,6 +5,7 @@
 //! thread, so calls and plain reads beside it are charged nothing of each
 //! other's.
 
+use fennec_core::engine::CallRead;
 use fennec_core::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
@@ -106,6 +107,35 @@ fn reads(db: &Database, name: &str) -> Option<bool> {
         Statement::Call(c) => db.call_reads(&c),
         _ => unreachable!(),
     }
+}
+
+/// A call's last statement, a plain `get`, is written out as JSON from the
+/// stored documents -- the bytes its rows render to, as `query_json` holds
+/// a `get` to `query` -- after its guards; any other is answered as rows.
+#[test]
+fn a_call_that_reads_is_written_out_as_its_get_is() {
+    let db = bank(4);
+    for (text, rows) in [("call rich {over: 15}", 3), ("call both {over: 2}", 2)] {
+        let Statement::Call(c) = one(text) else {
+            unreachable!()
+        };
+        let callee = db.callee(&c, &[]).unwrap();
+        let mut out = String::new();
+        let CallRead::Json(n) = db.read_call_json(&callee, &mut out).unwrap() else {
+            panic!("{text}: a plain get's rows are written out");
+        };
+        assert_eq!(n, rows);
+        let mut rendered = String::new();
+        let r = db.read_call(&callee).unwrap();
+        fennec_core::json::rows_array_into(&mut rendered, r.rows().unwrap());
+        assert_eq!(out, rendered, "{text}");
+    }
+    let Statement::Call(c) = one("call both {over: 99}") else {
+        unreachable!()
+    };
+    let callee = db.callee(&c, &[]).unwrap();
+    let e = db.read_call_json(&callee, &mut String::new()).err().unwrap();
+    assert_eq!(e.reason(), Some("none that rich"));
 }
 
 /// The read executor cannot write, by its type, and refuses a body that
