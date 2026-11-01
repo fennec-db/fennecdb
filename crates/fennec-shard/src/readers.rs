@@ -2612,11 +2612,12 @@ fn bound_before(r: &Reader, was: &[String]) -> bool {
 /// Whether a node's word on a tenant's lineage says its file holds its
 /// primary's history (`"ready"`): `None` from a node that does not say.
 fn ready_in(body: &[u8]) -> Option<bool> {
-    let fields = fennec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
-    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("ready", Value::Bool(b)) => Some(b),
-        _ => None,
-    })
+    crate::fields_of(body)
+        .into_iter()
+        .find_map(|(k, v)| match (k.as_str(), v) {
+            ("ready", Value::Bool(b)) => Some(b),
+            _ => None,
+        })
 }
 
 /// What a region's router said of the read replicas of a name it keeps.

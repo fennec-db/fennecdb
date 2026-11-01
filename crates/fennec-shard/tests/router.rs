@@ -410,15 +410,33 @@ fn a_move_copies_the_tenant_flips_the_route_and_removes_the_source() {
     assert_eq!(body(&r), r#"[{"id":4}]"#);
 }
 
+/// A file of the tenant on a move's target that this router did not note --
+/// a move that died after the copy and before the flip leaves one, and so
+/// does a router promoted behind its primary moving the tenant onto the
+/// node the primary had moved it to, there live -- is no longer deleted
+/// unjudged: the move is refused, the tenant stays on its source, and the
+/// file is noted for an operator. Once it is gone, the move goes.
 #[test]
-fn a_move_replaces_a_stale_copy_left_on_the_target() {
+fn a_move_keeps_a_file_it_did_not_leave_on_the_target() {
     let c = cluster("stale", 2, None);
     c.create("acme", Some("n1"));
     c.query("acme", "create collection notes (title text)");
     c.call("POST", "/t/acme/notes", r#"{"title":"real"}"#, None);
-    // What a move that died after the copy and before the flip leaves.
     c.nodes[1].tenants.create("acme").unwrap();
 
+    let r = c.call("POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#, None);
+    assert_eq!(r.0, 409, "{}", r.1);
+    assert!(c.nodes[1].tenants.names().contains(&"acme".to_string()));
+    let r = c.call("GET", "/t/acme/notes?select=title", "", None);
+    assert_eq!(body(&r), r#"[{"title":"real"}]"#);
+    let metrics = c.call("GET", "/_metrics", "", None);
+    assert!(
+        metrics.1.contains("fennec_router_files_left 1"),
+        "{}",
+        metrics.1
+    );
+
+    c.nodes[1].tenants.delete("acme").unwrap();
     let r = c.call("POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#, None);
     assert_eq!(r.0, 200, "{}", r.1);
     let r = c.call("GET", "/t/acme/notes?select=title", "", None);

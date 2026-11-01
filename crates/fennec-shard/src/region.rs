@@ -1069,9 +1069,10 @@ impl Router {
                 .call(&dst.addr, "PUT", &format!("{base}/file"), &dst.token, image)
         };
         let mut installed = put(image);
-        // 409: a copy a move that died before its flip left there.
+        // 409: a file of the tenant there, taken back only where this
+        // router left it, the node judging (`clear_target`).
         if matches!(installed, Ok((409, _))) {
-            let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
+            self.clear_target(tenant, to, "a move")?;
             installed = put(image);
         }
         let answer = expect(installed, 201, to)?;

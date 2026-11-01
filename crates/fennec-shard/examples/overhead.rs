@@ -319,13 +319,21 @@ fn main() {
     // A word first runs one part: `latency` the forwarded request alone,
     // `fanout` the query across tenants alone, `standby` a request through
     // a standby router against the primary, `reads` a read answered by a
-    // read replica against one sent home.
+    // read replica against one sent home, `failovers` a pair's failover and
+    // one across two nodes alone, what a promotion costs a tenant.
     let only = match args.first().map(String::as_str) {
-        Some(w @ ("latency" | "fanout" | "standby" | "regions" | "reads")) => Some(w.to_string()),
+        Some(w @ ("latency" | "fanout" | "standby" | "regions" | "reads" | "failovers")) => {
+            Some(w.to_string())
+        }
         _ => None,
     };
     if only.is_some() {
         args.remove(0);
+    }
+    if only.as_deref() == Some("failovers") {
+        replicas();
+        spread();
+        return;
     }
     if only.as_deref() == Some("fanout") {
         fanout();

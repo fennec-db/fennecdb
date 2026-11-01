@@ -734,3 +734,157 @@ fn a_scoped_write_to_a_tenant_is_checked() {
         r#"[{"owner":"alice","title":"acme secret"},{"owner":"alice","title":"mine"}]"#
     );
 }
+
+/// The `instance` a node's answer gives a tenant's file.
+fn instance_of(r: &Res) -> Option<String> {
+    let text = r.text();
+    let rest = text.split("\"instance\":\"").nth(1)?;
+    Some(rest.split('"').next()?.to_string())
+}
+
+/// `POST /_admin/tenants/<tenant>/reclaim` naming `ids`.
+fn reclaim(port: u16, tenant: &str, ids: &[&str]) -> Res {
+    let named: Vec<String> = ids.iter().map(|i| format!("\"{i}\"")).collect();
+    let body = format!("{{\"instances\":[{}]}}", named.join(","));
+    let target = format!("/_admin/tenants/{tenant}/reclaim");
+    call(port, "POST", &target, body.as_bytes(), Some(ADMIN))
+}
+
+/// Waits for `/t/<tenant>/notes/changes` to send its seed: the stream holds
+/// the tenant from then.
+fn stream_on(port: u16, tenant: &str) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let ask = format!("GET /t/{tenant}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n");
+    s.write_all(ask.as_bytes()).unwrap();
+    let mut buf = String::new();
+    let mut chunk = [0u8; 4096];
+    while !buf.contains("event: seed") {
+        let k = s.read(&mut chunk).unwrap();
+        buf.push_str(&String::from_utf8_lossy(&chunk[..k]));
+    }
+    s
+}
+
+/// A file a router left is taken back by the identity its node gave it,
+/// and by no other: one named wrongly is answered with what the file
+/// carries and kept, rows and all, its stream untouched. The identity
+/// outlives a close; a reclaim of an open file ends its streams before the
+/// file goes, and one of a file gone says so.
+#[test]
+fn a_file_is_taken_back_only_by_the_identity_it_carries() {
+    let n = start("reclaim", admin_cfg());
+    let r = call(n.port, "PUT", "/_admin/tenants/acme", b"", Some(ADMIN));
+    assert_eq!(r.status, 201, "{}", r.text());
+    let id = instance_of(&r).expect("an identity");
+    query(n.port, "acme", "create collection notes (title text)");
+    query(n.port, "acme", "put notes {title: \"kept\"}");
+
+    let r = reclaim(n.port, "acme", &["00000000000000ab"]);
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert_eq!(
+        instance_of(&r).as_deref(),
+        Some(id.as_str()),
+        "{}",
+        r.text()
+    );
+    assert!(n.dir.join("acme.fennec").exists());
+
+    // Closed and opened again: the same file, the same identity.
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    let r = call(n.port, "GET", "/t/acme/notes", b"", None);
+    assert!(r.text().contains("kept"), "{}", r.text());
+    assert_eq!(
+        n.tenants.instance("acme").map(fennec_http::instance::text),
+        Some(id.clone())
+    );
+
+    let mut s = stream_on(n.port, "acme");
+    let r = reclaim(n.port, "acme", &["00000000000000ab", &id]);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.text().contains("\"taken\":true"), "{}", r.text());
+    assert!(!n.dir.join("acme.fennec").exists());
+    assert!(!n.dir.join("acme.instance").exists());
+    let mut rest = String::new();
+    let _ = s.read_to_string(&mut rest);
+    assert!(rest.contains("event: error"), "{rest}");
+
+    let r = reclaim(n.port, "acme", &[&id]);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.text().contains("\"taken\":false"), "{}", r.text());
+    let bad = call(
+        n.port,
+        "POST",
+        "/_admin/tenants/acme/reclaim",
+        b"{}",
+        Some(ADMIN),
+    );
+    assert_eq!(bad.status, 400, "{}", bad.text());
+}
+
+/// A file at the same place is another file: a tenant deleted and made
+/// again carries another identity -- the one a router proposed for it,
+/// here -- and one put in place while the node did not hold it -- a
+/// restore, a binary from before identities making it again -- carries
+/// none, which nothing takes back.
+#[test]
+fn a_later_file_at_the_place_is_not_taken_back() {
+    let n = start("reclaim-later", admin_cfg());
+    let r = call(n.port, "PUT", "/_admin/tenants/acme", b"", Some(ADMIN));
+    let first = instance_of(&r).expect("an identity");
+    let r = call(n.port, "DELETE", "/_admin/tenants/acme", b"", Some(ADMIN));
+    assert_eq!(r.status, 204, "{}", r.text());
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(
+        b"PUT /_admin/tenants/acme HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+          Authorization: Bearer adm\r\nFennec-Instance: 00000000000000cd\r\n\
+          Content-Length: 0\r\n\r\n",
+    )
+    .unwrap();
+    let mut answer = String::new();
+    let _ = s.read_to_string(&mut answer);
+    assert!(
+        answer.contains("\"instance\":\"00000000000000cd\""),
+        "{answer}"
+    );
+    query(n.port, "acme", "create collection notes (title text)");
+    query(n.port, "acme", "put notes {title: \"made again\"}");
+    let mut stream = stream_on(n.port, "acme");
+    let r = reclaim(n.port, "acme", &[&first]);
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert_eq!(instance_of(&r).as_deref(), Some("00000000000000cd"));
+    // Judged before anything holding it was let go: its stream goes on.
+    query(n.port, "acme", "put notes {title: \"after\"}");
+    let mut buf = String::new();
+    let mut chunk = [0u8; 4096];
+    while !buf.contains("after") {
+        let k = stream.read(&mut chunk).unwrap();
+        assert!(k > 0, "the stream ended: {buf}");
+        buf.push_str(&String::from_utf8_lossy(&chunk[..k]));
+    }
+    drop(stream);
+
+    // Put in place by another hand while closed: a file of no identity.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while n.tenants.close_idle(Duration::ZERO) == 0 {
+        assert!(Instant::now() < deadline, "acme never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let file = n.dir.join("acme.fennec");
+    let aside = n.dir.join("aside");
+    std::fs::copy(&file, &aside).unwrap();
+    std::fs::rename(&aside, &file).unwrap();
+    assert_eq!(n.tenants.instance("acme"), None);
+    let r = reclaim(n.port, "acme", &["00000000000000cd"]);
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert!(r.text().contains("\"instance\":null"), "{}", r.text());
+    let r = call(n.port, "GET", "/t/acme/notes", b"", None);
+    assert!(r.text().contains("made again"), "{}", r.text());
+    // Opened, it is held as the file it is, of no identity; the close
+    // forgets the sidecar rather than bind it to this file.
+    assert_eq!(n.tenants.instance("acme"), None);
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    assert!(!n.dir.join("acme.instance").exists());
+    assert_eq!(n.tenants.instance("acme"), None);
+}
