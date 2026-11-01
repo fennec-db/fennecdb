@@ -116,18 +116,57 @@ impl Pinned {
         }
         r
     }
+
+    /// [`Database::read_call`] as at the pin ([`Database::pin_call`]),
+    /// `None` as [`Self::query`].
+    #[cfg(feature = "statements")]
+    pub fn read_call(&self, callee: &Callee) -> Option<Result<Response>> {
+        held(self.db.read_call(callee))
+    }
 }
 
 impl Database {
     /// What `stmts` -- one read, or a read-only batch read as one -- read,
     /// pinned as it stands, for them to run on once the lock is let go: a
     /// writer waits for this alone rather than for the read. `None` where
-    /// they are better run under the lock: a statement that is not a `get`,
-    /// or that an index answers (its filter's equalities and ranges, an
+    /// they are better run under the lock: a statement that is not a `get`
+    /// or a call whose body is `get`s (read as its body is), or that an
+    /// index answers (its filter's equalities and ranges, an
     /// ordered walk, a facet a hash index counts, `match`, `near`,
     /// `lookup`) -- short, and an index cannot be pinned for nothing -- or
     /// none of them reading [`PIN_AT`] rows, or the pins past their budget.
     pub fn pin(&self, stmts: &[(&Statement, &[Value])]) -> Option<Pinned> {
+        // A call is pinned as its body, judged as it will be on the pin
+        // (which holds the table of statements): one refused, or one whose
+        // body writes, is the lock's to answer.
+        #[cfg(feature = "statements")]
+        let (judged, bodies): (Vec<Callee>, Vec<(&Statement, &[Value])>);
+        #[cfg(feature = "statements")]
+        let stmts = match stmts.iter().any(|(s, _)| matches!(s, Statement::Call(_))) {
+            false => stmts,
+            true => {
+                judged = (stmts.iter())
+                    .filter_map(|(s, p)| match s {
+                        Statement::Call(c) => Some(self.callee(c, p)),
+                        _ => None,
+                    })
+                    .collect::<Result<_>>()
+                    .ok()?;
+                if judged.iter().any(|c| c.def.writes()) {
+                    return None;
+                }
+                let mut calls = judged.iter();
+                bodies = (stmts.iter())
+                    .flat_map(|&(s, p)| match s {
+                        Statement::Call(_) => calls.next().map_or(Vec::new(), |c| {
+                            (c.def.body.iter()).map(|b| (b, &c.values[..])).collect()
+                        }),
+                        _ => vec![(s, p)],
+                    })
+                    .collect();
+                &bodies[..]
+            }
+        };
         let mut long = false;
         let alone = stmts.len() == 1;
         for (stmt, params) in stmts {
@@ -156,6 +195,21 @@ impl Database {
         Some(self.pinned_of(&names, held))
     }
 
+    /// [`Self::pin`] of a call judged already ([`Self::callee`]): its body,
+    /// for [`Pinned::read_call`] to read once the lock is let go. `None`
+    /// where the body writes, or where `pin` declines it.
+    #[cfg(feature = "statements")]
+    pub fn pin_call(&self, callee: &Callee) -> Option<Pinned> {
+        if callee.def.writes() {
+            return None;
+        }
+        let values = &callee.values[..];
+        match callee.def.body.as_slice() {
+            [s] => self.pin(&[(s, values)]),
+            all => self.pin(&all.iter().map(|s| (s, values)).collect::<Vec<_>>()),
+        }
+    }
+
     /// The rows a read reads at least for [`Self::pin`] to take it: 0 pins
     /// every read it can answer, as a test does to run them all that way.
     pub fn set_pin_at(&mut self, rows: usize) {
@@ -181,6 +235,13 @@ impl Database {
         db.registry = self.registry.clone();
         db.clock = self.clock;
         db.mapped = self.mapped;
+        // The statements as they stood, for a call read on the pin: the
+        // table is never changed in place, a definition makes a new one.
+        db.statements = Arc::clone(&self.statements);
+        #[cfg(feature = "statements")]
+        {
+            db.call_max_rows = self.call_max_rows;
+        }
         for name in &self.order {
             if let (true, Some(c)) = (names.contains(&name.as_str()), self.collections.get(name)) {
                 db.collections.insert(name.clone(), c.pinned());
