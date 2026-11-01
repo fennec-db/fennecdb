@@ -147,8 +147,9 @@ del cart_items where cart = $1 and product not in $2
     <code>in []</code> does.</li>
   <li><b>From SQL,</b> PostgreSQL's <code>x = ANY($1)</code> is <code>x in
     $1</code> and <code>x &lt;&gt; ALL($1)</code> is <code>x not in
-    $1</code>; <code>x IN ($1)</code> stays SQL's list of one value (<a
-    href="/docs/sql">From SQL</a>).</li>
+    $1</code>; <code>x IN ($1)</code> stays SQL's list of one value, and
+    <code>= ANY</code> around anything but one parameter is refused naming
+    the <code>in</code> to write (<a href="/docs/sql">From SQL</a>).</li>
 </ul>
 
 <details class="deep"><summary>How a list parameter is read</summary>
@@ -157,11 +158,12 @@ parse cache (<code>POST /query</code>) holds one text for every list,
 where a list written out was a text per length — and past 1 024 bytes,
 some 150 ids, parsed again at every request. Every plan reads the list
 as it reads one written out, so every index meets what it meets there;
-a parameter holding no list is refused at the first row the filter
-tests, as any filter's error is. A list of numbers handed the quick way, as a vector's
-<code>f32</code>s, is read again from its JSON first: the server reads the
-body again, and the browser module asks the page to send that parameter
-as JSON.</p>
+a parameter holding no list, or too long a one, is refused before any
+row is read, so the answer never depends on the rows. A list of numbers
+handed the quick way, as a vector's <code>f32</code>s, is read again from
+its JSON first: the server reads the body again, and the browser module
+asks the page to send that parameter as JSON, which the page then does
+at once for that text.</p>
 </details>
 
 <h2 id="order-by-expression">Ordering by an expression</h2>

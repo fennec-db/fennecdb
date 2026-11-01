@@ -641,8 +641,9 @@ refused as its literal is (`Select::check_counts`).
 is.](docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
 `Expr::In` in its place on every path, so `eval` never meets one.
 [`in $n`](docs/design/fennecql.md#list-parameters) is planned as its list
-written out (`Expr::in_list`, `eval` elsewhere), read as written whatever
-its field (`Database::exactly`).
+written out (`Expr::in_list`, `eval` elsewhere), held to its list before
+the plan (`Statement::lists_held`), read as written whatever its field
+(`Database::exactly`).
 
 **[`alter collection` rewrites no document; positions are not
 places.](docs/design/fennecql.md#alter-collection)** A drop keeps its place

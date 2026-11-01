@@ -448,7 +448,11 @@ reads as `x in $1`, `x <> ALL($1)` (and `!=`) as `not (x in $1)`
 (`Parser::any_param`, out of line and cold, asked only where a word of
 three letters follows `=` or `<>`, and taking only `any`/`all`, `(`, one
 parameter and `)`), while `x IN ($1)` stays SQL's list of one value, as
-SQL reads it. The builders still write `in [$1, $2, ...]`, the golden
+SQL reads it. Any other `any(` or `all(` after a comparison -- a list
+written out, an inner `get`, a field, `> any`, `= all` -- is refused
+naming the `in` to write (`ANY`), its word not read, the shell told where
+the text ended inside the parentheses (`cut`): it was a call of a
+function no build has, refused only as it ran. The builders still write `in [$1, $2, ...]`, the golden
 file unchanged.
 
 It is planned as the list written out. Every planner that read an
@@ -466,20 +470,26 @@ and a `del` that pick their rows, a select item and a `group`. Anywhere
 else -- a select list's item, an `order` key, a stream's test of a written
 row, a held write's look among the rows written -- `eval` reads the list
 (`param_list`), comparing as `Expr::In` does (`in_same`, the fold
-included). A parameter holding no list, or more than the bound, is no
-list to a plan (`in_list` answers `None`), so the filter's `eval`
-refuses it at the first row it tests -- what `Filter` cannot bind is
-refused so, never over none; `has_subquery` is the inner `get`'s alone,
+included). **Every `in $n` is held to its list before the plan**
+(`Statement::lists_held`, asked in `Database::answered`, which every
+statement handed parameters passes -- a `/batch`'s line, a call's body
+with its arguments, the module's -- walking its filter, select list,
+`order`, `lookup` levels, facets, a picked write's keys and an inner
+`get`'s at any depth). Left to the filter's `eval` at the first row it
+tested, as what `Filter` cannot bind is, a list of none or past the
+bound was answered over an empty collection, under `id = 7 and n in $1`
+finding no 7, or by a held `del` finding nothing, and refused once a row
+was tested: an answer that hung on the data. A statement handed no
+parameters walks nothing; one handed some walks its expressions once,
+SIZE_AND_TIME. `has_subquery` is the inner `get`'s alone,
 so a poll's tag (`etag`) and the pin, which ask whether another collection
 is read, see an `in $n` as reading none. **Put in its place first, as an
 inner `get`'s list is, it cost a copy of the statement:** 10 ids by `id`
 took 1 353 ns in process against 1 052 written out, and `query_json`, a
 server's plain `get`, 397 against 149 -- the `Select`'s clone alone 157;
 read where it stands, 1 045 and 100 against 1 070 and 151 (a load of 3
-to 10, the figures indicative, the bench's below). A walk checking every
-`in $n`'s list before the query, so one over no row was refused too, was
-1.1 KB of the browser module (`Expr::lists`, `Select::lists`), and
-`ExactSizeIterator` for the items 1.1 KB more (its `len`'s `assert_eq!`
+to 10, the figures indicative, the bench's below). `ExactSizeIterator`
+for the items was 1.1 KB of the browser module (its `len`'s `assert_eq!`
 brought `Debug` for `usize` and `Option<usize>`). The tree holds the place, never
 the values: the parse cache's statement serves every list
 (`the_parsed_tree_holds_no_value`).
@@ -491,27 +501,41 @@ row's id, and `[0.1]` 0.100000001. The server reads the body again as
 written (`api::exactly`, `/batch`'s lines and `/_call` alike); the
 browser module, handed the array apart as a vector (`vectorsApart`),
 answers `exact` and the page sends that parameter as JSON (`#run`'s
-second call); a `Value::Vector` handed to `Database::query` is refused
+second call) -- once a text: the page keeps the places the module named
+for each (`#asked`, 256 texts, cleared when full) and sends them as JSON
+at once after, looked up only where a list of numbers is among the
+parameters, so a run with none pays nothing, and a place it names beside
+them is added. COST_NUMBERS; a `Value::Vector` handed to `Database::query` is refused
 (`refuse_inexact`, its words naming `in $n`). A call's argument is named
 where its parameter is a list (`$ids [int]`) as where it keeps numbers, and
 one handed as a parameter (`call f($1)`) is the parameter's -- `exact_args`
 asked only the literals written in before, so `call f($1)` handed a json
-field's list read it as `f32`s.
+field's list read it as `f32`s. A writing body's `in $ids` over `id` or
+an indexed field narrows its rows (`narrowed`), as `in [$a, $b]` does:
+the holes a body is judged with hand it no list.
 
 The list is held to the inner `get`'s bound: past `MAX_SUBQUERY_VALUES`
 (100 000) `param_list` refuses it, never cut, and a parameter holding no
 list is refused naming the form (`` `in $1` takes a list, and $1 is of
 type int: `= $1` compares one value ``). A rule's `in $jwt.rooms` is still
 written `in [$k]` before it is parsed and spread by `bind` (`usable` and
-`kind_held` unchanged), and a rule writing `$1` is refused at startup as
-any is; `bind_held`, `claims_held`, `Reach::of` and the held writes'
-`bind` take an `in $n` as the list it holds, which no rule writes.
+`kind_held` unchanged), and SQL's `= any($jwt.rooms)`, which the parser
+reads as `in $k`, is made that same `in [$k]` as the rule is read
+(`any_as_in`, `<> all` its `not`): one rule however it is spelled, held
+by every check, where the parser's own node had none of them, and
+`claims_held` refuses one should it come. A rule writing `$1` is refused
+at startup as any is; `bind_held` and `Reach::of` take an `in $n` as the
+list it holds, and the held writes' `bind` refuses one holding none
+(`holdable`), whose every look's test was an error, a `del` finding
+nothing held its whole wait.
 
 **Grammar epoch 2.** `x = any($1)` parsed before, as a call of `any`,
 which no build has and every run refused, and a definition could store
 one (a body's functions are named as it runs): read as `x in $1` now, its
 digest is another, so `GRAMMAR_EPOCH` moved and such a definition is
-marked broken, to be defined again. The corpus (`make fennecql-corpus`),
+marked broken, to be defined again; one holding any other `any(...)`
+after a comparison, refused as it ran, is refused as it is read now, and
+marked broken alike. The corpus (`make fennecql-corpus`),
 9 726 texts: none of main's reads otherwise; the six that do are this
 change's own `= any`/`<> all` texts, and the `in $n` texts parse where
 they were refused (Grafana's tests bind `in $syms` themselves, into `[$1,

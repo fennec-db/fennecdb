@@ -833,6 +833,17 @@ fn narrowed(
         if ins.iter().any(|(field, _)| answers(field, false)) {
             return true;
         }
+        // `in $ids`, which the holes hand no list: read through the index
+        // whatever list a call hands it, as `in [$a, $b]` is.
+        let mut terms = Vec::new();
+        f.conjuncts(&mut terms);
+        let listed = |e: &Expr| matches!(e, Expr::Field(n) if answers(n, false));
+        if terms
+            .iter()
+            .any(|t| matches!(t, Expr::InParam(l, _) if listed(l)))
+        {
+            return true;
+        }
         let mut ranges = Vec::new();
         f.conjunct_ranges(holes, &mut ranges);
         if ranges

@@ -426,7 +426,7 @@ fn holdable_one(stmt: &Statement, params: &[Value]) -> std::result::Result<(), E
         Statement::Update { filter, .. } | Statement::Delete { filter, .. } => {
             let mut f = filter.clone();
             if let Some(f) = &mut f {
-                bind(f, params);
+                bind(f, params)?;
             }
             fennec_core::engine::placeable(f.as_ref())
         }
@@ -553,7 +553,10 @@ fn plan_one(
     };
     let mut filter = filter.clone();
     if let Some(f) = &mut filter {
-        bind(f, params);
+        // Refused already, by [`holdable`] and the run: no test of it.
+        if bind(f, params).is_err() {
+            return;
+        }
         read_by(f, collections);
     }
     if !collections.contains(collection) {
@@ -564,7 +567,9 @@ fn plan_one(
     // bound as the filter is: a test runs with no parameters, and two
     // couriers' claims are two groups by the points they name.
     for e in order.iter_mut().filter_map(|s| s.expr.as_mut()) {
-        bind(e, params);
+        if bind(e, params).is_err() {
+            return;
+        }
     }
     // Where the first key is worked out of the row, the test answers it
     // too: what the claim ranks the row it found by, beside every other
@@ -610,31 +615,39 @@ fn next_moment(db: &Database, tests: &[Select], at: i64) -> Option<i64> {
 
 /// Each parameter in `e` made the value it is bound to, inner `get`s
 /// included: a test runs with none, and two requests whose filters bind the
-/// same values are one group whatever else their parameters hold.
-fn bind(e: &mut Expr, params: &[Value]) {
+/// same values are one group whatever else their parameters hold. An `in
+/// $n` whose parameter holds no list, or past the bound, is refused
+/// ([`param_list`](fennec_core::query::param_list)): left in place, every
+/// look's test of it was an error, and a `del` it found nothing for was
+/// held its whole wait.
+fn bind(e: &mut Expr, params: &[Value]) -> std::result::Result<(), Error> {
     if let Expr::Param(i) = e {
         if let Some(v) = params.get(*i) {
             *e = Expr::Lit(v.clone());
         }
-        return;
+        return Ok(());
     }
-    // `in $n` as the `in [..]` its list is, which the run refuses where
-    // the parameter holds none.
+    // `in $n` as the `in [..]` its list is.
     if let Expr::InParam(lhs, i) = e {
-        if let Ok(l) = fennec_core::query::param_list(params, *i) {
-            let items = l.iter().cloned().map(Expr::Lit).collect();
-            *e = Expr::In(
-                std::mem::replace(lhs, Box::new(Expr::Lit(Value::Null))),
-                items,
-            );
-        }
+        let items = fennec_core::query::param_list(params, *i)?;
+        let items = items.iter().cloned().map(Expr::Lit).collect();
+        *e = Expr::In(
+            std::mem::replace(lhs, Box::new(Expr::Lit(Value::Null))),
+            items,
+        );
     }
     if let Expr::InSelect(_, inner) = e {
         if let Some(f) = &mut inner.filter {
-            bind(f, params);
+            bind(f, params)?;
         }
     }
-    e.each_child_mut(&mut |c| bind(c, params));
+    let mut bound = Ok(());
+    e.each_child_mut(&mut |c| {
+        if bound.is_ok() {
+            bound = bind(c, params);
+        }
+    });
+    bound
 }
 
 /// The collections an inner `get` in `e` reads.

@@ -103,7 +103,11 @@ a transition and 8.7-9.3 answering, main's 5.1, 5.8-6.0 and 8.5-9.0 (`make
 policy-bench`, three runs each in turns). The browser module registers no
 hook and has the `answering` loop `cfg`'d out: the size it was.
 A list claim goes after `in` (`room in $jwt.rooms` is read as `in
-[$jwt.rooms]`, which `bind` spreads), more than `MAX_CLAIM_VALUES` (1 000)
+[$jwt.rooms]`, which `bind` spreads; SQL's `room = any($jwt.rooms)`, which
+the parser reads as `in $k`, is made that same `in [$k]` as the rule is
+read (`any_as_in`), and `<> all(..)` its `not`, so both spellings are one
+rule held by every check -- the parser's own node had none of them, and
+`claims_held` refuses one should it come), more than `MAX_CLAIM_VALUES` (1 000)
 refuses the token, and claims are read exact (`json::parse_json`): a list
 of numbers read the quick way was `f32`s, team 123456789 matching
 123456792. A `match` the token reads through a filter is `Match::within`:

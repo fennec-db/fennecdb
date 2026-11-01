@@ -6702,6 +6702,13 @@ impl Database {
         if !crate::FULL {
             self.refuse_unbuilt(stmt)?;
         }
+        // Every `in $n` held to its list before anything is planned, so
+        // the refusal never hangs on the rows (`lists_held`): every
+        // statement passes here -- a `/batch`'s, a call's body with its
+        // arguments, the module's. One handed no parameters walks nothing.
+        if !params.is_empty() {
+            stmt.lists_held(params)?;
+        }
         let (collection, filter) = match stmt {
             Statement::Select(sel) => {
                 return Ok(match self.answered_top(sel, params)? {

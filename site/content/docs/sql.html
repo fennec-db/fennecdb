@@ -229,6 +229,7 @@ FennecQL text asks for.</p>
 <thead><tr><th>SQL</th><th>FennecQL</th><th>Why</th></tr></thead>
 <tbody>
 <tr data-refused><td><code>ALTER TABLE t ADD COLUMN a int</code></td><td><code>alter collection t add field a int</code></td><td></td></tr>
+<tr data-refused><td><code>SELECT * FROM t WHERE x = ANY(SELECT n FROM s)</code></td><td><code>get t where x in (get s select n)</code></td><td><code>= ANY(…)</code> is read only around one parameter holding the list; a list written out is <code>x in [1, 2]</code>, and <code>&lt;&gt; ALL(…)</code> is <code>not (x in …)</code></td></tr>
 <tr data-refused><td><code>DROP TABLE t</code></td><td><code>drop collection t</code></td><td></td></tr>
 <tr data-refused><td><code>TRUNCATE t</code></td><td><code>del t</code></td><td></td></tr>
 <tr data-refused><td><code>BEGIN</code></td><td>a <code>/batch</code></td><td>no transaction is held open across requests; a <a href="/docs/http#batches"><code>/batch</code></a> lands whole or not at all, and <a href="/docs/fennecql-writing#require"><code>require</code></a> makes a count its condition</td></tr>

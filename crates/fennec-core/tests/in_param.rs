@@ -355,3 +355,77 @@ fn a_named_statement_takes_its_list_by_name() {
     };
     assert_eq!(got, vec![16777217]);
 }
+
+/// A list of none, or past the bound, is refused before the plan, whatever
+/// the rows: over an empty collection, under a filter the id index finds
+/// nothing for, in a clause no row reaches, a `/batch`'s line and a
+/// definition's body alike. Left to the row a filter tests, each was
+/// answered over no rows and refused once one was tested.
+#[test]
+fn the_refusal_never_hangs_on_the_rows() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    exec(&mut db, "create collection e (n int @hash, tag text)");
+    exec(&mut db, "create collection f (n int, tag text)");
+    exec(&mut db, "put f {id: 1, n: 1, tag: \"a\"}");
+    let long = Value::List((0..=100_000).map(Value::Int).collect());
+    let refused = |e: Error| {
+        let e = e.to_string();
+        assert!(
+            e.contains("`in $1` takes a list") || e.contains("more than 100000"),
+            "{e}"
+        );
+    };
+    for sql in [
+        "get e where n in $1",
+        "get e where tag = 'x' or n not in $1",
+        "get f where id = 7 and n in $1",
+        "get f where id in [7, 8] and n in $1",
+        "get e select n in $1 as hit",
+        "get e order n in $1",
+        "get f where n in (get e select n where n in $1)",
+        "get f where id = 7 lookup e on n = n where n in $1",
+        "get e facet tag where n in $1",
+        "explain get e where n in $1",
+        "set e {tag: 'x'} where n in $1",
+        "del e where n in $1",
+        "del f where id = 7 and n in $1",
+        "set f {tag: 'y'} where id > 5 and n in $1 order id limit 1",
+        "put f {id: 1, n: 1} if absent else set {tag: n in $1}",
+    ] {
+        for bad in [Value::Int(7), long.clone()] {
+            match run(&mut db, sql, &[bad]) {
+                Err(e) => refused(e),
+                Ok(r) => panic!("{sql}: answered {r:?}"),
+            }
+        }
+    }
+    // A `/batch` of lines, each with its own parameters.
+    let get = fennec_ql::parse_one("get e where n in $1").unwrap();
+    let del = fennec_ql::parse_one("del e where n in $1").unwrap();
+    let (good, bad) = ([Value::List(vec![])], [Value::Int(3)]);
+    let (at, e) = db
+        .execute_block(&[(&get, &good), (&del, &bad)])
+        .unwrap_err();
+    assert_eq!(at, 1);
+    refused(e);
+    // A definition's body, handed its arguments.
+    exec(
+        &mut db,
+        "create statement gone($ids json) public as del e where n in $ids",
+    );
+    exec(
+        &mut db,
+        "create statement found($ids json) public as get e select n where n in $ids",
+    );
+    for sql in ["call gone {ids: 7}", "call found {ids: 7}"] {
+        let e = run(&mut db, sql, &[]).unwrap_err().to_string();
+        assert!(
+            e.contains("takes a list, and $1 is of type int"),
+            "{sql}: {e}"
+        );
+    }
+    let call = fennec_ql::parse_one("call found($1)").unwrap();
+    let e = db.query(&call, &[long]).unwrap_err().to_string();
+    assert!(e.contains("more than 100000"), "{e}");
+}

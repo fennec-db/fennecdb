@@ -86,6 +86,11 @@ export class Fennec {
   /** The live queries (`live`), made with the first; and whether a run of them is due. */
   #lives = null;
   #due = false;
+  /**
+   * By text, the parameters the module asked to have as JSON (`exact`): an
+   * `in $1`'s list of ids, a json field's numbers. Made at the first ask.
+   */
+  #asked = null;
 
   /**
    * The time, in milliseconds since the epoch, a statement is answered at:
@@ -227,6 +232,12 @@ export class Fennec {
     // A module from before vectors went over as f32s takes five arguments,
     // and would read the JSON's `null` where each vector goes.
     const [json, vectors] = this.#wasm.fennec_query.length > 5 ? vectorsApart(params, asJson) : [params, null];
+    // A text whose lists the module asked for as JSON before sends them so
+    // at once: sent apart, they were refused and sent again, the text and
+    // its parameters read twice each run. Looked up only where a list of
+    // numbers is among the parameters, so a run with none pays nothing.
+    const known = vectors && !asJson ? this.#asked?.get(sql) : null;
+    if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
     const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
@@ -249,7 +260,15 @@ export class Fennec {
     // A json field takes a list of numbers as written, not as the f32s it
     // went over apart as: the module names those, before running anything,
     // and they go again as JSON.
-    if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact, quiet);
+    // Never a place sent as JSON already: those it names are new, so this
+    // ends.
+    if (res.kind === 'error' && res.exact) {
+      const places = (asJson ?? []).concat(res.exact);
+      this.#asked ??= new Map();
+      if (this.#asked.size >= 256) this.#asked.clear();
+      this.#asked.set(sql, places);
+      return this.#run(sql, params, places, quiet);
+    }
     if (res.kind === 'error') {
       // On a sync's replica a named statement is the sync's refusal,
       // in the native core's words (`NAMED`).

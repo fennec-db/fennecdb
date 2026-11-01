@@ -960,6 +960,95 @@ pub fn param_list(params: &[Value], i: usize) -> Result<&[Value]> {
     }
 }
 
+impl Expr {
+    /// Each `in $n` in it held to its parameter ([`param_list`]), an inner
+    /// `get`'s at any depth: refused before the plan, as a count parameter
+    /// is ([`Select::check_counts`]). Left to the row a filter tests, a
+    /// list of none, or past the bound, was answered over no rows -- an
+    /// empty collection, `id = 7 and n in $1` finding no 7 -- and refused
+    /// once one was tested.
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        match self {
+            Expr::InParam(_, i) => {
+                param_list(params, *i)?;
+            }
+            Expr::InSelect(_, sel) => sel.lists_held(params)?,
+            Expr::Lit(_) | Expr::Field(_) | Expr::Param(_) => return Ok(()),
+            _ => {}
+        }
+        let mut held = Ok(());
+        self.each_child(&mut |c| {
+            if held.is_ok() {
+                held = c.lists_held(params);
+            }
+        });
+        held
+    }
+}
+
+impl Select {
+    /// [`Expr::lists_held`] for every expression it holds, a `lookup`
+    /// level's and a facet's filter among them.
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        fn sorts(o: &[Sort]) -> impl Iterator<Item = &Expr> {
+            o.iter().filter_map(|s| s.expr.as_ref())
+        }
+        let levels = self.lookup.iter().flat_map(|l| l.chain());
+        let mut exprs = (self.filter.iter())
+            .chain(self.having.iter())
+            .chain(self.group.iter())
+            .chain(self.aggregate.iter().chain(&self.computed).map(|c| &c.expr))
+            .chain(sorts(&self.order))
+            .chain(self.near.iter().map(|n| &n.vector))
+            .chain(self.matcher.iter().map(|m| &m.query))
+            .chain(self.rerank.iter().map(|r| &r.vector))
+            .chain(self.marks.iter().flat_map(|m| &m.args))
+            .chain(self.facets.iter().filter_map(|f| f.rest.as_ref()?.as_ref()))
+            .chain(
+                levels.flat_map(|l| l.filter.iter().chain(l.list_exprs()).chain(sorts(&l.order))),
+            );
+        exprs.try_for_each(|e| e.lists_held(params))
+    }
+}
+
+impl Statement {
+    /// [`Expr::lists_held`] for every expression it holds: what each
+    /// statement is asked, with its parameters, before its plan.
+    pub fn lists_held(&self, params: &[Value]) -> Result<()> {
+        let pairs = |v: &[(String, Expr)]| -> Result<()> {
+            v.iter().try_for_each(|(_, e)| e.lists_held(params))
+        };
+        let picked = |p: &Option<Box<Pick>>| -> Result<()> {
+            let sorts = p.iter().flat_map(|p| &p.order);
+            sorts
+                .filter_map(|s| s.expr.as_ref())
+                .try_for_each(|e| e.lists_held(params))
+        };
+        match self {
+            Statement::Select(s) | Statement::Explain(s) => s.lists_held(params),
+            Statement::Update {
+                set, filter, pick, ..
+            } => {
+                pairs(set)?;
+                filter.iter().try_for_each(|e| e.lists_held(params))?;
+                picked(pick)
+            }
+            Statement::Delete { filter, pick, .. } => {
+                filter.iter().try_for_each(|e| e.lists_held(params))?;
+                picked(pick)
+            }
+            Statement::Put { docs, else_set, .. } => {
+                docs.iter().chain(else_set).try_for_each(|d| pairs(d))
+            }
+            #[cfg(feature = "statements")]
+            Statement::Call(c) => (c.args.exprs())
+                .chain(c.claims.iter().flat_map(|a| a.exprs()))
+                .try_for_each(|e| e.lists_held(params)),
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value> {
     Ok(match expr {
         Expr::Lit(v) => v.clone(),

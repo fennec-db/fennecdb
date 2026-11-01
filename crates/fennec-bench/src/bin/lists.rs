@@ -11,7 +11,11 @@
 //! trip's p50) and `CLIENTS` at once (requests a second). Each request asks
 //! for `n` ids drawn at random, by `id` (the id index) and by a `@hash`
 //! field, the two ways in turns, twice, so that neither has the machine to
-//! itself.
+//! itself; and, beside them, one id asked for with no list (`= $1`), what
+//! the check of every `in $n`'s list before the plan must not make dearer,
+//! and the second reading of a body whose list of numbers came the quick
+//! way (`json::parse_object_listing_exact`), what a server pays for an `in
+//! $1` of numbers.
 
 #[path = "../http.rs"]
 mod http;
@@ -22,7 +26,8 @@ use std::time::{Duration, Instant};
 use fennec_core::prelude::*;
 
 const ROWS: u64 = 100_000;
-const SIZES: [usize; 2] = [10, 1_000];
+/// 1 is no list: `= $1`.
+const SIZES: [usize; 3] = [1, 10, 1_000];
 const CLIENTS: usize = 8;
 const RUN: Duration = Duration::from_secs(3);
 
@@ -44,8 +49,12 @@ impl Rng {
     }
 }
 
-/// The text asking for `n` values of `field`: one parameter, or `n`.
+/// The text asking for `n` values of `field`: one parameter, or `n`; one
+/// value, `= $1`, for 1.
 fn text(field: &str, n: usize, one: bool) -> String {
+    if n == 1 {
+        return format!("get products select id where {field} = $1");
+    }
     let list = match one {
         true => "$1".to_string(),
         false => {
@@ -59,7 +68,7 @@ fn text(field: &str, n: usize, one: bool) -> String {
 /// The parameters of [`text`], a JSON array's insides.
 fn params(list: &[i64], one: bool) -> String {
     let items: Vec<String> = list.iter().map(i64::to_string).collect();
-    match one {
+    match one && list.len() > 1 {
         true => format!("[{}]", items.join(",")),
         false => items.join(","),
     }
@@ -86,7 +95,7 @@ fn in_process(db: &Database, field: &str, n: usize, one: bool) -> f64 {
     let mut lat = Vec::with_capacity(reps);
     for i in 0..reps + reps / 10 {
         let list = rng.list(n, step(field));
-        let values: Vec<Value> = match one {
+        let values: Vec<Value> = match one && n > 1 {
             true => vec![Value::List(list.iter().map(|&v| Value::Int(v)).collect())],
             false => list.iter().map(|&v| Value::Int(v)).collect(),
         };
@@ -150,6 +159,40 @@ fn at_once(addr: &str, field: &str, n: usize, one: bool) -> f64 {
     done.load(Ordering::Relaxed) as f64 / RUN.as_secs_f64()
 }
 
+/// Median ns of reading a `POST /query` body of `n` ids the quick way, and
+/// again as written: the second reading a server does where `exactly`
+/// names the list.
+fn readings(n: usize) -> (f64, f64) {
+    let list = Rng(5).list(n, 1);
+    let body = format!(
+        r#"{{"query":"{}","params":[{}]}}"#,
+        text("id", n, true),
+        params(&list, true)
+    );
+    let time = |f: &dyn Fn() -> usize| {
+        let mut lat = Vec::with_capacity(5_000);
+        for i in 0..5_500 {
+            let t = Instant::now();
+            std::hint::black_box(f());
+            if i >= 500 {
+                lat.push(t.elapsed().as_secs_f64() * 1e9);
+            }
+        }
+        pct(&mut lat, 0.5)
+    };
+    let quick = time(&|| {
+        fennec_core::json::parse_object_listing(&body, "params")
+            .unwrap()
+            .len()
+    });
+    let exact = time(&|| {
+        fennec_core::json::parse_object_listing_exact(&body, "params")
+            .unwrap()
+            .len()
+    });
+    (quick, exact)
+}
+
 fn fill(db: &mut Database) {
     let run = |db: &mut Database, sql: &str, params: &[Value]| {
         db.execute_with(&fennec_ql::parse_one(sql).unwrap(), params)
@@ -181,10 +224,20 @@ fn main() {
     println!("{ROWS} rows; in process: median us a query, parsed once");
     let mut db = Database::new();
     fill(&mut db);
+    for n in SIZES.into_iter().filter(|&n| n > 1) {
+        let (quick, exact) = readings(n);
+        println!(
+            "a body of {n:>5} ids read the quick way {quick:>9.0} ns, again as written {exact:>9.0} ns"
+        );
+    }
     for round in 0..2 {
         for field in fields {
             for n in SIZES {
                 for (one, name) in ways {
+                    if n == 1 && !one {
+                        continue;
+                    }
+                    let name = if n == 1 { "= $1" } else { name };
                     let us = in_process(&db, field, n, one);
                     println!("round {round} {field:<3} {n:>5} ids  {name:<11} {us:>9.2} us");
                 }
@@ -211,6 +264,10 @@ fn main() {
         for field in fields {
             for n in SIZES {
                 for (one, name) in ways {
+                    if n == 1 && !one {
+                        continue;
+                    }
+                    let name = if n == 1 { "= $1" } else { name };
                     let (p50, p99) = one_at_a_time(&addr, field, n, one);
                     let rate = at_once(&addr, field, n, one);
                     println!(
