@@ -70,7 +70,9 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenn
   `Update(ctx, fennecdb.D("balance", fennecdb.Expr("balance - ?", amount)), fennecdb.Require(1))` is
   `set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1`. A Param goes wherever a value
   does -- a condition, an `in` list's element, a document, `Expr`'s and `Raw`'s `?`, `Distance`'s point, `Near`'s
-  vector, `Match`'s words; the same value given twice is two parameters.
+  vector, `Match`'s words; the same value given twice is two parameters. A Param inside a list or a json value is
+  refused. `Expr`'s and `Raw`'s text is trusted FennecQL, written into the statement as it is: the code's own,
+  never a value from a user, which goes in as a `?`'s parameter.
 - `Insert` sends `put`, which writes over a row holding the id; `InsertNew` (and `ToInsertNew`) sends `insert`,
   refused whole (409, `CodeConflict`) where a document names an id a row holds. Both take `Returning`, `Require`
   and `Reason` among the documents; only `Insert` takes `IfAbsent`.

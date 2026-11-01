@@ -55,6 +55,7 @@ use crate::Prepared;
 use fennec_core::json;
 use fennec_core::prelude::*;
 use fennec_core::query::{eval, EvalCtx, Require, RowAccess};
+use std::collections::HashSet;
 
 /// Where the temporary ids of optimistic rows start: far from a server's,
 /// as `web/fennec.js` has it.
@@ -123,6 +124,10 @@ struct Op {
     key: String,
     undo: String,
     label: String,
+    /// The ids its undo would delete or write back, by collection: read
+    /// from `undo` the first time the server sends rows while it waits
+    /// ([`Sync::heard`]), each taken out once the server sent it.
+    touched: Option<Vec<(String, HashSet<DocId>)>>,
 }
 
 /// A row an optimistic insert made, under a temporary id.
@@ -449,6 +454,74 @@ fn key_text(v: &Value) -> Option<String> {
         Value::Text(s) => Some(s.clone()),
         v => Some(json::to_string(v)),
     }
+}
+
+/// An undo's ids: `[(collection, the ids its steps would delete or write
+/// back)]`, but those a step's `kept` names. An undo that cannot be read
+/// touches nothing, so a change is never held up by one.
+fn touched_by(undo: &str) -> Vec<(String, HashSet<DocId>)> {
+    let mut by: Vec<(String, HashSet<DocId>)> = Vec::new();
+    let Ok(Value::List(steps)) = json::parse_json(undo) else {
+        return by;
+    };
+    for step in &steps {
+        let Some(Value::Text(c)) = shape::member(step, "c") else {
+            continue;
+        };
+        let kept = id_list(step, "kept");
+        let at = match by.iter().position(|(k, _)| k == c) {
+            Some(at) => at,
+            None => {
+                by.push((c.clone(), HashSet::new()));
+                by.len() - 1
+            }
+        };
+        let ids = &mut by[at].1;
+        ids.extend(
+            id_list(step, "del")
+                .into_iter()
+                .filter(|id| !kept.contains(id)),
+        );
+        if let Some(Value::Text(rows)) = shape::member(step, "put") {
+            if let Ok(Value::List(rows)) = json::parse_json(rows) {
+                ids.extend(
+                    rows.iter()
+                        .filter_map(|r| shape::member(r, "id"))
+                        .map(|v| int_of(v) as DocId)
+                        .filter(|id| !kept.contains(id)),
+                );
+            }
+        }
+    }
+    by
+}
+
+/// A step's list of ids by name: `del` or `kept`.
+fn id_list(step: &Value, name: &str) -> Vec<DocId> {
+    match shape::member(step, name) {
+        Some(Value::List(ids)) => ids.iter().map(|v| int_of(v) as DocId).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `undo` again with `hit` among the `kept` of each of its steps over `c`.
+fn keep_in(undo: &str, c: &str, hit: &[DocId]) -> Result<String> {
+    let mut steps = json::parse_json(undo)?;
+    let Value::List(list) = &mut steps else {
+        return Ok(undo.to_string());
+    };
+    for step in list {
+        if !matches!(shape::member(step, "c"), Some(Value::Text(t)) if t == c) {
+            continue;
+        }
+        let Value::Object(m) = step else { continue };
+        let more = hit.iter().map(|&id| Value::Int(id as i64));
+        match m.iter_mut().find(|(k, _)| k == "kept") {
+            Some((_, Value::List(kept))) => kept.extend(more),
+            _ => m.push(("kept".into(), Value::List(more.collect()))),
+        }
+    }
+    Ok(json::to_string(&steps))
 }
 
 fn rows_json(rs: &ResultSet) -> String {
@@ -781,6 +854,7 @@ impl Sync {
                 key: text_of(&r.values[2]),
                 undo: text_of(&r.values[3]),
                 label: text_of(&r.values[4]),
+                touched: None,
             })
             .collect();
         ops.sort_unstable_by_key(|o| o.n);
@@ -1352,23 +1426,65 @@ impl Sync {
         self.once("{\"do\":\"changed\"}");
     }
 
+    /// One statement's undo: its ids deleted, its rows written back -- but
+    /// for the ids the server sent since (`kept`, [`Sync::heard`]), whose
+    /// rows stay as the server sent them.
     fn undo_step(&self, db: &mut Database, step: &Value) -> Result<()> {
         let Some(Value::Text(c)) = shape::member(step, "c") else {
             return Ok(());
         };
-        if let Some(Value::List(dels)) = shape::member(step, "del") {
-            let ids: Vec<DocId> = dels.iter().map(|v| int_of(v) as DocId).collect();
-            if !ids.is_empty() {
-                db.execute_with(&del_ids(c, &ids), &[])?;
-            }
+        let kept = id_list(step, "kept");
+        let ids: Vec<DocId> = id_list(step, "del")
+            .into_iter()
+            .filter(|id| !kept.contains(id))
+            .collect();
+        if !ids.is_empty() {
+            db.execute_with(&del_ids(c, &ids), &[])?;
         }
         if let Some(Value::Text(rows)) = shape::member(step, "put") {
             let fields = json_fields(db, c);
             let names: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-            let docs = json::parse_documents_json(rows, &names)?;
+            let mut docs = json::parse_documents_json(rows, &names)?;
+            docs.retain(|d| {
+                !d.iter()
+                    .any(|(k, v)| k == "id" && kept.contains(&(int_of(v) as DocId)))
+            });
             if !docs.is_empty() {
                 db.execute_with(&put_docs(c, docs), &[])?;
             }
+        }
+        Ok(())
+    }
+
+    /// The server sent `ids` of `c`, each as it is now or gone. What a
+    /// write it has not answered would put back of them stood before
+    /// that: refused, the write leaves them as the server sent them (its
+    /// steps' `kept`), else an insert refused for an id the server holds
+    /// deleted the server's row the stream had brought. The browser's rule
+    /// too (`#heard`). A write's ids are read once (`Op::touched`), so a
+    /// change reaching none of them rewrites nothing; one that does is
+    /// kept in `_sync_queue` in the change's own block.
+    fn heard(&mut self, db: &mut Database, c: &str, ids: &[DocId]) -> Result<()> {
+        for at in 0..self.queue.len() {
+            let op = &mut self.queue[at];
+            let touched = op.touched.get_or_insert_with(|| touched_by(&op.undo));
+            let Some((_, mine)) = touched.iter_mut().find(|(k, _)| k == c) else {
+                continue;
+            };
+            let hit: Vec<DocId> = ids.iter().copied().filter(|id| mine.remove(id)).collect();
+            if hit.is_empty() {
+                continue;
+            }
+            op.undo = keep_in(&op.undo, c, &hit)?;
+            let params = [
+                Value::Int(op.n),
+                Value::Text(op.path.clone()),
+                Value::Text(op.body.clone()),
+                Value::Text(op.key.clone()),
+                Value::Text(op.undo.clone()),
+                Value::Text(op.label.clone()),
+            ];
+            self.exec(db, PUT_OP, &params)?;
         }
         Ok(())
     }
@@ -1627,6 +1743,10 @@ impl Sync {
                 .into_iter()
                 .filter(|id| !came.contains(id) && !keep.contains(id))
                 .collect();
+            if !self.queue.is_empty() {
+                let sent: Vec<DocId> = came.iter().chain(&gone).copied().collect();
+                self.heard(db, &c, &sent)?;
+            }
             if !gone.is_empty() {
                 db.execute_with(&del_ids(&c, &gone), &[])?;
             }
@@ -1668,6 +1788,15 @@ impl Sync {
         db.begin()?;
         let r = (|| -> Result<()> {
             self.reconcile(db, i, &docs)?;
+            if !self.queue.is_empty() {
+                let sent: Vec<DocId> = docs
+                    .iter()
+                    .filter_map(|d| d.iter().find(|(k, _)| k == "id"))
+                    .map(|(_, v)| int_of(v) as DocId)
+                    .chain(dels.iter().copied())
+                    .collect();
+                self.heard(db, &c, &sent)?;
+            }
             if !dels.is_empty() {
                 db.execute_with(&del_ids(&c, &dels), &[])?;
             }
@@ -1902,6 +2031,7 @@ impl Sync {
             key: format!("fennec-{}", self.rng.uuid()),
             undo,
             label,
+            touched: None,
         };
         let temps: Vec<Temp> = applied
             .iter()

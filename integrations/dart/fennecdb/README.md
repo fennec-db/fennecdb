@@ -57,6 +57,12 @@ await orders.order(Computed.expr('n * 2'), 'desc').order('item').limit(10).rows(
 await db.from('journal').insertNew({'entry': 'inv-7'});
 ```
 
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `Computed.expr`'s text, and `Cond.raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 ## Sync with a server
 
 ```dart

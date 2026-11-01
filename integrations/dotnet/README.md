@@ -68,6 +68,8 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   twice is two parameters: with `var amount = new Param(300)`,
   `Where(new Dictionary<string, object?> { ["balance"] = new Dictionary<string, object?> { ["gte"] = amount } })
   .UpdateAsync(new { balance = Computed.Expr("balance - ?", amount) }, require: 1)` takes and checks one amount.
+  A `Param` inside a list or a json value is refused. `Computed.Expr`'s and `Cond.Raw`'s text is trusted FennecQL,
+  written into the statement as it is: the code's own, never a value from a user, which goes in as a `?`'s parameter.
 - A query is the list of an `in`, run before the one around it: `Where("customer", "in",
   db.From("customers").Select("id").Where("country", "TR"))` is `customer in (get customers select id where country
   = $1)`, or `["in"] = query` in an object condition; it selects exactly one column.

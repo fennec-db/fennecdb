@@ -247,6 +247,10 @@ export function normalize(v, what = 'value') {
     throw new FennecError(`${what} is undefined -- did you mean 'null'?`);
   }
   if (v === null || typeof v !== 'object') return v;
+  // A param is bound where a whole value stands, never from inside a list
+  // or a json value, where it would go as its own object; every builder
+  // refuses it in these words (builder-golden.json).
+  if (v instanceof Param) throw new FennecError('this object cannot be used as a fennecdb value (a param() inside a value)');
   if (v instanceof Date) return v.toISOString();
   if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
   if (Array.isArray(v)) return v.map((x) => normalize(x, what));
@@ -343,6 +347,7 @@ export function not(cond) {
  *
  * Every `?` in the fragment counts as a placeholder: if you need a literal
  * one, bind it as a parameter too (`raw('title ~ ?', "?")`), do not quote it.
+ * The text is trusted FennecQL, as `expr`'s is: never a value from a user.
  */
 export function raw(sql, ...params) {
   if (typeof sql !== 'string') throw new FennecError('raw() expects text');
@@ -392,6 +397,10 @@ export function inc(by = 1) {
  * bound to the parameters in order: `{ at: expr('now()') }`,
  * `{ total: expr('price * ?', 1.2) }`, `{ entry: expr('? + ":dr"', ref) }`
  * (`+` joins two texts, and only two texts).
+ *
+ * The text is trusted FennecQL, written into the statement as it is: the
+ * code's own, never a value from a user, which goes in as a `?`'s
+ * parameter. Names and this text are where an injection would get through.
  */
 export function expr(sql, ...params) {
   if (typeof sql !== 'string') throw new FennecError('expr() expects text');

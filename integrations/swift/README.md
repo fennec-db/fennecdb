@@ -80,6 +80,12 @@ try await orders.order(.expr("n * 2"), "desc").order("item").limit(10).rows()
 try await db.from("journal").insertNew(["entry": "inv-7"] as Value)
 ```
 
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `.expr`'s text, and `.raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 ## Sync with a server
 
 ```swift

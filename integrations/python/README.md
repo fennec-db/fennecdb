@@ -110,6 +110,12 @@ amount = param(300)
 # set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
 ```
 
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `expr`'s text, and `raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 A job queue's claim is one statement: `order` and `limit` before
 `update` pick the rows it writes, and `returning=True` (or a list of
 fields) answers them as written, where a count is answered otherwise:

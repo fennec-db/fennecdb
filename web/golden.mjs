@@ -788,6 +788,11 @@ c('a param as a point, in a filter and an order', ['from', 'orders'], ['where', 
 c('a param as near\'s vector and in a filter', docs, ['where', 'embed', '!=', P('v', [1, 0])], ['near', 'embed', P('v', [1, 0])], ['limit', 3], Q);
 c('a param in a document and its filter', docs, ['where', 'title', '!=', P('t', 'x')], ['update', { title: P('t', 'x'), seen: P('t', 'x') }]);
 c('a param of a date is its ISO text', docs, ['where', 'at', '>=', P('d', { $date: '2026-09-19T12:34:56.000Z' })], ['where', 'seen', '>=', P('d', { $date: '2026-09-19T12:34:56.000Z' })], Q);
+// A param goes where a whole value stands: inside a list or a json value
+// it is refused, never sent as the object it is.
+c('a param inside a list is refused', docs, ['where', 'tags', 'has', [P('t', 'rust')]], Q);
+c('a param inside a document\'s list is refused', docs, ['toInsert', { tags: [P('t', 'rust')] }]);
+c('a param inside a json value is refused', docs, ['toInsert', { meta: { lang: P('t', 'tr') } }]);
 c('a param in an inner query and around it', ['from', 'orders'], ['where', { tier: P('t', 2), customer: { in: sub(['from', 'customers'], ['select', 'id'], ['where', 'tier', P('t', 2)]) } }], Q);
 
 // `in (get ...)`: an inner query's one column is the list, its parameters

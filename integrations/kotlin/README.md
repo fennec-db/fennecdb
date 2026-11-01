@@ -81,6 +81,12 @@ db.from("accounts").where(mapOf("name" to "ada", "balance" to mapOf("gte" to amo
 // set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
 ```
 
+A param goes where a whole value stands: inside a list or a json value it
+is refused. `Computed.expr`'s text, and `Cond.raw`'s, is trusted FennecQL, written into the
+statement as it is: the code's own, never a value from a user, which goes in
+as a `?`'s parameter.
+
+
 ## Sync with a server
 
 ```kotlin

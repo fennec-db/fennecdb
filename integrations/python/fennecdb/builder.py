@@ -271,6 +271,11 @@ def _normalize(v: Any, what: str = "value") -> Any:
         return [_normalize(x, what) for x in v]
     if isinstance(v, Mapping):
         return {k: _normalize(x, what) for k, x in v.items()}
+    # A param is bound where a whole value stands, never from inside a list
+    # or a json value; every builder refuses it in these words
+    # (builder-golden.json).
+    if isinstance(v, Param):
+        raise _err("this object cannot be used as a fennecdb value (a param() inside a value)")
     tolist = getattr(v, "tolist", None)
     if callable(tolist):
         return _normalize(tolist(), what)
@@ -418,7 +423,12 @@ def inc(by: Any = 1) -> Computed:
 def expr(sql: str, *params: Any) -> Computed:
     """A value as a FennecQL expression over the row it is written into,
     each `?` bound to the next parameter: `{"at": expr("now()")}`,
-    `{"total": expr("price * ?", 1.2)}`."""
+    `{"total": expr("price * ?", 1.2)}`.
+
+    The text is trusted FennecQL, written into the statement as it is: the
+    code's own, never a value from a user, which goes in as a `?`'s
+    parameter. Names and this text are where an injection would get
+    through."""
     if not isinstance(sql, str):
         raise _err("expr() expects text")
     return Computed("expr", sql=sql, params=params)

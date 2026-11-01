@@ -269,6 +269,102 @@
       ]
     },
     {
+      "name": "an insert refused for an id the stream brought first keeps the server's row",
+      "covers": "sync.html#optimistic: a refusal puts back what the replica held before the write, and a row the server sent since stays as it sent it -- deleting the id the insert made would lose the server's row",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "mine"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>"}], "pending": 1,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "mine"}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 7, "key": "g", "priority": null, "status": "open", "title": "theirs"}], "dels": [], "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "theirs"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 7 already: insert makes new ones, put writes over"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "key": "g", "title": "theirs"}]}}}
+      ]
+    },
+    {
+      "name": "an insert refused before the stream brings the server's row deletes its own, and the server's row comes after",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "mine"}]}, "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "mine"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 7 already: insert makes new ones, put writes over"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 7, "key": "g", "priority": null, "status": "open", "title": "theirs"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "key": "g", "title": "theirs"}]}}}
+      ]
+    },
+    {
+      "name": "a batch of inserts one of which the server refuses is put back whole, the server's row kept",
+      "covers": "sync.html#batches: the block is refused whole, so every row its inserts made goes, and the row the server sent for the id it held stays",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"batch": [
+          {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "seven"}]},
+          {"insert_new": "tasks", "docs": [{"id": 8, "status": "open", "title": "eight"}, {"id": 9, "status": "open", "title": "nine"}]}]}, "expect": {
+          "requests": [{"path": "/batch", "key": "<w1>", "lines": 2}], "pending": 1,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "seven"}, {"id": 8, "title": "eight"}, {"id": 9, "title": "nine"}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 8, "key": "h", "priority": null, "status": "open", "title": "theirs"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7}, {"id": 8, "title": "theirs"}, {"id": 9}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 8 already: insert makes new ones, put writes over", "completed": 0}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}, {"id": 8, "key": "h", "title": "theirs"}]}}}
+      ]
+    },
+    {
+      "name": "an insert sent again after a reconnect, refused, keeps the row the reopened stream brought",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "mine"}]}, "expect": {
+          "requests": [{"key": "<w1>"}], "pending": 1}},
+        {"do": "answer", "status": 0, "expect": {"refused": [], "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "mine"}]}}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "change", "seq": 4, "puts": [{"id": 7, "key": "g", "priority": null, "status": "open", "title": "theirs"}], "dels": [], "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "theirs"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 7 already: insert makes new ones, put writes over"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "key": "g", "title": "theirs"}]}}}
+      ]
+    },
+    {
+      "name": "a restart keeps what the stream brought out of a pending write's undo",
+      "covers": "sync.html#persist: the undo a server's row trimmed is kept in the replica with the write, and a refusal after a restart keeps that row",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert_new": "tasks", "docs": [{"id": 7, "status": "open", "title": "mine"}]}, "expect": {
+          "requests": [{"key": "<w1>"}], "pending": 1}},
+        {"do": "change", "seq": 4, "puts": [{"id": 7, "key": "g", "priority": null, "status": "open", "title": "theirs"}], "dels": [], "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "theirs"}]}}},
+        {"do": "restart", "expect": {"requests": [{"key": "<w1>"}], "pending": 1,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "theirs"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`tasks` holds a document 7 already: insert makes new ones, put writes over"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "key": "g", "title": "theirs"}]}}}
+      ]
+    },
+    {
+      "name": "an update refused after the stream sent its rows anew keeps the server's rows",
+      "covers": "sync.html#optimistic: the same rule for every write -- a row the server changed or deleted since is not written back as it stood before",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "X"}, "where": {"status": "open"}}, "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 1, "title": "X"}, {"id": 2, "title": "X"}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "theirs"}], "dels": [2], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "theirs"}]}}},
+        {"do": "answer", "status": 403, "body": {"error": "the token's rules do not allow it"}, "expect": {
+          "refused": [403], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "theirs"}]}}}
+      ]
+    },
+    {
       "name": "an update shows at once, is sent, and its echo changes nothing",
       "covers": "sync.html#optimistic: update and delete work by the filter, needing no key",
       "steps": [

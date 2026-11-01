@@ -85,6 +85,11 @@ extension Value {
 
     /// A value as a FennecQL expression over the row, each `?` bound to the
     /// next parameter: `["at": .expr("now()")]`, `.expr("price * ?", 1.2)`.
+    ///
+    /// The text is trusted FennecQL, written into the statement as it is:
+    /// the code's own, never a value from a user, which goes in as a `?`'s
+    /// parameter. Names and this text are where an injection would get
+    /// through.
     public static func expr(_ sql: String, _ params: Value...) -> Value { expr(sql, params) }
 
     static func expr(_ sql: String, _ params: [Value]) -> Value {
@@ -661,6 +666,7 @@ final class Binder {
 
     func bind(_ v: Value) -> String {
         guard let p = v.param else {
+            refuseInside(v)
             params.append(v)
             return "$\(params.count)"
         }
@@ -669,10 +675,33 @@ final class Binder {
             refused = refused ?? FennecError.builder("param() takes a value, not another param()")
             return "$0"
         }
+        refuseInside(p.value)
         params.append(p.value)
         let at = "$\(params.count)"
         once[p.id] = at
         return at
+    }
+
+    /// A `param` -- or an `inc` or an `expr` -- inside a list or a json
+    /// value would go out as the object it is made of, its NUL key and its
+    /// id, as a value: each is bound where a whole value stands, and refused
+    /// from inside one, a param in every builder's words
+    /// (builder-golden.json).
+    private func refuseInside(_ v: Value) {
+        let members: [Value]
+        switch v {
+        case .array(let list): members = list
+        case .object(let r): members = Array(r.values)
+        default: return
+        }
+        for m in members {
+            if case .object(let r) = m, let kind = r[Value.computedKey]?.string {
+                let what = kind == "param" ? "a param() inside a value" : "\(kind)() inside a value"
+                refused = refused ?? FennecError.builder("this object cannot be used as a fennecdb value (\(what))")
+                return
+            }
+            refuseInside(m)
+        }
     }
 
     /// The parameters, once the text is made: refused where a `param` in it

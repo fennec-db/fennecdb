@@ -163,7 +163,9 @@ public sealed class Computed
     }
 
     /// <summary>A value as a FennecQL expression over the row it is written into, each <c>?</c> bound to the next
-    /// parameter: <c>Computed.Expr("now()")</c>, <c>Computed.Expr("price * ?", 1.2)</c>.</summary>
+    /// parameter: <c>Computed.Expr("now()")</c>, <c>Computed.Expr("price * ?", 1.2)</c>. The text is trusted
+    /// FennecQL, written into the statement as it is: the code's own, never a value from a user, which goes in as a
+    /// <c>?</c>'s parameter. Names and this text are where an injection would get through.</summary>
     public static Computed Expr(string sql, params object?[] parameters) => new("expr", null, sql, parameters.ToList());
 
     static bool FiniteNumber(object v) => v switch

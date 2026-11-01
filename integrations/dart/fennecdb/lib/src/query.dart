@@ -76,6 +76,10 @@ class Computed {
   /// A value as a FennecQL expression over the row, each `?` bound to the
   /// next parameter: `Computed.expr('now()')`, `Computed.expr('price * ?', [1.2])`.
   /// In a select list it is a column: `Computed.expr('sum(px * qty) / sum(qty)').as('vwap')`.
+  ///
+  /// The text is trusted FennecQL, written into the statement as it is: the
+  /// code's own, never a value from a user, which goes in as a `?`'s
+  /// parameter. Names and this text are where an injection would get through.
   static Computed expr(String sql, [List<Object?> params = const []]) => Computed._(null, sql, params);
 
   /// `bucket(field, interval)`: the start of the interval a timestamp falls

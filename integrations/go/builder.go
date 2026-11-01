@@ -397,6 +397,38 @@ func normalize(v any) any {
 	return v
 }
 
+// paramInside refuses a Param inside a list or a json value: it is bound
+// where a whole value stands, and from inside one it would go out as the
+// {} its unexported fields marshal to. Every builder refuses it in these
+// words (builder-golden.json).
+func paramInside(v any) error {
+	switch v := v.(type) {
+	case *Parameter:
+		if v != nil {
+			return refuse("this object cannot be used as a fennecdb value (a param() inside a value)")
+		}
+	case []any:
+		for _, x := range v {
+			if err := paramInside(x); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for _, x := range v {
+			if err := paramInside(x); err != nil {
+				return err
+			}
+		}
+	case Doc:
+		for _, f := range v {
+			if err := paramInside(f.Value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // --------------------------------------------- one value in two places
 
 // Parameter is what Param makes: one value bound once, whichever places
@@ -425,6 +457,13 @@ func Param(value any) *Parameter {
 		return &Parameter{err: refuse("param() takes a value, not another param()")}
 	}
 	return &Parameter{value: value}
+}
+
+// MarshalJSON refuses: a Param goes out as the value it holds, bound by the
+// builder, and one that reaches encoding/json -- inside a typed slice or a
+// struct, where paramInside does not look -- was never bound.
+func (p *Parameter) MarshalJSON() ([]byte, error) {
+	return nil, refuse("this object cannot be used as a fennecdb value (a param() inside a value)")
 }
 
 // valueOf is a value as the builder checks it: a Param's own.
@@ -763,7 +802,7 @@ func (b *binder) bind(v any) string {
 		if at, ok := b.once[p]; ok {
 			return at
 		}
-		b.params = append(b.params, normalize(p.value))
+		b.params = append(b.params, b.value(p.value))
 		at := fmt.Sprintf("$%d", len(b.params))
 		if b.once == nil {
 			b.once = map[*Parameter]string{}
@@ -771,8 +810,16 @@ func (b *binder) bind(v any) string {
 		b.once[p] = at
 		return at
 	}
-	b.params = append(b.params, normalize(v))
+	b.params = append(b.params, b.value(v))
 	return fmt.Sprintf("$%d", len(b.params))
+}
+
+// value is v as it goes into the parameters, a Param inside it refused.
+func (b *binder) value(v any) any {
+	if err := paramInside(v); err != nil && b.err == nil {
+		b.err = err
+	}
+	return normalize(v)
 }
 
 // out is a statement as its To... hands it back: refused where a Param in
@@ -2207,6 +2254,10 @@ func Inc(by any) Computed {
 
 // Expr is a value as a FennecQL expression over the row it is written into,
 // each ? bound to the next parameter: Expr("now()"), Expr("price * ?", 1.2).
+//
+// The text is trusted FennecQL, written into the statement as it is: the
+// code's own, never a value from a user, which goes in as a ?'s parameter.
+// Names and this text are where an injection would get through.
 func Expr(sql string, params ...any) Computed {
 	return Computed{kind: "expr", sql: sql, params: params}
 }
@@ -2932,6 +2983,9 @@ func callObject(v any, what string) (map[string]any, error) {
 		default:
 			return nil, refused
 		}
+	}
+	if err := paramInside(obj); err != nil {
+		return nil, err
 	}
 	out, _ := normalize(obj).(map[string]any)
 	if out == nil {

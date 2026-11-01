@@ -95,6 +95,10 @@ class Computed private constructor(
          * A value as a FennecQL expression over the row, each `?` bound to
          * the next parameter: `Computed.expr("now()")`, `Computed.expr("price * ?", 1.2)`.
          * In a select list it is a column: `Computed.expr("sum(px * qty) / sum(qty)").alias("vwap")`.
+         *
+         * The text is trusted FennecQL, written into the statement as it is:
+         * the code's own, never a value from a user, which goes in as a `?`'s
+         * parameter. Names and this text are where an injection would get through.
          */
         @JvmStatic fun expr(sql: String, vararg params: Any?): Computed = Computed(null, sql, params.toList())
 

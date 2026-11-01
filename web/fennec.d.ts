@@ -454,6 +454,10 @@ export function inc(by?: number): Computed;
  * A value as a FennecQL expression over the row, `?` placeholders bound to
  * parameters in order: `{ at: expr('now()') }`, `{ total: expr('price * ?', 1.2) }`,
  * `{ entry: expr('? + ":dr"', ref) }` (`+` joins two texts, and only two texts).
+ *
+ * The text is trusted FennecQL, written into the statement as it is: the
+ * code's own, never a value from a user, which goes in as a `?`'s
+ * parameter. Names and this text are where an injection would get through.
  */
 export function expr(sql: string, ...params: unknown[]): Expression;
 

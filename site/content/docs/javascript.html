@@ -1188,10 +1188,15 @@ nothing; a query needs no call to it before it runs.</p>
 
 <details class="deep"><summary>How values and names stay out of the query text</summary>
 <p>Nothing is hidden. Every leaf value is bound to a parameter and text is
-never embedded into the query, which leaves a single injection boundary:
-<b>names</b>. Collection and field names cannot be parameterised, so they are
+never embedded into the query, which leaves two injection boundaries.
+<b>Names</b>: collection and field names cannot be parameterised, so they are
 validated against FennecQL's identifier rule and anything that does not fit
-errors out.</p>
+errors out. And <b>the text of <code>expr()</code></b> (and of
+<code>raw()</code>): it is trusted FennecQL, written into the statement as
+it is, so it is the code's own and never a value from a user -- that goes in
+as a <code>?</code>'s parameter, <code>expr('price * ?', userValue)</code>.
+A <code>param()</code> goes where a whole value stands; inside a list or a
+json value it is refused.</p>
 
 <pre data-lang="ts">db.from('articles').where('title', '"; del articles; --')
 // get articles where title = $1     ← a value, not text
