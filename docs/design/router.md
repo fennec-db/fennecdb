@@ -273,7 +273,13 @@ eight runs a side in ABBA turns at loads of 1.9-2.5 (20.5-20.9 and
 (aarch64-apple-darwin, `__text` 3 001 344 bytes to 3 003 648), the cost
 of the mark, the out-of-line answer and the relay telling a router that
 took the request whole from one that never did; `fennec-server`'s 16 B,
-the header's name in the CORS list.
+the header's name in the CORS list. The review's fix -- a header name
+compared more for each header of a node's answer, and the relay's arm for
+a marked 503 after a whole hop -- kept the added p50 at a median of 20.8 us
+against the branch's 21.0 (eight runs a side, ABBA, each begun under a
+load of 3; one run whose load rose to 3.7 left out changes neither), and
+grew `__text` by 1 280 bytes (3 003 648 to 3 004 928), constants
+unchanged.
 
 ## Failover cuts
 
