@@ -50,7 +50,13 @@ async function server() {
   return {
     client: new FennecHttp(url),
     async stop() {
+      // Waited out before the folder goes: the server writes into it as it
+      // stops (see integrations/mcp/test.js).
+      const exited = new Promise((res) =>
+        child.exitCode !== null || child.signalCode !== null ? res() : child.once('exit', res),
+      );
       child.kill();
+      await exited;
       await rm(dir, { recursive: true, force: true });
     },
   };

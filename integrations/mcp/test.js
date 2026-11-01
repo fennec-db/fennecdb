@@ -75,7 +75,14 @@ async function startServer() {
 
 const srv = await startServer();
 after(async () => {
+  // The server syncs and checkpoints into `dir` as it stops (the one
+  // shutdown): removing the folder before it has exited races those writes
+  // and fails with ENOTEMPTY.
+  const exited = new Promise((res) =>
+    srv.child.exitCode !== null || srv.child.signalCode !== null ? res() : srv.child.once('exit', res),
+  );
   srv.child.kill();
+  await exited;
   await rm(dir, { recursive: true, force: true });
 });
 
