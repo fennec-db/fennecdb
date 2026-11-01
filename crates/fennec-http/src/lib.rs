@@ -724,7 +724,15 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 // A request that could not be read has an id all the same:
                 // its answer is what a client reports.
                 request_id::begin(None);
-                let _ = cors(Response::error(status, &msg), cfg).write(&mut out, false, false);
+                // Its body, if any, is unread: ended as a refused
+                // connection is, the answer read before the close.
+                if cors(Response::error(status, &msg), cfg)
+                    .write(&mut out, false, false)
+                    .is_ok()
+                {
+                    drop(out);
+                    accept::end_refused(reader.into_inner());
+                }
                 return;
             }
         };

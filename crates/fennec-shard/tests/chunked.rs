@@ -151,6 +151,39 @@ fn a_chunked_body_goes_on_to_the_node_by_its_length() {
     assert_eq!(statuses(&out), [200, 200], "{out}");
 }
 
+/// The router's refusal of a head, its body unread, is read whole by a
+/// client that writes its body first and reads after, as the server's is:
+/// closed with the body unread, the system reset the connection in place of
+/// the 400. 512 KiB, under `accept`'s `LINGER_DRAIN`, is past what
+/// loopback's buffers hold before the router reads.
+#[test]
+fn the_router_s_refusal_of_a_head_is_read_whole_while_its_body_is_unread() {
+    const UNREAD: usize = 512 << 10;
+    let node = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front = router_to(&node.local_addr().unwrap().to_string());
+    for header in ["X: a\x01b\r\n", "Transfer-Encoding\x0b: chunked\r\n"] {
+        for i in 0..3 {
+            let mut s = TcpStream::connect(&front).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let head = format!(
+                "POST /t/acme/query HTTP/1.1\r\nHost: t\r\n{header}Content-Length: {UNREAD}\r\n\r\n"
+            );
+            let sent = s
+                .write_all(head.as_bytes())
+                .and_then(|()| s.write_all(&vec![b' '; UNREAD]));
+            assert!(sent.is_ok(), "{header:?} {i}: the body: {sent:?}");
+            let mut out = String::new();
+            let read = s.read_to_string(&mut out);
+            assert!(
+                read.is_ok(),
+                "{header:?} {i}: the answer: {read:?}, {out:?}"
+            );
+            assert_eq!(statuses(&out), [400], "{header:?} {i}: {out}");
+            assert!(out.ends_with('}'), "{header:?} {i}: {out}");
+        }
+    }
+}
+
 #[test]
 fn a_framing_read_two_ways_is_the_router_s_400_sent_nowhere() {
     let node = TcpListener::bind("127.0.0.1:0").unwrap();

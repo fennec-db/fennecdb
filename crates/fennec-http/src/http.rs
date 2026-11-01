@@ -268,8 +268,8 @@ pub const MAX_CHUNK_LINE: usize = 1024;
 /// Whether a request's `Transfer-Encoding` is one this server reads: the
 /// one coding `chunked`, in HTTP/1.1, with no `Content-Length` beside it
 /// (RFC 9112 §6.1, §6.3). Every other framing is refused, and the
-/// connection closed after the refusal as after every refusal of a request,
-/// so no byte of a body framed otherwise is read as the next request: a
+/// connection ended after the refusal (`accept::end_refused`), so no byte
+/// of a body framed otherwise is read as the next request: a
 /// length beside a coding (400) is the shape of request smuggling, the two
 /// headers read by two servers two ways; `chunked` not last or twice (400)
 /// leaves a body with no end one can read; any other coding (`gzip,

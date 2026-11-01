@@ -826,8 +826,8 @@ one-byte chunks with sizes alone is legal and costs its framing, at most
 The rest is request smuggling's, the way a server in front and this one
 could frame one request two ways, so that the bytes one sent as the next
 request are the other's body (RFC 9112 §6.1, §6.3, §2.2, §5.1-5.2). Each is
-refused, and the connection closed after the refusal as after every
-refusal of a request, so nothing after it is read: a `Content-Length` beside
+refused, and the connection ended after the refusal as every refusal of a
+request's head is, so nothing after it is read as a request: a `Content-Length` beside
 a `Transfer-Encoding` (400, where the RFC lets a server take the coding and
 close); `chunked` named twice or not last (400); a coding but `chunked`,
 `gzip, chunked` among them (501: decoded, a coded body would go on still
@@ -850,6 +850,27 @@ data is 400 rather than the rest read as the next request; what follows the
 trailers' empty line is the next request's, left in the reader, which
 `a_kept_alive_connection_reads_on_right_after_the_trailers` holds with a
 chunked, a plain, a chunked and a plain request in one write.
+
+How the connection ends after such a refusal is `accept::end_refused`'s,
+on the server and the router alike, and is the 503's of a connection no
+thread is made for: the answer written whole, the write side shut, the
+stream handed to the lingering thread (`accept::linger`) to read off what
+the client still sends -- 1 MiB and 2 s at most -- until it ends the
+connection, or, where that thread is not running or holds `most_held`,
+what has arrived read off and the socket closed. The first version closed
+the socket after the answer, as every refusal of a head had: a body the
+refusal left unread had the system reset the connection, and a client
+still writing it, or not yet reading, met the reset in place of the
+answer. The merge queue found it once a header holding a control was
+refused with the head rather than by its route after the body was read:
+`idempotency::a_key_holding_a_control_character_is_refused` got
+`ECONNRESET`. `a_refusal_of_the_head_is_read_whole_while_its_body_is_unread`
+and the router's twin write a head refused, then 512 KiB of body, then
+read: before, the body's write failed `EPIPE` and the answer's read
+`ECONNRESET`; after, each of three refusals reads its 400 or 413 whole,
+held thirty times beside four busy loops. A refusal past the head -- a
+chunk past the ceiling, a malformed size -- ends the same way, with
+whatever of its body follows read off.
 
 The router decodes and forwards with a `Content-Length` rather than refuse
 or stream: it already reads every request through fennec-http's

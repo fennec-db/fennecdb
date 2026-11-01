@@ -1801,9 +1801,16 @@ impl Router {
                 Ok(None) => return,
                 Err(http::BadRequest(status, msg)) => {
                     fennec_http::request_id::begin(None);
-                    let _ = self
+                    // Its body, if any, is unread: ended as a refused
+                    // connection is, the answer read before the close.
+                    if self
                         .cors(Response::error(status, &msg))
-                        .write(&mut out, false, false);
+                        .write(&mut out, false, false)
+                        .is_ok()
+                    {
+                        drop(out);
+                        fennec_http::accept::end_refused(reader.into_inner());
+                    }
                     return;
                 }
             };

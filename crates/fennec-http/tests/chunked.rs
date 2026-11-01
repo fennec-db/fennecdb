@@ -244,6 +244,45 @@ fn a_kept_alive_connection_reads_on_right_after_the_trailers() {
     assert_eq!(got[3].body.trim(), r#"{"count":2}"#);
 }
 
+/// A body under `accept`'s `LINGER_DRAIN` and past what loopback's buffers
+/// hold before the server reads: written whole after the head, as a client
+/// writes it, while the server refuses the head.
+const UNREAD: usize = 512 << 10;
+
+/// A request refused at its head, its body never read, has its refusal read
+/// whole by a client that writes its body first and reads after: the body
+/// is read off and the connection ends with no reset. Closed with the body
+/// unread, the system reset it, and the client's write or read failed
+/// (`EPIPE`, `ECONNRESET`) in place of the 400 -- `idempotency.rs`'s key
+/// holding a control character in the merge queue.
+#[test]
+fn a_refusal_of_the_head_is_read_whole_while_its_body_is_unread() {
+    let port = start(|c| c.max_body = 64 << 10);
+    for (header, status) in [("X: a\x01b\r\n", 400), ("X\x0b: a\r\n", 400), ("", 413)] {
+        for i in 0..3 {
+            let mut s = connect(port);
+            let head = format!(
+                "POST /query HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {ROOT}\r\n{header}\
+                 Content-Length: {UNREAD}\r\n\r\n"
+            );
+            let sent = s
+                .write_all(head.as_bytes())
+                .and_then(|()| s.write_all(&vec![b' '; UNREAD]));
+            assert!(sent.is_ok(), "{header:?} {i}: the body: {sent:?}");
+            let mut out = String::new();
+            let read = s.read_to_string(&mut out);
+            assert!(
+                read.is_ok(),
+                "{header:?} {i}: the answer: {read:?}, {out:?}"
+            );
+            let got = answers(&out);
+            assert_eq!(got.len(), 1, "{header:?} {i}: {out}");
+            assert_eq!(got[0].status, status, "{header:?} {i}: {}", got[0].body);
+            assert!(got[0].body.starts_with('{') && got[0].body.ends_with('}'));
+        }
+    }
+}
+
 #[test]
 fn a_framing_read_two_ways_is_refused_and_the_connection_closed() {
     let port = start(|c| c.max_body = 1 << 10);
