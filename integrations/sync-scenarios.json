@@ -365,6 +365,52 @@
       ]
     },
     {
+      "name": "a delete refused after a seed without its row leaves the row gone",
+      "covers": "sync.html#optimistic: a seed names every row of the collection, the one a waiting delete took away and the seed lacks too -- put back, it would stay for good, since no change ever deletes it again",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "a"}}, "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "seed", "seq": 5, "rows": [{"id": 2, "key": "b", "priority": 5, "status": "open", "title": "two"}], "expect": {
+          "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "answer", "status": 403, "body": {"error": "the token's rules do not allow it"}, "expect": {
+          "refused": [403], "pending": 0, "rows": {"tasks": [{"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a delete refused after a reconnect's seed without its row leaves the row gone",
+      "covers": "sync.html#optimistic: a scoped stream resumed is seeded again whole, so a scoped replica meets the seed above on every reconnect",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "a"}}, "expect": {
+          "requests": [{"key": "<w1>"}], "pending": 1, "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 5, "rows": [{"id": 2, "key": "b", "priority": 5, "status": "open", "title": "two"}], "expect": {
+          "pending": 1, "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "answer", "status": 412, "body": {"error": "require 1 met 0"}, "expect": {
+          "pending": 0, "rows": {"tasks": [{"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "two writes over one row both refused put back the row the server holds, not the first write's",
+      "covers": "sync.html#optimistic: the second write read the row as the first left it, which the server never held; the first's refusal hands it the row as it is back",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "A"}, "where": {"key": "a"}}, "expect": {
+          "requests": [{"key": "<w1>"}], "pending": 1, "rows": {"tasks": [{"id": 1, "title": "A"}, {"id": 2}]}}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "B"}, "where": {"key": "a"}}, "expect": {
+          "requests": [], "pending": 2, "rows": {"tasks": [{"id": 1, "title": "B"}, {"id": 2}]}}},
+        {"do": "answer", "status": 403, "body": {"error": "the token's rules do not allow it"}, "expect": {
+          "refused": [403], "pending": 1, "requests": [{"key": "<w2>"}], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}]}}},
+        {"do": "answer", "status": 403, "body": {"error": "the token's rules do not allow it"}, "expect": {
+          "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}]}}}
+      ]
+    },
+    {
       "name": "an update shows at once, is sent, and its echo changes nothing",
       "covers": "sync.html#optimistic: update and delete work by the filter, needing no key",
       "steps": [

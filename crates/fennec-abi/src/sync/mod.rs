@@ -116,6 +116,15 @@ struct Shape {
     fresh: bool,
 }
 
+/// What a seed or a change names of a collection ([`Sync::heard`]).
+#[derive(Clone, Copy)]
+enum Sent<'a> {
+    /// A change: these ids, each as it is now or gone.
+    Ids(&'a [DocId]),
+    /// A seed: every id but these, the temporary rows it keeps.
+    AllBut(&'a [DocId]),
+}
+
 /// A write the server has not answered.
 struct Op {
     n: i64,
@@ -1377,6 +1386,7 @@ impl Sync {
             return;
         };
         let op = self.queue.remove(at);
+        let mut rebased = Vec::new();
         let r = (|| -> Result<()> {
             db.begin()?;
             if let Value::List(steps) = json::parse_json(&op.undo)? {
@@ -1384,6 +1394,7 @@ impl Sync {
                     self.undo_step(db, step)?;
                 }
             }
+            rebased = self.rebase(db, &op)?;
             self.exec(db, DEL_OP, &[Value::Int(n)])?;
             for t in self
                 .temps
@@ -1396,6 +1407,11 @@ impl Sync {
             }
             db.commit()
         })();
+        if r.is_ok() {
+            for (at, undo) in rebased {
+                self.queue[at].undo = undo;
+            }
+        }
         if let Err(e) = r {
             db.rollback();
             self.fault(
@@ -1456,22 +1472,37 @@ impl Sync {
         Ok(())
     }
 
-    /// The server sent `ids` of `c`, each as it is now or gone. What a
-    /// write it has not answered would put back of them stood before
-    /// that: refused, the write leaves them as the server sent them (its
-    /// steps' `kept`), else an insert refused for an id the server holds
-    /// deleted the server's row the stream had brought. The browser's rule
-    /// too (`#heard`). A write's ids are read once (`Op::touched`), so a
-    /// change reaching none of them rewrites nothing; one that does is
-    /// kept in `_sync_queue` in the change's own block.
-    fn heard(&mut self, db: &mut Database, c: &str, ids: &[DocId]) -> Result<()> {
+    /// The server sent ids of `c`, each as it is now or gone: a change's
+    /// own, or, for a seed, every id but the temporary rows it keeps -- a
+    /// row an unanswered write deleted is not held, so a seed lacking it
+    /// names it too. What a write it has not answered would put back of
+    /// them stood before that: refused, the write leaves them as the
+    /// server sent them (its steps' `kept`), else an insert refused for an
+    /// id the server holds deleted the server's row the stream had brought.
+    /// The browser's rule too (`#heard`). A write's ids are read once
+    /// (`Op::touched`), so a change reaching none of them rewrites nothing;
+    /// one that does is kept in `_sync_queue` in the change's own block.
+    fn heard(&mut self, db: &mut Database, c: &str, sent: Sent) -> Result<()> {
         for at in 0..self.queue.len() {
             let op = &mut self.queue[at];
             let touched = op.touched.get_or_insert_with(|| touched_by(&op.undo));
             let Some((_, mine)) = touched.iter_mut().find(|(k, _)| k == c) else {
                 continue;
             };
-            let hit: Vec<DocId> = ids.iter().copied().filter(|id| mine.remove(id)).collect();
+            let hit: Vec<DocId> = match sent {
+                Sent::Ids(ids) => ids.iter().copied().filter(|id| mine.remove(id)).collect(),
+                Sent::AllBut(keep) => {
+                    let hit: Vec<DocId> = mine
+                        .iter()
+                        .copied()
+                        .filter(|id| !keep.contains(id))
+                        .collect();
+                    for id in &hit {
+                        mine.remove(id);
+                    }
+                    hit
+                }
+            };
             if hit.is_empty() {
                 continue;
             }
@@ -1487,6 +1518,87 @@ impl Sync {
             self.exec(db, PUT_OP, &params)?;
         }
         Ok(())
+    }
+
+    /// A refused write's rows are put back as the server holds them, but
+    /// the next waiting write over each of them read them as the refused
+    /// one left them, which the server never held: refused in turn, it
+    /// would write that back. So its undo gets a step of its own, run last
+    /// (steps run the last first), putting back each such row as it is now
+    /// -- or deleting it where it is gone. Only the next write over a row:
+    /// the one after read the next one's row, right if that one lands.
+    /// The new undos, by place in the queue, kept in `_sync_queue` in the
+    /// refusal's block; the queue takes them once it commits. The
+    /// browser's rule too (`#rebase`).
+    fn rebase(&self, db: &mut Database, refused: &Op) -> Result<Vec<(usize, String)>> {
+        let mut left = touched_by(&refused.undo);
+        let mut out = Vec::new();
+        for (at, op) in self.queue.iter().enumerate() {
+            if left.iter().all(|(_, ids)| ids.is_empty()) {
+                break;
+            }
+            let read;
+            let touched = match &op.touched {
+                Some(t) => t,
+                None => {
+                    read = touched_by(&op.undo);
+                    &read
+                }
+            };
+            let mut steps = Vec::new();
+            for (c, ids) in &mut left {
+                let Some((_, mine)) = touched.iter().find(|(k, _)| k == c) else {
+                    continue;
+                };
+                let both: Vec<DocId> = ids.iter().copied().filter(|id| mine.contains(id)).collect();
+                if both.is_empty() {
+                    continue;
+                }
+                for id in &both {
+                    ids.remove(id);
+                }
+                let rows = match db.execute_with(
+                    &Statement::Select(Select {
+                        collection: c.clone(),
+                        filter: del_ids(c, &both).filter_of(),
+                        ..Default::default()
+                    }),
+                    &[],
+                )? {
+                    Response::Rows(rs) => rs,
+                    _ => ResultSet::default(),
+                };
+                let gone: Vec<Value> = both
+                    .iter()
+                    .filter(|id| !rows.rows.iter().any(|r| r.id == **id))
+                    .map(|&id| Value::Int(id as i64))
+                    .collect();
+                steps.push(json::to_string(&Value::Object(vec![
+                    ("c".into(), Value::Text(c.clone())),
+                    ("del".into(), Value::List(gone)),
+                    ("put".into(), Value::Text(rows_json(&rows))),
+                ])));
+            }
+            if steps.is_empty() {
+                continue;
+            }
+            let rest = op.undo.strip_prefix('[').unwrap_or("]");
+            let undo = match rest.trim_start().starts_with(']') {
+                true => format!("[{}]", steps.join(",")),
+                false => format!("[{},{rest}", steps.join(",")),
+            };
+            let params = [
+                Value::Int(op.n),
+                Value::Text(op.path.clone()),
+                Value::Text(op.body.clone()),
+                Value::Text(op.key.clone()),
+                Value::Text(undo.clone()),
+                Value::Text(op.label.clone()),
+            ];
+            self.exec(db, PUT_OP, &params)?;
+            out.push((at, undo));
+        }
+        Ok(out)
     }
 
     fn exec(&self, db: &mut Database, which: usize, params: &[Value]) -> Result<Response> {
@@ -1744,8 +1856,7 @@ impl Sync {
                 .filter(|id| !came.contains(id) && !keep.contains(id))
                 .collect();
             if !self.queue.is_empty() {
-                let sent: Vec<DocId> = came.iter().chain(&gone).copied().collect();
-                self.heard(db, &c, &sent)?;
+                self.heard(db, &c, Sent::AllBut(&keep))?;
             }
             if !gone.is_empty() {
                 db.execute_with(&del_ids(&c, &gone), &[])?;
@@ -1795,7 +1906,7 @@ impl Sync {
                     .map(|(_, v)| int_of(v) as DocId)
                     .chain(dels.iter().copied())
                     .collect();
-                self.heard(db, &c, &sent)?;
+                self.heard(db, &c, Sent::Ids(&sent))?;
             }
             if !dels.is_empty() {
                 db.execute_with(&del_ids(&c, &dels), &[])?;
