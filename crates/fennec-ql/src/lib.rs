@@ -68,6 +68,18 @@ pub fn schema_text(src: &str) -> Result<Vec<Schema>> {
     )
 }
 
+/// A schema text's collections and the named statements it declares after
+/// them, read as [`schema_into`] reads them, in the order written: what
+/// `fennec types` writes each statement's arguments and answer from.
+/// [`schema_text`] answers the collections alone, as it did before
+/// statements were declared.
+#[cfg(feature = "statements")]
+pub fn schema_statements(src: &str) -> Result<(Vec<Schema>, Vec<fennec_core::named::Definition>)> {
+    let mut statements = Vec::new();
+    let schemas = schema_read(src, &mut statements)?;
+    Ok((schemas, statements))
+}
+
 /// A description's FennecQL text, `text`, read into its collections and,
 /// with named statements, the `create statement`s it holds after the
 /// collections each names: what `declared::plan_statements` plans.

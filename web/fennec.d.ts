@@ -573,12 +573,13 @@ export declare class FennecError extends Error {
 }
 
 /**
- * One statement of `FennecHttp.batch`: a builder query (a read), a FennecQL
- * text, or `[text, params]` -- what `toInsert`, `toUpdate` and `toDelete`
- * make.
+ * One statement of `FennecHttp.batch`: a builder query (a read), a call, a
+ * FennecQL text, or `[text, params]` -- what `toInsert`, `toUpdate`,
+ * `toDelete` and `toCall` make.
  */
 export type BatchStatement =
   | Query<any, any, any, any, any, any>
+  | Call
   | string
   | readonly [sql: string, params?: unknown[]];
 
@@ -1080,6 +1081,75 @@ export type TypedFrom<S extends AnySchema<S>> = <K extends keyof S & string>(
   name: K,
 ) => Query<S[K]>;
 
+/**
+ * A call of a named statement: `call <name> $1`, its arguments the one
+ * parameter -- an object, by name -- and `{ claims }` after them `as $2`, the
+ * claims the server's token makes the call with (a scoped token's own are
+ * its token's, and it may not say them). Not bound to a collection, so
+ * `call(...)` stands beside `from(...)`; `db.call(...)` runs it. A name is
+ * ASCII letters, digits and `_`, a letter first, 59 bytes at most: the one
+ * thing of a call written into its text.
+ *
+ *   call('transfer', { from: 1, to: 2, amount: 300 }).toCall()
+ *   // ['call transfer $1', [{ from: 1, to: 2, amount: 300 }]]
+ */
+export declare class Call {
+  constructor(name: string, args?: Record<string, unknown> | null, opts?: CallClaims);
+  readonly name: string;
+  /** `[sql, params]`, what a `batch` takes beside a query. */
+  toCall(): [sql: string, params: unknown[]];
+}
+
+/** The claims a call is made with (`as {...}`): the server's token alone may say them. */
+export interface CallClaims {
+  claims?: Record<string, unknown> | null;
+}
+
+export function call(name: string, args?: Record<string, unknown> | null, opts?: CallClaims): Call;
+
+/**
+ * `FennecHttp.call`'s options: `run`'s `idempotencyKey`, `wait` and `signal`;
+ * `read: true` says the statement only reads, so on a client reading near
+ * it goes to the read replica near it (a statement that writes is refused
+ * there, 403, never landed); and `claims`.
+ */
+export interface CallOptions extends CallClaims {
+  idempotencyKey?: string;
+  wait?: number;
+  signal?: AbortSignal;
+  read?: boolean;
+}
+
+/**
+ * What a call answers, as `run` answers its body's last statement: the
+ * rows of one that reads or says `returning`, or the count of rows a write
+ * changed.
+ */
+export type CallAnswer<R = Record<string, unknown>> =
+  | { rows: R[]; seq?: number | null; replayed?: boolean }
+  | { kind: 'affected'; count: number; seq: number | null; replayed: boolean };
+
+/**
+ * The statements a generated file types: for each name the arguments it
+ * takes and the row its answer holds (`unknown` where the answer is a
+ * count or not typed). `fennec types` writes `FennecStatements`.
+ */
+export type Statements = { [name: string]: { args: object; row: unknown } };
+
+/**
+ * Binds `call` to the statements `fennec types` wrote -- purely a type, the
+ * same function at runtime. Completes names and checks the arguments.
+ *
+ *   const typed: TypedCall<FennecStatements> = db.call.bind(db);
+ *   await typed('transfer', { from: 1, to: 2, amount: 300 });
+ */
+export type TypedCall<T extends Statements> = <K extends keyof T & string>(
+  name: K,
+  ...rest: {} extends T[K]['args']
+    ? [args?: T[K]['args'] | null, opts?: CallOptions]
+    : [args: T[K]['args'], opts?: CallOptions]
+) => Promise<CallAnswer<T[K]['row']>>;
+
 /** Schema information from the `collections` output. */
 export interface SchemaInfo {
   name: string;
@@ -1131,6 +1201,20 @@ export declare class FennecHttp<S extends AnySchema<S> = Schema, Rel extends Rel
    */
   run(sql: string, params?: unknown[], opts?: RunOptions): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;
+  /**
+   * Calls the named statement `name` with `args`, an object of values by
+   * name: `call <name> $1` over `/query`, answered as `run` answers it --
+   * the last statement of its body, with the change it left the database at
+   * (`seq`) and whether the answer is the one kept for its key
+   * (`replayed`). A refusal is a `FennecError` as any statement's is:
+   * `status` 404 for no such statement, 403 for a claim the token lacks, 400
+   * for an argument missing, extra or of another type, 412 for a `require`
+   * not met, its `reason` the statement's.
+   *
+   *   await db.call('transfer', { from: 1, to: 2, amount: 300 },
+   *                 { idempotencyKey: 'xfer-7' });
+   */
+  call(name: string, args?: Record<string, unknown> | null, opts?: CallOptions): Promise<any>;
   /**
    * `POST /batch`: the statements in order as one block -- every write
    * lands or none does -- and each one's answer. A statement that stops
@@ -1339,6 +1423,16 @@ export declare class Fennec<S extends AnySchema<S> = Schema, Rel extends Relatio
    * (`completed`): none, but for a batch holding a `compact`.
    */
   batch(statements: readonly BatchStatement[]): Promise<BatchResult>;
+
+  /**
+   * `call <name> $1`, as `FennecHttp.call` sends it -- refused: a named
+   * statement is a server's. The module answers in words of its own
+   * ("named statements are a server's; this module is built without them"),
+   * a sync replica's local database in the sync's, and `wait` is a
+   * server's too. A call from a page goes through the HTTP client,
+   * `connect(url).call(...)` or `sync.remote.call(...)`.
+   */
+  call(name: string, args?: Record<string, unknown> | null, opts?: CallClaims): Promise<any>;
 
   /**
    * Live query: `cb` is handed the rows now, and again after every write

@@ -914,6 +914,27 @@ func TestDocsBuilderTabs(t *testing.T) {
 		sent(t, err, "del articles where year < $1", "[2000]")
 	})
 
+	t.Run("docs: a transfer called", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.Call(
+			ctx,
+			"transfer",
+			fennecdb.Params{"from": 1, "to": 2, "amount": 300},
+		)
+		sent(t, err, "call transfer $1", "[{\"from\": 1, \"to\": 2, \"amount\": 300}]")
+	})
+
+	t.Run("docs: a statement called for a signed-in user", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.Call(
+			ctx,
+			"history",
+			fennecdb.Params{"account": 1},
+			fennecdb.Claims(fennecdb.Params{"sub": "alice"}),
+		)
+		sent(t, err, "call history $1 as $2", "[{\"account\": 1}, {\"sub\": \"alice\"}]")
+	})
+
 	t.Run("docs: a page of documents with their comments", func(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("docs").
@@ -981,6 +1002,12 @@ func TestDocsBuilderTabs(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("docs").Where("year", "<", 2000).Delete(ctx)
 		sent(t, err, "del docs where year < $1", "[2000]")
+	})
+
+	t.Run("docs: a statement of no arguments called", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.Call(ctx, "stamp", nil)
+		sent(t, err, "call stamp", "[]")
 	})
 
 	t.Run("escapes: every character a literal escapes, in a filter", func(t *testing.T) {

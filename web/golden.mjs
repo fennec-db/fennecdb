@@ -12,7 +12,9 @@
 // `toUpdate`, `toUpsert`, `toDelete`, or an endpoint -- `rows`, `first`,
 // `count`, `explain`, `insert`, `update`, `upsert`, `delete` -- whose
 // statement is the one it
-// sends. Arguments are JSON, and what JSON has no word for is an object of
+// sends. A named statement's call is a chain of its own: `call` (the
+// statement's name, its arguments or null, and `{claims}`) then `toCall`.
+// Arguments are JSON, and what JSON has no word for is an object of
 // one `$` key, which no field name can start with:
 //
 //   {"$or": [c, ...]}, {"$and": [c, ...]}, {"$not": c}   or(), and(), not()
@@ -39,7 +41,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  from, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, FennecError,
+  from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, FennecError,
 } from './fennec.js';
 
 export const GOLDEN = fileURLToPath(new URL('../integrations/builder-golden.json', import.meta.url));
@@ -67,7 +69,7 @@ function arg(x) {
   return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, arg(v)]));
 }
 
-const TEXT = new Set(['toFennecQL', 'toInsert', 'toUpdate', 'toUpsert', 'toDelete']);
+const TEXT = new Set(['toFennecQL', 'toInsert', 'toUpdate', 'toUpsert', 'toDelete', 'toCall']);
 const ENDPOINTS = new Set(['rows', 'first', 'count', 'explain', 'insert', 'update', 'upsert', 'delete']);
 
 // What each endpoint is answered, as the HTTP transport hands it over.
@@ -81,8 +83,8 @@ function answer(sql) {
 export async function run(steps) {
   try {
     const [first, ...rest] = steps;
-    if (first.op !== 'from') throw new Error(`a chain starts with from, not ${first.op}`);
-    let q = from(...first.args.map(arg));
+    if (first.op !== 'from' && first.op !== 'call') throw new Error(`a chain starts with from or call, not ${first.op}`);
+    let q = (first.op === 'call' ? call : from)(...first.args.map(arg));
     for (const [i, { op, args = [] }] of rest.entries()) {
       const last = i === rest.length - 1;
       const a = args.map(arg);
@@ -109,7 +111,7 @@ export async function run(steps) {
 
 // ---------------------------------------------------------------- the cases
 //
-// `c(name, [op, ...args], ...)`: the first step is always `from`.
+// `c(name, [op, ...args], ...)`: the first step is `from`, or `call`.
 
 const cases = [];
 const c = (name, ...steps) =>
@@ -691,6 +693,44 @@ c('docs: two jobs queued', ['from', 'jobs'], ['insert', [queued('ada'), queued('
 c('docs: the ten oldest ready jobs claimed', ['from', 'jobs'], ['where', { $raw: ['run_at <= now()'] }], ['order', 'run_at'], ['limit', 10], ['update', { owner: 'w1', run_at: { $expr: ['now() + ?', 30000] }, attempts: { $expr: ['attempts + 1'] } }, { returning: true }]);
 c('docs: a job acknowledged', ['from', 'jobs'], ['where', 'id', 1], ['where', 'owner', 'w1'], ['delete', { require: 1 }]);
 c('docs: ready jobs popped', ['from', 'jobs'], ['where', { $raw: ['run_at <= now()'] }], ['order', 'run_at'], ['limit', 10], ['delete', { returning: ['id', 'payload.to'] }]);
+
+// A call of a named statement: `call <name> $1`, its arguments the one
+// parameter, an object by name, and its claims `as $n` after them. The
+// values are parameters as a query's are, a name is the one thing written
+// into the text and is held to the engine's rule: ASCII letters, digits
+// and `_`, a letter first, 59 bytes at most.
+const CALL = ['toCall'];
+c('a call with arguments', ['call', 'transfer', { from: 1, to: 2, amount: 300 }], CALL);
+c('a call with no arguments', ['call', 'stamp'], CALL);
+c('null arguments are none', ['call', 'stamp', null], CALL);
+c('an empty object is one argument', ['call', 'stamp', {}], CALL);
+c('a call with claims', ['call', 'mine', { limit: 10 }, { claims: { sub: 'alice', role: 'admin' } }], CALL);
+c('a call of no arguments with claims', ['call', 'stamp', null, { claims: { sub: 'alice' } }], CALL);
+c('no claims are none', ['call', 'mine', { limit: 10 }, { claims: null }], CALL);
+c(
+  'every kind of argument is a parameter',
+  ['call', 'kinds', { s: 'çağ "quoted" \\ \n', i: -42, big: 9007199254740991, f: 2.5, yes: true, no: false, nothing: null, tags: ['a', 'b'], meta: { lang: 'tr', rank: 2, at: null } }],
+  CALL,
+);
+c('a date argument is its ISO text', ['call', 'since', { at: { $date: '2026-09-19T12:34:56.789Z' } }], CALL);
+c('a float32 argument is its numbers', ['call', 'nearest', { embed: { $f32: [0.5, -0.25, 1] }, k: 5 }], CALL);
+c('a text argument is never in the text', ['call', 'find', { title: '"; del docs; --' }], CALL);
+c('a claim is a parameter too', ['call', 'mine', null, { claims: { sub: "x' or 1=1 --" } }], CALL);
+c('a name of letters, digits and underscores', ['call', 'Close_day_2', { day: 3 }], CALL);
+c('a name of 59 bytes', ['call', `a${'b'.repeat(58)}`], CALL);
+c('a name of 60 bytes is refused', ['call', `a${'b'.repeat(59)}`], CALL);
+c('a name is no text', ['call', 'stamp $1; del docs'], CALL);
+c('a name starts with a letter', ['call', '1st'], CALL);
+c('a name is ASCII', ['call', 'çağ'], CALL);
+c('a name is not empty', ['call', ''], CALL);
+c('arguments are an object, not a list', ['call', 'transfer', [1, 2, 300]], CALL);
+c('arguments are an object, not a text', ['call', 'transfer', 'from 1'], CALL);
+c('claims are an object', ['call', 'mine', null, { claims: 'alice' }], CALL);
+// fennecql.html, languages.html and mobile.html: a tab of a call is the
+// client's method, `db.call(...)`, which sends this text.
+c('docs: a transfer called', ['call', 'transfer', { from: 1, to: 2, amount: 300 }], CALL);
+c('docs: a statement called for a signed-in user', ['call', 'history', { account: 1 }, { claims: { sub: 'alice' } }], CALL);
+c('docs: a statement of no arguments called', ['call', 'stamp'], CALL);
 
 // ------------------------------------------------------------------ writing
 

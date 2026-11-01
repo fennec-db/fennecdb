@@ -411,6 +411,38 @@ class SyncTest {
         assertTrue(System.nanoTime() - t < 2_000_000_000L, "a cancelled claim let go at once")
     }
 
+    /**
+     * A replica holds its shapes' rows, not its server's statements: a call
+     * on its local database -- or a definition -- is refused in the engine's
+     * words before anything of it runs or is queued, and the call goes to
+     * the server through the HTTP client, what it wrote coming back through
+     * the shape's stream.
+     */
+    @Test
+    fun aSyncedDatabaseRunsNoNamedStatement() = runBlocking {
+        val s = server("named")
+        s.run("create statement close_task(\$key text) public as set tasks {status: 'closed'} where key = \$key")
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("named"))
+        db.replica!!.ready()
+        // Offline, so nothing queued could have been sent before it is counted.
+        offline(db)
+        val words = "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client"
+        val e = assertFailsWith<FennecException> { db.call("close_task", mapOf("key" to "a")) }
+        assertEquals(FennecException.Code.QUERY, e.code)
+        assertTrue(e.message!!.contains(words), e.message)
+        assertTrue(assertFailsWith<FennecException> { db.callBlocking("close_task", mapOf("key" to "a")) }.message!!.contains(words))
+        assertTrue(assertFailsWith<FennecException> { db.run("call close_task \$1", mapOf("key" to "a")) }.message!!.contains(words))
+        assertTrue(assertFailsWith<FennecException> { db.execute("create statement mine() public as get tasks select key") }.message!!.contains(words))
+        assertEquals(0, db.replica!!.refresh().pending)
+        assertEquals(listOf("one", "two"), titles(db))
+        db.replica!!.setOnline(true)
+
+        // The server's own call, through the HTTP client.
+        Fennec.connect(s.url).call("close_task", mapOf("key" to "a"))
+        eventually("the call's write coming back through the stream") { titles(db) == listOf("two") }
+        db.close()
+    }
+
     /** `/query` answers `{"rows": [...], "facets": {...}}` when the query asked facets, the bare array otherwise. */
     @Test
     fun highlightsAndFacetsOverHttp() = runBlocking {

@@ -157,7 +157,7 @@ async function parking(url) {
  * replica follows it through too (`link`), and us1 by one of its own
  * (`nearby`), which counts what the routers ask it.
  */
-async function world({ parked = false } = {}) {
+async function world({ parked = false, schema = 'create collection notes (body text)' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'fennec-replicas-'));
   const node = (name) =>
     listening(
@@ -189,7 +189,7 @@ async function world({ parked = false } = {}) {
   };
   await call(eu.url, 'PUT', '/_shard/nodes/eu1', { addr: link?.addr ?? new URL(eu1.url).host, token: 'adm', region: 'eu' });
   await call(eu.url, 'PUT', '/_shard/nodes/us1', { addr: nearby?.addr ?? new URL(us1.url).host, token: 'adm', region: 'us' });
-  await call(eu.url, 'PUT', '/_shard/tenants/acme', { node: 'eu1', schema: 'create collection notes (body text)' });
+  await call(eu.url, 'PUT', '/_shard/tenants/acme', { node: 'eu1', schema });
   const placed = await call(eu.url, 'PUT', '/_shard/tenants/acme/read-replicas/us');
   assert.equal(placed.node, 'us1');
   await until(async () => {
@@ -286,6 +286,62 @@ test('reads near a read replica are answered there, never older than the client 
     assert.equal(read.headers['fennec-read'], 'replica');
     await assert.rejects(() => home.from('notes').rows(), (e) => e instanceof FennecError && e.status === 502);
     await assert.rejects(() => db.from('notes').insert({ body: 'c' }), (e) => e instanceof FennecError && e.status === 502);
+  } finally {
+    await w.close();
+  }
+});
+
+// A named statement's call: `{ read: true }` marks one that only reads, and
+// a client reading near has it answered by the replica -- shown, as above,
+// by an answer while home cannot be reached. Unmarked, a call goes home as
+// every text not known to read does; marked and writing, it is refused at
+// the replica (403) and never sent home to land.
+test('a call marked read is answered by the read replica, a call that writes goes home', { skip }, async () => {
+  const w = await world({
+    schema: [
+      'create collection notes (body text)',
+      'create statement add_note($body text) public as insert notes {body: $body} returning id',
+      'create statement bodies() as get notes select body order id',
+    ].join('; '),
+  });
+  try {
+    const { sent, fetch: spy } = recording();
+    const db = connect(w.url, { reads: 'nearest', fetch: spy });
+
+    // A call that writes goes home, and says where it left the tenant.
+    const made = await db.call('add_note', { body: 'a' });
+    assert.equal(made.rows.length, 1);
+    assert.ok(made.seq > 0, `a write answers its seq: ${made.seq}`);
+    assert.equal(sent.at(-1).headers['fennec-read'], undefined);
+    // A call that reads, marked, is read near, after that write.
+    const read = await db.call('bodies', undefined, { read: true });
+    assert.equal(sent.at(-1).headers['fennec-read'], 'replica');
+    assert.equal(sent.at(-1).headers['fennec-after'], String(made.seq));
+    assert.deepEqual(read.rows.map((r) => r.body), ['a']);
+    // Not marked, it goes home like any text.
+    await db.call('bodies');
+    assert.equal(sent.at(-1).headers['fennec-read'], undefined);
+    // A call that writes, marked, is refused, never landed.
+    await assert.rejects(
+      () => db.call('add_note', { body: 'x' }, { read: true }),
+      (e) => e instanceof FennecError && e.status === 403,
+    );
+    assert.deepEqual((await db.call('bodies')).rows.map((r) => r.body), ['a']);
+
+    // Home gone: the marked call is still answered -- by the replica, the one
+    // copy left, once it holds the write -- and the unmarked one is not.
+    await until(async () => {
+      const res = await fetch(`${w.us1.url}/t/acme/query`, {
+        method: 'POST',
+        headers: { 'fennec-read': 'replica' },
+        body: JSON.stringify({ query: 'get notes count' }),
+      });
+      return res.ok && (await res.json())[0]?.count === 1;
+    }, 'the read replica holds the write');
+    w.eu1.close();
+    assert.deepEqual((await db.call('bodies', null, { read: true })).rows.map((r) => r.body), ['a']);
+    assert.equal(sent.at(-1).headers['fennec-read'], 'replica');
+    await assert.rejects(() => connect(w.url).call('bodies'), (e) => e instanceof FennecError && e.status === 502);
   } finally {
     await w.close();
   }

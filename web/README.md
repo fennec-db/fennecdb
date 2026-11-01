@@ -30,6 +30,14 @@ const rows = await db.from('docs').where('year', '>=', 2024).limit(10).rows();
 const stop = db.live(db.from('docs').where('done', false), render);   // again after a write it may read
 ```
 
+A named statement the server holds is called by name, its arguments one
+parameter: `await db.call('transfer', { from: 1, to: 2, amount: 300 }, { idempotencyKey })`
+sends `call transfer $1` and answers as `run` does; `{ read: true }` marks a
+statement that only reads, which a client reading near has answered by a read
+replica, `{ claims }` is `as {...}` for the server's token, and the builder's
+`call(name, args).toCall()` is the text and parameters. A database in the page
+refuses a call (a statement is a server's): call through `connect(url)`.
+
 A refusal throws a `FennecError` with the server's `status`; a stopped
 `batch` adds `at` and `completed`, and on a tenant node a quota names itself
 (`quota`): `'bytes'` and `'rows'` answer 507, and room is made by deleting;

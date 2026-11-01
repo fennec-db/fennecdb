@@ -31,6 +31,11 @@ class _Recording {
         });
       });
 
+  Future<Answer> callStatement(String name, {Object? args, Object? claims}) async {
+    sent = Call(name, args: args, claims: claims).toCall();
+    return Answer.of({'kind': 'affected', 'count': 0});
+  }
+
   void sends(String text, String params) {
     expect(sent?.text, text);
     final got = jsonDecode(jsonEncode(sent?.params));
@@ -771,6 +776,18 @@ void main() {
     db.sends('del articles where year < \$1', '[2000]');
   });
 
+  test('docs: a transfer called', () async {
+    final db = _Recording();
+    await db.callStatement('transfer', args: {'from': 1, 'to': 2, 'amount': 300});
+    db.sends('call transfer \$1', '[{"from": 1, "to": 2, "amount": 300}]');
+  });
+
+  test('docs: a statement called for a signed-in user', () async {
+    final db = _Recording();
+    await db.callStatement('history', args: {'account': 1}, claims: {'sub': 'alice'});
+    db.sends('call history \$1 as \$2', '[{"account": 1}, {"sub": "alice"}]');
+  });
+
   test('docs: a page of documents with their comments', () async {
     final db = _Recording();
     await db
@@ -829,6 +846,12 @@ void main() {
     final db = _Recording();
     await db.from('docs').where('year', '<', 2000).delete();
     db.sends('del docs where year < \$1', '[2000]');
+  });
+
+  test('docs: a statement of no arguments called', () async {
+    final db = _Recording();
+    await db.callStatement('stamp');
+    db.sends('call stamp', '[]');
   });
 
   test('escapes: every character a literal escapes, in a filter', () async {

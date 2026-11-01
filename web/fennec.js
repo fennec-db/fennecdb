@@ -30,6 +30,7 @@ import {
   Query,
   checked,
   collation,
+  call,
   declared,
   from,
   ident,
@@ -42,7 +43,7 @@ import {
 import { FennecHttp, connect, sseEvents } from './http.js';
 
 export {
-  FennecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
+  FennecError, Query, Call, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
 } from './builder.js';
 export { FennecHttp, connect, sseEvents } from './http.js';
 
@@ -464,6 +465,19 @@ export class Fennec {
       context: this,
       rel: declared.get(this)?.relations,
     });
+  }
+
+  /**
+   * `call <name> $1`, as `FennecHttp.call` sends it. A named statement is a
+   * server's: the module refuses it in words of its own ("named statements
+   * are a server's; this module is built without them"), and a sync
+   * replica's local database in the sync's (`NAMED`) -- so a call from a
+   * page goes through the HTTP client, `connect(url).call(...)` or
+   * `sync.remote.call(...)`. `{ wait }` is a server's too (`LOCAL_WAIT`).
+   */
+  async call(name, args, opts = {}) {
+    if (opts?.wait !== undefined) throw new FennecError(LOCAL_WAIT);
+    return this.query(...call(name, args, opts).toCall());
   }
 
   /**

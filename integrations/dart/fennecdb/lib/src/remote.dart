@@ -306,6 +306,44 @@ class FennecRemote {
   /// [asRead] copy's, near on a connection reading near.
   Query from(String collection) => Query.from(collection).bind(run, read: asRead().run);
 
+  /// Calls the named statement [name] on the server: `call <name> $1` with
+  /// [args], a map of values by name, as `$1` -- [Call] makes the text, so
+  /// only the name is ever written into it -- over `POST /query`, so the
+  /// transport, the errors, the key and the wait are [run]'s. It answers as
+  /// [run] does: the rows of a `get` or a `returning`, else how many rows it
+  /// wrote. [claims] are the call's `as`, which the server's own token alone
+  /// may say (a scoped token's are its token's, and it is refused if it
+  /// names them); [idempotencyKey] makes the call once ([withIdempotencyKey]'s,
+  /// a call that only reads keeps none); [wait] is [withWait]'s.
+  ///
+  /// [read] marks a call known to only read, as [asRead] marks a text: on a
+  /// connection reading near it goes to the read replica near the app, after
+  /// the connection's writes; without it a call goes home, as does every text
+  /// not known to read. A call that writes sent with [read] is refused
+  /// (status 403), never landed.
+  ///
+  /// Refusals are a [FennecException] by status: 404 no such statement or
+  /// none this token may call, 403 a claim it needs missing, 400 an argument
+  /// missing, extra or of another type, 409 a statement broken or a unique
+  /// value taken, 412 a `require` not met with its [FennecException.reason].
+  /// Named `callStatement` because a method named `call` would make the
+  /// connection callable as a function.
+  ///
+  /// ```dart
+  /// final moved = await db.callStatement('transfer',
+  ///     args: {'from': 1, 'to': 2, 'amount': 300}, idempotencyKey: 'transfer-42');
+  /// final mine = await db.callStatement('history', claims: {'sub': 'alice'}, read: true);
+  /// ```
+  Future<Answer> callStatement(String name,
+      {Object? args, Object? claims, String? idempotencyKey, Duration? wait, bool read = false}) async {
+    final s = Call(name, args: args, claims: claims).toCall();
+    var c = this;
+    if (idempotencyKey != null) c = c.withIdempotencyKey(idempotencyKey);
+    if (wait != null) c = c.withWait(wait);
+    if (read) c = c.asRead();
+    return c.run(s.text, s.params);
+  }
+
   /// Lets the connections go: this one's, and every copy's.
   void close() => _shared.client.close();
 

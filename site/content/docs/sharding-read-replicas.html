@@ -306,7 +306,12 @@ and <code>{ read: true }</code> on <code>run</code> and <code>batch</code>
 <code>Fennec.connect(url, reads: Reads.nearest)</code>, each with
 <code>db.asRead()</code> (<a href="mobile.html#connect">Without a
 file</a>). Each marks the builder's reads and the copy's requests alone,
-and keeps one position for every copy of the client it makes. A
+and keeps one position for every copy of the client it makes. A call of a
+<a href="fennecql.html#named-statements">named statement</a> whose body only
+reads is marked the same way, <code>db.call(name, args, { read: true })</code>
+and its kin (<code>read=True</code>, <code>db.Read().Call(…)</code>,
+<code>read:</code>), and answered by the replica; one that writes is refused
+there (403), never sent home to land. A
 subscription opened through a Go <code>Read()</code> or a .NET
 <code>AsRead()</code> copy, and its <code>/_changes</code> reads, are marked
 and sent after that position too, and a server holds a stream for

@@ -94,6 +94,49 @@ the app through a fennec-shard router (`Fennec-Read: replica`), each after the
 furthest position an answer from home named to the connection or any copy of
 it (`Fennec-After`, `Fennec-History`); writes go home.
 
+## Named statements
+
+A statement defined once in the database (`create statement transfer(...)`)
+is called by name with its arguments as one map, by name:
+
+```kotlin
+val moved = db.call("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300))
+val mine = db.call("history", read = true).rows
+val st = call("mine", mapOf("limit" to 10), claims = mapOf("sub" to "alice")).toCall()
+// st.text == "call mine $1 as $2", st.params == [{limit=10}, {sub=alice}]
+```
+
+`call` sends the builder's `call <name> $1` (`Call.of(name, args, claims)` or
+the top-level `call(...)`, its `toCall()` the text and parameters like
+`toInsert`'s) through `/query`, so the transport, the errors and the answer
+are a text's: the rows of a statement ending in a `get` or a `returning`,
+else how many documents it wrote. Only the name is written into the text, so
+it is checked (ASCII letters, digits and `_`, a letter first, at most 59
+bytes); the arguments and the claims are parameters, and the builder refuses
+anything but a map (`a call's arguments are an object of values by name`).
+No arguments is `call stamp`, an empty map is still one. On `Fennec.connect`'s
+`FennecRemote`, `call(name, args, claims, idempotencyKey, wait, read)`:
+`claims` is the `as` the server's token makes the call with (a scoped token's
+own are its token's), `idempotencyKey` and `wait` (milliseconds, 30 000 at
+most) are a text's, a cancelled coroutine gives a held call up, and `read =
+true` marks a call known to only read, as `asRead()` does -- on a connection
+reading `NEAREST` it is answered by the read replica near the app, and one
+that writes is refused (403), never landed; without it a call goes home. A
+refusal is a `FennecException`: `status` 404 (no such statement, or not
+granted), 403 (a claim missing), 400 (an argument missing, extra or of
+another type), 409 (a broken statement, a unique value taken) or 412 with
+the `require`'s `reason`.
+
+On the embedded `Fennec`, `call(name, args, claims)` runs it locally through
+the library (`callBlocking` for Java): `claims` are the embedder's `as`, a
+signed-in user's, held to the types the statement declares as a token's are.
+There is no `wait` or key on a local database. A database made by
+`Fennec.sync` is a replica of its shapes' rows, not of its server's
+statements, so its `call` is refused with the engine's words (`a synced
+database runs no named statement ...`) before anything runs or is queued:
+call the server through `Fennec.connect`, and what the call wrote comes back
+through the shapes' streams.
+
 ## Building and testing
 
 `make kotlin-test` builds the native library for Linux with its JNI

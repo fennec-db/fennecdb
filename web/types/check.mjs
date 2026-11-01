@@ -59,7 +59,8 @@ for (const name of names) {
     if (['length', 'name', 'prototype'].includes(key) || key in skip) continue;
     out.push(`void ${name}.${key};`);
   }
-  const generic = value.length >= 0 && name !== 'FennecError' ? '<any>' : '';
+  // The classes that take no type arguments.
+  const generic = !['FennecError', 'Call'].includes(name) ? '<any>' : '';
   out.push(`declare const a${name}: ${name}${generic};`);
   for (const key of Object.getOwnPropertyNames(value.prototype)) {
     if (key === 'constructor' || key in skip) continue;

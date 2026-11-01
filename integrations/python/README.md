@@ -97,6 +97,41 @@ lapsed -- rather than sent again every few: answered with the jobs it
 took, or with none at the end of the wait. `query` and `batch` take it
 too, and `AsyncClient`'s give a held request up when cancelled.
 
+A named statement (`create statement transfer(...) as ...`) is called by
+name, its arguments a mapping of values by name -- one parameter, `call
+transfer $1`, sent over `/query` as any statement is, so the errors, the
+key and `wait` are a statement's own:
+
+```python
+from fennecdb import call
+
+db.call("transfer", {"from": 1, "to": 2, "amount": 300}, idempotency_key=transfer_id)
+db.call("stamp")                                          # no arguments: call stamp
+db.call("mine", claims={"sub": "alice"})                  # call mine as $1
+db.call("history", {"limit": 10}, read=True)              # goes near on reads="nearest"
+await async_db.call("transfer", {"from": 1, "to": 2, "amount": 300})
+text, params = call("transfer", {"from": 1, "to": 2, "amount": 300}).to_call()
+db.batch([(text, params), debit])                         # a call inside a batch
+```
+
+`db.call(name, args=None, *, claims=None, idempotency_key=None, wait=None,
+read=False)` answers as `query` does -- rows, or the affected count for a
+body that answers none -- and `AsyncClient.call` is the same awaited. The
+arguments and the claims are parameters, normalised as a document's values
+are (a `datetime` its ISO text, an `array.array` its numbers); only the
+name is written into the text, so it is checked: ASCII letters, digits and
+`_`, a letter first, 59 bytes at most, else a `FennecError` of status 0
+(`invalid statement name: ...`), as is arguments or claims that are not a
+mapping (`a call's arguments are an object of values by name`). `claims`
+is the `as` part, the server's token alone may say it (a scoped token's
+are its own). `read=True` says the statement only reads: on a client with
+`reads="nearest"` it is answered near the client, after its writes, and a
+statement that writes is refused there (403), never landed; not said, a
+call goes home. Errors are `FennecError`'s, by status: 404 no such
+statement or none granted, 403 a claim missing, 400 an argument missing,
+extra or of another type, 409 a unique value taken, 412 a `require` not met
+with its `e.reason`.
+
 To see the text and parameters a chain builds, for logging or a test,
 `to_fennecql()` returns them and runs nothing:
 `docs.select("title").limit(5).to_fennecql()` is

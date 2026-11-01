@@ -127,4 +127,35 @@ export type FennecSchema = {
     /** geo @geo */
     loc: Point | null;
   };
+
+  accounts: {
+    /** text @hash */
+    owner: string | null;
+    /** int */
+    balance: number | null;
+  };
+};
+
+/**
+ * The named statements: what a call of each takes (`args`, one with a
+ * default may be left out) and a row of what it answers (`row`, `unknown`
+ * where it answers the rows it wrote, or rows not typed yet).
+ */
+export type FennecStatements = {
+  /** Moves money, or says why not. */
+  transfer: {
+    args: {
+      /** int */
+      from: number;
+      /** int */
+      to: number;
+      /** int */
+      amount: number;
+    };
+    row: {
+      id: number;
+      /** int */
+      balance: number | null;
+    };
+  };
 };

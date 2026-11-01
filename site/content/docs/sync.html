@@ -468,9 +468,10 @@ expect.</p>
     — <code>call</code>, <code>create statement</code> or <code>drop
     statement</code> — is refused on a synced database, before anything of
     the text runs: the replica holds its shapes' rows, not the server's
-    statements. Call it on the server (<code>db.remote</code>, or the
-    native SDKs' HTTP client), and what it writes comes back through the
-    shapes' streams.</li>
+    statements. Call it on the server (<code>db.remote.call(…)</code>, or the
+    native SDKs' HTTP client, <a href="/docs/languages#named-statements">Named
+    statements</a>), and what it writes comes back through the shapes'
+    streams.</li>
 </ul>
 
 <details class="deep"><summary>What a shape does not guarantee</summary>

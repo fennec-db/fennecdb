@@ -28,6 +28,16 @@ read `facet` counts, which come back beside the rows as `rows.facets`:
               .match("title", "phone").facet("brand", top=10).limit(20).rows())
     rows.facets["brand"]   # [FacetCount(value="acme", count=12), ...]
 
+A named statement (`create statement transfer(...) as ...`) is called by
+name with its arguments, an object, as one parameter -- `call transfer $1`
+over `/query`, so the errors, the key and `wait` are a statement's; the
+server's token may say the claims it is made with (`as $2`), and `read=True`
+marks a statement that only reads, to go near a read replica:
+
+    db.call("transfer", {"from": 1, "to": 2, "amount": 300}, idempotency_key=transfer_id)
+    db.call("history", read=True)
+    text, params = call("transfer", {"from": 1, "to": 2, "amount": 300}).to_call()
+
 A retry after a timeout cannot tell whether the write ran; under an
 `Idempotency-Key` it runs once, and the second answer is the first one
 kept (`replayed`). One key per write -- the same key with another request
@@ -83,11 +93,12 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterable, Iterator, NamedTuple, Sequence
+from typing import Any, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
 __all__ = [
     "AsyncClient",
     "AsyncQuery",
+    "Call",
     "Changes",
     "Client",
     "Computed",
@@ -99,6 +110,7 @@ __all__ = [
     "SchemaError",
     "and_",
     "bucket",
+    "call",
     "collection",
     "count_distinct",
     "distance",
@@ -358,6 +370,33 @@ class Client:
         `near`, `order`, `limit` ... and end with `rows()`, `first()`,
         `count()`, or a write -- `insert`, `update`, `delete`."""
         return Query(name, self)
+
+    def call(
+        self,
+        name: str,
+        args: Mapping[str, Any] | None = None,
+        *,
+        claims: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        wait: float | None = None,
+        read: bool = False,
+    ) -> Any:
+        """Calls the named statement `name` with `args`, a mapping of values
+        by name: `call <name> $1` over `/query`, sent and answered as
+        `query` does it -- the last statement of its body, rows or
+        `{"affected": n}`. A refusal is a `FennecError` as any statement's:
+        `status` 404 for no such statement or none granted, 403 for a claim
+        the token lacks, 400 for an argument missing, extra or of another
+        type, 412 for a `require` not met (its `reason`), 409 for a unique
+        value taken or a broken statement. `claims` is `as {...}`, the
+        claims the call is made with: the server's token alone may say them,
+        a scoped token's are its own. `idempotency_key` and `wait` are
+        `query`'s. `read=True` says the statement only reads, and on a
+        client with `reads="nearest"` it goes near, after this client's
+        writes; one that writes is refused there (403), never landed. Not
+        said, a call goes home, as every text not known to read does."""
+        text, params = Call(name, args, claims=claims).to_call()
+        return self.query(text, params, idempotency_key=idempotency_key, wait=wait, read=read)
 
     def query(
         self,
@@ -765,6 +804,21 @@ class AsyncClient:
         """The query builder, as `Client.collection`, its endpoints awaited."""
         return AsyncQuery(name, self)
 
+    async def call(
+        self,
+        name: str,
+        args: Mapping[str, Any] | None = None,
+        *,
+        claims: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        wait: float | None = None,
+        read: bool = False,
+    ) -> Any:
+        """A named statement's call, as `Client.call`, awaited; a held one is
+        cancelled as any task is, its connection closed with it."""
+        text, params = Call(name, args, claims=claims).to_call()
+        return await self.query(text, params, idempotency_key=idempotency_key, wait=wait, read=read)
+
     async def query(
         self,
         fennecql: str,
@@ -947,6 +1001,7 @@ def placeholders(start: int, n: int) -> str:
 # Below FennecError, which the builder raises.
 from .builder import (  # noqa: E402
     AsyncQuery,
+    Call,
     Computed,
     Cond,
     FacetCount,
@@ -955,6 +1010,7 @@ from .builder import (  # noqa: E402
     _rows,
     and_,
     bucket,
+    call,
     collection,
     count_distinct,
     distance,

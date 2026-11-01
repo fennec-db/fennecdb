@@ -15,11 +15,13 @@ import pytest
 from conftest import TOKEN, URL, fresh
 from fennecdb import (
     AsyncClient,
+    Call,
     FacetCount,
     FennecError,
     Query,
     and_,
     bucket,
+    call,
     collection,
     count_distinct,
     distance,
@@ -100,6 +102,8 @@ ENDPOINTS = {"rows", "first", "count", "explain", "insert", "update", "upsert", 
 def run(steps):
     rec = Recorder()
     first, *rest = steps
+    if first["op"] == "call":
+        return run_call(first, rest)
     assert first["op"] == "from"
     try:
         q = Query(*[arg(a) for a in first.get("args", [])], rec)
@@ -137,6 +141,19 @@ def run(steps):
     except FennecError as e:
         assert e.status == 0, e
         return {"error": str(e)}
+
+
+def run_call(first, rest):
+    """A call's chain: `call` (the name, its arguments or null, `{claims}`)
+    then `toCall`."""
+    assert [step["op"] for step in rest] == ["toCall"]
+    name, *more = [arg(a) for a in first["args"]]
+    try:
+        text, params = call(name, *more[:1], **kwargs(first["args"][2] if len(first["args"]) > 2 else None)).to_call()
+    except FennecError as e:
+        assert e.status == 0, e
+        return {"error": str(e)}
+    return {"text": text, "params": json.loads(json.dumps(params))}
 
 
 def step_of(q, op, args):
@@ -180,6 +197,12 @@ def test_a_golden_case(case):
     assert run(case["steps"]) == want
 
 
+def test_the_golden_file_holds_the_calls():
+    calls = [k for k in CASES if k["steps"][0]["op"] == "call"]
+    assert len(calls) >= 20
+    assert sum("error" in k for k in calls) >= 7
+
+
 def test_a_query_is_immutable_and_can_be_branched():
     base = collection("articles").where("year", ">=", 2024)
     a = base.where("tags", "has", "rust")
@@ -187,6 +210,44 @@ def test_a_query_is_immutable_and_can_be_branched():
     assert base.to_fennecql() == ("get articles where year >= $1", [2024])
     assert a.to_fennecql()[0] == "get articles where year >= $1 and tags has $2"
     assert b.to_fennecql() == ("get articles where year >= $1 limit $2", [2024, 3])
+
+
+def test_a_call_is_immutable_and_its_values_are_normalised_as_a_query_s():
+    c = call("since", {"at": datetime(2026, 9, 19, 12, 34, 56, 789000), "embed": array.array("f", [0.5, -0.25, 1])})
+    assert isinstance(c, Call) and c.name == "since"
+    assert c.to_call() == (
+        "call since $1",
+        [{"at": "2026-09-19T12:34:56.789Z", "embed": [0.5, -0.25, 1.0]}],
+    )
+    # Asked again it says the same, and nothing of it can be set.
+    assert c.to_call() == c.to_call()
+    for change in (lambda: setattr(c, "_name", "other"), lambda: setattr(c, "extra", 1), lambda: delattr(c, "_args")):
+        with pytest.raises(AttributeError):
+            change()
+    # Any Mapping is an object of values by name.
+    from types import MappingProxyType
+
+    assert call("t", MappingProxyType({"a": (1, 2)})).to_call() == ("call t $1", [{"a": [1, 2]}])
+    with pytest.raises(FennecError, match="cannot be used as a fennecdb value"):
+        call("t", {"a": object()}).to_call()
+
+
+def test_a_call_s_name_is_checked_and_its_arguments_are_an_object():
+    for name in ["stamp\n", "a b", "a-b", "", "1x", "ü", None, 5, b"stamp"]:
+        with pytest.raises(FennecError, match="invalid statement name") as e:
+            Call(name)
+        assert e.value.status == 0
+    for args in ([1, 2], (1, 2), "text", 5, True):
+        with pytest.raises(FennecError, match="a call's arguments are an object of values by name"):
+            call("t", args)
+    for claims in (["sub"], "alice", 0, False):
+        with pytest.raises(FennecError, match="a call's claims are an object of values by name"):
+            call("t", None, claims=claims)
+    # An empty object is one argument, None none; claims are keyword-only.
+    assert call("t", {}).to_call() == ("call t $1", [{}])
+    assert call("t", None, claims={}).to_call() == ("call t as $1", [{}])
+    with pytest.raises(TypeError):
+        call("t", None, {"sub": "x"})
 
 
 def test_a_reason_that_utf8_cannot_send_is_refused_as_the_builder_s():

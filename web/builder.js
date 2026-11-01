@@ -71,11 +71,12 @@ export function rowsOf(res) {
 }
 
 /**
- * A `batch` item as `[text, params]`: a builder query, a FennecQL text, or
- * `[text, params]` -- what `FennecHttp.batch` and `Fennec.batch` take.
+ * A `batch` item as `[text, params]`: a builder query or call, a FennecQL
+ * text, or `[text, params]` -- what `FennecHttp.batch` and `Fennec.batch` take.
  */
 export function statementOf(item, i) {
   if (item instanceof Query) return item.toFennecQL();
+  if (item instanceof Call) return item.toCall();
   if (typeof item === 'string') return [item, []];
   if (Array.isArray(item) && typeof item[0] === 'string' && (item[1] === undefined || Array.isArray(item[1]))) {
     return [item[0], item[1] ?? []];
@@ -1586,4 +1587,75 @@ function renderDoc(doc, bind, write) {
  */
 export function from(name) {
   return new Query({ collection: ident(nameOf(name), 'collection') });
+}
+
+// A named statement's name: ASCII letters, digits and `_`, starting with a
+// letter, at most 59 bytes -- the engine's rule (`named::valid_name`), a
+// path segment with nothing to escape. The name is the one thing of a call
+// written into its text, so this is its injection boundary.
+const STATEMENT = /^[A-Za-z][A-Za-z0-9_]{0,58}$/;
+
+/**
+ * A call of a named statement: `call <name> $1`, its arguments the one
+ * parameter -- an object, by name -- and `{ claims }` after them
+ * `as $2`, the claims the server's token makes the call with (a scoped
+ * token's own are its token's, and it may not say them). Not bound to a
+ * collection, so `call(...)` stands beside `from(...)`:
+ *
+ *   call('transfer', { from: 1, to: 2, amount: 300 }).toCall()
+ *   // ['call transfer $1', [{ from: 1, to: 2, amount: 300 }]]
+ *
+ * `db.call(name, args, opts)` runs it. No arguments is a statement of
+ * none: `call stamp`. The values are parameters as a query's are -- a
+ * `Date` its ISO text, a `Float32Array` its numbers -- and never the text.
+ */
+export class Call {
+  #name;
+  #args;
+  #claims;
+
+  constructor(name, args, opts) {
+    if (typeof name !== 'string' || !STATEMENT.test(name)) {
+      throw new FennecError(`invalid statement name: ${JSON.stringify(name)}`);
+    }
+    this.#name = name;
+    this.#args = given(args, 'arguments');
+    this.#claims = given(opts?.claims, 'claims');
+    Object.freeze(this);
+  }
+
+  /** The statement's name. */
+  get name() {
+    return this.#name;
+  }
+
+  /**
+   * The call's FennecQL and its parameters: `[sql, params]`, what a
+   * `batch` takes beside a query.
+   */
+  toCall() {
+    const params = [];
+    const bind = binder(params);
+    let sql = `call ${this.#name}`;
+    if (this.#args !== undefined) sql += ` ${bind(this.#args, 'argument')}`;
+    if (this.#claims !== undefined) sql += ` as ${bind(this.#claims, 'claim')}`;
+    return [sql, params];
+  }
+}
+
+// A call's arguments or claims: an object of values by name, or none.
+function given(v, what) {
+  if (v === undefined || v === null) return undefined;
+  if (!isSpec(v)) throw new FennecError(`a call's ${what} are an object of values by name`);
+  // A copy, as every other SDK's builder takes: a frozen call is not
+  // changed by the object it was given changing after.
+  return { ...v };
+}
+
+/**
+ * Unbound call builder: `call('transfer', { from: 1, to: 2, amount: 300 })`,
+ * its text from `toCall()`.
+ */
+export function call(name, args, opts) {
+  return new Call(name, args, opts);
 }

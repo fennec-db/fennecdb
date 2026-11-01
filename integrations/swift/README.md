@@ -102,6 +102,64 @@ tenant's read replica near the app through a fennec-shard router
 home named to the connection or any copy of it (`Fennec-After`,
 `Fennec-History`); writes go home.
 
+## Named statements
+
+A statement a database holds under a name (`create statement transfer($from
+int, $to int, $amount int) public as ...`) is called with `call`, on the
+embedded database and on a server alike; the arguments are an object of
+values by name -- a dictionary, a `Row`, a `Value` or a `Codable`
+`FennecValue` -- and the answer is `run`'s: the rows of a `get` or a
+`returning` body in `.rows`, the count of a write that answers none in
+`.affected`.
+
+```swift
+struct Transfer: Codable, Sendable, FennecValue { var from: Int; var to: Int; var amount: Int }
+
+// The embedded database: call <name> $1 through the library.
+let moved = try await db.call("transfer", Transfer(from: 1, to: 2, amount: 300))
+let stamped = try await db.call("stamp")                                  // a statement of none
+let mine = try await db.call("mine", claims: ["sub": "alice"])            // a signed-in user's claims
+
+// A server (Fennec.connect): the same call over /query.
+let remote = Fennec.connect(url: "https://api.example.com", token: jwt)
+let rows = try await remote.call("history", read: true)                   // near, on a connection reading .nearest
+try await remote.call("transfer", Transfer(from: 1, to: 2, amount: 300), idempotencyKey: orderID)
+```
+
+`func call(_ name: String, _ args: (any FennecValue)? = nil, claims: (any
+FennecValue)? = nil) async throws -> Answer` on `Fennec`, and on
+`FennecRemote` with `idempotencyKey: String? = nil, wait: Double? = nil,
+read: Bool = false` after them. `claims` is the call's `as`: the server
+reads them from its own token alone (a scoped token's are its token's, and
+it may not say them), the embedded database from the embedder, a signed-in
+user's, held to the types the statement declares as a token's are.
+`idempotencyKey` makes a write once however often it is sent; `wait` is
+`withWait(seconds)`'s, at most 30; `read` is `asRead()`'s mark: on a
+connection made with `reads: .nearest` a read replica answers the call, one
+that writes is refused (403) and never lands, and without it a call goes
+home, as every text not known to read does. The embedded database has no
+`wait`, key or `read`. A call is refused as the text would be: a
+`FennecError` with `status` on a server -- 404 no such statement or not
+granted, 403 a claim missing, 400 an argument missing, extra or of another
+type, 409 a broken statement or a value taken, 412 (`.unmet`) a `require`
+not met, its `reason` the statement's -- and `.notFound`, `.denied`,
+`.query` and `.unmet` from the library.
+
+A synced database (`Fennec.sync`) holds its shapes' rows, not its server's
+statements, and refuses a local `call` (`.query`: "a synced database runs
+no named statement"); call the server through `Fennec.connect`, and what it
+writes comes back through the shapes.
+
+The call builder is `Call`, stood beside `Query.from`: `try Call.call("mine",
+["limit": 10], claims: ["sub": "alice"]).toCall()` is `("call mine $1 as
+$2", [{"limit": 10}, {"sub": "alice"}])`, the text and parameters for
+`batch` or a log. No arguments is a statement of none (`call stamp`), an
+empty object is still one argument (`call stamp $1`), and the name -- the
+one thing written into the text -- is ASCII letters, digits and `_`, a
+letter first, at most 59 bytes (`invalid statement name: "..."`); a list, a
+text or a number as the arguments or the claims is refused, the builder's
+words held to `integrations/builder-golden.json`.
+
 ## Building and testing
 
 `make swift-test` builds the XCFramework's macOS slice for this machine

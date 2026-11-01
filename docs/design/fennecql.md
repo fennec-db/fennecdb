@@ -642,4 +642,6 @@ brotli for the hooks and the check's errors, and `schema.js` is 5.9. `fennec typ
 `.fennecql` as it reads a database, and writes Python, Go, C#, Swift,
 Kotlin and Dart rows (`--lang`; Kotlin's and Dart's tests compile the
 golden file and read a row into it), the tables as code (`--schema`) and the schema as FennecQL
-(`--fennecql`); `integrations/types-golden/` holds each for one schema.
+(`--fennecql`); `integrations/types-golden/` holds each for one schema, with the
+named statements of [named-statements.md](named-statements.md#what-is-built) typed
+beside its collections (slice 6).

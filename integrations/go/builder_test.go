@@ -515,6 +515,9 @@ func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) 
 		return a.([]any)
 	}
 	first := steps[0]
+	if op, _ := first.get("op"); op == "call" {
+		return runCall(t, db, rec, args(first), steps[1:])
+	}
 	q := db.From(args(first)[0].(string))
 	sent := func(err error) outcome {
 		if err != nil {
@@ -641,6 +644,67 @@ func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) 
 	}
 	t.Fatal("a chain ends with a statement")
 	return outcome{}
+}
+
+// runCall is a chain that starts with `call`: its text and parameters from
+// ToCall, and, where it is not refused, the same two as the client sends
+// them.
+func runCall(t *testing.T, db *fennecdb.Client, rec *recorder, a []any, rest []object) outcome {
+	t.Helper()
+	if len(rest) != 1 {
+		t.Fatalf("a call chain ends with toCall: %v", rest)
+	}
+	if op, _ := rest[0].get("op"); op != "toCall" {
+		t.Fatalf("no builder step %s after call", op)
+	}
+	var args any
+	if len(a) > 1 {
+		args = value(a[1])
+	}
+	var opts []fennecdb.CallOpt
+	if o := optsOf(a, 2); len(o.keys) > 0 {
+		for i, k := range o.keys {
+			if k != "claims" {
+				t.Fatalf("no call option %s", k)
+			}
+			opts = append(opts, fennecdb.Claims(value(o.vals[i])))
+		}
+	}
+	text, params, err := fennecdb.NewCall(a[0].(string), args, opts...).ToCall()
+	if err != nil {
+		// The client refuses as the builder does, and sends nothing.
+		rec.mu.Lock()
+		rec.body = nil
+		rec.mu.Unlock()
+		if _, cerr := db.Call(context.Background(), a[0].(string), args, opts...); cerr == nil || cerr.Error() != err.Error() {
+			t.Fatalf("the client's refusal %v, the builder's %v", cerr, err)
+		}
+		if rec.body != nil {
+			t.Fatalf("a refused call was sent: %s", rec.body)
+		}
+		return refused(t, err)
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back any
+	json.Unmarshal(raw, &back)
+	got := outcome{text: text, params: back}
+	if _, err := db.Call(context.Background(), a[0].(string), args, opts...); err != nil {
+		t.Fatal(err)
+	}
+	var sent struct {
+		Query  string
+		Params any
+	}
+	if err := json.Unmarshal(rec.body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Query != text || !sameJSON(sent.Params, back) {
+		t.Fatalf("the client sent %q %v, the builder made %q %v", sent.Query, sent.Params, text, back)
+	}
+	return got
 }
 
 func refused(t *testing.T, err error) outcome {
@@ -792,6 +856,115 @@ func TestBuilderTakesMapsAndStructs(t *testing.T) {
 	_, params, _ = fennecdb.From("notes").Where("at", ">=", when).Where("n", "in", []int{1, 2}).ToFennecQL()
 	if !reflect.DeepEqual(params, []any{"2026-01-02T02:04:05.678Z", 1, 2}) {
 		t.Fatalf("%v", params)
+	}
+}
+
+// A call's arguments and claims are an object however Go spells one: a
+// Params map, a struct with json tags, a Doc, a typed map or a pointer to
+// any; nil -- a nil map or pointer too -- is none, and nothing else is an
+// object.
+func TestACallTakesMapsStructsAndDocs(t *testing.T) {
+	type transfer struct {
+		From   int       `json:"from"`
+		To     int       `json:"to"`
+		Amount int       `json:"amount,omitempty"`
+		Embed  []float32 `json:"embed"`
+	}
+	type who struct {
+		Sub string `json:"sub"`
+	}
+	when := time.Date(2026, 1, 2, 3, 4, 5, 678_000_000, time.FixedZone("x", 3600))
+	var nilParams fennecdb.Params
+	var nilStruct *transfer
+	for _, c := range []struct {
+		name   string
+		args   any
+		claims any
+		text   string
+		params string
+	}{
+		{"a Params map", fennecdb.Params{"from": 1, "to": 2}, nil,
+			"call t $1", `[{"from":1,"to":2}]`},
+		{"a struct", transfer{From: 1, To: 2, Embed: []float32{0.5, -1}}, who{Sub: "alice"},
+			"call t $1 as $2", `[{"embed":[0.5,-1],"from":1,"to":2},{"sub":"alice"}]`},
+		{"a pointer to a struct", &transfer{From: 3, To: 4, Amount: 5}, &who{Sub: "bob"},
+			"call t $1 as $2", `[{"amount":5,"embed":null,"from":3,"to":4},{"sub":"bob"}]`},
+		{"a Doc", fennecdb.D("from", 1, "at", when), fennecdb.D("sub", "carol"),
+			"call t $1 as $2", `[{"at":"2026-01-02T02:04:05.678Z","from":1},{"sub":"carol"}]`},
+		{"a typed map", map[string]int{"from": 1, "to": 2}, map[string]string{"sub": "dave"},
+			"call t $1 as $2", `[{"from":1,"to":2},{"sub":"dave"}]`},
+		{"a time inside", fennecdb.Params{"at": when, "list": []any{when}}, nil,
+			"call t $1", `[{"at":"2026-01-02T02:04:05.678Z","list":["2026-01-02T02:04:05.678Z"]}]`},
+		{"an empty map is one empty argument", fennecdb.Params{}, fennecdb.Params{},
+			"call t $1 as $2", `[{},{}]`},
+		{"nil is none", nil, nil, "call t", `[]`},
+		{"a nil map is none", nilParams, nilParams, "call t", `[]`},
+		{"a nil pointer is none", nilStruct, nilStruct, "call t", `[]`},
+	} {
+		text, params, err := fennecdb.NewCall("t", c.args, fennecdb.Claims(c.claims)).ToCall()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		raw, err := json.Marshal(params)
+		if err != nil || text != c.text || string(raw) != c.params {
+			t.Fatalf("%s: %q %s %v; want %q %s", c.name, text, raw, err, c.text, c.params)
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		args   any
+		claims any
+		err    string
+	}{
+		{"a list", []int{1, 2}, nil, "a call's arguments are an object of values by name"},
+		{"a text", "from 1", nil, "a call's arguments are an object of values by name"},
+		{"a number", 7, nil, "a call's arguments are an object of values by name"},
+		{"a time", time.Now(), nil, "a call's arguments are an object of values by name"},
+		{"a map by number", map[int]int{1: 2}, nil, "a call's arguments are an object of values by name"},
+		{"claims of a list", nil, []string{"alice"}, "a call's claims are an object of values by name"},
+		{"claims of a text", fennecdb.Params{}, "alice", "a call's claims are an object of values by name"},
+	} {
+		_, _, err := fennecdb.NewCall("t", c.args, fennecdb.Claims(c.claims)).ToCall()
+		var e *fennecdb.QueryError
+		if !errors.As(err, &e) || e.Message != c.err {
+			t.Fatalf("%s: %v; want %q", c.name, err, c.err)
+		}
+	}
+	// The name is checked before the arguments, and the arguments before the
+	// claims: the first refusal is the one told.
+	call := fennecdb.NewCall("a b", []int{1}, fennecdb.Claims("x"))
+	if call.Err() == nil || call.Err().Error() != `fennecdb: invalid statement name: "a b"` || call.Name() != "" {
+		t.Fatalf("%v %q", call.Err(), call.Name())
+	}
+	if err := fennecdb.NewCall("t", []int{1}, fennecdb.Claims("x")).Err(); err == nil || !strings.Contains(err.Error(), "arguments") {
+		t.Fatalf("%v", err)
+	}
+	// No text but the name: a hostile value is a parameter.
+	text, params, err := fennecdb.NewCall("find", fennecdb.Params{"t": "\"; del docs; --"}, fennecdb.Claims(fennecdb.Params{"sub": "x' or 1=1 --"})).ToCall()
+	if err != nil || text != "call find $1 as $2" || len(params) != 2 {
+		t.Fatalf("%q %v %v", text, params, err)
+	}
+}
+
+// A call never changes once made: the maps it was given, and the parameters
+// it hands out, are copies.
+func TestACallIsImmutable(t *testing.T) {
+	args := fennecdb.Params{"from": 1, "tags": []any{"a"}}
+	claims := fennecdb.Params{"sub": "alice"}
+	call := fennecdb.NewCall("transfer", args, fennecdb.Claims(claims))
+	args["from"], args["to"] = 9, 9
+	args["tags"].([]any)[0] = "z"
+	claims["sub"] = "mallory"
+	_, first, err := call.ToCall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[0].(map[string]any)["from"] = 5
+	first[1].(map[string]any)["sub"] = "eve"
+	text, again, _ := call.ToCall()
+	raw, _ := json.Marshal(again)
+	if text != "call transfer $1 as $2" || string(raw) != `[{"from":1,"tags":["a"]},{"sub":"alice"}]` {
+		t.Fatalf("%q %s", text, raw)
 	}
 }
 

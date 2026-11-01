@@ -116,10 +116,26 @@ class GoldenTest {
             else -> error("no builder step $op")
         }
 
+        /**
+         * A chain that starts with `call(name, args, {claims})` and ends in
+         * `toCall`. The arguments and the claims go through the untyped
+         * check, which a list or a text cannot be handed to the typed
+         * factory by (the file holds both, refused by their message).
+         */
+        private fun call(steps: List<Row>): Triple<String?, List<Any?>?, String?> {
+            val a = steps[0].list("args")!!
+            val made = Call.made(a[0] as String, value(a.getOrNull(1)), opt(a, 2, "claims")?.let(::value))
+            val op = steps.getOrNull(1)?.string("op") ?: return Triple(null, null, "a chain ends with a statement")
+            if (op != "toCall") error("no call step $op")
+            val st = made.toCall()
+            return Triple(st.text, st.params, null)
+        }
+
         /** The statement a chain makes, or the builder's refusal. */
         fun run(steps: List<Row>): Triple<String?, List<Any?>?, String?> = runBlocking {
             var sent: Statement? = null
             try {
+                if (steps[0].string("op") == "call") return@runBlocking call(steps)
                 var q = Query.from(steps[0].list("args")!![0] as String).bind { text, params ->
                     sent = Statement(text, params)
                     when {

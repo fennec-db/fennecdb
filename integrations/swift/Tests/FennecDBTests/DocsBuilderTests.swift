@@ -24,6 +24,13 @@ import Testing
             }
         }
 
+        @discardableResult
+        func call(_ name: String, _ args: (any FennecValue)? = nil, claims: (any FennecValue)? = nil) async throws -> Answer {
+            let (text, params) = try Call.call(name, args, claims: claims).toCall()
+            await sent.record(text, params)
+            return .affected(0)
+        }
+
         func sends(_ text: String, _ params: String) async throws {
             let got = await sent.last
             #expect(got?.0 == text)
@@ -879,6 +886,25 @@ import Testing
         try await db.sends("del articles where year < $1", "[2000]")
     }
 
+    @Test("docs: a transfer called") func aTransferCalled() async throws {
+        let db = Recording()
+        _ = try await db.call(
+            "transfer",
+            ["from": 1, "to": 2, "amount": 300] as Value
+        )
+        try await db.sends("call transfer $1", "[{\"from\": 1, \"to\": 2, \"amount\": 300}]")
+    }
+
+    @Test("docs: a statement called for a signed-in user") func aStatementCalledForASignedInUser() async throws {
+        let db = Recording()
+        _ = try await db.call(
+            "history",
+            ["account": 1] as Value,
+            claims: ["sub": "alice"] as Value
+        )
+        try await db.sends("call history $1 as $2", "[{\"account\": 1}, {\"sub\": \"alice\"}]")
+    }
+
     @Test("docs: a page of documents with their comments") func aPageOfDocumentsWithTheirComments() async throws {
         let db = Recording()
         _ = try await db.from("docs")
@@ -942,6 +968,12 @@ import Testing
         let db = Recording()
         _ = try await db.from("docs").where("year", "<", 2000).delete()
         try await db.sends("del docs where year < $1", "[2000]")
+    }
+
+    @Test("docs: a statement of no arguments called") func aStatementOfNoArgumentsCalled() async throws {
+        let db = Recording()
+        _ = try await db.call("stamp")
+        try await db.sends("call stamp", "[]")
     }
 
     @Test("escapes: every character a literal escapes, in a filter") func escapesEveryCharacterALiteralEscapesInAFilter() async throws {

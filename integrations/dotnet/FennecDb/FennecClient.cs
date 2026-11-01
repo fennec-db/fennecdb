@@ -227,6 +227,56 @@ public sealed partial class FennecClient : IDisposable
             head.Seq, head.Replayed);
     }
 
+    /// <summary>Calls the named statement <paramref name="name"/> with <paramref name="args"/>, a dictionary or an
+    /// object's public properties -- values by name -- <c>call &lt;name&gt; $1</c> over <c>/query</c>, the text and
+    /// parameters <see cref="Query.Call"/> makes, so the answers, the refusals and the options are a statement's.
+    /// A body that writes is one block under the write lock; the result is its last statement's answer: its
+    /// <c>Rows</c> where it answers rows (a <c>get</c>, a write with <c>returning</c>), <c>Affected</c> where it
+    /// does not, the change it left the database at (<c>Seq</c>) and whether the answer is the one kept for its
+    /// key (<c>Replayed</c>). A refusal is a <see cref="FennecException"/>: 404 for no such statement or one the
+    /// token is not granted, 403 for a claim the token lacks, 400 for an argument missing, extra or of another
+    /// type, 412 for a <c>require</c> not met with its <see cref="FennecException.Reason"/>, 409 for a broken
+    /// statement or a unique value taken. A name or arguments the builder refuses throw
+    /// <see cref="FennecQueryException"/> before anything is sent.</summary>
+    /// <param name="name">The statement's name: ASCII letters, digits and <c>_</c>, a letter first.</param>
+    /// <param name="args">The arguments, null for a statement of none.</param>
+    /// <param name="claims">The call's <c>as</c>, the claims it is made with; the server's token alone may say
+    /// them, a scoped token's are its own.</param>
+    /// <param name="idempotencyKey">Makes the call once: sent again with the same key it is answered as the first
+    /// time, <c>Replayed</c>, and not run twice. Otherwise the client's own key, if it has one
+    /// (<see cref="WithIdempotencyKey"/>).</param>
+    /// <param name="wait">Holds a call whose body can be held until it can write something, at most 30 seconds
+    /// (<c>Fennec-Wait</c>, <see cref="WithWait"/>); the client's Timeout is that much longer for it.</param>
+    /// <param name="read">The statement only reads: on a client with <see cref="FennecClientOptions.ReadsNearest"/> it
+    /// goes near, after this client's writes (<see cref="AsRead"/>), and one that writes is refused there (403),
+    /// never landed. Without it a call goes home, as every statement not known to read does.</param>
+    /// <param name="cancellationToken">Bounds the request, as the Timeout does.</param>
+    public async Task<ExecResult> CallAsync(string name, object? args = null, object? claims = null,
+        string? idempotencyKey = null, TimeSpan? wait = null, bool read = false,
+        CancellationToken cancellationToken = default)
+    {
+        var (text, parameters) = new Call(name, args, claims).ToCall();
+        var client = this;
+        if (idempotencyKey is not null) client = client.WithIdempotencyKey(idempotencyKey);
+        if (wait is { } w) client = client.WithWait(w);
+        if (read) client = client.AsRead();
+        var (body, head) = await client.RunAsync(text, parameters, cancellationToken).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(body);
+        var r = doc.RootElement;
+        // Rows: a bare array, or {"rows": [...], "facets": {...}} when the last statement asked facets.
+        if (r.ValueKind == JsonValueKind.Array || (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("rows", out _)))
+        {
+            var rows = AnswerOf(body).Rows;
+            return new ExecResult(rows.Count, null, head.Seq, head.Replayed, rows);
+        }
+        if (r.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException("the call answered neither rows nor a write's count");
+        return new ExecResult(
+            r.TryGetProperty("affected", out var a) ? a.GetInt64() : 0,
+            r.TryGetProperty("message", out var m) ? m.GetString() : null,
+            head.Seq, head.Replayed);
+    }
+
     /// <summary>Runs the statements in order under one write lock, as one block: their writes all land, or at the
     /// first error none of them do -- a <see cref="FennecException"/> whose <see cref="FennecException.Completed"/>
     /// says how many were applied. A batch holding a compact runs each statement on its own, and what ran before

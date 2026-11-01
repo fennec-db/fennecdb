@@ -229,6 +229,52 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     with <code>{ read: true }</code> is refused, 403.</li>
 </ul>
 
+<h3 id="call">Calling a named statement</h3>
+
+<p><code>db.call(name, args, opts)</code> calls a <a
+href="/docs/fennecql#named-statements">named statement</a> the server holds:
+<code>call &lt;name&gt; $1</code> over <code>/query</code>, the arguments one
+parameter, an object by name, so no value is ever text. It answers as
+<code>run</code> does, the last statement of the statement's body. The
+builder's <code>call(name, args)</code> makes the text without sending it,
+<code>toCall()</code> being <code>[text, params]</code> as
+<code>toInsert</code> is, and <code>batch</code> takes it beside queries.</p>
+
+<pre data-lang="ts">import { connect, call, FennecError } from '@fennecdb/web/client';
+
+const db = connect('https://db.example.com', { token: 'a token' });
+try {
+  await db.call('transfer', { from: 1, to: 2, amount: 300 }, { idempotencyKey: 'xfer-7' });
+} catch (e) {
+  // 412: a `require ... else 'insufficient funds'` of the body was not met, and nothing landed.
+  if (e instanceof FennecError &amp;&amp; e.status === 412) console.log(e.reason);
+}
+const { rows } = await db.call('history', { account: 1 }, { read: true });   // goes near on a client reading near
+call('transfer', { from: 1, to: 2, amount: 300 }).toCall();   // ['call transfer $1', [{ from: 1, to: 2, amount: 300 }]]
+</pre>
+
+<ul>
+  <li><b>The options are <code>run</code>'s:</b> <code>idempotencyKey</code>
+    makes a call once, <code>wait</code> and <code>signal</code> as on any
+    write. <code>{ read: true }</code> says the statement only reads: on a
+    client made with <code>reads: 'nearest'</code> it is answered by the
+    read replica near it, after this client's writes; a statement that
+    writes is refused there (403), never landed. Without it a call goes
+    home, as every text not known to read does.</li>
+  <li><b><code>{ claims }</code> is <code>as {…}</code>,</b> the claims a
+    statement declares, for the server's token alone; a scoped token's own
+    come from the token.</li>
+  <li><b>A refusal is a <code>FennecError</code>:</b> <code>status</code>
+    404 for no such statement (or none the token may call), 403 for a claim
+    the caller lacks, 400 for an argument missing, extra or of another type,
+    412 for a <code>require</code> not met, its <code>reason</code> the
+    statement's own words.</li>
+  <li><b>Not in the page:</b> the module refuses a call (<i>named
+    statements are a server's</i>) and so does a synced database's local
+    copy; call through <code>connect(url)</code> or <code>sync.remote</code>,
+    and what the call wrote comes back through the shapes' streams.</li>
+</ul>
+
 <h2>Opening a database</h2>
 
 <p>Copy <code>fennec.js</code>, the <code>builder.js</code> and
@@ -1194,6 +1240,7 @@ fields are compile errors.</p>
 <pre data-lang="bash">fennec types data.fennec > web/fennec-schema.d.ts  # or: make types FILE=data.fennec
 fennec types schema.fennecql > web/fennec-schema.d.ts # from a schema file, with no database
 fennec types --lang python data.fennec              # a row in Python, Go, C#, Swift, Kotlin or Dart
+                                                    # (a named statement's arguments and answer, too)
 </pre>
 
 <pre data-lang="ts">import { Fennec } from './fennec.js';
@@ -1210,6 +1257,25 @@ const products = await db.from('products')
   .lookup&lt;'reviews', FennecSchema['reviews']&gt;('reviews', { on: 'product_id', limit: 3 })
   .rows();
 //    products[0].reviews[0].stars: number | null
+</pre>
+
+<p>A file that holds <a href="/docs/fennecql#named-statements">named
+statements</a> gets them typed too, in <code>FennecStatements</code>: for each
+the arguments it takes and the row its answer holds, as far as the answer is
+typed — plain fields of one collection and a count; a count of rows written,
+or an item the statement works out, is <code>unknown</code> or <code>Json</code>.
+<code>TypedCall</code> binds <code>call</code> to them, so a name is completed
+and an argument missing or of another type is a compile error.</p>
+
+<pre data-lang="ts">import { connect, type TypedCall } from '@fennecdb/web/client';
+import type { FennecSchema, FennecStatements } from './fennec-schema.js';
+
+const db = connect&lt;FennecSchema&gt;('https://db.example.com', { token: 'a token' });
+const call: TypedCall&lt;FennecStatements&gt; = db.call.bind(db);
+
+const answer = await call('transfer', { from: 1, to: 2, amount: 300 });
+if ('rows' in answer) console.log(answer.rows[0].balance);   // number | null
+// await call('transfer', { from: 1, to: 2 });                // an argument missing: a compile error
 </pre>
 
 <details class="deep"><summary>How types map, and what is generated</summary>

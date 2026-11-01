@@ -191,6 +191,7 @@ public sealed class BuilderTests(Servers servers)
         static JsonElement[] Args(JsonElement s) => s.TryGetProperty("args", out var a) ? a.EnumerateArray().ToArray() : [];
         try
         {
+            if (list[0].GetProperty("op").GetString() == "call") return await RunCall(db, recorder, list);
             var q = db.From(Args(list[0])[0].GetString()!);
             for (var i = 1; i < list.Count; i++)
             {
@@ -240,6 +241,29 @@ public sealed class BuilderTests(Servers servers)
         }
     }
 
+    // A chain that starts with `call`: a statement of no collection. Its arguments and claims are handed over as a
+    // C# caller would, any JSON value, so the list and the text the file refuses are typable here as much as the
+    // object is (no case is untypable in C#: they are `object?`). The text and parameters ToCall makes are what
+    // CallAsync sends.
+    static async Task<(string? Text, JsonElement Params, string? Error)> RunCall(
+        FennecClient db, Recorder recorder, List<JsonElement> steps)
+    {
+        var a = steps[0].GetProperty("args").EnumerateArray().ToArray();
+        object? args = a.Length > 1 ? Value(a[1]) : null;
+        object? claims = Opt(a, 2, "claims") is { } c ? Value(c) : null;
+        var call = Query.Call(a[0].GetString()!, args, claims);
+        if (steps[1].GetProperty("op").GetString() != "toCall") throw new InvalidOperationException("a call ends with toCall");
+        var (t, ps) = call.ToCall();
+        using var buf = new MemoryStream();
+        Params.WriteBody(buf, t, ps);
+        var made = JsonDocument.Parse(buf.ToArray()).RootElement.GetProperty("params").Clone();
+        await db.CallAsync(a[0].GetString()!, args, claims);
+        var sent = JsonDocument.Parse(recorder.Body!).RootElement;
+        Assert.Equal(t, sent.GetProperty("query").GetString());
+        Assert.True(Same(made, sent.GetProperty("params")), $"sent {sent.GetProperty("params").GetRawText()}, made {made.GetRawText()}");
+        return (t, made, null);
+    }
+
     // JSON compared by value: a number the file writes as 1 and the client as 1.0 is one number to the server.
     static bool Same(JsonElement a, JsonElement b) => (a.ValueKind, b.ValueKind) switch
     {
@@ -286,6 +310,80 @@ public sealed class BuilderTests(Servers servers)
         Assert.Equal("get articles where year >= $1 limit $2", l.ToFennecQL().Text);
         Assert.Throws<FennecQueryException>(() => Query.From("t; drop collection x"));
         await Assert.ThrowsAsync<FennecQueryException>(() => Query.From("t").RowsAsync());
+    }
+
+    sealed record Transfer(int From, int To, [property: System.Text.Json.Serialization.JsonPropertyName("amount")] long Amount);
+
+    // The golden file holds the cases every builder shares; what C# types its own way is held here.
+    [Fact]
+    public void ACallTakesAnyObjectOfValuesByNameAndHoldsWhatItWasGiven()
+    {
+        // A record's properties as declared (and named as System.Text.Json names them), an anonymous object's, a
+        // dictionary's in its order, a JSON object as is: one argument each.
+        var (text, ps) = Query.Call("transfer", new Transfer(1, 2, 300)).ToCall();
+        Assert.Equal("call transfer $1", text);
+        Assert.Equal("""{"From":1,"To":2,"amount":300}""", JsonSerializer.Serialize(ps[0]));
+        Assert.Equal("""{"b":1,"a":2}""", JsonSerializer.Serialize(
+            Query.Call("x", new Dictionary<string, object?> { ["b"] = 1, ["a"] = 2 }).ToCall().Parameters[0]));
+        Assert.Equal("""{"from":1}""", JsonSerializer.Serialize(Query.Call("x", new { from = 1 }).ToCall().Parameters[0]));
+        using var doc = JsonDocument.Parse("""{"from":1,"to":[2]}""");
+        var json = Query.Call("x", doc.RootElement).ToCall();
+        Assert.Equal("call x $1", json.Text);
+        Assert.Equal("""{"from":1,"to":[2]}""", JsonSerializer.Serialize(json.Parameters[0]));
+        Assert.Equal("call x", Query.Call("x", JsonDocument.Parse("null").RootElement).ToCall().Text);
+        // Values as a document's are: a date its ISO text, in a list or an object too.
+        var when = new DateTime(2026, 1, 2, 3, 4, 5, 678, DateTimeKind.Utc);
+        var dated = Query.Call("x", new { at = when, list = new[] { when }, meta = new Dictionary<string, object?> { ["at"] = new DateTimeOffset(when) } }).ToCall();
+        Assert.Equal("""{"at":"2026-01-02T03:04:05.678Z","list":["2026-01-02T03:04:05.678Z"],"meta":{"at":"2026-01-02T03:04:05.678Z"}}""",
+            JsonSerializer.Serialize(dated.Parameters[0]));
+        // No arguments and claims is `as $1`; an empty object is one argument; a call made by hand is the same.
+        Assert.Equal("call stamp as $1", Query.Call("stamp", null, new { sub = "alice" }).ToCall().Text);
+        var empty = Query.Call("stamp", new { }).ToCall();
+        Assert.Equal("call stamp $1", empty.Text);
+        Assert.Equal("[{}]", JsonSerializer.Serialize(empty.Parameters));
+        Assert.Equal("call mine $1 as $2", new Call("mine", new { limit = 10 }, new { sub = "a" }).ToCall().Text);
+        Assert.Equal("mine", Query.Call("mine").Name);
+    }
+
+    [Fact]
+    public void ACallIsImmutableAndRendersTheSameTwice()
+    {
+        var args = new Dictionary<string, object?> { ["n"] = 1, ["tags"] = new List<string> { "a" } };
+        var claims = new Dictionary<string, object?> { ["sub"] = "alice" };
+        var call = Query.Call("note", args, claims);
+        var first = call.ToCall();
+        // What the dictionaries hold afterwards is not the call's.
+        args["n"] = 2;
+        args["more"] = true;
+        ((List<string>)args["tags"]!).Add("b");
+        claims["sub"] = "bob";
+        var second = call.ToCall();
+        Assert.Equal(first.Text, second.Text);
+        Assert.Equal(JsonSerializer.Serialize(first.Parameters), JsonSerializer.Serialize(second.Parameters));
+        Assert.Equal("""[{"n":1,"tags":["a"]},{"sub":"alice"}]""", JsonSerializer.Serialize(second.Parameters));
+        // Nor does changing what ToCall handed over change the next one.
+        ((Dictionary<string, object?>)first.Parameters[0]!)["n"] = 99;
+        Assert.Equal("""[{"n":1,"tags":["a"]},{"sub":"alice"}]""", JsonSerializer.Serialize(call.ToCall().Parameters));
+    }
+
+    [Fact]
+    public void ACallRefusesWhatIsNoStatementNameOrNoObjectOfValuesByName()
+    {
+        static string Refused(Func<Call> make) => Assert.Throws<FennecQueryException>(make).Message;
+        Assert.Equal("invalid statement name: null", Refused(() => Query.Call(null!)));
+        Assert.Equal("invalid statement name: \"a b\"", Refused(() => Query.Call("a b")));
+        Assert.Equal("invalid statement name: \"x\\n\"", Refused(() => Query.Call("x\n")));
+        Assert.Equal("invalid statement name: \"\u00e7\"", Refused(() => Query.Call("\u00e7")));
+        foreach (var args in new object[] { new[] { 1, 2 }, new List<object?>(), "from 1", 7, 2.5, true, 'c', DateTime.UnixEpoch, new float[] { 1f } })
+            Assert.Equal("a call's arguments are an object of values by name", Refused(() => Query.Call("x", args)));
+        using var array = JsonDocument.Parse("[1]");
+        using var text = JsonDocument.Parse("\"x\"");
+        Assert.Equal("a call's arguments are an object of values by name", Refused(() => Query.Call("x", array.RootElement)));
+        Assert.Equal("a call's arguments are an object of values by name", Refused(() => Query.Call("x", text.RootElement)));
+        Assert.Equal("a call's claims are an object of values by name", Refused(() => Query.Call("x", null, "alice")));
+        Assert.Equal("a call's claims are an object of values by name", Refused(() => Query.Call("x", new { a = 1 }, new[] { "sub" })));
+        // The name is checked first, as the JavaScript builder's constructor does.
+        Assert.Equal("invalid statement name: \"\"", Refused(() => Query.Call("", "x", "y")));
     }
 
     sealed record Note(string Title, [property: System.Text.Json.Serialization.JsonPropertyName("embed")] float[] Vector);

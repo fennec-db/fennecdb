@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fennecdb/web/client`).
 
-import { FennecError, Query, checked, declared, ident, nameOf, normalize, rowsOf, statementOf, whole } from './builder.js';
+import { FennecError, Query, call, checked, declared, ident, nameOf, normalize, rowsOf, statementOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -118,9 +118,35 @@ export class FennecHttp {
   }
 
   /**
+   * Calls the named statement `name` with `args`, an object of values by
+   * name: `call <name> $1` over `/query`, answered as `run` answers it --
+   * the last statement of its body, rows or `{ kind: 'affected' }`, with
+   * the change it left the database at (`seq`) and whether the answer is
+   * the one kept for its key (`replayed`). A body that writes is one block
+   * under the write lock, and a refusal throws a `FennecError` as any
+   * statement's does: `status` 404 for no such statement, 403 for a claim
+   * the token lacks, 400 for an argument missing, extra or of another type,
+   * 412 for a `require` not met, its `reason` the statement's.
+   *
+   *   await db.call('transfer', { from: 1, to: 2, amount: 300 },
+   *                 { idempotencyKey: 'xfer-7' });
+   *
+   * `{ idempotencyKey, wait, signal }` as `run`'s. `{ read: true }`: the
+   * statement only reads, and goes near on a client reading near, after
+   * this client's writes -- one that writes is refused there (403), never
+   * landed. `{ claims }` is `as {...}`, the claims the call is made with:
+   * the server's token alone may say them, a scoped token's are its own.
+   */
+  async call(name, args, opts = {}) {
+    const [sql, params] = call(name, args, opts).toCall();
+    const { idempotencyKey, wait, signal, read } = opts;
+    return this.run(sql, params, { idempotencyKey, wait, signal, read });
+  }
+
+  /**
    * `POST /batch`: the statements in order under one write lock, as one
    * block -- their writes all land, or at the first error none of them do.
-   * Each is a builder query (a read), a FennecQL text, or `[text, params]`,
+   * Each is a builder query (a read), a call, a FennecQL text, or `[text, params]`,
    * which a builder's `toInsert`, `toUpdate` and `toDelete` make. Answers
    * each statement's result in order as the server writes it -- `{rows}`
    * (and `facets`), `{affected}` or `{message}` -- with `seq` and

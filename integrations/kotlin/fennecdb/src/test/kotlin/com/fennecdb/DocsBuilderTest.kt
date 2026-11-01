@@ -27,6 +27,11 @@ class DocsBuilderTest {
             }
         }
 
+        suspend fun call(name: String, args: Map<String, Any?>? = null, claims: Map<String, Any?>? = null): Answer {
+            sent = Call.of(name, args, claims).toCall()
+            return Answer.Affected(0)
+        }
+
         fun sends(text: String, params: String) {
             assertEquals(text, sent?.text)
             val got = Json.parse(Json.write(sent?.params))
@@ -1041,6 +1046,26 @@ class DocsBuilderTest {
         db.sends("del articles where year < \$1", "[2000]")
     }
 
+    /** docs: a transfer called */
+    @Test
+    fun aTransferCalled() = runBlocking {
+        val db = Recording()
+        db.call("transfer", mapOf("from" to 1, "to" to 2, "amount" to 300))
+        db.sends("call transfer \$1", "[{\"from\": 1, \"to\": 2, \"amount\": 300}]")
+    }
+
+    /** docs: a statement called for a signed-in user */
+    @Test
+    fun aStatementCalledForASignedInUser() = runBlocking {
+        val db = Recording()
+        db.call(
+            "history",
+            mapOf("account" to 1),
+            claims = mapOf("sub" to "alice")
+        )
+        db.sends("call history \$1 as \$2", "[{\"account\": 1}, {\"sub\": \"alice\"}]")
+    }
+
     /** docs: a page of documents with their comments */
     @Test
     fun aPageOfDocumentsWithTheirComments() = runBlocking {
@@ -1120,6 +1145,14 @@ class DocsBuilderTest {
         val db = Recording()
         db.from("docs").where("year", "<", 2000).delete()
         db.sends("del docs where year < \$1", "[2000]")
+    }
+
+    /** docs: a statement of no arguments called */
+    @Test
+    fun aStatementOfNoArgumentsCalled() = runBlocking {
+        val db = Recording()
+        db.call("stamp")
+        db.sends("call stamp", "[]")
     }
 
     /** escapes: every character a literal escapes, in a filter */
