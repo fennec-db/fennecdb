@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 12] = [
+const SCHEMA: [&str; 13] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     // `failed_from` (`TENANT_FIELDS`): the node a failover took the tenant
@@ -116,19 +116,45 @@ const SCHEMA: [&str; 12] = [
     // `PUT` was answered, a detached or deleted tenant's copy that stayed,
     // a move's source that would not go, an old primary's file on a node
     // silent as its tenant's replica went elsewhere. Keyed
-    // `<tenant>/<node>`, with why and the directory's change it was noted
-    // at. Reported to an operator -- every repair's `left`,
-    // `fennec_router_files_left` -- and forgotten once a repair's look finds
-    // the file gone or the directory gives it its tenant; never taken off
-    // by the router, which cannot tell the file it left from a later one
-    // at the same place. Ignored, it was an orphan that every create of the
-    // name on that node met as 409, unsaid. Read where asked, never mapped;
-    // a router from before it neither reads nor writes it.
+    // `<tenant>/<node>`, with why, the directory's change it was noted at,
+    // and the identities the node gave the file as the router's calls made
+    // or changed it (`instances`, `LEFTOVER_FIELDS`). Reported to an
+    // operator -- every repair's `left`, `fennec_router_files_left` -- and
+    // forgotten once a repair's look finds the file gone, the directory
+    // gives it its tenant, or its node takes it back by one of those
+    // identities, the node judging. Ignored, it was an orphan that every
+    // create of the name on that node met as 409, unsaid. Read where
+    // asked, never mapped; a router from before it neither reads nor
+    // writes it.
     LEFTOVERS,
+    // The identity each file this directory's router placed of a tenant
+    // carried on its node, as the node answered the call that made or
+    // changed it -- a create, a move's install, a replica's follow
+    // (`fennec_http::instance`) -- keyed `<tenant>/<node>`. An attach
+    // finding a file of the tenant there (409) names it, and the node has
+    // the file follow only where it still carries it, judged under its
+    // slot as a reclaim is: a node back from a failover has its old primary
+    // follow the tenant's new one, as before identities, while a file
+    // another router placed since -- a live primary -- carries another or
+    // none. Written unsynced, beside a placement: lost to a crash, the file
+    // is reported instead. Read where asked, never mapped; a router from
+    // before it neither reads nor writes it.
+    FILES,
 ];
 
+const FILES: &str =
+    "create collection if not exists files (key text @hash, tenant text, node text, instance text)";
+
 const LEFTOVERS: &str = "create collection if not exists leftovers \
-     (key text @hash, tenant text, node text, why text, noted int)";
+     (key text @hash, tenant text, node text, why text, noted int, instances text)";
+
+/// The fields `leftovers` took after it was first written: `instances`,
+/// the identities a file left was noted under, space-separated 16-hex
+/// texts ([`fennec_http::instance`]), added and selected as
+/// `READER_FIELDS` are. A router from before it notes a file with none --
+/// and so does this one where the node, from before identities, named
+/// none -- which nothing takes back.
+const LEFTOVER_FIELDS: [&str; 1] = ["instances"];
 
 /// The fields `nodes` took after directories were first written, added to
 /// one written before them as the engine adds a field: its nodes read them
@@ -252,7 +278,8 @@ pub struct Reader {
 }
 
 /// A tenant's file a router may have left on a node, placed by nothing
-/// (`leftovers`): reported, for an operator to look at and remove by hand.
+/// (`leftovers`): reported, and taken back by its node where it still
+/// carries one of `instances`, or by an operator's hand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leftover {
     pub tenant: String,
@@ -263,6 +290,11 @@ pub struct Leftover {
     /// begun before then forgets nothing of it
     /// ([`Directory::forget_leftover`]).
     pub noted: i64,
+    /// The identities the node gave the file as the router's calls made or
+    /// changed it, or the router proposed for a call that went unanswered
+    /// ([`fennec_http::instance`]): none where its node named none -- one
+    /// from before identities -- or the router learned none.
+    pub instances: Vec<u64>,
 }
 
 /// A tenant the directory's maps, brought up to what a router it follows
@@ -369,6 +401,7 @@ impl Directory {
                     ("tenants", &TENANT_FIELDS[..]),
                     ("readers", &READER_FIELDS[..]),
                     ("lineages", &LINEAGE_FIELDS[..]),
+                    ("leftovers", &LEFTOVER_FIELDS[..]),
                 ] {
                     for f in fields {
                         if g.collection(coll)?.schema.field_pos(f).is_none() {
@@ -1159,11 +1192,16 @@ impl Directory {
     /// Every file a router noted as left on a node ([`Leftover`]), by key.
     pub fn leftovers(&self) -> Result<Vec<Leftover>> {
         let g = read(&self.db);
-        let found = rows(
-            &g,
-            "leftovers",
-            "get leftovers select tenant, node, why, noted order key",
-        )?;
+        // `instances` where the collection has it: a standby's, following a
+        // primary from before it, has not.
+        let sql = match g
+            .collection("leftovers")
+            .is_ok_and(|c| c.schema.field_pos("instances").is_some())
+        {
+            true => "get leftovers select tenant, node, why, noted, instances order key",
+            false => "get leftovers select tenant, node, why, noted order key",
+        };
+        let found = rows(&g, "leftovers", sql)?;
         Ok(found
             .into_iter()
             .map(|(_, row)| Leftover {
@@ -1174,8 +1212,70 @@ impl Directory {
                     Value::Int(n) => n,
                     _ => 0,
                 },
+                // A text this router cannot read names none: a file kept.
+                instances: row.get(4).map_or(Vec::new(), |v| {
+                    let ids: Option<Vec<u64>> = text(v)
+                        .split_whitespace()
+                        .map(fennec_http::instance::parse)
+                        .collect();
+                    ids.unwrap_or_default()
+                }),
             })
             .collect())
+    }
+
+    /// The identity `tenant`'s file on `node` carried as this router placed
+    /// or changed it (`files`): none where it learned none, or where the
+    /// directory -- a standby's following a primary from before it -- keeps
+    /// no such record.
+    pub fn placed_instance(&self, tenant: &str, node: &str) -> Option<u64> {
+        let g = read(&self.db);
+        g.collection("files").ok()?;
+        let stmt = fennec_ql::parse_one("get files select instance where key = $1").ok()?;
+        match g.query(&stmt, &[Value::Text(format!("{tenant}/{node}"))]) {
+            Ok(Response::Rows(rs)) => rs.rows.into_iter().find_map(|r| match &r.values[0] {
+                Value::Text(t) => fennec_http::instance::parse(t),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Records the identity `tenant`'s file on `node` carries, as its node
+    /// answered the call that made or changed it -- or forgets it, `None`
+    /// -- unsynced: the placement written at once after it syncs it, and
+    /// lost, the file is reported, never followed ([`FILES`]).
+    pub fn note_placed(&mut self, tenant: &str, node: &str, id: Option<u64>) -> Result<()> {
+        if read(&self.db).collection("files").is_err() {
+            self.run(FILES, &[])?;
+        }
+        let key = Value::Text(format!("{tenant}/{node}"));
+        let row = vec![
+            key.clone(),
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            id.map_or(Value::Null, |id| {
+                Value::Text(fennec_http::instance::text(id))
+            }),
+        ];
+        self.write_block_as(
+            &[
+                ("del files where key = $1", vec![key]),
+                (
+                    "put files {key: $1, tenant: $2, node: $3, instance: $4}",
+                    row,
+                ),
+            ],
+            false,
+        )
+    }
+
+    /// `tenant`'s file on `node`, where it is noted as left there.
+    pub fn leftover(&self, tenant: &str, node: &str) -> Result<Option<Leftover>> {
+        Ok(self
+            .leftovers()?
+            .into_iter()
+            .find(|l| l.tenant == tenant && l.node == node))
     }
 
     /// How many files a router noted as left on nodes:
@@ -1184,27 +1284,52 @@ impl Directory {
         self.leftovers().map_or(0, |l| l.len())
     }
 
-    /// Notes `tenant`'s file on `node` as left there, and why ([`Leftover`]):
-    /// noted again, at the change it is noted at now, so a look begun before
-    /// forgets nothing of it. A directory from before `leftovers`, led now
-    /// by a router that keeps them -- the standby of an older primary,
-    /// promoted -- is given the collection first.
-    pub fn note_leftover(&mut self, tenant: &str, node: &str, why: &str) -> Result<()> {
+    /// Notes `tenant`'s file on `node` as left there, why, and the
+    /// identities it may carry ([`Leftover`]): noted again, at the change it
+    /// is noted at now, so a look begun before forgets nothing of it, and
+    /// under these identities alone -- a file noted again is the one the
+    /// router's latest call left. A directory from before `leftovers`, or
+    /// before `instances`, led now by a router that keeps them -- the
+    /// standby of an older primary, promoted -- is given them first.
+    pub fn note_leftover(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        why: &str,
+        instances: &[u64],
+    ) -> Result<()> {
         if read(&self.db).collection("leftovers").is_err() {
             self.run(LEFTOVERS, &[])?;
         }
+        if read(&self.db)
+            .collection("leftovers")?
+            .schema
+            .field_pos("instances")
+            .is_none()
+        {
+            self.run("alter collection leftovers add field instances text", &[])?;
+        }
         let key = Value::Text(format!("{tenant}/{node}"));
+        let ids: Vec<String> = instances
+            .iter()
+            .map(|&id| fennec_http::instance::text(id))
+            .collect();
         let row = vec![
             key.clone(),
             Value::Text(tenant.into()),
             Value::Text(node.into()),
             Value::Text(why.into()),
             Value::Int(read(&self.db).change_seq().min(i64::MAX as u64) as i64),
+            match ids.is_empty() {
+                true => Value::Null,
+                false => Value::Text(ids.join(" ")),
+            },
         ];
         self.write_block(&[
             ("del leftovers where key = $1", vec![key]),
             (
-                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5}",
+                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5, \
+                 instances: $6}",
                 row,
             ),
         ])
@@ -1473,6 +1598,11 @@ impl Directory {
     /// with them: a tenant leaving this directory for a region keeping its
     /// own keeps the ones here, which follow it there.
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
+        // Its files' identities first, unsynced: the removal syncs them.
+        if read(&self.db).collection("files").is_ok() {
+            let of = vec![Value::Text(tenant.into())];
+            self.write_block_as(&[("del files where tenant = $1", of)], false)?;
+        }
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
         self.homes.remove(tenant);
@@ -1522,6 +1652,12 @@ impl Directory {
 
     /// Statements as one block, then one sync, as [`Self::run`] runs one.
     fn write_block(&mut self, stmts: &[(&str, Vec<Value>)]) -> Result<()> {
+        self.write_block_as(stmts, true)
+    }
+
+    /// [`Self::write_block`], synced or not: unsynced only where a synced
+    /// write follows at once ([`Self::note_placed`]).
+    fn write_block_as(&mut self, stmts: &[(&str, Vec<Value>)], synced: bool) -> Result<()> {
         let parsed = stmts
             .iter()
             .map(|(sql, _)| fennec_ql::parse_one(sql))
@@ -1533,7 +1669,9 @@ impl Directory {
             .collect();
         let mut g = write(&self.db);
         g.execute_block(&block).map_err(|(_, e)| e)?;
-        g.sync()?;
+        if synced {
+            g.sync()?;
+        }
         // The maps are updated by the caller, not their ids; the counter
         // moved here.
         self.seq = g.change_seq();
@@ -2333,12 +2471,25 @@ mod tests {
             let mut d = Directory::open(&path).unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
             assert_eq!(d.files_left(), 0);
-            d.note_leftover("acme", "n1", "a create taken back")
+            d.note_leftover("acme", "n1", "a create taken back", &[0xa1, 0xa2])
                 .unwrap();
-            d.note_leftover("acme", "n2", "a move undone").unwrap();
-            d.note_leftover("beta", "n1", "first").unwrap();
+            d.note_leftover("acme", "n2", "a move undone", &[0xb])
+                .unwrap();
+            d.note_leftover("beta", "n1", "first", &[0xc]).unwrap();
             let first = d.leftovers().unwrap()[2].noted;
-            d.note_leftover("beta", "n1", "again").unwrap();
+            // Noted again: under the identities of the latest call alone.
+            d.note_leftover("beta", "n1", "again", &[]).unwrap();
+            let ids: Vec<Vec<u64>> = d
+                .leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| l.instances)
+                .collect();
+            assert_eq!(ids, [vec![0xa1, 0xa2], vec![0xb], vec![]]);
+            assert_eq!(
+                d.leftover("acme", "n2").unwrap().map(|l| l.instances),
+                Some(vec![0xb])
+            );
             assert_eq!(
                 whys(&d),
                 [
@@ -2367,8 +2518,31 @@ mod tests {
                 .unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
             assert!(!d.forget_leftover("acme", "n2", None).unwrap());
-            d.note_leftover("gamma", "n3", "why").unwrap();
+            d.note_leftover("gamma", "n3", "why", &[0xd]).unwrap();
             assert_eq!(whys(&d), [owned("gamma", "n3", "why")]);
+            // A collection from before `instances`, a row an older router
+            // noted: read with none, and given the field as one is noted.
+            let old = [
+                "drop collection leftovers",
+                "create collection leftovers (key text @hash, tenant text, node text, why text, \
+                 noted int)",
+                "put leftovers {key: 'old/n1', tenant: 'old', node: 'n1', why: 'w', noted: 1}",
+            ];
+            for sql in old {
+                let stmt = fennec_ql::parse_one(sql).unwrap();
+                d.db().write().unwrap().execute(&stmt).unwrap();
+            }
+            let had = d.leftovers().unwrap();
+            assert_eq!(had.len(), 1);
+            assert_eq!(had[0].instances, Vec::<u64>::new());
+            d.note_leftover("delta", "n1", "why", &[0xe]).unwrap();
+            let ids: Vec<Vec<u64>> = d
+                .leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| l.instances)
+                .collect();
+            assert_eq!(ids, [vec![0xe], vec![]]);
         }
         let _ = std::fs::remove_file(&path);
     }

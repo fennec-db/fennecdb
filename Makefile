@@ -323,7 +323,8 @@ shard:
 ## query across 100 tenants against asking each (ARGS=latency or fanout
 ## for that part alone; ARGS=standby a standby router's request against
 ## the primary's; ARGS=regions a region keeping its own directory failing
-## a node over while cut off from the global router, at leases of 1 and 5 s).
+## a node over while cut off from the global router, at leases of 1 and 5 s;
+## ARGS=failovers a pair's failover and one across two nodes alone).
 shard-bench:
 	$(CARGO) run --release -p fennec-shard --example overhead -- $(or $(ARGS),100000 128)
 
@@ -1010,7 +1011,10 @@ packaging-test:
 ## verify` and `fennec restore` refuse what the old archiver kept, the old
 ## server the file this tree's restore wrote; an old router refuses a
 ## schema declaring a statement (400); a move onto an old node fails and
-## leaves the tenant on its source (tools/upgrade-order.sh). Builds BASE --
+## leaves the tenant on its source; and an old node, naming no file's
+## identity, answers a reclaim 404 and keeps the file, which this tree's
+## router reports; and an old router creates, replicates, moves and deletes
+## a tenant on this tree's nodes (tools/upgrade-order.sh). Builds BASE --
 ## 12d6f8db^, the last main before the kind, unless given -- in a scratch
 ## worktree: minutes. Not in CI.
 upgrade-check:

@@ -6,20 +6,35 @@
 //! GET    /_admin/tenants               names on disk
 //! GET    /_admin/sizes                 {"<tenant>": bytes on disk, ...}
 //! PUT    /_admin/tenants/<t>           create an empty tenant       201 / 409
+//!                                      {created, lineage, instance}
 //! POST   /_admin/tenants/<t>/schema    a description, applied as /_schema/apply
 //!                                      applies it: what a router's create with
 //!                                      a schema sends, once the tenant is placed
 //! DELETE /_admin/tenants/<t>           close and remove             204
+//! POST   /_admin/tenants/<t>/reclaim   {instances}: remove the file only where
+//!                                      it carries one of them: 200 {gone}, or
+//!                                      409 {error, instance} where it carries
+//!                                      another (null: none)
 //! POST   /_admin/tenants/<t>/query     {query, params}: a read, answered as
 //!                                      /query answers it, any write refused
 //!                                      (403): a router's query across tenants
-//! POST   /_admin/tenants/<t>/freeze    refuse writes, wait for the ones in flight
+//! POST   /_admin/tenants/<t>/freeze    refuse writes, wait for the ones in
+//!                                      flight: {frozen, instance}
 //! POST   /_admin/tenants/<t>/thaw
 //! GET    /_admin/tenants/<t>/file      the whole image (octet-stream)
 //! PUT    /_admin/tenants/<t>/file      install an image as a new tenant
+//!                                      {imported, lineage, instance}
 //! POST   /_admin/tenants/<t>/promote   a replica node takes this tenant's writes
 //! POST   /_admin/tenants/<t>/follow    {from}: follow the node at `from`, or
-//!                                      without it this node's upstream
+//!                                      without it this node's upstream:
+//!                                      {following, instance}
+//!
+//! A file's `instance` is its identity on this node ([`crate::instance`]),
+//! minted as a create or an install makes it and as a follow or a
+//! promotion changes it -- `Fennec-Instance`, where a router sends one, is
+//! taken for a file its `PUT` makes, and kept by a follow only on the file
+//! carrying it as the follow begins -- and a reclaim
+//! takes back only the file still carrying one it names.
 //! PUT    /_admin/tenants/<t>/quota     {bytes, rows, streams, requests, writes,
 //!                                      write_bytes}: what is set for the tenant
 //!                                      over the node's quota, kept beside its
@@ -46,7 +61,8 @@
 //! Without `--admin-token` the whole prefix answers 404 -- off, not open.
 
 use crate::http::{Method, Request, Response};
-use crate::tenants::{Refused, Tenants};
+use crate::instance;
+use crate::tenants::{Kept, Refused, Tenants};
 use crate::{constant_eq, Config};
 
 pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
@@ -84,16 +100,35 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             .map(|report| Response::json(200, report)),
         // The lineage the tenant's history is of, which a router binds its
         // read replicas to.
-        (Method::Put, ["tenants", t]) => tenants.create(t).map(|tenant| {
-            Response::json(
-                201,
-                format!(
-                    "{{\"created\":\"{t}\",\"lineage\":{}}}",
-                    lineage_json(&tenant)
-                ),
-            )
-        }),
+        (Method::Put, ["tenants", t]) => {
+            proposed(req)
+                .and_then(|id| tenants.create_as(t, id))
+                .map(|(tenant, id)| {
+                    Response::json(
+                        201,
+                        format!(
+                            "{{\"created\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
+                            lineage_json(&tenant),
+                            instance::json(id)
+                        ),
+                    )
+                })
+        }
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
+        // A router taking back a file it left, the node the judge: 200 only
+        // where it is gone -- taken, or not there -- which a node from
+        // before identities never answers here (404).
+        (Method::Post, ["tenants", t, "reclaim"]) => superseded(tenants, req)
+            .and_then(|_| {
+                instance::list_in(&String::from_utf8_lossy(&req.body)).map_err(|e| Refused(400, e))
+            })
+            .and_then(|named| match tenants.reclaim(t, &named) {
+                Ok(took) => Ok(Response::json(
+                    200,
+                    format!("{{\"gone\":\"{t}\",\"taken\":{took}}}"),
+                )),
+                Err(kept) => judged(t, kept),
+            }),
         // The node's admin token, which the router holds, rather than its
         // data token, which reaches every tenant: an app creating tenants
         // needs the router's token alone.
@@ -118,9 +153,12 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Post, ["tenants", t, "query"]) => tenants
             .get(t)
             .map(|tenant| crate::admin_query(&tenant, cfg, req)),
-        (Method::Post, ["tenants", t, "freeze"]) => tenants
-            .freeze(t)
-            .map(|_| Response::json(200, "{\"frozen\":true}")),
+        (Method::Post, ["tenants", t, "freeze"]) => tenants.freeze_as(t).map(|id| {
+            Response::json(
+                200,
+                format!("{{\"frozen\":true,\"instance\":{}}}", instance::json(id)),
+            )
+        }),
         (Method::Post, ["tenants", t, "thaw"]) => tenants
             .thaw(t)
             .map(|_| Response::json(200, "{\"frozen\":false}")),
@@ -149,15 +187,16 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 ),
             )
         }),
-        (Method::Put, ["tenants", t, "file"]) => tenants
-            .import(t, &req.body)
-            .and_then(|_| tenants.get(t))
-            .map(|tenant| {
+        (Method::Put, ["tenants", t, "file"]) => proposed(req)
+            .and_then(|id| tenants.import_as(t, &req.body, id))
+            .and_then(|id| tenants.get(t).map(|tenant| (tenant, id)))
+            .map(|(tenant, id)| {
                 Response::json(
                     201,
                     format!(
-                        "{{\"imported\":\"{t}\",\"lineage\":{}}}",
-                        lineage_json(&tenant)
+                        "{{\"imported\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
+                        lineage_json(&tenant),
+                        instance::json(id)
                     ),
                 )
             }),
@@ -173,11 +212,14 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 // Its lineage, which the router records: another file of
                 // the tenant, promoted by force, is of one of its own.
                 let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
+                // The identity the promotion gave it, which the router
+                // records ([`Tenants::promote_as`]).
+                let instance = instance::json(tenants.instance(t));
                 Response::json(
                     200,
                     format!(
                         "{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\",\
-                         \"lineage\":{lineage}}}"
+                         \"lineage\":{lineage},\"instance\":{instance}}}"
                     ),
                 )
             }),
@@ -186,10 +228,22 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // tenant follows the node its primary is on, where the router
         // placed its replica.
         (Method::Post, ["tenants", t, "follow"]) => {
-            match superseded(tenants, req).and_then(|_| from(&req.body)) {
-                Ok((from, lineage)) => tenants
-                    .follow_lineage(t, from.as_deref(), lineage)
-                    .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
+            match superseded(tenants, req)
+                .and_then(|_| from(&req.body))
+                .and_then(|f| proposed(req).map(|id| (f, id)))
+            {
+                Ok(((from, lineage, named), id)) => {
+                    match tenants.follow_as(t, from.as_deref(), lineage, id, named.as_deref()) {
+                        Ok(id) => Ok(Response::json(
+                            200,
+                            format!(
+                                "{{\"following\":\"{t}\",\"instance\":{}}}",
+                                instance::json(id)
+                            ),
+                        )),
+                        Err(kept) => judged(t, kept),
+                    }
+                }
                 Err(e) => Err(e),
             }
         }
@@ -221,18 +275,51 @@ pub fn schema_description(fennecql: &str) -> Result<String, String> {
     Ok(d)
 }
 
-/// The `from` of a follow's body, when it has one.
-/// A follow's body: the node to follow, and the lineage its tenant must be
-/// of (`"lineage": "<8 hex>"`), a router's read replica told which tenant
-/// it copies.
-fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
+/// The identity a router proposes for the file its call makes or changes
+/// (`Fennec-Instance`), which it notes where the answer does not reach it.
+fn proposed(req: &Request) -> Result<Option<u64>, Refused> {
+    match req.header(instance::HEADER) {
+        None => Ok(None),
+        Some(v) => instance::parse(v)
+            .map(Some)
+            .ok_or_else(|| Refused(400, format!("{} is 16 hex digits", instance::HEADER))),
+    }
+}
+
+/// A reclaim's or a follow's refusal: the node's judgment that the file is
+/// not the one named, answered 409 with what it carries (`null`, none) --
+/// which a router tells from any other refusal by that field -- or the
+/// refusal it was.
+fn judged(t: &str, kept: Kept) -> Result<Response, Refused> {
+    match kept {
+        Kept::Refused(r) => Err(r),
+        // The name passed `check_name`: nothing in it to escape.
+        Kept::Other(had) => Ok(Response::json(
+            409,
+            format!(
+                "{{\"error\":\"tenant `{t}`'s file is not the one named: it carries \
+                 {}\",\"instance\":{}}}",
+                had.map_or("no identity".into(), instance::text),
+                instance::json(had)
+            ),
+        )),
+    }
+}
+
+/// A follow's body: the node to follow, the lineage its tenant must be of
+/// (`"lineage": "<8 hex>"`), a router's read replica told which tenant it
+/// copies, and the identities the file must carry (`"instances"`), a
+/// router's word on a file it placed and finds there.
+type FollowBody = (Option<String>, Option<u32>, Option<Vec<u64>>);
+
+fn from(body: &[u8]) -> Result<FollowBody, Refused> {
     let text = String::from_utf8_lossy(body);
     if text.trim().is_empty() {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
     let fields = fennec_core::json::parse_object(&text)
         .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
-    let (mut from, mut lineage) = (None, None);
+    let (mut from, mut lineage, mut named) = (None, None, None);
     for (k, v) in fields {
         match (k.as_str(), v) {
             ("from", fennec_core::prelude::Value::Text(url)) => from = Some(url),
@@ -242,10 +329,11 @@ fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
                         .ok_or_else(|| Refused(400, "`lineage` is 8 hex digits".into()))?,
                 )
             }
+            ("instances", v) => named = Some(instance::ids_of(v).map_err(|e| Refused(400, e))?),
             _ => {}
         }
     }
-    Ok((from, lineage))
+    Ok((from, lineage, named))
 }
 
 /// A promotion's body: the lineage the tenant is of (`"lineage": "<8

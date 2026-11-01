@@ -975,6 +975,7 @@ impl Archive {
     pub fn restore(&self, out: &Path, to: Target) -> io::Result<Restored> {
         // Through a link, the file it leads to (`fennec_core::fs::resolved`),
         // as an open writes it: renamed over, the link would be another file.
+        let given = out;
         let out = &fennec_core::fs::resolved(out);
         let tmp = out.with_extension("restoring");
         let r = self.assemble(&tmp, to)?;
@@ -995,8 +996,10 @@ impl Archive {
             .map_err(|e| io::Error::other(e.to_string()))?;
         drop(db);
         // A log left beside `out` by a database there before would be
-        // another file's (`fennec_core::fs`): gone before the rename.
+        // another file's (`fennec_core::fs`): gone before the rename. So is
+        // a node's identity of a tenant file there (`crate::instance`).
         fennec_core::fs::forget_sync_log(out)?;
+        crate::instance::put_away_beside(given)?;
         fs::rename(&tmp, out)?;
         // Durable once it returns: lost to a crash, the file a server is
         // started on next was whatever was there before.
@@ -1423,6 +1426,7 @@ fn verify_probe() -> PathBuf {
 pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<u64> {
     // A file through a link is the one it leads to, as a restore's.
     let resolved = fennec_core::fs::resolved(out);
+    let given = out;
     let out = match out.is_dir() {
         true => out,
         false => &resolved,
@@ -1460,6 +1464,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         f.write_all(&bytes)?;
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(out)?;
+        crate::instance::put_away_beside(given)?;
         fs::rename(&tmp, out)?;
         sync_dir_of(out)?;
     }
@@ -1470,6 +1475,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
 /// `out`: the database file it holds.
 pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     // A file through a link is the one it leads to, as a restore's.
+    let given = out;
     let out = &fennec_core::fs::resolved(out);
     let bytes = seal::open_whole(key, &fs::read(sealed)?)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
@@ -1481,6 +1487,7 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
         .change_seq();
     File::open(&tmp)?.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
+    crate::instance::put_away_beside(given)?;
     fs::rename(&tmp, out)?;
     sync_dir_of(out)?;
     Ok(seq)
