@@ -1907,11 +1907,12 @@ impl Router {
             }
             let keep = match req.segments().first() {
                 Some(&"t") => {
-                    // The client's socket, for a held request to watch: not
+                    // The client, for a held request to watch through its
+                    // TLS where it speaks it ([`Conn::peer`]): not
                     // where the reader holds bytes of its next request, a
                     // client that has gone having sent none (`upstream`'s
                     // `answered_or_gone`).
-                    let watch = reader.buffer().is_empty().then(|| conn.socket());
+                    let watch = reader.buffer().is_empty().then_some(&conn);
                     self.forward(&req, &mut out, arrived, peer, relayed, watch)
                 }
                 Some(&"_replication") => {
@@ -1990,7 +1991,7 @@ impl Router {
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
-        watch: Option<&TcpStream>,
+        watch: Option<&Conn>,
     ) -> bool {
         let head_only = req.method == Method::Head;
         // A forwarded request is traced, the rest of the router's are not:
@@ -2242,7 +2243,7 @@ impl Router {
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
-        (watch, held): (Option<&TcpStream>, Duration),
+        (watch, held): (Option<&Conn>, Duration),
         tenant: &str,
         node: &str,
         ended: std::io::Error,
@@ -2925,8 +2926,14 @@ impl Router {
             return false;
         }
         let _ = out.set_read_timeout(None);
-        if let Ok(mut stream) = answer.into_stream(&self.pool) {
-            let _ = std::io::copy(&mut stream, out);
+        let relayed = answer
+            .into_stream(&self.pool)
+            .and_then(|mut stream| std::io::copy(&mut stream, out));
+        // The node broke off, or the client did: over TLS no
+        // `close_notify` after, so the client reads the stream as cut
+        // short, as it is, where the node's own end is sent as one.
+        if relayed.is_err() {
+            out.cut();
         }
         false
     }

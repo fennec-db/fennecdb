@@ -183,6 +183,51 @@ fn a_stream_is_relayed_over_tls_as_it_arrives() {
     }
 }
 
+/// A stream relayed to its end: the node's own end goes on as the
+/// router's `close_notify`, and a node that broke off -- its connection
+/// reset -- goes on as none, so the client reads the stream cut short.
+#[test]
+fn a_relayed_stream_s_end_is_a_close_notify_and_a_break_none() {
+    for reset in [false, true] {
+        let node = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = router_to(&node.local_addr().unwrap().to_string());
+        let mut client = dial(port);
+        client
+            .get_mut()
+            .write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: r\r\n\r\n")
+            .unwrap();
+        client.get_mut().flush().unwrap();
+        let mut node_conn = accepted(&node);
+        head(&mut node_conn);
+        node_conn
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                  event: seed\ndata: {}\n\n",
+            )
+            .unwrap();
+        let (h, _) = head(&mut client);
+        assert!(h.starts_with("HTTP/1.1 200"), "{h}");
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(line, "event: seed\n");
+        if reset {
+            crate::upstream::reset_on_close(node_conn.get_ref());
+        }
+        drop(node_conn);
+        let mut rest = Vec::new();
+        let ended = client.read_to_end(&mut rest);
+        match reset {
+            false => assert!(ended.is_ok(), "the node's end: {ended:?}"),
+            true => assert_eq!(
+                ended.map_err(|e| e.kind()),
+                Err(ErrorKind::UnexpectedEof),
+                "the node's reset"
+            ),
+        }
+    }
+}
+
 /// A plain request to the router's HTTPS port is answered 400 in the
 /// clear, naming the scheme.
 #[test]
@@ -197,4 +242,46 @@ fn plain_http_to_the_router_is_told_to_ask_over_https() {
     s.read_to_string(&mut got).unwrap();
     assert!(got.starts_with("HTTP/1.1 400 "), "{got}");
     assert!(got.contains(fennec_http::conn::PLAIN_TO_TLS), "{got}");
+}
+
+/// A held request's client ending its TLS with `close_notify`, and reading
+/// on, has its end passed on to the node, as a plain client's end is
+/// (`upstream::answered_or_gone`), and is answered what the node answers.
+/// The router's watch peeked the socket, where the alert's record read as
+/// bytes of a next request: it watched no more, and the node's held claim
+/// took a job for a client that had ended.
+#[test]
+fn a_held_request_s_close_notify_goes_on_to_the_node() {
+    let node = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = router_to(&node.local_addr().unwrap().to_string());
+    let mut client = dial(port);
+    let q = r#"{"query":"get jobs"}"#;
+    let req = format!(
+        "POST /t/acme/query HTTP/1.1\r\nHost: r\r\nFennec-Wait: 30000\r\n\
+         Content-Length: {}\r\n\r\n{q}",
+        q.len()
+    );
+    client.get_mut().write_all(req.as_bytes()).unwrap();
+    client.get_mut().flush().unwrap();
+    let mut node_conn = accepted(&node);
+    let (h, length) = head(&mut node_conn);
+    assert!(h.starts_with("POST /t/acme/query HTTP/1.1"), "{h}");
+    assert_eq!(body(&mut node_conn, length.unwrap()), q.as_bytes());
+    client.get_mut().close().unwrap();
+    // The router's connection shut for writing: the end the node reads
+    // from a client of its own.
+    let mut more = [0u8; 1];
+    match node_conn.read(&mut more) {
+        Ok(0) => {}
+        got => panic!("the client's close_notify never reached the node: {got:?}"),
+    }
+    let answer = r#"{"rows":[]}"#;
+    let out = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+        answer.len()
+    );
+    node_conn.get_mut().write_all(out.as_bytes()).unwrap();
+    let (h, length) = head(&mut client);
+    assert!(h.starts_with("HTTP/1.1 200"), "{h}");
+    assert_eq!(body(&mut client, length.unwrap()), answer.as_bytes());
 }

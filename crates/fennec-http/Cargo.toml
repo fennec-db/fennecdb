@@ -61,3 +61,8 @@ path = "tests/join_lists.rs"
 [[test]]
 name = "refused_counts"
 path = "tests/refused_counts.rs"
+
+# Apart: the count of failed handshakes is the process's own.
+[[test]]
+name = "tls_failures"
+path = "tests/tls_failures.rs"

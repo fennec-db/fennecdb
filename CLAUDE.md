@@ -497,7 +497,10 @@ no handshake runs on the accepting thread.
 alone](docs/design/http.md#tls)**, `--metrics` too, each handshake on its
 connection's thread within `Tls::handshake` (`conn::Conn::open`), a plain
 request a 400. Every route reads and writes the `&Conn`; without the flags
-it is the `TcpStream` it was, no allocation or dispatch added.
+it is the `TcpStream` it was, no allocation or dispatch added. A failed
+handshake is counted by reason and logged a minute apart at most; an end on
+purpose sends `close_notify`, the shutdown's too (`conn::end_all`), never
+after a failed write or `Conn::cut`.
 
 ### The HNSW graph
 
@@ -1031,9 +1034,10 @@ mark is dropped (`answer_out`), a relayed router's too once a hop before
 went whole (`relay_send`, `after_cut`'s `ran`): a 502. Every dial goes
 through `dial::resolve`, caching nothing; every body read allocates through
 `zeroed` and refuses an answer with no length. A held request watches its
-client for the head (`answered_or_gone`, `relay_send` at a relay): an end
-goes on to the node, never taken for gone; a reset lets the node's
-connection go.
+client for the head, over TLS through its session (`answered_or_gone`,
+`Conn::peer`; `relay_send` at a relay): an end, a `close_notify` too, goes
+on to the node, never taken for gone; a reset lets the node's connection
+go.
 
 **[A failover ends what the router has out to the node for the tenants it
 moved.](docs/design/router.md#failover-cuts)** `promote_on` has `Pool::cut`

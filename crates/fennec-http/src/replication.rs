@@ -688,11 +688,25 @@ impl Feed {
         }
     }
 
+    /// Wakes every stream waiting here to look again: the one shutdown
+    /// ending them ([`crate::conn::end_all`]).
+    fn nudge(&self) {
+        let _r = lock(&self.ring);
+        self.cv.notify_all();
+    }
+
     /// Waits until a write after `cursor` is on disk, the feed starts over,
     /// or `timeout` passes.
     pub(crate) fn wait(&self, cursor: u64, epoch: u64, timeout: Duration) {
+        self.wait_unless(cursor, epoch, timeout, || false)
+    }
+
+    /// [`Self::wait`], unless `ending()`, asked under the lock a nudge
+    /// takes ([`Self::nudge`]): a stream the one shutdown ends never
+    /// sleeps through the nudge that told it so.
+    fn wait_unless(&self, cursor: u64, epoch: u64, timeout: Duration, ending: fn() -> bool) {
         let r = lock(&self.ring);
-        if r.durable > cursor || r.epoch != epoch {
+        if r.durable > cursor || r.epoch != epoch || ending() {
             return;
         }
         let _ = self
@@ -1318,7 +1332,16 @@ fn stream(
     feed.sending(key, seq);
     let _stopped = Stopped(feed, key);
     let mut cursor = seq;
+    // The one shutdown wakes the stream to end it, its end over TLS a
+    // `close_notify`.
+    out.on_ending({
+        let feed = Arc::clone(feed);
+        move || feed.nudge()
+    });
     loop {
+        if crate::conn::ending() {
+            return;
+        }
         match feed.next(cursor, epoch, MESSAGE) {
             Next::Records(first, last, times, records) => {
                 let n = times.len() as u64;
@@ -1335,7 +1358,7 @@ fn stream(
             }
             Next::Nothing => {
                 feed.sent(key, cursor, true);
-                feed.wait(cursor, epoch, ALIVE);
+                feed.wait_unless(cursor, epoch, ALIVE, crate::conn::ending);
                 if feed.durable() <= cursor {
                     let alive = u64s(&[feed.seq(), feed.durable(), now_ms()]);
                     if message(&mut w, b'K', &[&alive])

@@ -1486,6 +1486,8 @@ fn serve_dir(
     loop {
         if !durability::wait_tick(tick, durability::shutdown_flag()) {
             fennec_http::waits::end_all(durability::HELD_GRACE);
+            // Each TLS connection ends with its `close_notify`.
+            fennec_http::conn::end_all(fennec_http::conn::END_GRACE);
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fennec_http::trace::flush(Duration::from_secs(2));

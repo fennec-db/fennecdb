@@ -55,9 +55,14 @@ pub enum Error {
     /// The peer's certificate was refused -- its chain, its name, its
     /// dates -- before anything of the caller's was sent.
     Certificate(String),
-    /// The handshake failed otherwise: an alert from the peer, no protocol
-    /// version or ALPN protocol in common, bytes that are not TLS.
+    /// The handshake failed otherwise: no protocol version, cipher suite or
+    /// ALPN protocol in common, bytes that are not TLS.
     Handshake(String),
+    /// The peer ended the handshake with an alert: it refused this side --
+    /// most often a server's certificate -- or was refused a connection
+    /// ([`REFUSAL`]). Told apart from [`Error::Handshake`] for a server to
+    /// count why its handshakes fail; said the same.
+    Alert(String),
     /// A certificate, key or name given to build a config or to dial is
     /// unusable.
     Config(String),
@@ -68,7 +73,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "{e}"),
             Error::Certificate(m) => write!(f, "certificate refused: {m}"),
-            Error::Handshake(m) => write!(f, "TLS handshake failed: {m}"),
+            Error::Handshake(m) | Error::Alert(m) => write!(f, "TLS handshake failed: {m}"),
             Error::Config(m) => write!(f, "{m}"),
         }
     }
@@ -112,7 +117,16 @@ impl Error {
                 "{peer}: {}",
                 rustls::Error::InvalidCertificate(c.clone())
             )),
-            other => Error::Handshake(format!("{peer}: {other}")),
+            other => Error::refused(other, peer),
+        }
+    }
+
+    /// rustls's error of a handshake that failed in the protocol: an alert
+    /// the peer sent, or the rest.
+    fn refused(e: &rustls::Error, peer: &str) -> Error {
+        match e {
+            rustls::Error::AlertReceived(_) => Error::Alert(format!("{peer}: {e}")),
+            _ => Error::Handshake(format!("{peer}: {e}")),
         }
     }
 }
@@ -554,7 +568,7 @@ impl Server {
             if let Err(e) = conn.process_new_packets() {
                 // The alert rustls queued for the client, then the error.
                 let _ = conn.write_tls(&mut sock);
-                return Err(Error::Handshake(format!("{}: {e}", sock_peer(&sock))));
+                return Err(Error::refused(&e, &sock_peer(&sock)));
             }
         }
         sock.set_read_timeout(None)?;
@@ -725,24 +739,32 @@ impl Read for TlsStream {
     }
 }
 
+/// What a peer did, looked at without waiting ([`TlsStream::peer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peer {
+    /// Nothing arrived, or records carrying no plaintext (a key update).
+    Quiet,
+    /// Plaintext waits to be read: the peer sent more.
+    Sent,
+    /// Its `close_notify`, or its end, came with no plaintext left before
+    /// it: closed, or done writing and still reading.
+    Ended,
+}
+
 impl TlsStream {
-    /// Whether the peer is gone, looked at without waiting: what has
-    /// arrived is taken in, and `true` once its `close_notify` or its end
-    /// came with no plaintext left to read -- a server's client gone while
-    /// its request is held. A socket's peek alone read a `close_notify`, a
-    /// record of bytes, as a client still there. The socket is left
-    /// blocking.
-    pub fn peer_gone(&mut self) -> io::Result<bool> {
-        let processed = |conn: &mut Conn| match conn {
-            Conn::Client(c) => c.process_new_packets(),
-            Conn::Server(c) => c.process_new_packets(),
-        };
-        let state = processed(&mut self.conn).map_err(invalid)?;
-        if state.plaintext_bytes_to_read() > 0 {
-            return Ok(false);
+    /// What the peer did, looked at without waiting: what has arrived is
+    /// taken in and read as TLS, so a `close_notify` -- a record of bytes
+    /// -- is the end it is, where a peek at the socket took it for bytes
+    /// of a next request. An error is a reset, or a record the session
+    /// cannot take (its alert sent back first): the peer can be answered
+    /// nothing more. The socket is left blocking.
+    pub fn peer(&mut self) -> io::Result<Peer> {
+        let state = self.processed()?;
+        if state.0 {
+            return Ok(Peer::Sent);
         }
-        if state.peer_has_closed() {
-            return Ok(true);
+        if state.1 {
+            return Ok(Peer::Ended);
         }
         self.sock.set_nonblocking(true)?;
         let got = match &mut self.conn {
@@ -753,12 +775,42 @@ impl TlsStream {
         let ended = match got {
             Ok(n) => n == 0,
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
-                return Ok(false)
+                return Ok(Peer::Quiet)
             }
             Err(e) => return Err(e),
         };
-        let state = processed(&mut self.conn).map_err(invalid)?;
-        Ok(state.plaintext_bytes_to_read() == 0 && (ended || state.peer_has_closed()))
+        let (plaintext, closed) = self.processed()?;
+        Ok(if plaintext {
+            Peer::Sent
+        } else if ended || closed {
+            Peer::Ended
+        } else {
+            Peer::Quiet
+        })
+    }
+
+    /// Whether the peer is gone, looked at without waiting ([`Self::peer`]
+    /// says [`Peer::Ended`]): a server's client gone while its request is
+    /// held.
+    pub fn peer_gone(&mut self) -> io::Result<bool> {
+        Ok(self.peer()? == Peer::Ended)
+    }
+
+    /// The records arrived, taken in: whether plaintext waits, and whether
+    /// the peer's `close_notify` came. A record refused has its alert sent
+    /// before the error.
+    fn processed(&mut self) -> io::Result<(bool, bool)> {
+        let state = match &mut self.conn {
+            Conn::Client(c) => c.process_new_packets(),
+            Conn::Server(c) => c.process_new_packets(),
+        };
+        match state {
+            Ok(s) => Ok((s.plaintext_bytes_to_read() > 0, s.peer_has_closed())),
+            Err(e) => {
+                let _ = self.flush_tls();
+                Err(invalid(e))
+            }
+        }
     }
 
     /// Whether records are queued that the socket has not taken: a write
@@ -1150,7 +1202,7 @@ mod tests {
         });
         let e = dial(&trusting(&ca), port, "localhost").unwrap_err();
         assert!(
-            matches!(e, Error::Handshake(_)) && e.to_string().contains("InternalError"),
+            matches!(e, Error::Alert(_)) && e.to_string().contains("InternalError"),
             "{e}"
         );
         refused.join().unwrap();
@@ -1173,7 +1225,7 @@ mod tests {
             let (sock, _) = listener.accept().unwrap();
             let mut s = server.accept(sock).unwrap();
             let mut c = dialed.join().unwrap();
-            assert!(!s.peer_gone().unwrap(), "{how}: quiet is not gone");
+            assert_eq!(s.peer().unwrap(), Peer::Quiet, "{how}: quiet is not gone");
             c.write_all(b"next").unwrap();
             c.flush().unwrap();
             // Plaintext waiting is a client there, however it ends after.
@@ -1183,7 +1235,7 @@ mod tests {
                 _ => c.get_ref().shutdown(std::net::Shutdown::Write).unwrap(),
             }
             thread::sleep(Duration::from_millis(50));
-            assert!(!s.peer_gone().unwrap(), "{how}: plaintext waits");
+            assert_eq!(s.peer().unwrap(), Peer::Sent, "{how}: plaintext waits");
             let mut got = [0u8; 4];
             s.read_exact(&mut got).unwrap();
             let started = Instant::now();

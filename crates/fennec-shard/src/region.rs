@@ -296,7 +296,7 @@ impl Router {
         req: &Request,
         headers: &[(&str, &str)],
         held: Duration,
-        client: Option<&std::net::TcpStream>,
+        client: Option<&fennec_http::conn::Conn>,
         taken: bool,
     ) -> std::io::Result<Answer> {
         let start = self.first_router(region, routers);

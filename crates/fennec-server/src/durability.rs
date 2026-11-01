@@ -320,6 +320,10 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // the nothing they found: left held, each was cut off with the process
     // and its worker learned of the shutdown from a broken connection.
     fennec_http::waits::end_all(HELD_GRACE);
+    // Then every TLS connection ends from its own thread with its
+    // `close_notify`, a stream woken to: cut by the exit with a TCP end
+    // alone, a TLS client read each as cut short.
+    fennec_http::conn::end_all(fennec_http::conn::END_GRACE);
     let before = std::mem::take(&mut *BEFORE_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()));
     for f in before {
         f();

@@ -52,6 +52,34 @@ fn tls_flags_go_together_and_are_read_at_the_start() {
     assert!(log.contains("absent.pem"), "{log}");
 }
 
+/// A key file open to other users is said at the start, its path and mode
+/// named and none of it; one open to its owner alone is not.
+#[cfg(unix)]
+#[test]
+fn a_key_open_to_others_is_warned_of() {
+    use std::os::unix::fs::PermissionsExt;
+    let pem = cert("server.pem");
+    let key = tmp("https-key", "server.key");
+    std::fs::copy(cert("server.key"), &key).unwrap();
+    let bytes = std::fs::read_to_string(&key).unwrap();
+    for (mode, warned) in [(0o644, true), (0o600, false)] {
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+        let server = start(&["--tls-cert", &pem, "--tls-key", key.to_str().unwrap()]);
+        let (_, log) = server.terminate();
+        assert_eq!(
+            log.contains("warning: --tls-key"),
+            warned,
+            "{mode:o}: {log}"
+        );
+        if warned {
+            assert!(log.contains("every user (mode 0644)"), "{log}");
+        }
+        for line in bytes.lines() {
+            assert!(!log.contains(line), "the key in the log: {log}");
+        }
+    }
+}
+
 /// `GET path` over TLS to `port`, trusting the test CA: the answer whole.
 fn get_tls(port: u16, path: &str) -> String {
     let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -123,6 +151,70 @@ fn serves_https_alone_and_pings_over_it() {
     let scrape = get_tls(port, "/_metrics");
     assert!(scrape.starts_with("HTTP/1.1 200"), "{scrape}");
     assert!(scrape.contains("fennec_"), "{scrape}");
+}
+
+/// Every TLS connection ends with its `close_notify`: one closed after its
+/// answer, and at the one shutdown a stream of changes, woken to end, and
+/// a connection waiting for its request. Each reads an end the server
+/// meant -- `read_to_end` is `Ok` -- where the exit's TCP end alone read as
+/// one cut short (rustls's `UnexpectedEof`).
+#[test]
+fn every_tls_end_is_a_close_notify_the_shutdown_s_too() {
+    let (pem, key) = (cert("server.pem"), cert("server.key"));
+    let file = tmp("https-close", "data.fennec");
+    let server = start(&[
+        "--tls-cert",
+        &pem,
+        "--tls-key",
+        &key,
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    let dial = || {
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let client = fennec_tls::Client::trusting_pem_file(Path::new(&cert("ca.pem"))).unwrap();
+        client.dial(s, "localhost").unwrap()
+    };
+    let q = r#"{"query":"create collection notes (t text)"}"#;
+    let mut made = dial();
+    write!(
+        made,
+        "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{q}",
+        q.len()
+    )
+    .unwrap();
+    let mut answer = Vec::new();
+    let ended = made.read_to_end(&mut answer);
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(ended.is_ok(), "{ended:?} after {answer}");
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+
+    let mut stream = std::io::BufReader::new(dial());
+    stream
+        .get_mut()
+        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
+    let mut events = String::new();
+    while !events.contains("event: seed") {
+        let mut line = String::new();
+        assert!(
+            std::io::BufRead::read_line(&mut stream, &mut line).unwrap() > 0,
+            "{events}"
+        );
+        events.push_str(&line);
+    }
+    // A connection whose handshake is done, its request not sent.
+    let mut waiting = dial();
+
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "{log}");
+    let mut rest = Vec::new();
+    let ended = stream.read_to_end(&mut rest);
+    assert!(ended.is_ok(), "the stream: {ended:?}\n{log}");
+    let ended = waiting.read_to_end(&mut rest);
+    assert!(ended.is_ok(), "the waiting connection: {ended:?}\n{log}");
 }
 
 /// A request over TLS is `"proto":"https"` in the audit log, a refusal

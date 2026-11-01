@@ -41,6 +41,7 @@ instances:
       - auto_compactions
       - connections
       - connections_refused
+      - tls_handshakes_failed
       - memory_bytes
       - vectors_unlinked
       # A file's server

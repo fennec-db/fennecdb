@@ -458,6 +458,7 @@ fn render(source: Source) -> String {
         CONNECTIONS.load(Ordering::Relaxed),
     );
     connections_refused(&mut out, "fennec_connections_refused_total");
+    handshakes_failed(&mut out, "fennec_tls_handshakes_failed_total");
     let held = crate::waits::totals();
     out.family(
         "fennec_held_requests",
@@ -620,6 +621,21 @@ pub fn connections_refused(out: &mut Text, name: &str) {
         .zip(REFUSALS)
     {
         out.sample(name, &[("reason", reason)], refused(r));
+    }
+}
+
+/// The connections to an HTTPS listener that ended before their handshake
+/// did, by why ([`crate::conn::Failed`]), as `name`: a node's family, and
+/// the router's under its own. Every reason 0 on a plain listener.
+pub fn handshakes_failed(out: &mut Text, name: &str) {
+    use crate::conn::{handshakes_failed, FAILURES};
+    out.family(
+        name,
+        "counter",
+        "Connections to an HTTPS listener (--tls-cert) that ended before their handshake did, by reason: timeout (none within 10 s), closed (the client left first, a TCP probe among them), alert (the client sent one, most often refusing the certificate), protocol (bytes not TLS, or no version, cipher suite or ALPN protocol in common), plain_http (a plain HTTP request, answered 400).",
+    );
+    for (why, reason) in FAILURES {
+        out.sample(name, &[("reason", reason)], handshakes_failed(why));
     }
 }
 

@@ -221,6 +221,12 @@ itself. No proxy goes in front.</p>
   <li><b>A bad file stops the start.</b> A file that cannot be read or parsed, or
     a key that is not the certificate's, is refused with exit code 2, before
     anything is opened.</li>
+  <li><b>Keep the key to its owner.</b> On Linux and macOS a key file that
+    other users can read is warned of at the start, its path and mode named:
+    <code>chmod 600</code> it, or <code>640</code> where root owns it and the
+    server reads it as its group. The server still starts, since Kubernetes
+    secret volumes (<code>0644</code>) and Docker secrets (<code>0444</code>)
+    mount keys that way by default.</li>
   <li><b>The listener speaks HTTPS alone.</b> TLS 1.2 and 1.3 (rustls, with
     ring), ALPN <code>http/1.1</code>, no client certificates. A plain HTTP
     request to it is answered 400, naming <code>https://</code>, and the start
@@ -254,7 +260,17 @@ itself. No proxy goes in front.</p>
 
 <details class="deep"><summary>Handshakes, refused connections, health checks and a proxy in front</summary>
 <p>Each handshake runs on its connection's own thread and is bounded at 10 s,
-so a client that stalls in it holds up no other.</p>
+so a client that stalls in it holds up no other. A handshake that fails is
+counted by reason in <code>fennec_tls_handshakes_failed_total</code>
+(<a href="/docs/monitoring">Monitoring</a>) and said in the log a minute apart
+at most, so a scan or a client with the wrong CA cannot fill the log.</p>
+
+<p>Every connection the server ends on purpose ends with TLS's
+<code>close_notify</code>: an answer with <code>Connection: close</code>, a
+kept-alive connection's end, a stream of changes or a replica's stream, and
+each open connection at a shutdown. A client reading a stream to its end can
+tell that end from one cut short. A connection whose write failed gets none,
+and neither does a stream the router relays from a node that broke off.</p>
 
 <p>A connection refused at <code>--max-connections</code>, or for which no
 thread can be made, is told a TLS <code>internal_error</code> alert, where plain

@@ -993,10 +993,61 @@ which `Conn::write_or_hold` finishes under the hold. A held request's
 client is looked at for its end (`waits`' `gone`): a peek read a
 `close_notify` as bytes, a client still there, so a TLS one takes in what
 arrived (`TlsStream::peer_gone`). The router's watch of a held request's
-client (`answered_or_gone`) `poll`s the socket beneath: a `close_notify`
-reads there as bytes of a next request, the client watched no longer and
-the claim let go at the node's next run or its wait's end, as a
-half-closed client's is.
+client (`answered_or_gone`) `poll`s the socket beneath and reads what moved
+through the session (`Conn::peer`, `TlsStream::peer`): a `close_notify` or
+an end is the client's end, passed on to the node; plaintext is a next
+request; a reset, or a record the session refuses, the client gone.
+Peeked as a plain socket is, the `close_notify` read as bytes of a next
+request, the router stopped watching, and a claim whose client had ended
+took a job answered to nobody
+([router.md](router.md#pooled-connections)).
+
+*A failed handshake leaves a trace.* `/_metrics` counts it by reason,
+`fennec_tls_handshakes_failed_total` (the router's
+`fennec_router_tls_handshakes_failed_total`): `timeout`, `closed` (a TCP
+probe among them), `alert` (the client's, most often its refusal of the
+certificate; `fennec_tls::Error::Alert`, told apart from the rest of
+`Handshake` for this), `protocol`, and `plain_http`. No label names a
+tenant: a handshake comes before any request. One process-wide counter a
+reason rather than a shard a thread, as `/_metrics`' requests have: a
+failure is a connection's once, after a handshake's milliseconds, and the
+refusals `accept` counts are kept so too. The log says one a minute apart
+at most (`conn::failed`), naming the client's address and what failed: a
+scan or a client given the wrong CA would write a line a connection.
+Before, a failed or timed-out handshake was dropped where it failed, with
+no line, count or audit entry.
+
+*Every end on purpose is a `close_notify`.* A TLS client reads a TCP end
+with none as a stream cut short (rustls's `UnexpectedEof`), so an end the
+server meant -- an answer with `Connection: close`, a kept-alive
+connection's end or idle timeout, an SSE stream's or a replica's -- sends
+one: `Secured`'s `Drop`, made non-blocking first, so a client reading
+nothing holds no thread at its end; one the socket has no room for is let
+go of. Not after a write failed (`Secured::noted`) nor where the caller
+cut the connection (`Conn::cut`, the router relaying a stream its node
+broke off): what went out may stop short, and a `close_notify` would vouch
+for it. rustls queues it after what a write left unsent, so it reaches the
+client only behind the whole answer. Every answer of the server's own
+states its length; the streams are framed. The one shutdown ends them too
+(`conn::end_all`, beside `waits::end_all`): each open TLS connection's read
+side is shut, so one waiting for its next request reads its end, and a
+stream waiting on its hub or its feed is woken by the waker it set
+(`Conn::on_ending`) and looks at `conn::ending()`; each thread then sends
+its own `close_notify`, its session its own, and the shutdown waits up to
+`END_GRACE` (500 ms) for them. The open connections are listed by
+descriptor, each let go of under the list's lock before it closes, so a
+shutdown never shuts a descriptor a new connection took
+(`every_tls_end_is_a_close_notify_the_shutdown_s_too`). Before, only a
+refused request's end sent one.
+
+*The key's file.* On Unix a key file open to more than its owner is said
+at the start, its path and mode, never a byte of it (`conn::warn_if_open`),
+by PostgreSQL's rule for its own key: its owner's alone, or its group's to
+read where root owns it. Warned, not refused as PostgreSQL and OpenSSH
+refuse: a Kubernetes secret volume mounts its files 0644 and Docker's
+secrets are 0444 unless told otherwise, inside a container no other user
+shares, and a server that would not start there would be worked around
+with a `chmod` in an entrypoint or a proxy's key rather than kept closed.
 
 *One write.* An answer's head and body went in one `writev`
 ([Parse cache](#parse-cache)); over TLS they go into the session as one
@@ -1047,7 +1098,12 @@ rustls's server half beside the client the importer took, and the
 listener's own code); `fennec-shard`, which took no TLS before, 4256 ->
 5113 KB (+857 KB, rustls, ring and Mozilla's roots whole), the price of
 serving its clients with no proxy in front. Built without `tls` the server
-is 4741 -> 4758 KB, one 16 KB page for `Conn`.
+is 4741 -> 4758 KB, one 16 KB page for `Conn`. The review's watch through
+the session, handshake counts, `close_notify` ends and key warning cost
+`fennec-server` 64 bytes (6 064 080 -> 6 064 144, inside its pages) and
+`fennec-shard` one 16 KB page (5 235 408 -> 5 251 968); the plain path
+gained a discriminant test in the router's watch and a relaxed load in a
+stream's wait, nothing on a request's.
 
 *Renewal* is a restart: the files are read once, at the start. A reload
 on a signal, the next connections taking the new certificate, is a

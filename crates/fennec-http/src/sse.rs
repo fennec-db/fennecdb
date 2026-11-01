@@ -108,11 +108,18 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// Wakes every stream waiting here to look again, the counter where it
+    /// is: the one shutdown ending them ([`crate::conn::end_all`]).
+    fn nudge(&self) {
+        let _g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
+    }
+
     /// Waits until it sees a counter greater than `after`. On timeout it
     /// returns as is -- the caller writes the keep-alive line.
     fn wait(&self, after: u64, timeout: Duration) -> u64 {
         let g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        if *g > after || self.is_closed() {
+        if *g > after || self.is_closed() || crate::conn::ending() {
             return *g;
         }
         let (g, _) = self
@@ -227,7 +234,7 @@ pub fn serve(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
-    hub: &Hub,
+    hub: &Arc<Hub>,
     req: &Request,
     who: &Who,
 ) {
@@ -395,8 +402,17 @@ pub fn serve(
     // a fresh token, then the stream again.
     let expires = who.scope().and_then(|s| s.expires_ms());
     let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
+    // The one shutdown wakes the stream to end it, its end over TLS a
+    // `close_notify` its client reads as the end it is.
+    out.on_ending({
+        let hub = Arc::clone(hub);
+        move || hub.nudge()
+    });
 
     loop {
+        if crate::conn::ending() {
+            return;
+        }
         if left().is_some_and(|l| l.is_zero()) {
             let _ = event(out, "error", EXPIRED);
             return;
