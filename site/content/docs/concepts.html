@@ -480,7 +480,10 @@ graph in one parallel pass.</p>
 
 <p>The core is written against Rust's standard library alone, with no
 outside packages. That keeps the WebAssembly module small and every line of
-it auditable.</p>
+it auditable. The one exception is TLS: the server and the shell take
+<a href="https://github.com/rustls/rustls">rustls</a>, with ring and
+Mozilla's roots, to reach PostgreSQL encrypted, and the browser module and
+the engine never do.</p>
 
 <details class="deep"><summary>Why there are no dependencies, and what it costs</summary>
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
@@ -497,9 +500,23 @@ the WebAssembly output — it has to stay small and auditable.</p>
 <code>fennec-ql</code>, which Cargo permits through a dev dependency, so tests
 can be written as real queries.</p>
 
+<p><b>TLS is the exception</b>, and the only one a shipped binary takes.
+Almost no Rust project writes TLS itself, and a TLS client of our own was
+judged too risky to trust with a password and a table's rows. It lives in
+one crate, <code>fennec-tls</code>: rustls 0.23 with ring rather than its
+default aws-lc-rs, which wants cmake, and webpki-roots, compiled in, so a
+static binary in an empty container still knows the public CAs. Twelve
+crates in all. The crates that take it take it behind a <code>tls</code>
+feature, on in <code>fennec-server</code> and <code>fennec</code>, so
+<code>--no-default-features</code> builds them with no outside crate at
+all; the engine, the parser and the browser module never reach it, and no
+other dependency comes in by that door. A check in CI,
+<code>tools/deps_check.py</code>, fails a change that breaks either rule.</p>
+
 <p><b>What it costs.</b> Every bug is ours, and so is every protocol detail:
 the HTTP server, the JSON reader, the JWT checks and the PostgreSQL client the
-importer reads with are all hand-written.</p>
+importer reads with are all hand-written — TLS beneath that client
+aside.</p>
 </details>
 
 <h2>Straight into the browser</h2>
@@ -654,8 +671,8 @@ should live.</p>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
 <tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">332 KB gzip<br><small>the wasm module</small></td></tr>
-<tr><td>Command line</td><td>The <code>fennec</code> shell, <code>fennec import</code>, <code>fennec types</code>, <code>fennec backup</code> and <code>restore</code></td><td class="n">1880–3013 KB</td></tr>
-<tr><td>Server</td><td><code>fennec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.99 MB image</td></tr>
+<tr><td>Command line</td><td>The <code>fennec</code> shell, <code>fennec import</code>, <code>fennec types</code>, <code>fennec backup</code> and <code>restore</code></td><td class="n">2091–4355 KB</td></tr>
+<tr><td>Server</td><td><code>fennec-server</code>: HTTP, replication and tenants in one process</td><td class="n">7.00 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fennec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
 </table>

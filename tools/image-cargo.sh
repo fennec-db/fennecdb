@@ -55,8 +55,18 @@
 #
 # Not followed yet: what a build script reads when it runs, which cargo
 # tracks by mtime alone (its rerun-if-changed), and files a proc-macro opens
-# itself. No crate here has a build script, and one is refused below until
-# the check holds its runs too; a proc-macro's own compile is checked as any.
+# itself. No workspace crate has a build script, and one is refused below
+# until the check holds its runs too; a proc-macro's own compile is checked
+# as any. Three crates.io crates' build scripts are taken, each by name and
+# version (the list below) -- ring's, which compiles its C and assembly,
+# libc's and rustls's, which probe the compiler (TLS, fennec-tls,
+# docs/design/crates.md#zero-dependencies): each was read, and reads its
+# own files, which Cargo.lock's checksum fixes and the registry never
+# changes, and the environment, which cargo tracks by value, so the
+# context's old mtimes, what this script guards against, never reach its
+# run. Its compile is held to its record as any unit's. Any other build
+# script is refused, a registry crate's too: a new one is code run at the
+# build that no one read.
 set -eu
 
 # ---------------------------------------------------------------- wrapper
@@ -129,18 +139,52 @@ bins=''
 # One line a unit, fresh or compiled now: every one the binaries are made of.
 while IFS= read -r m; do
     case $m in *'"reason":"compiler-artifact"'*) ;; *) continue ;; esac
+    exe=$(printf '%s\n' "$m" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
     case $m in
     *'"kind":["custom-build"]'*)
-        printf 'image-cargo: %s has a build script, which the check does not follow yet:\n' \
-            "$(printf '%s\n' "$m" | sed -n 's/.*"package_id":"\([^"]*\)".*/\1/p')" >&2
-        echo "image-cargo: what it reads when it runs, cargo tracks by mtime alone. Have" \
-            "tools/image-cargo.sh hold each run's inputs (cargo's build-script-executed" \
-            "messages name its out_dir, whose output lists them) before adding one." >&2
-        exit 1
+        package=$(printf '%s\n' "$m" | sed -n 's/.*"package_id":"\([^"]*\)".*/\1/p')
+        # crates.io's, name@version: the scripts read and found to read only
+        # their own files and the environment. Bumping one of them (cargo
+        # update, a new rustls) means reading its build.rs at the new version
+        # and then writing the version here; `cargo metadata
+        # --filter-platform x86_64-unknown-linux-musl` lists the packages
+        # with a `custom-build` target.
+        case $package in
+        'registry+https://github.com/rust-lang/crates.io-index#ring@0.17.14' | \
+            'registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46' | \
+            'registry+https://github.com/rust-lang/crates.io-index#libc@0.2.189') ;;
+        registry+*)
+            printf 'image-cargo: %s has a build script no one read at this version:\n' \
+                "$package" >&2
+            echo "image-cargo: read its build.rs, and if it reads only its own files and the" \
+                "environment, add it by name and version in tools/image-cargo.sh." >&2
+            exit 1
+            ;;
+        *)
+            printf 'image-cargo: %s has a build script, which the check does not follow yet:\n' \
+                "$package" >&2
+            echo "image-cargo: what it reads when it runs, cargo tracks by mtime alone. Have" \
+                "tools/image-cargo.sh hold each run's inputs (cargo's build-script-executed" \
+                "messages name its out_dir, whose output lists them) before adding one." >&2
+            exit 1
+            ;;
+        esac
+        # Cargo names the script by a hard link, build-script-build, beside
+        # the unit it compiled, build_script_build-<hash>.
+        script=$(printf '%s\n' "$m" | grep -oE '"[^"]*/build-script-build"' | head -n 1)
+        script=${script#\"}
+        script=${script%\"}
+        [ -n "$script" ] || fail "cannot tell which build script this is: $m"
+        unit=$(find "${script%/*}" -maxdepth 1 -type f -name 'build_script_build-*' ! -name '*.d' | head -n 1)
+        unit=${unit##*/}
+        ;;
+    *)
+        unit=''
         ;;
     esac
-    exe=$(printf '%s\n' "$m" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
-    if [ -n "$exe" ]; then
+    if [ -n "$unit" ]; then
+        :
+    elif [ -n "$exe" ]; then
         # A binary is a hard link out of deps/ to the unit that made it.
         unit=$(find "${exe%/*}/deps" -maxdepth 1 -type f -inum "$(stat -c %i "$exe")" | head -n 1)
         unit=${unit##*/}

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One version wherever a release reads it: `make version V=0.1.5`.
 
-The workspace's version and fennec-wire's where the workspace names it, the
+The workspace's version and fennec-wire's and fennec-tls's where the workspace
+names them, the
 Python package's, the npm packages' and their lock files, NuGet's FennecDb, and
 the image the README pulls -- site/build.py holds the README to the
 workspace, and packages.yml refuses a release whose packages say another
@@ -30,6 +31,7 @@ def main():
     v = sys.argv[1]
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     sub("Cargo.toml", r'^(fennec-wire = \{ version = )"[^"]+"', rf'\g<1>"{v}"')
+    sub("Cargo.toml", r'^(fennec-tls = \{ version = )"[^"]+"', rf'\g<1>"{v}"')
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json",
                  "integrations/grafana/package.json"):

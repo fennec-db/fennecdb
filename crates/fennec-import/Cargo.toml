@@ -18,6 +18,12 @@ fennec-wire.workspace = true
 # `--where` and `--index` are read by FennecQL's own parser (`args`).
 fennec-ql.workspace = true
 
+[features]
+default = ["tls"]
+# TLS to PostgreSQL (`sslmode`), fennec-wire's: rustls and ring
+# (docs/design/crates.md#zero-dependencies).
+tls = ["fennec-wire/tls"]
+
 [[test]]
 name = "all"
 path = "tests/all.rs"

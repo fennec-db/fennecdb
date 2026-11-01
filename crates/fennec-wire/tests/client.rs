@@ -9,7 +9,7 @@
 //! `make import-test`'s.
 
 use fennec_http::crypto::*;
-use fennec_wire::client::{Client, Url};
+use fennec_wire::client::{Client, SslMode, Url};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -281,6 +281,9 @@ fn url(port: u16, password: Option<&str>) -> Url {
         host: "127.0.0.1".into(),
         port,
         database: "fennec".into(),
+        // The stand-in takes no SSLRequest; tests/tls.rs's does.
+        sslmode: SslMode::Disable,
+        sslrootcert: None,
     }
 }
 

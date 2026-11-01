@@ -583,7 +583,7 @@ rclone sync r2:backups/archive ./archive && fennec verify ./archive
 fennec restore ./archive before.fennec --to 2026-09-22T10:14:59Z</pre>
 
 <details class="deep"><summary>How a bucket copy stays consistent</summary>
-<p>fennecdb speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
+<p>fennecdb's HTTP speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
 archive goes there the way any directory does: a sync tool beside the
 archiver.</p>
 

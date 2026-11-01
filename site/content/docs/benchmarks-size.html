@@ -48,16 +48,17 @@ server, the client alone in its bundle.</p>
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fennec-cli</code>, default</td><td class="n">3013 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">2400 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import, backup or MCP</td><td class="n">2236 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1880 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>cargo build --release -p fennec-cli</code>, default</td><td class="n">4355 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">3357 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import, backup or MCP</td><td class="n">2479 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>2091 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>cargo build --release -p fennec-server</code>, default</td><td class="n">5776 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>807 KB</b></td><td class="n"><b>275 KB</b></td><td class="n">332 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">588 KB</td><td class="n">204 KB</td><td class="n">244 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">528 KB</td><td class="n">181 KB</td><td class="n">216 KB</td></tr>
 <tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">213 KB</td><td class="n">55 KB</td><td class="n">60 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">32 KB</td><td class="n">10 KB</td><td class="n">11 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">7.00 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
@@ -87,6 +88,16 @@ dashes.</p>
 a connection thread that panics unwinds and takes down only its own session,
 and the server stays up. The <code>cli</code> profile turns panic unwinding
 into abort, which is right for a single process with nothing to recover.</p>
+
+<p><b>TLS is the largest part a default build adds.</b> rustls, ring and
+Mozilla's roots, there to reach PostgreSQL encrypted (<a
+href="import.html#tls">TLS</a>), are 1035 KB of <code>fennec-server</code>
+and 730 KB of <code>fennec</code> as a release builds it, where the
+<code>cli</code> profile builds them for size. The <code>tls</code> feature
+is a default one: <code>--no-default-features</code> leaves it out with
+the rest, and the binaries then take no crate from outside the workspace
+(<a href="concepts.html#zero-dependencies">Zero dependencies</a>). The
+binaries are measured on macOS arm64, a KB 1024 bytes.</p>
 
 <p id="module-parts"><b>Where the module's bytes go.</b>
 <code>make size-report</code> builds the module with its function names

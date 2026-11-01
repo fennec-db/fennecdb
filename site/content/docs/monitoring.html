@@ -442,7 +442,7 @@ OTEL_SERVICE_NAME=orders-db fennec-server --file data.fennec \
 </pre>
 
 <ul>
-  <li><b>A collector on loopback.</b> fennecdb speaks no TLS, so the endpoint
+  <li><b>A collector on loopback.</b> The exporter speaks no TLS, so the endpoint
     is a collector on the same host or network — the OpenTelemetry
     Collector, the Datadog Agent's OTLP receiver, Grafana Alloy — which
     forwards over TLS: <a href="/docs/datadog#tracing">their setup</a>.</li>

@@ -28,8 +28,14 @@ name = "fennec-server"
 path = "src/main.rs"
 
 [features]
+default = ["tls"]
 # The HTTP endpoint's phase timings (`fennec-http`'s `timing`, `GET /_timing`).
 timing = ["fennec-http/timing"]
+# TLS to the PostgreSQL `--follow` mirrors (`sslmode`): rustls and ring,
+# the only dependencies from outside the workspace a shipped binary takes
+# (docs/design/crates.md#zero-dependencies). Without it, `--no-default-features`,
+# the server takes none.
+tls = ["fennec-import/tls"]
 
 [[test]]
 name = "all"

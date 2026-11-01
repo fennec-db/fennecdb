@@ -22,7 +22,7 @@ show that your install lacks is in the next one, and
 <tr><td><a href="#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
 <tr><td><a href="#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
-<tr><td><a href="#docker">The Docker image</a></td><td><code>fennec-server</code> alone, under 3 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
+<tr><td><a href="#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
 <tr><td><a href="#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language</td></tr>
 <tr><td><a href="#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
 </tbody>
@@ -102,7 +102,7 @@ page lists every file.</p>
 <h2 id="docker">The Docker image</h2>
 
 <p>The image holds <code>fennec-server</code> and nothing else: no shell, no
-libc, under 3 MB. Its data lives in <code>/data</code>, which the command
+libc, 7 MB. Its data lives in <code>/data</code>, which the command
 below keeps in a volume.</p>
 
 <pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \

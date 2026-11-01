@@ -396,3 +396,35 @@ fn count_respects_filter_and_limit() {
     };
     assert_eq!(fennec_import::pg::count_rows(&url(), &capped).unwrap(), 10);
 }
+
+/// TLS to a real PostgreSQL -- OpenSSL's side of the handshake, its session
+/// tickets and all -- the certificate held to the name against
+/// fennec-wire's test CA: the server `make pgvector-tls` turned TLS on in,
+/// as `make import-test` does. The session says it is encrypted.
+#[test]
+#[ignore]
+#[cfg(feature = "tls")]
+fn verify_full_speaks_tls_to_a_live_server() {
+    let mut u = url();
+    u.host = "localhost".into();
+    u.sslmode = fennec_wire::client::SslMode::VerifyFull;
+    u.sslrootcert = Some(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fennec-wire/tests/certs/ca.pem"
+        )
+        .into(),
+    );
+    let mut c = Client::connect(&u)
+        .unwrap_or_else(|e| panic!("{e} (is TLS on in the server? make pgvector-tls)"));
+    let r = c
+        .query("select ssl, version from pg_stat_ssl where pid = pg_backend_pid()")
+        .unwrap();
+    assert_eq!(r.rows[0][0].as_deref(), Some("t"), "{:?}", r.rows);
+    let version = r.rows[0][1].as_deref().unwrap_or_default();
+    assert!(version.starts_with("TLSv1."), "{:?}", r.rows);
+    // The address is not the name the certificate holds.
+    u.host = "127.0.0.1".into();
+    let e = Client::connect(&u).unwrap_err().to_string();
+    assert!(e.contains("not valid for name"), "{e}");
+}

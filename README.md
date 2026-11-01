@@ -8,7 +8,8 @@ with the server, many clients writing into one file through one writer
 and sharing their disk syncs, a server that usually needs no cache in front of it,
 a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
-Written in Rust with no dependencies, it runs inside a web page as 332 KB of
+Written in Rust with no dependencies but TLS's (rustls, in the server and the
+shell), it runs inside a web page as 332 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FennecQL**).
@@ -241,9 +242,9 @@ the writes on the primary's disk, serves reads, refuses writes with 403, and
 is promoted by hand; `fennec backup`, `fennec archive` and `fennec restore --to
 <time>` take a running database whole, keep its writes, and rebuild it as it
 stood at a moment -- with `--tenants`, every tenant of a `--dir` node over
-one connection. With `--follow postgres://...` it mirrors a PostgreSQL
-table into its file as the table commits, and serves the mirror while it
-follows. [Server](https://fennecdb.com/docs/server) ·
+one connection. With `--follow postgres://...?sslmode=verify-full` it
+mirrors a PostgreSQL table into its file as the table commits, over TLS,
+and serves the mirror while it follows. [Server](https://fennecdb.com/docs/server) ·
 [HTTP endpoint](https://fennecdb.com/docs/http) ·
 [Replication](https://fennecdb.com/docs/replication).
 
@@ -266,7 +267,7 @@ that no acknowledged write was lost.
 [Read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas) ·
 [Deploying it](deploy/RUNBOOK.md).
 
-**Container.** 2.99 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 7.00 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -330,7 +331,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **No cache in front** | the file is mapped, so the operating system keeps the pages in use in memory and fennecdb copies none into a buffer pool of its own: a separate cache in front of `fennec-server` is usually unnecessary while the working set fits in memory. On YCSB in Docker against Redis 7.4, the same durability mode against the same, Redis does more operations a second in none of the 33 cells measured both ways (A to F at 1, 4 and 16 clients, durable and buffered; C, which writes nothing, buffered alone): fennec-server's C at 16 clients, buffered, is 18.4 k against Redis's 14.0 k, and its B, durable, 18.2 k against 9.25 k (one node over Docker's network, 1 KB records; a cache nearer the app than the database is not measured; about a database's reads, not an HTTP or CDN response cache — [the figures and their conditions](https://fennecdb.com/docs/redis#cache-in-front)) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize distance within` + plugins |
 | **Vector search** | `near` over `vector<N[, f16]>` (HNSW, with `int8` and `bit` codes; exact by dot product over a `sparse<N>` such as SPLADE's), by `cosine`, `l2` or `dot` · `rerank` (exact vector reordering of `match` candidates, no graph needed) · `fuse` (`match` and `near` ranking together, by reciprocal rank) |
-| **Interfaces** | FennecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
+| **Interfaces** | FennecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL, over TLS checked as libpq's `sslmode` says |
 | **Agents** | an MCP server (`fennec-server --mcp`, `fennec mcp` over stdio): `schema`, `search` (words, an embedding, or both fused), `query`, `get`, and `write` and a memory (`remember`, `recall`) where asked for, and a `call_<name>` tool for each named statement the token may call, typed by its signature, held to the token's rules |
 | **Integrations** | `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams · LangChain and LlamaIndex vector stores, each passing its framework's own tests |
 | **Access** | a server token · HS256, RS256 and ES256 JSON Web Tokens (JWKS, rotated by `kid`) held to [the issuer and audience you name](https://fennecdb.com/docs/http-access#whom-a-token-is-for) and to a policy, down to the rows (`owner = $jwt.sub`, a provider's own claims such as `$jwt."cognito:groups"`) and the fields each row shows · a refused token waiting longer each time · an audit log of refusals, schema changes and admin actions |
@@ -340,7 +341,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fennecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fennecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 332 KB gzip wasm + 65 KB gzip client, or the client alone (`@fennecdb/web/client`) · 1880–3013 KB binary · 2.99 MB container image |
+| **Runtime size** | 332 KB gzip wasm + 65 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.00 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 
@@ -350,7 +351,7 @@ SQL dialect (SQL's everyday spellings are read as FennecQL) and no PostgreSQL
 wire protocol, no join of arbitrary conditions (a JOIN on an indexed key is
 a `lookup`, and an uncorrelated `in (get ...)` a filter),
 no change of a field's type in place, no multi-writer replication, no decimal
-type, no TLS (a terminator goes in front) — is listed
+type, no TLS on its own port (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fennecdb.com/docs/limits), alongside every
 ceiling baked into the code. Relations are `lookup`, which attaches a
 collection's matching documents to the row they belong to with a `limit` that

@@ -11,10 +11,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-# No external dependencies: the framing is written by hand, and SCRAM's
-# hashing is fennec-http's.
+# No external dependency of its own: the framing is written by hand, and
+# SCRAM's hashing is fennec-http's. TLS (`sslmode`) is fennec-tls's, behind
+# the `tls` feature: built without it, `prefer` speaks plain text, as libpq
+# built without SSL does, and `require` and the `verify-*` modes are refused.
 fennec-core = { workspace = true, features = ["std-fs", "full"] }
 fennec-http.workspace = true
+fennec-tls = { workspace = true, optional = true }
+
+[features]
+default = ["tls"]
+tls = ["dep:fennec-tls"]
 
 [[test]]
 name = "all"
