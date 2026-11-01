@@ -1647,7 +1647,9 @@ export class Call {
 function given(v, what) {
   if (v === undefined || v === null) return undefined;
   if (!isSpec(v)) throw new FennecError(`a call's ${what} are an object of values by name`);
-  return v;
+  // A copy, as every other SDK's builder takes: a frozen call is not
+  // changed by the object it was given changing after.
+  return { ...v };
 }
 
 /**
