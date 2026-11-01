@@ -116,6 +116,7 @@ the words it begins — what a search box needs as someone types into it.</p>
 get products match title $1 prefix limit 10            -- "datab" finds "database", "databases"
 get products match title $1 fuzzy prefix limit 10      -- both, the last word a misspelt beginning
 get products match title $1 fuzzy 1 limit 10           -- one edit at most
+get products where category = $1 match title $2 fuzzy prefix limit 20   -- a search box inside one category
 </pre>
 
 <ul>
@@ -124,6 +125,10 @@ get products match title $1 fuzzy 1 limit 10           -- one edit at most
     <code>fuzzy 0</code> none.</li>
   <li><b>A word as typed ranks first.</b> A document holding the word
     itself scores more from it than one holding only a word near it.</li>
+  <li><b>A <code>where</code> narrows the search</b> as it does any
+    <code>match</code>: the rows it keeps are the ones ranked, tested as
+    the postings merge, so a category, a price or a tenant's rows cost no
+    second pass.</li>
   <li><b>A word reaches 10 000 words of the index at most</b>, and the query
     is refused past that rather than cut — a prefix of one letter over a
     large vocabulary is.</li>

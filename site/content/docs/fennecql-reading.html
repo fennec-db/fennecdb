@@ -1,6 +1,6 @@
 <!--
 title: Reading data — FennecQL — fennecdb
-description: Reading with FennecQL: get, select, where, order, limit and offset, pages that take parameters, ordering by an expression, columns worked out, functions over a row (bucket and time zones, greatest, least, case), count and explain.
+description: Reading with FennecQL: get, select, where, order, limit and offset, pages that take parameters, a list in one parameter (in $1), ordering by an expression, columns worked out, functions over a row (bucket and time zones, greatest, least, case), count and explain.
 -->
 
 <h1>Reading data</h1>
@@ -107,6 +107,61 @@ for, as a number written is. <code>/_stats/statements</code> counted a page size
 written in as a place already, <code>limit $3</code>; the parse cache
 (<code>POST /query</code>, 16 shards of 64, a shard emptied when full)
 kept a text a page.</p>
+</details>
+
+<h2 id="list-parameters">A list in one parameter</h2>
+
+<p><code>in $1</code> takes the list a parameter holds: a cart's ids, the
+teams a user is in, the tags a page's filter picked. The statement is one
+text however many values there are, and the client hands the list as one
+JSON array. It answers what the list written out with a parameter a value
+answers — <code>in [$1, $2, $3]</code> — row for row, through the same
+plan; <code>not in $1</code> keeps the rows the list does not hold.</p>
+
+<pre data-lang="fennecql">get products where id in $1
+get orders where status in $1 and customer = $2 order placed desc limit 20
+del cart_items where cart = $1 and product not in $2
+</pre>
+
+<pre data-lang="text">POST /query
+{"query": "get products where id in $1", "params": [[12, 7, 16777217]]}
+</pre>
+
+<ul>
+  <li><b>An index takes the list.</b> On <code>id</code>, a
+    <code>@hash</code> or <code>@unique</code> field, or the first field of
+    an <a href="fennecql-indexes.html#composite">index over several</a>,
+    each value is a bucket of the index, as it is for a list written out;
+    <code>explain</code> names the index.</li>
+  <li><b>Its numbers are read as written.</b> A list of numbers sent as a
+    parameter is read elsewhere as a vector's 32-bit floats, where 16777217
+    is 16777216 and 0.1 is 0.100000001; an <code>in $1</code> list is read
+    as its JSON says, every 64-bit integer and every float as a
+    64-bit one — on a server, in the browser module and in an app's
+    library alike.</li>
+  <li><b>It holds at most 100 000 values,</b> as an <a
+    href="fennecql-lookup.html#subqueries"><code>in (get …)</code></a>
+    list does; a longer one is refused, never cut short. A parameter that
+    is not a list is refused naming the form — <code>`in $1` takes a list,
+    and $1 is of type int</code> — and an empty list matches no row, as
+    <code>in []</code> does.</li>
+  <li><b>From SQL,</b> PostgreSQL's <code>x = ANY($1)</code> is <code>x in
+    $1</code> and <code>x &lt;&gt; ALL($1)</code> is <code>x not in
+    $1</code>; <code>x IN ($1)</code> stays SQL's list of one value (<a
+    href="/docs/sql">From SQL</a>).</li>
+</ul>
+
+<details class="deep"><summary>How a list parameter is read</summary>
+<p>The statement keeps the parameter's place, never its values, so the
+parse cache (<code>POST /query</code>) holds one text for every list,
+where a list written out was a text per length — and past 1 024 bytes,
+some 150 ids, parsed again at every request. Before the query runs the
+list is put in the filter's place as the list written out would be, its
+values the items, so every index and every plan meets what it meets
+there. A list of numbers handed the quick way, as a vector's
+<code>f32</code>s, is read again from its JSON first: the server reads the
+body again, and the browser module asks the page to send that parameter
+as JSON.</p>
 </details>
 
 <h2 id="order-by-expression">Ordering by an expression</h2>

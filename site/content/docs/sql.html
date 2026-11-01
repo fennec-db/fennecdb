@@ -1,6 +1,6 @@
 <!--
 title: From SQL — fennecdb
-description: The SQL spellings FennecQL reads as written — CREATE TABLE and CREATE INDEX, INSERT … VALUES, UPDATE … SET, JOIN, IN (…), EXISTS, DISTINCT, BETWEEN, LIKE and ILIKE, ON CONFLICT, pgvector's <-> — each the statement it means, what is refused with the FennecQL to write instead, and where the meaning differs from SQL's: nulls, double quotes, text, joins.
+description: The SQL spellings FennecQL reads as written — CREATE TABLE and CREATE INDEX, INSERT … VALUES, UPDATE … SET, JOIN, IN (…), = ANY($1), EXISTS, DISTINCT, BETWEEN, LIKE and ILIKE, ON CONFLICT, pgvector's <-> — each the statement it means, what is refused with the FennecQL to write instead, and where the meaning differs from SQL's: nulls, double quotes, text, joins.
 -->
 
 <h1>From SQL</h1>
@@ -86,6 +86,8 @@ last expression.</p>
 <tr data-same><td><code>SELECT k, count(*) AS n FROM t GROUP BY k HAVING count(*) &gt; 1</code></td><td><code>get t select k, count(*) as n group k having count(*) &gt; 1</code></td><td></td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (1, 2, 3)</code></td><td><code>get t where x in [1, 2, 3]</code></td><td>through <code>@hash</code> as <code>in [..]</code> is</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x NOT IN ('a', 'b')</code></td><td><code>get t where not (x in ["a", "b"])</code></td><td>a null <code>x</code> is taken in (<a href="#nulls">below</a>)</td></tr>
+<tr data-same><td><code>SELECT * FROM t WHERE x = ANY($1)</code></td><td><code>get t where x in $1</code></td><td>one parameter holding the list, its numbers as written (<a href="/docs/fennecql-reading#list-parameters">a list in one parameter</a>); <code>x IN ($1)</code> is a list of one value, as in SQL</td></tr>
+<tr data-same><td><code>SELECT * FROM t WHERE x &lt;&gt; ALL($1)</code></td><td><code>get t where not (x in $1)</code></td><td>a null <code>x</code> is taken in, as with <code>NOT IN</code></td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT y FROM u WHERE z = 1)</code></td><td><code>get t where x in (get u select y where z = 1)</code></td><td>a <a href="/docs/fennecql-lookup#subqueries">subquery</a>, run once</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT DISTINCT y FROM u)</code></td><td><code>get t where x in (get u select y)</code></td><td><code>DISTINCT</code> changes nothing there</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x BETWEEN 1 AND 3 AND y = 2</code></td><td><code>get t where x &gt;= 1 and x &lt;= 3 and y = 2</code></td><td>both bounds in; the first <code>AND</code> is <code>BETWEEN</code>'s</td></tr>

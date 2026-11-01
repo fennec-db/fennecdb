@@ -20,7 +20,9 @@ whole clone, 2 KB of the browser module -- `NOT IN`, `NOT LIKE` `not`
 over the test, `IS [NOT] DISTINCT FROM` `!=` and `=`, `IS [NOT] TRUE`
 `[not] (x = true)`, `count(x)` the rows where `x` is not null
 (`Fold::add` skips a null for `Count` too, `count(*)` being handed `true`),
-`'it''s'` a quote (`Tok::Single`), `||` the `+` it lexes to, `NULLS
+`'it''s'` a quote (`Tok::Single`), `x = ANY($1)` `x in $1` and `x <>
+ALL($1)` `not (x in $1)` (grammar epoch 2, [below](#list-parameters)),
+`||` the `+` it lexes to, `NULLS
 FIRST`/`LAST` where it says what the order does, `values {..}, {..}` and
 `put t {..}, {..}` a list without its brackets, `ON CONFLICT DO NOTHING`
 `if absent` and `DO UPDATE SET` `if absent else set`, `excluded.f` made
@@ -427,6 +429,96 @@ a rare order 0.20 against `lookup ... required`'s 0.44 (`make
 subquery-bench`). A subscription's REST shape cannot hold one, and the
 JS builder's `{ f: { in: query } }` renders one with the outer query's
 parameters.
+
+## List parameters
+
+**`in $n` is the list written out with a parameter a value.** A team
+building over HTTP named its main friction: `get products where id in $1`
+handed `[[1, 2]]` was refused (`[` expected), so a cart's ids, known at
+run time, were `in [$1, $2, ...]`, one parameter an element, which every
+client generated -- a text of its own for every length, which the parse
+cache (`POST /query`, 16 shards of 64) kept one of a length and, past
+`PARSED_LONGEST` (1 024 bytes, some 150 ids), parsed again at every
+request. `x in $1`, `$1` holding a JSON array, parses to
+`Expr::InParam(x, 0)` (`Parser::in_list`, `list_param`), the last of
+`Expr`'s variants so none before it was renumbered; `not in $1` is `not`
+over it. A definition's `$ids` reads as its place, and the canonical tree
+writes it as node 15. SQL's list parameter is PostgreSQL's: `x = ANY($1)`
+reads as `x in $1`, `x <> ALL($1)` (and `!=`) as `not (x in $1)`
+(`Parser::any_param`, out of line and cold, asked only where a word of
+three letters follows `=` or `<>`, and taking only `any`/`all`, `(`, one
+parameter and `)`), while `x IN ($1)` stays SQL's list of one value, as
+SQL reads it. The builders still write `in [$1, $2, ...]`, the golden
+file unchanged.
+
+It is answered as the list written out. `Database::answered` puts an
+`Expr::In` of the parameter's values, one `Lit` each, in its place
+(`answer_param_list`), where it answers the inner `get`s:
+`Expr::each_subquery_mut` hands both, and `answered_first` asks whether a
+filter holds either, so every planner that reads an `Expr::In` -- the id,
+hash, `@unique` and composite indexes' buckets, `Filter::bind`, a bare
+`in`'s exactness, `explain` -- meets the list it meets written
+out; `tests/in_param.rs` holds rows and plans equal for both forms over
+the id, a `@unique`, a `@hash`, a `nocase` and an `@sorted(g, n)` field, a
+list of 1 000, an empty one, one holding a null (kept, as `in [$1]`
+handed null keeps it, where an inner `get`'s list leaves nulls out),
+`not in`, a `set` and a `del` that pick their rows, a select item and a
+`group`. `has_subquery` stays the inner `get`'s alone: a poll's tag
+(`etag`) and the pin ask whether another collection is read, and an `in
+$n` reads none; `conjunct_in_sets` reads one's list where it is asked
+before the answer, by the pin. Where no filter put it in place -- a select
+list's item, an `order` key, a stream's test of a written row, a held
+write's look among the rows written -- `eval` reads the list itself
+(`param_list`), comparing as `Expr::In` does (`in_same`, a `nocase`
+field's fold included). The tree holds the place, never the values: the
+parse cache's statement serves every list (`the_parsed_tree_holds_no_value`).
+
+Its numbers are read as written. `expr_needs` names an `in $n`'s
+parameter whatever its left side, a json field's or not (`Exactly`):
+read the quick way, `[16777217]` is a vector's `f32`s, 16777216, another
+row's id, and `[0.1]` 0.100000001. The server reads the body again as
+written (`api::exactly`, `/batch`'s lines and `/_call` alike); the
+browser module, handed the array apart as a vector (`vectorsApart`),
+answers `exact` and the page sends that parameter as JSON (`#run`'s
+second call); a `Value::Vector` handed to `Database::query` is refused
+(`refuse_inexact`, its words naming `in $n`). A call's argument is named
+where its parameter is a list (`$ids [int]`) as where it keeps numbers, and
+one handed as a parameter (`call f($1)`) is the parameter's -- `exact_args`
+asked only the literals written in before, so `call f($1)` handed a json
+field's list read it as `f32`s.
+
+The list is held to the inner `get`'s bound: past `MAX_SUBQUERY_VALUES`
+(100 000) `param_list` refuses it, never cut, and a parameter holding no
+list is refused naming the form (`` `in $1` takes a list, and $1 is of
+type int: `= $1` compares one value ``). A rule's `in $jwt.rooms` is still
+written `in [$k]` before it is parsed and spread by `bind` (`usable` and
+`kind_held` unchanged), and a rule writing `$1` is refused at startup as
+any is; `bind_held`, `claims_held`, `Reach::of` and the held writes'
+`bind` take an `in $n` as the list it holds, which no rule writes.
+
+**Grammar epoch 2.** `x = any($1)` parsed before, as a call of `any`,
+which no build has and every run refused, and a definition could store
+one (a body's functions are named as it runs): read as `x in $1` now, its
+digest is another, so `GRAMMAR_EPOCH` moved and such a definition is
+marked broken, to be defined again. The corpus (`make fennecql-corpus`),
+9 726 texts: none of main's reads otherwise; the six that do are this
+change's own `= any`/`<> all` texts, and the `in $n` texts parse where
+they were refused (Grafana's tests bind `in $syms` themselves, into `[$1,
+$2]`). Rejected: a list parameter spread inside `in [$1]`, as a rule's
+claim is -- `tags in [$1]` handed a list compares the list whole, and
+would have answered otherwise; and a call standing for the list (`in
+[spread($1)]`), which every walk would have special-cased by its name and
+the canonical tree written as a call.
+
+The browser module grew 3 085 bytes, 1 228 gzip, 932 brotli (811.9,
+333.3, 275.7 KB): the parser's 0.9 KB (`any_param` 349, `list_param` 181,
+`cmp_expr` inlined into `not_expr` 284), `param_list` and its refusals
+281, the answer's closure 311, `eval`'s arm 244, `holds_list` and
+`Select::holds_list` 431 against `has_subquery`'s 201. Handing the operand
+into `any_param` and back out was 85 bytes more.
+Speed, `make lists-bench`: in process and over HTTP, for 10 and 1 000
+ids by `id` and by a `@hash` field -- its figures go here from a quiet
+machine.
 
 ## alter collection
 

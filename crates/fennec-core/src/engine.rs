@@ -2803,6 +2803,20 @@ fn offsets(text: &str, spans: &[(usize, usize)], shift: usize) -> Vec<Value> {
         .collect()
 }
 
+/// `e`, an `in $n`, made the `in [..]` its parameter's list writes out:
+/// each value an item, a null among them, as `in [$1, $2, ...]` with one
+/// parameter a value hands them -- so the hash, the ordered and the id
+/// index take the list as they take one written out. The list is refused
+/// where [`crate::query::param_list`] refuses it.
+fn answer_param_list(e: &mut Expr, params: &[Value]) -> Result<()> {
+    let Expr::InParam(lhs, i) = std::mem::replace(e, Expr::Lit(Value::Null)) else {
+        unreachable!("each_subquery_mut hands an `in $n` here")
+    };
+    let items = crate::query::param_list(params, i)?;
+    *e = Expr::In(lhs, items.iter().cloned().map(Expr::Lit).collect());
+    Ok(())
+}
+
 /// Whether `v` is not in `seen` yet, by its encoding, which it is then:
 /// equal encodings are equal values, and two that compare equal under
 /// others (`1` and `1.0`) both kept in an `in` list change no answer.
@@ -6721,7 +6735,7 @@ impl Database {
         // The walk first: the collection looked up by name for every write
         // took a `set` by id 1.09 -> 1.14 us.
         let asks = |f: &Expr| {
-            f.has_subquery() || (f.calls_now() && self.ordered(collection)) || kind_splits(f)
+            f.answered_first() || (f.calls_now() && self.ordered(collection)) || kind_splits(f)
         };
         if !filter.as_ref().is_some_and(asks) && self.ttl_of(collection).is_none() {
             return Ok(Cow::Borrowed(stmt));
@@ -6946,7 +6960,7 @@ impl Database {
                 && (opt(&sel.filter)
                     || (sel.lookup.as_ref()).is_some_and(|l| l.chain().any(|s| opt(&s.filter))))
         };
-        if !expiring && !sel.has_subquery() && !unsplit && !timed() && !kinded() {
+        if !expiring && !sel.answered_first() && !unsplit && !timed() && !kinded() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
         let mut sel = sel.clone();
@@ -7050,7 +7064,10 @@ impl Database {
         depth: usize,
     ) -> Result<()> {
         if let Some(f) = filter {
-            f.each_subquery_mut(&mut |e| self.answer_subquery(e, params, depth))?;
+            f.each_subquery_mut(&mut |e| match e {
+                Expr::InParam(..) => answer_param_list(e, params),
+                e => self.answer_subquery(e, params, depth),
+            })?;
             // Only an ordered index plans by a time; a module with no clock
             // handed it leaves the call for the row to meet, and refuse, as
             // it did.
@@ -11994,9 +12011,9 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field or a point keeps a list of numbers as written, and this one was \
-                 read into a vector's f32s: read the text with fennec_ql::parse_for, a parameter \
-                 as JSON"
+                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
+                 and this one was read into a vector's f32s: read the text with \
+                 fennec_ql::parse_for, a parameter as JSON"
                     .into(),
             )),
         }
@@ -12217,6 +12234,9 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
         }
         Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
         Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        // Whatever its field: a list of ids read into `f32`s finds
+        // 16777217 as 16777216, another row.
+        Expr::InParam(_, i) => given(&Expr::Param(*i), out),
         _ => {}
     }
     e.each_child(&mut |c| expr_needs(of, k, c, out));

@@ -618,6 +618,17 @@ fn bind(e: &mut Expr, params: &[Value]) {
         }
         return;
     }
+    // `in $n` as the `in [..]` its list is, which the run refuses where
+    // the parameter holds none.
+    if let Expr::InParam(lhs, i) = e {
+        if let Ok(l) = fennec_core::query::param_list(params, *i) {
+            let items = l.iter().cloned().map(Expr::Lit).collect();
+            *e = Expr::In(
+                std::mem::replace(lhs, Box::new(Expr::Lit(Value::Null))),
+                items,
+            );
+        }
+    }
     if let Expr::InSelect(_, inner) = e {
         if let Some(f) = &mut inner.filter {
             bind(f, params);

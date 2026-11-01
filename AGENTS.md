@@ -110,7 +110,8 @@ for every crate but `fennec-bench`; `fennec-core` dev-depends on `fennec-ql`.
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
 `near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
-a `lookup` chain at 8 and `in (get ...)` at 100 000 values and 4 levels,
+a `lookup` chain at 8, `in (get ...)` at 100 000 values and 4 levels and
+`in $n` at 100 000 values,
 each a query error, never a cut result; a new limit takes that shape.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
@@ -639,6 +640,9 @@ refused as its literal is (`Select::check_counts`).
 **[`in (get ...)` is answered before the query, as the list it
 is.](docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
 `Expr::In` in its place on every path, so `eval` never meets one.
+[`in $n`](docs/design/fennecql.md#list-parameters) is answered so with
+its parameter's list, read as written whatever its field
+(`Database::exactly`), never in the cached tree.
 
 **[`alter collection` rewrites no document; positions are not
 places.](docs/design/fennecql.md#alter-collection)** A drop keeps its place

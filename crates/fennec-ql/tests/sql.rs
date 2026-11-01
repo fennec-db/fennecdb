@@ -61,6 +61,12 @@ const SAME: &[(&str, &str)] = &[
         "get t where x not in (get c select f)",
         "get t where not (x in (get c select f))",
     ),
+    // PostgreSQL's list parameter, `= ANY($1)`: FennecQL's `in $1`. `IN
+    // ($1)` stays SQL's list of one value.
+    ("SELECT a FROM t WHERE x = ANY($1)", "get t select a where x in $1"),
+    ("get t where x <> ALL($2) and y = 1", "get t where not (x in $2) and y = 1"),
+    ("get t where x != all($1)", "get t where x not in $1"),
+    ("get t where x IN ($1)", "get t where x in [$1]"),
     // BETWEEN, its `and` its own
     (
         "get t where x BETWEEN 1 AND 3",

@@ -189,6 +189,15 @@ impl Reach {
                         }
                         return Ok(true);
                     }
+                    // `in $n` as the `in [..]` its list is, matched as one
+                    // written out would be.
+                    if let Expr::InParam(lhs, i) = x {
+                        if let Ok(l) = fennec_core::query::param_list(params, *i) {
+                            let items = l.iter().cloned().map(Expr::Lit).collect();
+                            let lhs = std::mem::replace(lhs, Box::new(Expr::Lit(Value::Null)));
+                            *x = Expr::In(lhs, items);
+                        }
+                    }
                     Ok(false)
                 });
                 t

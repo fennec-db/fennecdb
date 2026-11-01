@@ -1376,6 +1376,9 @@ fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(
             operand(x)?;
             items.iter().try_for_each(operand)
         }
+        // A rule writes `in $jwt.c` as `in [$k]` ([`rule`]): this is
+        // never a rule's, and is held as that list would be.
+        Expr::InParam(x, _) => operand(x),
         Expr::InSelect(x, sel) => {
             operand(x)?;
             match &sel.filter {
@@ -1862,6 +1865,15 @@ fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
             sel.filter = sel.filter.as_ref().map(|f| bind_held(f, values, pass));
             Expr::InSelect(b(x), Box::new(sel))
         }
+        // Never a rule's ([`rule`] writes `in [$k]`): its list, as `in
+        // [$k]`'s is spread.
+        Expr::InParam(x, k) => Expr::In(
+            b(x),
+            match &values[*k] {
+                Value::List(l) => l.iter().cloned().map(Expr::Lit).collect(),
+                v => vec![Expr::Lit(v.clone())],
+            },
+        ),
         Expr::Call(f, args) => Expr::Call(
             f.clone(),
             args.iter().map(|a| bind_held(a, values, pass)).collect(),
@@ -2045,8 +2057,12 @@ fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
 /// cut, which would hide rows the rule grants.
 fn answer(db: &Database, e: &mut Expr) -> Result<()> {
     e.each_subquery_mut(&mut |x| {
+        // An `in $n`, which no rule writes, is the statement's to answer.
+        if !matches!(x, Expr::InSelect(..)) {
+            return Ok(());
+        }
         let Expr::InSelect(lhs, sel) = std::mem::replace(x, Expr::Lit(Value::Null)) else {
-            unreachable!("each_subquery_mut hands an `in (get ...)`")
+            unreachable!("matched just above")
         };
         let mut sel = *sel;
         if let Some(f) = &mut sel.filter {
