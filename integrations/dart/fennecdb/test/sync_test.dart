@@ -190,6 +190,33 @@ void main() {
     await db.close();
   });
 
+  // `insertNew` is FennecQL's `insert`, which the replica's state machine
+  // applies as an insert (integrations/sync-scenarios.json): an id the
+  // replica holds is refused here, nothing sent, and one only the server
+  // holds is its 409, the row put back.
+  test('an insertNew of a held id is refused, and put back where the server holds it', () async {
+    final s = await server('insertnew');
+    final db = await Fennec.openSynced(url: s.url, shapes: [open], path: await scratch('insertnew'));
+    await db.replica!.ready();
+    final refused = <Refusal>[];
+    final sub = db.replica!.refusals.listen(refused.add);
+    await offline(db);
+    // Row 1 is in the replica: refused at once, where `insert` would write over it.
+    await expectLater(db.from('tasks').insertNew({'id': 1, 'key': 'x', 'title': 'again', 'status': 'open'}),
+        throwsA(isA<FennecException>()));
+    expect(await titles(db), ['one', 'two']);
+    expect((await db.replica!.refresh()).pending, 0);
+    // Row 3 is the server's alone (closed, outside the shape): taken here, refused there.
+    expect(await db.from('tasks').insertNew({'id': 3, 'key': 'y', 'title': 'taken', 'status': 'open'}), 1);
+    expect(await titles(db), ['one', 'taken', 'two']);
+    db.replica!.setOnline(true);
+    await eventually('the refusal', () => refused.isNotEmpty);
+    expect(refused.first.status, 409);
+    await eventually('the write put back', () async => (await titles(db)).join(',') == 'one,two');
+    await sub.cancel();
+    await db.close();
+  });
+
   test('a refused write is put back', () async {
     final s = await server('refused');
     final db = await Fennec.openSynced(url: s.url, shapes: [open], path: await scratch('refused'));

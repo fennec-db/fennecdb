@@ -47,6 +47,40 @@ getters (`string`, `long`, `double`, `bool`, `floats`, `row`, `list`); JSON is
 read by a reader of the library's own, so it depends on kotlinx-coroutines
 alone.
 
+`insert` sends `put`, which writes over a row holding a document's id;
+`insertNew` (`toInsertNew` for the text, `insertNewReturning` for the rows)
+sends FennecQL's `insert`, refused whole (409, `Code.DUPLICATE`) where one
+does. `in` takes an inner query of one column as well as a list, answered
+before the query around it, its parameters numbered where it stands; `order`
+takes an expression or a `distance` as well as a field; `match(..., fuzzy =
+true)` is `fuzzy` alone, the default edits, and with `fuse` a `match` and a
+`near` are written in the order they were called:
+
+```kotlin
+val orders = db.from("orders")
+db.from("docs").insertNew(mapOf("id" to 7, "title" to "Oasis"), require = 1)
+val turkish = db.from("customers").select("id").where("country", "TR")
+orders.where("customer", "in", turkish).rows()
+orders.where(mapOf("customer" to mapOf("in" to turkish))).count()
+orders.order(Computed.expr("n * 2"), "desc").order("item").limit(10).rows()
+db.from("places").order(Computed.distance("loc", listOf(13.4, 52.5))).limit(5).rows()
+db.from("products").match("title", input, fuzzy = true, prefix = true).limit(10).rows()
+```
+
+One value in two places is one parameter with `param`, so the amount a write
+takes and the amount its filter checks cannot drift apart: each use of the
+same `param` writes the same `$n`, where two equal values are two. It goes
+wherever a value does -- a condition (also as an operator map's value), an
+`in` list's element, a document, `Computed.expr`'s and `Cond.raw`'s `?`,
+`Computed.distance`'s point, `near`'s vector, `match`'s words:
+
+```kotlin
+val amount = param(300)
+db.from("accounts").where(mapOf("name" to "ada", "balance" to mapOf("gte" to amount)))
+    .update(mapOf("balance" to Computed.expr("balance - ?", amount)), require = 1)
+// set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1
+```
+
 ## Sync with a server
 
 ```kotlin

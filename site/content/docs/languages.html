@@ -542,15 +542,16 @@ a value worked out over the row with <code>inc</code> and <code>expr</code>
 insert <code>if absent</code>.
 A query is immutable, so a base query can be kept and branched from.</p>
 
-<p>The JavaScript, Python, Go and .NET builders also write an inner query
+<p>Every builder also writes an inner query
 as the list of an <code>in</code> (<a href="fennecql-lookup.html#subqueries">Subqueries</a>),
 an <code>order</code> key that is an expression, one value used in two places
 as one parameter (<code>param(300)</code>, Go's <code>fennecdb.Param(300)</code>,
-.NET's <code>new Param(300)</code>),
+.NET's <code>new Param(300)</code>, Kotlin's <code>param(300)</code>, Dart's
+<code>Param(300)</code>, Swift's <code>Value.param(300)</code>),
 and FennecQL's <code>insert</code>, which refuses a held id where
 <code>insert()</code>'s <code>put</code> writes over it:
 <code>insertNew</code>, <code>insert_new</code>, <code>InsertNew</code> and
-<code>InsertNewAsync</code>. Swift, Kotlin and Dart follow.</p>
+<code>InsertNewAsync</code>.</p>
 
 <p>Rows come back as each language holds a document, and three builders
 also decode them into a type of the app's: Go's

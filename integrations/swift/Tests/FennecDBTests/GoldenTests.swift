@@ -21,7 +21,8 @@ import Testing
     @Test(arguments: Golden.names)
     func aCase(_ name: String) async throws {
         let c = Golden.cases.first { $0["name"]?.string == name }!
-        let (text, params, error) = await Golden.run(c["steps"]!.array!)
+        // A case's params by name: each `$param` of a name is the one `.param`.
+        let (text, params, error) = await Golden.$held.withValue(Held()) { await Golden.run(c["steps"]!.array!) }
         if let want = c["error"]?.string {
             #expect(error == want, "\(name): made \(text ?? "nothing")")
             return
@@ -33,11 +34,23 @@ import Testing
 
     // ------------------------------------------------------------ the steps
 
+    /// The `$param`s of the case being run, by name.
+    final class Held: @unchecked Sendable { var byName: [String: Value] = [:] }
+    @TaskLocal static var held = Held()
+
     /// An argument as a Swift caller hands it over: `$date` a `Date`, `$f32`
-    /// a `[Float]`, an object a `Value` of its fields in order.
+    /// a `[Float]`, an object a `Value` of its fields in order, `$param` a
+    /// `.param`, the same one wherever its name comes again.
     static func value(_ v: Value) -> Value {
         switch v {
         case .object(let r):
+            if let p = r["$param"]?.array {
+                let name = p[0].string!
+                if let held = Golden.held.byName[name] { return held }
+                let made = Value.param(value(p[1]))
+                Golden.held.byName[name] = made
+                return made
+            }
             if let d = r["$date"]?.string { return date(d) }
             if let f = r["$f32"]?.array { return .floats(f.map { Float($0.double!) }) }
             if let n = r["$inc"] { return .inc(n) }
@@ -63,14 +76,30 @@ import Testing
         return Column("")
     }
 
-    static func cond(_ v: Value) -> Cond {
-        if let or = v["$or"]?.array { return Cond(.or(or.map(cond))) }
-        if let and = v["$and"]?.array { return Cond(.and(and.map(cond))) }
-        if let not = v["$not"] { return .not(cond(not)) }
+    /// An inner query of `in`: the steps of a chain from `from`, unended.
+    static func query(_ v: Value) throws -> Query {
+        let steps = v["$query"]!.array!
+        var q = try Query.from(steps[0]["args"]![0]!.string!)
+        for s in steps.dropFirst() { q = try step(q, s["op"]!.string!, s["args"]?.array ?? []) }
+        return q
+    }
+
+    static func cond(_ v: Value) throws -> Cond {
+        if let or = v["$or"]?.array { return Cond(.or(try or.map(cond))) }
+        if let and = v["$and"]?.array { return Cond(.and(try and.map(cond))) }
+        if let not = v["$not"] { return .not(try cond(not)) }
         if let raw = v["$raw"]?.array {
             return Cond(.raw(raw[0].string!, raw.dropFirst().map { value($0) as any FennecValue }))
         }
         let r = v.object!
+        // A field whose `in` is an inner query is a condition of its own,
+        // joined to the others with `and`.
+        if r.values.contains(where: { $0["in"]?["$query"] != nil }) {
+            return Cond(.and(try zip(r.keys, r.values).map { k, spec in
+                if let inner = spec["in"], inner["$query"] != nil { return .in(k, try query(inner)) }
+                return .fields(Row([(k, value(spec))]))
+            }))
+        }
         return .fields(Row(zip(r.keys, r.values.map(value)).map { ($0, $1) }))
     }
 
@@ -91,9 +120,11 @@ import Testing
     static func step(_ q: Query, _ op: String, _ a: [Value]) throws -> Query {
         switch (op, a.count) {
         case ("select", _): return try q.select(a.map(column))
+        case ("where", 3) where a[2]["$query"] != nil: return try q.where(a[0].string!, a[1].string!, query(a[2]))
         case ("where", 3): return try q.where(a[0].string!, a[1].string!, value(a[2]))
         case ("where", 2): return try q.where(a[0].string!, value(a[1]))
         case ("where", _): return try q.where(cond(a[0]))
+        case ("orWhere", 3) where a[2]["$query"] != nil: return try q.orWhere(a[0].string!, a[1].string!, query(a[2]))
         case ("orWhere", 3): return try q.orWhere(a[0].string!, a[1].string!, value(a[2]))
         case ("orWhere", 2): return try q.orWhere(a[0].string!, value(a[1]))
         case ("orWhere", _): return try q.orWhere(cond(a[0]))
@@ -101,7 +132,7 @@ import Testing
             return try q.near(a[0].string!, value(a[1]), ef: opt(a, 2, "ef")?.int, exact: opt(a, 2, "exact")?.bool ?? false)
         case ("rerank", _): return try q.rerank(a[0].string!, value(a[1]), candidates: opt(a, 2, "candidates")?.int)
         case ("match", _):
-            return try q.match(a[0].string!, a[1].string!, fuzzyValue: opt(a, 2, "fuzzy"), prefixValue: opt(a, 2, "prefix"))
+            return try q.match(a[0].string!, value(a[1]), fuzzyValue: opt(a, 2, "fuzzy"), prefixValue: opt(a, 2, "prefix"))
         case ("fuse", _): return try q.fuse(k: opt(a, 0, "k")?.int, candidates: opt(a, 0, "candidates")?.int)
         // One key as itself, several (or none) as the list they are.
         case ("group", 1): return try q.group(a[0].array.map { try $0.map(column) } ?? [column(a[0])])
@@ -119,13 +150,8 @@ import Testing
                 a[0].string!, top: opt(a, 1, "top")?.int, rangeValues: opt(a, 1, "ranges"),
                 disjunctiveValue: opt(a, 1, "disjunctive"))
         case ("order", _):
-            // A key that is an expression (`{"$expr": ...}`), which this
-            // builder does not take yet, fails its case rather than the run.
-            guard let field = a[0].string else {
-                Issue.record("an order key that is no field's name")
-                return q
-            }
-            return try q.order(field, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
+            // A key is a field's name, or an expression: `.expr`, `.distance`.
+            return try q.order(column(a[0]), a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)
         case ("offset", _): return try q.offset(a[0].int!)
         case ("require", _): return try q.require(a[0].int!, reason: opt(a, 1, "reason")?.string)
@@ -137,7 +163,7 @@ import Testing
             return try q.lookup(
                 a[0].string!, on: names(opt(a, 1, "on")) ?? [], parentKey: names(opt(a, 1, "parentKey")),
                 select: columns(opt(a, 1, "select")), group: columns(opt(a, 1, "group")),
-                where: opt(a, 1, "where").map(cond), required: opt(a, 1, "required")?.bool ?? false,
+                where: try opt(a, 1, "where").map(cond), required: opt(a, 1, "required")?.bool ?? false,
                 order: sortKeys(opt(a, 1, "order")), limit: opt(a, 1, "limit")?.int, offset: opt(a, 1, "offset")?.int)
         default:
             Issue.record("no builder step \(op)")
@@ -175,7 +201,7 @@ import Testing
             if steps[0]["op"]?.string == "call" { return try calls(steps) }
             var q = try Query.from(steps[0]["args"]![0]!.string!).bind { text, params in
                 await recorder.record(text, params)
-                if text.hasPrefix("put ") || text.hasPrefix("set ") || text.hasPrefix("del ") { return .affected(0) }
+                if text.hasPrefix("put ") || text.hasPrefix("insert ") || text.hasPrefix("set ") || text.hasPrefix("del ") { return .affected(0) }
                 if text.hasSuffix(" count") { return .rows(columns: ["count"], rows: [["count": 0]]) }
                 return .rows(columns: [], rows: [])
             }
@@ -198,6 +224,8 @@ import Testing
                 case "toFennecQL": made = try q.toFennecQL()
                 case "toInsert":
                     made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1), reason: reason(1), returning: returning(1))
+                case "toInsertNew":
+                    made = try q.toInsertNew(docs(), require: require(1), reason: reason(1), returning: returning(1))
                 case "toUpdate":
                     made = try q.toUpdate(docs(), all: all(1), require: require(1), reason: reason(1), returning: returning(1))
                 case "toUpsert":
@@ -213,6 +241,12 @@ import Testing
                             docs(), returning: r, ifAbsent: absent(), require: require(1), reason: reason(1))
                     } else {
                         _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1), reason: reason(1))
+                    }
+                case "insertNew":
+                    if let r = returning(1) {
+                        _ = try await q.insertNewReturning(docs(), returning: r, require: require(1), reason: reason(1))
+                    } else {
+                        _ = try await q.insertNew(docs(), require: require(1), reason: reason(1))
                     }
                 case "update":
                     if let r = returning(1) {

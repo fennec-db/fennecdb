@@ -46,7 +46,7 @@ class Cond {
   /// the next parameter -- a literal `?` goes in as one too.
   /// `Cond.raw('cosine(embed, ?) > ?', [vector, 0.5])`
   static Cond raw(String sql, [List<Object?> params = const []]) =>
-      Cond._(Node('raw', sql: sql, values: params.map(normalize).toList()));
+      Cond._(Node('raw', sql: sql, values: params.map((p) => p is Param ? p : normalize(p)).toList()));
 
   /// One comparison, `where`'s three arguments as a condition.
   static Cond cmp(String field, String op, Object? value) => Cond._(_condOf(field, op, value));
@@ -123,6 +123,32 @@ class Computed {
 // `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes.
 final _interval = RegExp(r'^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$');
 
+/// One value used in more than one place of a statement, bound once: each
+/// use writes the same `$n`, where the same value given twice is two
+/// parameters -- the amount taken and the amount checked one value, never
+/// two a caller could let drift apart. It goes wherever a value goes -- a
+/// filter, an `in` list's element, a document, [Computed.expr]'s and
+/// [Cond.raw]'s `?`, [Computed.distance]'s point, [Query.near]'s vector,
+/// [Query.match]'s words -- and is told by its identity: two [Param]s of one
+/// value are two parameters.
+///
+///     final amount = Param(300);
+///     db.from('accounts').where({'name': 'ada', 'balance': {'gte': amount}})
+///         .toUpdate({'balance': Computed.expr('balance - ?', [amount])}, require: 1)
+///     // set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1, [300, ada]
+///
+/// It is a value, never a map of operators, and goes where a value stands,
+/// not inside a list or a map.
+class Param {
+  final Object? value;
+  Param(this.value) {
+    if (value is Param) throw _refuse('param() takes a value, not another param()');
+  }
+}
+
+// A value as the builder checks it: a param's own.
+Object? _valueOf(Object? v) => v is Param ? v.value : v;
+
 /// One key of a lookup's order: a field, `asc` or `desc`, and a collation
 /// (`tr` or `und`).
 class SortKey {
@@ -133,7 +159,7 @@ class SortKey {
 }
 
 class Node {
-  final String t; // and, or, not, null, in, cmp, within, dist, raw
+  final String t; // and, or, not, null, in, sub, cmp, within, dist, raw
   final List<Node> items;
   final String field;
   final String op;
@@ -355,7 +381,8 @@ Node _fieldCond(String field, Object? spec) {
 /// `{'from': [lon, lat], 'lte': 500}`: a point's distance, compared --
 /// `distance(loc, $1) <= $2`, each comparison given its own.
 Node _distanceCond(String field, Object? spec) {
-  final from = spec is Map ? spec['from'] : null;
+  // A param's point and metres are held to what it holds, and bound as the param.
+  final from = spec is Map ? _valueOf(spec['from']) : null;
   if (spec is! Map || from is! List || from is TypedData) {
     throw _refuse('distance takes { from: [lon, lat], <op>: metres } (field: $field)');
   }
@@ -364,10 +391,10 @@ Node _distanceCond(String field, Object? spec) {
     final k = e.key.toString();
     if (k == 'from') continue;
     final op = _ops[k];
-    if (op == null || op == 'in' || op == 'has' || op == '~' || e.value is! num) {
+    if (op == null || op == 'in' || op == 'has' || op == '~' || _valueOf(e.value) is! num) {
       throw _refuse('distance compares metres with lt, lte, gt, gte, eq or ne: $k (field: $field)');
     }
-    items.add(Node('dist', field: field, op: op, value: e.value, values: [from]));
+    items.add(Node('dist', field: field, op: op, value: e.value, values: [spec['from']]));
   }
   return switch (items.length) {
     0 => throw _refuse('distance needs a comparison, as lte: metres (field: $field)'),
@@ -377,6 +404,10 @@ Node _distanceCond(String field, Object? spec) {
 }
 
 Node _inCond(String field, Object? values) {
+  // `{customer: {in: from('customers').select(['id'])}}`: the inner query
+  // runs once, before the outer one, and its one column is the list --
+  // `customer in (get customers select id ...)`.
+  if (values is Query) return Node('sub', field: field, value: values);
   // A typed list is no array to JavaScript's Array.isArray either.
   if (values is! List || values is TypedData) throw _refuse('`in` expects an array (field: $field)');
   if (values.isEmpty) throw _refuse('`in` does not accept an empty array (field: $field)');
@@ -420,6 +451,10 @@ String _render(Node c, String Function(Object?) bind, [String? parent]) {
       return '${c.field} is ${c.negated ? 'not ' : ''}null';
     case 'in':
       return '${c.field} in [${c.values.map(bind).join(', ')}]';
+    case 'sub':
+      // Its parameters numbered where its text stands, after the outer
+      // query's before it.
+      return '${c.field} in (${(c.value as Query)._inner(bind)})';
     case 'cmp':
       return '${c.field} ${c.op} ${bind(c.value)}';
     case 'within':
@@ -440,11 +475,21 @@ String _render(Node c, String Function(Object?) bind, [String? parent]) {
   return (out..write(pieces.last)).toString();
 }
 
-bool _readsMore(Node c) => switch (c.t) {
-      'and' || 'or' || 'not' => c.items.any(_readsMore),
-      'raw' => RegExp(r'\bget\b', caseSensitive: false).hasMatch(c.sql),
-      _ => false,
-    };
+// Whether a condition reads only the collections it names: a `raw` fragment
+// may read one of its own, and an inner query's go to [add].
+bool _readsKnown(Node c, void Function(String) add) {
+  switch (c.t) {
+    case 'and' || 'or' || 'not':
+      return c.items.every((x) => _readsKnown(x, add));
+    case 'sub':
+      final inner = (c.value as Query).reads;
+      inner?.forEach(add);
+      return inner != null;
+    case 'raw':
+      return !RegExp(r'\bget\b', caseSensitive: false).hasMatch(c.sql);
+  }
+  return true;
+}
 
 /// A statement and its parameters, as they would be run.
 typedef Statement = ({String text, List<Object?> params});
@@ -459,11 +504,14 @@ class _Vector {
   _Vector(this.field, this.vector, this.n, this.exact);
 }
 
+// One key of an order: a name, or an expression over the row whose values
+// are bound where the order clause stands.
 class _Key {
   final String field;
+  final Computed? expr;
   final bool asc;
   final String? collate;
-  _Key(this.field, this.asc, this.collate);
+  _Key(this.field, this.asc, this.collate, [this.expr]);
 }
 
 class _Level {
@@ -514,8 +562,14 @@ class Query {
   final List<Node> _cond;
   final _Vector? _near;
 
-  /// The field, the words, the most edits a word may take and whether the last word is a prefix.
-  final (String, String, int?, bool)? _match;
+  /// The field, the words (text, or a [Param] holding it), the text written
+  /// after them -- ` fuzzy` alone for the default, ` fuzzy 1`, or none --
+  /// and whether the last word is a prefix.
+  final (String, Object, String, bool)? _match;
+
+  /// Whether [match] was called while no [near] was there: a [fuse] reads
+  /// both ways, and the text keeps the chain's order.
+  final bool _matchFirst;
   final _Vector? _rerank;
   final (int?, int?)? _fuse;
   final List<_Key> _order;
@@ -536,7 +590,8 @@ class Query {
       List<Object>? group,
       List<Node> cond = const [],
       _Vector? near,
-      (String, String, int?, bool)? match,
+      (String, Object, String, bool)? match,
+      bool matchFirst = false,
       _Vector? rerank,
       (int?, int?)? fuse,
       List<_Key> order = const [],
@@ -555,6 +610,7 @@ class Query {
         _cond = cond,
         _near = near,
         _match = match,
+        _matchFirst = matchFirst,
         _rerank = rerank,
         _fuse = fuse,
         _order = order,
@@ -582,6 +638,7 @@ class Query {
     List<Node>? cond,
     Object? near = _keep,
     Object? match = _keep,
+    bool? matchFirst,
     Object? rerank = _keep,
     Object? fuse = _keep,
     List<_Key>? order,
@@ -601,7 +658,8 @@ class Query {
           group: identical(group, _keep) ? _group : group as List<Object>?,
           cond: cond ?? _cond,
           near: identical(near, _keep) ? _near : near as _Vector?,
-          match: identical(match, _keep) ? _match : match as (String, String, int?, bool)?,
+          match: identical(match, _keep) ? _match : match as (String, Object, String, bool)?,
+          matchFirst: matchFirst ?? _matchFirst,
           rerank: identical(rerank, _keep) ? _rerank : rerank as _Vector?,
           fuse: identical(fuse, _keep) ? _fuse : fuse as (int?, int?)?,
           order: order ?? _order,
@@ -619,12 +677,17 @@ class Query {
   /// near it, its writes home (`Reads.nearest`).
   Query bind(Exec exec, {Exec? read}) => _with(exec: exec, read: read);
 
-  /// Every collection the query reads -- its own and each lookup's -- or null
-  /// when a `raw` fragment may read one more: a live query runs again when
-  /// one of them is written.
+  /// Every collection the query reads -- its own, each lookup's and each
+  /// inner query's of an `in` -- or null when a `raw` fragment may read one
+  /// more: a live query runs again when one of them is written.
   List<String>? get reads {
-    if (_cond.any(_readsMore) || _lookups.any((l) => l.cond.any(_readsMore))) return null;
-    return {collection, ..._lookups.map((l) => l.collection)}.toList();
+    final out = <String>{collection};
+    if (!_cond.every((c) => _readsKnown(c, out.add))) return null;
+    for (final l in _lookups) {
+      out.add(l.collection);
+      if (!l.cond.every((c) => _readsKnown(c, out.add))) return null;
+    }
+    return out.toList();
   }
 
   /// `select a, b`; none, or `'*'`, is every field. Aggregates go in the same
@@ -677,27 +740,39 @@ class Query {
   }
 
   /// `near field $n [ef N] [exact]`. A [Float32List] goes to the library as its bytes.
-  Query near(String field, Object? vector, {int? ef, bool exact = false}) =>
-      _with(near: _Vector(_identOf(field), vector, ef == null ? null : _whole(ef, 'ef'), exact));
+  Query near(String field, Object? vector, {int? ef, bool exact = false}) => _with(
+      near: _Vector(_identOf(field), vector, ef == null ? null : _whole(ef, 'ef'), exact),
+      // `fuse` writes its two searches in the order they were first called:
+      // `match` first where it came while no `near` was there.
+      matchFirst: _match == null ? false : _matchFirst);
 
-  /// `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
-  /// `fuzzy: true` (2) matches each word within the edits its length
-  /// allows -- none under 5 characters, one up to 8, two from 9 -- `fuzzy:
-  /// 1` one at most; `prefix: true` matches the last word as the start of a
-  /// word too, as a search box is typed into.
-  Query match(String field, String query, {Object? fuzzy, Object? prefix}) {
+  /// `match field $n [fuzzy [N]] [prefix]`: BM25 over a `@text` index. The
+  /// words are text, or a [Param] holding it. `fuzzy: 2` matches each word
+  /// within the edits its length allows -- none under 5 characters, one up
+  /// to 8, two from 9 -- `fuzzy: 1` one at most; `fuzzy: true` is the
+  /// parser's default, two, written `fuzzy` alone; `prefix: true` matches
+  /// the last word as the start of a word too, as a search box is typed
+  /// into.
+  ///
+  ///     db.from('products').match('title', input, fuzzy: true, prefix: true).limit(10)
+  Query match(String field, Object query, {Object? fuzzy, Object? prefix}) {
     final f = _identOf(field);
-    final int? edits = switch (fuzzy) {
-      null || false => null,
-      true => 2,
-      int n when n >= 0 && n <= 2 => n,
+    if (_valueOf(query) is! String) {
+      throw _refuse('match takes its words as text: ${writeJson(normalize(_valueOf(query)))}');
+    }
+    final String edits = switch (fuzzy) {
+      null || false => '',
+      true => ' fuzzy',
+      int n when n >= 0 && n <= 2 => ' fuzzy $n',
       _ => throw _refuse('fuzzy is true, false or 0 to 2 edits: $fuzzy'),
     };
     if (prefix != null && prefix is! bool) throw _refuse('prefix is true or false: $prefix');
-    return _with(match: (f, query, edits, prefix == true));
+    return _with(match: (f, query, edits, prefix == true), matchFirst: _near == null ? true : _matchFirst);
   }
 
   /// `fuse [k N] [candidates N]`: with both [match] and [near], ranks by both.
+  /// The two are written in the order they were called:
+  /// `.match(...).near(...).fuse()` is `match ... near ... fuse`.
   Query fuse({int? k, int? candidates}) =>
       _with(fuse: (k == null ? null : _whole(k, 'k'), candidates == null ? null : _whole(candidates, 'candidates')));
 
@@ -843,11 +918,25 @@ class Query {
     return _with(lookups: [..._lookups, level]);
   }
 
-  /// `order field asc|desc`: each call adds a key. `collate: 'tr'` puts text
-  /// in Turkish order, `'und'` in Unicode's root order.
-  Query order(String field, [String direction = 'asc', String? collate]) =>
-      // Over groups a key may be an aggregate of the list, by its name.
-      _with(order: [..._order, _Key(_columnName(field).$1, _direction(direction), _collation(collate))]);
+  /// `order field asc|desc`: each call adds a key, the next deciding where
+  /// the one before ties. A key may be an expression over the row --
+  /// `order(Computed.expr('n * 2'), 'desc')`,
+  /// `order(Computed.distance('loc', point))` -- its values bound where the
+  /// order stands in the text, rows tied on every key going in id order; it
+  /// orders the rows an update or a delete picks too. `collate: 'tr'` puts
+  /// text in Turkish order, `'und'` in Unicode's root order.
+  Query order(Object field, [String direction = 'asc', String? collate]) {
+    // Over groups a key may be an aggregate of the list, by its name.
+    final (key, _) = _column(field);
+    if (key is Computed && key._name != null) {
+      throw _refuse('an order key is an expression or a name: order by ${key._name} itself, without as');
+    }
+    final asc = _direction(direction), collation = _collation(collate);
+    return _with(order: [
+      ..._order,
+      key is Computed ? _Key('', asc, collation, key) : _Key(key as String, asc, collation),
+    ]);
+  }
 
   /// How many rows come back.
   Query limit(int n) => _with(limit: _whole(n, 'limit'));
@@ -873,10 +962,21 @@ class Query {
     return (text: _text(_binder(params)), params: params);
   }
 
-  static String Function(Object?) _binder(List<Object?> params) => (v) {
-        params.add(normalize(v));
-        return '\$${params.length}';
-      };
+  // A [Param] takes its `$n` at its first use, and every use after writes
+  // that one, by the object: two params of one value stay two parameters.
+  static String Function(Object?) _binder(List<Object?> params) {
+    final once = Map<Param, String>.identity();
+    return (v) {
+      if (v is Param) {
+        return once.putIfAbsent(v, () {
+          params.add(normalize(v.value));
+          return '\$${params.length}';
+        });
+      }
+      params.add(normalize(v));
+      return '\$${params.length}';
+    };
+  }
 
   String _text(String Function(Object?) bind) {
     // The engine refuses each of these too; failing here runs nothing.
@@ -964,16 +1064,22 @@ class Query {
     final w = _whereOf(_cond, bind);
     if (w != null) sql.write(' where $w');
     if (_group != null) sql.write(' group ${_group.map((k) => _columnText(k, bind)).join(', ')}');
-    if (_near != null) {
+    void nearText() {
+      if (_near == null) return;
       sql.write(' near ${_near.field} ${bind(_near.vector)}');
       if (_near.n != null) sql.write(' ef ${_near.n}');
       if (_near.exact) sql.write(' exact');
     }
+
+    // Before `match` unless `match` was called first: a `fuse` reads both
+    // ways, and the text keeps the chain's order.
+    final matchFirst = _match != null && _matchFirst;
+    if (!matchFirst) nearText();
     if (_match case (final f, final q, final edits, final prefix)) {
-      sql.write(' match $f ${bind(q)}');
-      if (edits != null) sql.write(' fuzzy $edits');
+      sql.write(' match $f ${bind(q)}$edits');
       if (prefix) sql.write(' prefix');
     }
+    if (matchFirst) nearText();
     if (_rerank != null) {
       sql.write(' rerank ${_rerank.field} ${bind(_rerank.vector)}');
       if (_rerank.n != null) sql.write(' candidates ${_rerank.n}');
@@ -983,7 +1089,7 @@ class Query {
       if (_fuse.$1 != null) sql.write(' k ${_fuse.$1}');
       if (_fuse.$2 != null) sql.write(' candidates ${_fuse.$2}');
     }
-    _orderText(sql, _order);
+    _orderText(sql, _order, bind);
     if (_limit != null) sql.write(' limit ${bind(_limit)}');
     if (_offset > 0) sql.write(' offset ${bind(_offset)}');
     // Before a lookup, whose clauses are the children's.
@@ -1008,7 +1114,7 @@ class Query {
       final lw = _whereOf(l.cond, bind);
       if (lw != null) sql.write(' where $lw');
       if (l.group != null) sql.write(' group ${l.group!.map((k) => _columnText(k, bind)).join(', ')}');
-      _orderText(sql, l.order);
+      _orderText(sql, l.order, bind);
       if (l.limit != null) sql.write(' limit ${bind(l.limit)}');
       if (l.offset > 0) sql.write(' offset ${bind(l.offset)}');
     }
@@ -1024,14 +1130,25 @@ class Query {
     return (s..write(')')).toString();
   }
 
-  static void _orderText(StringBuffer sql, List<_Key> keys) {
+  static void _orderText(StringBuffer sql, List<_Key> keys, String Function(Object?) bind) {
     for (var i = 0; i < keys.length; i++) {
       final k = keys[i];
       sql.write(i == 0 ? ' order ' : ', ');
-      sql.write(k.field);
+      sql.write(k.expr == null ? k.field : _exprText(k.expr!, bind));
       if (k.collate != null) sql.write(' collate ${k.collate}');
       sql.write(k.asc ? ' asc' : ' desc');
     }
+  }
+
+  // The text as the inner query of an `in`, its values bound by the binder
+  // of the query around it.
+  String _inner(String Function(Object?) bind) {
+    // One column is the list; the engine refuses the rest too.
+    if (_project?.length != 1 || _count || _lookups.isNotEmpty || _marks.isNotEmpty || _facets.isNotEmpty) {
+      throw _refuse("an inner query of `in` selects exactly one column: from('$collection').select('id')");
+    }
+    if (_require.isNotEmpty) throw _refuse('an inner query of `in` takes no require: the query around it does');
+    return _text(bind);
   }
 
   static String? _whereOf(List<Node> cond, String Function(Object?) bind) {
@@ -1111,7 +1228,7 @@ class Query {
   // for every one.
   String _pick(List<String>? returning, String Function(Object?) bind) {
     final sql = StringBuffer();
-    _orderText(sql, _order);
+    _orderText(sql, _order, bind);
     if (_limit != null) sql.write(' limit ${bind(_limit)}');
     return (sql..write(_returningClause(returning))).toString();
   }
@@ -1158,7 +1275,20 @@ class Query {
   /// put in front -- written into the text, never a parameter, as the count
   /// is not. [returning]: the rows written answered, ids and all
   /// ([insertReturning]).
-  Statement toInsert(Object docs, {bool ifAbsent = false, int? require, String? reason, List<String>? returning}) {
+  Statement toInsert(Object docs, {bool ifAbsent = false, int? require, String? reason, List<String>? returning}) =>
+      _put('put', docs, ifAbsent, require, reason, returning);
+
+  /// The `insert` of a document or a list of them, not run: one naming an id
+  /// a row holds is refused -- 409, [FennecCode.duplicate] -- and the
+  /// statement, a block of one, put back whole, where [toInsert]'s `put`
+  /// writes over that row. [require], [reason] and [returning] as
+  /// [toInsert]'s; it takes no `ifAbsent`, which passes over a held id where
+  /// this refuses one.
+  Statement toInsertNew(Object docs, {int? require, String? reason, List<String>? returning}) =>
+      _put('insert', docs, false, require, reason, returning);
+
+  // Both are checked as an insert: the same clauses refused, in the same words.
+  Statement _put(String verb, Object docs, bool ifAbsent, int? require, String? reason, List<String>? returning) {
     _assertPlain('insert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -1167,7 +1297,7 @@ class Query {
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final absent = ifAbsent ? ' if absent' : '';
     final tail = _returningClause(returning) + _requireClause(require, reason);
-    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent$tail', params: params);
+    return (text: '$verb $collection ${list.length == 1 ? body : '[$body]'}$absent$tail', params: params);
   }
 
   /// The `set` of the rows the filter names, not run; with no filter it is
@@ -1275,6 +1405,17 @@ class Query {
     return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, reason: reason))).affected;
   }
 
+  /// Inserts a document or a list of them, refused whole (409,
+  /// [FennecCode.duplicate]) where one names an id a row holds: a row made
+  /// once, never written over, where [insert] puts over it. How many it
+  /// wrote; none is no statement. [require] and [reason] as [insert]'s. On a
+  /// sync replica the id is refused here, before anything is sent, and one
+  /// only the server holds is its 409, the rows put back.
+  Future<int> insertNew(Object docs, {int? require, String? reason}) async {
+    if (docs is List && docs.isEmpty) return 0;
+    return (await _run(toInsertNew(docs, require: require, reason: reason))).affected;
+  }
+
   /// Inserts each document, or, where a row holds its id or `@unique`
   /// value, sets that row by [patch] --
   /// `upsert({'key': k, 'n': 1}, {'n': Computed.expr('n + new.n')})`: the
@@ -1321,6 +1462,14 @@ class Query {
     if (docs is List && docs.isEmpty) return const Rows([]);
     return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, reason: reason, returning: returning)))
         .rows;
+  }
+
+  /// [insertNew] that answers the rows it wrote, ids and all, in the
+  /// documents' order, under the fields named -- `*` every one.
+  Future<Rows> insertNewReturning(Object docs,
+      {List<String> returning = const ['*'], int? require, String? reason}) async {
+    if (docs is List && docs.isEmpty) return const Rows([]);
+    return (await _run(toInsertNew(docs, require: require, reason: reason, returning: returning))).rows;
   }
 
   /// [upsert] that answers the rows it set and made, as written, in the

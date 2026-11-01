@@ -26,4 +26,4 @@ export 'src/fennec.dart'
         FennecSchema;
 export 'src/remote.dart' show BatchAnswer, FennecRemote, Reads;
 export 'src/live.dart' show LiveQueries;
-export 'src/query.dart' show Query, Call, Cond, Computed, SortKey, Statement;
+export 'src/query.dart' show Query, Call, Cond, Computed, Param, SortKey, Statement;

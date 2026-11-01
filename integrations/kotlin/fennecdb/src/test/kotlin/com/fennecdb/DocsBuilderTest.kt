@@ -21,7 +21,7 @@ class DocsBuilderTest {
         fun from(collection: String): Query = Query.from(collection).bind { text, params ->
             sent = Statement(text, params)
             when {
-                Regex("^(put|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
+                Regex("^(put|insert|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
                 text.endsWith(" count") -> Answer.Rows(listOf("count"), listOf(Row(mapOf("count" to 0L))))
                 else -> Answer.Rows(emptyList(), emptyList())
             }
@@ -449,6 +449,76 @@ class DocsBuilderTest {
         db.sends("get products count lookup reviews on product_id required where stars = \$1", "[5]")
     }
 
+    /** docs: orders of customers in a country */
+    @Test
+    fun ordersOfCustomersInACountry() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .where(Cond.cmp("customer", "in", db.from("customers").select("id").where("country", "TR")))
+            .rows()
+        db.sends("get orders where customer in (get customers select id where country = \$1)", "[\"TR\"]")
+    }
+
+    /** docs: open orders of customers of a tier */
+    @Test
+    fun openOrdersOfCustomersOfATier() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .where(mapOf("status" to "open", "customer" to mapOf("in" to db.from("customers").select("id").where("tier", ">=", 2))))
+            .rows()
+        db.sends("get orders where status = \$1 and customer in (get customers select id where tier >= \$2)", "[\"open\", 2]")
+    }
+
+    /** docs: orders of customers outside a country counted */
+    @Test
+    fun ordersOfCustomersOutsideACountryCounted() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .where(Cond.not(Cond.cmp("customer", "in", db.from("customers").select("id").where("country", "TR"))))
+            .count()
+        db.sends("get orders where not (customer in (get customers select id where country = \$1)) count", "[\"TR\"]")
+    }
+
+    /** docs: the sessions of banned users deleted */
+    @Test
+    fun theSessionsOfBannedUsersDeleted() = runBlocking {
+        val db = Recording()
+        db.from("sessions")
+            .where("user", "in", db.from("users").select("name").where("banned", true))
+            .delete()
+        db.sends("del sessions where user in (get users select name where banned = \$1)", "[true]")
+    }
+
+    /** docs: customers with their returned orders */
+    @Test
+    fun customersWithTheirReturnedOrders() = runBlocking {
+        val db = Recording()
+        db.from("customers")
+            .limit(20)
+            .lookup(
+                "orders",
+                on = "customer",
+                where = Cond.cmp("id", "in", db.from("returns").select("order_id")),
+                limit = 3
+            )
+            .rows()
+        db.sends("get customers limit \$1 lookup orders on customer where id in (get returns select order_id) limit \$2", "[20, 3]")
+    }
+
+    /** docs: orders of customers of an active tier */
+    @Test
+    fun ordersOfCustomersOfAnActiveTier() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .where(
+                "customer",
+                "in",
+                db.from("customers").select("id").where("tier", "in", db.from("tiers").select("n").where("active", true))
+            )
+            .rows()
+        db.sends("get orders where customer in (get customers select id where tier in (get tiers select n where active = \$1))", "[true]")
+    }
+
     /** docs: articles a page at a time */
     @Test
     fun articlesAPageAtATime() = runBlocking {
@@ -484,6 +554,29 @@ class DocsBuilderTest {
             .limit(10)
             .updateReturning(mapOf("owner" to "w1"))
         db.sends("set jobs {owner: \$1} where run_at <= now() order run_at asc limit \$2 returning *", "[\"w1\", 10]")
+    }
+
+    /** docs: orders by twice their count */
+    @Test
+    fun ordersByTwiceTheirCount() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .order(Computed.expr("n * 2"), "desc")
+            .order("item")
+            .limit(10)
+            .rows()
+        db.sends("get orders order n * 2 desc, item asc limit \$1", "[10]")
+    }
+
+    /** docs: one customer's orders first */
+    @Test
+    fun oneCustomerSOrdersFirst() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .order(Computed.expr("case when customer = ? then 0 else 1 end", "bo"))
+            .order("id")
+            .rows()
+        db.sends("get orders order case when customer = \$1 then 0 else 1 end asc, id asc", "[\"bo\"]")
     }
 
     /** docs: a column worked out */
@@ -725,6 +818,17 @@ class DocsBuilderTest {
         db.sends("get articles match body \$1 rerank embed \$2 candidates 500 limit \$3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    /** docs: products matching a misspelt word */
+    @Test
+    fun productsMatchingAMisspeltWord() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .match("title", "databse", fuzzy = true)
+            .limit(10)
+            .rows()
+        db.sends("get products match title \$1 fuzzy limit \$2", "[\"databse\", 10]")
+    }
+
     /** docs: products matching a word begun */
     @Test
     fun productsMatchingAWordBegun() = runBlocking {
@@ -736,6 +840,17 @@ class DocsBuilderTest {
         db.sends("get products match title \$1 prefix limit \$2", "[\"datab\", 10]")
     }
 
+    /** docs: products matching a misspelt word begun */
+    @Test
+    fun productsMatchingAMisspeltWordBegun() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .match("title", "datbas", fuzzy = true, prefix = true)
+            .limit(10)
+            .rows()
+        db.sends("get products match title \$1 fuzzy prefix limit \$2", "[\"datbas\", 10]")
+    }
+
     /** docs: products matching a word one edit away */
     @Test
     fun productsMatchingAWordOneEditAway() = runBlocking {
@@ -745,6 +860,58 @@ class DocsBuilderTest {
             .limit(10)
             .rows()
         db.sends("get products match title \$1 fuzzy 1 limit \$2", "[\"databse\", 10]")
+    }
+
+    /** docs: a search box inside one category */
+    @Test
+    fun aSearchBoxInsideOneCategory() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .where("category", "books")
+            .match("title", "datbas", fuzzy = true, prefix = true)
+            .limit(20)
+            .rows()
+        db.sends("get products where category = \$1 match title \$2 fuzzy prefix limit \$3", "[\"books\", \"datbas\", 20]")
+    }
+
+    /** docs: articles ranked by words and meaning */
+    @Test
+    fun articlesRankedByWordsAndMeaning() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .match("body", "rust ownership")
+            .near("embed", listOf(0.12, -0.03, 0.4))
+            .fuse()
+            .limit(10)
+            .rows()
+        db.sends("get articles match body \$1 near embed \$2 fuse limit \$3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
+    }
+
+    /** docs: articles since a year ranked by words and meaning */
+    @Test
+    fun articlesSinceAYearRankedByWordsAndMeaning() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .where("year", ">=", 2024)
+            .match("body", "rust ownership")
+            .near("embed", listOf(0.12, -0.03, 0.4))
+            .fuse()
+            .limit(10)
+            .rows()
+        db.sends("get articles where year >= \$1 match body \$2 near embed \$3 fuse limit \$4", "[2024, \"rust ownership\", [0.12, -0.03, 0.4], 10]")
+    }
+
+    /** docs: articles ranked by words and meaning, k and candidates */
+    @Test
+    fun articlesRankedByWordsAndMeaningKAndCandidates() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .match("body", "rust ownership")
+            .near("embed", listOf(0.12, -0.03, 0.4))
+            .fuse(k = 60, candidates = 50)
+            .limit(10)
+            .rows()
+        db.sends("get articles match body \$1 near embed \$2 fuse k 60 candidates 50 limit \$3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
     }
 
     /** docs: matches with their marks */
@@ -964,6 +1131,29 @@ class DocsBuilderTest {
                 ifAbsent = true
             )
         db.sends("put locks {name: \$1, owner: \$2, at: now()} if absent", "[\"nightly\", \"w1\"]")
+    }
+
+    /** docs: a journal entry made */
+    @Test
+    fun aJournalEntryMade() = runBlocking {
+        val db = Recording()
+        db.from("journal")
+            .insertNew(mapOf("entry" to Computed.expr("? + \":dr\"", "inv-7"), "amount" to Computed.expr("0 - ?", 300)))
+        db.sends("insert journal {entry: \$1 + \":dr\", amount: 0 - \$2}", "[\"inv-7\", 300]")
+    }
+
+    /** docs: an amount taken from a balance that holds it */
+    @Test
+    fun anAmountTakenFromABalanceThatHoldsIt() = runBlocking {
+        val db = Recording()
+        val amount = param(300)
+        db.from("accounts")
+            .where(mapOf("name" to "ada", "balance" to mapOf("gte" to amount)))
+            .update(
+                mapOf("balance" to Computed.expr("balance - ?", amount)),
+                require = 1
+            )
+        db.sends("set accounts {balance: balance - \$1} where name = \$2 and balance >= \$1 require 1", "[300, \"ada\"]")
     }
 
     /** docs: a held hold released */

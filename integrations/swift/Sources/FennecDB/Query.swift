@@ -29,6 +29,7 @@ public struct Cond: Sendable, ExpressibleByDictionaryLiteral {
         case raw(String, [any FennecValue])
         case cmp(String, String, any FennecValue)
         case fields([(String, Value)])
+        case sub(String, Query)
     }
 
     let spec: Spec
@@ -59,6 +60,13 @@ public struct Cond: Sendable, ExpressibleByDictionaryLiteral {
     public static func cmp(_ field: String, _ op: String, _ value: any FennecValue) -> Cond {
         Cond(.cmp(field, op, value))
     }
+
+    /// `field in (get ...)`: the inner query runs once, before the one
+    /// around it, and its one column is the list --
+    /// `.in("customer", db.from("customers").select("id").where("country", "TR"))`
+    /// is `customer in (get customers select id where country = $1)`, its
+    /// parameters numbered where its text stands.
+    public static func `in`(_ field: String, _ query: Query) -> Cond { Cond(.sub(field, query)) }
 }
 
 // A value a write works out over the row it writes, as the JS builder's
@@ -81,6 +89,33 @@ extension Value {
 
     static func expr(_ sql: String, _ params: [Value]) -> Value {
         .object(Row([(computedKey, "expr"), ("sql", .string(sql)), ("params", .array(params))]))
+    }
+
+    /// One parameter, used wherever a value goes -- a condition, a
+    /// document, `.expr`'s and `.raw`'s `?`, `.distance`'s point, `near`'s
+    /// vector, `match`'s words -- and bound once, at its first place in the
+    /// text, every later use writing that same `$n`. The same value given
+    /// twice is two parameters, which a caller could let drift apart; the
+    /// amount taken and the amount checked are one:
+    ///
+    ///     let amount = Value.param(300)
+    ///     try db.from("accounts").where(["name": "ada", "balance": ["gte": amount]])
+    ///         .toUpdate(["balance": .expr("balance - ?", amount)], require: 1)
+    ///     // set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1, [300, "ada"]
+    ///
+    /// A copy of it is the same parameter; a second `.param` of one value is
+    /// another. It is a value, never a dictionary of operators, and goes
+    /// where a value stands, not inside a list or a json value.
+    public static func param(_ value: Value) -> Value {
+        .object(Row([(computedKey, "param"), ("id", .string(UUID().uuidString)), ("value", value)]))
+    }
+
+    /// What `param` made: its id and the value it holds.
+    var param: (id: String, value: Value)? {
+        guard case .object(let r) = self, r.keys.first == Value.computedKey, r[Value.computedKey]?.string == "param",
+            let id = r["id"]?.string, let value = r["value"]
+        else { return nil }
+        return (id, value)
     }
 }
 
@@ -194,6 +229,8 @@ indirect enum Node: Sendable {
     case and([Node]), or([Node]), not(Node)
     case null(String, negated: Bool)
     case `in`(String, [Value])
+    /// `field in (get ...)`: an inner query's one column is the list.
+    case sub(String, Query)
     case cmp(String, String, Value)
     case within(String, Value)
     case distance(String, Value, String, Value)
@@ -415,6 +452,7 @@ enum Builder {
         case .not(let item): return .not(try node(item))
         case .raw(let sql, let params): return .raw(sql, try params.map { try $0.fennecValue() })
         case .cmp(let field, let op, let value): return try condOf(field, op, value.fennecValue())
+        case .sub(let field, let query): return .sub(try path(field), query)
         case .fields(let fields):
             let items = try fields.map { try fieldCond(try path($0.0), $0.1) }
             return items.count == 1 ? items[0] : .and(items)
@@ -430,7 +468,8 @@ enum Builder {
     /// One field's condition: a value is equality, `.null` is null, an
     /// object its operators.
     static func fieldCond(_ field: String, _ spec: Value) throws -> Node {
-        guard case .object(let opsMap) = spec else {
+        // A `param` is a value, equality, though it is an object to Swift.
+        guard case .object(let opsMap) = spec, spec.param == nil else {
             return spec.isNull ? .null(field, negated: false) : try cmp(field, "=", spec)
         }
         var items: [Node] = []
@@ -462,13 +501,14 @@ enum Builder {
     /// `["distance": ["from": [lon, lat], "lte": 500]]`: a point's distance,
     /// compared -- `distance(loc, $1) <= $2`, each comparison given its own.
     static func distanceCond(_ field: String, _ spec: Value) throws -> Node {
-        guard case .object(let opsMap) = spec, let from = opsMap["from"], case .array = from else {
+        // A `param`'s point and metres are held to what they are, and bound as the param.
+        guard case .object(let opsMap) = spec, let from = opsMap["from"], case .array = from.param?.value ?? from else {
             throw FennecError.builder("distance takes { from: [lon, lat], <op>: metres } (field: \(field))")
         }
         var items: [Node] = []
         for (k, v) in opsMap where k != "from" {
             let number: Bool
-            switch v {
+            switch v.param?.value ?? v {
             case .int, .double: number = true
             default: number = false
             }
@@ -482,6 +522,16 @@ enum Builder {
         case 1: return items[0]
         default: return .and(items)
         }
+    }
+
+    /// `where(field, op, query)`: only `in` takes an inner query.
+    static func subCond(_ field: String, _ op: String, _ query: Query) throws -> Node {
+        guard let o = ops[op] else { throw FennecError.builder("unknown operator `\(op)`") }
+        let f = try path(field)
+        guard o == "in" else {
+            throw FennecError.builder("this object cannot be used as a fennecdb value (a query is one only as an `in`'s list)")
+        }
+        return .sub(f, query)
     }
 
     static func inCond(_ field: String, _ values: Value) throws -> Node {
@@ -530,6 +580,9 @@ enum Builder {
         case .not(let item): return "not (\(try render(item, bind)))"
         case .null(let field, let negated): return "\(field) is \(negated ? "not " : "")null"
         case .in(let field, let values): return "\(field) in [\(values.map(bind.bind).joined(separator: ", "))]"
+        // Its parameters numbered where its text stands, after the outer
+        // query's before it.
+        case .sub(let field, let query): return "\(field) in (\(try query.inner(bind)))"
         case .cmp(let field, let op, let value): return "\(field) \(op) \(bind.bind(value))"
         case .within(let field, let box): return "within(\(field), \(bind.bind(box)))"
         case .distance(let field, let from, let op, let metres):
@@ -561,6 +614,7 @@ enum Builder {
     /// A document's value: `inc`'s and `expr`'s text, or a parameter.
     static func value(_ key: String, _ v: Value, _ bind: Binder, _ insert: Bool) throws -> String {
         guard case .object(let r) = v, let kind = r[Value.computedKey]?.string else { return bind.bind(v) }
+        if kind == "param" { return bind.bind(v) }
         if kind == "inc" {
             let by = r["by"] ?? .null
             let finite: Bool
@@ -578,23 +632,54 @@ enum Builder {
         return try exprText(r["sql"]?.string ?? "", r["params"]?.array ?? [], bind)
     }
 
-    /// Whether a `raw` fragment may read a collection of its own.
-    static func readsMore(_ c: Node) -> Bool {
+    /// Whether a condition reads only the collections it names: a `raw`
+    /// fragment may read one of its own, and an inner query's are added to
+    /// `out`.
+    static func readsKnown(_ c: Node, _ out: (String) -> Void) -> Bool {
         switch c {
-        case .and(let items), .or(let items): return items.contains(where: readsMore)
-        case .not(let item): return readsMore(item)
-        case .raw(let sql, _): return sql.range(of: #"\bget\b"#, options: [.regularExpression, .caseInsensitive]) != nil
-        default: return false
+        case .and(let items), .or(let items): return items.allSatisfy { readsKnown($0, out) }
+        case .not(let item): return readsKnown(item, out)
+        case .sub(_, let query):
+            guard let inner = query.reads else { return false }
+            inner.forEach(out)
+            return true
+        case .raw(let sql, _): return sql.range(of: #"\bget\b"#, options: [.regularExpression, .caseInsensitive]) == nil
+        default: return true
         }
     }
 }
 
+/// Numbers a statement's parameters in the order its text holds them. A
+/// `Value.param` takes its `$n` at its first use and keeps it, by the id it
+/// was made with: two params of one value are two parameters, as the same
+/// value given twice is.
 final class Binder {
     private(set) var params: [Value] = []
+    private var once: [String: String] = [:]
+    /// The first `param` refused, from whatever ends the chain (`finish`).
+    private var refused: FennecError?
 
     func bind(_ v: Value) -> String {
-        params.append(v)
-        return "$\(params.count)"
+        guard let p = v.param else {
+            params.append(v)
+            return "$\(params.count)"
+        }
+        if let at = once[p.id] { return at }
+        if p.value.param != nil {
+            refused = refused ?? FennecError.builder("param() takes a value, not another param()")
+            return "$0"
+        }
+        params.append(p.value)
+        let at = "$\(params.count)"
+        once[p.id] = at
+        return at
+    }
+
+    /// The parameters, once the text is made: refused where a `param` in it
+    /// was, so a text with a `$0` in it never leaves the builder.
+    func finish() throws -> [Value] {
+        if let refused { throw refused }
+        return params
     }
 }
 
@@ -617,9 +702,32 @@ public struct Query: Sendable {
         let group: [Column]?
         let cond: [Node]
         let required: Bool
-        let order: [(field: String, asc: Bool, collate: String?)]
+        let order: [OrderKey]
         let limit: Int?
         let offset: Int
+    }
+
+    /// One key of an `order`: a name, or an expression over the row whose
+    /// values are bound where the order clause stands.
+    struct OrderKey: Sendable {
+        let field: String
+        let expr: (sql: String, params: [Value])?
+        let asc: Bool
+        let collate: String?
+
+        init(_ field: String, asc: Bool, collate: String?) {
+            self.field = field
+            expr = nil
+            self.asc = asc
+            self.collate = collate
+        }
+
+        init(sql: String, params: [Value], asc: Bool, collate: String?) {
+            field = ""
+            expr = (sql, params)
+            self.asc = asc
+            self.collate = collate
+        }
     }
 
     /// `highlight(field)` when `words` is nil, `snippet(field, words)`
@@ -641,10 +749,15 @@ public struct Query: Sendable {
     var group: [Column]?
     var cond: [Node] = []
     var near: VectorClause?
-    var match: (field: String, query: Value, fuzzy: Int?, prefix: Bool)?
+    /// `fuzzy` is the text written after the words: ` fuzzy` alone for the
+    /// parser's default, ` fuzzy 1`, or none.
+    var match: (field: String, query: Value, fuzzy: String, prefix: Bool)?
+    /// Whether `match` was called while no `near` was there: a `fuse` reads
+    /// both ways, and the text keeps the chain's order.
+    var matchFirst = false
     var rerank: VectorClause?
     var fuse: (k: Int?, candidates: Int?)?
-    var order: [(field: String, asc: Bool, collate: String?)] = []
+    var order: [OrderKey] = []
     var limit: Int?
     var offset = 0
     /// ` require n`, or none.
@@ -693,15 +806,18 @@ public struct Query: Sendable {
         return q
     }
 
-    /// Every collection the query reads -- its own and each lookup's -- or
-    /// `nil` when a `raw` fragment may read one more: a live query runs
-    /// again when one of them is written.
+    /// Every collection the query reads -- its own, each lookup's and each
+    /// inner query's of an `in` -- or `nil` when a `raw` fragment may read
+    /// one more: a live query runs again when one of them is written.
     public var reads: [String]? {
-        if cond.contains(where: Builder.readsMore) || lookups.contains(where: { $0.cond.contains(where: Builder.readsMore) }) {
-            return nil
+        var out: [String] = []
+        let add = { (name: String) in if !out.contains(name) { out.append(name) } }
+        add(collection)
+        guard cond.allSatisfy({ Builder.readsKnown($0, add) }) else { return nil }
+        for l in lookups {
+            add(l.collection)
+            guard l.cond.allSatisfy({ Builder.readsKnown($0, add) }) else { return nil }
         }
-        var out = [collection]
-        for l in lookups where !out.contains(l.collection) { out.append(l.collection) }
         return out
     }
 
@@ -851,6 +967,17 @@ public struct Query: Sendable {
         return with { $0.cond.append(n) }
     }
 
+    /// `field in (get ...)`: an inner query's one column is the list. It
+    /// runs once, before the query around it, its parameters numbered where
+    /// its text stands:
+    ///
+    ///     try db.from("orders").where("customer", "in", db.from("customers").select("id").where("country", "=", "TR"))
+    ///     // get orders where customer in (get customers select id where country = $1)
+    public func `where`(_ field: String, _ op: String, _ inner: Query) throws -> Query {
+        let n = try Builder.subCond(field, op, inner)
+        return with { $0.cond.append(n) }
+    }
+
     /// The field held to a spec: a value is equality, `.null` is null, an
     /// object (a `Value` dictionary literal) its operators.
     public func `where`(_ field: String, _ spec: any FennecValue) throws -> Query {
@@ -867,6 +994,11 @@ public struct Query: Sendable {
     /// Everything conditioned so far, or `field op value`.
     public func orWhere(_ field: String, _ op: String, _ value: any FennecValue) throws -> Query {
         or(try Builder.condOf(field, op, value.fennecValue()))
+    }
+
+    /// Everything conditioned so far, or `field in (get ...)`.
+    public func orWhere(_ field: String, _ op: String, _ inner: Query) throws -> Query {
+        or(try Builder.subCond(field, op, inner))
     }
 
     /// Everything conditioned so far, or the field held to a spec.
@@ -887,23 +1019,52 @@ public struct Query: Sendable {
         let clause = VectorClause(
             field: try Builder.ident(field), vector: try vector.fennecValue(),
             n: try ef.map { try Builder.whole($0, "ef") }, exact: exact)
-        return with { $0.near = clause }
+        // `fuse` writes its two searches in the order they were first
+        // called: `match` first where it came while no `near` was there.
+        return with {
+            if $0.match == nil { $0.matchFirst = false }
+            $0.near = clause
+        }
     }
 
-    /// `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+    /// `match field $n [fuzzy [N]] [prefix]`: BM25 over a `@text` index.
     /// `fuzzy: 2` matches each word within the edits its length allows --
     /// none under 5 characters, one up to 8, two from 9 -- `fuzzy: 1` one
-    /// at most; `prefix: true` matches the last word as the start of a word
+    /// at most; `fuzzy: true` is the parser's default, two, written `fuzzy`
+    /// alone; `prefix: true` matches the last word as the start of a word
     /// too, as a search box is typed into.
+    ///
+    ///     try db.from("products").match("title", input, fuzzy: true, prefix: true).limit(10)
     public func match(_ field: String, _ query: String, fuzzy: Int? = nil, prefix: Bool = false) throws -> Query {
+        try match(field, .string(query), fuzzyValue: fuzzy.map { .int(Int64($0)) }, prefixValue: .bool(prefix))
+    }
+
+    /// `match field $n fuzzy [prefix]`: each word within the edits its
+    /// length allows, as `fuzzy: 2` does, written `fuzzy` alone.
+    public func match(_ field: String, _ query: String, fuzzy: Bool, prefix: Bool = false) throws -> Query {
+        try match(field, .string(query), fuzzyValue: .bool(fuzzy), prefixValue: .bool(prefix))
+    }
+
+    /// `match` of a `Value.param`'s text, its `$n` the one each of its uses
+    /// writes.
+    public func match(_ field: String, _ query: Value, fuzzy: Int? = nil, prefix: Bool = false) throws -> Query {
         try match(field, query, fuzzyValue: fuzzy.map { .int(Int64($0)) }, prefixValue: .bool(prefix))
+    }
+
+    /// `match` of a `Value.param`'s text, `fuzzy` alone or not.
+    public func match(_ field: String, _ query: Value, fuzzy: Bool, prefix: Bool = false) throws -> Query {
+        try match(field, query, fuzzyValue: .bool(fuzzy), prefixValue: .bool(prefix))
     }
 
     /// `match`, its options as the golden file holds them -- a fuzzy that
     /// is not a number, a prefix that is not a boolean -- so a refusal of
     /// one is the JS builder's.
-    func match(_ field: String, _ query: String, fuzzyValue: Value?, prefixValue: Value?) throws -> Query {
+    func match(_ field: String, _ query: Value, fuzzyValue: Value?, prefixValue: Value?) throws -> Query {
         let f = try Builder.ident(field)
+        // The words are text, or a `param` holding it.
+        guard (query.param?.value ?? query).string != nil else {
+            throw FennecError.builder("match takes its words as text: \(query.param?.value.json ?? query.json)")
+        }
         // As JavaScript writes a value into its message.
         func shown(_ v: Value) -> String {
             switch v {
@@ -914,11 +1075,12 @@ public struct Query: Sendable {
             default: return v.json
             }
         }
-        var edits: Int?
+        var edits = ""
         switch fuzzyValue {
-        case nil, .null?, .bool(false)?: edits = nil
-        case .bool(true)?: edits = 2
-        case .int(let n)? where (0...2).contains(n): edits = Int(n)
+        case nil, .null?, .bool(false)?: edits = ""
+        // The default is `fuzzy` alone; a number of edits is written out.
+        case .bool(true)?: edits = " fuzzy"
+        case .int(let n)? where (0...2).contains(n): edits = " fuzzy \(n)"
         case let v?: throw FennecError.builder("fuzzy is true, false or 0 to 2 edits: \(shown(v))")
         }
         var prefix = false
@@ -927,11 +1089,16 @@ public struct Query: Sendable {
         case .bool(let b)?: prefix = b
         case let v?: throw FennecError.builder("prefix is true or false: \(shown(v))")
         }
-        return with { $0.match = (f, .string(query), edits, prefix) }
+        return with {
+            if $0.near == nil { $0.matchFirst = true }
+            $0.match = (f, query, edits, prefix)
+        }
     }
 
     /// `fuse [k N] [candidates N]`: with both `match` and `near`, ranks by
     /// both, a document scoring `1 / (k + rank)` from each list it is on.
+    /// The two are written in the order they were called:
+    /// `.match(...).near(...).fuse()` is `match ... near ... fuse`.
     public func fuse(k: Int? = nil, candidates: Int? = nil) throws -> Query {
         let f = (try k.map { try Builder.whole($0, "k") }, try candidates.map { try Builder.whole($0, "candidates") })
         return with { $0.fuse = f }
@@ -1024,18 +1191,38 @@ public struct Query: Sendable {
             cond: try cond.map { [try Builder.node($0)] } ?? [],
             required: required,
             // Over groups a key may name an aggregate of the list.
-            order: try order.map { (try Builder.column($0.field).text, try Builder.direction($0.direction), try Builder.collation($0.collate)) },
+            order: try order.map { OrderKey(try Builder.column($0.field).text, asc: try Builder.direction($0.direction), collate: try Builder.collation($0.collate)) },
             limit: try limit.map { try Builder.whole($0, "limit") },
             offset: try offset.map { try Builder.whole($0, "offset") } ?? 0)
         return with { $0.lookups.append(level) }
     }
 
-    /// `order field asc|desc`: each call adds a key. `collate: "tr"` puts
-    /// text in Turkish order, `"und"` in Unicode's root order.
+    /// `order field asc|desc`: each call adds a key, the next deciding
+    /// where the one before ties. `collate: "tr"` puts text in Turkish
+    /// order, `"und"` in Unicode's root order.
     public func order(_ field: String, _ direction: String = "asc", collate: String? = nil) throws -> Query {
         // Over groups a key may be an aggregate of the list, by its name.
-        let key = (try Builder.column(field).text, try Builder.direction(direction), try Builder.collation(collate))
+        let key = OrderKey(
+            try Builder.column(field).text, asc: try Builder.direction(direction), collate: try Builder.collation(collate))
         return with { $0.order.append(key) }
+    }
+
+    /// `order <expression> asc|desc`: a key worked out over the row, rows
+    /// tied on every key going in id order -- `.order(.expr("n * 2"), "desc")`,
+    /// `.order(.distance("loc", point))` -- its values bound where the
+    /// order stands in the text. It orders the rows an update or a delete
+    /// picks too. A field's name is the key it is, as `order(_:)` takes it.
+    public func order(_ key: Column, _ direction: String = "asc", collate: String? = nil) throws -> Query {
+        switch key.kind {
+        case .name(let name): return try order(name, direction, collate: collate)
+        case .expr(_, _, let name?):
+            // A select list's name is no key of its own: ordering by it is ordering by the name.
+            throw FennecError.builder("an order key is an expression or a name: order by \(name) itself, without as")
+        case .expr(let sql, let params, nil):
+            let key = OrderKey(
+                sql: sql, params: params, asc: try Builder.direction(direction), collate: try Builder.collation(collate))
+            return with { $0.order.append(key) }
+        }
     }
 
     /// How many rows come back.
@@ -1068,7 +1255,8 @@ public struct Query: Sendable {
     /// The statement and its parameters, as they would be run.
     public func toFennecQL() throws -> (text: String, params: [Value]) {
         let bind = Binder()
-        return (try text(bind), bind.params)
+        let made = try text(bind)
+        return (made, try bind.finish())
     }
 
     private func text(_ bind: Binder) throws -> String {
@@ -1151,16 +1339,22 @@ public struct Query: Sendable {
         if columns != nil || !items.isEmpty { sql += " select " + ((columns ?? ["*"]) + items).joined(separator: ", ") }
         if let w = try whereOf(cond, bind) { sql += " where \(w)" }
         if let group { sql += " group " + (try group.map { try Builder.columnText($0, bind) }).joined(separator: ", ") }
-        if let near {
-            sql += " near \(near.field) \(bind.bind(near.vector))"
-            if let ef = near.n { sql += " ef \(ef)" }
-            if near.exact { sql += " exact" }
+        let nearText = { (bind: Binder) -> String in
+            guard let near else { return "" }
+            var s = " near \(near.field) \(bind.bind(near.vector))"
+            if let ef = near.n { s += " ef \(ef)" }
+            if near.exact { s += " exact" }
+            return s
         }
+        // Before `match` unless `match` was called first: a `fuse` reads
+        // both ways, and the text keeps the chain's order.
+        let matchFirst = match != nil && self.matchFirst
+        if !matchFirst { sql += nearText(bind) }
         if let match {
-            sql += " match \(match.field) \(bind.bind(match.query))"
-            if let edits = match.fuzzy { sql += " fuzzy \(edits)" }
+            sql += " match \(match.field) \(bind.bind(match.query))\(match.fuzzy)"
             if match.prefix { sql += " prefix" }
         }
+        if matchFirst { sql += nearText(bind) }
         if let rerank {
             sql += " rerank \(rerank.field) \(bind.bind(rerank.vector))"
             if let c = rerank.n { sql += " candidates \(c)" }
@@ -1170,7 +1364,7 @@ public struct Query: Sendable {
             if let k = fuse.k { sql += " k \(k)" }
             if let c = fuse.candidates { sql += " candidates \(c)" }
         }
-        sql += Query.orderText(order)
+        sql += try Query.orderText(order, bind)
         if let limit { sql += " limit " + bind.bind(.int(Int64(limit))) }
         if offset > 0 { sql += " offset " + bind.bind(.int(Int64(offset))) }
         // Before a lookup, whose clauses are the children's.
@@ -1200,21 +1394,38 @@ public struct Query: Sendable {
             if let keys = l.group {
                 sql += " group " + (try keys.map { try Builder.columnText($0, bind) }).joined(separator: ", ")
             }
-            sql += Query.orderText(l.order)
+            sql += try Query.orderText(l.order, bind)
             if let n = l.limit { sql += " limit " + bind.bind(.int(Int64(n))) }
             if l.offset > 0 { sql += " offset " + bind.bind(.int(Int64(l.offset))) }
         }
         return sql
     }
 
-    private static func orderText(_ keys: [(field: String, asc: Bool, collate: String?)]) -> String {
+    /// `name collate tr desc` for each key, an expression's values bound
+    /// where its text stands.
+    private static func orderText(_ keys: [OrderKey], _ bind: Binder) throws -> String {
         var out = ""
         for (i, k) in keys.enumerated() {
-            out += (i == 0 ? " order " : ", ") + k.field
+            out += (i == 0 ? " order " : ", ")
+            if let e = k.expr { out += try Builder.exprText(e.sql, e.params, bind) } else { out += k.field }
             if let c = k.collate { out += " collate \(c)" }
             out += k.asc ? " asc" : " desc"
         }
         return out
+    }
+
+    /// The text as the inner query of an `in`, its values bound by the
+    /// binder of the query around it.
+    func inner(_ bind: Binder) throws -> String {
+        // One column is the list; the engine refuses the rest too.
+        if project?.count != 1 || count || !lookups.isEmpty || !marks.isEmpty || !facets.isEmpty {
+            throw FennecError.builder(
+                "an inner query of `in` selects exactly one column: from('\(collection)').select('id')")
+        }
+        if !requirement.isEmpty {
+            throw FennecError.builder("an inner query of `in` takes no require: the query around it does")
+        }
+        return try text(bind)
     }
 
     private func whereOf(_ cond: [Node], _ bind: Binder) throws -> String? {
@@ -1302,7 +1513,7 @@ public struct Query: Sendable {
     // it picks, and whether it answers them, under the fields named -- `*`
     // for every one.
     private func pick(_ returning: [String]?, _ bind: Binder) throws -> String {
-        var out = Query.orderText(order)
+        var out = try Query.orderText(order, bind)
         if let limit { out += " limit " + bind.bind(.int(Int64(limit))) }
         return out + (try Query.returningClause(returning))
     }
@@ -1336,6 +1547,22 @@ public struct Query: Sendable {
     /// never a parameter, as the count is not. `returning`: the rows
     /// written answered, ids and all (`insertReturning`).
     public func toInsert(_ docs: any FennecValue, ifAbsent: Bool = false, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+        try put("put", docs, ifAbsent: ifAbsent, require: require, reason: reason, returning: returning)
+    }
+
+    /// The `insert` of a document or a list of them, not run: one naming an
+    /// id a row holds is refused -- 409, `.duplicate` -- and the statement,
+    /// a block of one, put back whole, where `toInsert`'s `put` writes over
+    /// that row. `require`, `reason` and `returning` as `toInsert`'s; it
+    /// takes no `ifAbsent`, which passes over a held id where this refuses
+    /// one.
+    public func toInsertNew(_ docs: any FennecValue, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+        try put("insert", docs, ifAbsent: false, require: require, reason: reason, returning: returning)
+    }
+
+    // Both are checked as an insert: the same clauses refused, in the same
+    // words.
+    private func put(_ verb: String, _ docs: any FennecValue, ifAbsent: Bool, require: Int?, reason: String?, returning: [String]?) throws -> (text: String, params: [Value]) {
         try assertPlain("insert")
         let list = Query.docs(try docs.fennecValue())
         guard !list.isEmpty else { throw FennecError.builder("cannot write an empty document list") }
@@ -1343,7 +1570,7 @@ public struct Query: Sendable {
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let absent = ifAbsent ? " if absent" : ""
         let tail = try Query.returningClause(returning) + Query.requireClause(require, reason)
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(tail)", bind.params)
+        return ("\(verb) \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(tail)", try bind.finish())
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
@@ -1358,7 +1585,7 @@ public struct Query: Sendable {
         let bind = Binder()
         let body = try Builder.renderDoc(try patch.fennecValue(), bind)
         let filter = try requireFilter("update", all, bind)
-        return ("set \(collection) \(body)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", bind.params)
+        return ("set \(collection) \(body)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", try bind.finish())
     }
 
     /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1375,7 +1602,7 @@ public struct Query: Sendable {
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let set = try Builder.renderDoc(try patch.fennecValue(), bind)
         let tail = try Query.returningClause(returning) + Query.requireClause(require, reason)
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(tail)", bind.params)
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(tail)", try bind.finish())
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
@@ -1387,7 +1614,7 @@ public struct Query: Sendable {
         try assertPlain("delete")
         let bind = Binder()
         let filter = try requireFilter("delete", all, bind)
-        return ("del \(collection)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", bind.params)
+        return ("del \(collection)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", try bind.finish())
     }
 
     // -------------------------------------------------------------- running
@@ -1439,6 +1666,19 @@ public struct Query: Sendable {
         let v = try docs.fennecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
         return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, reason: reason)).affected
+    }
+
+    /// Inserts a document or a list of them, refused whole (409,
+    /// `.duplicate`) where one names an id a row holds: a row made once,
+    /// never written over, where `insert` puts over it. How many it wrote;
+    /// none is no statement. `require` and `reason` as `insert`'s. On a
+    /// sync replica the id is refused here, before anything is sent, and one
+    /// only the server holds is its 409, the rows put back.
+    @discardableResult
+    public func insertNew(_ docs: any FennecValue, require: Int? = nil, reason: String? = nil) async throws -> Int {
+        let v = try docs.fennecValue()
+        if case .array(let list) = v, list.isEmpty { return 0 }
+        return try await run(toInsertNew(v, require: require, reason: reason)).affected
     }
 
     /// Inserts each document, or, where a row holds its id or `@unique`
@@ -1494,6 +1734,15 @@ public struct Query: Sendable {
         let v = try docs.fennecValue()
         if case .array(let list) = v, list.isEmpty { return [] }
         return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, reason: reason, returning: returning)).rows
+    }
+
+    /// `insertNew` that answers the rows it wrote, ids and all, in the
+    /// documents' order, under the fields named -- `["*"]` every one.
+    @discardableResult
+    public func insertNewReturning(_ docs: any FennecValue, returning: [String] = ["*"], require: Int? = nil, reason: String? = nil) async throws -> [Row] {
+        let v = try docs.fennecValue()
+        if case .array(let list) = v, list.isEmpty { return [] }
+        return try await run(toInsertNew(v, require: require, reason: reason, returning: returning)).rows
     }
 
     /// `upsert` that answers the rows it set and made, as written, in the

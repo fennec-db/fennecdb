@@ -43,9 +43,12 @@ class Cond internal constructor(internal val node: Node) {
          * bound to the next parameter -- a literal `?` goes in as one too.
          * `raw("cosine(embed, ?) > ?", vector, 0.5)`
          */
-        @JvmStatic fun raw(sql: String, vararg params: Any?): Cond = Cond(Node.Raw(sql, params.map(Values::normalize)))
+        @JvmStatic fun raw(sql: String, vararg params: Any?): Cond = Cond(Node.Raw(sql, params.map(Values::held)))
 
-        /** One comparison, `where`'s three arguments as a condition. */
+        /**
+         * One comparison, `where`'s three arguments as a condition. Its value
+         * may be a [Query] for `in`: `Cond.cmp("customer", "in", db.from("customers").select("id"))`.
+         */
         @JvmStatic fun cmp(field: String, op: String, value: Any?): Cond = Cond(Builder.condOf(field, op, value))
 
         /** The JS builder's object condition: each field held to its spec, joined with `and`. */
@@ -149,6 +152,38 @@ class Computed private constructor(
     }
 }
 
+/**
+ * One value bound once, whichever places it is used in: each use writes the
+ * same `$n`, where the same value given twice is two parameters -- the
+ * amount taken and the amount checked one value, never two a caller could
+ * let drift apart. It goes wherever a value goes: a filter's, also as an
+ * operator map's value (`mapOf("gte" to amount)`), an `in` list's element, a
+ * document's, [Computed.expr]'s and [Cond.raw]'s `?`, [Computed.distance]'s
+ * point, [Query.near]'s vector and [Query.match]'s words. It is a value,
+ * never a map of operators, and it is bound by identity: a second [param]
+ * of one value is another parameter, the same instance twice is one.
+ *
+ *     val amount = param(300)
+ *     db.from("accounts").where(mapOf("name" to "ada", "balance" to mapOf("gte" to amount)))
+ *         .toUpdate(mapOf("balance" to Computed.expr("balance - ?", amount)), require = 1)
+ *     // set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1, [300, "ada"]
+ *
+ * A value inside a list or a json value is that value's own: a param stands
+ * where a whole value does, and in the elements of an `in` list.
+ */
+class Param private constructor(internal val value: Any?) {
+    companion object {
+        /** A parameter of [value]; `null` is a value too. */
+        @JvmStatic fun of(value: Any?): Param {
+            if (value is Param) throw refuse("param() takes a value, not another param()")
+            return Param(value)
+        }
+    }
+}
+
+/** [Param.of]: one parameter, used in as many places as the value is wanted. */
+fun param(value: Any?): Param = Param.of(value)
+
 /** One key of a lookup's order: a field, `asc` or `desc`, and a collation (`tr` or `und`). */
 data class SortKey @JvmOverloads constructor(val field: String, val direction: String = "asc", val collate: String? = null)
 
@@ -158,6 +193,9 @@ internal sealed class Node {
     class Not(val item: Node) : Node()
     class Null(val field: String, val negated: Boolean) : Node()
     class In(val field: String, val values: List<Any?>) : Node()
+
+    /** `field in (get ...)`: an inner query's one column is the list. */
+    class Sub(val field: String, val query: Query) : Node()
     class Cmp(val field: String, val op: String, val value: Any?) : Node()
     class Within(val field: String, val box: Any?) : Node()
     class Distance(val field: String, val from: Any?, val op: String, val metres: Any?) : Node()
@@ -381,7 +419,10 @@ internal object Builder {
     /** `mapOf("from" to listOf(lon, lat), "lte" to 500)`: a point's distance, compared, each comparison its own. */
     private fun distanceCond(field: String, spec: Any?): Node {
         val from = (spec as? Map<*, *>)?.get("from")
-        if (spec !is Map<*, *> || (from !is List<*> && from !is Array<*>)) {
+        // A param's point and metres are held to the value it holds, and
+        // bound as the param: the node keeps it.
+        val point = held(from)
+        if (spec !is Map<*, *> || (point !is List<*> && point !is Array<*>)) {
             throw refuse("distance takes { from: [lon, lat], <op>: metres } (field: $field)")
         }
         val items = ArrayList<Node>()
@@ -389,7 +430,7 @@ internal object Builder {
             val k = key.toString()
             if (k == "from") continue
             val op = ops[k]
-            if (op == null || op == "in" || op == "has" || op == "~" || v !is Number) {
+            if (op == null || op == "in" || op == "has" || op == "~" || held(v) !is Number) {
                 throw refuse("distance compares metres with lt, lte, gt, gte, eq or ne: $k (field: $field)")
             }
             items.add(Node.Distance(field, from, op, v))
@@ -401,7 +442,14 @@ internal object Builder {
         }
     }
 
+    /** A value as the builder checks it: a [Param]'s own. */
+    private fun held(v: Any?): Any? = if (v is Param) v.value else v
+
     private fun inCond(field: String, values: Any?): Node {
+        // `mapOf("customer" to mapOf("in" to db.from("customers").select("id")))`:
+        // the inner query runs once, before the one around it, and its one
+        // column is the list -- `customer in (get customers select id)`.
+        if (values is Query) return Node.Sub(field, values)
         val list = when (values) {
             is List<*> -> values
             is Array<*> -> values.toList()
@@ -438,6 +486,10 @@ internal object Builder {
         is Node.Not -> "not (${render(c.item, bind)})"
         is Node.Null -> "${c.field} is ${if (c.negated) "not " else ""}null"
         is Node.In -> "${c.field} in [${c.values.joinToString(", ") { bind.bind(it) }}]"
+        // Its values are numbered where its text stands, after the outer
+        // query's before it, and a param it shares with that query keeps its
+        // one `$n`.
+        is Node.Sub -> "${c.field} in (${c.query.inner(bind)})"
         is Node.Cmp -> "${c.field} ${c.op} ${bind.bind(c.value)}"
         is Node.Within -> "within(${c.field}, ${bind.bind(c.box)})"
         is Node.Distance -> {
@@ -475,20 +527,39 @@ internal object Builder {
         return exprText(v, bind)
     }
 
-    /** Whether a `raw` fragment may read a collection of its own. */
-    fun readsMore(c: Node): Boolean = when (c) {
-        is Node.And -> c.items.any(::readsMore)
-        is Node.Or -> c.items.any(::readsMore)
-        is Node.Not -> readsMore(c.item)
-        is Node.Raw -> Regex("\\bget\\b", RegexOption.IGNORE_CASE).containsMatchIn(c.sql)
-        else -> false
+    /**
+     * Whether a condition reads only the collections it names -- a `raw`
+     * fragment may read one of its own -- adding an inner query's to [out].
+     */
+    fun readsKnown(c: Node, out: MutableCollection<String>): Boolean = when (c) {
+        is Node.And -> c.items.all { readsKnown(it, out) }
+        is Node.Or -> c.items.all { readsKnown(it, out) }
+        is Node.Not -> readsKnown(c.item, out)
+        is Node.Sub -> c.query.reads?.let { out.addAll(it); true } ?: false
+        is Node.Raw -> !Regex("\\bget\\b", RegexOption.IGNORE_CASE).containsMatchIn(c.sql)
+        else -> true
     }
 }
 
+/**
+ * Numbers a statement's parameters in the order its text holds them. A
+ * [Param] takes its `$n` at its first use and keeps it, by the instance it
+ * was made as: two params of one value are two parameters, as the same value
+ * given twice is.
+ */
 internal class Binder {
     val params = ArrayList<Any?>()
 
+    // Made at the first param, so a query with none pays for no map.
+    private var once: java.util.IdentityHashMap<Param, String>? = null
+
     fun bind(v: Any?): String {
+        if (v is Param) {
+            val seen = once ?: java.util.IdentityHashMap<Param, String>().also { once = it }
+            seen[v]?.let { return it }
+            params.add(Values.normalize(v.value))
+            return "$${params.size}".also { seen[v] = it }
+        }
         params.add(Values.normalize(v))
         return "$${params.size}"
     }
@@ -505,10 +576,16 @@ data class Statement(val text: String, val params: List<Any?>)
 class Query private constructor(private val s: State) {
     private class VectorClause(val field: String, val vector: Any?, val n: Long?, val exact: Boolean)
 
-    // A match's field, its words, the most edits a word may take and whether the last word is a prefix.
-    private class MatchClause(val field: String, val query: String, val fuzzy: Long?, val prefix: Boolean)
+    // A match's field, its words (a text, or a Param holding one), the text
+    // its edits are written as -- " fuzzy" alone for the parser's default,
+    // " fuzzy 1", or none -- and whether the last word is a prefix.
+    private class MatchClause(val field: String, val query: Any, val fuzzy: String, val prefix: Boolean)
 
-    private class Key(val field: String, val asc: Boolean, val collate: String?)
+    // One key of an order: a name, or an expression over the row whose
+    // values are bound where the order clause stands.
+    private class Key(val field: String, val expr: Computed?, val asc: Boolean, val collate: String?) {
+        constructor(field: String, asc: Boolean, collate: String?) : this(field, null, asc, collate)
+    }
 
     /** A highlight (no [words]) or a snippet of a field, in the select list. */
     private class Mark(val field: String, val words: Long?, val ellipsis: String?, val pre: String?, val post: String?) {
@@ -534,6 +611,9 @@ class Query private constructor(private val s: State) {
         val cond: List<Node> = emptyList(),
         val near: VectorClause? = null,
         val match: MatchClause? = null,
+        // Whether match was called while no near was there: a fuse reads
+        // both ways, and the text keeps the chain's order.
+        val matchFirst: Boolean = false,
         val rerank: VectorClause? = null,
         val fuse: Pair<Long?, Long?>? = null,
         val order: List<Key> = emptyList(),
@@ -567,14 +647,20 @@ class Query private constructor(private val s: State) {
         Query(s.copy(exec = exec, read = read))
 
     /**
-     * Every collection the query reads -- its own and each lookup's -- or
-     * `null` when a `raw` fragment may read one more: a live query runs again
-     * when one of them is written.
+     * Every collection the query reads -- its own, each lookup's and each
+     * inner query's of an `in` -- or `null` when a `raw` fragment may read one
+     * more: a live query runs again when one of them is written.
      */
     val reads: List<String>?
         get() {
-            if (s.cond.any(Builder::readsMore) || s.lookups.any { l -> l.cond.any(Builder::readsMore) }) return null
-            return (listOf(s.collection) + s.lookups.map { it.collection }).distinct()
+            val out = LinkedHashSet<String>()
+            out.add(s.collection)
+            if (!s.cond.all { Builder.readsKnown(it, out) }) return null
+            for (l in s.lookups) {
+                out.add(l.collection)
+                if (!l.cond.all { Builder.readsKnown(it, out) }) return null
+            }
+            return out.toList()
         }
 
     /**
@@ -610,8 +696,18 @@ class Query private constructor(private val s: State) {
     /**
      * `field op value`, joined to the conditions before with `and`. The op is
      * a symbol or its word: `=`, `!=`, `<`, `<=`, `>`, `>=`, `~`, `has`, `in`
-     * (a list), or `eq`, `ne`, `lt`, `gte`, `like`, `contains` ... A null with
-     * `=` or `!=` is `is null` and `is not null`.
+     * (a list, or a [Query] selecting one column), or `eq`, `ne`, `lt`, `gte`,
+     * `like`, `contains` ... A null with `=` or `!=` is `is null` and
+     * `is not null`.
+     *
+     * An inner query runs once, before the one around it, its one column the
+     * list, and its values are numbered where its text stands:
+     *
+     *     db.from("orders").where("customer", "in", db.from("customers").select("id").where("country", "TR"))
+     *     // get orders where customer in (get customers select id where country = $1)
+     *
+     * It goes the same inside a [Cond] or a map of operators, [orWhere] and a
+     * lookup's `where`.
      */
     fun where(field: String, op: String, value: Any?): Query = and(Builder.condOf(field, op, value))
 
@@ -638,34 +734,68 @@ class Query private constructor(private val s: State) {
     /** `near field $n [ef N] [exact]`. A [FloatArray] goes to the library as its bytes. */
     @JvmOverloads
     fun near(field: String, vector: Any?, ef: Long? = null, exact: Boolean = false): Query =
-        Query(s.copy(near = VectorClause(Builder.ident(field), vector, ef?.let { Builder.whole(it, "ef") }, exact)))
+        // `fuse` writes its two searches in the order they were first called:
+        // `match` first where it came while no `near` was there.
+        Query(s.copy(
+            near = VectorClause(Builder.ident(field), vector, ef?.let { Builder.whole(it, "ef") }, exact),
+            matchFirst = s.match != null && s.matchFirst,
+        ))
 
     /**
-     * `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+     * `match field $n [fuzzy [N]] [prefix]`: BM25 over a `@text` index.
      * `fuzzy = 2` matches each word within the edits its length allows --
      * none under 5 characters, one up to 8, two from 9 -- `fuzzy = 1` one at
-     * most; `prefix = true` matches the last word as the start of a word
+     * most; `fuzzy = true` is the parser's default, two, written `fuzzy`
+     * alone; `prefix = true` matches the last word as the start of a word
      * too, as a search box is typed into.
+     *
+     *     db.from("products").match("title", input, fuzzy = true, prefix = true).limit(10)
      */
     @JvmOverloads
     fun match(field: String, query: String, fuzzy: Long? = null, prefix: Boolean = false): Query =
         matchOf(field, query, fuzzy, prefix)
 
-    /** [match] over options of any type, as the golden file holds them, so a refusal of one is the JS builder's. */
-    internal fun matchOf(field: String, query: String, fuzzy: Any?, prefix: Any?): Query {
+    /** [match] with `fuzzy` as the parser's default, `fuzzy` alone: each word within the edits its length allows; `false` exactly. */
+    @JvmOverloads
+    fun match(field: String, query: String, fuzzy: Boolean, prefix: Boolean = false): Query =
+        matchOf(field, query, fuzzy, prefix)
+
+    /** [match] of a [Param]'s text, its `$n` the one each of its uses writes. */
+    @JvmOverloads
+    fun match(field: String, query: Param, fuzzy: Long? = null, prefix: Boolean = false): Query =
+        matchOf(field, query, fuzzy, prefix)
+
+    /** [match] of a [Param]'s text, `fuzzy` alone or not. */
+    @JvmOverloads
+    fun match(field: String, query: Param, fuzzy: Boolean, prefix: Boolean = false): Query =
+        matchOf(field, query, fuzzy, prefix)
+
+    /**
+     * [match] over a query and options of any type, as the golden file holds
+     * them, so a refusal of one is the JS builder's.
+     */
+    internal fun matchOf(field: String, query: Any?, fuzzy: Any?, prefix: Any?): Query {
         val f = Builder.ident(field)
+        // The words are text, or a param holding it.
+        val words = if (query is Param) query.value else query
+        if (words !is String) throw refuse("match takes its words as text: ${Json.write(Values.normalize(words))}")
+        // The default is `fuzzy` alone; a number of edits is written out.
         val edits = when (fuzzy) {
-            null, false -> null
-            true -> 2L
-            is Long, is Int -> (fuzzy as Number).toLong().takeIf { it in 0L..2L }
+            null, false -> ""
+            true -> " fuzzy"
+            is Long, is Int -> (fuzzy as Number).toLong().takeIf { it in 0L..2L }?.let { " fuzzy $it" }
                 ?: throw refuse("fuzzy is true, false or 0 to 2 edits: $fuzzy")
             else -> throw refuse("fuzzy is true, false or 0 to 2 edits: $fuzzy")
         }
         if (prefix != null && prefix !is Boolean) throw refuse("prefix is true or false: $prefix")
-        return Query(s.copy(match = MatchClause(f, query, edits, prefix == true)))
+        return Query(s.copy(match = MatchClause(f, query as Any, edits, prefix == true), matchFirst = s.near == null || s.matchFirst))
     }
 
-    /** `fuse [k N] [candidates N]`: with both [match] and [near], ranks by both. */
+    /**
+     * `fuse [k N] [candidates N]`: with both [match] and [near], ranks by both.
+     * The two are written in the order they were called:
+     * `.match(...).near(...).fuse()` is `match ... near ... fuse`.
+     */
     @JvmOverloads
     fun fuse(k: Long? = null, candidates: Long? = null): Query =
         Query(s.copy(fuse = k?.let { Builder.whole(it, "k") } to candidates?.let { Builder.whole(it, "candidates") }))
@@ -825,11 +955,30 @@ class Query private constructor(private val s: State) {
         return Query(s.copy(facets = s.facets + Facet(name, t, bounds, disjunctive == true)))
     }
 
-    /** `order field asc|desc`: each call adds a key. `collate = "tr"` puts text in Turkish order. */
+    /**
+     * `order field asc|desc`: each call adds a key, the next deciding where
+     * the one before ties. `collate = "tr"` puts text in Turkish order.
+     */
     @JvmOverloads
     fun order(field: String, direction: String = "asc", collate: String? = null): Query =
         // Over groups a key may be an aggregate of the list, by its name.
         Query(s.copy(order = s.order + Key(Builder.column(field).first, Builder.direction(direction), Builder.collation(collate))))
+
+    /**
+     * `order <expression> asc|desc`: a key worked out over the row, rows tied
+     * on every key going in id order -- `order(Computed.expr("n * 2"), "desc")`,
+     * `order(Computed.distance("loc", point))` -- its values bound where the
+     * order stands in the text. It orders the rows an update or a delete
+     * picks too.
+     */
+    @JvmOverloads
+    fun order(key: Computed, direction: String = "asc", collate: String? = null): Query {
+        // An expression, not an `inc`, which is a value to write.
+        Builder.column(key)
+        // A select list's name is no key of its own: ordering by it is ordering by the name.
+        key.name?.let { throw refuse("an order key is an expression or a name: order by $it itself, without as") }
+        return Query(s.copy(order = s.order + Key("", key, Builder.direction(direction), Builder.collation(collate))))
+    }
 
     /** How many rows come back. */
     fun limit(n: Long): Query = Query(s.copy(limit = Builder.whole(n, "limit")))
@@ -940,16 +1089,21 @@ class Query private constructor(private val s: State) {
         }
         whereOf(s.cond, bind)?.let { sql.append(" where ").append(it) }
         s.group?.let { g -> sql.append(" group ").append(g.joinToString(", ") { Builder.columnText(it, bind) }) }
-        s.near?.let { n ->
+        fun nearText() {
+            val n = s.near ?: return
             sql.append(" near ${n.field} ${bind.bind(n.vector)}")
             n.n?.let { sql.append(" ef $it") }
             if (n.exact) sql.append(" exact")
         }
+        // Before `match` unless `match` was called first: a `fuse` reads both
+        // ways, and the text keeps the chain's order.
+        val matchFirst = s.match != null && s.matchFirst
+        if (!matchFirst) nearText()
         s.match?.let { m ->
-            sql.append(" match ${m.field} ${bind.bind(m.query)}")
-            m.fuzzy?.let { sql.append(" fuzzy $it") }
+            sql.append(" match ${m.field} ${bind.bind(m.query)}").append(m.fuzzy)
             if (m.prefix) sql.append(" prefix")
         }
+        if (matchFirst) nearText()
         s.rerank?.let { r ->
             sql.append(" rerank ${r.field} ${bind.bind(r.vector)}")
             r.n?.let { sql.append(" candidates $it") }
@@ -959,7 +1113,7 @@ class Query private constructor(private val s: State) {
             k?.let { sql.append(" k $it") }
             c?.let { sql.append(" candidates $it") }
         }
-        appendOrder(sql, s.order)
+        appendOrder(sql, s.order, bind)
         s.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
         if (s.offset > 0) sql.append(" offset ").append(bind.bind(s.offset))
         // Before a lookup, whose clauses are the children's.
@@ -984,19 +1138,34 @@ class Query private constructor(private val s: State) {
             l.project?.let { p -> sql.append(" select ").append(p.joinToString(", ") { Builder.columnText(it, bind) }) }
             whereOf(l.cond, bind)?.let { sql.append(" where ").append(it) }
             l.group?.let { g -> sql.append(" group ").append(g.joinToString(", ") { Builder.columnText(it, bind) }) }
-            appendOrder(sql, l.order)
+            appendOrder(sql, l.order, bind)
             l.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
             if (l.offset > 0) sql.append(" offset ").append(bind.bind(l.offset))
         }
         return sql.toString()
     }
 
-    private fun appendOrder(sql: StringBuilder, keys: List<Key>) {
+    // `name collate tr desc` for each key, an expression's values bound where
+    // its text stands.
+    private fun appendOrder(sql: StringBuilder, keys: List<Key>, bind: Binder) {
         keys.forEachIndexed { i, k ->
-            sql.append(if (i == 0) " order " else ", ").append(k.field)
+            sql.append(if (i == 0) " order " else ", ").append(if (k.expr != null) Builder.columnText(k.expr, bind) else k.field)
             k.collate?.let { sql.append(" collate ").append(it) }
             sql.append(if (k.asc) " asc" else " desc")
         }
+    }
+
+    /**
+     * The text as the inner query of an `in`, its values bound by the binder
+     * of the query around it.
+     */
+    internal fun inner(bind: Binder): String {
+        // One column is the list; the engine refuses the rest too.
+        if (s.project?.size != 1 || s.count || s.lookups.isNotEmpty() || s.marks.isNotEmpty() || s.facets.isNotEmpty()) {
+            throw refuse("an inner query of `in` selects exactly one column: from('${s.collection}').select('id')")
+        }
+        if (s.require.isNotEmpty()) throw refuse("an inner query of `in` takes no require: the query around it does")
+        return text(bind)
     }
 
     private fun whereOf(cond: List<Node>, bind: Binder): String? = Builder.prune(Node.And(cond))?.let { Builder.render(it, bind) }
@@ -1066,7 +1235,7 @@ class Query private constructor(private val s: State) {
     // for every one.
     private fun pick(returning: List<String>?, bind: Binder): String {
         val sql = StringBuilder()
-        appendOrder(sql, s.order)
+        appendOrder(sql, s.order, bind)
         s.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
         return sql.append(returningClause(returning)).toString()
     }
@@ -1109,7 +1278,27 @@ class Query private constructor(private val s: State) {
         require: Long? = null,
         returning: List<String>? = null,
         reason: String? = null,
-    ): Statement {
+    ): Statement = put("put", docs, ifAbsent, require, returning, reason)
+
+    /**
+     * The `insert` of a document or a list of them, not run: one naming an id
+     * a row holds is refused -- 409, [FennecException.Code.DUPLICATE] -- and
+     * the statement, a block of one, put back whole, where [toInsert]'s `put`
+     * writes over that row. [require], [returning] and [reason] as
+     * [toInsert]'s; it takes no `ifAbsent`, which passes over a held id where
+     * this refuses one.
+     */
+    @JvmOverloads
+    fun toInsertNew(
+        docs: Any?,
+        require: Long? = null,
+        returning: List<String>? = null,
+        reason: String? = null,
+    ): Statement = put("insert", docs, false, require, returning, reason)
+
+    // Both are checked as an insert: the same clauses refused, in the same
+    // words.
+    private fun put(verb: String, docs: Any?, ifAbsent: Boolean, require: Long?, returning: List<String>?, reason: String?): Statement {
         assertPlain("insert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
@@ -1117,7 +1306,7 @@ class Query private constructor(private val s: State) {
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val absent = if (ifAbsent) " if absent" else ""
         val tail = returningClause(returning) + requireClause(require, reason)
-        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$tail", bind.params)
+        return Statement("$verb ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$tail", bind.params)
     }
 
     /**
@@ -1234,6 +1423,20 @@ class Query private constructor(private val s: State) {
     }
 
     /**
+     * Inserts a document -- a map of fields -- or a list of them, refused
+     * whole ([FennecException.Code.DUPLICATE], 409) where one names an id a
+     * row holds: a row made once, never written over, where [insert] puts
+     * over it. How many it wrote; none is no statement. [require] and
+     * [reason] as [insert]'s. On a sync replica the id is refused here,
+     * before anything is sent, and one only the server holds is its 409, the
+     * rows put back.
+     */
+    suspend fun insertNew(docs: Any?, require: Long? = null, reason: String? = null): Long {
+        if (docsOf(docs).isEmpty()) return 0
+        return run(toInsertNew(docs, require, reason = reason)).affected
+    }
+
+    /**
      * Inserts each document, or, where a row holds its id or `@unique` value,
      * sets that row by [patch] --
      * `upsert(mapOf("key" to k, "n" to 1), mapOf("n" to Computed.expr("n + new.n")))`:
@@ -1301,6 +1504,20 @@ class Query private constructor(private val s: State) {
         return run(toInsert(docs, ifAbsent, require, returning, reason)).page
     }
 
+    /**
+     * [insertNew] that answers the rows it wrote, ids and all, in the
+     * documents' order, under the fields named -- `*` every one.
+     */
+    suspend fun insertNewReturning(
+        docs: Any?,
+        returning: List<String> = listOf("*"),
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows {
+        if (docsOf(docs).isEmpty()) return Rows(emptyList())
+        return run(toInsertNew(docs, require, returning, reason)).page
+    }
+
     /** [upsert] that answers the rows it set and made, as written, in the documents' order. */
     suspend fun upsertReturning(
         docs: Any?,
@@ -1326,6 +1543,11 @@ class Query private constructor(private val s: State) {
     @JvmOverloads
     fun insertBlocking(docs: Any?, ifAbsent: Boolean = false, require: Long? = null, reason: String? = null): Long =
         kotlinx.coroutines.runBlocking { insert(docs, ifAbsent, require, reason) }
+
+    /** [insertNew] on the calling thread, for Java. */
+    @JvmOverloads
+    fun insertNewBlocking(docs: Any?, require: Long? = null, reason: String? = null): Long =
+        kotlinx.coroutines.runBlocking { insertNew(docs, require, reason) }
 
     /** [upsert] on the calling thread, for Java. */
     @JvmOverloads
@@ -1361,6 +1583,15 @@ class Query private constructor(private val s: State) {
         require: Long? = null,
         reason: String? = null,
     ): Rows = kotlinx.coroutines.runBlocking { insertReturning(docs, returning, ifAbsent, require, reason) }
+
+    /** [insertNewReturning] on the calling thread, for Java. */
+    @JvmOverloads
+    fun insertNewReturningBlocking(
+        docs: Any?,
+        returning: List<String> = listOf("*"),
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { insertNewReturning(docs, returning, require, reason) }
 
     /** [upsertReturning] on the calling thread, for Java. */
     @JvmOverloads

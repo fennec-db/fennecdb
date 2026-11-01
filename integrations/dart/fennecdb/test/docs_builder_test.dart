@@ -17,7 +17,7 @@ class _Recording {
 
   Query from(String collection) => Query.from(collection).bind((text, params) async {
         sent = (text: text, params: params);
-        if (RegExp(r'^(put|set|del) ').hasMatch(text)) return Answer.of({'kind': 'affected', 'count': 0});
+        if (RegExp(r'^(put|insert|set|del) ').hasMatch(text)) return Answer.of({'kind': 'affected', 'count': 0});
         return Answer.of({
           'kind': 'rows',
           'result': {
@@ -339,6 +339,70 @@ void main() {
     db.sends('get products count lookup reviews on product_id required where stars = \$1', '[5]');
   });
 
+  test('docs: orders of customers in a country', () async {
+    final db = _Recording();
+    await db
+        .from('orders')
+        .where(Cond.cmp('customer', 'in', db.from('customers').select(['id']).where('country', 'TR')))
+        .rows();
+    db.sends('get orders where customer in (get customers select id where country = \$1)', '["TR"]');
+  });
+
+  test('docs: open orders of customers of a tier', () async {
+    final db = _Recording();
+    await db.from('orders').where({
+      'status': 'open',
+      'customer': {
+        'in': db.from('customers').select(['id']).where('tier', '>=', 2)
+      }
+    }).rows();
+    db.sends(
+        'get orders where status = \$1 and customer in (get customers select id where tier >= \$2)', '["open", 2]');
+  });
+
+  test('docs: orders of customers outside a country counted', () async {
+    final db = _Recording();
+    await db
+        .from('orders')
+        .where(Cond.not(Cond.cmp('customer', 'in', db.from('customers').select(['id']).where('country', 'TR'))))
+        .count();
+    db.sends('get orders where not (customer in (get customers select id where country = \$1)) count', '["TR"]');
+  });
+
+  test('docs: the sessions of banned users deleted', () async {
+    final db = _Recording();
+    await db.from('sessions').where('user', 'in', db.from('users').select(['name']).where('banned', true)).delete();
+    db.sends('del sessions where user in (get users select name where banned = \$1)', '[true]');
+  });
+
+  test('docs: customers with their returned orders', () async {
+    final db = _Recording();
+    await db
+        .from('customers')
+        .limit(20)
+        .lookup('orders',
+            on: 'customer', where: Cond.cmp('id', 'in', db.from('returns').select(['order_id'])), limit: 3)
+        .rows();
+    db.sends('get customers limit \$1 lookup orders on customer where id in (get returns select order_id) limit \$2',
+        '[20, 3]');
+  });
+
+  test('docs: orders of customers of an active tier', () async {
+    final db = _Recording();
+    await db
+        .from('orders')
+        .where(
+            'customer',
+            'in',
+            db
+                .from('customers')
+                .select(['id']).where('tier', 'in', db.from('tiers').select(['n']).where('active', true)))
+        .rows();
+    db.sends(
+        'get orders where customer in (get customers select id where tier in (get tiers select n where active = \$1))',
+        '[true]');
+  });
+
   test('docs: articles a page at a time', () async {
     final db = _Recording();
     await db.from('articles').where('year', 2024).order('published', 'desc').limit(20).offset(40).rows();
@@ -355,6 +419,18 @@ void main() {
     final db = _Recording();
     await db.from('jobs').where(Cond.raw('run_at <= now()')).order('run_at').limit(10).updateReturning({'owner': 'w1'});
     db.sends('set jobs {owner: \$1} where run_at <= now() order run_at asc limit \$2 returning *', '["w1", 10]');
+  });
+
+  test('docs: orders by twice their count', () async {
+    final db = _Recording();
+    await db.from('orders').order(Computed.expr('n * 2'), 'desc').order('item').limit(10).rows();
+    db.sends('get orders order n * 2 desc, item asc limit \$1', '[10]');
+  });
+
+  test('docs: one customer\'s orders first', () async {
+    final db = _Recording();
+    await db.from('orders').order(Computed.expr('case when customer = ? then 0 else 1 end', ['bo'])).order('id').rows();
+    db.sends('get orders order case when customer = \$1 then 0 else 1 end asc, id asc', '["bo"]');
   });
 
   test('docs: a column worked out', () async {
@@ -520,16 +596,72 @@ void main() {
         'get articles match body \$1 rerank embed \$2 candidates 500 limit \$3', '["ownership", [0.9, 0.1, 0], 10]');
   });
 
+  test('docs: products matching a misspelt word', () async {
+    final db = _Recording();
+    await db.from('products').match('title', 'databse', fuzzy: true).limit(10).rows();
+    db.sends('get products match title \$1 fuzzy limit \$2', '["databse", 10]');
+  });
+
   test('docs: products matching a word begun', () async {
     final db = _Recording();
     await db.from('products').match('title', 'datab', prefix: true).limit(10).rows();
     db.sends('get products match title \$1 prefix limit \$2', '["datab", 10]');
   });
 
+  test('docs: products matching a misspelt word begun', () async {
+    final db = _Recording();
+    await db.from('products').match('title', 'datbas', fuzzy: true, prefix: true).limit(10).rows();
+    db.sends('get products match title \$1 fuzzy prefix limit \$2', '["datbas", 10]');
+  });
+
   test('docs: products matching a word one edit away', () async {
     final db = _Recording();
     await db.from('products').match('title', 'databse', fuzzy: 1).limit(10).rows();
     db.sends('get products match title \$1 fuzzy 1 limit \$2', '["databse", 10]');
+  });
+
+  test('docs: a search box inside one category', () async {
+    final db = _Recording();
+    await db
+        .from('products')
+        .where('category', 'books')
+        .match('title', 'datbas', fuzzy: true, prefix: true)
+        .limit(20)
+        .rows();
+    db.sends('get products where category = \$1 match title \$2 fuzzy prefix limit \$3', '["books", "datbas", 20]');
+  });
+
+  test('docs: articles ranked by words and meaning', () async {
+    final db = _Recording();
+    await db.from('articles').match('body', 'rust ownership').near('embed', [0.12, -0.03, 0.4]).fuse().limit(10).rows();
+    db.sends('get articles match body \$1 near embed \$2 fuse limit \$3', '["rust ownership", [0.12, -0.03, 0.4], 10]');
+  });
+
+  test('docs: articles since a year ranked by words and meaning', () async {
+    final db = _Recording();
+    await db
+        .from('articles')
+        .where('year', '>=', 2024)
+        .match('body', 'rust ownership')
+        .near('embed', [0.12, -0.03, 0.4])
+        .fuse()
+        .limit(10)
+        .rows();
+    db.sends('get articles where year >= \$1 match body \$2 near embed \$3 fuse limit \$4',
+        '[2024, "rust ownership", [0.12, -0.03, 0.4], 10]');
+  });
+
+  test('docs: articles ranked by words and meaning, k and candidates', () async {
+    final db = _Recording();
+    await db
+        .from('articles')
+        .match('body', 'rust ownership')
+        .near('embed', [0.12, -0.03, 0.4])
+        .fuse(k: 60, candidates: 50)
+        .limit(10)
+        .rows();
+    db.sends('get articles match body \$1 near embed \$2 fuse k 60 candidates 50 limit \$3',
+        '["rust ownership", [0.12, -0.03, 0.4], 10]');
   });
 
   test('docs: matches with their marks', () async {
@@ -696,6 +828,27 @@ void main() {
     final db = _Recording();
     await db.from('locks').insert({'name': 'nightly', 'owner': 'w1', 'at': Computed.expr('now()')}, ifAbsent: true);
     db.sends('put locks {name: \$1, owner: \$2, at: now()} if absent', '["nightly", "w1"]');
+  });
+
+  test('docs: a journal entry made', () async {
+    final db = _Recording();
+    await db.from('journal').insertNew({
+      'entry': Computed.expr('? + ":dr"', ['inv-7']),
+      'amount': Computed.expr('0 - ?', [300])
+    });
+    db.sends('insert journal {entry: \$1 + ":dr", amount: 0 - \$2}', '["inv-7", 300]');
+  });
+
+  test('docs: an amount taken from a balance that holds it', () async {
+    final db = _Recording();
+    final amount = Param(300);
+    await db.from('accounts').where({
+      'name': 'ada',
+      'balance': {'gte': amount}
+    }).update({
+      'balance': Computed.expr('balance - ?', [amount])
+    }, require: 1);
+    db.sends('set accounts {balance: balance - \$1} where name = \$2 and balance >= \$1 require 1', '[300, "ada"]');
   });
 
   test('docs: a held hold released', () async {

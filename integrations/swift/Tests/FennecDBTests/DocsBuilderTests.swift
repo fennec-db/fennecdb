@@ -18,7 +18,7 @@ import Testing
         func from(_ collection: String) throws -> Query {
             try Query.from(collection).bind { [sent] text, params in
                 await sent.record(text, params)
-                if text.hasPrefix("put ") || text.hasPrefix("set ") || text.hasPrefix("del ") { return .affected(0) }
+                if text.hasPrefix("put ") || text.hasPrefix("insert ") || text.hasPrefix("set ") || text.hasPrefix("del ") { return .affected(0) }
                 if text.hasSuffix(" count") { return .rows(columns: ["count"], rows: [["count": 0]]) }
                 return .rows(columns: [], rows: [])
             }
@@ -381,6 +381,64 @@ import Testing
         try await db.sends("get products count lookup reviews on product_id required where stars = $1", "[5]")
     }
 
+    @Test("docs: orders of customers in a country") func ordersOfCustomersInACountry() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .where(.in("customer", db.from("customers").select("id").where("country", "TR")))
+            .rows()
+        try await db.sends("get orders where customer in (get customers select id where country = $1)", "[\"TR\"]")
+    }
+
+    @Test("docs: open orders of customers of a tier") func openOrdersOfCustomersOfATier() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .where(.and(.cmp("status", "=", "open"), .in("customer", db.from("customers").select("id").where("tier", ">=", 2))))
+            .rows()
+        try await db.sends("get orders where status = $1 and customer in (get customers select id where tier >= $2)", "[\"open\", 2]")
+    }
+
+    @Test("docs: orders of customers outside a country counted") func ordersOfCustomersOutsideACountryCounted() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .where(.not(.in("customer", db.from("customers").select("id").where("country", "TR"))))
+            .count()
+        try await db.sends("get orders where not (customer in (get customers select id where country = $1)) count", "[\"TR\"]")
+    }
+
+    @Test("docs: the sessions of banned users deleted") func theSessionsOfBannedUsersDeleted() async throws {
+        let db = Recording()
+        _ = try await db.from("sessions")
+            .where("user", "in", db.from("users").select("name").where("banned", true))
+            .delete()
+        try await db.sends("del sessions where user in (get users select name where banned = $1)", "[true]")
+    }
+
+    @Test("docs: customers with their returned orders") func customersWithTheirReturnedOrders() async throws {
+        let db = Recording()
+        _ = try await db.from("customers")
+            .limit(20)
+            .lookup(
+                "orders",
+                on: "customer",
+                where: .in("id", db.from("returns").select("order_id")),
+                limit: 3
+            )
+            .rows()
+        try await db.sends("get customers limit $1 lookup orders on customer where id in (get returns select order_id) limit $2", "[20, 3]")
+    }
+
+    @Test("docs: orders of customers of an active tier") func ordersOfCustomersOfAnActiveTier() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .where(
+                "customer",
+                "in",
+                db.from("customers").select("id").where("tier", "in", db.from("tiers").select("n").where("active", true))
+            )
+            .rows()
+        try await db.sends("get orders where customer in (get customers select id where tier in (get tiers select n where active = $1))", "[true]")
+    }
+
     @Test("docs: articles a page at a time") func articlesAPageAtATime() async throws {
         let db = Recording()
         _ = try await db.from("articles")
@@ -410,6 +468,25 @@ import Testing
             .limit(10)
             .updateReturning(["owner": "w1"] as Value)
         try await db.sends("set jobs {owner: $1} where run_at <= now() order run_at asc limit $2 returning *", "[\"w1\", 10]")
+    }
+
+    @Test("docs: orders by twice their count") func ordersByTwiceTheirCount() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .order(.expr("n * 2"), "desc")
+            .order("item")
+            .limit(10)
+            .rows()
+        try await db.sends("get orders order n * 2 desc, item asc limit $1", "[10]")
+    }
+
+    @Test("docs: one customer's orders first") func oneCustomerSOrdersFirst() async throws {
+        let db = Recording()
+        _ = try await db.from("orders")
+            .order(.expr("case when customer = ? then 0 else 1 end", "bo"))
+            .order("id")
+            .rows()
+        try await db.sends("get orders order case when customer = $1 then 0 else 1 end asc, id asc", "[\"bo\"]")
     }
 
     @Test("docs: a column worked out") func aColumnWorkedOut() async throws {
@@ -612,6 +689,15 @@ import Testing
         try await db.sends("get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    @Test("docs: products matching a misspelt word") func productsMatchingAMisspeltWord() async throws {
+        let db = Recording()
+        _ = try await db.from("products")
+            .match("title", "databse", fuzzy: true)
+            .limit(10)
+            .rows()
+        try await db.sends("get products match title $1 fuzzy limit $2", "[\"databse\", 10]")
+    }
+
     @Test("docs: products matching a word begun") func productsMatchingAWordBegun() async throws {
         let db = Recording()
         _ = try await db.from("products")
@@ -621,6 +707,15 @@ import Testing
         try await db.sends("get products match title $1 prefix limit $2", "[\"datab\", 10]")
     }
 
+    @Test("docs: products matching a misspelt word begun") func productsMatchingAMisspeltWordBegun() async throws {
+        let db = Recording()
+        _ = try await db.from("products")
+            .match("title", "datbas", fuzzy: true, prefix: true)
+            .limit(10)
+            .rows()
+        try await db.sends("get products match title $1 fuzzy prefix limit $2", "[\"datbas\", 10]")
+    }
+
     @Test("docs: products matching a word one edit away") func productsMatchingAWordOneEditAway() async throws {
         let db = Recording()
         _ = try await db.from("products")
@@ -628,6 +723,50 @@ import Testing
             .limit(10)
             .rows()
         try await db.sends("get products match title $1 fuzzy 1 limit $2", "[\"databse\", 10]")
+    }
+
+    @Test("docs: a search box inside one category") func aSearchBoxInsideOneCategory() async throws {
+        let db = Recording()
+        _ = try await db.from("products")
+            .where("category", "books")
+            .match("title", "datbas", fuzzy: true, prefix: true)
+            .limit(20)
+            .rows()
+        try await db.sends("get products where category = $1 match title $2 fuzzy prefix limit $3", "[\"books\", \"datbas\", 20]")
+    }
+
+    @Test("docs: articles ranked by words and meaning") func articlesRankedByWordsAndMeaning() async throws {
+        let db = Recording()
+        _ = try await db.from("articles")
+            .match("body", "rust ownership")
+            .near("embed", [0.12, -0.03, 0.4])
+            .fuse()
+            .limit(10)
+            .rows()
+        try await db.sends("get articles match body $1 near embed $2 fuse limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
+    }
+
+    @Test("docs: articles since a year ranked by words and meaning") func articlesSinceAYearRankedByWordsAndMeaning() async throws {
+        let db = Recording()
+        _ = try await db.from("articles")
+            .where("year", ">=", 2024)
+            .match("body", "rust ownership")
+            .near("embed", [0.12, -0.03, 0.4])
+            .fuse()
+            .limit(10)
+            .rows()
+        try await db.sends("get articles where year >= $1 match body $2 near embed $3 fuse limit $4", "[2024, \"rust ownership\", [0.12, -0.03, 0.4], 10]")
+    }
+
+    @Test("docs: articles ranked by words and meaning, k and candidates") func articlesRankedByWordsAndMeaningKAndCandidates() async throws {
+        let db = Recording()
+        _ = try await db.from("articles")
+            .match("body", "rust ownership")
+            .near("embed", [0.12, -0.03, 0.4])
+            .fuse(k: 60, candidates: 50)
+            .limit(10)
+            .rows()
+        try await db.sends("get articles match body $1 near embed $2 fuse k 60 candidates 50 limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]")
     }
 
     @Test("docs: matches with their marks") func matchesWithTheirMarks() async throws {
@@ -813,6 +952,22 @@ import Testing
                 ifAbsent: true
             )
         try await db.sends("put locks {name: $1, owner: $2, at: now()} if absent", "[\"nightly\", \"w1\"]")
+    }
+
+    @Test("docs: a journal entry made") func aJournalEntryMade() async throws {
+        let db = Recording()
+        _ = try await db.from("journal")
+            .insertNew(["entry": .expr("? + \":dr\"", "inv-7"), "amount": .expr("0 - ?", 300)] as Value)
+        try await db.sends("insert journal {entry: $1 + \":dr\", amount: 0 - $2}", "[\"inv-7\", 300]")
+    }
+
+    @Test("docs: an amount taken from a balance that holds it") func anAmountTakenFromABalanceThatHoldsIt() async throws {
+        let db = Recording()
+        let amount = Value.param(300)
+        _ = try await db.from("accounts")
+            .where(["name": "ada", "balance": ["gte": amount]])
+            .update(["balance": .expr("balance - ?", amount)] as Value, require: 1)
+        try await db.sends("set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1", "[300, \"ada\"]")
     }
 
     @Test("docs: a held hold released") func aHeldHoldReleased() async throws {

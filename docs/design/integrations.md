@@ -45,7 +45,10 @@ endpoints' statements read off a recording transport. A builder change
 starts in `web/builder.js` and a case in `golden.mjs`, then the three
 follow, and the Swift, Kotlin and Dart builders with them. Six forms a
 page wrote and no builder could (#409's list) came in together, JavaScript,
-Python, Go and .NET first: `param(value)`, a value bound once wherever it
+Python, Go and .NET first and Swift, Kotlin and Dart after (a Swift
+`Value.param(300)`, a Kotlin `param(300)`, a Dart `Param(300)`; Swift's
+`Cond.in(field, query)`, since a `Query` is no `Value`, where Kotlin's and
+Dart's maps hold one): `param(value)`, a value bound once wherever it
 is used -- the binder keeps each param's `$n` by its identity, so the same
 value given twice stays two parameters, as before -- spelt
 `{"$param": [name, value]}`, one param a name within a case; an inner
@@ -56,8 +59,11 @@ written in the order its `match` and `near` were first called (the cases
 that called `match` first were turned to call `near` first, keeping their
 text); and `fuzzy: true` as FennecQL's `fuzzy` alone, a number of edits
 still written (`fuzzy 2`, the case that wrote it and the tour taking `2`).
-No case's text changed: the builders not yet taught fail only the new
-cases. Go's object conditions are `Fields`/`Ops` and a document a
+No case's text changed: the builders not yet taught failed only the new
+cases. A sync replica needs no builder of its own for `insertNew`: the
+native bindings run its text through the one state machine
+(`fennec_abi::sync`), which `sync-scenarios.json` holds, and each binding's
+sync test only shows its `insertNew` meets it. Go's object conditions are `Fields`/`Ops` and a document a
 `D(...)`, names and values in turn, since a map has no order and the order
 is the text's; its options are functional, since a struct cannot tell
 `limit 0` from none. CI also builds the five packages as a release
@@ -121,14 +127,15 @@ from a case can be held to it.
   the builders learned them (row 68): seven blocks took tabs then, a
   `not (x in (...))` and an `order` key's direction written into the page
   as the builders write them.
-- **A builder a form reaches later has no tab for it yet.** The six forms
-  came to JavaScript, Python, Go and .NET first, and to Swift, Kotlin and
-  Dart in a second change. Between the two, a box whose cases use one
-  (`newer`) leaves those three languages out (`LATER`), and their test
-  files leave the cases out: a tab is code its SDK's tests ran, and a call
-  the SDK has not got would compile nowhere. The widget opens such a box on
-  its FennecQL tab for a reader who chose one of them. The second change
-  empties `LATER`.
+- **A form reaches the builders in two changes, and a tab waits for its
+  SDK.** The six forms came to JavaScript, Python, Go and .NET first, and to
+  Swift, Kotlin and Dart in a second change. Between the two, a box whose
+  cases used one had no tab in those three languages and their test files
+  left the cases out: a tab is code its SDK's tests ran, and a call the SDK
+  has not got would compile nowhere. A form the next time reaches the
+  builders in two steps takes the same: a list of the languages that wait,
+  and a test of whether a case needs the form, in `builder_tabs.py`, both
+  deleted when the last language has it.
 - **A placeholder over no block writes its FennecQL tab.** languages.html's
   tour of the builder has no statement of its own in the prose, so
   `{{builder ...}}` alone on its line makes the FennecQL tab of the cases:
