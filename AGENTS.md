@@ -84,9 +84,10 @@ behind `std-fs`; the indexes are `vector`, `text`, `highlight`, `fuzzy`,
 `sparse`, `sorted`, `composite`, `geo`, `hll` and `maps`, and `off` stands
 in for one a build is made without.
 
-The browser client is `web/fennec.js` -- WASM glue, persistence and the
-sync layer -- re-exporting the query builder (`web/builder.js`) and the
-HTTP client (`web/http.js`), dependency-free ES modules; `web/fennec.d.ts`
+The browser client is `web/fennec.js` -- WASM glue (~636 lines),
+persistence and the sync layer -- re-exporting the query builder
+(`web/builder.js`) and the HTTP client (`web/http.js`), dependency-free ES
+modules; `web/fennec.d.ts`
 and `web/client.d.ts` hold the types, `fennec types <file>` a schema's.
 [In the page](docs/design/js-client.md#persistence-in-the-page)
 `persist`/`restore` keep an image and the journal's chunks in IndexedDB
