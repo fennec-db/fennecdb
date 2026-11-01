@@ -1319,7 +1319,7 @@ impl Parser {
     /// and their directions, and the operator class SQL named the first
     /// with, or `to_tsvector` for full text. Not `sql`, FennecQL's alone,
     /// as an index over several fields is declared and dropped: one reader
-    /// for both was 0.4 KB of the browser module less than two.
+    /// for both was 0.2 KB of the browser module less than two.
     #[inline(never)]
     #[allow(clippy::type_complexity)]
     fn sql_index_keys(&mut self, sql: bool) -> Result<(Vec<(String, bool)>, Option<String>)> {

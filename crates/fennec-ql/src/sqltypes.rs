@@ -32,7 +32,7 @@ pub enum Why {
 /// PostgreSQL's type names, a group each of what [`postgres`] makes them,
 /// in its order: `|` between two names, `;` between two groups. One text
 /// read by a loop, where a `match` compared each name in code of its own
-/// (1.4 KB of the browser module). The last group is PostgreSQL's own types
+/// (0.6 KB more of the browser module). The last group is PostgreSQL's own types
 /// that SQLite's rules would read otherwise -- `interval` holds `INT` --
 /// and fennecdb has none of.
 const POSTGRES: &str = "bool|boolean;\
