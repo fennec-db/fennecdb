@@ -360,6 +360,14 @@ impl super::Database {
             }
             if let (None, Some(read)) = (&s.tree, crate::named::reader()) {
                 match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
+                    // A definition's record (op 1) holds a callable
+                    // statement; a binding is op 3's (F2's slice 2), so
+                    // one read here, digest and all, is none this build
+                    // wrote, and never loaded as callable.
+                    Ok((_, d)) if d.after.is_some() => {
+                        marks.push((i, Some(misread(s, "reads as a bound statement"))));
+                        continue;
+                    }
                     Ok((digest, d)) if digest == s.digest => trees.push((i, Arc::new(d))),
                     Ok((_, d)) => {
                         marks.push((i, Some(misread(s, "reads as another statement"))));
@@ -437,7 +445,14 @@ impl super::Database {
         &mut self,
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
-        use crate::named::{GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
+        use crate::named::{BOUND_NOT_BUILT, GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
+        // First, before a name held or the schema is asked: nothing runs a
+        // binding yet, and one stored would let the writes it binds land
+        // without its rows -- here every way in (`/query`, `/batch`, the
+        // shell, the native library, a declared schema's apply) meets it.
+        if def.after.is_some() {
+            return Err(Error::Query(BOUND_NOT_BUILT.into()));
+        }
         let name = &def.name;
         let held = self.statements.get(name);
         if let Some(old) = held {

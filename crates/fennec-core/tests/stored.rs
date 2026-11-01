@@ -643,3 +643,43 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
         "{e}"
     );
 }
+
+/// A definition's record (op 1) holds a callable statement: a text there
+/// reading as a binding, its digest and all, is none this build writes --
+/// a binding is op 3's (named-statements.md, F2's slice 2) -- and is
+/// marked broken, never loaded as a statement a call runs.
+#[test]
+fn a_binding_s_text_in_a_callable_record_is_marked_broken() {
+    let tap = Tap::default();
+    let db = schema(&tap);
+    let mut file = db.snapshot();
+    let text = "create statement credit after insert entries as set accounts {balance: balance + \
+                new.amount} where id = new.dst";
+    let mut body = vec![1u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, db.change_seq() + 1);
+    put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+    body.extend_from_slice(&digest(text).to_le_bytes());
+    encode_str(&mut body, "credit");
+    put_uvarint(&mut body, 1);
+    encode_str(&mut body, "accounts");
+    encode_str(&mut body, text);
+    file.push(13);
+    put_uvarint(&mut file, 0);
+    put_uvarint(&mut file, body.len() as u64);
+    file.extend_from_slice(&body);
+    let mut db = opened(&file);
+    let credit = db.statements().get("credit").unwrap();
+    assert!(credit.tree.is_none());
+    let why = credit.broken.clone().unwrap_or_default();
+    assert!(
+        why.starts_with("its text reads as a bound statement"),
+        "{why}"
+    );
+    let call = fennec_ql::parse_one("call credit").unwrap();
+    let e = db.execute(&call).unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.contains("reads as a bound statement")),
+        "{e}"
+    );
+}

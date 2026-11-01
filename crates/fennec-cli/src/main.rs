@@ -759,7 +759,10 @@ fn kind(s: &Statement) -> Kind {
         | Statement::Compact(_) => Kind::Schema,
         // `begin ... end` closes itself, and runs as its line ends; a body
         // of one statement may go on with the next line -- its `where`, its
-        // guard -- as the write it is would.
+        // guard -- as the write it is would. A statement bound `after` a
+        // collection's writes alike: its events, its collection and its
+        // condition go on until `as`, which the parser refuses the text's
+        // end before, and then its body is a callable one's.
         Statement::CreateStatement(d) if d.block => Kind::Schema,
         Statement::CreateStatement(_) => Kind::Write,
     }
