@@ -31,8 +31,8 @@ fn io(e: impl std::fmt::Display) -> Error {
 
 /// Whether TLS is asked for, and what of the server's certificate is
 /// checked: libpq's `sslmode`, each as libpq defines it. Only `verify-full`
-/// keeps out someone standing in for the server; `require` checks nothing,
-/// as libpq's does not.
+/// keeps out someone standing in for the server; `require` checks nothing
+/// without a CA file, as libpq's does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SslMode {
     /// Plain text; no `SSLRequest` is sent.
@@ -43,12 +43,15 @@ pub enum SslMode {
     /// built without SSL.
     #[default]
     Prefer,
-    /// TLS or no connection; no certificate checked -- unless `sslrootcert`
-    /// names a file, which makes it `verify-ca`, as libpq does.
+    /// TLS or no connection; no certificate checked -- unless there is a
+    /// CA file, `sslrootcert`'s or libpq's own `~/.postgresql/root.crt`,
+    /// which makes it `verify-ca`, as libpq does.
     Require,
-    /// TLS, the chain checked up to `sslrootcert`'s CAs, the name not.
+    /// TLS, the chain checked up to the CA file's CAs (`sslrootcert`, else
+    /// `~/.postgresql/root.crt`), the name not.
     VerifyCa,
-    /// TLS, the chain checked and the host dialed held to the certificate.
+    /// TLS, the chain checked and the host dialed held to the certificate:
+    /// against the CA file, else Mozilla's roots.
     VerifyFull,
 }
 
@@ -97,8 +100,10 @@ pub struct Url {
     /// `sslmode`, else `PGSSLMODE`, else `prefer`.
     pub sslmode: SslMode,
     /// `sslrootcert`, else `PGSSLROOTCERT`: a PEM file of the CAs the
-    /// `verify-*` modes trust, or `system` for Mozilla's roots compiled in
-    /// (webpki-roots), which `verify-full` uses when none is named.
+    /// `verify-*` modes and `require` trust, or `system` for Mozilla's
+    /// roots compiled in (webpki-roots). Where none is named, libpq's
+    /// `~/.postgresql/root.crt` is read at the dial if it is there, and
+    /// `verify-full` takes Mozilla's roots if it is not.
     pub sslrootcert: Option<String>,
 }
 
@@ -150,9 +155,10 @@ impl Url {
                 .ok()
                 .filter(|r| !r.is_empty())
         });
-        // libpq's rules: Mozilla's roots vouch for every public name, so
-        // they are taken only where the name is checked too, and
-        // `verify-ca` checks a chain only against a CA named for it.
+        // libpq's rule: Mozilla's roots vouch for every public name, so
+        // they are taken only where the name is checked too. `verify-ca`
+        // without a file named is answered at the dial, where libpq's own
+        // root file is looked for (`tls_client`).
         match (sslmode, sslrootcert.as_deref()) {
             (SslMode::VerifyFull | SslMode::Disable, _) => {}
             (_, Some("system")) => {
@@ -161,13 +167,6 @@ impl Url {
                      any certificate a public CA signed would pass",
                     sslmode.name()
                 )))
-            }
-            (SslMode::VerifyCa, None) => {
-                return Err(Error::Query(
-                    "sslmode=verify-ca needs sslrootcert=<file>, the CAs whose chain is checked \
-                     (verify-full checks against the public CAs without one)"
-                        .into(),
-                ))
             }
             _ => {}
         }
@@ -468,7 +467,12 @@ fn negotiate(url: &Url) -> Result<Conn> {
         b'S' => match tls.dial(sock, &url.host) {
             Ok(s) => Ok(Conn::Tls(Box::new(s))),
             // libpq's `prefer` goes again without TLS when the handshake
-            // fails, on a new connection.
+            // fails, on a new connection: fe-connect.c's CONNECTION_FAILED
+            // after `pqsecure_open_client` ("SSL handshake failed. We will
+            // retry with a plaintext connection, if permitted by sslmode"),
+            // whose next method for `prefer` is plain text. Failing here
+            // instead would keep out no one: whoever can break the
+            // handshake can as well answer `N`, which `prefer` takes.
             Err(_) if url.sslmode == SslMode::Prefer => Ok(Conn::Plain(dial(url)?)),
             // The network's failure is an `Io`, which a follower waits out
             // and dials again after; a certificate refused or a handshake
@@ -481,12 +485,18 @@ fn negotiate(url: &Url) -> Result<Conn> {
             "postgres: the server does not take TLS (its `ssl` is off), and sslmode={} asks for it",
             url.sslmode.name()
         ))),
-        // A server that cannot take the request answers with an error,
-        // read whole as any message is, its length held to MAX_MESSAGE.
-        b'E' => {
-            let m = read_message(&mut (&b"E"[..]).chain(&mut sock)).map_err(io)?;
-            Err(server_error(&m))
-        }
+        // A server that cannot take the request (one that failed to fork a
+        // backend, say) answers with an error. Its text is never read, let
+        // alone shown: it comes before TLS and before any password, so
+        // anyone in the path can write it, and a log or a terminal showing
+        // it shows the attacker's words as the server's (libpq stopped
+        // showing it in 17.2, CVE-2024-10977). Not tried again in plain
+        // text, `prefer` or not, as libpq does not.
+        b'E' => Err(Error::Query(
+            "postgres: the server answered the TLS request with an error, \
+             whose text is not shown: it comes before TLS, from anyone in the path"
+                .into(),
+        )),
         other => Err(Error::Corrupt(format!(
             "postgres: `{}` in answer to the TLS request",
             other.escape_ascii()
@@ -494,24 +504,68 @@ fn negotiate(url: &Url) -> Result<Conn> {
     }
 }
 
-/// What a dial trusts and checks, by `sslmode` and `sslrootcert`.
+/// libpq's root file, read where no `sslrootcert` is named:
+/// `~/.postgresql/root.crt`, `%APPDATA%\postgresql\root.crt` on Windows,
+/// taken where something stands there, as libpq's `stat` takes it -- a file
+/// that then does not read as CAs is an error, never passed over. No home
+/// is no file, as in libpq.
+#[cfg(feature = "tls")]
+fn default_root() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let dir = std::env::var_os("APPDATA")
+        .filter(|d| !d.is_empty())
+        .map(|d| std::path::PathBuf::from(d).join("postgresql"));
+    #[cfg(not(windows))]
+    let dir = std::env::home_dir()
+        .filter(|h| !h.as_os_str().is_empty())
+        .map(|h| h.join(".postgresql"));
+    let file = dir?.join("root.crt");
+    if std::fs::metadata(&file).is_ok() {
+        Some(file)
+    } else {
+        None
+    }
+}
+
+/// What a dial trusts and checks, by `sslmode` and `sslrootcert`, else
+/// libpq's root file ([`default_root`]).
 #[cfg(feature = "tls")]
 fn tls_client(url: &Url) -> Result<fennec_tls::Client> {
-    let file = url.sslrootcert.as_deref().filter(|f| *f != "system");
+    use std::path::PathBuf;
+    // `prefer` checks nothing whatever file there is: libpq's would check a
+    // chain against one, then go again in plain text where it fails.
+    let checks = !matches!(url.sslmode, SslMode::Disable | SslMode::Prefer);
+    let (file, said): (Option<PathBuf>, &str) = match url.sslrootcert.as_deref() {
+        Some("system") => (None, "sslrootcert"),
+        Some(f) => (Some(PathBuf::from(f)), "sslrootcert"),
+        None if checks => (default_root(), "root certificate"),
+        None => (None, "sslrootcert"),
+    };
     let roots = || -> Result<fennec_tls::Client> {
-        let Some(path) = file else {
+        let Some(path) = &file else {
             return Ok(fennec_tls::Client::new());
         };
-        fennec_tls::Client::trusting_pem_file(std::path::Path::new(path)).map_err(|e| match e {
-            fennec_tls::Error::Io(e) => Error::Io(format!("sslrootcert {e}")),
-            e => Error::Query(format!("sslrootcert {e}")),
+        fennec_tls::Client::trusting_pem_file(path).map_err(|e| match e {
+            fennec_tls::Error::Io(e) => Error::Io(format!("{said} {e}")),
+            e => Error::Query(format!("{said} {e}")),
         })
     };
     Ok(match url.sslmode {
-        // libpq's rule: a CA file named makes `require` a `verify-ca`.
+        SslMode::Disable | SslMode::Prefer => fennec_tls::Client::unverified(),
+        // libpq's rule: a CA file, named or its own root file, makes
+        // `require` a `verify-ca`.
         SslMode::Require if file.is_some() => roots()?.chain_only(),
-        SslMode::Disable | SslMode::Prefer | SslMode::Require => fennec_tls::Client::unverified(),
+        SslMode::Require => fennec_tls::Client::unverified(),
+        SslMode::VerifyCa if file.is_none() => {
+            return Err(Error::Query(
+                "sslmode=verify-ca needs sslrootcert=<file> or ~/.postgresql/root.crt, \
+                 the CAs whose chain is checked (verify-full checks against the public \
+                 CAs without one)"
+                    .into(),
+            ))
+        }
         SslMode::VerifyCa => roots()?.chain_only(),
+        // Mozilla's roots where no file is named nor libpq's is there.
         SslMode::VerifyFull => roots()?,
     })
 }
@@ -1058,8 +1112,9 @@ mod tests {
             );
         }
         // The public CAs vouch for every public name: taken only where the
-        // name is checked too, and `verify-ca` names its own CA.
-        assert!(parse("sslmode=verify-ca").is_err());
+        // name is checked too. `verify-ca` without a file named is the
+        // dial's to answer, where libpq's root file may be (tests/tls.rs).
+        assert!(parse("sslmode=verify-ca").is_ok());
         assert!(parse("sslmode=verify-ca&sslrootcert=system").is_err());
         assert!(parse("sslmode=require&sslrootcert=system").is_err());
         assert!(parse("sslmode=prefer&sslrootcert=system").is_err());

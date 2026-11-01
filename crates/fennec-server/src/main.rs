@@ -291,8 +291,13 @@ usage: fennec-server [options]
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
                             but the follower's. TLS is the URL's ?sslmode=,
-                            libpq's (prefer by default; verify-full checks
-                            the server's name), and its &sslrootcert=
+                            libpq's, and its &sslrootcert= (else
+                            ~/.postgresql/root.crt if there): prefer, the
+                            default, and require encrypt but check nothing
+                            of the server (require: unless a CA file is
+                            there), so anyone in the path can stand in for
+                            it; across a network, use verify-full, which
+                            checks its certificate and name
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>

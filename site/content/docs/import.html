@@ -115,23 +115,29 @@ fennec import 'postgres://app@10.0.0.5/shop?sslmode=verify-ca&amp;sslrootcert=/e
 <tbody>
 <tr><td><code>disable</code></td><td>no</td><td>—</td></tr>
 <tr><td><code>prefer</code>, the default</td><td>where the server takes TLS</td><td>nothing</td></tr>
-<tr><td><code>require</code></td><td>yes, or no connection</td><td>nothing; with <code>sslrootcert</code>, as <code>verify-ca</code></td></tr>
-<tr><td><code>verify-ca</code></td><td>yes</td><td>the certificate is signed by <code>sslrootcert</code>'s CAs; the name is not checked</td></tr>
+<tr><td><code>require</code></td><td>yes, or no connection</td><td>nothing; with a CA file (<code>sslrootcert</code>, or <code>~/.postgresql/root.crt</code> where it is), as <code>verify-ca</code></td></tr>
+<tr><td><code>verify-ca</code></td><td>yes</td><td>the certificate is signed by the CA file's CAs; the name is not checked</td></tr>
 <tr><td><code>verify-full</code></td><td>yes</td><td>the certificate is signed by a trusted CA and names the host dialed</td></tr>
 </tbody>
 </table>
 </div>
 
-<p><b><code>require</code> does not verify the server</b>, as libpq's does
-not: it keeps the rows from someone listening on the path, not from someone
-standing in for the server, who would read them, and the password's proof
-too. Only <code>verify-full</code> keeps that out; use it on any network you
-do not own.</p>
+<p><b><code>prefer</code> and <code>require</code> encrypt without checking
+the server</b>, as libpq's do not check it — <code>require</code> unless a CA
+file is there, when it checks the chain as <code>verify-ca</code>. They keep
+the rows from someone listening on the path, not from someone standing in
+for the server, who would read them, and the password's proof too; and
+<code>prefer</code> goes on in plain text where the server, or whoever stands
+in for it, says it takes no TLS. Only <code>verify-full</code> keeps that
+out: it is the mode to use across a network, and on any you do not own.</p>
 
-<p>Without <code>sslrootcert</code>, <code>verify-full</code> trusts the
-public CAs of Mozilla's store, compiled into the binary, so a static binary
-in an empty container needs no file of the system's (libpq would read
-<code>~/.postgresql/root.crt</code>: name it if your CA is there). A server
+<p>Without <code>sslrootcert</code>, libpq's own CA file,
+<code>~/.postgresql/root.crt</code> (<code>%APPDATA%\postgresql\root.crt</code>
+on Windows), is read where it is there, by <code>require</code>,
+<code>verify-ca</code> and <code>verify-full</code>, as libpq reads it. With
+neither, <code>verify-full</code> trusts the public CAs of Mozilla's store,
+compiled into the binary, so a static binary in an empty container needs no
+file of the system's (libpq would refuse). A server
 whose certificate a private CA signed — Amazon RDS, Azure, Cloud SQL —
 needs that CA's file in <code>sslrootcert</code>. <code>sslrootcert=system</code>
 is the public store, taken only by <code>verify-full</code>, and

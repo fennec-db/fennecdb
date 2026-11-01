@@ -554,16 +554,26 @@ user's and the database's names, and SCRAM's exchange, go out only once
 the handshake is done -- and under `verify-full` only to the server the
 certificate names. The modes are libpq's five but `allow`, with its
 default, `prefer`, and its rules: `prefer` goes on in plain text on an
-`N` and dials again without TLS when the handshake fails; a named CA file
-makes `require` a `verify-ca`; `verify-ca` takes a file, never the public
-roots, since with every public CA trusted and no name checked any
+`N` and dials again without TLS when the handshake fails (fe-connect.c's
+`CONNECTION_FAILED` after it: failing there would keep out no one, since
+whoever can break a handshake can as well answer `N`), never after an
+error; a CA file makes `require` a `verify-ca` -- `sslrootcert`'s, else
+libpq's own `~/.postgresql/root.crt` (`%APPDATA%\postgresql\root.crt` on
+Windows), looked for at each dial; `verify-ca` takes a file, never the
+public roots, since with every public CA trusted and no name checked any
 certificate a public CA signed passes; `sslrootcert=system` (the roots
-compiled in, webpki-roots) is `verify-full`'s alone. Where libpq reads
-`~/.postgresql/root.crt` when no CA is named, `verify-full` trusts the
-public roots: a static binary in a scratch image has no home and no store.
-The answer to the request is one byte read alone off the socket, so bytes
-someone put after an `S` go into the handshake, which refuses them, never
-into what is read as the server's (CVE-2021-23222, libpq's). A build
+compiled in, webpki-roots) is `verify-full`'s alone. With no file named
+and none at libpq's place, `verify-full` trusts the public roots where
+libpq refuses: a static binary in a scratch image has no home and no
+store. `prefer` reads no file, where libpq's checks a chain against one
+only to go on in plain text if it fails. The answer to the request is one
+byte read alone off the socket, so bytes someone put after an `S` go into
+the handshake, which refuses them, never into what is read as the
+server's (CVE-2021-23222, libpq's). An error in answer is said to be one,
+its text never read: it comes before TLS and any password, so anyone in
+the path writes it, and shown it would put their words in a log or a
+terminal as the server's (libpq stopped showing it in 17.2,
+CVE-2024-10977). A build
 without the `tls` feature takes `prefer` as plain text and refuses the
 rest, as libpq built without SSL does. The wait for the next replication
 message is `TlsStream::readable` over TLS: it takes whole records in under

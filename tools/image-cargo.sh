@@ -57,13 +57,16 @@
 # tracks by mtime alone (its rerun-if-changed), and files a proc-macro opens
 # itself. No workspace crate has a build script, and one is refused below
 # until the check holds its runs too; a proc-macro's own compile is checked
-# as any. A registry crate's build script is taken -- ring's, which compiles
-# its C and assembly, libc's and rustls's, which probe the compiler (TLS,
-# fennec-tls, docs/design/crates.md#zero-dependencies): it reads its own
-# files, which Cargo.lock's checksum fixes and the registry never changes,
-# and the environment, which cargo tracks by value, so the context's old
-# mtimes, what this script guards against, never reach its run. Its compile
-# is held to its record as any unit's.
+# as any. Three crates.io crates' build scripts are taken, each by name and
+# version (the list below) -- ring's, which compiles its C and assembly,
+# libc's and rustls's, which probe the compiler (TLS, fennec-tls,
+# docs/design/crates.md#zero-dependencies): each was read, and reads its
+# own files, which Cargo.lock's checksum fixes and the registry never
+# changes, and the environment, which cargo tracks by value, so the
+# context's old mtimes, what this script guards against, never reach its
+# run. Its compile is held to its record as any unit's. Any other build
+# script is refused, a registry crate's too: a new one is code run at the
+# build that no one read.
 set -eu
 
 # ---------------------------------------------------------------- wrapper
@@ -140,8 +143,23 @@ while IFS= read -r m; do
     case $m in
     *'"kind":["custom-build"]'*)
         package=$(printf '%s\n' "$m" | sed -n 's/.*"package_id":"\([^"]*\)".*/\1/p')
+        # crates.io's, name@version: the scripts read and found to read only
+        # their own files and the environment. Bumping one of them (cargo
+        # update, a new rustls) means reading its build.rs at the new version
+        # and then writing the version here; `cargo metadata
+        # --filter-platform x86_64-unknown-linux-musl` lists the packages
+        # with a `custom-build` target.
         case $package in
-        registry+*) ;;
+        'registry+https://github.com/rust-lang/crates.io-index#ring@0.17.14' | \
+            'registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46' | \
+            'registry+https://github.com/rust-lang/crates.io-index#libc@0.2.189') ;;
+        registry+*)
+            printf 'image-cargo: %s has a build script no one read at this version:\n' \
+                "$package" >&2
+            echo "image-cargo: read its build.rs, and if it reads only its own files and the" \
+                "environment, add it by name and version in tools/image-cargo.sh." >&2
+            exit 1
+            ;;
         *)
             printf 'image-cargo: %s has a build script, which the check does not follow yet:\n' \
                 "$package" >&2

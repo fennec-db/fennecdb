@@ -106,7 +106,7 @@ sealed, a new image flushed into `<name>~` before the file is written over.
 **[Zero dependencies is a hard rule](docs/design/crates.md#zero-dependencies)**
 but for `fennec-bench` and the user's exception, `fennec-tls` (rustls,
 ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
--abi or -wasm, nor more by that door (`tools/deps_check.py`).
+-abi, -wasm or -ffi, its tree pinned (`tools/deps_check.py`).
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
 Every cap (`near`, `match`, `fuse`, depth, `lookup`s, `in`) is a query

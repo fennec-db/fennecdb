@@ -3,6 +3,11 @@
 //! certificate refused before the startup message -- user, database and
 //! all -- is sent. A live PostgreSQL with `ssl = on` is `make import-test`'s.
 //!
+//! A dial that checks a certificate and names no CA file reads libpq's
+//! `~/.postgresql/root.crt`, the machine's: such a dial is made only in a
+//! child whose HOME is the test's own
+//! (`libpqs_root_file_is_read_where_none_is_named`).
+//!
 //! The certificates are `tests/certs`, made by fennec-tls's `wire_certs`
 //! test, so rcgen stays fennec-tls's dev-dependency alone:
 //! `FENNEC_WRITE_CERTS=1 cargo test -p fennec-tls wire_certs` writes them
@@ -117,7 +122,7 @@ fn connection(mut s: TcpStream, answer: Answer, server: &fennec_tls::Server) -> 
             for (k, v) in [
                 (b'S', "FATAL"),
                 (b'C', "08P01"),
-                (b'M', "no TLS before 7.0"),
+                (b'M', "words of whoever is in the path"),
             ] {
                 b.push(k);
                 b.extend_from_slice(v.as_bytes());
@@ -257,24 +262,17 @@ fn verify_full_refuses_an_unknown_issuer_before_a_byte_is_sent() {
     assert!(e.contains("UnknownIssuer"), "{e}");
     let saw = seen(port, &rx);
     assert!(matches!(&saw[..], [Seen::HandshakeFailed(_)]), "{saw:?}");
-
-    // Mozilla's roots, without an sslrootcert, never signed the test CA.
-    let (port, rx) = standin(Answer::Tls);
-    let e = via(&url("localhost", port, SslMode::VerifyFull, None)).unwrap_err();
-    assert!(e.contains("UnknownIssuer"), "{e}");
-    let saw = seen(port, &rx);
-    assert!(matches!(&saw[..], [Seen::HandshakeFailed(_)]), "{saw:?}");
 }
 
-/// `verify-ca` checks the chain and not the name; `require` checks nothing,
-/// as libpq's does not -- unless a CA file is named, which makes it a
-/// `verify-ca`, as libpq does.
+/// `verify-ca` checks the chain and not the name; a CA file named makes
+/// `require` a `verify-ca`, as libpq does. Without one, `require` checks
+/// nothing: `libpqs_root_file_is_read_where_none_is_named`, whose HOME is
+/// its own.
 #[test]
 fn verify_ca_checks_the_chain_and_require_checks_nothing() {
     for (mode, root, ok) in [
         (SslMode::VerifyCa, Some("ca.pem"), true),
         (SslMode::VerifyCa, Some("other-ca.pem"), false),
-        (SslMode::Require, None, true),
         (SslMode::Require, Some("ca.pem"), true),
         (SslMode::Require, Some("other-ca.pem"), false),
         (SslMode::Prefer, None, true),
@@ -324,7 +322,8 @@ fn disable_asks_for_no_tls() {
 }
 
 /// libpq's `prefer` goes again without TLS, on a new connection, when the
-/// handshake fails; `require` does not.
+/// handshake fails (fe-connect.c's CONNECTION_FAILED after the handshake,
+/// plain text the next method `prefer` allows); `require` does not.
 #[test]
 fn prefer_goes_again_in_plain_text_when_the_handshake_fails() {
     let (port, rx) = standin(Answer::HangUp);
@@ -338,19 +337,26 @@ fn prefer_goes_again_in_plain_text_when_the_handshake_fails() {
     );
 
     let (port, rx) = standin(Answer::HangUp);
-    assert!(via(&url("localhost", port, SslMode::Require, None)).is_err());
+    assert!(via(&url("localhost", port, SslMode::Require, Some("ca.pem"))).is_err());
     assert_eq!(seen(port, &rx), vec![Seen::HungUp]);
 }
 
+/// An error in answer to the request is said to be one, its text never
+/// shown: it comes before TLS and any password, from whoever is in the path
+/// (libpq 17.2, CVE-2024-10977). Nor is it tried again in plain text,
+/// `prefer` or not, as libpq does not.
 #[test]
-fn an_error_in_answer_to_the_request_is_the_servers() {
-    let (port, rx) = standin(Answer::Error);
-    let e = via(&url("localhost", port, SslMode::Require, None)).unwrap_err();
-    assert!(
-        e.contains("08P01") && e.contains("no TLS before 7.0"),
-        "{e}"
-    );
-    assert_eq!(seen(port, &rx), vec![Seen::Errored]);
+fn an_error_in_answer_to_the_request_is_not_shown() {
+    for (mode, root) in [(SslMode::Require, Some("ca.pem")), (SslMode::Prefer, None)] {
+        let (port, rx) = standin(Answer::Error);
+        let e = via(&url("localhost", port, mode, root)).unwrap_err();
+        assert!(e.contains("answered the TLS request with an error"), "{e}");
+        assert!(
+            !e.contains("whoever is in the path") && !e.contains("08P01"),
+            "{mode:?}: {e}"
+        );
+        assert_eq!(seen(port, &rx), vec![Seen::Errored], "{mode:?}");
+    }
 }
 
 /// A CA file that is not there, or holds no certificate, is said before
@@ -366,4 +372,117 @@ fn a_ca_file_that_cannot_be_read_is_an_error_before_the_dial() {
     let e = via(&u).unwrap_err();
     assert!(e.contains("no CA certificate"), "{e}");
     assert_eq!(seen(port, &rx), vec![]);
+}
+
+/// Set in a child of `libpqs_root_file_is_read_where_none_is_named`: what it
+/// dials, `<host> <port> <query>`, its HOME (and APPDATA) the parent's
+/// directory, so no other test of this process reads that file.
+const DIAL_IN_HOME: &str = "FENNEC_WIRE_DIAL_IN_HOME";
+
+/// The child's half: one dial, its outcome on a line of its own. Run alone,
+/// it does nothing.
+#[test]
+fn dial_in_a_home_of_its_own() {
+    let Ok(what) = std::env::var(DIAL_IN_HOME) else {
+        return;
+    };
+    let mut it = what.splitn(3, ' ');
+    let (host, port, query) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+    let got = Url::parse(&format!("postgres://fennec@{host}:{port}/fennec?{query}"))
+        .map_err(|e| e.to_string())
+        .and_then(|u| via(&u));
+    println!("dialed: {got:?}");
+}
+
+/// libpq's root file, `~/.postgresql/root.crt` (under `%APPDATA%` on
+/// Windows), is read where no `sslrootcert` is named: there, it
+/// makes `require` a `verify-ca` and is what `verify-ca` and `verify-full`
+/// trust; not there, `require` checks nothing, `verify-ca` is refused before
+/// the dial and `verify-full` takes Mozilla's roots. `prefer` reads none, and
+/// a file named goes before it.
+#[test]
+fn libpqs_root_file_is_read_where_none_is_named() {
+    use std::process::Command;
+    struct Home(PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let home =
+        Home(std::env::temp_dir().join(format!("fennec-wire-root-crt-{}", std::process::id())));
+    let lay = |ca: Option<&str>| {
+        let _ = std::fs::remove_dir_all(&home.0);
+        for dir in [".postgresql", "postgresql"] {
+            let dir = home.0.join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(ca) = ca {
+                std::fs::copy(cert(ca), dir.join("root.crt")).unwrap();
+            }
+        }
+    };
+    let dial = |host: &str, query: &str| -> (Result<String, String>, Vec<Seen>) {
+        let (port, rx) = standin(Answer::Tls);
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tls::dial_in_a_home_of_its_own"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(DIAL_IN_HOME, format!("{host} {port} {query}"))
+            .env("HOME", &home.0)
+            .env("APPDATA", &home.0)
+            .env_remove("PGSSLROOTCERT")
+            .env_remove("PGSSLMODE")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{said}");
+        // The harness writes the test's name ahead of it on the line.
+        let line = said
+            .lines()
+            .find_map(|l| l.split_once("dialed: ").map(|(_, d)| d))
+            .unwrap_or_else(|| panic!("no dial in: {said}"));
+        let got = match line.strip_prefix("Ok(\"") {
+            Some(ok) => Ok(ok.trim_end_matches("\")").to_string()),
+            None => Err(line.to_string()),
+        };
+        (got, seen(port, &rx))
+    };
+    let tls = || (Ok("tls".to_string()), vec![Seen::Tls { startup: true }]);
+    let refused = |(got, saw): (Result<String, String>, Vec<Seen>), why: &str| {
+        let e = got.unwrap_err();
+        assert!(e.contains(why), "{e}");
+        assert!(matches!(&saw[..], [Seen::HandshakeFailed(_)]), "{saw:?}");
+    };
+
+    // No root file.
+    lay(None);
+    assert_eq!(dial("127.0.0.1", "sslmode=require"), tls());
+    let (got, saw) = dial("127.0.0.1", "sslmode=verify-ca");
+    assert!(
+        got.as_ref().unwrap_err().contains("needs sslrootcert"),
+        "{got:?}"
+    );
+    assert_eq!(saw, vec![], "refused before the dial");
+    // Mozilla's roots never signed the test CA.
+    refused(dial("localhost", "sslmode=verify-full"), "UnknownIssuer");
+
+    // The test CA's: the chain is checked, and the name by verify-full alone.
+    lay(Some("ca.pem"));
+    for (host, mode) in [
+        ("127.0.0.1", "require"),
+        ("127.0.0.1", "verify-ca"),
+        ("localhost", "verify-full"),
+    ] {
+        assert_eq!(dial(host, &format!("sslmode={mode}")), tls(), "{mode}");
+    }
+
+    // A CA that signed nothing here: `require` refused, as `verify-ca` is.
+    lay(Some("other-ca.pem"));
+    refused(dial("127.0.0.1", "sslmode=require"), "UnknownIssuer");
+    refused(dial("localhost", "sslmode=verify-full"), "UnknownIssuer");
+    assert_eq!(dial("127.0.0.1", "sslmode=prefer"), tls());
+    let named = cert("ca.pem").display().to_string().replace(' ', "%20");
+    assert_eq!(
+        dial("127.0.0.1", &format!("sslmode=require&sslrootcert={named}")),
+        tls()
+    );
 }

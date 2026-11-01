@@ -79,18 +79,39 @@ took 2245 ms at the median on main in plain text, 2173 here with
 `sslmode=disable` and 2357 under `verify-full`, at the same loads.
 
 **What must never happen.** A dependency in `fennec-core`, `fennec-ql`,
-`fennec-abi`, `fennec-wasm` or the browser module -- not `fennec-tls`, not
-anything -- and another crate coming in by this door: `fennec-tls` takes
-rustls and webpki-roots, rcgen to test, and nothing else, and no other
-crate takes a crate from outside the workspace because TLS now does.
-`tools/deps_check.py`, in CI's fmt job, fails a change that breaks either:
-a crate but `fennec-tls` and `fennec-bench` naming a crate from outside the
-workspace, of any kind; `fennec-tls` naming one beyond its three;
-`fennec-tls` taken other than optional behind `tls`; or the trees of
-`fennec-core`, `fennec-ql`, `fennec-abi` and `fennec-wasm`, every feature
-on, reaching outside the workspace or `fennec-tls`. Not `cargo deny`: a
+`fennec-abi`, `fennec-wasm`, the browser module or `fennec-ffi`, the
+library apps embed -- not `fennec-tls`, not anything -- and another crate
+coming in by this door: `fennec-tls` takes rustls and webpki-roots, rcgen
+to test, and nothing else, and no other crate takes a crate from outside
+the workspace because TLS now does. `tools/deps_check.py`, in CI's fmt
+job, fails a change that breaks either: a crate but `fennec-tls` and
+`fennec-bench` naming a crate from outside the workspace, of any kind;
+`fennec-tls` naming one beyond its three; `fennec-tls` taken other than
+optional behind `tls`; the trees of `fennec-core`, `fennec-ql`,
+`fennec-abi`, `fennec-wasm` and `fennec-ffi`, every feature on, reaching
+outside the workspace or `fennec-tls`; or `fennec-tls`'s own tree, normal
+and build edges as Cargo.lock resolves them for the shipped targets,
+differing from `TLS_TREE`, its sixteen crates by name and version. Naming
+only the two direct dependencies held nothing: a rustls feature turned on
+(`aws-lc-rs`, `brotli`) or a `cargo update` brings crates in, or moves
+them, without a line of any Cargo.toml changing, so the check fails and
+says to review the crate and write the list again. Not `cargo deny`: a
 dependency of its own, for the one question asked. A change that would
 take another dependency anywhere argues its case first, as this one did.
+
+**Build scripts.** Three crates of that tree run one: ring's compiles its
+C and assembly, libc's and rustls's probe the compiler.
+`tools/image-cargo.sh`, which builds the images' binaries and holds each
+to the bytes of the build context, refuses a workspace crate's build
+script (what it reads cargo tracks by mtime alone) and takes a crates.io
+one only by name and version -- `ring@0.17.14`, `rustls@0.23.46`,
+`libc@0.2.189` -- each read first and found to read only its own files,
+which Cargo.lock's checksum fixes, and the environment, which cargo tracks
+by value. Taking every registry crate's, as the first cut did, would run
+at the build whatever a new dependency or version brought, read by no one.
+Bumping one means reading its `build.rs` at the new version and writing
+the version there; `deploy/test/image_cargo.py` (`make deploy-check`)
+holds libc's taken at its version and refused at another.
 
 ## Limits
 
