@@ -157,9 +157,11 @@ export function collation(name) {
   return name;
 }
 
-// `name collate tr desc`: one key of an `order`.
-function sortKey(o) {
-  return `${o.field}${o.collate ? ` collate ${o.collate}` : ''} ${o.asc ? 'asc' : 'desc'}`;
+// `name collate tr desc`: one key of an `order`, an expression's values
+// bound where its text stands.
+function sortKey(o, bind) {
+  const key = o.node ? value('order', o.node, bind, null) : o.field;
+  return `${key}${o.collate ? ` collate ${o.collate}` : ''} ${o.asc ? 'asc' : 'desc'}`;
 }
 
 export function ident(name, what = 'field') {
@@ -245,6 +247,10 @@ export function normalize(v, what = 'value') {
     throw new FennecError(`${what} is undefined -- did you mean 'null'?`);
   }
   if (v === null || typeof v !== 'object') return v;
+  // A param is bound where a whole value stands, never from inside a list
+  // or a json value, where it would go as its own object; every builder
+  // refuses it in these words (builder-golden.json).
+  if (v instanceof Param) throw new FennecError('this object cannot be used as a fennecdb value (a param() inside a value)');
   if (v instanceof Date) return v.toISOString();
   if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
   if (Array.isArray(v)) return v.map((x) => normalize(x, what));
@@ -266,9 +272,45 @@ export function isSpec(v) {
     typeof v === 'object' &&
     !Array.isArray(v) &&
     !(v instanceof Date) &&
+    !(v instanceof Param) &&
     !ArrayBuffer.isView(v)
   );
 }
+
+// ------------------------------------------------- one value in two places
+
+/**
+ * What `param()` makes: a value bound once, whichever places it is used in.
+ * Each use writes the same `$n`, where the same value given twice is two
+ * parameters -- `balance - $1 ... balance >= $1`, the amount taken and the
+ * amount checked one value, never two a caller could let drift apart.
+ */
+export class Param {
+  constructor(value) {
+    if (value === undefined) throw new FennecError("param() takes a value -- did you mean 'null'?");
+    if (value instanceof Param) throw new FennecError('param() takes a value, not another param()');
+    this.value = value;
+    Object.freeze(this);
+  }
+}
+
+/**
+ * `param(value)`: one parameter, used wherever a value goes -- a filter, a
+ * document, `expr()`, `raw()`, `distance()`, `near`, `match` -- and bound
+ * once, at its first place in the text:
+ *
+ *   const amount = param(300);
+ *   from('accounts').where({ name: 'ada', balance: { gte: amount } })
+ *     .toUpdate({ balance: expr('balance - ?', amount) }, { require: 1 })
+ *   // ['set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1',
+ *   //  [300, 'ada']]
+ */
+export function param(value) {
+  return new Param(value);
+}
+
+// A value as the builder checks it: a param's own.
+const valueOf = (v) => (v instanceof Param ? v.value : v);
 
 // ---------------------------------------------------------- condition tree
 
@@ -305,6 +347,7 @@ export function not(cond) {
  *
  * Every `?` in the fragment counts as a placeholder: if you need a literal
  * one, bind it as a parameter too (`raw('title ~ ?', "?")`), do not quote it.
+ * The text is trusted FennecQL, as `expr`'s is: never a value from a user.
  */
 export function raw(sql, ...params) {
   if (typeof sql !== 'string') throw new FennecError('raw() expects text');
@@ -354,6 +397,10 @@ export function inc(by = 1) {
  * bound to the parameters in order: `{ at: expr('now()') }`,
  * `{ total: expr('price * ?', 1.2) }`, `{ entry: expr('? + ":dr"', ref) }`
  * (`+` joins two texts, and only two texts).
+ *
+ * The text is trusted FennecQL, written into the statement as it is: the
+ * code's own, never a value from a user, which goes in as a `?`'s
+ * parameter. Names and this text are where an injection would get through.
  */
 export function expr(sql, ...params) {
   if (typeof sql !== 'string') throw new FennecError('expr() expects text');
@@ -496,14 +543,14 @@ function fieldCond(field, spec) {
  * compared -- `distance(loc, $1) <= $2`, each comparison given its own.
  */
 function distanceCond(field, spec) {
-  if (!isSpec(spec) || !Array.isArray(spec.from)) {
+  if (!isSpec(spec) || !Array.isArray(valueOf(spec.from))) {
     throw new FennecError(`distance takes { from: [lon, lat], <op>: metres } (field: ${field})`);
   }
   const items = [];
   for (const [k, v] of Object.entries(spec)) {
     if (k === 'from') continue;
     const op = OPS[k];
-    if (!op || op === 'in' || op === 'has' || op === '~' || typeof v !== 'number') {
+    if (!op || op === 'in' || op === 'has' || op === '~' || typeof valueOf(v) !== 'number') {
       throw new FennecError(`distance compares metres with lt, lte, gt, gte, eq or ne: ${k} (field: ${field})`);
     }
     items.push({ t: 'dist', field, from: spec.from, op, value: v });
@@ -825,6 +872,9 @@ export class Query {
   /** `near field $n [ef N] [exact]` */
   near(field, vector, opts = {}) {
     return this.#with({
+      // `fuse` writes its two searches in the order they were first
+      // called: `match` first where it came while no `near` was there.
+      matchFirst: this.#s.match === undefined ? false : this.#s.matchFirst,
       near: {
         field: ident(field),
         vector,
@@ -835,10 +885,10 @@ export class Query {
   }
 
   /**
-   * `match field $n [fuzzy N] [prefix]` -- BM25 over a `@text` index.
-   * `fuzzy: true` (2) matches each word within the edits its length
-   * allows (none under 5 characters, one up to 8, two from 9), `fuzzy: 1`
-   * one at most; `prefix: true` matches the last word as the start of a
+   * `match field $n [fuzzy [N]] [prefix]` -- BM25 over a `@text` index.
+   * `fuzzy: true` (`fuzzy`, 2 edits) matches each word within the edits
+   * its length allows (none under 5 characters, one up to 8, two from 9),
+   * `fuzzy: 1` one at most; `prefix: true` matches the last word as the start of a
    * word too, as a search box is typed into.
    *
    *   db.from('products').match('title', input, { fuzzy: true, prefix: true }).limit(10)
@@ -849,13 +899,17 @@ export class Query {
       throw new FennecError(`fuzzy is true, false or 0 to 2 edits: ${fuzzy}`);
     }
     if (typeof prefix !== 'boolean') throw new FennecError(`prefix is true or false: ${prefix}`);
-    return this.#with({ match: { field: ident(field), query, fuzzy, prefix } });
+    return this.#with({
+      matchFirst: this.#s.near === undefined ? true : this.#s.matchFirst,
+      match: { field: ident(field), query, fuzzy, prefix },
+    });
   }
 
   /**
    * `fuse [k N] [candidates N]` -- with both `match` and `near`, ranks by
    * both: each side takes its own candidates and a document scores
-   * `1 / (k + rank)` from each list it is on.
+   * `1 / (k + rank)` from each list it is on. The two are written in the
+   * order they were called: `.match(...).near(...)` is `match ... near ...`.
    *
    *   db.from('docs').match('body', text).near('embed', vector).fuse().limit(10)
    */
@@ -998,17 +1052,22 @@ export class Query {
 
   /**
    * `order field asc|desc`. Successive calls add keys: when the first key
-   * ties, the second decides. `{ collate: 'tr' }` puts text in Turkish order
+   * ties, the second decides. A key may be an expression over the row --
+   * `order(expr('n * 2'), 'desc')`, `order(distance('pickup', point))` --
+   * ties going in id order. `{ collate: 'tr' }` puts text in Turkish order
    * rather than its bytes' -- `ç` after `c`, `ı` before `i`, `Çağla` before
    * `Zeynep` -- which is `collate tr`.
    */
   order(field, dir = 'asc', { collate } = {}) {
-    // Over groups a key may be an aggregate of the list, by its name.
+    // Over groups a key may be an aggregate of the list, by its name; any
+    // key may be an expression over the row, `expr()` or `distance()`.
+    const c = column(field);
+    if (c.node?.name !== undefined) {
+      throw new FennecError(`an order key is an expression or a name: order by ${c.node.name} itself, without as`);
+    }
+    const key = c.node ? { node: c.node } : { field: c.text ?? path(field) };
     return this.#with({
-      order: [
-        ...this.#s.order,
-        { field: column(field).text ?? path(field), asc: direction(dir), collate: collation(collate) },
-      ],
+      order: [...this.#s.order, { ...key, asc: direction(dir), collate: collation(collate) }],
     });
   }
 
@@ -1158,17 +1217,23 @@ export class Query {
     const where = this.#where(bind);
     if (where) sql += ` where ${where}`;
     if (group) sql += ` group ${group.map((k) => columnText(k, bind)).join(', ')}`;
-    if (near) {
+    const nearText = () => {
       sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
       if (near.ef !== null) sql += ` ef ${near.ef}`;
       if (near.exact) sql += ' exact';
-    }
+    };
+    // Before `match` unless `match` was called first: a `fuse` reads both
+    // ways, and the text keeps the chain's order.
+    const matchFirst = match && this.#s.matchFirst;
+    if (near && !matchFirst) nearText();
     if (match) {
       sql += ` match ${match.field} ${bind(match.query, match.field)}`;
-      // Written with its number, `true` as 2: what every builder writes.
-      if (match.fuzzy !== false) sql += ` fuzzy ${match.fuzzy === true ? 2 : match.fuzzy}`;
+      // `true` is the default, `fuzzy` alone (2 edits); a number is written.
+      if (match.fuzzy === true) sql += ' fuzzy';
+      else if (match.fuzzy !== false) sql += ` fuzzy ${match.fuzzy}`;
       if (match.prefix) sql += ' prefix';
     }
+    if (near && matchFirst) nearText();
     if (rerank) {
       sql += ` rerank ${rerank.field} ${bind(rerank.vector, rerank.field)}`;
       if (rerank.candidates !== null) sql += ` candidates ${rerank.candidates}`;
@@ -1179,7 +1244,7 @@ export class Query {
       if (fuse.candidates !== null) sql += ` candidates ${fuse.candidates}`;
     }
     for (const [i, o] of order.entries()) {
-      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
+      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o, bind)}`;
     }
     if (limit !== undefined) sql += ` limit ${bind(limit, 'limit')}`;
     if (offset) sql += ` offset ${bind(offset, 'offset')}`;
@@ -1210,7 +1275,7 @@ export class Query {
       if (root) sql += ` where ${render(root, bind, null)}`;
       if (lookup.group) sql += ` group ${lookup.group.map((k) => columnText(k, bind)).join(', ')}`;
       for (const [i, o] of lookup.order.entries()) {
-        sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
+        sql += `${i === 0 ? ' order ' : ', '}${sortKey(o, bind)}`;
       }
       if (lookup.limit !== undefined) sql += ` limit ${bind(lookup.limit, 'limit')}`;
       if (lookup.offset) sql += ` offset ${bind(lookup.offset, 'offset')}`;
@@ -1275,6 +1340,24 @@ export class Query {
    * every field, or the fields named.
    */
   toInsert(docs, opts = {}) {
+    return this.#put('put', docs, opts);
+  }
+
+  /**
+   * The `insert` text: a document naming an id a row holds is refused --
+   * 409, `duplicate` -- and the statement, a block of one, put back whole,
+   * where `toInsert`'s `put` writes over that row. `{ returning }` and `{
+   * require, reason }` as `toInsert`'s.
+   */
+  toInsertNew(docs, opts = {}) {
+    // `if absent` passes over a held id, which is insert's: this one refuses it.
+    if (opts?.ifAbsent !== undefined) {
+      throw new FennecError('insertNew refuses a held id; to pass over one, insert(docs, { ifAbsent: true })');
+    }
+    return this.#put('insert', docs, opts);
+  }
+
+  #put(verb, docs, opts) {
     this.#assertPlain('insert');
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) throw new FennecError('cannot write an empty document list');
@@ -1283,7 +1366,7 @@ export class Query {
     const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
     const absent = opts?.ifAbsent === true ? ' if absent' : '';
     const tail = returningClause(opts) + requireClause(opts);
-    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${tail}`, params];
+    return [`${verb} ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${tail}`, params];
   }
 
   /**
@@ -1351,6 +1434,19 @@ export class Query {
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) return opts?.returning ? [] : 0;
     const r = await this.#exec(...this.toInsert(list, opts));
+    return opts?.returning ? rowsOf(r) : r.count ?? 0;
+  }
+
+  /**
+   * `insert` -- a single document or an array, refused whole (409,
+   * `duplicate`) where one names an id a row holds: a row made once, never
+   * written over. Returns: documents written, or with `{ returning }` the
+   * rows written, ids and all.
+   */
+  async insertNew(docs, opts = {}) {
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) return opts?.returning ? [] : 0;
+    const r = await this.#exec(...this.toInsertNew(list, opts));
     return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
@@ -1434,7 +1530,7 @@ export class Query {
   #pick(opts, bind) {
     let sql = '';
     for (const [i, o] of this.#s.order.entries()) {
-      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
+      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o, bind)}`;
     }
     if (this.#s.limit !== undefined) sql += ` limit ${bind(this.#s.limit, 'limit')}`;
     return sql + returningClause(opts);
@@ -1514,7 +1610,19 @@ function condOf(args) {
 }
 
 function binder(params) {
+  // A `param()` takes its `$n` at its first use, and every use after
+  // writes that one.
+  const once = new Map();
   return (v, what) => {
+    if (v instanceof Param) {
+      let at = once.get(v);
+      if (at === undefined) {
+        params.push(normalize(v.value, what));
+        at = `$${params.length}`;
+        once.set(v, at);
+      }
+      return at;
+    }
     params.push(normalize(v, what));
     return `$${params.length}`;
   };

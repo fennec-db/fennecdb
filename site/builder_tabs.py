@@ -106,7 +106,7 @@ def case(name):
     return c
 
 
-ENDPOINTS = ("rows", "first", "count", "explain", "insert", "update", "upsert", "delete")
+ENDPOINTS = ("rows", "first", "count", "explain", "insert", "insertNew", "update", "upsert", "delete")
 
 # ------------------------------------------------------- the page's statements
 
@@ -286,9 +286,19 @@ class Lang:
     # -- the chain, laid out
 
     def render(self, c):
+        decls, chain = self.parts(c)
+        return "\n".join(decls + [chain])
+
+    def parts(self, c):
+        """The tab's declarations -- a `param()` each, named as the case
+        names it, before the chain that uses it -- and its chain."""
+        self.decls, self.params = [], set()
         steps = c["steps"]
         if steps[0]["op"] == "call":
-            return self.render_call(steps[0]["args"])
+            return self.decls, self.render_call(steps[0]["args"])
+        return self.decls, self.layout(self.calls(steps))
+
+    def calls(self, steps):
         calls = [self.start(steps[0]["args"][0])]
         for s in steps[1:]:
             a = s.get("args", [])
@@ -296,7 +306,24 @@ class Lang:
                 # A list of columns is its columns: every builder flattens it.
                 a = [x for e in a for x in (e if isinstance(e, list) else [e])]
             calls.append(self.step(s["op"], a))
-        return self.layout(calls)
+        return calls
+
+    def param(self, w):
+        """`{"$param": [name, value]}`: the variable, declared at its first use."""
+        name, value = w
+        if name not in self.params:
+            self.params.add(name)
+            self.decls.append(self.declare(name, self.v(value)))
+        return name
+
+    def query(self, steps):
+        """`{"$query": [steps]}`: an inner query, its chain from the client
+        on one line, as an argument."""
+        calls = self.calls(steps)
+        return calls[0].flat() + "".join("." + c.flat() for c in calls[1:])
+
+    def declare(self, name, value):
+        raise NotImplementedError
 
     def render_call(self, a):
         """`db.call(name, args, claims)`: the call's arguments as `call_args`
@@ -329,7 +356,7 @@ class Lang:
             lines.append(text)
         return self.wrap_lines(lines)
 
-    WRITES = {"insert": 1, "update": 1, "upsert": 2, "delete": 0}
+    WRITES = {"insert": 1, "insertNew": 1, "update": 1, "upsert": 2, "delete": 0}
 
     def write(self, op, a, labels, names):
         """A write: its documents and options, and, where it answers its
@@ -363,14 +390,24 @@ class Lang:
 class JS(Lang):
     name, code = "JavaScript", "js"
     IMPORT = "import {{ connect{} }} from '@fennecdb/web/client'"
-    HELPERS = ("or", "and", "not", "raw", "inc", "expr", "bucket", "countDistinct", "distance", "first", "last")
+    HELPERS = ("or", "and", "not", "raw", "inc", "expr", "bucket", "countDistinct", "distance", "first", "last",
+               "param")
     indent = "  "
 
     def s(self, v):
         return quoted(v, "'")
 
+    def declare(self, name, value):
+        return f"const {name} = param({value});"
+
     def v(self, x):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"inc({_num(w)})"
         if k == "$expr":
@@ -454,7 +491,8 @@ class JS(Lang):
                 return Call(op, [self.cond(a[0])])
             return Call(op, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            args = [self.s(x) for x in a[:2]]
+            # A key is a field's name, or an expression: `expr()`, `distance()`.
+            args = [self.col(a[0])] + [self.s(x) for x in a[1:2]]
             return Call(op, args + ([self.opts(a[2])] if len(a) > 2 else []))
         if op in ("limit", "offset", "require"):
             return Call(op, [_num(a[0])] + ([self.opts(a[1])] if len(a) > 1 else []))
@@ -468,7 +506,7 @@ class JS(Lang):
             return Call(op, [self.s(a[0]), _num(a[1])] + ([self.opts(a[2])] if len(a) > 2 else []))
         if op == "fuse":
             return Call(op, [self.opts(a[0])] if a else [])
-        if op in ("insert", "update"):
+        if op in ("insert", "insertNew", "update"):
             return Call(op, [self.v(a[0])] + ([self.opts(a[1])] if len(a) > 1 else []))
         if op == "upsert":
             return Call(op, [self.v(a[0]), self.v(a[1])] + ([self.opts(a[2])] if len(a) > 2 else []))
@@ -485,14 +523,24 @@ class JS(Lang):
 class Python(Lang):
     name, code = "Python", "python"
     IMPORT = "from fennecdb import Client{}"
-    HELPERS = ("or_", "and_", "not_", "raw", "inc", "expr", "bucket", "count_distinct", "distance", "first", "last")
-    SNAKE = {"parentKey": "parent_key", "ifAbsent": "if_absent"}
+    HELPERS = ("or_", "and_", "not_", "raw", "inc", "expr", "bucket", "count_distinct", "distance", "first", "last",
+               "param")
+    SNAKE = {"parentKey": "parent_key", "ifAbsent": "if_absent", "insertNew": "insert_new"}
 
     def s(self, v):
         return quoted(v, '"')
 
+    def declare(self, name, value):
+        return f"{name} = param({value})"
+
     def v(self, x):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"inc({_num(w)})"
         if k == "$expr":
@@ -574,7 +622,8 @@ class Python(Lang):
                 return Call(name, [self.cond(a[0])])
             return Call(name, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            return Call(op, [self.s(x) for x in a[:2]] + self.kw(_opt(a, 2)))
+            # A key is a field's name, or an expression: `expr()`, `distance()`.
+            return Call(op, [self.col(a[0])] + [self.s(x) for x in a[1:2]] + self.kw(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
             return Call(op, [_num(a[0])] + self.kw(_opt(a, 1)))
         if op in ("near", "rerank"):
@@ -587,8 +636,8 @@ class Python(Lang):
             return Call(op, [self.s(a[0]), _num(a[1])] + self.kw(_opt(a, 2)))
         if op == "fuse":
             return Call(op, self.kw(_opt(a, 0)))
-        if op in ("insert", "update"):
-            return Call(op, [self.v(a[0])] + self.kw(_opt(a, 1)))
+        if op in ("insert", "insertNew", "update"):
+            return Call(self.SNAKE.get(op, op), [self.v(a[0])] + self.kw(_opt(a, 1)))
         if op == "upsert":
             return Call(op, [self.v(a[0]), self.v(a[1])] + self.kw(_opt(a, 2)))
         if op == "delete":
@@ -611,8 +660,17 @@ class Go(Lang):
     def s(self, v):
         return quoted(v, '"')
 
+    def declare(self, name, value):
+        return f"{name} := fennecdb.Param({value})"
+
     def v(self, x, vector=False):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"fennecdb.Inc({_num(w)})"
         if k == "$expr":
@@ -688,7 +746,8 @@ class Go(Lang):
             elif k == "exact":
                 out += ["fennecdb.Exact()"] if x else []
             elif k == "fuzzy":
-                out += [f"fennecdb.Fuzzy({2 if x is True else x})"] if x is not False else []
+                # true is FennecQL's `fuzzy` alone, a number its edits.
+                out += [f"fennecdb.Fuzzy({'' if x is True else x})"] if x is not False else []
             elif k == "prefix":
                 out += ["fennecdb.Prefix()"] if x else []
             elif k in ("k", "candidates", "top", "limit", "offset"):
@@ -761,7 +820,8 @@ class Go(Lang):
                 return Call(name, [self.s(a[0]), self.s("="), self.v(a[1])])
             return Call(name, [self.s(a[0]), self.s(a[1]), self.v(a[2])])
         if op == "order":
-            return Call("Order", [self.s(a[0]), self.s(a[1] if len(a) > 1 else "asc")] + self.opts(_opt(a, 2)))
+            # A key is a field's name, or an expression: `fennecdb.Expr`, `fennecdb.Distance`.
+            return Call("Order", [self.col(a[0]), self.s(a[1] if len(a) > 1 else "asc")] + self.opts(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
             return Call(op.title(), [_num(a[0])] + self.opts(_opt(a, 1)))
         if op in ("near", "rerank"):
@@ -780,12 +840,12 @@ class Go(Lang):
             return Call("Update", ["ctx", self.doc(a[0])] + self.opts(_opt(a, 1)))
         if op == "delete":
             return Call("Delete", ["ctx"] + self.opts(_opt(a, 0)))
-        if op == "insert":
+        if op in ("insert", "insertNew"):
             docs = a[0] if isinstance(a[0], list) else [a[0]]
             o = _opt(a, 1)
             more = (["fennecdb.IfAbsent()"] if o.get("ifAbsent") else []) + self.opts(
                 {k: x for k, x in o.items() if k != "ifAbsent"})
-            return Call("Insert", ["ctx"] + [self.doc(d) for d in docs] + more)
+            return Call(op[0].upper() + op[1:], ["ctx"] + [self.doc(d) for d in docs] + more)
         if op == "upsert":
             docs = a[0] if isinstance(a[0], list) else [a[0]]
             return Call("Upsert", ["ctx", "[]any{" + ", ".join(self.doc(d) for d in docs) + "}", self.doc(a[1])]
@@ -812,13 +872,23 @@ class CSharp(Lang):
     name, code = ".NET", "csharp"
     IMPORT = "using FennecDb;"
     ASYNC = {"rows": "RowsAsync", "first": "FirstAsync", "count": "CountAsync", "explain": "ExplainAsync",
-             "insert": "InsertAsync", "update": "UpdateAsync", "upsert": "UpsertAsync", "delete": "DeleteAsync"}
+             "insert": "InsertAsync", "insertNew": "InsertNewAsync", "update": "UpdateAsync",
+             "upsert": "UpsertAsync", "delete": "DeleteAsync"}
 
     def s(self, v):
         return quoted(v, '"')
 
+    def declare(self, name, value):
+        return f"var {name} = new Param({value});"
+
     def v(self, x, vector=False):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"Computed.Inc({_num(w)})"
         if k == "$expr":
@@ -944,14 +1014,15 @@ class CSharp(Lang):
                 return Call(name, [self.s(a[0]), self.dict(a[1])])
             return Call(name, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            return Call("Order", [self.s(x) for x in a[:2]] + self.named(_opt(a, 2)))
+            # A key is a field's name, or an expression: `Computed.Expr`, `Computed.Distance`.
+            return Call("Order", [self.col(a[0])] + [self.s(x) for x in a[1:2]] + self.named(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
             return Call(op.title(), [_num(a[0])] + self.named(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op.title(), [self.s(a[0]), self.v(a[1], vector=True)] + self.named(_opt(a, 2)))
         if op == "match":
-            # fuzzy is a number of edits, JavaScript's true two; false is none.
-            o = {k: (2 if x is True and k == "fuzzy" else x) for k, x in _opt(a, 2).items() if x is not False}
+            # fuzzy is a number of edits, or true for FennecQL's `fuzzy` alone; false is none.
+            o = {k: x for k, x in _opt(a, 2).items() if x is not False}
             return Call("Match", [self.s(a[0]), self.s(a[1])] + self.named(o))
         if op in ("highlight", "facet", "lookup"):
             return Call(op.title(), [self.s(a[0])] + self.named(_opt(a, 1)))
@@ -959,7 +1030,7 @@ class CSharp(Lang):
             return Call("Snippet", [self.s(a[0]), _num(a[1])] + self.named(_opt(a, 2)))
         if op == "fuse":
             return Call("Fuse", self.named(_opt(a, 0)))
-        if op in ("insert", "update"):
+        if op in ("insert", "insertNew", "update"):
             docs = a[0]
             first = ("new object[] { " + ", ".join(self.doc(d) for d in docs) + " }") if isinstance(docs, list) else self.doc(docs)
             return Call(self.ASYNC[op], [first] + self.named(_opt(a, 1)))
@@ -988,6 +1059,12 @@ class Swift(Lang):
         """A value: `top`, an argument standing alone (`any FennecValue`),
         else inside a `Value` literal, whose elements are Values."""
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f".inc({_num(w)})"
         if k == "$expr":
@@ -1012,6 +1089,9 @@ class Swift(Lang):
         # dictionary has none.
         body = "[" + ", ".join(f"{self.s(k)}: {self.v(e, False)}" for k, e in x.items()) + "]" if x else "[:]"
         return body + " as Value" if top else body
+
+    def declare(self, name, value):
+        return f"let {name} = Value.param({value})"
 
     def col(self, x, lead=True):
         k, w = _special(x)
@@ -1039,12 +1119,25 @@ class Swift(Lang):
             return f".not({self.cond(w)})"
         if k == "$raw":
             return ".raw(" + ", ".join([self.s(w[0])] + [self.v(p, False) for p in w[1:]]) + ")"
-        if len(x) == 1:
-            (f, spec), = x.items()
-            if isinstance(spec, dict) and len(spec) == 1 and _special(spec)[0] is None:
-                (op, val), = spec.items()
-                if op not in ("not", "distance", "within"):
-                    return f".cmp({self.s(f)}, {self.s(op)}, {self.v(val)})"
+        # A field's `in` an inner query is a condition of its own (a Query
+        # is no Value), joined to the others with `and`.
+        def inner(spec):
+            return isinstance(spec, dict) and len(spec) == 1 and _special(spec.get("in"))[0] == "$query"
+
+        if len(x) == 1 or any(inner(spec) for spec in x.values()):
+            parts = []
+            for f, spec in x.items():
+                if inner(spec):
+                    parts.append(f".in({self.s(f)}, {self.v(spec['in'])})")
+                elif (isinstance(spec, dict) and len(spec) == 1 and _special(spec)[0] is None
+                      and next(iter(spec)) not in ("not", "distance", "within")):
+                    (op, val), = spec.items()
+                    parts.append(f".cmp({self.s(f)}, {self.s(op)}, {self.v(val)})")
+                elif len(x) == 1:
+                    return self.v(x, False)
+                else:
+                    parts.append(f".cmp({self.s(f)}, {self.s('=')}, {self.v(spec)})")
+            return parts[0] if len(parts) == 1 else ".and(" + ", ".join(parts) + ")"
         return self.v(x, False)
 
     # A call's labels in the order the method declares them.
@@ -1053,7 +1146,8 @@ class Swift(Lang):
         "near": ("ef", "exact"), "match": ("fuzzy", "prefix"), "rerank": ("candidates",),
         "fuse": ("k", "candidates"), "highlight": ("pre", "post"), "snippet": ("ellipsis", "pre", "post"),
         "facet": ("top", "ranges", "disjunctive"), "order": ("collate",),
-        "insert": ("ifAbsent", "require", "reason"), "update": ("all", "require", "reason"),
+        "insert": ("ifAbsent", "require", "reason"), "insertNew": ("require", "reason"),
+        "update": ("all", "require", "reason"),
         "upsert": ("require", "reason"), "delete": ("all", "require", "reason"), "require": ("reason",),
     }
 
@@ -1063,11 +1157,9 @@ class Swift(Lang):
             if k not in o:
                 continue
             x = o[k]
-            # fuzzy is a number of edits, JavaScript's true two; false is none.
+            # fuzzy is a number of edits, or true for FennecQL's `fuzzy` alone; false is none.
             if k == "fuzzy" and x is False:
                 continue
-            if k == "fuzzy" and x is True:
-                x = 2
             if k in ("on", "parentKey"):
                 x = self.s(x) if isinstance(x, str) else "[" + ", ".join(self.s(n) for n in x) + "]"
             elif k == "where":
@@ -1112,7 +1204,8 @@ class Swift(Lang):
                 return Call(op, [self.cond(a[0])])
             return Call(op, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            return Call(op, [self.s(x) for x in a[:2]] + self.labels(op, _opt(a, 2)))
+            # A key is a field's name, or an expression: `.expr`, `.distance`.
+            return Call(op, [self.col(a[0])] + [self.s(x) for x in a[1:2]] + self.labels(op, _opt(a, 2)))
         if op in ("limit", "offset", "require"):
             return Call(op, [_num(a[0])] + (self.labels(op, _opt(a, 1)) if op == "require" else []))
         if op in ("near", "rerank"):
@@ -1143,8 +1236,27 @@ class Kotlin(Lang):
     def s(self, v):
         return quoted(v, '"', also="$")
 
+    def declare(self, name, value):
+        return f"val {name} = param({value})"
+
+    def param(self, w):
+        # A list of numbers is a vector or a point: its numbers are Doubles.
+        name, value = w
+        if name not in self.params:
+            self.params.add(name)
+            numbers = isinstance(value, list) and value and all(
+                isinstance(e, (int, float)) and not isinstance(e, bool) for e in value)
+            self.decls.append(self.declare(name, self.v(value, bool(numbers))))
+        return name
+
     def v(self, x, vector=False):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"Computed.inc({_num(w)})"
         if k == "$expr":
@@ -1203,11 +1315,9 @@ class Kotlin(Lang):
     def named(self, o):
         out = []
         for k, x in o.items():
-            # fuzzy is a number of edits, JavaScript's true two; false is none.
+            # fuzzy is a number of edits, or true for FennecQL's `fuzzy` alone; false is none.
             if k == "fuzzy" and x is False:
                 continue
-            if k == "fuzzy" and x is True:
-                x = 2
             if k in ("on", "parentKey"):
                 x = self.s(x) if isinstance(x, str) else "listOf(" + ", ".join(self.s(n) for n in x) + ")"
             elif k == "where":
@@ -1249,13 +1359,14 @@ class Kotlin(Lang):
                 return Call(op, [self.cond(a[0])])
             return Call(op, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            return Call(op, [self.s(x) for x in a[:2]] + self.named(_opt(a, 2)))
+            # A key is a field's name, or an expression: `Computed.expr`, `Computed.distance`.
+            return Call(op, [self.col(a[0])] + [self.s(x) for x in a[1:2]] + self.named(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
             return Call(op, [_num(a[0])] + self.named(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1], True)] + self.named(_opt(a, 2)))
         if op == "match":
-            return Call(op, [self.s(a[0]), self.s(a[1])] + self.named(_opt(a, 2)))
+            return Call(op, [self.s(a[0]), self.v(a[1])] + self.named(_opt(a, 2)))
         if op in ("highlight", "facet", "lookup"):
             return Call(op, [self.s(a[0])] + self.named(_opt(a, 1)))
         if op == "snippet":
@@ -1277,8 +1388,17 @@ class Dart(Lang):
     def s(self, v):
         return quoted(v, "'", also="$")
 
+    def declare(self, name, value):
+        return f"final {name} = Param({value});"
+
     def v(self, x):
         k, w = _special(x)
+        if k == "$param":
+            return self.param(w)
+        if k == "$query":
+            return self.query(w)
+        if k == "$distance":
+            return self.col(x)
         if k == "$inc":
             return f"Computed.inc({_num(w)})"
         if k == "$expr":
@@ -1383,8 +1503,9 @@ class Dart(Lang):
                 return Call(op, [self.cond(a[0])])
             return Call(op, [self.s(a[0])] + ([self.s(a[1])] if len(a) == 3 else []) + [self.v(a[-1])])
         if op == "order":
-            # The direction and the collation are positional.
-            args = [self.s(x) for x in a[:2]]
+            # A key is a field's name, or an expression; the direction and the
+            # collation are positional.
+            args = [self.col(a[0])] + [self.s(x) for x in a[1:2]]
             if len(a) > 2 and "collate" in a[2]:
                 args += [self.s("asc")] * (len(args) == 1) + [self.s(a[2]["collate"])]
             return Call(op, args)
@@ -1412,7 +1533,6 @@ class Dart(Lang):
 
 
 LANGS = [JS(), Python(), Go(), CSharp(), Swift(), Kotlin(), Dart()]
-
 
 def render(lang, name):
     return lang.render(case(name))
@@ -1610,11 +1730,13 @@ def go_test(names):
     body = []
     for n in names:
         c = case(n)
+        decls, chain = lang.parts(c)
         body.append(
             f"\tt.Run({lang.s(n)}, func(t *testing.T) {{\n"
             # A tab that sent nothing finds no body of the tab before it.
             "\t\trec.body = nil\n"
-            f"\t\t_, err := {_indented(render(lang, n), chr(9) * 2).lstrip()}\n"
+            + "".join(f"\t\t{d}\n" for d in decls) +
+            f"\t\t_, err := {_indented(chain, chr(9) * 2).lstrip()}\n"
             f"\t\tsent(t, err, {lang.s(c['text'])}, {lang.s(json.dumps(c['params'], ensure_ascii=False))})\n"
             "\t})\n")
     return f"""// Code generated by site/builder_tabs.py (make docs-builder); DO NOT EDIT.
@@ -1743,10 +1865,12 @@ def swift_test(names):
     body = []
     for n in names:
         c = case(n)
+        decls, chain = lang.parts(c)
         body.append(
             f"    @Test({lang.s(n)}) func {_ident(n, False, taken)}() async throws {{\n"
             "        let db = Recording()\n"
-            f"        _ = {_indented(render(lang, n), ' ' * 8).lstrip()}\n"
+            + "".join(f"        {d}\n" for d in decls) +
+            f"        _ = {_indented(chain, ' ' * 8).lstrip()}\n"
             f"        try await db.sends({lang.s(c['text'])}, {lang.s(json.dumps(c['params'], ensure_ascii=False))})\n"
             "    }\n")
     return f"""// {WRITTEN}
@@ -1765,7 +1889,7 @@ import Testing
         func from(_ collection: String) throws -> Query {{
             try Query.from(collection).bind {{ [sent] text, params in
                 await sent.record(text, params)
-                if text.hasPrefix("put ") || text.hasPrefix("set ") || text.hasPrefix("del ") {{ return .affected(0) }}
+                if text.hasPrefix("put ") || text.hasPrefix("insert ") || text.hasPrefix("set ") || text.hasPrefix("del ") {{ return .affected(0) }}
                 if text.hasSuffix(" count") {{ return .rows(columns: ["count"], rows: [["count": 0]]) }}
                 return .rows(columns: [], rows: [])
             }}
@@ -1826,7 +1950,7 @@ class DocsBuilderTest {{
         fun from(collection: String): Query = Query.from(collection).bind {{ text, params ->
             sent = Statement(text, params)
             when {{
-                Regex("^(put|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
+                Regex("^(put|insert|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
                 text.endsWith(" count") -> Answer.Rows(listOf("count"), listOf(Row(mapOf("count" to 0L))))
                 else -> Answer.Rows(emptyList(), emptyList())
             }}
@@ -1853,10 +1977,12 @@ def dart_test(names):
     body = []
     for n in names:
         c = case(n)
+        decls, chain = lang.parts(c)
         body.append(
             f"  test({lang.s(n)}, () async {{\n"
             "    final db = _Recording();\n"
-            f"{_indented(render(lang, n), '    ')}\n"
+            + "".join(f"    {d}\n" for d in decls) +
+            f"{_indented(chain, '    ')}\n"
             f"    db.sends({lang.s(c['text'])}, {lang.s(json.dumps(c['params'], ensure_ascii=False))});\n"
             "  });\n")
     return f"""// {WRITTEN}
@@ -1874,7 +2000,7 @@ class _Recording {{
 
   Query from(String collection) => Query.from(collection).bind((text, params) async {{
         sent = (text: text, params: params);
-        if (RegExp(r'^(put|set|del) ').hasMatch(text)) return Answer.of({{'kind': 'affected', 'count': 0}});
+        if (RegExp(r'^(put|insert|set|del) ').hasMatch(text)) return Answer.of({{'kind': 'affected', 'count': 0}});
         return Answer.of({{
           'kind': 'rows',
           'result': {{
@@ -1926,7 +2052,8 @@ TESTS = {
     "integrations/swift/Tests/FennecDBTests/DocsBuilderTests.swift": (swift_test, None),
     "integrations/kotlin/fennecdb/src/test/kotlin/com/fennecdb/DocsBuilderTest.kt": (kotlin_test, None),
     "integrations/dart/fennecdb/test/docs_builder_test.dart": (
-        dart_test, ("integrations/dart/fennecdb", [["dart", "pub", "get"], ["dart", "format", "test/docs_builder_test.dart"]])),
+        dart_test,
+        ("integrations/dart/fennecdb", [["dart", "pub", "get"], ["dart", "format", "test/docs_builder_test.dart"]])),
 }
 
 
@@ -2066,14 +2193,14 @@ def _same(a, b):
 
 def _answer(text):
     """What fennec-server answers a statement, as far as the clients read it."""
-    if re.match(r"(put|set|del) ", text):
+    if re.match(r"(put|insert|set|del) ", text):
         return {"affected": 0}
     rows = [{"count": 0}] if text.endswith(" count") or " count lookup " in text else []
     return {"rows": rows, "facets": {}} if " facet " in text else rows
 
 
 JS_RUN = """
-import { connect, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last } from '@@CLIENT@@';
+import { connect, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, param } from '@@CLIENT@@';
 const answers = @@ANSWERS@@;
 let sent = [];
 const fetch = async (url, init) => {
@@ -2128,7 +2255,8 @@ def run_python(names):
             return _answer(fennecql)
 
     helpers = {k: getattr(fennecdb, k) for k in
-               ("or_", "and_", "not_", "raw", "inc", "expr", "bucket", "count_distinct", "distance", "first", "last")}
+               ("or_", "and_", "not_", "raw", "inc", "expr", "bucket", "count_distinct", "distance", "first", "last",
+                "param")}
     out = {}
     for n in names:
         db = Recording()

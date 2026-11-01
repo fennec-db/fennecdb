@@ -48,8 +48,28 @@ public sealed class BuilderTests(Servers servers)
         _ when e.TryGetProperty("$first", out var f) => Computed.First(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
         _ when e.TryGetProperty("$last", out var f) => Computed.Last(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
         _ when e.TryGetProperty("$as", out var x) => ((Computed)Value(x[0])!).As(x[1].GetString()!),
+        // Every $param of a name in a case is the one Param, made where it is first met.
+        _ when e.TryGetProperty("$param", out var p) => Held.Value!.TryGetValue(p[0].GetString()!, out var made)
+            ? made
+            : Held.Value[p[0].GetString()!] = new Param(Value(p[1])),
+        _ when e.TryGetProperty("$query", out var s) => Chain(s),
         _ => e.EnumerateObject().ToDictionary(p => p.Name, p => Value(p.Value)),
     };
+
+    // The case's params by name. Async-local, as the steps are read by static methods a case's run calls, and each
+    // run sets a map of its own.
+    static readonly AsyncLocal<Dictionary<string, Param>?> Held = new();
+
+    /// <summary>An inner query of <c>in</c>: a chain's steps from <c>from</c>, bound to no client.</summary>
+    static Query Chain(JsonElement steps)
+    {
+        var list = steps.EnumerateArray().ToList();
+        if (list[0].GetProperty("op").GetString() != "from") throw new InvalidOperationException("an inner query starts with from");
+        var q = Query.From(list[0].GetProperty("args")[0].GetString()!);
+        foreach (var s in list.Skip(1))
+            q = Step(q, s.GetProperty("op").GetString()!, s.TryGetProperty("args", out var a) ? a.EnumerateArray().ToArray() : []);
+        return q;
+    }
 
     static bool Plain(JsonElement e) =>
         e.ValueKind == JsonValueKind.Object && !e.EnumerateObject().Any(p => p.Name.StartsWith('$'));
@@ -119,10 +139,12 @@ public sealed class BuilderTests(Servers servers)
         "orWhere" => q.OrWhere(Condition(a[0])),
         "near" => q.Near(a[0].GetString()!, Value(a[1]), Long(Opt(a, 2, "ef")), Opt(a, 2, "exact")?.GetBoolean() ?? false),
         "rerank" => q.Rerank(a[0].GetString()!, Value(a[1]), Long(Opt(a, 2, "candidates"))),
-        "match" => q.Matched(a[0].GetString()!, a[1].GetString()!, Arg(a, 2, "fuzzy"), Arg(a, 2, "prefix")),
+        "match" => q.Matched(a[0].GetString()!, Value(a[1]), Arg(a, 2, "fuzzy"), Arg(a, 2, "prefix")),
         "fuse" => q.Fuse(Long(Opt(a, 0, "k")), Long(Opt(a, 0, "candidates"))),
         "group" => q.Group(a.Select(Value).ToArray()),
-        "order" => q.Order(a[0].GetString()!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),
+        "order" when a[0].ValueKind == JsonValueKind.String =>
+            q.Order(a[0].GetString()!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),
+        "order" => q.Order((Computed)Value(a[0])!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),
         "limit" => q.Limit(a[0].GetInt64()),
         "offset" => q.Offset(a[0].GetInt64()),
         "require" => q.Require(a[0].GetInt64(), Opt(a, 1, "reason")?.GetString()),
@@ -177,7 +199,7 @@ public sealed class BuilderTests(Servers servers)
             var query = JsonDocument.Parse(Body).RootElement.GetProperty("query").GetString()!;
             var rows = query.EndsWith(" count") || query.Contains(" count facet ") ? """[{"count":0}]""" : "[]";
             // A query asking facets is answered with them beside the rows.
-            var answer = query.Split(' ')[0] is "put" or "set" or "del" ? """{"affected":0}"""
+            var answer = query.Split(' ')[0] is "put" or "insert" or "set" or "del" ? """{"affected":0}"""
                 : query.Contains(" facet ") ? """{"rows":""" + rows + ""","facets":{}}""" : rows;
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(answer, Encoding.UTF8, "application/json") };
         }
@@ -189,6 +211,7 @@ public sealed class BuilderTests(Servers servers)
         var recorder = new Recorder();
         using var db = new FennecClient("http://golden.invalid", new() { HttpClient = new HttpClient(recorder) });
         static JsonElement[] Args(JsonElement s) => s.TryGetProperty("args", out var a) ? a.EnumerateArray().ToArray() : [];
+        Held.Value = [];
         try
         {
             if (list[0].GetProperty("op").GetString() == "call") return await RunCall(db, recorder, list);
@@ -201,6 +224,7 @@ public sealed class BuilderTests(Servers servers)
                 {
                     "toFennecQL" => q.ToFennecQL(),
                     "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), Returning(Opt(a, 1, "returning"))),
+                    "toInsertNew" => q.ToInsertNew(Docs(a[0]), Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), Returning(Opt(a, 1, "returning"))),
                     "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), Returning(Opt(a, 1, "returning"))),
                     "toUpsert" => q.ToUpsert(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require")), Opt(a, 2, "reason")?.GetString(), Returning(Opt(a, 2, "returning"))),
                     "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Opt(a, 0, "reason")?.GetString(), Returning(Opt(a, 0, "returning"))),
@@ -220,6 +244,7 @@ public sealed class BuilderTests(Servers servers)
                     "count" => q.CountAsync(),
                     "explain" => q.ExplainAsync(),
                     "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), returning: Returning(Opt(a, 1, "returning"))),
+                    "insertNew" => q.InsertNewAsync(Docs(a[0]), Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), Returning(Opt(a, 1, "returning"))),
                     "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Opt(a, 1, "reason")?.GetString(), Returning(Opt(a, 1, "returning"))),
                     "upsert" => q.UpsertAsync(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require")), Opt(a, 2, "reason")?.GetString(), returning: Returning(Opt(a, 2, "returning"))),
                     "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Opt(a, 0, "reason")?.GetString(), Returning(Opt(a, 0, "returning"))),
@@ -402,9 +427,92 @@ public sealed class BuilderTests(Servers servers)
         Assert.Throws<FennecQueryException>(() => Query.From("notes").ToInsert(42));
     }
 
+    // The golden file's forms as a C# caller spells them: a Param in a typed object, a Param's text matched, the
+    // inner query a client's, and what a Param is held to.
+    [Fact]
+    public void AParamIsOneValueAndAnInnerQueryIsBoundByTheQueryAroundIt()
+    {
+        using var db = new FennecClient("http://golden.invalid");
+        var amount = new Param(300);
+        var (text, ps) = db.From("accounts")
+            .Where(new Dictionary<string, object?> { ["name"] = "ada", ["balance"] = new Dictionary<string, object?> { ["gte"] = amount } })
+            .ToUpdate(new { balance = Computed.Expr("balance - ?", amount) }, require: 1);
+        Assert.Equal("set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1", text);
+        Assert.Equal(new object?[] { 300, "ada" }, ps);
+
+        var word = new Param("rust");
+        (text, ps) = db.From("docs").Select("title").Highlight("body").Match("body", word, fuzzy: true)
+            .Where(Cond.Raw("lang != ?", word)).Limit(5).ToFennecQL();
+        Assert.Equal("get docs select title, highlight(body) where lang != $1 match body $1 fuzzy limit $2", text);
+        Assert.Equal(new object?[] { "rust", 5L }, ps);
+
+        var tier = new Param(2);
+        var customers = db.From("customers").Select("id").Where("tier", ">=", tier);
+        (text, ps) = db.From("orders").Where("tier", tier).Where("customer", "in", customers)
+            .Order(Computed.Expr("n * ?", 2), "desc").Order(Computed.Distance("loc", new[] { 13.4, 52.5 }))
+            .Limit(10).ToFennecQL();
+        Assert.Equal("get orders where tier = $1 and customer in (get customers select id where tier >= $1) "
+            + "order n * $2 desc, distance(loc, $3) asc limit $4", text);
+        Assert.Equal(4, ps.Count);
+        (text, _) = db.From("orders").Where(new Dictionary<string, object?>
+        {
+            ["customer"] = new Dictionary<string, object?> { ["in"] = Query.From("customers").Select("id") },
+        }).ToFennecQL();
+        Assert.Equal("get orders where customer in (get customers select id)", text);
+
+        // A Param is a value, never a dictionary of operators; a query is a value only as an `in`'s list.
+        (text, _) = Query.From("t").Where("meta", new Param(new Dictionary<string, object?> { ["gte"] = 1 })).ToFennecQL();
+        Assert.Equal("get t where meta = $1", text);
+        static string Refused(Action make) => Assert.Throws<FennecQueryException>(make).Message;
+        Assert.Equal("param() takes a value, not another param()", Refused(() => _ = new Param(amount)));
+        Refused(() => Query.From("t").Where("a", customers).ToFennecQL());
+        Refused(() => Query.From("t").ToInsert(new { tags = new object[] { amount } }));
+        Assert.Equal("an order key is an expression or a name: order by twice itself, without as",
+            Refused(() => Query.From("t").Order(Computed.Expr("n * 2").As("twice"))));
+        Assert.Equal("insert takes require as its option: insert(..., { require: n })",
+            Refused(() => Query.From("t").Require(1).ToInsertNew(new { a = 1 })));
+    }
+
     // ---------------------------------------------------------- against the primary
 
     sealed record Title(string title);
+
+    [Fact]
+    public async Task TheNewFormsAnswerAsTheirTexts()
+    {
+        using var db = new FennecClient(servers.Primary, new FennecClientOptions { Token = Servers.RootToken });
+        var orders = $"orders_{Environment.ProcessId}_{Guid.NewGuid():N}"[..30];
+        var customers = $"cust_{Environment.ProcessId}_{Guid.NewGuid():N}"[..30];
+        await db.ExecAsync($"create collection {customers} (country text @hash)");
+        await db.ExecAsync($"create collection {orders} (customer int @hash, n int)");
+        Assert.Equal(3, (await db.From(customers).InsertNewAsync(new object[]
+        {
+            new { id = 1, country = "TR" }, new { id = 2, country = "DE" }, new { id = 3, country = "TR" },
+        })).Affected);
+        // insert refuses a held id, the block put back whole, where put writes over it.
+        var held = await Assert.ThrowsAsync<FennecException>(() =>
+            db.From(customers).InsertNewAsync(new object[] { new { id = 4, country = "FR" }, new { id = 1, country = "FR" } }));
+        Assert.Equal(409, held.Status);
+        Assert.Equal(3, await db.From(customers).CountAsync());
+        await db.From(orders).InsertAsync(new object[]
+        {
+            new { id = 1, customer = 1, n = 5 }, new { id = 2, customer = 2, n = 9 }, new { id = 3, customer = 3, n = 7 },
+        });
+
+        var turks = db.From(customers).Select("id").Where("country", "TR");
+        var rows = await db.From(orders).Select("id").Where("customer", "in", turks).Order(Computed.Expr("n * 2"), "desc").RowsAsync();
+        Assert.Equal(new[] { 3, 1 }, rows.Select(r => r.GetProperty("id").GetInt32()));
+        Assert.Equal(1, await db.From(orders).Where(Cond.Not(new Dictionary<string, object?>
+        {
+            ["customer"] = new Dictionary<string, object?> { ["in"] = turks },
+        })).CountAsync());
+        var amount = new Param(7);
+        var w = await db.From(orders).Where("n", ">=", amount).UpdateAsync(new { n = Computed.Expr("n - ?", amount) });
+        Assert.Equal(2, w.Affected);
+        Assert.Equal(1, await db.From(orders).Where("n", 0).CountAsync());
+        await db.ExecAsync($"drop collection {orders}");
+        await db.ExecAsync($"drop collection {customers}");
+    }
 
     [Fact]
     public async Task BuilderAnswersAreTheTextsAnswers()

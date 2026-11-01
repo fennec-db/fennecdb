@@ -137,7 +137,32 @@ keeps its vector's node). A change with `"schema": true`, or rows naming a
 field the replica has not got, has the collection made again from `GET
 /collections`, its rows kept in the fields left (`remake`), and the shape
 seeded whole (`Shape::fresh`): applied as they came, the rows of an alter
-failed the put and the stream retried the same change for good. A one-row change
+failed the put and the stream retried the same change for good. A refusal
+puts back what the replica held before the write, but never over what the
+server sent since: each id a change names -- a row as it is now, or an id
+deleted -- and for a seed every id but the temporary rows it keeps joins
+the `kept` of every unanswered write's undo steps over that collection
+(`Sync::heard`, `#heard`), and the undo leaves those ids alone. A seed
+marks more than the ids it holds or deletes: a row a waiting delete took
+away is held no longer, so a seed lacking it would not name it, and the
+delete refused (a 412, a 403) put it back for good -- on every reconnect
+of a scoped stream, which is seeded again whole. Before, an `insertNew` refused with a 409 for
+an id whose server row the stream had brought first deleted that row (the
+undo deleted the ids the insert made, unchecked), and an update refused
+after a change wrote the stale row back over the server's. A write's ids
+are read from its undo the first time rows come while it waits and kept
+beside it (`Op::touched`), so a change reaching none of them rewrites
+nothing; one that does rewrites that write's `_sync_queue` row in the
+change's own block, so a restart refuses with the same undo. Two waiting
+writes over one row: the second read it as the first left it, which the
+server never held, so the first's refusal gives the next write over each
+of its rows a step of its own, run last, putting the row back as it is
+once the refusal is undone (`Sync::rebase`, `#rebase`) -- the next only,
+since the one after read that one's row, right if it lands. With no write
+waiting a change pays one test of an empty queue (`make sync-bench` has
+none waiting). With `rebase` it costs the native library 17 KB of code, the file
+2 753 408 -> 2 786 448 bytes on aarch64-apple-darwin (two 16 KiB pages),
+and the browser module nothing: it has no sync. A one-row change
 costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
 3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
 000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
@@ -159,7 +184,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 73 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 84 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

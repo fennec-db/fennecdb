@@ -105,6 +105,7 @@ __all__ = [
     "Cond",
     "FacetCount",
     "FennecError",
+    "Param",
     "Query",
     "Rows",
     "SchemaError",
@@ -120,6 +121,7 @@ __all__ = [
     "last",
     "not_",
     "or_",
+    "param",
     "placeholders",
     "raw",
 ]
@@ -1005,6 +1007,7 @@ from .builder import (  # noqa: E402
     Computed,
     Cond,
     FacetCount,
+    Param,
     Query,
     Rows,
     _rows,
@@ -1020,5 +1023,6 @@ from .builder import (  # noqa: E402
     last,
     not_,
     or_,
+    param,
     raw,
 )

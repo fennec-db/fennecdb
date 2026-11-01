@@ -471,6 +471,76 @@ public sealed class DocsBuilderTests
         Sends(sent, "get products count lookup reviews on product_id required where stars = $1", "[5]");
     }
 
+    [Fact(DisplayName = "docs: orders of customers in a country")]
+    public async Task OrdersOfCustomersInACountry()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Where((Cond)new Dictionary<string, object?> { ["customer"] = new Dictionary<string, object?> { ["in"] = db.From("customers").Select("id").Where("country", "TR") } })
+            .RowsAsync();
+        Sends(sent, "get orders where customer in (get customers select id where country = $1)", "[\"TR\"]");
+    }
+
+    [Fact(DisplayName = "docs: open orders of customers of a tier")]
+    public async Task OpenOrdersOfCustomersOfATier()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Where((Cond)new Dictionary<string, object?> { ["status"] = "open", ["customer"] = new Dictionary<string, object?> { ["in"] = db.From("customers").Select("id").Where("tier", ">=", 2) } })
+            .RowsAsync();
+        Sends(sent, "get orders where status = $1 and customer in (get customers select id where tier >= $2)", "[\"open\", 2]");
+    }
+
+    [Fact(DisplayName = "docs: orders of customers outside a country counted")]
+    public async Task OrdersOfCustomersOutsideACountryCounted()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Where(Cond.Not((Cond)new Dictionary<string, object?> { ["customer"] = new Dictionary<string, object?> { ["in"] = db.From("customers").Select("id").Where("country", "TR") } }))
+            .CountAsync();
+        Sends(sent, "get orders where not (customer in (get customers select id where country = $1)) count", "[\"TR\"]");
+    }
+
+    [Fact(DisplayName = "docs: the sessions of banned users deleted")]
+    public async Task TheSessionsOfBannedUsersDeleted()
+    {
+        using var db = Db(out var sent);
+        await db.From("sessions")
+            .Where("user", "in", db.From("users").Select("name").Where("banned", true))
+            .DeleteAsync();
+        Sends(sent, "del sessions where user in (get users select name where banned = $1)", "[true]");
+    }
+
+    [Fact(DisplayName = "docs: customers with their returned orders")]
+    public async Task CustomersWithTheirReturnedOrders()
+    {
+        using var db = Db(out var sent);
+        await db.From("customers")
+            .Limit(20)
+            .Lookup(
+                "orders",
+                on: "customer",
+                where: (Cond)new Dictionary<string, object?> { ["id"] = new Dictionary<string, object?> { ["in"] = db.From("returns").Select("order_id") } },
+                limit: 3
+            )
+            .RowsAsync();
+        Sends(sent, "get customers limit $1 lookup orders on customer where id in (get returns select order_id) limit $2", "[20, 3]");
+    }
+
+    [Fact(DisplayName = "docs: orders of customers of an active tier")]
+    public async Task OrdersOfCustomersOfAnActiveTier()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Where(
+                "customer",
+                "in",
+                db.From("customers").Select("id").Where("tier", "in", db.From("tiers").Select("n").Where("active", true))
+            )
+            .RowsAsync();
+        Sends(sent, "get orders where customer in (get customers select id where tier in (get tiers select n where active = $1))", "[true]");
+    }
+
     [Fact(DisplayName = "docs: articles a page at a time")]
     public async Task ArticlesAPageAtATime()
     {
@@ -506,6 +576,29 @@ public sealed class DocsBuilderTests
             .Limit(10)
             .UpdateAsync(new { owner = "w1" }, returning: ["*"]);
         Sends(sent, "set jobs {owner: $1} where run_at <= now() order run_at asc limit $2 returning *", "[\"w1\", 10]");
+    }
+
+    [Fact(DisplayName = "docs: orders by twice their count")]
+    public async Task OrdersByTwiceTheirCount()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Order(Computed.Expr("n * 2"), "desc")
+            .Order("item")
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get orders order n * 2 desc, item asc limit $1", "[10]");
+    }
+
+    [Fact(DisplayName = "docs: one customer's orders first")]
+    public async Task OneCustomerSOrdersFirst()
+    {
+        using var db = Db(out var sent);
+        await db.From("orders")
+            .Order(Computed.Expr("case when customer = ? then 0 else 1 end", "bo"))
+            .Order("id")
+            .RowsAsync();
+        Sends(sent, "get orders order case when customer = $1 then 0 else 1 end asc, id asc", "[\"bo\"]");
     }
 
     [Fact(DisplayName = "docs: a column worked out")]
@@ -759,6 +852,102 @@ public sealed class DocsBuilderTests
         Sends(sent, "get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]");
     }
 
+    [Fact(DisplayName = "docs: products matching a misspelt word")]
+    public async Task ProductsMatchingAMisspeltWord()
+    {
+        using var db = Db(out var sent);
+        await db.From("products")
+            .Match("title", "databse", fuzzy: true)
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get products match title $1 fuzzy limit $2", "[\"databse\", 10]");
+    }
+
+    [Fact(DisplayName = "docs: products matching a word begun")]
+    public async Task ProductsMatchingAWordBegun()
+    {
+        using var db = Db(out var sent);
+        await db.From("products")
+            .Match("title", "datab", prefix: true)
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get products match title $1 prefix limit $2", "[\"datab\", 10]");
+    }
+
+    [Fact(DisplayName = "docs: products matching a misspelt word begun")]
+    public async Task ProductsMatchingAMisspeltWordBegun()
+    {
+        using var db = Db(out var sent);
+        await db.From("products")
+            .Match("title", "datbas", fuzzy: true, prefix: true)
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get products match title $1 fuzzy prefix limit $2", "[\"datbas\", 10]");
+    }
+
+    [Fact(DisplayName = "docs: products matching a word one edit away")]
+    public async Task ProductsMatchingAWordOneEditAway()
+    {
+        using var db = Db(out var sent);
+        await db.From("products")
+            .Match("title", "databse", fuzzy: 1)
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get products match title $1 fuzzy 1 limit $2", "[\"databse\", 10]");
+    }
+
+    [Fact(DisplayName = "docs: a search box inside one category")]
+    public async Task ASearchBoxInsideOneCategory()
+    {
+        using var db = Db(out var sent);
+        await db.From("products")
+            .Where("category", "books")
+            .Match("title", "datbas", fuzzy: true, prefix: true)
+            .Limit(20)
+            .RowsAsync();
+        Sends(sent, "get products where category = $1 match title $2 fuzzy prefix limit $3", "[\"books\", \"datbas\", 20]");
+    }
+
+    [Fact(DisplayName = "docs: articles ranked by words and meaning")]
+    public async Task ArticlesRankedByWordsAndMeaning()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles")
+            .Match("body", "rust ownership")
+            .Near("embed", new[] { 0.12, -0.03, 0.4 })
+            .Fuse()
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get articles match body $1 near embed $2 fuse limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]");
+    }
+
+    [Fact(DisplayName = "docs: articles since a year ranked by words and meaning")]
+    public async Task ArticlesSinceAYearRankedByWordsAndMeaning()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles")
+            .Where("year", ">=", 2024)
+            .Match("body", "rust ownership")
+            .Near("embed", new[] { 0.12, -0.03, 0.4 })
+            .Fuse()
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get articles where year >= $1 match body $2 near embed $3 fuse limit $4", "[2024, \"rust ownership\", [0.12, -0.03, 0.4], 10]");
+    }
+
+    [Fact(DisplayName = "docs: articles ranked by words and meaning, k and candidates")]
+    public async Task ArticlesRankedByWordsAndMeaningKAndCandidates()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles")
+            .Match("body", "rust ownership")
+            .Near("embed", new[] { 0.12, -0.03, 0.4 })
+            .Fuse(k: 60, candidates: 50)
+            .Limit(10)
+            .RowsAsync();
+        Sends(sent, "get articles match body $1 near embed $2 fuse k 60 candidates 50 limit $3", "[\"rust ownership\", [0.12, -0.03, 0.4], 10]");
+    }
+
     [Fact(DisplayName = "docs: matches with their marks")]
     public async Task MatchesWithTheirMarks()
     {
@@ -936,6 +1125,94 @@ public sealed class DocsBuilderTests
             .Limit(10)
             .RowsAsync();
         Sends(sent, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]");
+    }
+
+    [Fact(DisplayName = "docs: a hit counted and stamped")]
+    public async Task AHitCountedAndStamped()
+    {
+        using var db = Db(out var sent);
+        await db.From("hits")
+            .Where("key", "ip1")
+            .UpdateAsync(new { n = Computed.Expr("n + 1"), seen = Computed.Expr("now()") });
+        Sends(sent, "set hits {n: n + 1, seen: now()} where key = $1", "[\"ip1\"]");
+    }
+
+    [Fact(DisplayName = "docs: a hit counted from nothing")]
+    public async Task AHitCountedFromNothing()
+    {
+        using var db = Db(out var sent);
+        await db.From("hits")
+            .Where("key", "ip1")
+            .UpdateAsync(new { n = Computed.Inc(5) });
+        Sends(sent, "set hits {n: coalesce(n, 0) + $1} where key = $2", "[5, \"ip1\"]");
+    }
+
+    [Fact(DisplayName = "docs: a document written over its version")]
+    public async Task ADocumentWrittenOverItsVersion()
+    {
+        using var db = Db(out var sent);
+        await db.From("docs")
+            .Where(Cond.And(Cond.Cmp("id", "=", 7), Cond.Cmp("version", "=", 3)))
+            .UpdateAsync(new { body = "new text", version = Computed.Expr("version + 1") });
+        Sends(sent, "set docs {body: $1, version: version + 1} where id = $2 and version = $3", "[\"new text\", 7, 3]");
+    }
+
+    [Fact(DisplayName = "docs: a lock taken unless held")]
+    public async Task ALockTakenUnlessHeld()
+    {
+        using var db = Db(out var sent);
+        await db.From("locks")
+            .InsertAsync(
+                new { name = "nightly", owner = "w1", at = Computed.Expr("now()") },
+                ifAbsent: true
+            );
+        Sends(sent, "put locks {name: $1, owner: $2, at: now()} if absent", "[\"nightly\", \"w1\"]");
+    }
+
+    [Fact(DisplayName = "docs: a journal entry made")]
+    public async Task AJournalEntryMade()
+    {
+        using var db = Db(out var sent);
+        await db.From("journal")
+            .InsertNewAsync(new { entry = Computed.Expr("? + \":dr\"", "inv-7"), amount = Computed.Expr("0 - ?", 300) });
+        Sends(sent, "insert journal {entry: $1 + \":dr\", amount: 0 - $2}", "[\"inv-7\", 300]");
+    }
+
+    [Fact(DisplayName = "docs: an amount taken from a balance that holds it")]
+    public async Task AnAmountTakenFromABalanceThatHoldsIt()
+    {
+        using var db = Db(out var sent);
+        var amount = new Param(300);
+        await db.From("accounts")
+            .Where(Cond.And(Cond.Cmp("name", "=", "ada"), Cond.Cmp("balance", "gte", amount)))
+            .UpdateAsync(
+                new { balance = Computed.Expr("balance - ?", amount) },
+                require: 1
+            );
+        Sends(sent, "set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1", "[300, \"ada\"]");
+    }
+
+    [Fact(DisplayName = "docs: a held hold released")]
+    public async Task AHeldHoldReleased()
+    {
+        using var db = Db(out var sent);
+        await db.From("holds")
+            .Where(Cond.And(Cond.Cmp("order_ref", "=", "o-17"), Cond.Cmp("state", "=", "held")))
+            .DeleteAsync(require: 1);
+        Sends(sent, "del holds where order_ref = $1 and state = $2 require 1", "[\"o-17\", \"held\"]");
+    }
+
+    [Fact(DisplayName = "docs: a lock taken or refused")]
+    public async Task ALockTakenOrRefused()
+    {
+        using var db = Db(out var sent);
+        await db.From("locks")
+            .InsertAsync(
+                new { name = "nightly", owner = "w1" },
+                ifAbsent: true,
+                require: 1
+            );
+        Sends(sent, "put locks {name: $1, owner: $2} if absent require 1", "[\"nightly\", \"w1\"]");
     }
 
     [Fact(DisplayName = "docs: a debit that must find the money, or says why")]

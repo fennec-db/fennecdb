@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 53 KB brotli as they are served with no build step; a bundler keeps
+imports, 55 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -975,12 +975,14 @@ types take <code>'meta.lang'</code> as a path of it.</p>
 <tr><td><b>Word forms</b></td><td><code>eq</code> <code>ne</code> <code>lt</code> <code>lte</code> <code>gt</code> <code>gte</code> <code>like</code> <code>has</code> <code>in</code></td></tr>
 <tr><td><b>Null</b></td><td><code>{ summary: null }</code> becomes <code>is null</code>; <code>{ summary: { not: null } }</code> becomes <code>is not null</code></td></tr>
 <tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
+<tr><td><b>Inner queries</b></td><td><code>where('customer', 'in', db.from('customers').select('id').where({ country: 'TR' }))</code> — <code>customer in (get customers select id where country = $1)</code>, run once before the query, its one column the list (<a href="fennecql-lookup.html#subqueries">Subqueries</a>)</td></tr>
+<tr><td><b>One value twice</b></td><td><code>const amount = param(300)</code>, then <code>amount</code> wherever a value goes: every use writes the same <code>$n</code> — <code>balance - $1 … balance &gt;= $1</code> — where a value given twice is two parameters</td></tr>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
-<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fennecql-schema.html#collation">Collation</a>)</td></tr>
-<tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fennecql-search.html#hybrid">Hybrid search</a>)</td></tr>
+<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; a key may be an expression, <code>order(expr('n * 2'), 'desc')</code> or <code>order(distance('loc', point))</code> (<a href="fennecql-reading.html#order-by-expression">Ordering by an expression</a>); <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fennecql-schema.html#collation">Collation</a>)</td></tr>
+<tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text, { fuzzy, prefix })</code> (<code>fuzzy: true</code> is FennecQL's <code>fuzzy</code>, a number its edits), <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both, the two written in the order called (<a href="fennecql-search.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
 <tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fennecql-reading.html#explain">Explain</a>)</td></tr>
-<tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code>, each resolving to the rows it changed; <code>insert(doc, { ifAbsent: true })</code> passes over a held id or <code>@unique</code> value (<code>put … if absent</code>); <code>order(...)</code> and <code>limit(n)</code> before an <code>update</code> or a <code>delete</code> pick its rows, and <code>{ returning: true }</code> resolves to them — a job queue's claim (<a href="queues.html">Job queues</a>)</td></tr>
+<tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code>, each resolving to the rows it changed; <code>insert</code> sends <code>put</code>, which writes over the row of a held id, and <code>insertNew(doc|docs)</code> sends <code>insert</code>, refused (409) where a document names one; <code>insert(doc, { ifAbsent: true })</code> passes over a held id or <code>@unique</code> value (<code>put … if absent</code>); <code>order(...)</code> and <code>limit(n)</code> before an <code>update</code> or a <code>delete</code> pick its rows, and <code>{ returning: true }</code> resolves to them — a job queue's claim (<a href="queues.html">Job queues</a>)</td></tr>
 <tr><td><b>Values worked out</b></td><td><code>update({ n: inc(1) })</code> renders <code>n: coalesce(n, 0) + $1</code>, and <code>expr('price * ?', 1.2)</code> any expression over the row — see <a href="fennecql-writing.html#writes">Writes that read the row</a> and <a href="redis.html">Instead of Redis</a></td></tr>
 </tbody>
 </table>
@@ -1186,10 +1188,15 @@ nothing; a query needs no call to it before it runs.</p>
 
 <details class="deep"><summary>How values and names stay out of the query text</summary>
 <p>Nothing is hidden. Every leaf value is bound to a parameter and text is
-never embedded into the query, which leaves a single injection boundary:
-<b>names</b>. Collection and field names cannot be parameterised, so they are
+never embedded into the query, which leaves two injection boundaries.
+<b>Names</b>: collection and field names cannot be parameterised, so they are
 validated against FennecQL's identifier rule and anything that does not fit
-errors out.</p>
+errors out. And <b>the text of <code>expr()</code></b> (and of
+<code>raw()</code>): it is trusted FennecQL, written into the statement as
+it is, so it is the code's own and never a value from a user -- that goes in
+as a <code>?</code>'s parameter, <code>expr('price * ?', userValue)</code>.
+A <code>param()</code> goes where a whole value stands; inside a list or a
+json value it is refused.</p>
 
 <pre data-lang="ts">db.from('articles').where('title', '"; del articles; --')
 // get articles where title = $1     ← a value, not text

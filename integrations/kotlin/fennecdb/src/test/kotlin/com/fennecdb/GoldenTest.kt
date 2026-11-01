@@ -25,9 +25,18 @@ class GoldenTest {
             Json.parse(File(path).readText()) as List<Row>
         }
 
-        /** An argument as a Kotlin caller hands it over: `$date` a Date, `$f32` a FloatArray, an object a map. */
+        /** The `$param`s of the case being run, by name: each use of a name is the one `param(...)`. */
+        private var held = HashMap<String, Param>()
+
+        /**
+         * An argument as a Kotlin caller hands it over: `$date` a Date, `$f32`
+         * a FloatArray, `$param` a [param] (the same one wherever its name
+         * comes again), `$query` an inner query, an object a map.
+         */
         fun value(v: Any?): Any? = when (v) {
             is Row -> when {
+                v.containsKey("\$param") -> v.list("\$param")!!.let { p -> held.getOrPut(p[0] as String) { param(value(p[1])) } }
+                v.containsKey("\$query") -> query(v)
                 v.containsKey("\$date") -> java.util.Date(java.time.Instant.parse(v.string("\$date")).toEpochMilli())
                 v.containsKey("\$f32") -> v.list("\$f32")!!.let { l -> FloatArray(l.size) { (l[it] as Number).toFloat() } }
                 v.containsKey("\$inc") -> Computed.inc(v["\$inc"])
@@ -44,6 +53,14 @@ class GoldenTest {
             }
             is List<*> -> v.map(::value)
             else -> v
+        }
+
+        /** An inner query of `in`: the steps of a chain from `from`, unended. */
+        fun query(v: Row): Query {
+            val steps = v.list("\$query")!!.map { it as Row }
+            var q = Query.from(steps[0].list("args")!![0] as String)
+            for (s in steps.drop(1)) q = step(q, s.string("op")!!, s.list("args") ?: emptyList())
+            return q
         }
 
         fun cond(v: Any?): Any {
@@ -86,12 +103,17 @@ class GoldenTest {
             op == "orWhere" -> q.orWhere(cond(a[0]))
             op == "near" -> q.near(a[0] as String, value(a[1]), opt(a, 2, "ef") as Long?, opt(a, 2, "exact") as Boolean? ?: false)
             op == "rerank" -> q.rerank(a[0] as String, value(a[1]), opt(a, 2, "candidates") as Long?)
-            op == "match" -> q.matchOf(a[0] as String, a[1] as String, opt(a, 2, "fuzzy"), opt(a, 2, "prefix"))
+            op == "match" -> q.matchOf(a[0] as String, value(a[1]), opt(a, 2, "fuzzy"), opt(a, 2, "prefix"))
             op == "fuse" -> q.fuse(opt(a, 0, "k") as Long?, opt(a, 0, "candidates") as Long?)
             // One key as itself, several (or none) as the list they are.
             op == "group" && a.size == 1 -> (value(a[0]) as Any).let { if (it is List<*>) q.group(it.map { k -> k!! }) else q.group(it) }
             op == "group" -> q.group(a.map { value(it)!! })
-            op == "order" -> q.order(a[0] as String, a.getOrNull(1) as? String ?: "asc", opt(a, 2, "collate") as String?)
+            // A key is a field's name, or an expression: `$expr`, `$distance`, `$as` (refused).
+            op == "order" -> a[0].let { key ->
+                val direction = a.getOrNull(1) as? String ?: "asc"
+                val collate = opt(a, 2, "collate") as String?
+                if (key is String) q.order(key, direction, collate) else q.order(value(key) as Computed, direction, collate)
+            }
             op == "limit" -> q.limit(a[0] as Long)
             op == "offset" -> q.offset(a[0] as Long)
             op == "require" -> q.require(a[0] as Long, opt(a, 1, "reason") as String?)
@@ -134,12 +156,13 @@ class GoldenTest {
         /** The statement a chain makes, or the builder's refusal. */
         fun run(steps: List<Row>): Triple<String?, List<Any?>?, String?> = runBlocking {
             var sent: Statement? = null
+            held = HashMap()
             try {
                 if (steps[0].string("op") == "call") return@runBlocking call(steps)
                 var q = Query.from(steps[0].list("args")!![0] as String).bind { text, params ->
                     sent = Statement(text, params)
                     when {
-                        Regex("^(put|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
+                        Regex("^(put|insert|set|del) ").containsMatchIn(text) -> Answer.Affected(0)
                         text.endsWith(" count") -> Answer.Rows(listOf("count"), listOf(Row(mapOf("count" to 0L))))
                         else -> Answer.Rows(emptyList(), emptyList())
                     }
@@ -162,6 +185,7 @@ class GoldenTest {
                         "toFennecQL" -> q.toFennecQL()
                         "toInsert" -> q.toInsert(
                             value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1), returning(1), reason(1))
+                        "toInsertNew" -> q.toInsertNew(value(a[0]), require(1), returning(1), reason(1))
                         "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1), returning(1), reason(1))
                         "toUpsert" -> q.toUpsert(value(a[0]), value(a[1]), require(2), returning(2), reason(2))
                         "toDelete" -> q.toDelete(all(0), require(0), returning(0), reason(0))
@@ -174,6 +198,12 @@ class GoldenTest {
                             when (val r = returning(1)) {
                                 null -> q.insert(value(a[0]), absent, require(1), reason(1))
                                 else -> q.insertReturning(value(a[0]), r, absent, require(1), reason(1))
+                            }
+                        }
+                        "insertNew" -> null.also {
+                            when (val r = returning(1)) {
+                                null -> q.insertNew(value(a[0]), require(1), reason(1))
+                                else -> q.insertNewReturning(value(a[0]), r, require(1), reason(1))
                             }
                         }
                         "update" -> null.also {
@@ -296,5 +326,30 @@ class GoldenTest {
         assertEquals(listOf("articles"), b.reads)
         assertEquals(listOf("articles", "notes"), b.lookup("notes", on = "article_id").reads)
         assertNull(b.where(Cond.raw("id in (get x select id)")).reads)
+    }
+
+    @Test
+    fun anInnerQueryIsReadToo() {
+        val inner = Query.from("customers").select("id")
+        val q = Query.from("orders").where("customer", "in", inner)
+        assertEquals(listOf("orders", "customers"), q.reads)
+        assertEquals(listOf("orders", "customers", "notes"), q.lookup("notes", on = "order_id").reads)
+        // An inner query that may read one more makes the whole unknown.
+        assertNull(Query.from("orders").where("customer", "in", inner.where(Cond.raw("id in (get x select id)"))).reads)
+        // Only an `in` takes a query: any other operator refuses it as a value.
+        val e = kotlin.test.assertFailsWith<FennecException> { Query.from("orders").where("customer", "=", inner).toFennecQL() }
+        assertEquals("this object cannot be used as a fennecdb value (a query is one only as an `in`'s list)", e.message)
+    }
+
+    @Test
+    fun aParamIsOneParameterByIdentity() {
+        val p = param(300)
+        val st = Query.from("accounts").where("a", ">=", p).where("b", "<", p).where("c", "=", param(300)).toFennecQL()
+        assertEquals("get accounts where a >= \$1 and b < \$1 and c = \$2", st.text)
+        assertEquals(listOf<Any?>(300, 300), st.params)
+        // A param is a value, never a map of operators, and not another param's value.
+        assertEquals("get accounts where a = \$1", Query.from("accounts").where("a", p).toFennecQL().text)
+        assertEquals("param() takes a value, not another param()", kotlin.test.assertFailsWith<FennecException> { param(p) }.message)
+        assertEquals("get accounts where a in [\$1, \$2, \$1]", Query.from("accounts").where("a", "in", listOf(p, 1, p)).toFennecQL().text)
     }
 }

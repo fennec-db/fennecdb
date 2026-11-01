@@ -42,6 +42,7 @@ __all__ = [
     "Computed",
     "Cond",
     "FacetCount",
+    "Param",
     "Query",
     "Rows",
     "and_",
@@ -56,6 +57,7 @@ __all__ = [
     "last",
     "not_",
     "or_",
+    "param",
     "raw",
 ]
 
@@ -269,10 +271,65 @@ def _normalize(v: Any, what: str = "value") -> Any:
         return [_normalize(x, what) for x in v]
     if isinstance(v, Mapping):
         return {k: _normalize(x, what) for k, x in v.items()}
+    # A param is bound where a whole value stands, never from inside a list
+    # or a json value; every builder refuses it in these words
+    # (builder-golden.json).
+    if isinstance(v, Param):
+        raise _err("this object cannot be used as a fennecdb value (a param() inside a value)")
     tolist = getattr(v, "tolist", None)
     if callable(tolist):
         return _normalize(tolist(), what)
     raise _err(f"this object cannot be used as a fennecdb value ({what})")
+
+
+# ---------------------------------------------------- one value in two places
+
+
+class Param:
+    """What `param()` makes: a value bound once, whichever places it is
+    used in. Each use writes the same `$n`, where the same value given twice
+    is two parameters -- `balance - $1 ... balance >= $1`, the amount taken
+    and the amount checked one value, never two a caller could let drift
+    apart. A param is told by its identity, never its value: two params of
+    equal values stay two parameters, as the JavaScript builder's do."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        if isinstance(value, Param):
+            raise _err("param() takes a value, not another param()")
+        object.__setattr__(self, "value", value)
+
+    # Immutable, as a query is: a param changed after a query took it would
+    # change a statement already written.
+    def __setattr__(self, key: str, value: Any) -> None:
+        raise AttributeError("a param is immutable")
+
+    def __delattr__(self, key: str) -> None:
+        raise AttributeError("a param is immutable")
+
+    def __repr__(self) -> str:
+        return f"param({self.value!r})"
+
+
+def param(value: Any) -> Param:
+    """`param(value)`: one parameter, used wherever a value goes -- a filter,
+    a document, `expr()`, `raw()`, `distance()`, `near`, `match` -- and bound
+    once, at its first place in the text:
+
+        amount = param(300)
+        (collection("accounts").where({"name": "ada", "balance": {"gte": amount}})
+            .to_update({"balance": expr("balance - ?", amount)}, require=1))
+        # ("set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1",
+        #  [300, "ada"])
+
+    `None` is a value here, FennecQL's null."""
+    return Param(value)
+
+
+def _value_of(v: Any) -> Any:
+    """A value as the builder checks it: a param's own."""
+    return v.value if isinstance(v, Param) else v
 
 
 # ---------------------------------------------------------- the condition tree
@@ -366,7 +423,12 @@ def inc(by: Any = 1) -> Computed:
 def expr(sql: str, *params: Any) -> Computed:
     """A value as a FennecQL expression over the row it is written into,
     each `?` bound to the next parameter: `{"at": expr("now()")}`,
-    `{"total": expr("price * ?", 1.2)}`."""
+    `{"total": expr("price * ?", 1.2)}`.
+
+    The text is trusted FennecQL, written into the statement as it is: the
+    code's own, never a value from a user, which goes in as a `?`'s
+    parameter. Names and this text are where an injection would get
+    through."""
     if not isinstance(sql, str):
         raise _err("expr() expects text")
     return Computed("expr", sql=sql, params=params)
@@ -501,14 +563,17 @@ def _distance_cond(field: str, spec: Any) -> Cond:
     """`{"distance": {"from": [lon, lat], "lte": 500}}`: the metres from a
     point, compared -- `distance(loc, $1) <= $2`, each comparison given its
     own."""
-    if not isinstance(spec, Mapping) or not isinstance(spec.get("from"), (list, tuple)):
+    # A param's value is checked, the param itself bound: its `$n` is the one
+    # its other places write.
+    if not isinstance(spec, Mapping) or not isinstance(_value_of(spec.get("from")), (list, tuple)):
         raise _err(f"distance takes {{ from: [lon, lat], <op>: metres }} (field: {field})")
     items = []
     for k, v in spec.items():
         if k == "from":
             continue
         op = _OPS.get(k) if isinstance(k, str) else None
-        number = isinstance(v, (int, float)) and not isinstance(v, bool)
+        n = _value_of(v)
+        number = isinstance(n, (int, float)) and not isinstance(n, bool)
         if not op or op in ("in", "has", "~") or not number:
             raise _err(
                 f"distance compares metres with lt, lte, gt, gte, eq or ne: {k} (field: {field})"
@@ -520,6 +585,11 @@ def _distance_cond(field: str, spec: Any) -> Cond:
 
 
 def _in_cond(field: str, values: Any) -> Cond:
+    # `{"customer": {"in": db.collection("customers").select("id").where(...)}}`:
+    # the inner query runs once, before the outer one, and its one column is
+    # the list -- `customer in (get customers select id where ...)`.
+    if isinstance(values, _Builder):
+        return Cond("sub", field=field, value=values)
     if not isinstance(values, (list, tuple)):
         raise _err(f"`in` expects an array (field: {field})")
     if not values:
@@ -569,8 +639,18 @@ def _prune(c: Cond) -> Cond | None:
 class _Binder:
     def __init__(self) -> None:
         self.params: list = []
+        # A `param()` takes its `$n` at its first use, and every use after
+        # writes that one: kept by the param's identity (`Param` defines no
+        # `__eq__`), so two params of one value stay two parameters.
+        self._once: dict[Param, str] = {}
 
     def __call__(self, v: Any, what: str) -> str:
+        if isinstance(v, Param):
+            at = self._once.get(v)
+            if at is None:
+                self.params.append(_normalize(v.value, what))
+                at = self._once[v] = f"${len(self.params)}"
+            return at
         self.params.append(_normalize(v, what))
         return f"${len(self.params)}"
 
@@ -586,6 +666,10 @@ def _render(c: Cond, bind: _Binder, parent: str | None = None) -> str:
         return f"{c.field} is {'not ' if c.negated else ''}null"
     if c.t == "in":
         return f"{c.field} in [{', '.join(bind(v, c.field) for v in c.items)}]"
+    if c.t == "sub":
+        # Its parameters numbered where its text stands, after the outer
+        # query's before it.
+        return f"{c.field} in ({c.value._inner(bind)})"
     if c.t == "cmp":
         return f"{c.field} {c.op} {bind(c.value, c.field)}"
     if c.t == "within":
@@ -628,9 +712,12 @@ def _order_keys(spec: Any) -> list[tuple[str, bool, str | None]]:
     return keys
 
 
-def _sort_key(k: tuple[str, bool, str | None]) -> str:
-    field, asc, collate = k
-    return f"{field}{f' collate {collate}' if collate else ''} {'asc' if asc else 'desc'}"
+def _sort_key(k: tuple[Any, bool, str | None], bind: _Binder) -> str:
+    """`name collate tr desc`: one key of an `order`, an expression's values
+    bound where its text stands."""
+    key, asc, collate = k
+    text = _value("order", key, bind, "") if isinstance(key, Computed) else key
+    return f"{text}{f' collate {collate}' if collate else ''} {'asc' if asc else 'desc'}"
 
 
 Q = TypeVar("Q", bound="_Builder")
@@ -654,6 +741,9 @@ class _Builder:
             "cond": [],
             "near": None,
             "match": None,
+            # `fuse` writes its two searches in the order they were first
+            # called: `match` first where it came while no `near` was there.
+            "match_first": False,
             "rerank": None,
             "fuse": None,
             "order": [],
@@ -806,20 +896,22 @@ class _Builder:
     def near(self: Q, field: str, vector: Any, *, ef: int | None = None, exact: bool = False) -> Q:
         """`near field $n [ef N] [exact]`."""
         return self._with(
-            near=(_ident(field), vector, None if ef is None else _whole(ef, "ef"), bool(exact))
+            match_first=False if self._s["match"] is None else self._s["match_first"],
+            near=(_ident(field), vector, None if ef is None else _whole(ef, "ef"), bool(exact)),
         )
 
     def match(
         self: Q, field: str, query: str, *, fuzzy: bool | int = False, prefix: bool = False
     ) -> Q:
-        """`match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
-        `fuzzy=True` (2) matches each word within the edits its length allows
-        -- none under 5 characters, one up to 8, two from 9 -- `fuzzy=1` one at
-        most; `prefix=True` matches the last word as the start of a word too,
-        as a search box is typed into."""
-        # `True` is an `int` too: asked first, it is 2 and never 1.
+        """`match field $n [fuzzy [N]] [prefix]`: BM25 over a `@text` index.
+        `fuzzy=True` (`fuzzy` alone, 2 edits) matches each word within the
+        edits its length allows -- none under 5 characters, one up to 8, two
+        from 9 -- `fuzzy=1` one at most; `prefix=True` matches the last word
+        as the start of a word too, as a search box is typed into."""
+        # `True` is an `int` too: asked first, it is the parser's default,
+        # written as `fuzzy` alone, and never 1.
         if fuzzy is True:
-            edits = 2
+            edits = True
         elif fuzzy is False:
             edits = None
         elif isinstance(fuzzy, int) and 0 <= fuzzy <= 2:
@@ -828,7 +920,10 @@ class _Builder:
             raise _err(f"fuzzy is true, false or 0 to 2 edits: {fuzzy}")
         if not isinstance(prefix, bool):
             raise _err(f"prefix is true or false: {prefix}")
-        return self._with(match=(_ident(field), query, edits, prefix))
+        return self._with(
+            match_first=True if self._s["near"] is None else self._s["match_first"],
+            match=(_ident(field), query, edits, prefix),
+        )
 
     def fuse(self: Q, *, k: int | None = None, candidates: int | None = None) -> Q:
         """`fuse [k N] [candidates N]`: with both `match` and `near`, ranks by
@@ -915,12 +1010,27 @@ class _Builder:
         }
         return self._with(lookups=[*self._s["lookups"], level])
 
-    def order(self: Q, field: str, direction: str = "asc", *, collate: str | None = None) -> Q:
-        """`order field asc|desc`; each call adds a key. `collate="tr"` puts
+    def order(
+        self: Q, field: str | Computed, direction: str = "asc", *, collate: str | None = None
+    ) -> Q:
+        """`order field asc|desc`; each call adds a key. A key may be an
+        expression over the row -- `order(expr("n * 2"), "desc")`,
+        `order(distance("pickup", point))` -- ties going in id order, and
+        picks the rows of an `update` or a `delete` too. `collate="tr"` puts
         text in Turkish order, `"und"` in Unicode's root order."""
-        return self._with(
+        if isinstance(field, Computed) and field.kind == "expr":
+            # A name given with `as_` would read as the key's own; the
+            # statement has no such column to order by.
+            if field.name is not None:
+                raise _err(
+                    f"an order key is an expression or a name: order by {field.name} itself, without as"
+                )
+            key: Any = field
+        else:
             # Over groups a key may be an aggregate of the list, by its name.
-            order=[*self._s["order"], (_key(field), _direction(direction), _collation(collate))]
+            key = _key(field)
+        return self._with(
+            order=[*self._s["order"], (key, _direction(direction), _collation(collate))]
         )
 
     def limit(self: Q, n: int) -> Q:
@@ -945,6 +1055,34 @@ class _Builder:
 
     def to_fennecql(self) -> tuple[str, list]:
         """The statement and its parameters, as they would be sent."""
+        bind = _Binder()
+        return self._text(bind), bind.params
+
+    def _inner(self, bind: _Binder) -> str:
+        """The text as an inner query of `in`, its values bound by the
+        query around it: numbered where its text stands, and a param the two
+        share one `$n`."""
+        s = self._s
+        # One column is the list; the engine refuses the rest too.
+        if (
+            s["project"] is None
+            or len(s["project"]) != 1
+            or s["count"]
+            or s["lookups"]
+            or s["marks"]
+            or s["facets"]
+        ):
+            # The JavaScript builder's spelling, word for word: every
+            # builder's refusal is the same text.
+            raise _err(
+                f"an inner query of `in` selects exactly one column: "
+                f"from('{s['collection']}').select('id')"
+            )
+        if s["require"]:
+            raise _err("an inner query of `in` takes no require: the query around it does")
+        return self._text(bind)
+
+    def _text(self, bind: _Binder) -> str:
         s = self._s
         near, match, rerank, fuse = s["near"], s["match"], s["rerank"], s["fuse"]
         lookups, count, order = s["lookups"], s["count"], s["order"]
@@ -1008,7 +1146,6 @@ class _Builder:
             extra = self._extra_clause() or ("require" if s["require"] else None)
             if extra:
                 raise _err(f"count cannot be used with `{extra}`")
-        bind = _Binder()
         sql = f"get {s['collection']}"
         # The marks after the fields `select` named, or after every field.
         items = []
@@ -1032,18 +1169,29 @@ class _Builder:
             sql += f" where {where}"
         if s["group"]:
             sql += f" group {', '.join(_column_text(k, bind) for k in s['group'])}"
-        if near:
-            sql += f" near {near[0]} {bind(near[1], near[0])}"
+        def near_text() -> str:
+            out = f" near {near[0]} {bind(near[1], near[0])}"
             if near[2] is not None:
-                sql += f" ef {near[2]}"
-            if near[3]:
-                sql += " exact"
+                out += f" ef {near[2]}"
+            return out + (" exact" if near[3] else "")
+
+        # Before `match` unless `match` was called first: a `fuse` reads both
+        # ways, and the text keeps the chain's order.
+        match_first = bool(match) and s["match_first"]
+        if near and not match_first:
+            sql += near_text()
         if match:
             sql += f" match {match[0]} {bind(match[1], match[0])}"
-            if match[2] is not None:
+            # `True` is the parser's default, `fuzzy` alone (2 edits); a
+            # number is written.
+            if match[2] is True:
+                sql += " fuzzy"
+            elif match[2] is not None:
                 sql += f" fuzzy {match[2]}"
             if match[3]:
                 sql += " prefix"
+        if near and match_first:
+            sql += near_text()
         if rerank:
             sql += f" rerank {rerank[0]} {bind(rerank[1], rerank[0])}"
             if rerank[2] is not None:
@@ -1055,7 +1203,7 @@ class _Builder:
             if fuse[1] is not None:
                 sql += f" candidates {fuse[1]}"
         for i, k in enumerate(order):
-            sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
+            sql += f"{' order ' if i == 0 else ', '}{_sort_key(k, bind)}"
         if s["limit"] is not None:
             sql += f" limit {bind(s['limit'], 'limit')}"
         if s["offset"]:
@@ -1091,12 +1239,12 @@ class _Builder:
             if level["group"]:
                 sql += f" group {', '.join(_column_text(k, bind) for k in level['group'])}"
             for i, k in enumerate(level["order"]):
-                sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
+                sql += f"{' order ' if i == 0 else ', '}{_sort_key(k, bind)}"
             if level["limit"] is not None:
                 sql += f" limit {bind(level['limit'], 'limit')}"
             if level["offset"]:
                 sql += f" offset {bind(level['offset'], 'offset')}"
-        return sql, bind.params
+        return sql
 
     def to_insert(
         self,
@@ -1115,6 +1263,28 @@ class _Builder:
         it, `require n else '<reason>'`, is the refusal's `reason`.
         `returning=True`, or a list of fields, answers the rows written, ids
         and all."""
+        return self._put("put", docs, if_absent, require, reason, returning)
+
+    def to_insert_new(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        require: int | None = None,
+        reason: str | None = None,
+        returning: Any = None,
+    ) -> tuple[str, list]:
+        """The `insert` of a document or a list of them, not sent: one
+        naming an id a row holds is refused -- 409, `duplicate` -- and the
+        statement, a block of one, put back whole, where `to_insert`'s `put`
+        writes over that row. `require`, `reason` and `returning` as
+        `to_insert`'s; no `if_absent`, which passes over a held id where
+        this refuses it."""
+        return self._put("insert", docs, False, require, reason, returning)
+
+    def _put(
+        self, verb: str, docs: Any, if_absent: Any, require: Any, reason: Any, returning: Any
+    ) -> tuple[str, list]:
+        # Both verbs are checked as `insert`, so their refusals read alike.
         self._assert_plain("insert")
         items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
         if not items:
@@ -1124,7 +1294,7 @@ class _Builder:
         absent = " if absent" if if_absent is True else ""
         tail = _returning_clause(returning) + _require_clause(require, reason)
         many = body if len(items) == 1 else f"[{body}]"
-        return f"put {self.collection} {many}{absent}{tail}", bind.params
+        return f"{verb} {self.collection} {many}{absent}{tail}", bind.params
 
     def to_update(
         self,
@@ -1224,7 +1394,7 @@ class _Builder:
     def _pick(self, returning: Any, bind: _Binder) -> str:
         sql = ""
         for i, k in enumerate(self._s["order"]):
-            sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
+            sql += f"{' order ' if i == 0 else ', '}{_sort_key(k, bind)}"
         if self._s["limit"] is not None:
             sql += f" limit {bind(self._s['limit'], 'limit')}"
         return sql + _returning_clause(returning)
@@ -1398,6 +1568,23 @@ class Query(_Builder):
         )
         return _written(self._client().query(*text), returning)
 
+    def insert_new(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        require: int | None = None,
+        reason: str | None = None,
+        returning: Any = None,
+    ) -> Any:
+        """`insert` of a document or a list of them, refused whole (409,
+        `duplicate`) where one names an id a row holds: a row made once,
+        never written over, where `insert`'s `put` writes over it. How many
+        were written, or with `returning` the rows written, ids and all."""
+        if isinstance(docs, (list, tuple)) and not docs:
+            return _written({}, returning)
+        text = self.to_insert_new(docs, require=require, reason=reason, returning=returning)
+        return _written(self._client().query(*text), returning)
+
     def upsert(
         self,
         docs: Mapping | Sequence[Mapping],
@@ -1486,6 +1673,19 @@ class AsyncQuery(_Builder):
             return 0
         text = self.to_insert(docs, if_absent=if_absent, require=require, reason=reason)
         return _affected(await self._client().query(*text))
+
+    async def insert_new(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        require: int | None = None,
+        reason: str | None = None,
+        returning: Any = None,
+    ) -> Any:
+        if isinstance(docs, (list, tuple)) and not docs:
+            return _written({}, returning)
+        text = self.to_insert_new(docs, require=require, reason=reason, returning=returning)
+        return _written(await self._client().query(*text), returning)
 
     async def upsert(
         self,

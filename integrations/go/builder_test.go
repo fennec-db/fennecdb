@@ -137,9 +137,14 @@ func loadGolden(t *testing.T) []golden {
 var untypable = map[string]string{
 	"range bounds are numbers":                  "Ranges takes float64s",
 	"disjunctive is a boolean":                  "Disjunctive takes no value",
-	"fuzzy is true, false or a number of edits": "Fuzzy takes an int",
+	"fuzzy is true, false or a number of edits": "Fuzzy takes ints, none for the default",
 	"prefix is true or false":                   "Prefix takes no value",
 }
+
+// held is the case's params by name: each {"$param": [name, value]} of a
+// name is the one Param, made at its first sight. runChain empties it for
+// each case; an inner query shares its case's.
+var held map[string]*fennecdb.Parameter
 
 // value is an argument as a Go caller would hand it over.
 func value(x any) any {
@@ -199,6 +204,32 @@ func value(x any) any {
 		if a, ok := v.get("$as"); ok {
 			list := a.([]any)
 			return value(list[0]).(fennecdb.Computed).As(list[1].(string))
+		}
+		if p, ok := v.get("$param"); ok {
+			list := p.([]any)
+			name := list[0].(string)
+			if held[name] == nil {
+				held[name] = fennecdb.Param(value(list[1]))
+			}
+			return held[name]
+		}
+		// An inner query, as a caller writes one: not bound to a client.
+		// TestAnInnerQueryFromTheClient holds one that is.
+		if q, ok := v.get("$query"); ok {
+			var steps []object
+			for _, s := range q.([]any) {
+				steps = append(steps, s.(object))
+			}
+			from, _ := steps[0].get("args")
+			b := fennecdb.From(from.([]any)[0].(string))
+			for _, s := range steps[1:] {
+				op, _ := s.get("op")
+				var ok bool
+				if b, ok = apply(b, op.(string), stepArgs(s)); !ok {
+					panic("no chain step " + op.(string) + " in an inner query")
+				}
+			}
+			return b
 		}
 		if len(v.keys) == 1 && strings.HasPrefix(v.keys[0], "$") {
 			panic("a condition where a value goes: " + v.keys[0])
@@ -327,11 +358,11 @@ func options(o object) []fennecdb.Opt {
 			if v.(bool) {
 				out = append(out, fennecdb.Exact())
 			}
-		// JavaScript's true is 2 edits, false none written.
+		// JavaScript's true is the default edits, Fuzzy(); false none written.
 		case "fuzzy":
 			if b, ok := v.(bool); ok {
 				if b {
-					out = append(out, fennecdb.Fuzzy(2))
+					out = append(out, fennecdb.Fuzzy())
 				}
 			} else {
 				out = append(out, fennecdb.Fuzzy(v.(int)))
@@ -488,7 +519,8 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	var q struct{ Query string }
 	json.Unmarshal(raw, &q)
 	switch {
-	case strings.HasPrefix(q.Query, "put ") || strings.HasPrefix(q.Query, "set ") || strings.HasPrefix(q.Query, "del "):
+	case strings.HasPrefix(q.Query, "put ") || strings.HasPrefix(q.Query, "insert ") ||
+		strings.HasPrefix(q.Query, "set ") || strings.HasPrefix(q.Query, "del "):
 		io.WriteString(w, `{"affected":0}`)
 	case strings.HasSuffix(q.Query, " count"):
 		io.WriteString(w, `[{"count":0}]`)
@@ -505,15 +537,73 @@ type outcome struct {
 	err    string
 }
 
+func stepArgs(s object) []any {
+	a, _ := s.get("args")
+	if a == nil {
+		return nil
+	}
+	return a.([]any)
+}
+
+// apply is one step of a chain that does not end it, or false where op
+// ends one: a case's steps and an inner query's alike.
+func apply(q *fennecdb.Builder, op string, a []any) (*fennecdb.Builder, bool) {
+	switch op {
+	case "select":
+		return q.Select(value(a).([]any)...), true
+	case "where", "orWhere":
+		var c fennecdb.Cond
+		switch len(a) {
+		case 3:
+			c = fennecdb.Cmp(a[0].(string), a[1].(string), value(a[2]))
+		case 2:
+			c = fennecdb.Fields(a[0].(string), spec(a[1]))
+		default:
+			c = cond(a[0])
+		}
+		if op == "where" {
+			return q.WhereCond(c), true
+		}
+		return q.OrWhereCond(c), true
+	case "near":
+		return q.Near(a[0].(string), value(a[1]), options(optsOf(a, 2))...), true
+	case "rerank":
+		return q.Rerank(a[0].(string), value(a[1]), options(optsOf(a, 2))...), true
+	case "match":
+		return q.Match(a[0].(string), value(a[1]), options(optsOf(a, 2))...), true
+	case "fuse":
+		return q.Fuse(options(optsOf(a, 0))...), true
+	case "lookup":
+		return q.Lookup(a[0].(string), options(optsOf(a, 1))...), true
+	case "group":
+		return q.Group(value(a).([]any)...), true
+	case "highlight":
+		return q.Highlight(a[0].(string), options(optsOf(a, 1))...), true
+	case "snippet":
+		return q.Snippet(a[0].(string), a[1].(int), options(optsOf(a, 2))...), true
+	case "facet":
+		return q.Facet(a[0].(string), options(optsOf(a, 1))...), true
+	case "order":
+		// A name, or an expression: Expr, Distance, or one named with As.
+		dir := "asc"
+		if len(a) > 1 {
+			dir = a[1].(string)
+		}
+		return q.Order(value(a[0]), dir, options(optsOf(a, 2))...), true
+	case "limit":
+		return q.Limit(a[0].(int)), true
+	case "offset":
+		return q.Offset(a[0].(int)), true
+	case "require":
+		return q.Require(a[0].(int), options(optsOf(a, 1))...), true
+	}
+	return q, false
+}
+
 func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) outcome {
 	ctx := context.Background()
-	args := func(s object) []any {
-		a, _ := s.get("args")
-		if a == nil {
-			return nil
-		}
-		return a.([]any)
-	}
+	held = map[string]*fennecdb.Parameter{}
+	args := stepArgs
 	first := steps[0]
 	if op, _ := first.get("op"); op == "call" {
 		return runCall(t, db, rec, args(first), steps[1:])
@@ -536,55 +626,8 @@ func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) 
 		op, _ := s.get("op")
 		a := args(s)
 		last := i == len(steps)-2
-		switch op {
-		case "select":
-			q = q.Select(value(a).([]any)...)
-		case "where", "orWhere":
-			var c fennecdb.Cond
-			switch len(a) {
-			case 3:
-				c = fennecdb.Cmp(a[0].(string), a[1].(string), value(a[2]))
-			case 2:
-				c = fennecdb.Fields(a[0].(string), spec(a[1]))
-			default:
-				c = cond(a[0])
-			}
-			if op == "where" {
-				q = q.WhereCond(c)
-			} else {
-				q = q.OrWhereCond(c)
-			}
-		case "near":
-			q = q.Near(a[0].(string), value(a[1]), options(optsOf(a, 2))...)
-		case "rerank":
-			q = q.Rerank(a[0].(string), value(a[1]), options(optsOf(a, 2))...)
-		case "match":
-			q = q.Match(a[0].(string), a[1].(string), options(optsOf(a, 2))...)
-		case "fuse":
-			q = q.Fuse(options(optsOf(a, 0))...)
-		case "lookup":
-			q = q.Lookup(a[0].(string), options(optsOf(a, 1))...)
-		case "group":
-			q = q.Group(value(a).([]any)...)
-		case "highlight":
-			q = q.Highlight(a[0].(string), options(optsOf(a, 1))...)
-		case "snippet":
-			q = q.Snippet(a[0].(string), a[1].(int), options(optsOf(a, 2))...)
-		case "facet":
-			q = q.Facet(a[0].(string), options(optsOf(a, 1))...)
-		case "order":
-			dir := "asc"
-			if len(a) > 1 {
-				dir = a[1].(string)
-			}
-			q = q.Order(a[0].(string), dir, options(optsOf(a, 2))...)
-		case "limit":
-			q = q.Limit(a[0].(int))
-		case "offset":
-			q = q.Offset(a[0].(int))
-		case "require":
-			q = q.Require(a[0].(int), options(optsOf(a, 1))...)
-		default:
+		var stepped bool
+		if q, stepped = apply(q, op.(string), a); !stepped {
 			if !last {
 				t.Fatalf("%s ends a chain", op)
 			}
@@ -596,6 +639,8 @@ func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) 
 				text, params, err = q.ToFennecQL()
 			case "toInsert":
 				text, params, err = q.ToInsert(append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
+			case "toInsertNew":
+				text, params, err = q.ToInsertNew(append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
 			case "toUpdate":
 				text, params, err = q.ToUpdate(doc(a[0]), options(optsOf(a, 1))...)
 			case "toUpsert":
@@ -616,6 +661,9 @@ func runChain(t *testing.T, db *fennecdb.Client, rec *recorder, steps []object) 
 				return sent(err)
 			case "insert":
 				_, err = q.Insert(ctx, append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
+				return sent(err)
+			case "insertNew":
+				_, err = q.InsertNew(ctx, append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
 				return sent(err)
 			case "update":
 				_, err = q.Update(ctx, doc(a[0]), options(optsOf(a, 1))...)
@@ -1124,5 +1172,120 @@ func TestHighlightsAndFacets(t *testing.T) {
 	if len(out.Results) != 2 || !reflect.DeepEqual(out.Results[0].Facets, want) || len(out.Results[0].Rows) != 1 ||
 		out.Results[1].Facets != nil || len(out.Results[1].Rows) != 1 {
 		t.Fatalf("%+v", out)
+	}
+}
+
+// A Param binds once wherever it goes, an in list's elements and Match's
+// words too; one Param of another, or words that are not text, are
+// refused, and so is a Fuzzy of two numbers.
+func TestAParamIsBoundOnce(t *testing.T) {
+	who := fennecdb.Param("ada")
+	text, params, err := fennecdb.From("docs").
+		Where("author", "in", []any{who, "bo", who}).
+		Match("body", who, fennecdb.Fuzzy()).
+		Where("editor", "=", fennecdb.Param(nil)).
+		ToFennecQL()
+	want := "get docs where author in [$1, $2, $1] and editor = $3 match body $1 fuzzy"
+	if err != nil || text != want || !reflect.DeepEqual(params, []any{"ada", "bo", nil}) {
+		t.Fatalf("%q %v %v; want %q", text, params, err, want)
+	}
+	for _, c := range []struct {
+		q   *fennecdb.Builder
+		err string
+	}{
+		{fennecdb.From("docs").Where("a", "=", fennecdb.Param(fennecdb.Param(1))), "param() takes a value, not another param()"},
+		{fennecdb.From("docs").Match("body", 7), "match takes its words as text: 7"},
+		{fennecdb.From("docs").Match("body", fennecdb.Param(7)), "match takes its words as text: 7"},
+		{fennecdb.From("docs").Match("body", "x", fennecdb.Fuzzy(1, 2)), "Fuzzy takes one number of edits, or none for the default: [1 2]"},
+	} {
+		if _, _, err := c.q.ToFennecQL(); err == nil || err.(*fennecdb.QueryError).Message != c.err {
+			t.Fatalf("%v; want %q", err, c.err)
+		}
+	}
+	// A refused Param refuses a write too, and its text never leaves.
+	if s, _, err := fennecdb.From("docs").ToInsertNew(fennecdb.D("a", fennecdb.Param(fennecdb.Param(1)))); err == nil || s != "" {
+		t.Fatalf("%q %v", s, err)
+	}
+}
+
+// An inner query is a *Builder, bound to a client or not, in each way a
+// condition is written; a refused step of it is the chain's refusal.
+func TestAnInnerQueryFromTheClient(t *testing.T) {
+	db := fennecdb.New("http://127.0.0.1:1")
+	inner := db.From("customers").Select("id").Where("country", "=", "TR")
+	want := "get orders where status = $1 and customer in (get customers select id where country = $2)"
+	for _, q := range []*fennecdb.Builder{
+		db.From("orders").Where("status", "=", "open").Where("customer", "in", inner),
+		db.From("orders").WhereCond(fennecdb.Fields("status", "open", "customer", fennecdb.Ops("in", inner))),
+		db.From("orders").WhereCond(fennecdb.Fields("status", "open", "customer", map[string]any{"in": inner})),
+		fennecdb.From("orders").Where("status", "=", "open").Where("customer", "in", fennecdb.From("customers").Select("id").Where("country", "=", "TR")),
+	} {
+		text, params, err := q.ToFennecQL()
+		if err != nil || text != want || !reflect.DeepEqual(params, []any{"open", "TR"}) {
+			t.Fatalf("%q %v %v", text, params, err)
+		}
+	}
+	if _, _, err := db.From("orders").Where("customer", "in", db.From("customers").Select("id").Limit(-1)).ToFennecQL(); err == nil ||
+		err.(*fennecdb.QueryError).Message != "limit must be a non-negative integer: -1" {
+		t.Fatalf("%v", err)
+	}
+	// insertNew passes over no held id: that is insert's IfAbsent.
+	if _, _, err := db.From("locks").ToInsertNew(fennecdb.D("name", "n"), fennecdb.IfAbsent()); err == nil ||
+		err.(*fennecdb.QueryError).Message != "insertNew refuses a held id; to pass over one, insert(docs, { ifAbsent: true })" {
+		t.Fatalf("%v", err)
+	}
+}
+
+// What the builders learned together, answered by the server: a param bound
+// once, insertNew refusing a held id whole, an inner query of in, and an
+// order by an expression.
+func TestParamsInnerQueriesAndInsertNewAgainstTheServer(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	cust, orders := fresh("cust"), fresh("orders")
+	must(db.Exec(ctx, "create collection "+cust+" (country text, tier int)")).of(t)
+	must(db.Exec(ctx, "create collection "+orders+" (customer int, n int, item text)")).of(t)
+	defer db.Exec(ctx, "drop collection if exists "+cust)
+	defer db.Exec(ctx, "drop collection if exists "+orders)
+
+	customers := db.From(cust)
+	if w := must(customers.InsertNew(ctx, fennecdb.D("id", 1, "country", "TR", "tier", 2), fennecdb.D("id", 2, "country", "DE", "tier", 3))).of(t); w.Affected != 2 {
+		t.Fatalf("%+v", w)
+	}
+	_, err := customers.InsertNew(ctx, fennecdb.D("id", 3, "country", "FR", "tier", 1), fennecdb.D("id", 1, "country", "TR", "tier", 1))
+	var e *fennecdb.Error
+	if !errors.As(err, &e) || e.Status != 409 {
+		t.Fatalf("a held id: %v", err)
+	}
+	if n := must(customers.Count(ctx)).of(t); n != 2 {
+		t.Fatalf("an insert refused landed in part: %d rows", n)
+	}
+
+	must(db.From(orders).Insert(ctx,
+		fennecdb.D("customer", 1, "n", 5, "item", "a"),
+		fennecdb.D("customer", 2, "n", 9, "item", "b"),
+		fennecdb.D("customer", 1, "n", 7, "item", "c"),
+	)).of(t)
+	q := db.From(orders).Select("item").
+		Where("customer", "in", customers.Select("id").Where("country", "=", "TR")).
+		Order(fennecdb.Expr("n * 2"), "desc")
+	text, params, err := q.ToFennecQL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := must(q.Rows(ctx)).of(t)
+	want := must(db.Query(ctx, text, params...)).of(t)
+	if len(got) != 2 || got[0]["item"] != "c" || got[1]["item"] != "a" || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: %v, by hand %v", text, got, want)
+	}
+
+	amount := fennecdb.Param(6)
+	take := db.From(orders).WhereCond(fennecdb.Fields("item", "c", "n", fennecdb.Ops("gte", amount)))
+	if w := must(take.Update(ctx, fennecdb.D("n", fennecdb.Expr("n - ?", amount)), fennecdb.Require(1))).of(t); w.Affected != 1 {
+		t.Fatalf("%+v", w)
+	}
+	// Now 1, short of the amount: the same statement is refused.
+	if _, err := take.Update(ctx, fennecdb.D("n", fennecdb.Expr("n - ?", amount)), fennecdb.Require(1)); !errors.As(err, &e) || e.Status != 412 {
+		t.Fatalf("an amount past the balance: %v", err)
 	}
 }

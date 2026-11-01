@@ -56,6 +56,15 @@ statement, and the batch it is in, when it is not met (<code>else
 written or removed. The sections below take each in turn, and the last ones
 put several statements in one batch.</p>
 
+<p>In the query builders <code>insert()</code> sends <code>put</code>, and
+<code>insertNew()</code> sends <code>insert</code>: JavaScript's
+<code>insertNew</code>, Python's <code>insert_new</code>, Go's
+<code>InsertNew</code> and .NET's <code>InsertNewAsync</code>, with the
+options <code>insert()</code> takes but <code>ifAbsent</code>. A sync replica
+applies it as an insert: an id the replica holds is refused there before
+anything is sent, and one only the server holds comes back a 409, the rows
+put back.</p>
+
 <h2 id="writes">Writes that read the row</h2>
 
 <p>A value in a <code>set</code> can be an expression over the row it
@@ -64,6 +73,7 @@ writes: its fields, parameters and functions, with <code>+</code>
 rows it changed, so a write that names what it expects to find says
 whether it found it.</p>
 
+{{builder "docs: a hit counted and stamped" "docs: a hit counted from nothing" "docs: a document written over its version" "docs: a lock taken unless held" "docs: a journal entry made"}}
 <pre data-lang="fennecql">set hits {n: n + 1, seen: now()} where key = "ip1"      -- an increment
 set hits {n: coalesce(n, 0) + $1} where key = $2         -- from nothing, by a parameter
 set docs {body: $1, version: version + 1}
@@ -166,6 +176,7 @@ it is refused, and the block it is in — a <code>/batch</code>, a run of
 several in the page, a keyed write — is put back whole, as on any other
 error.</p>
 
+{{builder "docs: an amount taken from a balance that holds it" "docs: a held hold released" "docs: a lock taken or refused"}}
 <pre data-lang="fennecql">set accounts {balance: balance - $1} where name = $2 and balance &gt;= $1 require 1
 del holds where order_ref = $1 and state = "held" require 1
 put locks {name: "nightly", owner: $1} if absent require 1      -- refused while it is held

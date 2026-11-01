@@ -309,7 +309,18 @@ how long a move holds its writes, never the backoff's guess under it.</p>
 <p><b>Put back in order.</b> A refused write's rows are written back as they
 stood before it. A later write to the same rows, still waiting, is not
 replayed on top; the server's answer to it, and the change it sends, has the
-last word.</p>
+last word -- and refused in turn, it puts the rows back as the server holds
+them, not as the first write left them.</p>
+
+<p><b>The server's rows stay.</b> A row the server sent while the write
+waited -- changed, or gone -- is newer than what the replica held before the
+write, so a refusal leaves it as the server sent it; a seed, which a
+scoped stream gets again on every reconnect, speaks for every row, the one
+a waiting delete took away included, which stays gone. An
+<code>insertNew</code> refused for an id the server holds deletes the row it
+made only where the stream has not brought the server's row yet; where it
+has, the server's row stays, and a block of several is put back whole but
+for those rows.</p>
 </details>
 
 <h2>Live queries</h2>

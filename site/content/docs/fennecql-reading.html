@@ -173,8 +173,9 @@ a distance, a product, a <code>case</code>. The rows a <code>get</code>
 answers, and those a <code>set</code> or a <code>del</code> picks, are put
 in its order as by a field's, ties in id order:</p>
 
-<pre data-lang="fennecql">get orders order n * 2 desc, item limit 10
-get orders order case when customer = "bo" then 0 else 1 end, id
+{{builder "docs: orders by twice their count" "docs: one customer's orders first"}}
+<pre data-lang="fennecql">get orders order n * 2 desc, item asc limit 10
+get orders order case when customer = "bo" then 0 else 1 end asc, id asc
 </pre>
 
 <ul>

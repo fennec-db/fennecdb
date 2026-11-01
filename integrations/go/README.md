@@ -65,6 +65,25 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenn
   `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup` -- `On("org", "order"), ParentKey("org",
   "id")` a key over several fields. An object condition is `Fields` and `Ops`, names and values in turn, and a
   document a `D(...)` in its order, a map in its sorted keys, or a struct.
+- `fennecdb.Param(v)` is one value in several places, bound once: `amount := fennecdb.Param(300)` in
+  `WhereCond(fennecdb.Fields("name", "ada", "balance", fennecdb.Ops("gte", amount)))` and
+  `Update(ctx, fennecdb.D("balance", fennecdb.Expr("balance - ?", amount)), fennecdb.Require(1))` is
+  `set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1`. A Param goes wherever a value
+  does -- a condition, an `in` list's element, a document, `Expr`'s and `Raw`'s `?`, `Distance`'s point, `Near`'s
+  vector, `Match`'s words; the same value given twice is two parameters. A Param inside a list or a json value is
+  refused. `Expr`'s and `Raw`'s text is trusted FennecQL, written into the statement as it is: the code's own,
+  never a value from a user, which goes in as a `?`'s parameter.
+- `Insert` sends `put`, which writes over a row holding the id; `InsertNew` (and `ToInsertNew`) sends `insert`,
+  refused whole (409, `CodeConflict`) where a document names an id a row holds. Both take `Returning`, `Require`
+  and `Reason` among the documents; only `Insert` takes `IfAbsent`.
+- `in` takes an inner query selecting one column, the list it answers: `Where("customer", "in",
+  db.From("customers").Select("id").Where("country", "=", "TR"))`, or `fennecdb.Ops("in", ...)` in `Fields`, is
+  `customer in (get customers select id where country = $1)`, in `Or`, `Not`, a lookup's `Where` and the filter
+  of an `Update` or `Delete` too.
+- `Order` takes an expression as a key: `Order(fennecdb.Expr("n * 2"), "desc")`, `Order(fennecdb.Distance("loc",
+  []float64{13.4, 52.5}), "asc")`, its values bound where the order stands; one named with `.As` is refused.
+- `Match(field, words, fennecdb.Fuzzy())` is `fuzzy` alone, the default edits (2 for a long word); `Fuzzy(1)`
+  writes `fuzzy 1`. With `Fuse`, `Match` and `Near` are written in the order they were called.
 - `Facet(field, Ranges(0, 25, 50))` counts by ranges of numbers, each value `[from, to]`; `Disjunctive()` counts past
   the filter's own condition on the field, as a shop's filter list does.
 - Aggregates go in `Select` as FennecQL spells them (`"count(*)"`, `"sum(total)"`), and `Group` takes one key or

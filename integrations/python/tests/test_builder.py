@@ -15,9 +15,11 @@ import pytest
 from conftest import TOKEN, URL, fresh
 from fennecdb import (
     AsyncClient,
+    AsyncQuery,
     Call,
     FacetCount,
     FennecError,
+    Param,
     Query,
     and_,
     bucket,
@@ -31,6 +33,7 @@ from fennecdb import (
     last,
     not_,
     or_,
+    param,
     raw,
 )
 
@@ -39,28 +42,35 @@ GOLDEN = Path(os.environ.get("FENNEC_GOLDEN") or Path(__file__).parents[2] / "bu
 CASES = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
-def arg(x):
-    """A step's argument as this builder takes it."""
+def arg(x, held=None):
+    """A step's argument as this builder takes it; `held` is the case's
+    params by name, so each `$param` of a name is the one `param()`, and an
+    inner query's share the case's."""
+    held = {} if held is None else held
+
+    def a(v):
+        return arg(v, held)
+
     if isinstance(x, list):
-        return [arg(v) for v in x]
+        return [a(v) for v in x]
     if not isinstance(x, dict):
         return x
     if "$or" in x:
-        return or_(*[arg(c) for c in x["$or"]])
+        return or_(*[a(c) for c in x["$or"]])
     if "$and" in x:
-        return and_(*[arg(c) for c in x["$and"]])
+        return and_(*[a(c) for c in x["$and"]])
     if "$not" in x:
-        return not_(arg(x["$not"]))
+        return not_(a(x["$not"]))
     if "$raw" in x:
-        return raw(x["$raw"][0], *[arg(p) for p in x["$raw"][1:]])
+        return raw(x["$raw"][0], *[a(p) for p in x["$raw"][1:]])
     if "$inc" in x:
         return inc(x["$inc"])
     if "$expr" in x:
-        return expr(x["$expr"][0], *[arg(p) for p in x["$expr"][1:]])
+        return expr(x["$expr"][0], *[a(p) for p in x["$expr"][1:]])
     if "$bucket" in x:
         return bucket(*x["$bucket"])
     if "$distance" in x:
-        return distance(*x["$distance"])
+        return distance(x["$distance"][0], a(x["$distance"][1]))
     if "$countDistinct" in x:
         return count_distinct(x["$countDistinct"])
     if "$first" in x:
@@ -68,19 +78,37 @@ def arg(x):
     if "$last" in x:
         return last(*x["$last"])
     if "$as" in x:
-        return arg(x["$as"][0]).as_(x["$as"][1])
+        return a(x["$as"][0]).as_(x["$as"][1])
     if "$date" in x:
         return datetime.fromisoformat(x["$date"].replace("Z", "+00:00"))
     if "$f32" in x:
         return array.array("f", x["$f32"])
-    return {k: arg(v) for k, v in x.items()}
+    if "$param" in x:
+        name, v = x["$param"]
+        if name not in held:
+            held[name] = param(a(v))
+        return held[name]
+    if "$query" in x:
+        return chain(x["$query"], held)
+    return {k: a(v) for k, v in x.items()}
+
+
+def chain(steps, held):
+    """An inner query's steps, `from` first, as the query they make: built
+    by the step dispatcher a case's chain goes through, bound to no client."""
+    first, *rest = steps
+    assert first["op"] == "from", f"an inner query starts with from, not {first['op']}"
+    q = collection(*[arg(v, held) for v in first.get("args", [])])
+    for step in rest:
+        q = step_of(q, step["op"], step.get("args", []), held)
+    return q
 
 
 SNAKE = {"parentKey": "parent_key", "ifAbsent": "if_absent"}
 
 
-def kwargs(opts):
-    return {SNAKE.get(k, k): arg(v) for k, v in (opts or {}).items()}
+def kwargs(opts, held=None):
+    return {SNAKE.get(k, k): arg(v, held) for k, v in (opts or {}).items()}
 
 
 class Recorder:
@@ -91,12 +119,27 @@ class Recorder:
 
     def query(self, text, params=None):
         self.sent.append((text, params))
-        if text.split(" ", 1)[0] in ("put", "set", "del"):
+        if text.split(" ", 1)[0] in ("put", "insert", "set", "del"):
             return {"affected": 0}
         return [{"count": 0}] if text.endswith(" count") else []
 
 
-ENDPOINTS = {"rows", "first", "count", "explain", "insert", "update", "upsert", "delete"}
+ENDPOINTS = {"rows", "first", "count", "explain", "insert", "insertNew", "update", "upsert", "delete"}
+
+# Each writing step's builder method and the endpoint beside it, and how
+# many documents and patches it takes before its options.
+WRITES = {
+    "toInsert": ("to_insert", 1),
+    "insert": ("insert", 1),
+    "toInsertNew": ("to_insert_new", 1),
+    "insertNew": ("insert_new", 1),
+    "toUpdate": ("to_update", 1),
+    "update": ("update", 1),
+    "toUpsert": ("to_upsert", 2),
+    "upsert": ("upsert", 2),
+    "toDelete": ("to_delete", 0),
+    "delete": ("delete", 0),
+}
 
 
 def run(steps):
@@ -105,34 +148,24 @@ def run(steps):
     if first["op"] == "call":
         return run_call(first, rest)
     assert first["op"] == "from"
+    held = {}
     try:
-        q = Query(*[arg(a) for a in first.get("args", [])], rec)
+        q = Query(*[arg(a, held) for a in first.get("args", [])], rec)
         for i, step in enumerate(rest):
             op, args = step["op"], step.get("args", [])
             last = i == len(rest) - 1
             if op == "toFennecQL":
                 text, params = q.to_fennecql()
-            elif op in ("toInsert", "insert"):
-                fn = q.to_insert if op == "toInsert" else q.insert
-                out = fn(arg(args[0]), **kwargs(args[1] if len(args) > 1 else None))
-                text, params = out if op == "toInsert" else rec.sent[-1]
-            elif op in ("toUpdate", "update"):
-                fn = q.to_update if op == "toUpdate" else q.update
-                out = fn(arg(args[0]), **kwargs(args[1] if len(args) > 1 else None))
-                text, params = out if op == "toUpdate" else rec.sent[-1]
-            elif op in ("toUpsert", "upsert"):
-                fn = q.to_upsert if op == "toUpsert" else q.upsert
-                out = fn(arg(args[0]), arg(args[1]), **kwargs(args[2] if len(args) > 2 else None))
-                text, params = out if op == "toUpsert" else rec.sent[-1]
-            elif op in ("toDelete", "delete"):
-                fn = q.to_delete if op == "toDelete" else q.delete
-                out = fn(**kwargs(args[0] if args else None))
-                text, params = out if op == "toDelete" else rec.sent[-1]
+            elif op in WRITES:
+                name, n = WRITES[op]
+                given = [arg(a, held) for a in args[:n]]
+                out = getattr(q, name)(*given, **kwargs(args[n] if len(args) > n else None, held))
+                text, params = out if op.startswith("to") else rec.sent[-1]
             elif op in ENDPOINTS:
                 getattr(q, op)()
                 text, params = rec.sent[-1]
             else:
-                q = step_of(q, op, args)
+                q = step_of(q, op, args, held)
                 continue
             assert last, f"{op} ends a chain"
             assert len(rec.sent) <= 1
@@ -156,33 +189,39 @@ def run_call(first, rest):
     return {"text": text, "params": json.loads(json.dumps(params))}
 
 
-def step_of(q, op, args):
+def step_of(q, op, args, held):
+    def a(v):
+        return arg(v, held)
+
+    def opts(i):
+        return kwargs(args[i] if len(args) > i else None, held)
+
     if op in ("select", "group"):
-        return getattr(q, op)(*[arg(a) for a in args])
+        return getattr(q, op)(*[a(v) for v in args])
     if op == "where":
-        return q.where(*[arg(a) for a in args])
+        return q.where(*[a(v) for v in args])
     if op == "orWhere":
-        return q.or_where(*[arg(a) for a in args])
+        return q.or_where(*[a(v) for v in args])
     if op in ("near", "rerank"):
-        return getattr(q, op)(args[0], arg(args[1]), **kwargs(args[2] if len(args) > 2 else None))
+        return getattr(q, op)(args[0], a(args[1]), **opts(2))
     if op == "fuse":
-        return q.fuse(**kwargs(args[0] if args else None))
+        return q.fuse(**opts(0))
     if op == "lookup":
-        return q.lookup(args[0], **kwargs(args[1] if len(args) > 1 else None))
+        return q.lookup(args[0], **opts(1))
     if op == "order":
-        return q.order(*args[:2], **kwargs(args[2] if len(args) > 2 else None))
+        return q.order(*[a(v) for v in args[:2]], **opts(2))
     if op == "highlight":
-        return q.highlight(args[0], **kwargs(args[1] if len(args) > 1 else None))
+        return q.highlight(args[0], **opts(1))
     if op == "snippet":
-        return q.snippet(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
+        return q.snippet(args[0], args[1], **opts(2))
     if op == "facet":
-        return q.facet(args[0], **kwargs(args[1] if len(args) > 1 else None))
+        return q.facet(args[0], **opts(1))
     if op == "match":
-        return q.match(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
+        return q.match(args[0], a(args[1]), **opts(2))
     if op in ("limit", "offset"):
         return getattr(q, op)(*args)
     if op == "require":
-        return q.require(args[0], **kwargs(args[1] if len(args) > 1 else None))
+        return q.require(args[0], **opts(1))
     raise AssertionError(f"no builder step {op}")
 
 
@@ -277,6 +316,81 @@ def test_a_tuple_a_numpy_like_list_and_a_naive_datetime_are_values():
     assert q.to_fennecql()[1] == [[0.5, 0.25], "a", "b", "2026-01-02T03:04:05.678Z"]
     with pytest.raises(FennecError, match="cannot be used as a fennecdb value"):
         collection("t").where("v", "=", object()).to_fennecql()
+
+
+def test_a_param_is_one_parameter_by_its_identity():
+    amount = param(300)
+    assert isinstance(amount, Param) and amount.value == 300
+    q = collection("accounts").where({"name": "ada", "balance": {"gte": amount}})
+    assert q.to_update({"balance": expr("balance - ?", amount)}, require=1) == (
+        "set accounts {balance: balance - $1} where name = $2 and balance >= $1 require 1",
+        [300, "ada"],
+    )
+    # Two params of one value are two parameters, as two values are.
+    assert collection("t").where("a", param(1)).where("b", param(1)).to_fennecql() == (
+        "get t where a = $1 and b = $2",
+        [1, 1],
+    )
+    # Every text numbers afresh: asked twice, a query says the same.
+    twice = collection("t").where("a", amount).where("b", "in", [amount, 7])
+    assert twice.to_fennecql() == twice.to_fennecql() == ("get t where a = $1 and b in [$1, $2]", [300, 7])
+    # A param is a value, never an operator map, and a point's or metres'
+    # check looks through it to its value.
+    assert collection("t").where({"a": param({"gte": 1})}).to_fennecql() == ("get t where a = $1", [{"gte": 1}])
+    at, far = param([13.4, 52.5]), param(500)
+    assert collection("t").where({"loc": {"distance": {"from": at, "lte": far}}}).order(
+        distance("loc", at)
+    ).to_fennecql() == ("get t where distance(loc, $1) <= $2 order distance(loc, $1) asc", [[13.4, 52.5], 500])
+    with pytest.raises(FennecError, match="distance compares metres"):
+        collection("t").where({"loc": {"distance": {"from": at, "lte": param("far")}}})
+    with pytest.raises(FennecError, match="distance takes"):
+        collection("t").where({"loc": {"distance": {"from": param("here"), "lte": 5}}})
+    # A param is a value of its own: not one of another param, not an
+    # element inside a value, and never changed once made.
+    with pytest.raises(FennecError, match=r"param\(\) takes a value, not another param\(\)"):
+        param(amount)
+    with pytest.raises(FennecError, match="cannot be used as a fennecdb value"):
+        collection("t").where("a", [amount]).to_fennecql()
+    with pytest.raises(AttributeError):
+        amount.value = 1
+
+
+def test_insert_new_sends_insert_and_takes_no_if_absent():
+    rec = Recorder()
+    q = Query("docs", rec)
+    assert q.insert_new({"id": 1, "title": "a"}) == 0
+    assert q.insert_new([]) == 0
+    assert q.insert_new([], returning=True) == []
+    assert rec.sent == [("insert docs {id: $1, title: $2}", [1, "a"])]
+    # `if absent` passes over a held id, which is insert's: this one refuses it.
+    with pytest.raises(TypeError):
+        q.to_insert_new({"id": 1}, if_absent=True)
+
+    class Awaited:
+        def __init__(self):
+            self.sent = []
+
+        async def query(self, text, params=None):
+            self.sent.append((text, params))
+            return {"affected": 1}
+
+    client = Awaited()
+    assert asyncio.run(AsyncQuery("docs", client).insert_new({"id": 1}, require=1)) == 1
+    assert client.sent == [("insert docs {id: $1} require 1", [1])]
+
+
+def test_an_inner_query_comes_from_a_client_or_from_none():
+    rec = Recorder()
+    want = ("get orders where customer in (get customers select id where country = $1)", ["TR"])
+    for inner in (
+        Query("customers", rec).select("id").where("country", "TR"),
+        AsyncQuery("customers", object()).select("id").where("country", "TR"),
+        collection("customers").select("id").where("country", "TR"),
+    ):
+        assert collection("orders").where("customer", "in", inner).to_fennecql() == want
+        assert collection("orders").where({"customer": {"in": inner}}).to_fennecql() == want
+    # Its text goes inside the query around it, never on its own.
+    assert rec.sent == []
 
 
 # ---------------------------------------------------------- against the server

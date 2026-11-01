@@ -92,6 +92,38 @@
             try await db.close()
         }
 
+        /// `insertNew` is FennecQL's `insert`, which the replica's state
+        /// machine applies as an insert (integrations/sync-scenarios.json):
+        /// an id the replica holds is refused here, nothing sent, and one
+        /// only the server holds is its 409, the row put back.
+        @Test func anInsertNewOfAHeldIdIsRefusedAndPutBack() async throws {
+            let s = try await Server("insertnew")
+            defer { s.stop() }
+            let db = try await Fennec.sync(url: s.url, shapes: [open], path: try scratch("sync-insertnew"))
+            await db.replica!.ready()
+            let refusals = db.replica!.refusals()
+            let refused = Box<[Refusal]>([])
+            let reader = Task {
+                for await r in refusals { refused.set { $0 + [r] } }
+            }
+            try await offline(db)
+            // Row 1 is in the replica: refused at once, where `insert` would write over it.
+            await #expect(throws: FennecError.self) {
+                try await db.from("tasks").insertNew(["id": 1, "key": "x", "title": "again", "status": "open"] as Value)
+            }
+            #expect(try await titles(db) == ["one", "two"])
+            #expect(await db.replica!.refresh().pending == 0)
+            // Row 3 is the server's alone (closed, outside the shape): taken here, refused there.
+            #expect(try await db.from("tasks").insertNew(["id": 3, "key": "y", "title": "taken", "status": "open"] as Value) == 1)
+            #expect(try await titles(db) == ["one", "taken", "two"])
+            db.replica!.setOnline(true)
+            try await eventually("the refusal") { !refused.get().isEmpty }
+            #expect(refused.get().first?.status == 409)
+            reader.cancel()
+            try await eventually("the write put back") { try await titles(db) == ["one", "two"] }
+            try await db.close()
+        }
+
         @Test func aRefusedWriteIsPutBack() async throws {
             let s = try await Server("refused")
             defer { s.stop() }

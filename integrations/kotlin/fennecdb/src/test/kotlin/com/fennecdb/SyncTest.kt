@@ -211,6 +211,37 @@ class SyncTest {
     }
 
     /**
+     * `insertNew` is FennecQL's `insert`, which the replica's state machine
+     * applies as an insert (integrations/sync-scenarios.json): an id the
+     * replica holds is refused here, nothing sent, and one only the server
+     * holds is its 409, the row put back.
+     */
+    @Test
+    fun anInsertNewOfAHeldIdIsRefusedAndPutBack() = runBlocking {
+        val s = server("insertnew")
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("insertnew"))
+        db.replica!!.ready()
+        val refused = Collections.synchronizedList(ArrayList<Refusal>())
+        val job = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { db.replica!!.refusals.collect { refused.add(it) } }
+        offline(db)
+        // Row 1 is in the replica: refused at once, where `insert` would write over it.
+        assertFailsWith<FennecException> {
+            db.from("tasks").insertNew(mapOf("id" to 1, "key" to "x", "title" to "again", "status" to "open"))
+        }
+        assertEquals(listOf("one", "two"), titles(db))
+        assertEquals(0, db.replica!!.refresh().pending)
+        // Row 3 is the server's alone (closed, outside the shape): taken here, refused there.
+        assertEquals(1L, db.from("tasks").insertNew(mapOf("id" to 3, "key" to "y", "title" to "taken", "status" to "open")))
+        assertEquals(listOf("one", "taken", "two"), titles(db))
+        db.replica!!.setOnline(true)
+        eventually("the refusal") { refused.isNotEmpty() }
+        assertEquals(409, refused[0].status)
+        job.cancel()
+        eventually("the write put back") { titles(db) == listOf("one", "two") }
+        db.close()
+    }
+
+    /**
      * A require's reason goes with its write, and comes back with the refusal
      * that puts it back; one the replica finds unmet says it at once, nothing sent.
      */

@@ -370,7 +370,8 @@ static and instance member of one name.</p>
     <code>409</code> for a unique value held, a <code>403</code> from a
     token's rules, a <code>507</code> from a tenant's quota of bytes or rows
     (<code>quota</code> names it) -- the replica is put back as it was and
-    the app is told: <code>db.replica.refusals</code>.</li>
+    the app is told: <code>db.replica.refusals</code>. A row the server
+    sent meanwhile stays as the server sent it.</li>
   <li><b>Offline, writes wait.</b> A write made while the server cannot be
     reached waits in the file, and goes once it can, in order, once each.
     An app closed meanwhile sends it when it opens again.</li>
@@ -442,7 +443,7 @@ rows 72 ms (<code>make sync-bench</code>).</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
-73 scenarios of shapes, writes, answers and server events, each step's
+84 scenarios of shapes, writes, answers and server events, each step's
 replica, queue and requests stated once and run against both. What is left
 between them is the platforms':</p>
 <ul>
