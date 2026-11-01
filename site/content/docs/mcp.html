@@ -1,6 +1,6 @@
 <!--
 title: Agents and MCP — fennecdb
-description: fennecdb as an agent's search and memory tool over the Model Context Protocol: Streamable HTTP on fennec-server, stdio with fennec mcp, schema, search, query, get, write and a memory that outlives the conversation — each tool a statement held to the token's rules.
+description: fennecdb as an agent's search and memory tool over the Model Context Protocol: Streamable HTTP on fennec-server, stdio with fennec mcp, schema, search, query, get, write, a memory that outlives the conversation and a tool for each named statement — each tool a statement held to the token's rules.
 -->
 
 <h1>Agents and MCP</h1>
@@ -135,6 +135,7 @@ of its servers called with the official TypeScript MCP client.</p>
 <tr><td><code>remember</code></td><td>keeps a memory (<code>--mcp-memory</code>)</td><td><code>text</code>, <code>vector</code>, <code>tags</code>, <code>expires_in</code></td></tr>
 <tr><td><code>recall</code></td><td>the memories that best match, or the latest</td><td><code>text</code>, <code>vector</code>, <code>tags</code>, <code>limit</code></td></tr>
 <tr><td><code>forget</code></td><td>deletes a memory by its id</td><td><code>id</code></td></tr>
+<tr><td><code>call_&lt;name&gt;</code></td><td>a <a href="#statements">named statement</a> the token may call, one tool each; one that writes with <code>--mcp-write</code></td><td>the statement's arguments, by name</td></tr>
 </tbody>
 </table>
 
@@ -174,13 +175,69 @@ the 412 does (<a href="/docs/fennecql-writing#require-reason">A reason for the
 refusal</a>). A call that is not one — an unknown tool, a malformed message —
 is a JSON-RPC error.</p>
 
+<h2 id="statements">Named statements as tools</h2>
+
+<p>Each <a href="fennecql.html#named-statements">named statement</a> the
+token may call is a tool of its own, <code>call_</code> and its name: a
+curated statement is the safest tool to hand an agent, since the model picks
+the statement and gives its arguments as values, and the statement's text —
+written and checked when it was defined — is all it can do. A scoped token's
+tools are the statements a <code>call</code> line of its policy grants it and
+whose claims it holds, each called as the token, its claims the statement's —
+one it lacks a claim for, or holds as <code>null</code>, <code>""</code> or
+another type, is no tool, its arguments never shown; the server's token's are
+the statements that read no claim, since a model is not handed
+<code>as</code>. A statement that writes is a tool only under
+<code>--mcp-write</code>, asked again as the call runs: one made again to write
+since the tools were listed is refused (403) without it. The
+tool's description is the statement's <code>comment</code>; its
+<code>inputSchema</code> its signature, each argument typed, the ones with a
+default left out of <code>required</code>, and nothing else taken; its
+<code>outputSchema</code> its answer, <code>{"rows": [...]}</code>, each item
+typed as <a href="javascript.html#typescript"><code>fennec types</code></a>
+types it, and <code>{"affected": n}</code> for a write that names no
+<code>returning</code>. Its annotations say whether it only reads, and whether
+it changes or deletes rows (a body of <code>insert</code>s only adds).</p>
+
+<pre data-lang="json" data-label="tools/list, one tool">{"name": "call_years", "title": "years",
+ "description": "Titles from a year on, oldest first. An answer of more than 100 rows or 65536 bytes is refused, not cut.",
+ "inputSchema": {"type": "object",
+   "properties": {"from": {"type": "integer", "description": "int"},
+                  "n": {"type": "integer", "default": 2, "description": "int, 2 when absent"}},
+   "required": ["from"], "additionalProperties": false},
+ "outputSchema": {"type": "object", "required": ["rows"],
+   "properties": {"rows": {"type": "array", "items": {"type": "object",
+     "properties": {"title": {"type": ["string", "null"]}, "year": {"type": ["integer", "null"]}}}}}},
+ "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}}
+</pre>
+
+<p>That is the tool of <code>create statement years($from int, $n int = 2)
+comment 'Titles from a year on, oldest first' as get docs select title, year
+where year &gt;= $from order year limit $n</code>. A call of it is
+<code>call years $1</code> with the tool's arguments as <code>$1</code>, run
+as <code>/query</code> runs it — the grant, the claims,
+<code>--call-rate</code>, <code>--call-max-rows</code> — and refused as it
+refuses it, an argument missing or of another type a 400 the model corrects
+from. Its answer is held to the bounds below where the server answers it: a
+statement that writes runs in a block that lands only once its answer is
+within them, and past them is put back and refused (413), so a model is never
+told half an answer, nor leaves a write it was not told of. A statement the
+token may not call, or none of that name, is the same unknown tool; a
+<code>call</code> sent to <code>query</code> or <code>write</code> is refused,
+naming its tool. Every statement's tool is counted under
+<code>tool="call"</code> in <code>fennec_mcp_tool_calls_total</code>, no
+metric naming a statement, and a call of one that writes is an
+<code>mcp</code> line of the audit log, by its tool's name. The list changes
+when a statement is defined or dropped: the server says
+<code>listChanged: false</code>, and a client lists again.</p>
+
 <h2 id="limits">Bounds</h2>
 
 <table>
 <thead><tr><th>flag</th><th>default</th><th>past it</th></tr></thead>
 <tbody>
 <tr><td><code>--mcp-max-rows</code></td><td class="n">100</td><td>refused, 413: a <code>query</code> with no <code>limit</code> is asked for one row more than the bound, so a larger answer is known without being fetched</td></tr>
-<tr><td><code>--mcp-max-bytes</code></td><td class="n">64K</td><td>refused, 413, measured on the JSON the model would read</td></tr>
+<tr><td><code>--mcp-max-bytes</code></td><td class="n">64K</td><td>refused, 413, measured on the JSON the model would read; a statement's tool that writes is put back, as past the rows</td></tr>
 <tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's subject, or an address for the server's token</td></tr>
 </tbody>
 </table>

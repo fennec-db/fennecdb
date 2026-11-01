@@ -592,10 +592,10 @@ const ctx = {
   fieldsOf: (c) => fieldsOf(c),
   /** The collections listed again, after a schema change. */
   refresh: () => listCollections(),
-  /** The query editor opened on `text`, with `params`; `run` runs it there. */
-  query: async (text, params = '[]', run = false) => {
+  /** The query editor opened on `text`, with `params`; `run` runs it there, under `key` where a call gives one. */
+  query: async (text, params = '[]', run = false, key = null) => {
     await showView('query');
-    mounted.query?.view?.load?.(text, params, run);
+    mounted.query?.view?.load?.(text, params, run, key);
   },
   /** The collections and the view open read again: the database was replaced. */
   reload: async () => {

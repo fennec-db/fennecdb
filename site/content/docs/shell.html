@@ -118,8 +118,13 @@ one line runs at Enter. A write, and a read written over several lines, wait
 for the next line: one that goes on with them — <code>where</code>,
 <code>order</code>, <code>and</code> — joins them, and an empty line or another
 statement runs them first. <code>describe statement</code> waits too, since a
-name on the next line makes it a named statement's. A <code>;</code> after a
-statement runs it at once.
+name on the next line makes it a named statement's, and so does a
+<code>call</code> whose arguments may come on the next line. A definition's
+body of several, <code>as begin</code> … <code>end</code>, is one statement:
+its <code>;</code>s run nothing, and the Enter after its <code>end</code> runs it (a
+<code>case</code>'s own <code>end</code> closing the <code>case</code>).
+<code>.help</code> gives the forms of a definition and a call beside the rest
+of FennecQL. A <code>;</code> after a statement runs it at once.
 So <code>del notes</code> with <code>where id = 3</code> on the line under it
 deletes one row. A <code>.</code> command leaves a waiting statement waiting —
 <code>.tables</code> to look a name up before the <code>where</code> — and

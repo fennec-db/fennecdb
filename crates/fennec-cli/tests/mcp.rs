@@ -161,3 +161,60 @@ fn a_session_over_a_server_carries_the_token_from_the_environment() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("TLS"));
 }
+
+/// A local session lists the file's statements as tools of their own and
+/// calls them under the lock -- a write in a block held to `--max-rows`
+/// before it lands, put back past it -- and a read-only one calls the ones
+/// that read, the ones that write no tools of it.
+#[test]
+fn a_session_over_a_file_calls_its_statements_as_tools() {
+    let path = scratch("calls.fennec");
+    let p = path.to_str().unwrap();
+    let made = Command::new(BIN)
+        .args([
+            p,
+            "-c",
+            "create collection marks (n int); \
+             create statement mark($n int) public scans as begin insert marks {n: $n}; \
+             get marks select n end; \
+             create statement marked() as get marks select n",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let mut s = Session::start(&["--file", p, "--write", "--max-rows", "2"], &[]);
+    s.ask(INIT);
+    let a = s.ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    assert!(
+        a.contains(r#""name":"call_mark""#) && a.contains(r#""name":"call_marked""#),
+        "{a}"
+    );
+    let call = |id: i64, n: i64| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"call_mark","arguments":{{"n":{n}}}}}}}"#
+        )
+    };
+    for n in [1, 2] {
+        let a = s.ask(&call(2 + n, n));
+        assert!(a.contains("\"isError\":false"), "{a}");
+    }
+    // A third row is past the bound: refused, and the insert put back.
+    let a = s.ask(&call(5, 3));
+    assert!(
+        a.contains("\"isError\":true") && a.contains("--mcp-max-rows"),
+        "{a}"
+    );
+    assert_eq!(s.end().0, 0);
+    let mut ro = Session::start(&["--file", p, "--read-only"], &[]);
+    let a = ro.ask(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"call_marked","arguments":{}}}"#);
+    assert!(a.contains(r#"\"rows\":[{\"n\":1},{\"n\":2}]"#), "{a}");
+    // Without --write, which a read-only session cannot take, a statement
+    // that writes is no tool of it.
+    let a = ro.ask(&call(7, 4));
+    assert!(a.contains("Unknown tool: call_mark"), "{a}");
+    assert_eq!(ro.end().0, 0);
+}

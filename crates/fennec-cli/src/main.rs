@@ -73,6 +73,13 @@ FennecQL summary
   set | del ... [order <field> [desc]] [limit N] [returning * | a,b]   -- pick the rows, answer them
   collections | describe <name> | compact [<name>]
 
+Named statements
+  create [or replace] statement <name>($a int, $b text = 'x') [claims (sub text)]
+           [public] [scans] [comment '...'] [check <expr>]
+           as <statement>  |  as begin <statement>; <statement>; ... end
+  call <name> {a: 1, b: 'y'} [as {sub: 'alice'}]   -- or CALL name(1, b => 'y')
+  statements | describe statement <name> | drop statement [if exists] <name>
+
 Types     bool  int  float  text  bytes  vector<N>  [type]  json
 Paths     meta.source.rank reads into a json field, where a field goes
 Case      email text nocase -- compared by its case fold everywhere, kept as written

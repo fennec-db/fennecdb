@@ -226,3 +226,36 @@ test('a subscription: its seed, then each change, alike', { skip }, async () => 
   assert.deepEqual(remote[0].rows.map((r) => r.n), [1, 3]);
   assert.equal(remote.length, 6, JSON.stringify(remote));
 });
+
+// Last: a definition is a write of the server's that the page has none
+// of, so the server's change counter stands ahead of the page's after it.
+test('a call: answered as the page answers its body, which refuses statements in words of its own', { skip }, async () => {
+  await q('create collection acct (owner text @hash, balance int)');
+  await q('put acct [{owner: "a", balance: 10}, {owner: "b", balance: 5}, {owner: "c", balance: 7}]');
+  // Defined on the server alone: the module in the page is built without them.
+  for (const text of [
+    'create statement rich($min int) comment \'Owners with at least min\' as get acct select owner, balance where balance >= $min order balance desc',
+    'create statement pay($owner text, $n int) public as set acct {balance: balance + $n} where owner = $owner returning owner, balance',
+  ]) {
+    const r = await remote('POST', '/query', JSON.stringify({ query: text }));
+    assert.equal(r.status, 200, JSON.stringify(r));
+  }
+  // The call form's statement, `call <name> $1`, answers the rows its body's
+  // last statement answers -- the grid draws the two alike -- a write's too.
+  const call = (name, args) => remote('POST', '/query', JSON.stringify({ query: `call ${name} $1`, params: [args] }));
+  const body = (text, params) => local('POST', '/query', JSON.stringify({ query: text, params }));
+  const read = await call('rich', { min: 6 });
+  assert.deepEqual([read.status, read.json], [200, (await body('get acct select owner, balance where balance >= $1 order balance desc', [6])).json]);
+  const paid = await call('pay', { owner: 'b', n: 2 });
+  assert.deepEqual([paid.status, paid.json], [200, (await body('set acct {balance: balance + $2} where owner = $1 returning owner, balance', ['b', 2])).json]);
+  assert.ok(paid.seq > 0, JSON.stringify(paid));
+  await q('get acct select owner, balance order owner');
+  // Refused as /query refuses any statement: an argument of another type.
+  assert.equal((await call('pay', { owner: 'b', n: 'two' })).status, 400);
+  // The page names what it lacks, before anything of the text runs.
+  for (const text of ['statements', 'call rich $1', 'create statement x() as get acct select owner']) {
+    const r = await local('POST', '/query', JSON.stringify({ query: text, params: [{ min: 1 }] }));
+    assert.equal(r.status, 400, `${text}: ${JSON.stringify(r)}`);
+    assert.match(r.json.error, /named statements are a server's/, text);
+  }
+});

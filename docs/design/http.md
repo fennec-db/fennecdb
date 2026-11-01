@@ -184,7 +184,13 @@ object, never a stream), with the 2026-07-28 headers held to the body
 `schema`, `search` (`match`, its `fuzzy` and `prefix` too, `near` or
 `fuse`, a snippet in `**bold**`),
 `query`, `get`; `write` with `--mcp-write` (put, insert, set and del:
-never a schema change or a compact, by any token); `remember`, `recall`
+never a schema change, a compact or a `call`, by any token); a
+`call_<name>` tool for each named statement the token may call, one that
+writes under `--mcp-write`, typed by its signature and its answer, called
+as `call <name> $1` through `/query`'s path with its answer held to the
+bounds where that path answers it -- a write's in a block put back past
+them before it lands (`mcp::bounded_call`, `mcp::land`;
+[named-statements.md](named-statements.md#what-is-built)); `remember`, `recall`
 and `forget` with `--mcp-memory`, whose collection `remember` makes at the
 first memory (`memory_schema`: `expires timestamp @ttl(1ms)` for a
 memory's own expiry, the vector field added at the first vector). A

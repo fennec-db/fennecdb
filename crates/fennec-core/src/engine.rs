@@ -36,7 +36,7 @@ pub use limit::{Landing, Limit};
 #[cfg(feature = "statements")]
 mod call;
 #[cfg(feature = "statements")]
-pub use call::{CallRead, Callee};
+pub use call::{claims_carried, CallRead, Callee};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;

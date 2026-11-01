@@ -50,6 +50,7 @@ use crate::http::{Method, Request, Response};
 use crate::Config;
 use fennec_core::json;
 use fennec_core::prelude::*;
+use std::cell::Cell;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -630,8 +631,9 @@ fn instructions(opts: Option<&Options>) -> String {
          `query` runs a FennecQL read (get <collection> where <condition> order <field> limit <n>, \
          aggregates, count; SQL's SELECT ... FROM ... JOIN ... WHERE is read too, double quotes being text \
          and a field written bare); `get` reads rows by id. Values always go in `params` as $1, \
-         $2, never into the text. An answer too large is refused rather than cut: narrow the filter, ask \
-         for fewer fields or rows.",
+         $2, never into the text. A `call_<name>` tool, where there are any, runs a statement the \
+         database keeps under that name, its arguments typed values. An answer too large is \
+         refused rather than cut: narrow the filter, ask for fewer fields or rows.",
     );
     if let Some(o) = opts {
         if o.write {
@@ -662,9 +664,10 @@ fn dispatch(ctx: &Ctx, id: &Value, method: &str, params: &[(String, Value)], era
         "ping" if era == Era::Legacy => result(id, era, ""),
         "tools/list" => {
             let mut body = String::from("\"tools\":");
-            tools::list_into(&mut body, ctx.opts);
-            // The list is the server's options' and changes only with a
-            // restart; it is the same for every token.
+            tools::list_into(&mut body, ctx);
+            // The list is the server's options' and the token's statements:
+            // it changes with a restart, or with a statement defined or
+            // dropped, rarely; a client lists again within the ttl.
             if era == Era::Modern {
                 body.push_str(",\"ttlMs\":300000,\"cacheScope\":\"private\"");
             }
@@ -707,7 +710,17 @@ fn call(ctx: &Ctx, id: &Value, params: &[(String, Value)], era: Era) -> Reply {
             )
         }
     };
-    let Some(tool) = tools::Tool::named(name, ctx.opts) else {
+    // A statement's tool where the token's list holds it -- one it may not
+    // call is the unknown tool a missing statement's is -- and whether it
+    // writes, for the audit log.
+    let statement = name
+        .strip_prefix("call_")
+        .and_then(|s| Some((s, tools::callable(ctx, s)?)));
+    let tool = match statement {
+        Some(_) => Some(tools::Tool::Call),
+        None => tools::Tool::named(name, ctx.opts),
+    };
+    let Some(tool) = tool else {
         return Reply::error(
             200,
             Some(id),
@@ -726,14 +739,177 @@ fn call(ctx: &Ctx, id: &Value, params: &[(String, Value)], era: Era) -> Reply {
             wait_ms.div_ceil(1000),
         ),
         Ok(()) => {
-            let outcome = tools::run(ctx, tool, args);
+            let outcome = match statement {
+                Some((s, _)) => tools::call(ctx, s, args),
+                None => tools::run(ctx, tool, args),
+            };
             tools::bounded(outcome, ctx.opts)
         }
     };
-    counted(tool, &outcome);
+    let writes = statement.map_or(tool.writes(), |(_, writes)| writes);
+    counted(tool, name, writes, &outcome);
     let mut body = String::new();
     outcome.result_into(&mut body);
     result(id, era, &body)
+}
+
+// ------------------------------------------------------------ a call's bounds
+
+/// What a `call_<name>` tool's call is held to where `/query`'s path runs
+/// it: its answer's rows and bytes, and whether the session takes writes.
+#[derive(Clone, Copy)]
+struct Bound {
+    rows: usize,
+    bytes: usize,
+    /// `--mcp-write`, asked again under the lock the call runs under
+    /// ([`writes_refused`]): the tool list asked it of the statement as it
+    /// was then, and a `drop` and a `create` may land in between.
+    write: bool,
+}
+
+thread_local! {
+    /// The bound a `call_<name>` tool's call is held to, set while the
+    /// call runs through `/query`'s path on this thread ([`bounded_call`]),
+    /// which asks it where it answers: a reading call as it reads, a
+    /// writing one before its block lands. None anywhere else: a client's
+    /// call is held to `--call-max-rows` alone.
+    static BOUND: Cell<Option<Bound>> = const { Cell::new(None) };
+}
+
+/// `f`, a call tool's statement through `/query`'s path, with its answer
+/// held to `opts`' bounds there.
+pub(super) fn bounded_call<R>(opts: &Options, f: impl FnOnce() -> R) -> R {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            BOUND.with(|b| b.set(None));
+        }
+    }
+    BOUND.with(|b| {
+        b.set(Some(Bound {
+            rows: opts.max_rows,
+            bytes: opts.max_bytes,
+            write: opts.write,
+        }))
+    });
+    let _clear = Clear;
+    f()
+}
+
+/// Why an answer of `rows` rows, `/query`'s `body`, is past the bounds of
+/// the call tool running on this thread -- `None` where it is not, or no
+/// call tool runs: a model is never told half an answer, nor leaves a
+/// write it was not told of.
+pub(crate) fn past(rows: usize, body: &[u8]) -> Option<String> {
+    let Bound {
+        rows: most_rows,
+        bytes: most_bytes,
+        ..
+    } = BOUND.with(Cell::get)?;
+    if rows > most_rows {
+        return Some(format!(
+            "the statement answered {rows} rows, past this server's bound of {most_rows} \
+             (--mcp-max-rows): refused rather than cut, and nothing it wrote kept. Call it with \
+             arguments that narrow what it answers"
+        ));
+    }
+    let bytes = tools::answer_len(body);
+    (bytes > most_bytes).then(|| {
+        format!(
+            "the statement's answer is {bytes} bytes, past this server's bound of {most_bytes} \
+             (--mcp-max-bytes): refused rather than cut, and nothing it wrote kept"
+        )
+    })
+}
+
+/// Whether a call tool runs on this thread: one question of a thread-local,
+/// all a request that is not one pays.
+pub(crate) fn holding() -> bool {
+    BOUND.with(Cell::get).is_some()
+}
+
+/// The rows an answer holds, as a tool counts them: a join's flat ones.
+pub(crate) fn rows_of(resp: &api::Response2) -> usize {
+    match resp {
+        api::Response2::Rows(rs) => rs.answered().rows.len(),
+        _ => 0,
+    }
+}
+
+/// [`past`] of an answer not written yet.
+pub(crate) fn past_answer(resp: &api::Response2) -> Option<String> {
+    if !holding() {
+        return None;
+    }
+    past(
+        rows_of(resp),
+        &api::render_any(resp, fennec_core::VERSION).body,
+    )
+}
+
+/// Why a call tool's `stmt` may not run here: it writes, as the statement
+/// of its name is under the lock `db` is held by, and the session takes no
+/// writes (`--mcp-write`). The tool list asked that of the statement as it
+/// was, under a lock let go before the call: a `drop` and a `create`
+/// landing between made a reading tool's call a write, which only the lock
+/// it runs under can tell. `None` for any other statement, or where no call
+/// tool runs on this thread; a statement there is none of is refused as the
+/// call runs.
+pub(crate) fn writes_refused(db: &Database, stmt: &Statement) -> Option<Response> {
+    let Statement::Call(c) = stmt else {
+        return None;
+    };
+    let bound = BOUND.with(Cell::get)?;
+    if bound.write || db.call_reads(c) != Some(false) {
+        return None;
+    }
+    Some(Response::error(
+        403,
+        &format!(
+            "statement `{}` writes, and this server takes no writes over MCP (--mcp-write): it \
+             was made again since its tool was listed. List the tools again",
+            c.name
+        ),
+    ))
+}
+
+/// Opens the block a call tool's write runs in, so that its answer is held
+/// to the bounds before it lands ([`land`]): `false`, opening none, where
+/// no call tool runs on this thread. A call tool's statement that writes
+/// where the session takes no writes is refused here, under the write lock
+/// it would run under ([`writes_refused`]).
+pub(crate) fn open(db: &mut Database, stmt: &Statement) -> std::result::Result<bool, Response> {
+    if BOUND.with(Cell::get).is_none() {
+        return Ok(false);
+    }
+    if let Some(refused) = writes_refused(db, stmt) {
+        return Err(refused);
+    }
+    db.begin()
+        .map(|_| true)
+        .map_err(|e| crate::error_response(&e))
+}
+
+/// Lands the block [`open`] opened, or puts it back: where the statement
+/// failed, or its answer is past the bounds -- refused then (413) -- or the
+/// block cannot land. What to answer in place of the answer, if anything.
+pub(crate) fn land(
+    db: &mut Database,
+    r: &fennec_core::error::Result<api::Response2>,
+) -> Option<Response> {
+    let why = match r {
+        Ok(resp) => past_answer(resp),
+        Err(_) => {
+            db.rollback();
+            return None;
+        }
+    };
+    if let Some(why) = why {
+        db.rollback();
+        return Some(Response::error(413, &why));
+    }
+    // A block the sink refuses is put back by `commit` itself.
+    db.commit().err().map(|e| crate::error_response(&e))
 }
 
 // ------------------------------------------------------------ rate
@@ -807,26 +983,25 @@ pub fn serving() {
     ON.store(true, Ordering::Relaxed);
 }
 
-fn counted(tool: tools::Tool, outcome: &tools::Outcome) {
+/// A call of `tool`, `name` as the client named it -- a statement's tool by
+/// its own, `call_transfer` -- counted, and where it `writes` logged.
+fn counted(tool: tools::Tool, name: &str, writes: bool, outcome: &tools::Outcome) {
     let failed = outcome.is_error();
     CALLS[tool as usize][failed as usize].fetch_add(1, Ordering::Relaxed);
     // An agent's write is named in the audit log, as an admin's change is;
     // its reads are not, as no read is.
-    if tool.writes() && crate::audit::on() {
+    if writes && crate::audit::on() {
         use crate::audit::Field;
         crate::audit::event(
             "mcp",
-            &[
-                ("tool", Field::Text(tool.name())),
-                ("failed", Field::Bool(failed)),
-            ],
+            &[("tool", Field::Text(name)), ("failed", Field::Bool(failed))],
         );
     }
 }
 
 /// The calls' counts, in `/_metrics`: `fennec_mcp_tool_calls_total`, by
-/// tool and outcome. No collection is a label: a tool's name is one of
-/// eight.
+/// tool and outcome. No collection is a label, nor a statement: a tool's
+/// name is one of nine, every statement's tool counted as `call`.
 pub(crate) fn metrics(out: &mut crate::metrics::Text) {
     if !ON.load(Ordering::Relaxed) {
         return;

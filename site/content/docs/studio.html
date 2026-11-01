@@ -172,7 +172,9 @@ with your token: it can do what the token may, and nothing more.</p>
     <code>$2</code>…</li>
   <li><b>Several statements</b>, separated by <code>;</code>, run as one
     <code>/batch</code>: they land together or not at all. Give their
-    parameters as a list each, <code>[[1], ["a"]]</code>.</li>
+    parameters as a list each, <code>[[1], ["a"]]</code>. A named
+    statement's body of several, <code>begin … end</code>, is one
+    statement, sent whole.</li>
   <li><b>The answer</b> as rows or as JSON, with its status, its time, its
     <code>Fennec-Seq</code> for a write and its <code>X-Request-Id</code>.</li>
   <li><b>The plan</b> of a <code>get</code>: the Plan tab asks the server
@@ -190,7 +192,9 @@ the same patterns and keywords into the editor's highlighter, and
 text is drawn over the textarea as text nodes, so the caret, selection,
 input methods and undo are the browser's. Nothing you type is rewritten:
 the editor only cuts the text at each <code>;</code> outside strings and
-comments, and a statement goes to <code>POST /query</code>, several to
+comments and outside a definition's <code>begin … end</code> (a
+<code>case</code>'s own <code>end</code> closing the <code>case</code>), as the
+parser reads it, and a statement goes to <code>POST /query</code>, several to
 <code>POST /batch</code>, as any client sends them.</p>
 </details>
 
@@ -213,6 +217,19 @@ or drop a field, and drop the collection.</p>
     runs only once you type its name.</li>
   <li><b>A scoped token reads the schema</b> of the collections it reads,
     and changes nothing.</li>
+  <li><b>The database's <a href="fennecql.html#named-statements">named
+    statements</a></b> are listed below the fields: to the server's token
+    each one's signature, whether it writes, its comment, why it is broken
+    where it is, and its definition, which opens in the query editor as
+    <code>create or replace statement</code>; to a scoped token the ones a
+    <code>call</code> line of the policy grants it. In the page's own
+    database there are none: the module is built without them.</li>
+  <li><b>A call form</b> gives each argument an input typed as the
+    signature types it (a scoped token, which is not shown signatures, types
+    the arguments as a JSON object), and shows the statement it sends,
+    <code>call transfer $1</code>, the arguments the one parameter. It runs in
+    the query editor, its answer in the grid, under an
+    <code>Idempotency-Key</code>.</li>
 </ul>
 
 <pre data-lang="fennecql">create index on orders (total) @sorted

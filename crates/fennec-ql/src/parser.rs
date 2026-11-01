@@ -5173,6 +5173,9 @@ mod tests {
         "create statement transfer($from int, $to int, $amount int) claims (sub text) comment 'Moves an amount' check $amount > 0 and $from != $to as begin get accounts select id where id = $from and owner = $jwt.sub limit 1 require 1; set accounts {balance: balance - $amount} where id = $from and balance >= $amount require 1; set accounts {balance: balance + $amount} where id = $to require 1; insert entries {from: $from, to: $to, amount: $amount, by: $jwt.sub, at: now()} returning id, at end",
         "create or replace statement claim($queue text) claims (sub text, groups [text] from \"cognito:groups\") as set jobs {owner: $jwt.sub, run_at: now() + 30000, attempts: attempts + 1} where queue = $queue and run_at <= now() order run_at limit 1 returning id, payload",
         "create statement purge($n int = 10) public scans as del sessions where seen < now() - 86400000",
+        // A `case`'s `end` inside a body, and a `;` before the body's own:
+        // the studio's splitter reads it as one statement too.
+        "create statement grade($id int) as begin get scores select id, case when points >= 90 then 'a' else 'b' end as grade where id = $id; end",
         "drop statement if exists transfer",
         "statements",
         "describe statement transfer",
@@ -5336,6 +5339,9 @@ mod tests {
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1)",
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1) as",
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1) as s",
+                // An item with no name yet in a body, its `case` closed: the
+                // body's `end` is still to come.
+                "create statement grade($id int) as begin get scores select id, case when points >= 90 then 'a' else 'b' end",
                 // And of the aliases named statements' words still are.
                 "select count(*)",
                 "select count(*) statements",

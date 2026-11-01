@@ -457,6 +457,19 @@ fn claims(def: &Definition, given: Option<&Args>, ctx: &EvalCtx) -> Result<Vec<V
         Some(a) => named(a, ctx, "claims")?,
         None => Vec::new(),
     };
+    claims_from(def, &carried)
+}
+
+/// Whether `carried` -- a token's claims -- holds every claim `def`
+/// declares, as a call judges them ([`claims`]): what MCP asks before it
+/// lists a statement's tool, so a token that may never call it is told
+/// nothing of its arguments.
+pub fn claims_carried(def: &Definition, carried: &[(String, Value)]) -> bool {
+    claims_from(def, carried).is_ok()
+}
+
+/// [`claims`] of the claims a call carries, evaluated.
+fn claims_from(def: &Definition, carried: &[(String, Value)]) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(def.claims.len());
     for c in &def.claims {
         let lacks = || {

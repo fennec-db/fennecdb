@@ -435,7 +435,9 @@ is.](docs/design/http.md#mcp)** A model's filter goes in parsed, never as
 text, and a read past `--mcp-max-rows` or `--mcp-max-bytes` is refused,
 never cut. The origin is asked before the token, and with no token only a
 `Host` naming localhost or an address is answered; `write` never changes a
-schema or compacts. `<file>.lock` (`fennec_abi::lock`) is taken by `fennec
+schema or compacts. A named statement the token may call is a `call_<name>`
+tool, its answer held to the bounds before a write's block lands
+(`mcp::land`). `<file>.lock` (`fennec_abi::lock`) is taken by `fennec
 mcp --file`, `fennec-server --file`, the native library and the shell alike.
 
 **[An `Idempotency-Key` makes a write
@@ -696,7 +698,7 @@ its judgment (at `/batch` too), a freeze's or a lapsed lease's refusal
 before it unless this copy reads it; a
 call is counted as that shape, its slow line naming the version, traced
 with `db.stored_procedure.name`, and the router's route `call`, never its
-name. MCP and a sync replica refuse them (`NOT_BUILT`, `NAMED`); the
+name. A sync replica refuses them (`NAMED`); the
 router reads a tenant's with the grammar. Readers upgrade before a primary
 defines one (RELEASING.md, `make upgrade-check`). `$name` is a definition's alone, and `call` and `statements`
 reserve no word (`NAMED_COMMANDS`, never `COMMANDS`). They are fennec-core's
