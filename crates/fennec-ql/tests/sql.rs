@@ -592,7 +592,7 @@ const REFUSED: &[(&str, &str)] = &[
     ),
     (
         "CREATE INDEX ON t (a) WHERE a > 1",
-        "a partial index's `where`",
+        "partial index's `where`",
     ),
     ("CREATE UNIQUE INDEX ON t (a) @hash", "not both"),
     (

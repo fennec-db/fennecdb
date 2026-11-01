@@ -275,9 +275,9 @@ pub(crate) fn relate(
             } else {
                 return Err(
                     "a LEFT JOIN's `on` reads its own table's columns beside the key: a \
-                     condition there on a table before it keeps that table's rows and drops \
-                     only their matches, which no `lookup` says -- in the `where` it would \
-                     drop the rows",
+                     condition there on a table before it keeps that table's rows, dropping \
+                     only their matches, which no `lookup` says; in the `where` it drops the \
+                     rows",
                 );
             }
         }
@@ -376,7 +376,7 @@ pub(crate) fn relate(
     }
     // The rest of the names the statement writes, each its table's: the
     // engine holds them to the tables' fields ([`Flat::names`]).
-    let mut written = read.clone();
+    let mut written = read;
     for f in &filters {
         for t in f {
             t.referenced_fields(&mut written);
@@ -388,23 +388,21 @@ pub(crate) fn relate(
     }
     // Each once: the engine asks each of every run of the statement.
     let mut each = Vec::with_capacity(names.len());
-    for n in names {
+    for n in &mut names {
+        let n = std::mem::take(n);
         if n.1 != "id" && !n.1.contains('(') && !each.contains(&n) {
             each.push(n);
         }
     }
     let names = each;
-    let tables = (from.tables.iter())
-        .map(|t| {
-            (
-                t.alias.clone().unwrap_or_else(|| t.collection.clone()),
-                t.collection.clone(),
-            )
-        })
-        .collect();
+    let mut tables = Vec::with_capacity(n);
+    for t in &from.tables {
+        let name = t.alias.as_ref().unwrap_or(&t.collection);
+        tables.push((name.clone(), t.collection.clone()));
+    }
     let names = Some(Arc::new(JoinNames { tables, names }));
     let folds = items_fold(&items) || !sel.group.is_empty() || sel.having.is_some();
-    let inner: Vec<bool> = from.joins.iter().map(|j| !j.left).collect();
+    let inner = !from.joins[0].left;
     if one_key {
         let (child, parent) = (&keys[1].0[0], &keys[1].1[0]);
         let once = distinct && !folds;
@@ -428,8 +426,8 @@ pub(crate) fn relate(
         // the probe alone, a join to three rows of `vip` looked up each of
         // 100 001 users.
         if none || reads & !1 == 0 && (child == "id" || once) {
-            let probe = child == "id" && inner[0] && !none && !folds && !distinct;
-            if inner[0] || none {
+            let probe = child == "id" && inner && !none && !folds && !distinct;
+            if inner || none {
                 let some = semi(from, 1, child, parent, &mut filters[1]);
                 filters[0].push(match none {
                     true => Expr::Not(Box::new(some)),
@@ -437,17 +435,18 @@ pub(crate) fn relate(
                 });
             }
             sel.flat = join_flat(names, probe);
-            return Ok(driving(sel, from, items, filters.swap_remove(0), None));
+            let own = std::mem::take(&mut filters[0]);
+            return Ok(driving(sel, from, items, own, None));
         }
         // The joined table's, the first table's a filter -- its key read
         // as the joined table's, which an inner join's rows hold too. Its
         // probe drives the joined table, the first table a `required`
         // level found by its `id`.
-        if inner[0] && reads & !3 == 0 && !first_more && (parent == "id" || once) {
+        if inner && reads & !3 == 0 && !first_more && (parent == "id" || once) {
             let probe = parent == "id" && !folds && !distinct;
             let some = semi(from, 0, parent, child, &mut filters[0]);
             filters[1].push(some);
-            let own = filters.swap_remove(1);
+            let own = std::mem::take(&mut filters[1]);
             sel.flat = join_flat(names, probe);
             return Ok(driving(sel, from, items, own, Some((parent, child))));
         }
@@ -455,7 +454,7 @@ pub(crate) fn relate(
     if folds || distinct {
         return Err(FOLDED);
     }
-    flat(sel, from, items, filters, keys, &inner, names)
+    flat(sel, from, items, filters, keys, names)
 }
 
 /// What a statement read off a join without flat rows carries: the names
@@ -518,11 +517,15 @@ fn items(sel: &mut Select, from: &From) -> Vec<Item> {
     }
     let computed = std::mem::take(&mut sel.computed);
     match sel.project.take() {
-        None => out.extend((0..from.tables.len()).map(|t| Item {
-            expr: Expr::Lit(Value::Null),
-            name: String::new(),
-            star: Some(t),
-        })),
+        None => {
+            for t in 0..from.tables.len() {
+                out.push(Item {
+                    expr: Expr::Lit(Value::Null),
+                    name: String::new(),
+                    star: Some(t),
+                });
+            }
+        }
         Some(names) => {
             for name in names {
                 if let Some(c) = computed.iter().find(|c| c.name == name) {
@@ -598,7 +601,11 @@ fn driving(
     if !folds {
         order_by_items(&mut sel, from, &items);
     }
-    for mut i in items.into_iter().filter(|_| !star) {
+    let items = match star {
+        true => Vec::new(),
+        false => items,
+    };
+    for mut i in items {
         let derived = Some(&i.name) == label_of(&i.expr).as_ref();
         if derived {
             i.name = from.label(&i.name);
@@ -667,9 +674,8 @@ fn bare(sel: &mut Select, from: &From, key: Option<(&str, &str)>) {
             }
             from.strip(&mut c.expr, None);
         }
-        let computed: Vec<String> = sel.computed.iter().map(|c| c.name.clone()).collect();
-        for p in sel.project.iter_mut().flatten() {
-            if !computed.contains(p) {
+        for p in sel.project.as_mut().map_or(&mut [][..], |p| &mut p[..]) {
+            if !sel.computed.iter().any(|c| c.name == *p) {
                 *p = from.owner(p).1.to_string();
             }
         }
@@ -701,8 +707,7 @@ fn flat(
     from: &From,
     items: Vec<Item>,
     mut filters: Vec<Vec<Expr>>,
-    keys: Vec<(Vec<String>, Vec<String>)>,
-    inner: &[bool],
+    mut keys: Vec<(Vec<String>, Vec<String>)>,
     names: Option<Arc<JoinNames>>,
 ) -> Result<Select, &'static str> {
     let n = from.tables.len();
@@ -719,7 +724,10 @@ fn flat(
             );
         }
     }
-    let mut projects: Vec<Option<Vec<String>>> = (0..n).map(|_| Some(Vec::new())).collect();
+    let mut projects: Vec<Option<Vec<String>>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        projects.push(Some(Vec::new()));
+    }
     let mut columns = Vec::new();
     for mut i in items {
         if let Some(t) = i.star {
@@ -734,9 +742,9 @@ fn flat(
         if Some(&i.name) == label_of(&i.expr).as_ref() {
             i.name = from.label(&i.name);
         }
-        let column = match &i.expr {
+        let column = match i.expr {
             Expr::Field(f) => {
-                let (t, bare) = from.owner(f);
+                let (t, bare) = from.owner(&f);
                 let t = t.unwrap_or(0);
                 if let Some(p) = &mut projects[t] {
                     if !p.iter().any(|c| c == bare) {
@@ -749,14 +757,13 @@ fn flat(
                     name: i.name,
                 }
             }
-            e => {
-                if from.levels(e) & !1 != 0 {
+            mut e => {
+                if from.levels(&e) & !1 != 0 {
                     return Err(
                         "a column worked out of a row reads the first table's columns; \
                                 a joined table's are listed as they are",
                     );
                 }
-                let mut e = i.expr.duplicate();
                 from.strip(&mut e, None);
                 if projects[0].is_none() {
                     return Err("`o.*` beside a column worked out of the row: name the fields");
@@ -777,6 +784,9 @@ fn flat(
         };
         columns.push(column);
     }
+    // A row of each table at most, by `id`: the first table's page is the
+    // flat rows'.
+    let by_id = keys[1..].iter().all(|(c, _)| c.len() == 1 && c[0] == "id");
     // The chain, the last level first.
     let mut next: Option<Box<Lookup>> = None;
     for j in (1..n).rev() {
@@ -784,14 +794,14 @@ fn flat(
         if let Some(f) = &mut filter {
             from.strip(f, None);
         }
-        let (on, parent) = keys[j].clone();
+        let (on, parent) = std::mem::take(&mut keys[j]);
         next = Some(Box::new(Lookup {
             collection: from.tables[j].collection.clone(),
             on,
             parent,
             project: projects[j].take(),
             filter,
-            required: inner[j - 1],
+            required: !from.joins[j - 1].left,
             next,
             ..Lookup::default()
         }));
@@ -800,9 +810,6 @@ fn flat(
     sel.project = projects[0].take();
     sel.filter = joined(std::mem::take(&mut filters[0]));
     bare(&mut sel, from, None);
-    // A row of each table at most, by `id`: the first table's page is the
-    // flat rows'.
-    let by_id = keys[1..].iter().all(|(c, _)| c.len() == 1 && c[0] == "id");
     let mut page = Flat {
         columns,
         names,
