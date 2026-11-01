@@ -42,10 +42,25 @@ class Daemon {
     }
   }
 
-  /// Killed, as a crash would; returns once it is gone.
+  /// Killed, as a crash would; returns once it is gone and its port
+  /// refuses. A test going on sooner had its next request reach the dying
+  /// process on a connection the router pooled, written whole and then
+  /// reset: the router's 502 of a request that may have run, not its 503 of
+  /// one never sent. The refusal comes after the node's ends of those
+  /// connections closed, so the router's look at each finds it closed.
   Future<void> kill() async {
     process.kill(ProcessSignal.sigkill);
-    await process.exitCode;
+    await process.exitCode.timeout(const Duration(seconds: 20));
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (true) {
+      try {
+        (await Socket.connect('127.0.0.1', port)).destroy();
+      } on SocketException {
+        return;
+      }
+      if (DateTime.now().isAfter(deadline)) throw StateError('port $port still answers its connects');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
   }
 }
 
@@ -202,6 +217,9 @@ class Wire {
   /// Every request's head so far.
   final List<Map<String, String>> heads = [];
 
+  /// The head of every answer passed on so far, its names in lower case.
+  final List<Map<String, String>> answers = [];
+
   Wire._(this._server, this.target, this.script);
 
   static Future<Wire> start({String? target, List<Scripted>? script}) async {
@@ -248,6 +266,9 @@ class Wire {
     final back = await out.close();
     final bytes = await back.fold<List<int>>([], (all, chunk) => all..addAll(chunk));
     res.statusCode = back.statusCode;
+    final answer = <String, String>{};
+    back.headers.forEach((name, values) => answer[name.toLowerCase()] = values.join(','));
+    answers.add(answer);
     back.headers.forEach((name, values) {
       if (!_hop.contains(name)) {
         for (final v in values) {
@@ -303,7 +324,7 @@ void main() {
     final w = await ReadReplicas.start();
     final sent = await Wire.start(target: w.near);
     final db = Fennec.connect('${sent.url}/t/acme', reads: Reads.nearest);
-    final home = Fennec.connect('${w.near}/t/acme');
+    final home = Fennec.connect('${sent.url}/t/acme');
     try {
       // A write goes home, unmarked -- marked, it would be refused -- and
       // says where it left the tenant.
@@ -358,8 +379,11 @@ void main() {
       expect([for (final r in await db.from('notes').order('body').rows()) r['body']], ['a', 'b']);
       expect(sent.last['fennec-read'], 'replica');
       expect(sent.last['fennec-after'], '$b');
-      expect(await status(() => home.from('notes').rows()), 502);
-      expect(await status(() => db.from('notes').insert({'body': 'c'})), 502);
+      // Home gone, the router never sends them: its own 503, marked so.
+      expect(await status(() => home.from('notes').rows()), 503);
+      expect(sent.answers.last['fennec-unsent'], '1');
+      expect(await status(() => db.from('notes').insert({'body': 'c'})), 503);
+      expect(sent.answers.last['fennec-unsent'], '1');
     } finally {
       db.close();
       home.close();

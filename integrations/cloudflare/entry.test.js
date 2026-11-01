@@ -805,6 +805,46 @@ test("a guessed region's router that cannot reach the home is passed for a read,
   }
 });
 
+test("a router's 503 for a request it never sent is its answer, and a guessed region's sends a write on", async () => {
+  const unsent = (home) => (req, res) => {
+    const marks = { 'Content-Type': 'application/json', 'Retry-After': '1', 'Fennec-Shard': '1', 'Fennec-Unsent': '1' };
+    res.writeHead(503, home ? { ...marks, 'Fennec-Home': home } : marks);
+    res.end('{"error":"not reached -- the request was not sent, and ran nowhere: send it again","retry_after":1}');
+  };
+  // cut's router reaches none of home's routers: its own 503, naming no home.
+  const cut = await standIn(unsent(null));
+  const home = await standIn((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fennec-Shard': '1', 'Fennec-Home': 'home' });
+    res.end('{"affected":1}');
+  });
+  // A home whose router could not reach the tenant's node names the home.
+  const failing = await standIn(unsent('cut'));
+  const standby = await standIn(() => assert.fail('the standby dials the same node'));
+  try {
+    const write = { method: 'POST', body: '{"query":"put notes {title: \\"t\\"}"}' };
+    let fetchOf = inNode({ REGIONS: JSON.stringify({ cut: [cut.url], home: [home.url] }), DEFAULT_REGION: 'cut', HOMES_CACHE: 'off' });
+    // It ran nowhere: a write goes on as a read does, and its home answers.
+    const sent = await fetchOf('/t/other/query', write);
+    assert.equal(sent.status, 200);
+    assert.equal(cut.seen.length, 1);
+    assert.equal(home.seen.length, 1);
+    fetchOf = inNode({ REGIONS: JSON.stringify({ cut: [failing.url, standby.url], home: [home.url] }), DEFAULT_REGION: 'cut', HOMES_CACHE: 'off' });
+    for (const n of [1, 2]) {
+      const refused = await fetchOf('/t/acme/query', write);
+      assert.equal(refused.status, 503);
+      assert.equal(refused.headers.get('retry-after'), '1');
+      assert.equal(refused.headers.get('fennec-unsent'), '1', 'the client is told it ran nowhere');
+      assert.match(await refused.text(), /"retry_after":1/);
+      // The router's own answer: the one that answered, asked first again.
+      assert.equal(failing.seen.length, n);
+    }
+    assert.equal(standby.seen.length, 0);
+    assert.equal(home.seen.length, 1, 'no other region asked');
+  } finally {
+    for (const s of [cut, home, failing, standby]) s.close();
+  }
+});
+
 test('a router that refused the connection as it took it is passed over for the next, a write too: it ran nothing', async () => {
   // At its thread limit, or past its --max-connections: the router's 503,
   // written before it read a byte of the request.
@@ -986,7 +1026,8 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
       res.writeHead(522, { 'Content-Type': 'text/html' });
       res.end('error code: 522');
     });
-    // A router's own 502 -- a node it could not reach -- is an answer.
+    // A router's own 502 -- a node that took the request and did not
+    // answer -- is an answer.
     failing = await standIn((req, res) => {
       res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8', 'X-Request-Id': 'r1', 'Fennec-Shard': '1' });
       res.end('{"error":"node `n1` did not answer"}');

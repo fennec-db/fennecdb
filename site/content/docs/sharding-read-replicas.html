@@ -285,11 +285,12 @@ waited out, and the replica held until the tenant is placed there, so no
 look's <code>follow</code> lands on the node it moved to.</p>
 
 <p><b>A partition.</b> The replica's region cut off from the tenant's home:
-writes from that region are answered <code>502</code>, as a node out of reach
-is; a marked read naming no position is answered by the replica from the state
+writes from that region are answered as a node out of reach is — a
+<code>503</code> marked <code>Fennec-Unsent</code> where the router never got
+one out, a <code>502</code> where it went out and no answer came; a marked read naming no position is answered by the replica from the state
 it last applied — as old as the cut, and, cut off across a failover of home,
 on the branch the failover left — and one naming a position the replica does
-not hold waits, goes home, and is answered <code>502</code>. Nothing is
+not hold waits, goes home, and is answered so too. Nothing is
 answered from before a write the client was told landed. Once healed, the
 replica's feed reconnects and it catches up. Reads that tolerate a bounded staleness —
 a replica answering while it is at most so far behind, without a write of

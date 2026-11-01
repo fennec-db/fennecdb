@@ -2011,7 +2011,7 @@ impl Router {
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
             Some((region, routers)) => {
-                self.relay_send(region, routers, req, &headers, held, held_watch)
+                self.relay_send(region, routers, req, &headers, held, held_watch, false)
             }
         };
         let answer = match sending {
@@ -2042,21 +2042,13 @@ impl Router {
                 forwarding.error(e.to_string());
                 drop(forwarding);
                 metrics::unreachable(&node);
-                // 502, as a node out of reach is: a client takes it to ask
-                // again, and a region cut off from this one answers its own
-                // clients all the while.
-                let why = match &routers {
-                    None => format!("node `{node}` ({addr}) did not answer: {e}"),
-                    Some((region, _)) => format!(
-                        "region `{region}`'s routers did not answer -- it may be cut off from \
-                         this one, and answers through its own: {e}"
-                    ),
-                };
-                return reply(out, region::homed(Response::error(502, &why), &home));
+                let unrun = upstream::unsent(&e);
+                return reply(out, unreached(&node, &addr, &routers, &home, &e, unrun));
             }
         };
+        let relay = routers.is_some();
         self.answer_out(
-            req, out, arrived, peer, &node, answer, None, sent, forwarding, &home,
+            req, out, arrived, peer, &node, answer, None, sent, forwarding, &home, relay,
         )
     }
 
@@ -2177,6 +2169,11 @@ impl Router {
             .or(peer.map(|p| p.ip()));
         let mut node = node.to_string();
         let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
+        // Whether a node it was cut from may have run it: once so, so
+        // whatever comes after -- another cut, of a copy that took less of
+        // it -- the request is never told it ran nothing.
+        let whole = upstream::Ended::Cut { whole: true };
+        let mut ran = ended == whole;
         let (mut tries, mut asks) = (1, CUT_ASKS);
         // A follower's asks of a copy refusing it ([`Self::copy_pause`]),
         // and its count among those waiting to ask again.
@@ -2252,7 +2249,7 @@ impl Router {
                     flying,
                 ),
                 Some((region, routers)) => {
-                    self.relay_send(region, routers, req, &headers, left, watch)
+                    self.relay_send(region, routers, req, &headers, left, watch, ran)
                 }
             };
             match sending {
@@ -2288,8 +2285,10 @@ impl Router {
                         },
                     };
                     let Some(pause) = again else {
+                        let relay = routers.is_some();
                         return self.answer_out_cold(
                             req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
+                            relay,
                         );
                     };
                     forwarding.error("503");
@@ -2319,14 +2318,14 @@ impl Router {
                             // it ran perhaps on the copy already, which its
                             // key finds. Told it ran nothing, a client would
                             // send it again under a key of its own.
-                            let why = match ended {
-                                upstream::Ended::Cut { whole: true } => format!(
+                            let why = match ran {
+                                true => format!(
                                     "tenant `{tenant}`'s new primary had not taken its writes \
                                      yet as this request's client ended its connection, and \
-                                     node `{node}` may have run it before the failover: ask \
-                                     again with its Idempotency-Key"
+                                     a node it was cut from may have run it before the \
+                                     failover: ask again with its Idempotency-Key"
                                 ),
-                                _ => format!(
+                                false => format!(
                                     "tenant `{tenant}`'s new primary had not taken its writes \
                                      yet as this request's client ended its connection: it ran \
                                      nothing, ask again"
@@ -2363,6 +2362,7 @@ impl Router {
                         // Another cut, of another copy: counted, and asked
                         // anew.
                         again => {
+                            ran |= again == whole;
                             (node, ended, asks) = (to, again, CUT_ASKS);
                             (asking, pausing, counted) = (None, None, false);
                         }
@@ -2372,14 +2372,10 @@ impl Router {
                     forwarding.error(e.to_string());
                     drop(forwarding);
                     metrics::unreachable(&to);
-                    let why = match &routers {
-                        None => format!("node `{to}` ({addr}) did not answer: {e}"),
-                        Some((region, _)) => format!(
-                            "region `{region}`'s routers did not answer -- it may be cut off \
-                             from this one, and answers through its own: {e}"
-                        ),
-                    };
-                    return reply(out, region::homed(Response::error(502, &why), &home));
+                    // Unsent here, it may have run all the same on a node a
+                    // cut ended it on, sent whole.
+                    let unrun = !ran && upstream::unsent(&e);
+                    return reply(out, unreached(&to, &addr, &routers, &home, &e, unrun));
                 }
             }
         }
@@ -2676,16 +2672,20 @@ impl Router {
         sent: Instant,
         forwarding: fennec_http::trace::Span,
         home: &Option<String>,
+        relay: bool,
     ) -> bool {
         self.answer_out(
-            req, out, arrived, peer, node, answer, read, sent, forwarding, home,
+            req, out, arrived, peer, node, answer, read, sent, forwarding, home, relay,
         )
     }
 
     /// The node's `answer` to `req`, forwarded to `node`, written to the
     /// client: its head as the router writes it, and its body -- `read`,
     /// where it was read already -- or stream. `home` the tenant's region
-    /// where the request asked for it. Inlined
+    /// where the request asked for it; `relay`, whether `answer` is a
+    /// region's router's ([`Self::relay_send`]), which alone may say it
+    /// never sent the request ([`region::UNSENT_HEADER`]): a node sent
+    /// nothing on, and its mark is no one's. Inlined
     /// where it is called, so the request every client sends compiles as it
     /// did written out in [`Self::forward`].
     #[inline(always)]
@@ -2702,6 +2702,7 @@ impl Router {
         sent: Instant,
         forwarding: fennec_http::trace::Span,
         home: &Option<String>,
+        relay: bool,
     ) -> bool {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
@@ -2737,7 +2738,8 @@ impl Router {
             // preflight told it. Whether the node verified a token is the
             // router's to know and no one else's. A node's mark of a
             // connection it served nothing on is about that connection, not
-            // the router's (`fennec_http::accept::UNSERVED_HEADER`).
+            // the router's (`fennec_http::accept::UNSERVED_HEADER`); its
+            // word that it sent the request nowhere, a router's alone.
             if k.eq_ignore_ascii_case(fennec_http::audit::VERIFIED_HEADER) {
                 verified = true;
             } else if !hop_by_hop(k)
@@ -2745,6 +2747,7 @@ impl Router {
                 && !k.eq_ignore_ascii_case(fennec_http::request_id::HEADER)
                 && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
                 && !k.eq_ignore_ascii_case(fennec_http::accept::UNSERVED_HEADER)
+                && (relay || !k.eq_ignore_ascii_case(region::UNSENT_HEADER))
                 && !(cors.is_some() && fennec_http::cors::is_cors_header(k, v))
             {
                 for part in [k.as_str(), ": ", v.as_str(), "\r\n"] {
@@ -2954,7 +2957,7 @@ impl Router {
                     // names no home.
                     let home = None;
                     return Some(self.answer_out_cold(
-                        req, out, arrived, peer, &rnode, a, body, sent, forwarding, &home,
+                        req, out, arrived, peer, &rnode, a, body, sent, forwarding, &home, false,
                     ));
                 }
                 // Not reached, or no whole request taken: the node's.
@@ -5422,6 +5425,45 @@ fn forward_span(req: &Request, node: &str, addr: &str) -> fennec_http::trace::Sp
     forwarding
 }
 
+/// The router's own answer to a forward to `node` at `addr` -- or to a
+/// region's `routers` -- that failed short of an answer with `e`, naming
+/// the tenant's `home` where it is known (`region::homed`). Where the
+/// request never went out whole (`unrun`, [`upstream::unsent`]) it ran
+/// nowhere: a 503 to come back from, marked so ([`region::unsent`]) --
+/// told 502, it read as an answer the node broke off, which may have run,
+/// and a client sent an unkeyed write again only at the risk of making it
+/// twice. Otherwise 502, the node having taken it whole: it may have run.
+/// Either way a client asks again, and a region cut off from this one
+/// answers its own clients all the while.
+#[cold]
+#[inline(never)]
+fn unreached(
+    node: &str,
+    addr: &str,
+    routers: &Option<(String, Vec<String>)>,
+    home: &Option<String>,
+    e: &std::io::Error,
+    unrun: bool,
+) -> Response {
+    let resp = match (routers, unrun) {
+        (None, false) => {
+            Response::error(502, &format!("node `{node}` ({addr}) did not answer: {e}"))
+        }
+        (None, true) => region::unsent(&format!("node `{node}` ({addr}) was not reached: {e}")),
+        (Some((region, _)), unrun) => {
+            let why = format!(
+                "region `{region}`'s routers did not answer -- it may be cut off from this one, \
+                 and answers through its own: {e}"
+            );
+            match unrun {
+                true => region::unsent(&why),
+                false => Response::error(502, &why),
+            }
+        }
+    };
+    region::homed(resp, home)
+}
+
 fn body_fields(req: &Request) -> std::result::Result<Vec<(String, Value)>, String> {
     let text = std::str::from_utf8(&req.body).map_err(|_| "the body is not UTF-8".to_string())?;
     if text.trim().is_empty() {
@@ -5883,5 +5925,120 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert_eq!(sent, ["Authorization", "Fennec-Read", "Cf-Access"]);
+    }
+
+    /// An address nothing listens on: its connect is refused.
+    fn refusing() -> String {
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = gone.local_addr().unwrap().to_string();
+        drop(gone);
+        addr
+    }
+
+    fn router(d: Directory) -> Arc<Router> {
+        fennec_http::audit::set_delay(0);
+        let cfg = Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        };
+        Router::new(d, cfg)
+    }
+
+    /// A router placing `acme` on node `n2`, at `addr`.
+    fn placing_on(addr: String) -> Arc<Router> {
+        let mut d = Directory::in_memory();
+        let n2 = directory::Node {
+            addr,
+            token: "adm".into(),
+            ..directory::Node::default()
+        };
+        d.set_node("n2", n2).unwrap();
+        d.place("acme", "n2", State::Active).unwrap();
+        router(d)
+    }
+
+    /// What [`Router::after_cut`] answers a keyed write a failover ended on
+    /// `n1`, sent whole there where `whole`: the status and the head.
+    fn after_cut_from_n1(router: &Router, whole: bool) -> (u16, String) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let mut out = l.accept().unwrap().0;
+        let body = br#"{"query":"put notes {title: \"t\"}"}"#.to_vec();
+        let header = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let req = Request {
+            method: Method::Post,
+            target: "/t/acme/query".into(),
+            path: "/t/acme/query".into(),
+            query: Vec::new(),
+            headers: vec![
+                header("Host", "t"),
+                header("Idempotency-Key", "k-1"),
+                header("Content-Length", &body.len().to_string()),
+            ],
+            body,
+            keep_alive: false,
+        };
+        let ended = std::io::Error::other(upstream::Ended::Cut { whole });
+        let asked = (None, Duration::ZERO);
+        router.after_cut(
+            &req,
+            &mut out,
+            Instant::now(),
+            None,
+            None,
+            asked,
+            "acme",
+            "n1",
+            ended,
+        );
+        drop(out);
+        let mut answer = String::new();
+        std::io::Read::read_to_string(&mut client, &mut answer).unwrap();
+        let head = answer.split_once("\r\n\r\n").map_or(&*answer, |h| h.0);
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, head.to_string())
+    }
+
+    fn unsent_mark(head: &str) -> bool {
+        head.lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("fennec-unsent:"))
+    }
+
+    /// A request a failover cut on `n1` once it went out whole may have
+    /// run there (`after_cut`'s `ran`): the copy's dial refused after is a
+    /// 502, never the 503 saying it ran nowhere -- told so, a client sent a
+    /// keyed write again under a key of its own. Cut before its last byte,
+    /// it ran nowhere, and is that 503.
+    #[test]
+    fn a_cut_write_that_went_whole_is_never_told_unsent() {
+        let r = placing_on(refusing());
+        let (status, head) = after_cut_from_n1(&r, true);
+        assert_eq!(status, 502, "{head}");
+        assert!(!unsent_mark(&head), "{head}");
+        let (status, head) = after_cut_from_n1(&r, false);
+        assert_eq!(status, 503, "{head}");
+        assert!(unsent_mark(&head), "{head}");
+    }
+
+    /// The same where the tenant is relayed to its home region's routers
+    /// now, and the one asked never sent it on: its 503 says so, and is
+    /// passed on only where no node had the request whole before.
+    #[test]
+    fn a_cut_write_that_went_whole_is_never_told_unsent_by_a_relay() {
+        let unsent = placing_on(refusing());
+        let listener = unsent.bind().unwrap();
+        let at = listener.local_addr().unwrap();
+        std::thread::spawn(move || unsent.serve_on(listener));
+        let mut d = Directory::in_memory();
+        d.set_region("us", Some(&[format!("http://{at}")])).unwrap();
+        d.place_home("acme", "us").unwrap();
+        let r = router(d);
+        let (status, head) = after_cut_from_n1(&r, true);
+        assert_eq!(status, 502, "{head}");
+        assert!(!unsent_mark(&head), "{head}");
+        let (status, head) = after_cut_from_n1(&r, false);
+        assert_eq!(status, 503, "{head}");
+        assert!(unsent_mark(&head), "{head}");
     }
 }
