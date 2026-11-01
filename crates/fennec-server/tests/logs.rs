@@ -180,9 +180,10 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
     assert_eq!(refused.status, 401);
     let refused_id = refused.header("x-request-id").unwrap().to_string();
 
-    // The slow lines go to stderr as the answer goes out: waited for.
+    // The slow lines go to stderr as the answer goes out: each one read
+    // below is waited for, or it races the reads (call 3 did).
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !["req 42", "call 1", "call 2"].iter().all(|id| {
+    while !["req 42", "call 1", "call 2", "call 3"].iter().all(|id| {
         server
             .log
             .lock()
