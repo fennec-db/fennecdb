@@ -779,8 +779,8 @@ against 132-225. `fennec-server`'s `__text` grew 5 632 bytes and
 
 ## Chunked bodies
 
-**A chunked body is read whole, held to the ceiling before allocating; a
-framing read two ways is refused** (`http::read_chunked`,
+**A chunked body grows as it comes, held to the ceiling; a
+framing read two ways is refused** (`http::read_chunked`, `http::read_onto`,
 `http::chunked_framing`). A request's body came by its `Content-Length`
 alone, `Transfer-Encoding: chunked` refused with 411, and a team whose
 clients sat behind a proxy that re-chunks every body could not reach a
@@ -798,8 +798,23 @@ what is left under the ceiling the connection reads to (`--max-body`, or a
 tenant node's import ceiling, the data's refused after as by a length)
 before the chunk is read, 413 the moment one would pass it -- a size of
 `ffffffffffffffff` with no byte behind it is refused, never reserved -- and
-the buffer doubles as a `Vec` does but never past the ceiling, so a 40 MB
-body under 64 does not reserve 80. Extensions are read past and trailers
+a size within it is believed no further than its bytes come: `read_onto`
+grows the buffer a step of 64 KiB (`BODY_STEP`) at a time, each step
+zeroed and read into with one `read_exact`, its room doubling as a `Vec`'s
+does but never past the ceiling, so a 40 MB body under 64 does not reserve
+80. The first version reserved and zeroed each chunk's declared size
+before a byte of it came, and the review's unauthenticated request of
+about 80 bytes ending in `3fffffff` had a node of a 1 GiB `--max-body` take
+up a gibibyte a connection (RSS from 5 MB to 241-371 MB), the router the
+same under its own ceiling; a `Content-Length` of as much took up nothing,
+its `vec![0; len]` the system's zero pages, each taken up only as a byte
+reaches it, as the router's relay of a node's answer (`zeroed`) and a
+replica's message are. A step costs its memset and a read of 64 KiB at
+most where a chunk was one read; `a_declared_chunk_grows_the_body_only_as_its_bytes_come`
+holds the buffer to a step for a gibibyte declared and ten bytes sent, and
+to twice the bytes and a step after more. `fennec mcp`'s bridge reads a
+server's answer, chunked or by its length, through the same function.
+Extensions are read past and trailers
 read and dropped, the two together at most 64 KiB (`MAX_HEADER_BYTES`,
 431): without a bound on them, a body of one-byte chunks each carrying a
 kilobyte of extension has 64 MB of body read 64 GB off the wire, Go's
@@ -820,7 +835,15 @@ coded); any coding in HTTP/1.0 (400); a bare LF or bare CR anywhere in the
 head or the framing, which the head's reader had read as a line's end (400,
 no client of the repository's sends one); a line folded onto the one
 before (obs-fold) and whitespace between a field's name and its colon, both
-of which `trim` had read as a header (400); two `Content-Length`s that
+of which `trim` had read as a header (400); a field's name that is not a
+token, or a value holding a control character (400, RFC 9110 §5.1, §5.5),
+a value trimmed of SP and HTAB alone (OWS, §5.6.3) -- `str::trim`, which
+strips Unicode's whitespace, read `\x0bchunked`, `chunked\x0c` and
+`chunked\u{a0}` as `chunked`, and kept `Transfer-Encoding\x0b` as a header
+of no meaning, where main had refused all four with 411 (the review's), so
+a space no server in front reads as one is now part of the value: a coding
+`chunked\u{a0}` is 501 as any other, a length `5\u{a0}` 400 as any word
+but digits; `a_header_disguised_past_sp_and_htab_is_refused` holds each; two `Content-Length`s that
 differ, or one that is not digits alone -- `usize`'s parse took `+5` (400).
 A chunk's data must be followed by exactly CRLF, so a size smaller than its
 data is 400 rather than the rest read as the next request; what follows the

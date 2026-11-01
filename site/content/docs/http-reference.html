@@ -377,9 +377,12 @@ would pass it.</p>
     <code>chunked</code> named twice or not last, a transfer coding in an
     HTTP/1.0 request, a size of anything but hex digits, a line that ends in
     a bare LF or holds a bare CR, a header or trailer folded onto the line
-    before or with whitespace before its colon, two
+    before or with whitespace before its colon, a header name that is not a
+    token or a value holding a control character, two
     <code>Content-Length</code>s that differ or one that is not digits
-    alone. Each is a request two servers could frame two ways — one in front
+    alone. Only a space or a tab is trimmed around a value, so
+    <code>chunked</code> followed by a non-breaking space is a coding of
+    its own (<code>501</code>). Each is a request two servers could frame two ways — one in front
     and this one — so that bytes one sent as the next request would be read
     by the other as a body (request smuggling, RFC 9112 §6.3).</li>
   <li><b><code>501</code>:</b> a transfer coding other than
@@ -387,7 +390,8 @@ would pass it.</p>
 </ul>
 <p>A body read whole is what a write needs anyway — a statement runs once
 all of it is in, and the router resends a request only with its body in
-hand — so a chunked one costs no more memory than its length would.</p>
+hand — so a chunked one costs no more memory than its length would: its
+buffer grows as its bytes arrive, never by the size a chunk declares.</p>
 </details>
 
 

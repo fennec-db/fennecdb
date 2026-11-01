@@ -13,7 +13,7 @@
 //! whatever a server in front could frame otherwise than this one does
 //! (400; a transfer coding but `chunked`, 501).
 
-use std::io::{BufRead, IoSlice, Write};
+use std::io::{BufRead, IoSlice, Read, Write};
 
 /// Ceiling of the header block. A large ceiling would let a single
 /// connection grow memory without bound.
@@ -177,10 +177,21 @@ pub fn read_request<R: BufRead>(
         let Some((k, v)) = line.split_once(':') else {
             return Err(BadRequest(400, "malformed header line".into()));
         };
-        if k.is_empty() || k.ends_with([' ', '\t']) {
+        // A name is a token and a value holds no control character (RFC
+        // 9110 §5.1, §5.5), trimmed of SP and HTAB alone (OWS, §5.6.3):
+        // `str::trim` took `\x0bchunked`, `chunked\x0c` and `chunked\u{a0}`
+        // for `chunked`, and a name ending in `\x0b` was kept as no framing
+        // header at all, each a body a server in front frames otherwise.
+        if k.is_empty() || !k.bytes().all(tchar) {
             return Err(BadRequest(400, "malformed header line".into()));
         }
-        let v = v.trim();
+        let v = v.trim_matches([' ', '\t']);
+        if v.bytes().any(ctl) {
+            return Err(BadRequest(
+                400,
+                "a control character in a header's value".into(),
+            ));
+        }
         if k.eq_ignore_ascii_case("content-length") {
             // One length, of digits alone (RFC 9110 §8.6): `+5`, which
             // `usize`'s parse took, or a second length unlike the first, is
@@ -204,7 +215,9 @@ pub fn read_request<R: BufRead>(
 
     let body = if coded {
         chunked_framing(&headers, length.is_some(), version)?;
-        read_chunked(reader, max_body)?
+        let mut body = Vec::new();
+        read_chunked(reader, max_body, &mut body)?;
+        body
     } else {
         let len: usize = match length {
             Some(at) => headers[at]
@@ -285,7 +298,7 @@ fn chunked_framing(
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
         .flat_map(|(_, v)| v.split(','))
-        .map(str::trim)
+        .map(|c| c.trim_matches([' ', '\t']))
         .filter(|c| !c.is_empty());
     let (mut last, mut chunked, mut other) = (None, 0, None);
     for c in codings {
@@ -319,12 +332,17 @@ fn chunked_framing(
 /// trailers read and dropped, the two together at most [`MAX_HEADER_BYTES`]
 /// (431) -- a body of one-byte chunks each carrying a kilobyte of extension
 /// would have 64 MB of body read 64 GB off the wire (Go's CVE-2023-39326).
-/// Every line ends in CRLF, the CRLF after each chunk's data is there, and
-/// nothing else is: a bare LF or CR, a folded trailer or a size of anything
-/// but hex digits is 400. What follows the trailers' empty line is the next
-/// request's, left in the reader.
-fn read_chunked<R: BufRead>(reader: &mut R, max_body: usize) -> Result<Vec<u8>, BadRequest> {
-    let mut body: Vec<u8> = Vec::new();
+/// A chunk's data is read [`read_onto`] the body, which grows as its bytes
+/// come, never by the size a line declares. Every line ends in CRLF, the
+/// CRLF after each chunk's data is there, and nothing else is: a bare LF or
+/// CR, a folded trailer or a size of anything but hex digits is 400. What
+/// follows the trailers' empty line is the next request's, left in the
+/// reader.
+fn read_chunked<R: BufRead>(
+    reader: &mut R,
+    max_body: usize,
+    body: &mut Vec<u8>,
+) -> Result<(), BadRequest> {
     let mut spare = MAX_HEADER_BYTES;
     let mut line = Vec::new();
     loop {
@@ -360,15 +378,7 @@ fn read_chunked<R: BufRead>(reader: &mut R, max_body: usize) -> Result<Vec<u8>, 
                 format!("the chunked body passes the ceiling of {max_body} bytes"),
             ));
         }
-        let size = size as usize;
-        // Doubled as a `Vec` grows, but never past the ceiling: a body of
-        // 40 MB would otherwise have reserved 80 under a ceiling of 64.
-        if at + size > body.capacity() {
-            let room = (at + size).max(body.capacity() * 2).min(max_body);
-            body.reserve_exact(room - at);
-        }
-        body.resize(at + size, 0);
-        reader.read_exact(&mut body[at..]).map_err(|e| unread(&e))?;
+        read_onto(reader, body, size as usize, max_body).map_err(|e| unread(&e))?;
         let mut end = [0u8; 2];
         reader.read_exact(&mut end).map_err(|e| unread(&e))?;
         if &end != b"\r\n" {
@@ -385,7 +395,7 @@ fn read_chunked<R: BufRead>(reader: &mut R, max_body: usize) -> Result<Vec<u8>, 
     loop {
         let n = chunk_line(reader, &mut line, spare + 2, framing_too_large)?;
         if n == 0 {
-            return Ok(body);
+            return Ok(());
         }
         spare = spare.checked_sub(n + 2).ok_or_else(framing_too_large)?;
         let content = &line[..n];
@@ -400,6 +410,51 @@ fn read_chunked<R: BufRead>(reader: &mut R, max_body: usize) -> Result<Vec<u8>, 
             _ => return Err(BadRequest(400, "malformed trailer line".into())),
         }
     }
+}
+
+/// The most a body's buffer is grown, and zeroed, ahead of the bytes read
+/// into it.
+pub(crate) const BODY_STEP: usize = 64 << 10;
+
+/// `n` bytes off `reader` onto the end of `body`, a [`BODY_STEP`] at a time:
+/// the buffer grows as the bytes come, its room doubled as a `Vec`'s is but
+/// never past `most`, so a 40 MB body under a ceiling of 64 does not reserve
+/// 80. Grown by the size declared and zeroed whole before a byte of it came,
+/// an 80-byte request ending in `3fffffff` had a node of a 1 GiB ceiling
+/// take up a gibibyte a connection (241-371 MB of RSS in the review, from
+/// 5), where a `Content-Length` of as much took up none: its
+/// `vec![0; len]` is the system's zero pages, each taken up as a byte
+/// reaches it. A step is one `read_exact` into the slice, which a
+/// `BufReader` past its own buffer reads straight into.
+pub(crate) fn read_onto<R: Read>(
+    reader: &mut R,
+    body: &mut Vec<u8>,
+    mut n: usize,
+    most: usize,
+) -> std::io::Result<()> {
+    while n > 0 {
+        let step = n.min(BODY_STEP);
+        let at = body.len();
+        if at + step > body.capacity() {
+            let room = (at + step)
+                .max(body.capacity() * 2)
+                .min(most.max(at + step));
+            body.reserve_exact(room - at);
+        }
+        body.resize(at + step, 0);
+        reader.read_exact(&mut body[at..])?;
+        n -= step;
+    }
+    Ok(())
+}
+
+/// A token's character (RFC 9110 §5.6.2), what a field's name is made of.
+fn tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'!' | b'#'..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        )
 }
 
 /// A line of a chunked body's framing, of at most `budget` bytes, read into
@@ -445,8 +500,8 @@ fn framing_too_large() -> BadRequest {
     )
 }
 
-/// A control byte a chunk extension may not hold (RFC 9110 §5.6.2), a tab
-/// being whitespace.
+/// A control byte a header's value or a chunk extension may not hold (RFC
+/// 9110 §5.5, §5.6.2), a tab being whitespace.
 fn ctl(b: u8) -> bool {
     (b < 0x20 && b != b'\t') || b == 0x7f
 }
@@ -998,6 +1053,79 @@ mod tests {
         let r = one_chunked(&chunked(&body, 30), 100).unwrap();
         assert_eq!(r.body, body);
         assert!(r.body.capacity() <= 100, "{}", r.body.capacity());
+    }
+
+    #[test]
+    fn a_declared_chunk_grows_the_body_only_as_its_bytes_come() {
+        // The review's request: a gibibyte declared under a ceiling of one,
+        // ten bytes of it sent, then the end. Zeroed whole as declared, the
+        // buffer was the gibibyte; grown as the bytes come, it is a step.
+        let mut body = Vec::new();
+        let r = read_chunked(&mut &b"3fffffff\r\n0123456789"[..], 1 << 30, &mut body);
+        assert_eq!(r.err().map(|e| e.0), Some(400));
+        assert!(body.capacity() <= BODY_STEP, "{}", body.capacity());
+        // Bytes that come grow it, twice them and a step at most.
+        let sent = 3 * BODY_STEP + 5;
+        let mut bytes = b"3fffffff\r\n".to_vec();
+        bytes.resize(bytes.len() + sent, b'x');
+        let mut body = Vec::new();
+        let r = read_chunked(&mut &bytes[..], 1 << 30, &mut body);
+        assert_eq!(r.err().map(|e| e.0), Some(400));
+        assert!(
+            body.capacity() <= 2 * sent + BODY_STEP,
+            "{}",
+            body.capacity()
+        );
+        // A chunk of several steps reads whole, a byte a read too.
+        let data: Vec<u8> = (0..sent as u32).map(|i| (i * 7 % 251) as u8).collect();
+        assert_eq!(
+            one_chunked(&chunked(&data, sent), 1 << 20).unwrap().body,
+            data
+        );
+    }
+
+    #[test]
+    fn a_header_disguised_past_sp_and_htab_is_refused() {
+        // `str::trim` read every value here as the one it hides, and every
+        // name here was kept as a header of no meaning: a framing a server
+        // in front reads otherwise. Each request is refused before its body.
+        let hello = "\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let cases: &[(&str, u16)] = &[
+            ("Transfer-Encoding: \x0bchunked", 400),
+            ("Transfer-Encoding: chunked\x0c", 400),
+            ("Transfer-Encoding: chunked\x00", 400),
+            ("Transfer-Encoding: chunked\u{a0}", 501),
+            ("Transfer-Encoding: \u{85}chunked", 501),
+            ("Transfer-Encoding: chunked,\u{3000}", 400),
+            ("Transfer-Encoding\x0b: chunked", 400),
+            ("Transfer\x00-Encoding: chunked", 400),
+            ("Content-Length: \x0b5", 400),
+            ("Content-Length: 5\u{a0}", 400),
+            ("Content-Length\x0c: 5", 400),
+            ("X: a\x01b", 400),
+            ("X: a\x7f", 400),
+            ("X(: a", 400),
+            ("X\u{e9}: a", 400),
+        ];
+        for (header, status) in cases {
+            let bytes = format!("POST / HTTP/1.1\r\nHost: t\r\n{header}{hello}");
+            let first = read_request(&mut bytes.as_bytes(), 1 << 20);
+            assert_eq!(first.err().map(|e| e.0), Some(*status), "{header:?}");
+        }
+        // SP and HTAB are trimmed and kept inside a value; obs-text is a
+        // value's to hold.
+        let r = read_all(
+            format!(
+                "POST / HTTP/1.1\r\nX: \t a \t b\t \r\nY: caf\u{e9}\r\n\
+                 Transfer-Encoding: \t chunked \t{hello}"
+            )
+            .as_bytes(),
+            1 << 20,
+        )
+        .unwrap();
+        assert_eq!(r[0].header("x"), Some("a \t b"));
+        assert_eq!(r[0].header("y"), Some("caf\u{e9}"));
+        assert_eq!(r[0].body, b"hello");
     }
 
     #[test]

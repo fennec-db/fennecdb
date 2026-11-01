@@ -187,4 +187,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 143. [A release is installed from its own files, each checked before it is used](integrations.md#install-channels) (added after the move, under *Integrations and deploy*)
 144. [The desktop app is a window on a studio a `fennec-server` serves, one server per file](integrations.md#studio-desktop) (added after the move, under *Integrations and deploy*)
 145. [A token is taken only from the issuers, for the audiences and clients, a server was told](access.md#whom-a-token-is-for) (added after the move, under *Access*)
-146. [A chunked body is read whole, held to the ceiling before allocating](http.md#chunked-bodies) (added after the move, under *The HTTP server*)
+146. [A chunked body grows as it comes, held to the ceiling](http.md#chunked-bodies) (added after the move, under *The HTTP server*)
