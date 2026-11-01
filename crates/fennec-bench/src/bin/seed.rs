@@ -4,12 +4,15 @@
 //! client making single writes -- one `insert` a request into the same
 //! collection, at `RATE` a second (`SEED_RATE`, 0 for as fast as it is
 //! answered) -- for [`RUN`], alone and beside a subscriber seeded over and
-//! over: `GET /items/changes`, read to the end of its `seed` event, closed.
-//! A write's time runs from the moment it was due, not the moment it went
-//! out, so a write the stall held back counts the wait of every one queued
-//! behind it, as an app making them at that rate meets it. Printed: the
-//! writes' rate, p50, p99 and longest, how many took past 50 ms, and each
-//! seed's time to its last byte.
+//! over: `GET /items/changes`, read to the end of its `seed` event, then on
+//! through the stream's first look -- the `change` event telling the writes
+//! made while the seed was read, all of them read under the lock -- and
+//! [`LINGER`] after it, closed. A write's time runs from the moment it was
+//! due, not the moment it went out, so a write the stall held back counts
+//! the wait of every one queued behind it, as an app making them at that
+//! rate meets it. Printed: the writes' rate, p50, p99 and longest over the
+//! whole run, how many took past 50 ms, and each seed's time to its last
+//! byte.
 //!
 //! `FENNEC_SERVER` runs another build of the server (a binary from before,
 //! to compare in turns); `SEED_ROWS` and `SEED_RATE` change the shape's
@@ -28,6 +31,14 @@ use std::time::{Duration, Instant};
 
 const ROWS: usize = 1_000_000;
 const RUN: Duration = Duration::from_secs(10);
+
+/// How long a subscriber stays after its first `change` event: the looks
+/// after the first, each a write's, are timed beside the writes too.
+const LINGER: Duration = Duration::from_millis(100);
+
+/// How long a subscriber waits for its first `change` event at most: one
+/// comes with the next write once the seed is sent.
+const FIRST_LOOK: Duration = Duration::from_secs(5);
 
 fn env_or(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -93,8 +104,39 @@ fn start(file: &Path) -> (http::Server, String) {
 }
 
 /// A subscriber's seed: the stream opened, read to the end of its `seed`
-/// event and let go. Its time, ms.
+/// event, then on to the end of its first `change` -- the stream's first
+/// look after the seed, which reads every write made while the seed was
+/// read, under the lock -- and [`LINGER`] after it, and let go. The seed's
+/// time to its last byte, ms; `buf` left holding the seed alone.
 fn seed(addr: &str, buf: &mut Vec<u8>) -> f64 {
+    let (mut s, took, end) = seed_event(addr, buf);
+    let mut after = buf.split_off(end);
+    let mut chunk = vec![0u8; 1 << 16];
+    s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    const CHANGE: &[u8] = b"event: change\n";
+    let first = Instant::now() + FIRST_LOOK;
+    let mut until = None;
+    while until.map_or(Instant::now() < first, |at| Instant::now() < at) {
+        match s.read(&mut chunk) {
+            Ok(0) => panic!("the stream ended after its seed"),
+            Ok(n) if until.is_none() => after.extend_from_slice(&chunk[..n]),
+            _ => {}
+        }
+        if until.is_none() {
+            let told = after.windows(CHANGE.len()).position(|w| w == CHANGE);
+            if told.is_some_and(|at| after[at..].windows(2).any(|w| w == b"\n\n")) {
+                until = Some(Instant::now() + LINGER);
+                after = Vec::new();
+            }
+        }
+    }
+    took
+}
+
+/// A stream opened and read to the end of its `seed` event into `buf`,
+/// which may hold what came after it too: the stream, the seed's time to
+/// its last byte (ms), and where in `buf` the event ends.
+fn seed_event(addr: &str, buf: &mut Vec<u8>) -> (TcpStream, f64, usize) {
     let t = Instant::now();
     let mut s = TcpStream::connect(addr).unwrap();
     write!(s, "GET /items/changes HTTP/1.1\r\nHost: bench\r\n\r\n").unwrap();
@@ -118,12 +160,12 @@ fn seed(addr: &str, buf: &mut Vec<u8>) -> f64 {
         };
         data = Some(from);
         looked = looked.max(from);
-        if buf[looked..].windows(2).any(|w| w == b"\n\n") {
-            break;
+        if let Some(at) = buf[looked..].windows(2).position(|w| w == b"\n\n") {
+            let took = t.elapsed().as_secs_f64() * 1e3;
+            return (s, took, looked + at + 2);
         }
         looked = buf.len() - 1;
     }
-    t.elapsed().as_secs_f64() * 1e3
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -184,7 +226,8 @@ fn main() {
     // The file's pages read in, and the writes' path, before anything is
     // timed.
     let mut buf = Vec::new();
-    seed(&addr, &mut buf);
+    // No write comes to end a first look here: the seed alone.
+    seed_event(&addr, &mut buf);
     round(&addr, rate, false, 1 << 40);
     let rate_name = match rate {
         0 => "back to back".to_string(),

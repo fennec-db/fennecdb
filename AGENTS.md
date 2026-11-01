@@ -187,7 +187,8 @@ read an index answers, and a pinned index refuses (`PINNED_OUT`), so a stray rea
 lock. A stream's seed is one (`sse::seed`): at the pin's change, its scope
 bound under the pin's lock, the change ring held back to that change until
 the stream's first look (`hold_changes`), and read again under the lock
-where the ring passed it anyway.
+where the ring passed it anyway or an image was adopted since
+(`Database::adoptions`), which every look of a stream reseeds on too.
 
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica

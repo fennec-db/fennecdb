@@ -991,3 +991,115 @@ fn a_seed_the_ring_overran_is_read_again_under_the_lock() {
     assert_eq!(count(&seed, "rows"), 3 + beside, "{seed}");
     assert!(s.next_within(Duration::from_millis(300)).is_none());
 }
+
+/// The rows the server holds, by id, as a stream's events write them.
+fn server_rows(port: u16) -> std::collections::BTreeMap<i64, String> {
+    let (_, all) = post(port, "/query", r#"{"query":"get tasks order id"}"#);
+    rows_of(&format!("{{\"rows\":{all}}}"), "rows")
+        .into_iter()
+        .collect()
+}
+
+/// An image adopted into the server's database (`Database::adopt`, what a
+/// replica does when its primary no longer holds the writes it missed),
+/// holding other titles for the same ids at the very change the database
+/// stands at: the ring and the counter show nothing.
+fn adopt_at_the_same_change(h: &Harness) {
+    let mut other = Database::new();
+    for sql in [
+        "create collection tasks (key text @hash, title text, status text @hash)",
+        r#"put tasks [
+             {key: "a", title: "uno",  status: "open"},
+             {key: "b", title: "dos",  status: "open"},
+             {key: "c", title: "tres", status: "closed"}
+           ]"#,
+    ] {
+        other.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let image = other.snapshot();
+    let mut fresh = Database::new();
+    fresh.load(&image).unwrap();
+    let mut db = h.db.write().unwrap();
+    assert_eq!(fresh.change_seq(), db.change_seq());
+    db.adopt(fresh, &image).unwrap();
+}
+
+/// An image adopted while a seed is read pinned replaced what the pin
+/// reads, and can land on the pin's own change, where the ring and the
+/// counter show nothing: the seed is read again rather than sent
+/// (`Database::adoptions`), and the replica it builds is the server's.
+#[test]
+fn an_image_adopted_while_a_seed_is_read_is_read_again() {
+    let (h, began, go) = gated(Config::default());
+    let mut s = Sub::open(h.port, GATED);
+    began
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the seed read");
+    adopt_at_the_same_change(&h);
+    drop(go);
+    let (name, seed) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert!(
+        seed.contains("\"uno\"") && !seed.contains("\"one\""),
+        "a seed of what the image replaced: {seed}"
+    );
+    let mut replica: std::collections::BTreeMap<i64, String> =
+        rows_of(&seed, "rows").into_iter().collect();
+    while let Some((name, data)) = s.next_within(Duration::from_millis(300)) {
+        assert_eq!(name, "change", "{data}");
+        for (id, row) in rows_of(&data, "puts") {
+            replica.insert(id, row);
+        }
+    }
+    assert_eq!(replica, server_rows(h.port));
+}
+
+/// An image adopted after a seed was sent, at the change the stream stands
+/// at, reseeds it: its next look finds the adoptions moved, where the ring
+/// shows nothing.
+#[test]
+fn an_image_adopted_at_a_streams_change_reseeds_it() {
+    let h = start(Config::default());
+    let mut s = Sub::open(h.port, "/tasks/changes");
+    let (name, seed) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert!(seed.contains("\"one\""), "{seed}");
+    adopt_at_the_same_change(&h);
+    let (name, seed) = s.next().expect("seeded again");
+    assert_eq!(name, "seed", "{seed}");
+    let replica: std::collections::BTreeMap<i64, String> =
+        rows_of(&seed, "rows").into_iter().collect();
+    assert_eq!(replica, server_rows(h.port));
+}
+
+/// A seed's hold on the change ring goes at the stream's first look after
+/// it, not with the stream: held for as long as an idle stream stays
+/// open, the ring kept every write since its seed, `HELD_TIMES` its
+/// capacity, for every stream open.
+#[test]
+fn a_stream_lets_the_ring_go_at_its_first_look() {
+    let h = start(Config {
+        change_capacity: 2,
+        ..Config::default()
+    });
+    let mut s = Sub::open(h.port, "/tasks/changes");
+    let (name, _) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    // Told a write: the stream has looked past its seed.
+    put_tasks(h.port, 0, 1);
+    let (name, change) = s.next().expect("a write after the seed");
+    assert_eq!((name.as_str(), count(&change, "puts")), ("change", 1));
+    // Writes a hold would keep, short of its bound: the ring keeps its
+    // capacity alone, and the stream, its cursor overrun, is seeded again.
+    put_tasks(h.port, 1, fennec_core::changes::HELD_TIMES / 2);
+    {
+        let db = h.db.read().unwrap();
+        assert_eq!(
+            db.change_horizon(),
+            db.change_seq() - 2,
+            "the ring is held past the stream's first look"
+        );
+    }
+    let (name, _) = s.next().expect("the writes");
+    assert_eq!(name, "seed");
+}

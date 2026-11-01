@@ -433,6 +433,10 @@ checked against the server's again, and a difference goes to
 loaded from a file has no history, only its present state. A cursor standing
 exactly there, after a quiet restart, gets an empty response; anything behind
 it is reseeded.</p>
+
+<p>A replica that takes its primary's whole image, having fallen behind what
+the primary keeps, reseeds every stream open on it, a seed being read
+included, even where the image stands at the stream's own change.</p>
 </details>
 
 <h2>Cost</h2>

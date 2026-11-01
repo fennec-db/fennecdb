@@ -342,7 +342,19 @@ hold goes at the stream's first look, the next write dropping what is past
 the capacity and giving the room back. A write into a ring with room asks
 nothing more; one into a full ring reads an atomic. Past the bound the
 seed is read again under the lock rather than sent
-(`a_seed_the_ring_overran_is_read_again_under_the_lock`). Back to back,
+(`a_seed_the_ring_overran_is_read_again_under_the_lock`). The hold goes at
+the first look, not with the stream: kept to the stream's end, an idle
+stream held the ring at its bound for as long as it stayed open
+(`a_stream_lets_the_ring_go_at_its_first_look`). An image adopted while
+the seed is read (`Database::adopt`, a replica taking its primary's
+image) replaced what the pin reads, and may land on the pin's very
+change, where neither the ring nor the counter shows it: the seed holds
+`Database::adoptions` after its read to the count at the pin and is read
+again under the lock where it moved, and every look of a stream holds it
+to the count its seed was at, reseeding where it moved -- a hole streams
+had before their seeds were pinned, an image adopted at the cursor's
+change (`an_image_adopted_while_a_seed_is_read_is_read_again`,
+`an_image_adopted_at_a_streams_change_reseeds_it`). Back to back,
 the writes then went on beside the seeds at 45 500-49 300 a second, the
 longest 11-16 ms, against 5 500-6 700 and 500-642 ms under the lock, and a
 seed took 678-873 ms at its median against 550-912: it shares the cores

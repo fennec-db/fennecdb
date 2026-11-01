@@ -356,7 +356,15 @@ pub fn serve(
     // A stream of a shape that holds nothing, unscoped, is told of every
     // write to the collection, and so of every row reaching its time.
     let everything = seen.is_none() && matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
-    let mut expiry = Expiry::of(&crate::held::read(db), &sub.collection, everything);
+    // The images the database had adopted where the stream stands
+    // (`Database::adoptions`): one adopted since replaced what it was
+    // sent, possibly at the very change its cursor names, where the ring
+    // shows nothing, and it is seeded again.
+    let (mut expiry, mut adopted) = {
+        let guard = crate::held::read(db);
+        let expiry = Expiry::of(&guard, &sub.collection, everything);
+        (expiry, guard.adoptions())
+    };
     let began = now_ms() as i64;
     // The change ring held back to the seed's change until the first look
     // after it ([`seed`]).
@@ -367,8 +375,8 @@ pub fn serve(
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
         _ => match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
-            Ok((seq, hold)) => {
-                held = Some(hold);
+            Ok((seq, hold, images)) => {
+                (held, adopted) = (Some(hold), images);
                 // The seed left out every row past its time by then.
                 if let Some(x) = &mut expiry {
                     x.told = Some(began);
@@ -404,15 +412,19 @@ pub fn serve(
         }
         let (step, members) = {
             let guard = crate::held::read(db);
+            let replaced = guard.adoptions() != adopted;
             // Rules reading another collection, bound again where it was
             // written: rows may enter and leave the shape, and show other
             // fields, with no write to its own collection.
             let moved = match &reach {
-                Some(r) => r.rebind(&guard, cursor, &mut sub, &mut view),
-                None => Ok(false),
+                Some(r) if !replaced => r.rebind(&guard, cursor, &mut sub, &mut view),
+                _ => Ok(false),
             };
             let shown = shows(&view);
             let step = moved.and_then(|moved| {
+                if replaced {
+                    return Ok((Changes::Reseed, None));
+                }
                 let mut step = guard.changes_since(
                     &sub.collection,
                     cursor,
@@ -460,7 +472,7 @@ pub fn serve(
             Ok(Changes::Reseed) => {
                 let began = now_ms() as i64;
                 match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
-                    Ok((seq, hold)) => (cursor, held) = (seq, Some(hold)),
+                    Ok((seq, hold, images)) => (cursor, held, adopted) = (seq, Some(hold), images),
                     Err(_) => return,
                 }
                 if let Some(x) = &mut expiry {
@@ -840,8 +852,9 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
     out
 }
 
-/// Sends the whole shape; the change it is at, and the change ring held
-/// back to it until the stream's first look after it.
+/// Sends the whole shape; the change it is at, the change ring held back
+/// to it until the stream's first look after it, and the images the
+/// database had adopted by then (`Database::adoptions`).
 ///
 /// The rows and the change they are at are one moment: a write landing
 /// between the two would be a row the seed lacks at a counter saying the
@@ -858,15 +871,17 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// again, pinned again, for as long as they outran the scan. What the pin
 /// declines -- a shape an index answers, one too short to be worth it -- is
 /// read under the lock as before, as is a pinned read that reached for an
-/// index (`None`), and one the ring no longer reaches back to by its end,
-/// the hold's bound passed.
+/// index (`None`), one the ring no longer reaches back to by its end, the
+/// hold's bound passed, and one an image adopted meanwhile made stale: an
+/// image can land on the pin's own change, where neither the ring nor the
+/// counter shows it, and the pin read what it replaced.
 fn seed(
     out: &mut TcpStream,
     db: &Arc<RwLock<Database>>,
     (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
     seen: &mut Option<Seen>,
     quiet: bool,
-) -> std::io::Result<(u64, Hold)> {
+) -> std::io::Result<(u64, Hold, u64)> {
     let mut pin = true;
     let read = loop {
         let guard = crate::held::read(db);
@@ -878,14 +893,14 @@ fn seed(
             None => Ok(()),
         };
         let stmt = Statement::Select(api::seed_select(sub));
-        let hold = guard.hold_changes();
+        let (hold, adopted) = (guard.hold_changes(), guard.adoptions());
         let pinned = match (pin, &bound) {
             (true, Ok(())) => guard.pin(&[(&stmt, &[][..])]),
             _ => None,
         };
         let Some(p) = pinned else {
             let rows = bound.and_then(|_| guard.query(&stmt, &[]));
-            break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold));
+            break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold, adopted));
         };
         drop(guard);
         let Some(rows) = p.query(&stmt, &[]) else {
@@ -896,13 +911,14 @@ fn seed(
         drop(p);
         let guard = crate::held::read(db);
         let seq = hold.seq();
-        if read.is_ok() && (seq < guard.change_horizon() || seq > guard.change_seq()) {
+        let overrun = seq < guard.change_horizon() || seq > guard.change_seq();
+        if read.is_ok() && (overrun || guard.adoptions() != adopted) {
             pin = false;
             continue;
         }
-        break read.map(|r| (r, hold));
+        break read.map(|r| (r, hold, adopted));
     };
-    let (rows, hold) = match read {
+    let (rows, hold, adopted) = match read {
         Ok(r) => r,
         Err(e) => {
             event(out, "error", &error_json(&e))?;
@@ -911,7 +927,7 @@ fn seed(
     };
     let seq = hold.seq();
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
-    Ok((seq, hold))
+    Ok((seq, hold, adopted))
 }
 
 /// The seed's rows as their event sends them, read on `db` -- the database

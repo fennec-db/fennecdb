@@ -424,7 +424,8 @@ nearest-bench:
 
 ## A sync's seed beside the writes: single inserts at SEED_RATE a second
 ## (1000; 0 back to back) for 10 s, alone and beside a subscriber seeded
-## over and over from a shape of SEED_ROWS (1 000 000) -- the writes' p99
+## over and over from a shape of SEED_ROWS (1 000 000), each kept through
+## its first look and 100 ms after -- the writes' p99
 ## and longest, timed from when each was due, and each seed's time
 ## (crates/fennec-bench/src/bin/seed.rs; FENNEC_SERVER=<bin> another build).
 seed-bench:
