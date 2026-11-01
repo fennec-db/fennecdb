@@ -1,7 +1,7 @@
 // A page on another origin talking to fennec-shard (`--http-cors`) in a
 // headless Chrome, through the real client (`web/client.js`): the router's
 // own answers -- an unknown tenant's 404, a standby's 503, an unreachable
-// node's 502 -- reach the page as the refusals they are, where they read as
+// node's 503 -- reach the page as the refusals they are, where they read as
 // the network failing; a node's answer through the router names one origin
 // though the node allows `*` too, which a browser would refuse whole; and a
 // page on an origin the router does not allow reads nothing.
@@ -100,11 +100,13 @@ test('a page on another origin reads the router\'s own answers and a node\'s thr
     assert.equal(early.retryAfter, 1);
     assert.equal((await seen(p, `${standby.url}/t/acme/query`)).retryAfter, '1');
 
-    // A node the router cannot reach.
+    // A node the router cannot reach: the request never left the router,
+    // which says so and when to come back.
     await node.stop();
     const gone = await outcome(p, `${router.url}/t/acme`, 'get notes');
     assert.equal(gone.refused, true, JSON.stringify(gone));
-    assert.equal(gone.status, 502);
+    assert.equal(gone.status, 503);
+    assert.equal(gone.retryAfter, 1);
 
     // Another origin -- `localhost` is not `127.0.0.1` to a browser -- is
     // told nothing: the fetch fails as the network would.

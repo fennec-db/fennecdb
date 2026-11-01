@@ -62,11 +62,23 @@ async function signIn(p, token, at = server.url) {
   await p.waitForSelector('.row:not(.pending)');
 }
 
-/** The text of row `i`'s cell under `field`, once its block is in, in the grid under `within`. */
+/**
+ * The text of row `i`'s cell under `field`, once its block is in, in the grid
+ * under `within`. `within` may not be on the page yet when this is asked: the
+ * query editor is a module fetched and mounted by its first use, so a wait
+ * begun the moment a call form was submitted came before `.ed` and read
+ * `null.querySelectorAll`. A predicate that throws does not fail a
+ * `waitForFunction`, it ends its polling (puppeteer starts the poller with
+ * `void poller.start()`, so the throw is only a `pageerror`) and the wait
+ * runs out its 10 s, the editor taking longer to mount than the test's own
+ * call to answer: 5 runs in 100 in a container of one core (Chromium 156), 1
+ * in 100 beside a renderer slowed 4x; none in 84 with the root waited for.
+ */
 async function cell(p, i, field, within = 'body') {
   return p.waitForFunction(
     (i, field, within) => {
       const root = document.querySelector(within);
+      if (!root) return null;
       const names = [...root.querySelectorAll('.grid-head .col-name')].map((e) => e.textContent);
       const row = root.querySelector(`.row[aria-rowindex="${i + 3}"]:not(.pending):not([hidden])`);
       const at = names.indexOf(field);
@@ -664,7 +676,16 @@ test('the schema: the named statements, a definition, and a call from its form i
   assert.equal(await p.$eval('#query', (e) => e.value), 'call big $1');
   // A write's call goes under an Idempotency-Key, as the studio's writes
   // do: its answer kept with the key.
-  const kept = async () => (await query(server.url, 'get _idempotency count'))[0].count;
+  // The first keyed write makes `_idempotency`: this test run alone, as in a
+  // loop, finds none yet, and none is none kept.
+  const kept = async () => {
+    try {
+      return (await query(server.url, 'get _idempotency count'))[0].count;
+    } catch (e) {
+      if (e.status === 404) return 0;
+      throw e;
+    }
+  };
   const before = await kept();
   const [order] = await query(server.url, 'get orders select id where owner = $1 limit 1', ['carol']);
   await view(p, 'schema', 'button[aria-label="Call settle"]');

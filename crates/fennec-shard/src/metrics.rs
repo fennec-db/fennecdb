@@ -356,7 +356,7 @@ pub fn counters(out: &mut Text) {
     out.family(
         "fennec_router_upstream_errors_total",
         "counter",
-        "Forwarded requests a node did not answer or broke off, each answered 502, by node.",
+        "Forwarded requests a node did not answer or broke off, by node: answered 503 where the request never went out whole (Fennec-Unsent), 502 where the node may have run it.",
     );
     for (node, n) in UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         out.sample("fennec_router_upstream_errors_total", &[("node", node)], n);

@@ -27,6 +27,11 @@
 
 use crate::value::DocId;
 use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 /// Default entry count of the ring buffer (~96 KB).
 ///
@@ -36,6 +41,20 @@ use std::collections::VecDeque;
 /// reseeded. At 100 writes per second, 4096 entries is a window of about
 /// 40 seconds.
 pub const DEFAULT_CAPACITY: usize = 4096;
+
+/// How many times its capacity the ring grows to at most while a seed
+/// holds it ([`ChangeLog::hold`]), [`HELD_MOST`] marks at most: 262 144
+/// marks, 6 MB, at the default capacity -- over five seconds of one
+/// client's single writes back to back, 46 000 a second, where a seed of a
+/// million rows took 0.6 to 0.9. Past it the oldest go as before, and the
+/// seed is read again under the lock rather than sent.
+#[cfg(not(target_arch = "wasm32"))]
+pub const HELD_TIMES: usize = 64;
+
+/// The marks a held ring grows to at most, 24 MB, whatever its capacity
+/// short of it: a ring made larger is not made 64 times larger with it.
+#[cfg(not(target_arch = "wasm32"))]
+pub const HELD_MOST: usize = 1 << 20;
 
 /// Document id of the schema-change mark. Real ids start at 1, so 0 never
 /// collides.
@@ -69,6 +88,57 @@ pub struct ChangeLog {
     /// H-1, so the horizon is "oldest mark - 1". On an empty ring the horizon
     /// is `seq` itself: only a cursor saying "I saw everything" gets nothing.
     horizon: u64,
+    /// The changes seeds hold the ring back to ([`Self::hold`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    holds: Arc<Holds>,
+}
+
+/// The changes the seeds of streams hold the ring back to, each with how
+/// many hold it, and the oldest of them, which every write asks.
+#[cfg(not(target_arch = "wasm32"))]
+struct Holds {
+    held: Mutex<std::collections::BTreeMap<u64, usize>>,
+    /// `u64::MAX` where none is held.
+    oldest: AtomicU64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Holds {
+    /// `held`'s oldest change made the one every write asks.
+    fn settle(&self, held: &std::collections::BTreeMap<u64, usize>) {
+        let oldest = held.keys().next().copied().unwrap_or(u64::MAX);
+        self.oldest.store(oldest, Ordering::Release);
+    }
+}
+
+/// The ring held back to the change it names ([`ChangeLog::hold`]) for as
+/// long as this lives.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Hold {
+    holds: Arc<Holds>,
+    seq: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Hold {
+    /// The change it holds the ring back to.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut held = self.holds.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = held.get_mut(&self.seq) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.seq);
+            }
+        }
+        self.holds.settle(&held);
+    }
 }
 
 impl Default for ChangeLog {
@@ -84,6 +154,11 @@ impl ChangeLog {
             cap: cap.max(1),
             seq: 0,
             horizon: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            holds: Arc::new(Holds {
+                held: Mutex::default(),
+                oldest: AtomicU64::new(u64::MAX),
+            }),
         }
     }
 
@@ -124,15 +199,66 @@ impl ChangeLog {
     /// Records a write and returns the new `seq`.
     pub fn record(&mut self, cid: u32, id: DocId) -> u64 {
         self.seq += 1;
+        #[cfg(target_arch = "wasm32")]
         if self.ring.len() == self.cap {
             self.evict();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.make_room();
         self.ring.push_back(Mark {
             seq: self.seq,
             cid,
             id,
         });
         self.seq
+    }
+
+    /// Holds the ring back to the change it stands at, past its capacity,
+    /// for as long as the hold lives: a stream's seed read beside the
+    /// writers (`Database::pin`) is at that change, and the stream goes on
+    /// from it once the seed is sent. Dropped by its oldest marks as
+    /// writes came, the ring of a stream whose writers outran its seed had
+    /// it seeded again, and again, for as long as they did. Taken under
+    /// the read lock, where no write is recording; held, the ring grows by
+    /// a mark a write, [`HELD_TIMES`] its capacity at most ([`HELD_MOST`]),
+    /// and let go the next write drops what is past the capacity.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hold(&self) -> Hold {
+        let mut held = self.holds.held.lock().unwrap_or_else(|e| e.into_inner());
+        *held.entry(self.seq).or_default() += 1;
+        self.holds.settle(&held);
+        Hold {
+            holds: Arc::clone(&self.holds),
+            seq: self.seq,
+        }
+    }
+
+    /// Room for a mark: the oldest dropped while the ring is full, but for
+    /// a mark after the oldest change a hold names -- dropped, it would
+    /// leave the horizon past that change -- while the ring is short of
+    /// [`HELD_TIMES`] its capacity ([`HELD_MOST`]). A write into a ring
+    /// with room asks nothing more.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn make_room(&mut self) {
+        if self.ring.len() < self.cap {
+            return;
+        }
+        let oldest = self.holds.oldest.load(Ordering::Acquire);
+        let most = (self.cap.saturating_mul(HELD_TIMES).min(HELD_MOST)).max(self.cap);
+        let was = self.ring.len();
+        while self.ring.len() >= self.cap {
+            let held = self.ring.front().is_some_and(|m| m.seq > oldest);
+            if held && self.ring.len() < most {
+                break;
+            }
+            self.evict();
+        }
+        // Let go, a ring that grew gives its room back: kept, the 6 MB of
+        // a held default ring stayed with the database. Still held at its
+        // bound, it keeps it.
+        if was > self.cap && self.ring.len() < self.cap {
+            self.ring.shrink_to(self.cap);
+        }
     }
 
     fn evict(&mut self) {
@@ -186,6 +312,53 @@ impl ChangeLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seed's hold keeps every mark after its change past the capacity
+    /// until it is let go; then the next write drops what is past it.
+    #[test]
+    fn a_hold_keeps_the_ring_back_to_its_change() {
+        let mut log = ChangeLog::new(2);
+        log.record(1, 1);
+        let hold = log.hold();
+        assert_eq!(hold.seq(), 1);
+        for id in 2..=6 {
+            log.record(1, id);
+        }
+        assert_eq!(log.since(1, 1), Since::Ids(vec![2, 3, 4, 5, 6]));
+        assert_eq!(log.horizon(), 1);
+        drop(hold);
+        log.record(1, 7);
+        assert_eq!(log.since(1, 1), Since::Reseed);
+        assert_eq!(log.since(5, 1), Since::Ids(vec![6, 7]));
+        assert_eq!(log.ring.len(), 2);
+    }
+
+    /// Held, the ring grows to `HELD_TIMES` its capacity and no further:
+    /// past it the oldest go, the hold's change with them. Of two holds,
+    /// the older keeps the ring.
+    #[test]
+    fn a_hold_keeps_no_more_than_its_bound() {
+        let mut log = ChangeLog::new(2);
+        let most = 2 * HELD_TIMES as u64;
+        let hold = log.hold();
+        for id in 1..=most {
+            log.record(1, id);
+        }
+        assert_eq!(log.since(hold.seq(), 1), Since::Ids((1..=most).collect()));
+        log.record(1, most + 1);
+        assert_eq!(log.since(hold.seq(), 1), Since::Reseed);
+        assert_eq!(log.ring.len() as u64, most);
+
+        let mut log = ChangeLog::new(2);
+        let first = log.hold();
+        log.record(1, 1);
+        let second = log.hold();
+        log.record(1, 2);
+        log.record(1, 3);
+        drop(second);
+        log.record(1, 4);
+        assert_eq!(log.since(first.seq(), 1), Since::Ids(vec![1, 2, 3, 4]));
+    }
 
     #[test]
     fn empty_log_serves_only_its_own_cursor() {

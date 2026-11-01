@@ -3924,6 +3924,15 @@ impl Database {
         self.changes.horizon()
     }
 
+    /// The change ring held back to the change the database stands at,
+    /// past its capacity, for as long as the hold lives
+    /// ([`crate::changes::ChangeLog::hold`]): a stream's seed, read pinned
+    /// beside the writers, goes on from that change.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hold_changes(&self) -> crate::changes::Hold {
+        self.changes.hold()
+    }
+
     /// Entry count of the ring buffer: it decides how far behind a
     /// subscriber may fall.
     pub fn set_change_capacity(&mut self, n: usize) {

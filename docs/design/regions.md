@@ -161,9 +161,15 @@ one of its routers answers -- a write that may have reached a dead guess is
 not resent, and dropped from the end after 10 s it was a 502 for an unrun
 write every 10 s an isolate while the default region stayed down. A
 guessed region's router answering 5xx naming no home (cut off from the
-home's region) sends a read on to the next region; the placing router's own
-502 for a node it could not reach names the home (`region::homed`), and is
-the answer. A move across leaves the old region's router relaying
+home's region) sends a read on to the next region, and any request where
+its 503 says it never sent it (`Fennec-Unsent`, [router.md](router.md#pooled-connections)).
+A write goes on safely there: no router marks a request any hop may have
+run -- a relaying router turns another's marked 503 into a 502 once a
+router before it took the request whole, or a failover cut it from a node
+that had, and drops a node's mark -- so the mark reaching the entry means
+the request ran nowhere. The placing router's own answer for a node it could not reach -- a 503
+marked so where the request never went out, a 502 where it may have run --
+names the home (`region::homed`), and is the answer. A move across leaves the old region's router relaying
 the tenant and the answer naming the new home, a hop and never an error.
 A read marked for a replica (`Fennec-Read: replica`, the read replicas
 below; `marked`, `near`) goes to the region of the client's continent
@@ -325,7 +331,9 @@ answering 502 for a router it cannot reach (Cloudflare's tunnel
 troubleshooting: 530 means no connector, the 502 a connector up and its
 origin not) -- goes on only for a `GET`, `HEAD`, `OPTIONS` or a keyed
 request, the router's own rule towards a node, any other a 502 saying it
-may have run; a router's own 502 is its answer. A body up to a mebibyte is
+may have run; a router's own 502 is its answer, and so is its 503 for a
+request it never sent (`Fennec-Unsent`), passed on with its mark, the
+router still the one asked first: the next router dials the same node. A body up to a mebibyte is
 read whole for a retry, a longer one streamed to one router (`request.body`
 handed on keeps its length, probed; a router refuses a chunked body, 411),
 and one sent with no length is read up to a mebibyte and refused past it

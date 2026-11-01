@@ -185,7 +185,10 @@ it.
 **[A long read is pinned, and read with no lock held](docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a stray read reruns under the
-lock.
+lock. A stream's seed is one (`sse::seed`), its scope bound under the
+pin's lock, the ring held back to it till the first look (`hold_changes`);
+it reads again under the lock where the ring passed it or an image was
+adopted (`Database::adoptions`), as every look reseeds.
 
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica
@@ -317,7 +320,9 @@ and drops from all it forwards (`forwarded_headers`); a router refuses an
 entry token empty or equal to another it holds, at the start and as a node
 is added (`set_node`). Every router
 answer carries `Fennec-Shard: 1`; a request that may have reached one goes
-again only as a `GET`, `HEAD`, `OPTIONS` or keyed.
+again only as a `GET`, `HEAD`, `OPTIONS` or keyed, or, any request, from a
+guessed region's router's 503 marked `Fennec-Unsent`: it ran nowhere, as
+no router marks a request any hop may have run.
 
 ### Read replicas
 
@@ -1022,7 +1027,11 @@ preflights and puts its own CORS headers in place of a node's
 cannot have run or may run twice.](docs/design/router.md#pooled-connections)**
 A request not sent whole goes again, one sent whole only if `replayable`
 (a `GET`, `HEAD`, `OPTIONS`, keyed or marked read), judged by `Stage`, not
-errno; head and body are one `writev`. Every dial goes through `dial::resolve`, caching nothing; every
+errno; head and body are one `writev`. One never sent whole, the retry
+spent, is the router's 503 marked `Fennec-Unsent` (`region::unsent`),
+never a 502, and never once a try went whole (`Stage::Retried`); a node's
+mark is dropped (`answer_out`), a relayed router's too once a hop before
+went whole (`relay_send`, `after_cut`'s `ran`): a 502. Every dial goes through `dial::resolve`, caching nothing; every
 body read allocates through `zeroed` and refuses an answer with no length.
 A held request watches its client for the head (`answered_or_gone`,
 `relay_send` at a relay): an end goes on to the node, never taken for

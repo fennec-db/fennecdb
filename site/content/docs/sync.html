@@ -433,12 +433,17 @@ checked against the server's again, and a difference goes to
 loaded from a file has no history, only its present state. A cursor standing
 exactly there, after a quiet restart, gets an empty response; anything behind
 it is reseeded.</p>
+
+<p>A replica that takes its primary's whole image, having fallen behind what
+the primary keeps, reseeds every stream open on it, a seed being read
+included, even where the image stands at the stream's own change.</p>
 </details>
 
 <h2>Cost</h2>
 
-<p>The server's change ring is about 96 KB at the default size, and
-subscriptions do not poll.</p>
+<p>The server's change ring is about 96 KB at the default size,
+subscriptions do not poll, and a large seed does not hold up the writes: it
+is read beside them.</p>
 
 <details class="deep"><summary>What the change ring costs</summary>
 <p>At the default <code>--changes 4096</code> the ring is about 96 KB and costs
@@ -446,6 +451,23 @@ one push per entry on the write path. Subscriptions do not poll — see
 <a href="http-reference.html#subscriptions">the HTTP endpoint</a> for why — and are
 counted separately from ordinary requests under
 <code>--http-max-streams</code>.</p>
+</details>
+
+<details class="deep"><summary>Writes while a seed is read</summary>
+<p>A seed of 10 000 rows or more whose filter no index answers is read as a
+long <code>/query</code> is: the server takes what the read needs under its
+lock — the collection's ids, 12 bytes a row — and reads the rows with no
+lock held, so writes land while it reads. The seed is the shape at the
+change its <code>seq</code> names, and every write after that change comes in
+the stream's changes, once. Until the stream has looked past that change the
+server keeps the ring back to it, past <code>--changes</code> up to 64 times
+it (6 MB at the default), so a burst of writes beside a long seed does not
+send the client to be seeded again; past that the seed is read once more
+under the lock. A shape an index answers, or a short one, is read under the
+lock as before. Beside a subscriber seeded over and over from a million rows,
+single writes at 1 000 a second took 0.8 ms at p99, where they took 212 to
+231 ms while the seed held the lock, and each seed took as long as it did
+(<code>make seed-bench</code>).</p>
 </details>
 
 <h2>Limits</h2>

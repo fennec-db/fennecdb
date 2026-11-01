@@ -247,11 +247,16 @@ fn the_routers_own_answers_tell_an_allowed_page() {
 }
 
 #[test]
-fn a_node_the_router_cannot_reach_is_a_502_a_page_reads() {
+fn a_node_the_router_cannot_reach_is_a_503_a_page_reads() {
     let port = router(placed_at(&dead_addr()), Some(APP), 0);
     let r = ask(port, "POST", "/t/acme/query", Some(APP), "");
-    assert_eq!(r.status, 502, "{}", r.body);
+    assert_eq!(r.status, 503, "{}", r.body);
     r.tells(APP);
+    // Its wait and its mark, each a header the page may read.
+    assert_eq!(r.one("retry-after"), Some("1"));
+    assert_eq!(r.one("fennec-unsent"), Some("1"));
+    let exposed = r.one("access-control-expose-headers").unwrap_or_default();
+    assert!(exposed.contains("fennec-unsent"), "{exposed}");
     // The preflight before it never reached the node: the router says
     // what its answers say, and the page sends the request.
     let r = ask(port, "OPTIONS", "/t/acme/query", Some(APP), PREFLIGHT);

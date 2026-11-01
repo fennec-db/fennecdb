@@ -291,6 +291,17 @@ with 4, `stud` and `mobi` no longer find the studio and the mobile page;
 with 5, `compa`, `highl`, `colla`, `grafa`, `vecto`, `looku` and `tenan` do
 not.
 
+The test holds the verdict, not the list of chance. For the two Turkish
+questions it asks that the words do not vote, and that a docs change cannot
+move the page: it adds `tell`, `verify` and `durable` to the answer's own
+sections until the words alone find the page, and the question is still
+ranked by its meaning, hit for hit. It once asserted that the list of chance
+*misses* the page, which fails, with nothing wrong in the search, as soon as
+an edit of docs/mobile or docs/server gives that list a `verify`. A word of
+the docs misspelled (`replicaton`, `compacton`) still counts: the index
+meets it by the letters they share, its mark shares most of the word, and
+the words vote beside the meaning.
+
 The sections' vectors are kept in `search-embeddings.json`, committed, by a
 hash of the model and the text embedded: a build embeds only the sections
 new or changed since, through Workers AI when it has the credentials

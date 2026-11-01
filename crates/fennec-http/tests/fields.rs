@@ -806,7 +806,19 @@ fn a_token_without_field_lists_reads_as_before() {
 /// show: that would tell it when the door changed.
 #[test]
 fn a_stream_is_masked_and_hears_nothing_of_a_hidden_write() {
-    let n = start();
+    masked_stream(false);
+}
+
+/// The same, its seed read pinned with no lock held (`sse::seed`): masked
+/// through the pin's schemas, and the rows it was sent known by their
+/// digests as the seed under the lock knew them.
+#[test]
+fn a_pinned_seed_is_masked_as_the_locked_one() {
+    masked_stream(true);
+}
+
+fn masked_stream(pin_all: bool) {
+    let n = start_with(POLICY, SETUP, pin_all);
     let c = n.courier();
     let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_millis(100)))

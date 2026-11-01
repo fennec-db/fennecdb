@@ -171,7 +171,7 @@ test('the vector image holds every section, and the cache\'s vectors reach it', 
 
 test('a question the words miss finds its page by its meaning', () => {
   // Each: the words leave the page off the ten shown, the meaning puts it there.
-  for (const [q, url, within] of [
+  for (const [q, url, within, chance] of [
     ['keep data on a phone', 'docs/mobile', 1],
     // Neither Turkish question holds a word of the docs. The words found
     // only prefixes (`telefonda` reaches `tell`, `veri` `version`, `durdurmak`
@@ -189,11 +189,20 @@ test('a question the words miss finds its page by its meaning', () => {
     // since the cache was committed and CI holds no vector for them. A bound
     // is otherwise the committed vectors' rank and one more, for the sections
     // whose text changed since: CI holds the vector of an earlier text.
-    ['telefonda veri saklamak', 'docs/mobile', 2], // 1st
-    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 8], // 1st
+    //
+    // What is held of the words for these two is that they do not vote
+    // (`by`), not that their list of chance misses the page: a `tell` or a
+    // `verify` added to the page itself puts it in that list, and the answer
+    // stays where the meaning put it (the test after the next).
+    ['telefonda veri saklamak', 'docs/mobile', 2, true], // 1st
+    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 8, true], // 1st
   ]) {
     const [words, meaning] = standing(q, url);
-    assert.ok(words === 0, `${q}: the words alone found ${url} at ${words}`);
+    if (chance) {
+      assert.equal(search(dbv, q, null, 10, fixtureVector(q)).by, 'meaning', `${q}: the words voted`);
+    } else {
+      assert.ok(words === 0, `${q}: the words alone found ${url} at ${words}`);
+    }
     assert.ok(meaning >= 1 && meaning <= within, `${q}: ${url} at ${meaning} by meaning, within ${within} wanted`);
   }
 });
@@ -213,6 +222,18 @@ test('the words vote beside the meaning only when a hit holds a word of the ques
     // `ne` is no word that counts, though the docs hold a `ne`.
     ['dosya sürekli büyüyor ne yapmalıyım', 'meaning'],
     ['как хранить данные на телефоне', 'meaning'],
+    // English words the docs do not hold, sharing four letters with some
+    // they do (`telemetry`, `version`): the same chance, in the docs' own
+    // language.
+    ['telepathy versatile', 'meaning'],
+    ['sürüm doğrulaması nasıl yapılır', 'meaning'],
+    // A word of the docs misspelled or half typed meets it by the letters
+    // they share, and that hit is a right one: its mark shares most of the
+    // word (`replication` and `replicaton` seven letters), so the words vote
+    // though the rest of the question is Turkish or nothing the docs say.
+    ['compacton nasıl yapılır', 'words and meaning'],
+    ['idempotncy anahtarı nedir', 'words and meaning'],
+    ['replicaton failovr', 'words and meaning'],
     // A run of Han is indexed in grams: not judged, and voting as it did.
     ['手机上如何存储数据', 'words and meaning'],
   ]) {
@@ -248,6 +269,58 @@ test('a question with no word of the docs is ranked by its meaning alone, whatev
   // A word of the question itself, whole, and the words vote again.
   copy.run('set docs {body: $1} where id = $2', [`${rows[0].body} veri`, rows[0].id]);
   assert.equal(search(copy, q, null, 10, v).by, 'words and meaning');
+});
+
+/** Words that share three or four letters with a Turkish question's, and no
+ *  more: `tell`, `telephone` for `telefonda`; `version`, `verify` for `veri`;
+ *  `durable` for `durdurmak`. What a docs change adds without meaning to. */
+const CHANCE = ' tell tells telling telephone version verify verified very durable durability';
+
+test('chance words in the answer\'s own sections do not move a question with no word of the docs', async () => {
+  // The words' list for such a question is prefixes of three or four
+  // letters, so a docs change can put the page that answers it there, saying
+  // nothing of the question. Added here to the answer's own sections, a
+  // round at a time until the words alone find it -- so the test does
+  // exercise what it holds, whatever the docs say now -- and the question is
+  // still ranked by its meaning, hit for hit, as it was.
+  for (const [q, page] of [
+    ['telefonda veri saklamak', 'docs/mobile'],
+    ['dosyanın büyümesini durdurmak', 'docs/server#compaction'],
+  ]) {
+    const v = fixtureVector(q);
+    const before = search(dbv, q, null, 10, v);
+    assert.equal(before.by, 'meaning', q);
+    const copy = await Fennec.open(module);
+    copy.load(imageOf('FENNEC_SEARCH_VECTORS', 'search-vectors'));
+    const own = copy.run('get docs select id, url, body limit 10000').rows
+      .filter((r) => r.url === page || r.url.startsWith(`${page}#`));
+    assert.ok(own.length > 0, `no section of ${page}`);
+    const found = () => search(copy, q).hits.some((h) => h.url === page || h.url.startsWith(`${page}#`));
+    let rounds = 0;
+    for (; rounds < 20 && !found(); rounds++) {
+      for (const r of own) {
+        r.body += CHANCE;
+        copy.run('set docs {body: $1} where id = $2', [r.body, r.id]);
+      }
+    }
+    assert.ok(found(), `${q}: ${rounds} rounds of chance words did not put ${page} among the words' ten`);
+    const after = search(copy, q, null, 10, v);
+    assert.equal(after.by, 'meaning', `${q}: the words voted once ${page} held chance words`);
+    assert.deepEqual(after.hits.map((h) => h.url), before.hits.map((h) => h.url), q);
+  }
+});
+
+test('a misspelled word of the docs still counts beside the meaning', () => {
+  // Two words misspelled: the words find replication and failover by the
+  // letters they share, the vector is that of a question about failing over
+  // to a replica, and the pages both lists agree on stand first.
+  const q = 'replicaton failovr';
+  const found = search(dbv, q, null, 10, fixtureVector('replica failover'));
+  assert.equal(found.by, 'words and meaning');
+  const at = found.hits.findIndex((h) => /^docs\/(sharding-failover|replication)/.test(h.url)) + 1;
+  assert.ok(at >= 1 && at <= 3, `${q}: the page at ${at}, within 3 wanted`);
+  // Words only, as the dialog asks two words: the same pages, first.
+  assert.match(search(db, q).hits[0].url, /^docs\/(sharding-failover|replication)/);
 });
 
 /** Whether a section is in the vector image with its vector. */

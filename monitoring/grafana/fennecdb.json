@@ -1552,7 +1552,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Forwarded requests a node did not answer or broke off, each answered 502.",
+      "description": "Forwarded requests a node did not answer or broke off: answered 503 where the request never went out whole (Fennec-Unsent), 502 where the node may have run it.",
       "gridPos": {
         "h": 8,
         "w": 8,
