@@ -39,7 +39,7 @@
             defer { w.stop() }
             let sent = Wire.Log(script: nil)
             let db = connection(w.url, reads: .nearest, log: sent)
-            let home = Fennec.connect(url: w.url)
+            let home = connection(w.url, reads: .home, log: sent)
 
             // A write goes home, unmarked -- marked, it would be refused --
             // and says where it left the tenant.
@@ -90,21 +90,24 @@
             // read near above may have been answered home, the replica not
             // caught up yet.
             try await eventually("the read replica holds both writes") { try await w.replicaCount() == 2 }
-            await w.eu1.kill()
+            try await w.eu1.kill()
             #expect(try await db.from("notes").order("body").rows().compactMap { $0["body"]?.string } == ["a", "b"])
             #expect(sent.last["fennec-read"] == "replica" && sent.last["fennec-after"] == String(b))
+            // Home gone, the router never sends them: its own 503, marked so.
             do {
                 _ = try await home.from("notes").rows()
                 Issue.record("home answered with no node")
             } catch let e as FennecError {
-                #expect(e.status == 502)
+                #expect(e.status == 503)
             }
+            #expect(sent.answered["fennec-unsent"] == "1")
             do {
                 try await db.from("notes").insert(["body": "c"] as Value)
                 Issue.record("a write was answered with no home")
             } catch let e as FennecError {
-                #expect(e.status == 502)
+                #expect(e.status == 503)
             }
+            #expect(sent.answered["fennec-unsent"] == "1")
         }
 
         /// `call`'s `read` is the mark every text the caller knows reads has:
@@ -135,10 +138,11 @@
             #expect(try await db.call("history").rows.count == 1)
 
             try await eventually("the read replica holds the note") { try await w.replicaCount() == 1 }
-            await w.eu1.kill()
+            try await w.eu1.kill()
             #expect(try await db.call("history", read: true).rows.compactMap { $0["body"]?.string } == ["a"])
             let homeless = await refusal { try await db.call("history") }
-            #expect(homeless?.status == 502)
+            #expect(homeless?.status == 503)
+            #expect(sent.answered["fennec-unsent"] == "1")
         }
 
         /// A connection reading home marks nothing, `asRead()` or not.

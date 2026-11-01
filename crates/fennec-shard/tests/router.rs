@@ -565,12 +565,13 @@ fn refusals() {
     assert_eq!(r.0, 404);
 }
 
-/// A node nothing listens on is a 502 at once, not after the upstream
-/// timeout: a minute here, past the 10 s the test's client reads for.
-/// Held to the whole of a 2 s timeout, the router's answer had no time to
-/// spare on a machine under load.
+/// A node nothing listens on is the router's 503 at once -- the request
+/// never sent, `tests/unsent.rs` -- not after the upstream timeout: a
+/// minute here, past the 10 s the test's client reads for. Held to the
+/// whole of a 2 s timeout, the router's answer had no time to spare on a
+/// machine under load.
 #[test]
-fn an_unreachable_node_is_a_502_not_a_hang() {
+fn an_unreachable_node_is_a_503_not_a_hang() {
     const TIMEOUT: Duration = Duration::from_secs(60);
     // A directory that points at a node nothing listens on: what a crashed
     // node looks like from the router.
@@ -603,7 +604,7 @@ fn an_unreachable_node_is_a_502_not_a_hang() {
 
     let started = Instant::now();
     let r = call(port, "GET", "/t/acme/", "", None);
-    assert_eq!(r.0, 502, "{}", r.1);
+    assert_eq!(r.0, 503, "{}", r.1);
     assert!(started.elapsed() < TIMEOUT / 2, "{:?}", started.elapsed());
     // And a new tenant has nowhere to go.
     assert_eq!(call(port, "PUT", "/_shard/tenants/beta", "", None).0, 503);

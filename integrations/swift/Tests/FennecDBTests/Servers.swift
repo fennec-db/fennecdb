@@ -54,11 +54,11 @@
         }
 
         /// Killed, as a crash would: no checkpoint, no goodbye. Returns once
-        /// it is gone, its file and its port let go of.
-        func kill() async {
+        /// it is gone, its file let go of and its port refusing.
+        func kill() async throws {
             let d = daemon
             daemon = nil
-            await d?.kill()
+            try await d?.kill()
         }
 
         /// Started again over its file, on the port it had.
@@ -164,10 +164,38 @@
         }
 
         /// Killed, as a crash would: no checkpoint, no goodbye. Returns once
-        /// it is gone, its files and its port let go of.
-        func kill() async {
+        /// it is gone, its files let go of and its port refusing. A test
+        /// going on sooner had its next request reach the dying process on
+        /// a connection the router pooled, written whole and then reset: the
+        /// router's 502 of a request that may have run, not its 503 of one
+        /// never sent. The refusal comes after the node's ends of those
+        /// connections closed, so the router's look at each finds it closed.
+        func kill() async throws {
             Darwin.kill(process.processIdentifier, SIGKILL)
             _ = await ended.value()
+            for _ in 0..<1000 {
+                if Daemon.refused(port) { return }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            throw FennecError(code: .io, message: "port \(port) still answers its connects")
+        }
+
+        /// Whether a connect to `port` is refused: nothing listens there now.
+        private static func refused(_ port: Int) -> Bool {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { return false }
+            defer { Darwin.close(fd) }
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(UInt16(port).bigEndian)
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let r = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            return r != 0 && errno == ECONNREFUSED
         }
 
         /// Killed and not waited for: what a test's `defer` can do.

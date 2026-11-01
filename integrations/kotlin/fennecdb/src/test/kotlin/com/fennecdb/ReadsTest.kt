@@ -67,9 +67,26 @@ class Daemon(binary: String, args: List<String>) {
         }
     }
 
-    /** Killed, as a crash would; returns once it is gone. */
+    /**
+     * Killed, as a crash would; returns once it is gone and its port refuses.
+     * A test going on sooner had its next request reach the dying process
+     * on a connection the router pooled, written whole and then reset: the
+     * router's 502 of a request that may have run, not its 503 of one never
+     * sent. The refusal comes after the node's ends of those connections
+     * closed, so the router's look at each finds it closed.
+     */
     fun kill() {
-        process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
+        check(process.destroyForcibly().waitFor(20, TimeUnit.SECONDS)) { "the server on $port did not exit" }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+        while (true) {
+            try {
+                java.net.Socket("127.0.0.1", port).close()
+            } catch (_: java.net.ConnectException) {
+                return
+            }
+            check(System.nanoTime() < deadline) { "port $port still answers its connects" }
+            Thread.sleep(20)
+        }
     }
 
     companion object {
@@ -173,12 +190,13 @@ data class Scripted(
 /**
  * A server between a connection and where its requests go, keeping each
  * request's head in the order they came, as it arrives: passed on to
- * [target], or -- with none -- answered from the script in turn, `[]` once
- * it runs out.
+ * [target], the head of each answer kept too, or -- with none -- answered
+ * from the script in turn, `[]` once it runs out.
  */
 class Wire(private val target: String?, script: List<Scripted> = emptyList()) : AutoCloseable {
     private val script = ArrayDeque(script)
     private val heads = mutableListOf<Map<String, String>>()
+    private val answers = mutableListOf<Map<String, String>>()
     private val pool: ExecutorService = Executors.newCachedThreadPool()
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         executor = pool
@@ -193,6 +211,9 @@ class Wire(private val target: String?, script: List<Scripted> = emptyList()) : 
 
     /** The last request's head. */
     val last: Map<String, String> get() = all.last()
+
+    /** The head of the last answer passed on, its names in lower case. */
+    val answered: Map<String, String> @Synchronized get() = answers.last()
 
     /** Answers for the script's end. */
     @Synchronized fun add(vararg more: Scripted) {
@@ -226,6 +247,7 @@ class Wire(private val target: String?, script: List<Scripted> = emptyList()) : 
         val status = c.responseCode
         val back = (if (status >= 400) c.errorStream else c.inputStream)?.use { it.readBytes() } ?: ByteArray(0)
         c.headerFields.forEach { (name, values) -> if (name != null && name.lowercase() !in HOP) values.forEach { ex.responseHeaders.add(name, it) } }
+        synchronized(this) { answers.add(c.headerFields.filterKeys { it != null }.entries.associate { (k, v) -> k.lowercase() to v.joinToString(",") }) }
         ex.sendResponseHeaders(status, if (back.isEmpty()) -1 else back.size.toLong())
         ex.responseBody.use { it.write(back) }
     }
@@ -275,7 +297,7 @@ class ReadsTest {
         val sent = Wire(w.near)
         try {
             val db = Fennec.connect("${sent.url}/t/acme", reads = FennecRemote.Reads.NEAREST)
-            val home = Fennec.connect("${w.near}/t/acme")
+            val home = Fennec.connect("${sent.url}/t/acme")
 
             // A write goes home, unmarked -- marked, it would be refused --
             // and says where it left the tenant.
@@ -328,8 +350,11 @@ class ReadsTest {
             assertEquals(listOf("a", "b"), db.from("notes").order("body").rows().map { it.string("body") })
             assertEquals("replica", sent.last["fennec-read"])
             assertEquals("$b", sent.last["fennec-after"])
-            assertEquals(502, assertFailsWith<FennecException> { home.from("notes").rows() }.status)
-            assertEquals(502, assertFailsWith<FennecException> { db.from("notes").insert(mapOf("body" to "c")) }.status)
+            // Home gone, the router never sends them: its own 503, marked so.
+            assertEquals(503, assertFailsWith<FennecException> { home.from("notes").rows() }.status)
+            assertEquals("1", sent.answered["fennec-unsent"])
+            assertEquals(503, assertFailsWith<FennecException> { db.from("notes").insert(mapOf("body" to "c")) }.status)
+            assertEquals("1", sent.answered["fennec-unsent"])
         } finally {
             sent.close()
             w.stop()
@@ -369,7 +394,8 @@ class ReadsTest {
             w.eu1.kill()
             assertEquals(listOf("z"), db.call("history", read = true).rows.map { it.string("body") })
             assertEquals("replica", sent.last["fennec-read"])
-            assertEquals(502, assertFailsWith<FennecException> { db.call("stamp") }.status)
+            assertEquals(503, assertFailsWith<FennecException> { db.call("stamp") }.status)
+            assertEquals("1", sent.answered["fennec-unsent"])
         } finally {
             sent.close()
             w.stop()

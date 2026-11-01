@@ -36,7 +36,9 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         // mirrors a 2026-07-28 request's version, method and tool into
         // headers its binding requires, refused unread otherwise. A page
         // marks its reads for a replica near it with `Fennec-Read`, which
-        // refused, went home every time.
+        // refused, went home every time. A router's 503 for a request it
+        // never got to the node says so (`Fennec-Unsent`), which a page
+        // reads to send an unkeyed write again.
         (
             "Access-Control-Allow-Headers",
             "content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, \
@@ -45,7 +47,7 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         (
             "Access-Control-Expose-Headers",
             "fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, \
-             fennec-quota, retry-after",
+             fennec-quota, retry-after, fennec-unsent",
         ),
         ("Access-Control-Max-Age", "600"),
         ("Vary", "Origin"),

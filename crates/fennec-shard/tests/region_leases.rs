@@ -579,11 +579,19 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
         r#"{"region":"us"}"#,
     );
     assert_eq!(status, 503, "{body}");
-    assert_eq!(
-        query(w.global, "beta", r#"put notes {title: "thawed"}"#).0,
-        200,
-        "the move was undone"
-    );
+    let (status, written) = query(w.global, "beta", r#"put notes {title: "thawed"}"#);
+    if status != 200 {
+        // Which refusal it was: beta left frozen on eu1, or placed `moving`
+        // still, or eu1's lease lapsed -- each its own cause.
+        let tok = format!("adm-{}-eu1", w.tag);
+        let open = call(w.eu1.port, "GET", "/_admin/open", "", Some(&tok)).1;
+        let lease = call(w.eu1.port, "GET", "/_admin/lease", "", Some(&tok)).1;
+        let placed = shard(w.global, "GET", "/_shard/tenants/beta", "").1;
+        panic!(
+            "the move was undone ({body}), but beta's write answered {status} {written}; \
+             eu1 holds {open} under the lease {lease}, and the directory places it {placed}"
+        );
+    }
     let (status, body) = shard(
         w.global,
         "PUT",

@@ -164,7 +164,7 @@ fn pass(s: &Arc<Shared>, router: TcpStream) {
 /// the FIN is processed -- so a look at its end finds the close. Read as the
 /// connection's TCP state, which leaves FIN_WAIT_1, CLOSING or LAST_ACK on
 /// that ACK alone, or is gone with the connection.
-fn until_fin_taken(s: &TcpStream) {
+pub(crate) fn until_fin_taken(s: &TcpStream) {
     use std::os::fd::AsRawFd;
     extern "C" {
         fn getsockopt(fd: i32, level: i32, name: i32, value: *mut u8, len: *mut u32) -> i32;

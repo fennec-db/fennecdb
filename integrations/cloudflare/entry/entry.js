@@ -96,6 +96,17 @@ export const UNSERVED = 'fennec-unserved';
 export const FOLLOWS = 'fennec-follows';
 
 /**
+ * The mark of a router's own 503 for a request it never got whole to the
+ * tenant's node or region (`fennec-shard`'s `region::UNSENT_HEADER`): the
+ * request ran nowhere. Unlike {@link UNSERVED} the router took it and is
+ * the one that answered -- the next router of its region dials the same
+ * node -- so it is the router's answer, passed on to the client with its
+ * mark; a guessed region's, naming no home, sends even a write on to the
+ * next region, which may reach the home.
+ */
+export const UNSENT = 'fennec-unsent';
+
+/**
  * Answers Cloudflare gives a Worker's fetch where the origin was never
  * reached -- refused (521), unreachable (523), its TLS failed (525, 526),
  * no tunnel connector (530) -- so the router cannot have run the request.
@@ -189,7 +200,7 @@ export function corsHeaders(origin) {
     'Access-Control-Allow-Headers':
       'content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, fennec-read, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
     'Access-Control-Expose-Headers':
-      'fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, fennec-quota, retry-after',
+      'fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, fennec-quota, retry-after, fennec-unsent',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
@@ -607,8 +618,11 @@ async function toRegion(request, url, region, sent, state, guess) {
         // A router that could not reach the tenant's home -- it relays to
         // another region, cut off from this one -- answers 5xx naming no
         // home; a read goes on to the next region, whose router may reach
-        // it. The home's own failure names the home, and is the answer.
-        if (guess && answer.status >= 500 && !answer.headers.has(HOME) && sent.repeatable && sent.again) {
+        // it, and so does any request the router says it never sent
+        // ({@link UNSENT}). The home's own failure names the home, and is
+        // the answer.
+        const unrun = answer.status === 503 && answer.headers.has(UNSENT);
+        if (guess && answer.status >= 500 && !answer.headers.has(HOME) && (sent.repeatable || unrun) && sent.again) {
           console.warn(`region ${region.name}: ${router}: answered ${answer.status}, naming no home`);
           return { fail: 'resend', why: `answered ${answer.status}`, answer };
         }

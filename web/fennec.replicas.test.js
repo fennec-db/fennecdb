@@ -72,11 +72,35 @@ async function listening(path, args, name) {
       rej(new Error(`${name} exited with ${c}: ${buf}`));
     });
   });
-  const close = () => {
+  // Killed, as a crash would; returns once it is gone and its port refuses.
+  // A test going on sooner had its next request reach the dying process on
+  // a connection the router pooled, written whole and then reset: the
+  // router's 502 of a request that may have run, not its 503 of one never
+  // sent. The refusal comes after the node's ends of those connections
+  // closed, so the router's look at each finds it closed.
+  const close = async () => {
     alive.delete(proc);
-    proc.kill('SIGKILL');
+    if (proc.exitCode === null && proc.signalCode === null) {
+      const gone = new Promise((res) => proc.once('exit', res));
+      proc.kill('SIGKILL');
+      await gone;
+    }
+    await until(() => refused(url), `${url} refusing its connects`);
   };
   return { url, close };
+}
+
+/** Whether a connect to `url` is refused: nothing listens there now. */
+function refused(url) {
+  const { hostname, port } = new URL(url);
+  return new Promise((res) => {
+    const s = dial(Number(port), hostname);
+    s.once('connect', () => {
+      s.destroy();
+      res(false);
+    });
+    s.once('error', (e) => res(e.code === 'ECONNREFUSED'));
+  });
 }
 
 /** Waits for `check` to hold: a bound on what must happen, never on how soon. */
@@ -206,7 +230,7 @@ async function world({ parked = false, schema = 'create collection notes (body t
     us: us.url,
     url: `${us.url}/t/acme`,
     close: async () => {
-      for (const p of [us, eu, us1, eu1]) p.close();
+      await Promise.all([us, eu, us1, eu1].map((p) => p.close()));
       link?.close();
       nearby?.close();
       await rm(dir, { recursive: true, force: true });
@@ -214,12 +238,15 @@ async function world({ parked = false, schema = 'create collection notes (body t
   };
 }
 
-/** A `fetch` that keeps every request's headers. */
+/** A `fetch` that keeps every request's headers, and its answer's (`answer`) once it comes. */
 function recording() {
   const sent = [];
-  const fetchSpy = (url, init) => {
-    sent.push({ path: new URL(url).pathname, headers: { ...(init?.headers ?? {}) } });
-    return fetch(url, init);
+  const fetchSpy = async (url, init) => {
+    const kept = { path: new URL(url).pathname, headers: { ...(init?.headers ?? {}) } };
+    sent.push(kept);
+    const res = await fetch(url, init);
+    kept.answer = res.headers;
+    return res;
   };
   return { sent, fetch: fetchSpy };
 }
@@ -229,7 +256,7 @@ test('reads near a read replica are answered there, never older than the client 
   try {
     const { sent, fetch: spy } = recording();
     const db = connect(w.url, { reads: 'nearest', fetch: spy });
-    const home = connect(w.url);
+    const home = connect(w.url, { fetch: spy });
 
     // A write goes home, and says where it left the tenant.
     const { seq } = await db.run('put notes {body: "a"}');
@@ -280,12 +307,15 @@ test('reads near a read replica are answered there, never older than the client 
       });
       return res.ok && (await res.json())[0]?.count === 2;
     }, 'the read replica holds both writes');
-    w.eu1.close();
+    await w.eu1.close();
     assert.deepEqual((await db.from('notes').order('body').rows()).map((r) => r.body), ['a', 'b']);
     read = sent.at(-1);
     assert.equal(read.headers['fennec-read'], 'replica');
-    await assert.rejects(() => home.from('notes').rows(), (e) => e instanceof FennecError && e.status === 502);
-    await assert.rejects(() => db.from('notes').insert({ body: 'c' }), (e) => e instanceof FennecError && e.status === 502);
+    // Home gone, the router never sends them: its own 503, marked so.
+    await assert.rejects(() => home.from('notes').rows(), (e) => e instanceof FennecError && e.status === 503);
+    assert.equal(sent.at(-1).answer.get('fennec-unsent'), '1');
+    await assert.rejects(() => db.from('notes').insert({ body: 'c' }), (e) => e instanceof FennecError && e.status === 503);
+    assert.equal(sent.at(-1).answer.get('fennec-unsent'), '1');
   } finally {
     await w.close();
   }
@@ -338,10 +368,14 @@ test('a call marked read is answered by the read replica, a call that writes goe
       });
       return res.ok && (await res.json())[0]?.count === 1;
     }, 'the read replica holds the write');
-    w.eu1.close();
+    await w.eu1.close();
     assert.deepEqual((await db.call('bodies', null, { read: true })).rows.map((r) => r.body), ['a']);
     assert.equal(sent.at(-1).headers['fennec-read'], 'replica');
-    await assert.rejects(() => connect(w.url).call('bodies'), (e) => e instanceof FennecError && e.status === 502);
+    await assert.rejects(
+      () => connect(w.url, { fetch: spy }).call('bodies'),
+      (e) => e instanceof FennecError && e.status === 503,
+    );
+    assert.equal(sent.at(-1).answer.get('fennec-unsent'), '1');
   } finally {
     await w.close();
   }
