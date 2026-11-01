@@ -63,8 +63,24 @@ fn node(tag: &str) -> Node {
     node_of(tag, None)
 }
 
+/// The tags this process made nodes under. A node's directory is its tag's,
+/// emptied as it is made and removed as it drops, so two tests naming one
+/// tag ran over each other's files: one test's end removed the directory,
+/// `<tenant>.instance` and all, under the other's open tenants, whose files
+/// then carried no identity -- a failure macOS's runner met, whose tests
+/// overlap otherwise than Ubuntu's. Taken twice, a tag fails at once.
+static TAGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// A node; `follows` makes it the standby of the node at that address.
 fn node_of(tag: &str, follows: Option<u16>) -> Node {
+    {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !tags.iter().any(|t| t == tag),
+            "node tag `{tag}` is another test's: their directories would be one"
+        );
+        tags.push(tag.into());
+    }
     let dir = std::env::temp_dir().join(format!("fennec-retries-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -719,10 +735,10 @@ fn an_old_primary_back_from_a_failover_is_its_tenants_copy_again() {
 /// a copy after a second failover.
 #[test]
 fn a_tenant_failed_over_twice_has_its_copy_back_each_time() {
-    let (n1, n2) = (node("tw1"), node("tw2"));
+    let (n1, n2) = (node("ft1"), node("ft2"));
     let port = router();
-    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "tw1", "");
-    put_node(port, "n2", &format!("127.0.0.1:{}", n2.port), "tw2", "");
+    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "ft1", "");
+    put_node(port, "n2", &format!("127.0.0.1:{}", n2.port), "ft2", "");
     create_acme(port);
     assert_eq!(placed(port, "acme"), ("n1".into(), Some("n2".into())));
     reads(n2.port, "acme", "get notes select title", "\"one\"");
@@ -1494,11 +1510,11 @@ fn a_file_of_no_lineage_left_is_taken_back() {
 /// the file, no `DELETE` sent in its place. Both stay for an operator.
 #[test]
 fn a_node_from_before_identities_has_no_file_taken_back() {
-    let n1 = node("ob1");
+    let n1 = node("nb1");
     let p1 = Proxy::to(n1.port);
     p1.before_identities();
     let port = router();
-    put_node(port, "n1", &p1.addr, "ob1", "");
+    put_node(port, "n1", &p1.addr, "nb1", "");
     create_taken_back(
         port,
         &p1,
