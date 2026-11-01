@@ -32,6 +32,7 @@ use crate::access::{Mask, Scope, Who};
 use crate::api;
 use crate::http::Request;
 use crate::Config;
+use fennec_core::changes::Hold;
 use fennec_core::prelude::*;
 use std::io::Write;
 use std::net::TcpStream;
@@ -357,13 +358,17 @@ pub fn serve(
     let everything = seen.is_none() && matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
     let mut expiry = Expiry::of(&crate::held::read(db), &sub.collection, everything);
     let began = now_ms() as i64;
+    // The change ring held back to the seed's change until the first look
+    // after it ([`seed`]).
+    let mut held = None;
     let mut cursor = match sub.since {
         // Resuming, a scoped subscriber is seeded all the same: the rows it
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
         _ => match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
-            Ok(seq) => {
+            Ok((seq, hold)) => {
+                held = Some(hold);
                 // The seed left out every row past its time by then.
                 if let Some(x) = &mut expiry {
                     x.told = Some(began);
@@ -442,6 +447,9 @@ pub fn serve(
                 Err(e) => (Err(e), None),
             }
         };
+        // Looked past the seed's change: the ring goes back to its
+        // capacity.
+        drop(held.take());
         match step {
             Err(e) => {
                 // The collection may have been dropped: write the reason and
@@ -452,7 +460,7 @@ pub fn serve(
             Ok(Changes::Reseed) => {
                 let began = now_ms() as i64;
                 match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
-                    Ok(seq) => cursor = seq,
+                    Ok((seq, hold)) => (cursor, held) = (seq, Some(hold)),
                     Err(_) => return,
                 }
                 if let Some(x) = &mut expiry {
@@ -832,21 +840,37 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
     out
 }
 
-/// Sends the whole shape and returns the counter at that moment.
+/// Sends the whole shape; the change it is at, and the change ring held
+/// back to it until the stream's first look after it.
 ///
-/// Reading the rows and taking the counter has to happen **under one lock**:
-/// a write arriving in between would leave a row that is not in the seed yet
-/// counts as "seen" according to the counter.
+/// The rows and the change they are at are one moment: a write landing
+/// between the two would be a row the seed lacks at a counter saying the
+/// stream has it. Read under the lock, that moment was the whole read, and
+/// every writer waited for it -- single writes beside a stream seeded from
+/// a million rows waited out its scan and encoding. So the shape is pinned
+/// under the lock ([`Database::pin`]) and read with none held, at the
+/// change the pin took: writes go on beside it, and the stream tells each
+/// as a change after that one, none twice and none missed. Under the same
+/// lock a rule reading another collection is bound, so the scope is the
+/// pin's moment too, and the change ring is held back to that change
+/// ([`Database::hold_changes`]): the writes beside a long seed would
+/// otherwise leave the stream behind the ring's horizon, to be seeded
+/// again, pinned again, for as long as they outran the scan. What the pin
+/// declines -- a shape an index answers, one too short to be worth it -- is
+/// read under the lock as before, as is a pinned read that reached for an
+/// index (`None`), and one the ring no longer reaches back to by its end,
+/// the hold's bound passed.
 fn seed(
     out: &mut TcpStream,
     db: &Arc<RwLock<Database>>,
     (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
     seen: &mut Option<Seen>,
     quiet: bool,
-) -> std::io::Result<u64> {
-    let (rows, seq) = {
+) -> std::io::Result<(u64, Hold)> {
+    let mut pin = true;
+    let read = loop {
         let guard = crate::held::read(db);
-        let answered = match reach {
+        let bound = match reach {
             Some(r) => r.bind(&guard).map(|(filter, project, v)| {
                 (sub.filter, sub.project) = (filter, project);
                 *view = Some(v);
@@ -854,29 +878,65 @@ fn seed(
             None => Ok(()),
         };
         let stmt = Statement::Select(api::seed_select(sub));
-        match answered.and_then(|_| guard.query(&stmt, &[])) {
-            Ok(Response::Rows(mut rs)) => {
-                if let Some((scope, mask)) = shows(view) {
-                    scope.shown_rows(mask, &guard, &mut rs);
-                }
-                if let Some(seen) = seen {
-                    seen.seed(&rs.rows);
-                }
-                let rows = match quiet {
-                    true => String::from("[]"),
-                    false => api::rows_json(&rs),
-                };
-                (rows, guard.change_seq())
-            }
-            Ok(_) => (String::from("[]"), guard.change_seq()),
-            Err(e) => {
-                event(out, "error", &error_json(&e))?;
-                return Err(std::io::Error::other("seeding failed"));
-            }
+        let hold = guard.hold_changes();
+        let pinned = match (pin, &bound) {
+            (true, Ok(())) => guard.pin(&[(&stmt, &[][..])]),
+            _ => None,
+        };
+        let Some(p) = pinned else {
+            let rows = bound.and_then(|_| guard.query(&stmt, &[]));
+            break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold));
+        };
+        drop(guard);
+        let Some(rows) = p.query(&stmt, &[]) else {
+            pin = false;
+            continue;
+        };
+        let read = seed_rows(p.database(), rows, view, seen, quiet);
+        drop(p);
+        let guard = crate::held::read(db);
+        let seq = hold.seq();
+        if read.is_ok() && (seq < guard.change_horizon() || seq > guard.change_seq()) {
+            pin = false;
+            continue;
+        }
+        break read.map(|r| (r, hold));
+    };
+    let (rows, hold) = match read {
+        Ok(r) => r,
+        Err(e) => {
+            event(out, "error", &error_json(&e))?;
+            return Err(std::io::Error::other("seeding failed"));
         }
     };
+    let seq = hold.seq();
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
-    Ok(seq)
+    Ok((seq, hold))
+}
+
+/// The seed's rows as their event sends them, read on `db` -- the database
+/// under the lock, or a pin's, whose schemas the mask reads -- and `seen`
+/// told of them.
+fn seed_rows(
+    db: &Database,
+    rows: fennec_core::error::Result<Response>,
+    view: &Option<View>,
+    seen: &mut Option<Seen>,
+    quiet: bool,
+) -> fennec_core::error::Result<String> {
+    let Response::Rows(mut rs) = rows? else {
+        return Ok(String::from("[]"));
+    };
+    if let Some((scope, mask)) = shows(view) {
+        scope.shown_rows(mask, db, &mut rs);
+    }
+    if let Some(seen) = seen {
+        seen.seed(&rs.rows);
+    }
+    Ok(match quiet {
+        true => String::from("[]"),
+        false => api::rows_json(&rs),
+    })
 }
 
 /// The last event of a stream whose token's `exp` passed: what a refused

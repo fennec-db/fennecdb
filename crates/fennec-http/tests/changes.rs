@@ -8,7 +8,7 @@ use fennec_core::prelude::*;
 use fennec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 fn seeded() -> Database {
@@ -768,4 +768,226 @@ fn an_expired_row_leaves_the_subscription() {
     let (name, data) = s.next().expect("change");
     assert_eq!(name, "change");
     assert!(data.contains("\"dels\":[1]"), "{data}");
+}
+
+/// A seed read pinned leaves out a row past its time as the one under the
+/// lock does: `alive` is ANDed in on the pin as on the database.
+#[test]
+fn a_pinned_seed_leaves_out_an_expired_row() {
+    let h = start(Config::default());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let mut db = h.db.write().unwrap();
+        db.set_pin_at(0);
+        for sql in [
+            "create collection sessions (user text, seen timestamp @ttl(1h))".to_string(),
+            format!("put sessions [{{user: \"live\", seen: {now}}}, {{user: \"old\", seen: 1}}]"),
+        ] {
+            db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+        }
+    }
+    for target in ["/sessions/changes", "/sessions/changes?user=neq.nobody"] {
+        let mut s = Sub::open(h.port, target);
+        let (name, data) = s.next().expect("seed");
+        assert_eq!(name, "seed");
+        assert_eq!(count(&data, "rows"), 1, "{target}: {data}");
+        assert!(data.contains("live") && !data.contains("old"), "{data}");
+    }
+}
+
+/// A server over `seeded()` whose every read is pinned where the pin takes
+/// it, and whose shape `gate(status) != "none"` holds its first read -- a
+/// seed's -- where it began, until the test lets it go: the moment a long
+/// seed is being read. The receiver hears the read begin; dropping the
+/// sender lets it go.
+fn gated(cfg: Config) -> (Harness, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (began, heard) = mpsc::channel();
+    let (go, wait) = mpsc::channel::<()>();
+    let first = Mutex::new(Some((began, wait)));
+    let mut db = seeded();
+    db.set_pin_at(0);
+    let gate = move |args: &[Value]| {
+        let held = first.lock().unwrap().take();
+        if let Some((began, wait)) = held {
+            let _ = began.send(());
+            let _ = wait.recv();
+        }
+        Ok(args[0].clone())
+    };
+    db.registry_mut()
+        .register_fn("gate", Arc::new(gate))
+        .unwrap();
+    (start_over(db, cfg), heard, go)
+}
+
+const GATED: &str = "/tasks/changes?where=gate(status)%20!%3D%20%22none%22";
+
+/// The `seq` an event's data names.
+fn seq_of(data: &str) -> u64 {
+    let at = data.find("\"seq\":").expect("seq") + 6;
+    let digits: String = data[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().unwrap()
+}
+
+/// The rows of the array `key` in an event's data, by id, each the text
+/// after its id.
+fn rows_of(data: &str, key: &str) -> Vec<(i64, String)> {
+    let (_, tail) = data.split_once(&format!("\"{key}\":[")).expect(key);
+    tail.split("{\"id\":")
+        .skip(1)
+        .map(|r| {
+            let id: String = r.chars().take_while(char::is_ascii_digit).collect();
+            (
+                id.parse().unwrap(),
+                r.split('}').next().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A seed is read pinned, with no lock held (`Database::pin`): a write
+/// made while the seed is being read is answered then, not after it, and
+/// the stream joins the two with no gap and no duplicate -- the seed at
+/// the change it read at, without the writes, and the writes the changes
+/// after it, each once. A seed taking the lock again holds the write for
+/// as long as it reads, and the write here is never answered.
+#[test]
+fn a_write_made_while_a_seed_is_read_lands_and_follows_it() {
+    let (h, began, go) = gated(Config::default());
+    let before = h.db.read().unwrap().change_seq();
+    let mut s = Sub::open(h.port, GATED);
+    assert_eq!(s.status, 200);
+    began
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the seed read");
+
+    // Answered while the seed is held: no lock is.
+    let (st, _) = post(
+        h.port,
+        "/tasks",
+        r#"{"key":"d","title":"four","status":"open"}"#,
+    );
+    assert_eq!(
+        st, 201,
+        "a write waited for the seed: the seed holds the lock"
+    );
+    let (st, body) = post(
+        h.port,
+        "/query",
+        r#"{"query":"set tasks {title: \"ONE\"} where key = \"a\""}"#,
+    );
+    assert_eq!(st, 200, "{body}");
+    let after = h.db.read().unwrap().change_seq();
+    assert_eq!(after, before + 2);
+    drop(go);
+
+    let (name, seed) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert_eq!(seq_of(&seed), before, "the seed is at the change it read");
+    assert_eq!(count(&seed, "rows"), 3, "{seed}");
+    assert!(
+        seed.contains("\"one\"") && !seed.contains("four") && !seed.contains("ONE"),
+        "{seed}"
+    );
+
+    // The replica: the seed, then every change over it, by id.
+    let mut replica: std::collections::BTreeMap<i64, String> =
+        rows_of(&seed, "rows").into_iter().collect();
+    let mut told = Vec::new();
+    while replica.len() < 4 || !replica.values().any(|r| r.contains("ONE")) {
+        let (name, data) = s.next().expect("the writes made beside the seed");
+        assert_eq!(name, "change", "{data}");
+        assert!(seq_of(&data) > before && seq_of(&data) <= after, "{data}");
+        for (id, row) in rows_of(&data, "puts") {
+            told.push(id);
+            replica.insert(id, row);
+        }
+    }
+    told.sort_unstable();
+    assert_eq!(told, [1, 4], "each write told once, nothing the seed held");
+    assert!(s.next_within(Duration::from_millis(300)).is_none());
+    // What the server holds, row for row.
+    let (_, all) = post(h.port, "/query", r#"{"query":"get tasks order id"}"#);
+    let held: std::collections::BTreeMap<i64, String> =
+        rows_of(&format!("{{\"rows\":{all}}}"), "rows")
+            .into_iter()
+            .collect();
+    assert_eq!(replica, held);
+}
+
+/// `n` tasks put in one write while a seed is held, keyed from `from`.
+fn put_tasks(port: u16, from: usize, n: usize) {
+    let docs: Vec<String> = (from..from + n)
+        .map(|k| format!(r#"{{"key":"k{k}","title":"t{k}","status":"open"}}"#))
+        .collect();
+    let body = format!(
+        r#"{{"query":"put tasks $1","params":[[{}]]}}"#,
+        docs.join(",")
+    );
+    let (st, out) = post(port, "/query", &body);
+    assert_eq!(st, 200, "{out}");
+}
+
+/// Writes beside a seed outnumbering the change ring leave its change
+/// servable: the seed holds the ring back to it (`Database::hold_changes`),
+/// and the stream goes on from the seed with every one of them, rather
+/// than finding its change overrun and seeding again -- pinned again, for
+/// as long as the writes outran the scan.
+#[test]
+fn a_seed_holds_the_change_ring_back_to_its_change() {
+    let (h, began, go) = gated(Config {
+        change_capacity: 2,
+        ..Config::default()
+    });
+    let before = h.db.read().unwrap().change_seq();
+    let mut s = Sub::open(h.port, GATED);
+    began
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the seed read");
+    put_tasks(h.port, 0, 5);
+    drop(go);
+    let (name, seed) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert_eq!(seq_of(&seed), before, "{seed}");
+    assert_eq!(count(&seed, "rows"), 3, "{seed}");
+    let (name, change) = s.next().expect("the writes beside the seed");
+    assert_eq!(name, "change", "{change}");
+    assert_eq!(count(&change, "puts"), 5, "{change}");
+    // Let go, the ring is back to its capacity: a later write is told.
+    put_tasks(h.port, 5, 1);
+    let (name, change) = s.next().expect("a write after");
+    assert_eq!((name.as_str(), count(&change, "puts")), ("change", 1));
+}
+
+/// A pinned seed the change ring no longer reaches back to by its end --
+/// the writes beside it past what a hold keeps (`HELD_TIMES` the ring) --
+/// is read again under the lock rather than sent: the stream would find its
+/// change overrun and seed again, pinned again, for as long as writes
+/// outran the scan. One seed goes out, at the change it read, holding
+/// every write made beside the first read.
+#[test]
+fn a_seed_the_ring_overran_is_read_again_under_the_lock() {
+    let (h, began, go) = gated(Config {
+        change_capacity: 2,
+        ..Config::default()
+    });
+    let mut s = Sub::open(h.port, GATED);
+    began
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the seed read");
+    let beside = 2 * fennec_core::changes::HELD_TIMES + 1;
+    put_tasks(h.port, 0, beside);
+    let now = h.db.read().unwrap().change_seq();
+    drop(go);
+    let (name, seed) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert_eq!(seq_of(&seed), now, "{seed}");
+    assert_eq!(count(&seed, "rows"), 3 + beside, "{seed}");
+    assert!(s.next_within(Duration::from_millis(300)).is_none());
 }

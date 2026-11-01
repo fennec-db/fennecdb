@@ -312,6 +312,46 @@ database the pin and the readers beside it share
 ([named-statements.md](named-statements.md#calls)). The browser module has
 one thread and none of it: not a byte of it changed.
 
+A stream's seed is pinned too (`sse::seed`). Read under the lock, the seed
+of a large shape held every writer for its scan and encoding: single
+writes at 1 000 a second beside a subscriber seeded over and over from a
+million rows, 57 MB of JSON a seed (`make seed-bench`, writes timed from
+when each was due, three turns against the build before, the load under
+2.5) took 207-237 ms at p99 and 230-313 at most, two thirds of them past 50
+ms, against 0.46-0.61 ms alone. The seed's `get` is pinned under the lock
+its rules are bound under -- a scoped token's lists answered there, so the
+scope is the pin's moment -- its rows masked through the pin's schemas and
+`Seen` told of them after, and the seed names the pin's change: the
+stream's first look reads the changes after it, so a write landing during
+the read is in no seed and in the next change, once
+(`a_write_made_while_a_seed_is_read_lands_and_follows_it`, which a seed
+taking the lock again fails at its write). Pinned, the same writes took
+0.80-0.83 ms at p99 and 4.1-5.8 at most, none past 50, and a seed 257-265
+ms at its median, as under the lock (262-265). The writes beside a long
+seed are what the change ring must hold: one client's single writes back
+to back, 46 000 a second, passed its 4 096 marks in under a tenth of a
+second, and the stream, behind the horizon at its first look, was seeded
+again -- pinned again, as long as the writes outran it; read again under
+the lock where the ring had passed its change, a seed took 1.66 s against
+0.59 under the lock alone (one run, before the hold). So under the same lock the ring
+is held back to the seed's change (`ChangeLog::hold`,
+`Database::hold_changes`): while a hold names a change, the mark of a write
+after it is not dropped, the ring growing past its capacity to `HELD_TIMES`
+(64) it, 6 MB at the default and `HELD_MOST` (24 MB) at most, and the
+hold goes at the stream's first look, the next write dropping what is past
+the capacity and giving the room back. A write into a ring with room asks
+nothing more; one into a full ring reads an atomic. Past the bound the
+seed is read again under the lock rather than sent
+(`a_seed_the_ring_overran_is_read_again_under_the_lock`). Back to back,
+the writes then went on beside the seeds at 45 500-49 300 a second, the
+longest 11-16 ms, against 5 500-6 700 and 500-642 ms under the lock, and a
+seed took 678-873 ms at its median against 550-912: it shares the cores
+with eight times the writes. A shape an index answers, or one of fewer than `PIN_AT` rows, is
+read under the lock as before, as is the shape read again where the rules
+of a stream reading another collection moved (`enter_and_leave`). The
+browser module's code is the same to the byte: the hold is native, and its
+`record` drops a mark as it did.
+
 ## Blocks
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
