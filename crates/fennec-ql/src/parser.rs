@@ -198,6 +198,31 @@ const ROUTINE: &str = "a routine here is a named statement, `create statement <n
                        <statement>`, called with `call <name> {a: 1}`: it runs with its own \
                        text's authority, where SQL's function runs as its caller unless told";
 
+/// What SQL's `create trigger` is refused with: PostgreSQL's runs a
+/// function as whoever fired it, before, after or instead of the write,
+/// and fires the triggers its own writes wake -- read as a bound
+/// statement, each would mean something else.
+#[cfg(feature = "statements")]
+const TRIGGER: &str = "a trigger here is a statement bound to a collection's writes, `create \
+                       statement <name> after insert|set|del <collection> [where new.<field> \
+                       ...] as <statement>`: it runs in the write's block, once a row, with its \
+                       own text's authority";
+
+/// What `before` where `after` binds a statement is refused with: a
+/// document is encoded, and judged by a token's rules, as its writer wrote
+/// it.
+#[cfg(feature = "statements")]
+const BEFORE: &str = "a bound statement runs after the write that wakes it, in its block, and \
+                      changes no row as it is written: `create statement <name> after set \
+                      <collection> ... as ...`";
+
+/// What a parameter, a claim or parentheses in a bound statement are
+/// refused with.
+#[cfg(feature = "statements")]
+const BOUND_VALUES: &str = "a bound statement takes no parameters and reads no claim: its \
+                            values are the row's, `new.<field>` as written and `old.<field>` \
+                            as it stood, and it writes on behalf of whoever wrote the row";
+
 /// What PostgreSQL's `->>` is answered with, and `json_extract()` by the
 /// engine in its words.
 const JSON_PATH: &str = "a json field's member is read by a path: `meta.source`, not \
@@ -274,6 +299,24 @@ pub struct Parser {
 struct Names {
     params: Vec<String>,
     claims: Vec<String>,
+    /// A bound statement's condition or body: where `new.` and `old.`
+    /// read the row a write wrote, and no `$` names anything.
+    #[cfg(feature = "statements")]
+    bound: Option<Bound>,
+}
+
+/// What a bound statement's `new.<field>` and `old.<field>` are read by.
+#[cfg(feature = "statements")]
+struct Bound {
+    /// The events it is bound to (`Binding::INSERT`, ...): `old.` where
+    /// one is `insert` and `new.` where one is `del` are refused.
+    events: u8,
+    /// Reading its condition, where each stays the row's field, bound to
+    /// the collection as a filter is, and a bare name is refused; else its
+    /// body, where each is a place.
+    condition: bool,
+    /// The body's places, in the order they first appear.
+    places: Vec<fennec_core::named::Place>,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
@@ -934,7 +977,13 @@ impl Parser {
     /// as [`Self::ident`].
     fn path(&mut self) -> Result<String> {
         match self.next() {
-            Tok::Ident(s) | Tok::Str(s) => Ok(s),
+            Tok::Ident(s) | Tok::Str(s) => {
+                #[cfg(feature = "statements")]
+                if self.def.is_some() {
+                    self.pair_named(&s)?;
+                }
+                Ok(s)
+            }
             other => self.err(format!("expected a name, found {}", other.describe())),
         }
     }
@@ -1143,6 +1192,10 @@ impl Parser {
         #[cfg(feature = "statements")]
         if self.peek_kw("function") || self.peek_kw("procedure") {
             return self.err(ROUTINE);
+        }
+        #[cfg(feature = "statements")]
+        if self.peek_kw("trigger") {
+            return self.err(TRIGGER);
         }
         if self.peek_kw("index") {
             return self.create_index(false);
@@ -2047,7 +2100,7 @@ impl Parser {
             });
         }
         #[cfg(feature = "statements")]
-        if self.peek_kw("function") || self.peek_kw("procedure") {
+        if self.peek_among(&["function", "procedure", "trigger"]) {
             return self.err("a named statement is dropped with `drop statement <name>`");
         }
         // `drop index [if exists] on posts (owner, created)`: an index over
@@ -3649,6 +3702,9 @@ impl Parser {
     #[cold]
     #[inline(never)]
     fn past_params(&self, i: usize, declared: usize) -> Error {
+        if self.def.as_deref().is_some_and(|d| d.bound.is_some()) {
+            return self.error(&BOUND_VALUES);
+        }
         self.error(&format!(
             "`${}`: the statement declares {declared} parameters, read by name or by place, and \
              its claims by name, `$jwt.<claim>`",
@@ -3708,6 +3764,9 @@ impl Parser {
 
     #[cfg(feature = "statements")]
     fn named_in(&self, d: &Names, n: &str) -> Result<usize> {
+        if d.bound.is_some() {
+            return self.err(BOUND_VALUES);
+        }
         if n == "jwt" {
             return self
                 .err("`$jwt` is the caller's token: a body reads a claim it declares, `$jwt.sub`");
@@ -3753,12 +3812,19 @@ impl Parser {
         self.skip();
         let at = self.i;
         let name = self.statement_name()?;
+        if self.peek_kw("after") {
+            return self.bound_statement(replace, name, at);
+        }
+        if self.peek_kw("before") {
+            return self.err(BEFORE);
+        }
         if !matches!(self.peek(), Tok::LParen) {
             return Err(self.taught(
                 "a statement's parameters follow its name in parentheses, `()` for none: \
                  `create statement purge() ...`",
             ));
         }
+        let paren = self.i;
         self.skip();
         let mut params: Vec<Param> = Vec::new();
         while !matches!(self.peek(), Tok::RParen) {
@@ -3826,6 +3892,7 @@ impl Parser {
                         .flatten()
                         .map(|c: &Claim| c.name.clone())
                         .collect(),
+                    bound: None,
                 }));
                 let at = self.i;
                 let e = self.expr();
@@ -3836,6 +3903,13 @@ impl Parser {
                     return self.err(why);
                 }
                 check = Some(e);
+            } else if self.peek_kw("after") {
+                // Bound to writes: its values are the row's, so the
+                // parentheses are what is refused.
+                self.i = paren;
+                return self.err(BOUND_VALUES);
+            } else if self.peek_kw("before") {
+                return self.err(BEFORE);
             } else {
                 break;
             }
@@ -3850,6 +3924,7 @@ impl Parser {
         self.def = Some(Box::new(Names {
             params: params.iter().map(|p| p.name.clone()).collect(),
             claims: claims.iter().map(|c| c.name.clone()).collect(),
+            bound: None,
         }));
         let body = self.body();
         self.def = None;
@@ -3866,7 +3941,21 @@ impl Parser {
             body,
             block,
             text: String::new(),
+            after: None,
         };
+        self.defined(def, &starts, at)
+    }
+
+    /// `def`, read, held to what its tree alone refuses
+    /// ([`Definition::refused`]), placed at the statement of the body it is
+    /// about or at the name.
+    #[cfg(feature = "statements")]
+    fn defined(
+        &mut self,
+        def: fennec_core::named::Definition,
+        starts: &[usize],
+        at: usize,
+    ) -> Result<Statement> {
         if let Some((which, why)) = def.refused() {
             // A body the text's end cut short may yet read: a `where`, a
             // list, a claim on the next line.
@@ -3875,6 +3964,256 @@ impl Parser {
             return self.err(why);
         }
         Ok(Statement::CreateStatement(Box::new(def)))
+    }
+
+    /// `create [or replace] statement <name> after <event> [or <event> ...]
+    /// <collection> [where <condition>] [comment '<text>'] [scans] as
+    /// <body>`, at `after`: a statement bound to a collection's writes,
+    /// with no parameters, claims, `check` or `public` -- its values are
+    /// the row's, `new.<field>` and `old.<field>`, numbered as places in
+    /// the body. Out of line, as every path only a definition takes.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn bound_statement(&mut self, replace: bool, name: String, at: usize) -> Result<Statement> {
+        use fennec_core::named::{Binding, Definition};
+        self.skip();
+        let mut events = 0u8;
+        loop {
+            let event = self.i;
+            // SQL's `update` and `delete` are `set` and `del` here, as
+            // they are as statements.
+            let bit = if self.eat_kw("insert") {
+                Binding::INSERT
+            } else if self.eat_kw("set") || self.eat_kw("update") {
+                Binding::SET
+            } else if self.eat_kw("del") || self.eat_kw("delete") {
+                Binding::DEL
+            } else {
+                return Err(self.taught(
+                    "a statement is bound after what happens to a row, `insert`, `set` or \
+                     `del`: `after set orders`, `after insert or del likes`",
+                ));
+            };
+            if events & bit != 0 {
+                self.i = event;
+                return self.err(format!("`{}` is named twice", Binding::events_named(bit)));
+            }
+            events |= bit;
+            if !self.eat_kw("or") {
+                break;
+            }
+        }
+        // PostgreSQL's `after update on orders`: unconsumed, as SQL's
+        // words with no FennecQL meaning are.
+        if self.peek_kw("on")
+            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::Ident(w)) if !among(w, &["where", "as", "comment", "scans"]))
+        {
+            return self.err(
+                "a bound statement names its collection after its events, with no `on`: \
+                 `after set orders`",
+            );
+        }
+        let named = self.i;
+        let collection = self.ident()?;
+        if fennec_core::declared::own(&collection) {
+            self.i = named;
+            return self.err(format!(
+                "`{collection}` is the database's own: no statement is bound to a collection \
+                 whose name starts with `_`"
+            ));
+        }
+        let bound = |condition| {
+            Some(Box::new(Names {
+                params: Vec::new(),
+                claims: Vec::new(),
+                bound: Some(Bound {
+                    events,
+                    condition,
+                    places: Vec::new(),
+                }),
+            }))
+        };
+        let mut condition = None;
+        if self.peek_kw("when") {
+            return self.err(
+                "a bound statement's condition is its `where`: `after set orders where \
+                 new.status = 'paid'`",
+            );
+        }
+        if self.eat_kw("where") {
+            self.def = bound(true);
+            let from = self.i;
+            let e = self.expr();
+            self.def = None;
+            let e = e?;
+            if let Some(why) = fennec_core::named::condition_refused(&e) {
+                self.i = from;
+                return self.err(why);
+            }
+            condition = Some(e);
+        }
+        let (mut comment, mut scans) = (None, false);
+        loop {
+            if self.peek_kw("comment") {
+                if comment.is_some() {
+                    return self.err("`comment` is written once");
+                }
+                self.skip();
+                comment = Some(self.quoted_text(
+                    "`comment` takes what the statement does, in quotes: `comment 'A ledger \
+                     line for each order paid'`",
+                )?);
+            } else if self.peek_kw("scans") {
+                if scans {
+                    return self.err("`scans` is written once");
+                }
+                self.skip();
+                scans = true;
+            } else if self.peek_among(&["claims", "check", "public"]) {
+                return self.err(BOUND_VALUES);
+            } else {
+                break;
+            }
+        }
+        if !self.eat_kw("as") {
+            return Err(self.taught(
+                "a bound statement's body follows its collection, its `where` and `as`: `as \
+                 insert ledger {order: new.id}`, or `as begin <statement>; ... end`",
+            ));
+        }
+        self.def = bound(false);
+        let body = self.body();
+        let places = self
+            .def
+            .take()
+            .and_then(|d| d.bound)
+            .map(|b| b.places)
+            .unwrap_or_default();
+        let (body, starts, block) = body?;
+        let def = Definition {
+            name,
+            replace,
+            params: Vec::new(),
+            claims: Vec::new(),
+            public: false,
+            scans,
+            comment,
+            check: None,
+            body,
+            block,
+            text: String::new(),
+            after: Some(Box::new(Binding {
+                collection,
+                events,
+                condition,
+                places,
+            })),
+        };
+        self.defined(def, &starts, at)
+    }
+
+    /// `new.<field>` or `old.<field>` in a bound statement, `name` stepped
+    /// past: in its condition the row's field, as written; in its body a
+    /// place, `Expr::Param(k)`. Each refused where an event it is bound to
+    /// has no such row, and a bare name in the condition, which has no row
+    /// to be read from. Anywhere else in a definition, the field.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn defined_field(&mut self, name: String) -> Result<Expr> {
+        use fennec_core::named::{Binding, Place};
+        let Some((events, condition)) = self
+            .def
+            .as_deref()
+            .and_then(|d| d.bound.as_ref())
+            .map(|b| (b.events, b.condition))
+        else {
+            return Ok(Expr::Field(name));
+        };
+        let (old, field) = match (name.strip_prefix("new."), name.strip_prefix("old.")) {
+            (Some(f), _) => (false, f),
+            (_, Some(f)) => (true, f),
+            _ if condition => {
+                self.i -= 1;
+                return self.err(format!(
+                    "`{name}`: a bound statement's condition reads the row as written, \
+                     `new.<field>`, and as it stood, `old.<field>` -- a bare name has no row to \
+                     be read from"
+                ));
+            }
+            _ => return Ok(Expr::Field(name)),
+        };
+        let bound = Binding::events_named(events);
+        if old && events & Binding::INSERT != 0 {
+            self.i -= 1;
+            return self.err(format!(
+                "`{name}`: a row made has no row before it, and this statement is bound after \
+                 `{bound}` -- `old.` is read where every event is `set` or `del`"
+            ));
+        }
+        if !old && events & Binding::DEL != 0 {
+            self.i -= 1;
+            return self.err(format!(
+                "`{name}`: a row taken out leaves none, and this statement is bound after \
+                 `{bound}` -- `new.` is read where every event is `insert` or `set`"
+            ));
+        }
+        if condition {
+            return Ok(Expr::Field(name));
+        }
+        let field = field.to_string();
+        let Some(b) = self.def.as_deref_mut().and_then(|d| d.bound.as_mut()) else {
+            return Ok(Expr::Field(name));
+        };
+        let k = match b
+            .places
+            .iter()
+            .position(|p| p.old == old && p.field == field)
+        {
+            Some(k) => k,
+            None => {
+                b.places.push(Place { old, field });
+                b.places.len() - 1
+            }
+        };
+        Ok(Expr::Param(k))
+    }
+
+    /// An inner `get` in a bound statement's condition, at its `get`: the
+    /// condition reads the row alone, refused here before the inner get's
+    /// own names would be as bare ones.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn condition_reads_elsewhere(&self) -> Result<()> {
+        let bound = self.def.as_deref().and_then(|d| d.bound.as_ref());
+        if bound.is_some_and(|b| b.condition) {
+            return self.err(
+                "a bound statement's condition reads the row alone: a read of another \
+                 collection is its body's guard, `get ... require 1 else '<why>'`",
+            );
+        }
+        Ok(())
+    }
+
+    /// A name where a bound statement's body takes one -- a list's, a
+    /// key's -- that is the row's: `new.` and `old.` are values, read where
+    /// a value stands.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn pair_named(&mut self, name: &str) -> Result<()> {
+        let bound = self.def.as_deref().is_some_and(|d| d.bound.is_some());
+        if bound && (name.starts_with("new.") || name.starts_with("old.")) {
+            self.i -= 1;
+            return self.err(format!(
+                "`{name}` is a value of the row the write wrote, read where a value stands \
+                 (`{{order: {name}}}`, `where id = {name}`), and names no field here"
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(not(feature = "statements"))]
@@ -4387,6 +4726,10 @@ impl Parser {
     /// depth subqueries nest to, and to the one column it answers.
     fn inner_get(&mut self) -> Result<Select> {
         self.deeper()?;
+        #[cfg(feature = "statements")]
+        if self.def.is_some() {
+            self.condition_reads_elsewhere()?;
+        }
         self.subqueries += 1;
         let inner = self.get();
         self.subqueries -= 1;
@@ -5050,6 +5393,12 @@ impl Parser {
                     self.skip();
                     return self.call(lower);
                 }
+                // A bound statement's `new.` and `old.`, out of line: every
+                // field of every text passes here.
+                #[cfg(feature = "statements")]
+                if self.def.is_some() {
+                    return self.defined_field(name);
+                }
                 Ok(Expr::Field(name))
             }
             // PostgreSQL's `meta->>'source'`, lexed `-` and `>`.
@@ -5259,6 +5608,13 @@ mod tests {
         // A `case`'s `end` inside a body, and a `;` before the body's own:
         // the studio's splitter reads it as one statement too.
         "create statement grade($id int) as begin get scores select id, case when points >= 90 then 'a' else 'b' end as grade where id = $id; end",
+        // A bound statement: its events, its collection, its condition and
+        // its body each go on with the next line until `as` and the body
+        // read whole.
+        "create statement paid_ledger after set orders where new.status = 'paid' and old.status = 'open' comment 'A ledger line' as begin get accounts select id where id = new.account limit 1 require 1 else 'no such account'; insert ledger {order: new.id, account: new.account, amount: new.total, at: now()}; set accounts {balance: balance - new.total} where id = new.account require 1 end",
+        "create or replace statement count_likes after insert or set likes scans as set posts {likes: likes + 1} where id = new.post",
+        "create statement unlike after delete likes where old.n > 0 as set posts {likes: likes - 1} where id = old.post order id limit 1",
+        "create statement debit after update orders as update accounts set balance = balance - new.total where id = new.account require 1",
         "drop statement if exists transfer",
         "statements",
         "describe statement transfer",

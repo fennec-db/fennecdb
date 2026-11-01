@@ -116,10 +116,13 @@ pub const MAX_CLAIMS: usize = 16;
 pub const MAX_NAME: usize = 59;
 
 /// `create [or replace] statement <name>(<parameters>) [claims (...)]
-/// [public] [scans] [comment '<text>'] [check <expr>] as <body>`. Two are
-/// equal where everything but their [`Definition::text`] is: the same
-/// statement written over one line or several. Its `Debug` form is its
-/// tree's, the text left out, which `make fennecql-corpus` compares.
+/// [public] [scans] [comment '<text>'] [check <expr>] as <body>`, or one
+/// bound to a collection's writes, `create [or replace] statement <name>
+/// after <event> [or <event> ...] <collection> [where <condition>]
+/// [comment '<text>'] [scans] as <body>` ([`Binding`]). Two are equal where
+/// everything but their [`Definition::text`] is: the same statement
+/// written over one line or several. Its `Debug` form is its tree's, the
+/// text left out, which `make fennecql-corpus` compares.
 #[derive(Clone)]
 pub struct Definition {
     pub name: String,
@@ -156,7 +159,90 @@ pub struct Definition {
     /// `parse`): what its record stores and an open reads again. The
     /// digest leaves it out, as it leaves out how the tree was written.
     pub text: String,
+    /// `after <event> <collection> [where ...]`: a statement bound to a
+    /// collection's writes, never called, with no parameters, claims,
+    /// `check` or `public` -- its values are the row's. Boxed: a callable
+    /// definition carries a pointer for it.
+    pub after: Option<Box<Binding>>,
 }
+
+/// What a bound statement is bound to (`docs/design/named-statements.md`,
+/// *Write-bound statements*): the writes of one collection, by what
+/// happened to a row -- [`Binding::INSERT`], [`Binding::SET`] and
+/// [`Binding::DEL`], the bits its record will write -- and a condition over
+/// the row as written and as it stood. Its body reads the pair through
+/// [`Binding::places`]: `new.total` is `Expr::Param(k)`, `k` its place, so
+/// the body is the statements every path of the engine takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binding {
+    pub collection: String,
+    /// The events, a bit each: SQL's `update` and `delete` read as `set`
+    /// and `del`.
+    pub events: u8,
+    /// `where <condition>`: `new.<field>`, `old.<field>` and `now()` alone,
+    /// each field an `Expr::Field` named as written (`new.status`), which
+    /// the engine binds to the collection as a read's filter is bound, its
+    /// collation and case fold with it.
+    pub condition: Option<Expr>,
+    /// What the body's `Expr::Param(k)` reads: the `k`th of its
+    /// `new.<field>`s and `old.<field>`s, in the order they first appear.
+    pub places: Vec<Place>,
+}
+
+impl Binding {
+    /// A row made: `insert`, a `put` of an id not held.
+    pub const INSERT: u8 = 1;
+    /// A row written over: `set`, a `put` of a live row's id.
+    pub const SET: u8 = 2;
+    /// A row taken out: `del`.
+    pub const DEL: u8 = 4;
+
+    /// Whether every event it is bound to leaves a row as written: none is
+    /// a `del`.
+    pub fn reads_new(&self) -> bool {
+        self.events & Self::DEL == 0
+    }
+
+    /// Whether every event it is bound to had a row as it stood: none is an
+    /// `insert`.
+    pub fn reads_old(&self) -> bool {
+        self.events & Self::INSERT == 0
+    }
+
+    /// The events as FennecQL writes them, `insert or set`.
+    pub fn events_named(events: u8) -> String {
+        let mut out = String::new();
+        for (bit, word) in [
+            (Self::INSERT, "insert"),
+            (Self::SET, "set"),
+            (Self::DEL, "del"),
+        ] {
+            if events & bit != 0 {
+                if !out.is_empty() {
+                    out.push_str(" or ");
+                }
+                out.push_str(word);
+            }
+        }
+        out
+    }
+}
+
+/// A place of a bound statement's body: `new.<field>` or `old.<field>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Place {
+    /// `old.`, the row as it stood; else `new.`, the row as written.
+    pub old: bool,
+    /// The field, or a path into a `json` one (`meta.source`).
+    pub field: String,
+}
+
+/// What every way of running a statement answers a bound one's definition
+/// with until the engine runs bindings: one defined with nothing to run it
+/// would let the writes it binds land without its rows.
+pub const BOUND_NOT_BUILT: &str = "write-bound statements are not built yet: a statement \
+                                   defined `after` a collection's writes is refused until the \
+                                   engine runs it in the block of every write it binds";
 
 /// `$name type [= literal]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -305,6 +391,12 @@ impl Definition {
                 );
             }
         }
+        // A bound statement's answer goes nowhere and it reads no claim:
+        // its values are the row's, its writes on behalf of whoever wrote
+        // it.
+        if let Some(b) = &self.after {
+            return self.bound_refused(b);
+        }
         let last = self.body.len() - 1;
         if let Some(why) = unnamed_answer(&self.body[last]) {
             return at(last, why.into());
@@ -327,6 +419,29 @@ impl Definition {
                     self.name
                 ),
             ));
+        }
+        None
+    }
+
+    /// What a bound statement's body refuses beyond a callable one's: its
+    /// rows go nowhere, so a `get` is a guard, with `require`, and nothing
+    /// answers `returning`. Out of line: only a binding's definition asks.
+    #[cold]
+    #[inline(never)]
+    fn bound_refused(&self, _: &Binding) -> Option<(Option<usize>, String)> {
+        for (i, s) in self.body.iter().enumerate() {
+            let why = match s {
+                Statement::Select(sel) if sel.require.is_none() => {
+                    "a bound statement answers no one, so its `get` is a guard, which counts \
+                     its rows: `get accounts select id where id = new.account require 1 else \
+                     'no such account'`"
+                }
+                _ if s.pick().is_some_and(|p| p.returning.is_some()) => {
+                    "a bound statement answers no one: its writes say nothing with `returning`"
+                }
+                _ => continue,
+            };
+            return Some((Some(i), why.into()));
         }
         None
     }
@@ -366,6 +481,7 @@ impl Definition {
             body,
             block: _,
             text: _,
+            after,
         } = self;
         let mut c = Canon(Vec::new());
         c.node(1);
@@ -398,6 +514,28 @@ impl Definition {
                 c.statement(s)?;
             }
         }
+        // Tag 9 only where the statement is bound: every callable
+        // statement's bytes, and so every stored digest, stay as they were.
+        if let Some(b) = after {
+            let Binding {
+                collection,
+                events,
+                condition,
+                places,
+            } = &**b;
+            c.tag(9);
+            c.node(4);
+            c.text(1, collection);
+            c.num(2, u64::from(*events));
+            c.opt_expr(3, condition);
+            c.list(4, places, |c, p| {
+                c.node(5);
+                c.flag(1, p.old);
+                c.text(2, &p.field);
+                c.end();
+            });
+            c.end();
+        }
         c.end();
         Ok(c.0)
     }
@@ -405,8 +543,8 @@ impl Definition {
 
 impl std::fmt::Debug for Definition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Definition")
-            .field("name", &self.name)
+        let mut d = f.debug_struct("Definition");
+        d.field("name", &self.name)
             .field("replace", &self.replace)
             .field("params", &self.params)
             .field("claims", &self.claims)
@@ -415,8 +553,13 @@ impl std::fmt::Debug for Definition {
             .field("comment", &self.comment)
             .field("check", &self.check)
             .field("body", &self.body)
-            .field("block", &self.block)
-            .finish()
+            .field("block", &self.block);
+        // Only where it holds one, as the canonical tree writes it: the
+        // corpus compares every callable definition's form as it was.
+        if let Some(b) = &self.after {
+            d.field("after", b);
+        }
+        d.finish()
     }
 }
 
@@ -434,12 +577,14 @@ impl PartialEq for Definition {
             body,
             block,
             text: _,
+            after,
         } = self;
         (name, replace, params, claims, public, scans)
             == (
                 &o.name, &o.replace, &o.params, &o.claims, &o.public, &o.scans,
             )
             && (comment, check, body, block) == (&o.comment, &o.check, &o.body, &o.block)
+            && *after == o.after
     }
 }
 
@@ -890,6 +1035,36 @@ pub fn check_refused(e: &Expr) -> Option<String> {
     };
     each_expr(e, &mut walk);
     why
+}
+
+/// Why a bound statement's condition is refused, if it is: it reads the
+/// row the write wrote, as written and as it stood, and `now()` -- a read
+/// of another collection is its body's guard, whose refusal can say why.
+/// Its fields are the parser's to hold to `new.` and `old.`.
+#[cold]
+pub fn condition_refused(e: &Expr) -> Option<String> {
+    let mut why = None;
+    let mut walk = |e: &Expr| {
+        if why.is_some() {
+            return;
+        }
+        why = match e {
+            Expr::InSelect(..) => Some(
+                "a bound statement's condition reads the row alone: a read of another \
+                 collection is its body's guard, `get ... require 1 else '<why>'`",
+            ),
+            e if e.aggregate_name().is_some() => {
+                Some("a bound statement's condition reads one row, and folds none")
+            }
+            e if e.asks_expired() => Some(
+                "a bound statement's condition reads no `expired()`: no binding sees a row \
+                 expire",
+            ),
+            _ => None,
+        };
+    };
+    each_expr(e, &mut walk);
+    why.map(String::from)
 }
 
 /// Why a body refuses `s`, if it does: the statement it holds is a `get`,
