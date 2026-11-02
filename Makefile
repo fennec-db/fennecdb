@@ -1039,9 +1039,12 @@ packaging-test:
 ## leaves the tenant on its source; and an old node, naming no file's
 ## identity, answers a reclaim 404 and keeps the file, which this tree's
 ## router reports; and an old router creates, replicates, moves and deletes
-## a tenant on this tree's nodes (tools/upgrade-order.sh). Builds BASE --
-## 12d6f8db^, the last main before the kind, unless given -- in a scratch
-## worktree: minutes. Not in CI.
+## a tenant on this tree's nodes (tools/upgrade-order.sh). Then a binding,
+## kind 13's op 3: the server, a replica and `fennec types` built before
+## the op stop at it in words (fennec-core's tests/statements.fennec).
+## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
+## and OP3_BASE -- b73ce4ca, the last before the op -- in scratch
+## worktrees: minutes. Not in CI.
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)

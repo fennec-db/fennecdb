@@ -430,6 +430,7 @@ impl Collection {
             composites: (self.composites.iter())
                 .map(|(c, _)| (c.clone(), refused()))
                 .collect(),
+            bound: self.bound,
         }
     }
 }
