@@ -100,6 +100,9 @@ pub const MAX_BODY: usize = 64;
 pub const CALL_MAX_ROWS: usize = 100_000;
 /// The most named statements a database holds.
 pub const MAX_STATEMENTS: usize = 1_000;
+/// The most statements bound to one collection's writes, refused past it,
+/// never cut: each is a run a row of every write it binds.
+pub const MAX_BOUND: usize = 16;
 /// The most values a list claim hands a call, as a policy's rule is handed
 /// at most as many (`fennec_http::access::MAX_CLAIM_VALUES`, this one): the
 /// body spreads it after `in` on every call. Past it the call is refused,
@@ -207,6 +210,37 @@ impl Binding {
     /// `insert`.
     pub fn reads_old(&self) -> bool {
         self.events & Self::INSERT == 0
+    }
+
+    /// Each field of the bound collection the condition and the body read,
+    /// as `new.<field>` or `old.<field>`, a path into a `json` field by
+    /// the field: what its `depends` names, so dropping one is refused
+    /// while the binding stands.
+    pub fn fields(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut read = Vec::new();
+        if let Some(c) = &self.condition {
+            c.referenced_fields(&mut read);
+        }
+        let pairs = read
+            .iter()
+            .filter_map(|n| n.strip_prefix("new.").or_else(|| n.strip_prefix("old.")));
+        for f in pairs.chain(self.places.iter().map(|p| p.field.as_str())) {
+            if !out.iter().any(|o| o == f) {
+                out.push(f.to_string());
+            }
+        }
+        out
+    }
+
+    /// The first field the pair reads that `schema` -- the bound
+    /// collection's -- does not hold: a field, a path, or a path into a
+    /// field it holds.
+    pub fn unheld(&self, schema: &Schema) -> Option<String> {
+        self.fields().into_iter().find(|f| {
+            let root = crate::schema::split_path(f).map_or(f.as_str(), |(r, _)| r);
+            f != "id" && schema.path(f).is_none() && schema.field(root).is_none()
+        })
     }
 
     /// The events as FennecQL writes them, `insert or set`.
@@ -731,6 +765,29 @@ impl Definition {
     /// written as `drop` and `create`, so no grant starts meaning more with
     /// no line of a policy changed.
     pub fn breaks_contract(&self, old: &Definition) -> Option<String> {
+        if let Some(why) = kind_kept(&self.name, self.bound_as(), old.bound_as()) {
+            return Some(why);
+        }
+        // A bound statement's contract is what a `wake` line grants: to
+        // cause what it writes, each collection by the kind of write. A
+        // condition, a value, a guard or a field a `set` writes is within
+        // it, and so is writing less; writing a collection or a kind of
+        // write it did not is a new grant's.
+        if self.after.is_some() {
+            let was = old.written();
+            let (c, kind) = self.written().into_iter().find(|w| !was.contains(w))?;
+            let how = match kind {
+                Binding::INSERT => "inserts into",
+                Binding::SET => "sets rows of",
+                _ => "deletes from",
+            };
+            return Some(format!(
+                "statement `{}` {how} `{c}`, which it did not: a bound statement's replacement \
+                 writes no collection and no kind of write it did not -- write `drop statement \
+                 {}` and `create statement`, which leaves every grant naming it naming nothing",
+                self.name, self.name
+            ));
+        }
         let what = if self.writes() != old.writes() {
             match self.writes() {
                 true => "writes, where it read",
@@ -757,6 +814,32 @@ impl Definition {
         ))
     }
 
+    /// What it binds, as its record keeps it: the collection and the
+    /// events. `None` for a callable statement.
+    pub fn bound_as(&self) -> Option<(&str, u8)> {
+        self.after
+            .as_ref()
+            .map(|b| (b.collection.as_str(), b.events))
+    }
+
+    /// What the body writes, by collection and kind of write: each
+    /// `(collection, Binding::INSERT | SET | DEL)` once.
+    fn written(&self) -> Vec<(&str, u8)> {
+        let mut out: Vec<(&str, u8)> = Vec::new();
+        for s in &self.body {
+            let w = match s {
+                Statement::Put { collection, .. } => (collection.as_str(), Binding::INSERT),
+                Statement::Update { collection, .. } => (collection.as_str(), Binding::SET),
+                Statement::Delete { collection, .. } => (collection.as_str(), Binding::DEL),
+                _ => continue,
+            };
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
     /// What the body depends on among the collections `schema_of` holds
     /// (`Stored::depends`, in fennec-core's engine): each collection it
     /// names; each of their fields it reads or writes -- a name the
@@ -773,11 +856,43 @@ impl Definition {
             schema_of,
             out: Vec::new(),
         };
+        // A binding's collection first, and each field its pair reads:
+        // dropping `orders`, or its `status`, is refused while it stands.
+        if let Some(b) = &self.after {
+            let s = d.collection(&b.collection)?;
+            for f in b.fields() {
+                d.field(s, &f);
+            }
+        }
         for s in &self.body {
             d.statement(s)?;
         }
         Ok(d.out)
     }
+}
+
+/// Why a replacement is refused for its kind, if it is: a callable
+/// statement replaced by a bound one or the other way, or a bound one by
+/// one bound to another collection or other events (`now` and `was`, each
+/// the collection and events a statement binds). A `call` or `wake` line
+/// naming it would name something else, so it is a new statement, written
+/// as `drop` and `create`. Asked from the record where the old text reads
+/// no tree: its op and its fields say both.
+pub fn kind_kept(name: &str, now: Option<(&str, u8)>, was: Option<(&str, u8)>) -> Option<String> {
+    let what = match (now, was) {
+        (a, b) if a == b => return None,
+        (Some(_), None) => "is bound to writes, where it was called".to_string(),
+        (None, _) => "is called, where it was bound to writes".to_string(),
+        (Some((c, e)), Some(_)) => format!(
+            "is bound after `{}` on `{c}`, where it was bound to other writes",
+            Binding::events_named(e)
+        ),
+    };
+    Some(format!(
+        "statement `{name}` {what}: a replacement keeps its kind, and a bound one the collection \
+         and events it is bound to -- write `drop statement {name}` and `create statement`, \
+         which leaves every grant naming it naming nothing"
+    ))
 }
 
 /// `c.f`.
