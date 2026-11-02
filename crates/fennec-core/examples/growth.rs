@@ -121,10 +121,10 @@ fn unique(dir: &std::path::Path, n: usize) {
     for _ in 0..3 {
         let db = fennec_core::fs::open(&path).unwrap();
         let t = Instant::now();
-        db.warm_index("j", "entry").unwrap();
+        db.warm_index("j", "entry", DerivedKind::Hash).unwrap();
         let entry = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
-        db.warm_index("j", "account").unwrap();
+        db.warm_index("j", "account", DerivedKind::Hash).unwrap();
         let account = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         for i in (0..n).step_by(7) {
@@ -181,7 +181,7 @@ fn text(dir: &std::path::Path, n: usize, new: usize) {
     for _ in 0..3 {
         let db = fennec_core::fs::open(&path).unwrap();
         let t = Instant::now();
-        db.warm_index("t", "body").unwrap();
+        db.warm_index("t", "body", DerivedKind::Text).unwrap();
         let built = t.elapsed().as_secs_f64() * 1e3;
         let q = 200_000;
         let t = Instant::now();

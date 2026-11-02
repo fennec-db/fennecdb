@@ -65,6 +65,12 @@ export function lines() {
   if (!existsSync(REPORT)) return [];
   return readFileSync(REPORT, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
+/**
+ * Sends the app a command. The lines one look of the app finds run in turn,
+ * but the next look's lines start beside them (testhooks.ts's `boot`), so a
+ * check that sends several waits for each one's report, never the last one's
+ * alone.
+ */
 export function cmd(o) {
   appendFileSync(CONTROL, JSON.stringify(o) + '\n');
 }

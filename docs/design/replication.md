@@ -1,6 +1,6 @@
 # Replication and archives
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Replication and archives*: replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-import/CLAUDE.md](../../crates/fennec-import/CLAUDE.md) list under *Replication and archives*: replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Replication
 

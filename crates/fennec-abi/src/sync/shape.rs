@@ -219,6 +219,11 @@ pub fn schema_ddl(schema: &Value) -> Result<String> {
                     text.push_str(&format!(" @{ix}"));
                 }
             }
+            // The `@text` beside its own index: a replica's `match` finds
+            // what the server's does.
+            if let Some(Value::Text(ix)) = member(f, "also") {
+                text.push_str(&format!(" @{ix}"));
+            }
             fields.push(text);
         }
     }
@@ -284,6 +289,24 @@ mod tests {
             "create collection if not exists t (k text nocase required @hash, n text collate tr, e vector<2> @hnsw(cosine, m=16, ef_search=100))"
         );
         fennec_ql::parse(&ddl).unwrap();
+        // The `@text` a field keeps beside its own: both made, the
+        // `@unique` a hash as above.
+        let s = json::parse_json(
+            r#"{"name":"t","fields":[{"name":"email","type":"text","index":"unique","also":"text(k1=1.2, b=0.75)","required":false,"nocase":true}]}"#,
+        )
+        .unwrap();
+        let ddl = schema_ddl(&s).unwrap();
+        assert_eq!(
+            ddl,
+            "create collection if not exists t (email text nocase @hash @text(k1=1.2, b=0.75))"
+        );
+        let made = fennec_ql::parse_one(&ddl).unwrap();
+        let fennec_core::query::Statement::CreateCollection { schema, .. } = made else {
+            panic!("{made:?}");
+        };
+        let email = schema.field("email").unwrap();
+        assert_eq!(email.index, fennec_core::schema::IndexKind::HASH);
+        assert!(email.text_index().is_some(), "{email:?}");
         // An index over several fields, a unique one ordered.
         let s = json::parse_json(
             r#"{"name":"t","fields":[{"name":"k","type":"text","index":null},{"name":"at","type":"timestamp","index":null}],"indexes":["sorted(k, at desc)","unique(at, k)"]}"#,

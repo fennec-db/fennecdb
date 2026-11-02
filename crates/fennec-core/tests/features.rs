@@ -141,6 +141,59 @@ fn what_needs_a_missing_index_is_refused() {
     );
 }
 
+/// A field keeping `@text` beside its `@unique`: a build without the text
+/// index refuses as the `@unique` does -- a hash is in every build -- and
+/// refuses `match`, the feature named.
+#[test]
+fn a_unique_field_beside_a_text_index_refuses_without_it() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection u (email text @unique @text, n int)",
+    )
+    .unwrap();
+    run(&mut db, r#"put u {email: "x@y.z"}"#).unwrap();
+    for sql in [
+        r#"insert u {email: "x@y.z"}"#,
+        r#"put u [{email: "n@x.y"}, {email: "n@x.y"}]"#,
+    ] {
+        assert!(
+            matches!(run(&mut db, sql), Err(Error::Duplicate(_))),
+            "{sql}"
+        );
+    }
+    let e = run(&mut db, r#"get u match email "x""#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("`text`") && e.contains("this build was made without"),
+        "{e}"
+    );
+    let e = run(&mut db, "create index on u (n) @hash").map(|_| ());
+    assert!(e.is_ok(), "{e:?}");
+}
+
+/// A field keeping `@text` beside its `@sorted`, in a build with neither:
+/// `match` is refused naming the index it reads, `text`, never the field's
+/// other one, and a range is answered by the scan.
+#[test]
+fn match_beside_an_ordered_index_names_the_text_feature() {
+    let mut db = Database::new();
+    run(&mut db, "create collection s (title text @sorted @text)").unwrap();
+    run(&mut db, r#"put s [{title: "a rust"}, {title: "b go"}]"#).unwrap();
+    let e = run(&mut db, r#"get s match title "rust""#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("`text`")
+            && !e.contains("`sorted`")
+            && e.contains("this build was made without"),
+        "{e}"
+    );
+    let r = run(&mut db, r#"get s where title >= "b" count"#).unwrap();
+    assert_eq!(ints(&r, 0), [1]);
+}
+
 /// A path's ordered index is declared in the file as a field's is: a build
 /// without `sorted` opens it, answers its comparisons and its order by the
 /// scan, and refuses to make one.

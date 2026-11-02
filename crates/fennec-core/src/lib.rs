@@ -72,7 +72,7 @@ pub mod prelude {
     #[cfg(not(target_arch = "wasm32"))]
     pub use crate::engine::Pinned;
     pub use crate::engine::{
-        ChangeBatch, Changes, Collection, CollectionStats, Database, Durability, Sink,
+        ChangeBatch, Changes, Collection, CollectionStats, Database, DerivedKind, Durability, Sink,
         TextIndexStats, VectorIndexStats, Watcher,
     };
     pub use crate::error::{Error, Result};

@@ -70,6 +70,7 @@ mod stored;
 mod subquery;
 mod synclog;
 mod ttl;
+mod two_indexes;
 mod unique;
 mod upsert;
 mod wakes;

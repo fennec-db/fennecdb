@@ -4,6 +4,9 @@
 //! The files apart (Cargo.toml) read the process's own counts, or run
 //! without the indexes.
 
+// Write-bound statements' syntax, and their refusal where statements run.
+#[cfg(feature = "statements")]
+mod bound;
 mod e2e;
 mod join;
 // Named statements' syntax, read where the parser reads it.

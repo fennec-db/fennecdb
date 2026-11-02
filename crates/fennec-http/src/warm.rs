@@ -59,13 +59,14 @@ pub fn start(what: &str, db: &Arc<RwLock<Database>>, warm: &Warm) {
                 None => return,
             };
             let mut built = 0;
-            for (c, f) in &todo {
+            for (c, f, kind) in &todo {
                 let Some(db) = db.upgrade() else { return };
                 // One index under each hold of the lock, so a writer waits
-                // out one build and not all of them.
-                let r = crate::held::read(&db).warm_index(c, f);
+                // out one build and not all of them -- a field's `@text`
+                // beside its `@unique` too, listed apart.
+                let r = crate::held::read(&db).warm_index(c, f, *kind);
                 if let Err(e) = r {
-                    crate::log!("warm ({what}): {c}.{f}: {e}");
+                    crate::log!("warm ({what}): {c}.{f} ({}): {e}", kind.name());
                 } else {
                     built += 1;
                 }

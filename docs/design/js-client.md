@@ -1,6 +1,6 @@
 # The JS client and Cloudflare
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The JS client and Cloudflare*: the module and the client entry, live queries, Durable Objects and their alarms. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [web/CLAUDE.md](../../web/CLAUDE.md) lists under *The JS client and Cloudflare*: the module and the client entry, live queries, Durable Objects and their alarms. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## The module and the client
 

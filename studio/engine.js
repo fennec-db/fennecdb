@@ -72,7 +72,7 @@ export function fennecqlOf(collections) {
   const out = [];
   for (const c of collections) {
     const fields = c.fields.map((f) =>
-      [f.name, f.type, f.required && 'required', f.collate && `collate ${f.collate}`, f.nocase && 'nocase', f.index && indexText(f.index)].filter(Boolean).join(' '),
+      [f.name, f.type, f.required && 'required', f.collate && `collate ${f.collate}`, f.nocase && 'nocase', f.index && indexText(f.index), f.also && indexText(f.also)].filter(Boolean).join(' '),
     );
     // An index over several fields, a line of the collection's own.
     for (const ix of c.indexes ?? []) fields.push(`@${ix.kind}(${ix.keys.map((k) => (k.desc ? `${k.field} desc` : k.field)).join(', ')})`);
@@ -99,6 +99,8 @@ function collections(list, described) {
         let index = f.index === 'none' ? null : f.index;
         if (df?.index?.kind === 'hnsw' && index) index = index.replace(/^(hnsw\([^,]+, m=\d+)/, `$1, ef_search=${df.index.ef_search}`);
         const out = { name: f.name, type: f.type, index, required: !!df?.required };
+        // The text index a field keeps beside its own, as a server writes it.
+        if (f.also) out.also = f.also;
         if (df?.collate) out.collate = df.collate;
         if (df?.nocase) out.nocase = true;
         return out;

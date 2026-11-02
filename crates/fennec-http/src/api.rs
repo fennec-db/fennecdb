@@ -920,10 +920,7 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
 /// When the collection has a single `@text` field there is no need to write
 /// `match_field`.
 fn default_text_field(schema: &Schema) -> Result<String> {
-    let mut texts = schema
-        .fields
-        .iter()
-        .filter(|f| matches!(f.index, IndexKind::Text(_)));
+    let mut texts = schema.fields.iter().filter(|f| f.text_index().is_some());
     match (texts.next(), texts.next()) {
         (Some(f), None) => Ok(f.name.clone()),
         (None, _) => Err(Error::Query(format!(
@@ -1543,6 +1540,12 @@ fn schemas_json(list: &[Schema]) -> String {
                 }
                 IndexKind::Inverted => json::escape_into(&mut out, "inverted"),
                 IndexKind::Geo => json::escape_into(&mut out, "geo"),
+            }
+            // The `@text` it keeps beside its own index, only where there
+            // is one: a client making a replica's collection keeps both.
+            if let Some(spec) = f.beside {
+                out.push_str(",\"also\":");
+                json::escape_into(&mut out, &format!("text({})", spec.args()));
             }
             out.push_str(",\"required\":");
             out.push_str(if f.required { "true" } else { "false" });

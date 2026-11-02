@@ -111,12 +111,12 @@ fn warm_builds_each_index_the_first_read_would() {
     assert_eq!(
         back.unbuilt_indexes(&[]),
         [
-            ("docs", "kind"),
-            ("docs", "body"),
-            ("docs", "n"),
-            ("docs", "s")
+            ("docs", "kind", DerivedKind::Hash),
+            ("docs", "body", DerivedKind::Text),
+            ("docs", "n", DerivedKind::Sorted),
+            ("docs", "s", DerivedKind::Sparse)
         ]
-        .map(|(c, f)| (c.to_string(), f.to_string()))
+        .map(|(c, f, k)| (c.to_string(), f.to_string(), k))
     );
     assert_eq!(back.warm(&["docs.body".into(), "tags".into()]).unwrap(), 1);
     assert_eq!(built(&back), [false, true, false, true, false]);
@@ -126,6 +126,29 @@ fn warm_builds_each_index_the_first_read_would() {
     for q in QUERIES {
         assert_eq!(answer(&back, q), answer(&db, q), "{q}");
     }
+}
+
+/// A field keeping `@text` beside its `@unique` is listed once a kind, and
+/// `warm_index` builds the one it names alone: a server's `--warm` holds
+/// the read lock for one build at a time (CLAUDE.md).
+#[test]
+fn warm_builds_a_fields_two_indexes_one_at_a_time() {
+    let mut db = Database::new();
+    run(&mut db, "create collection d (sku text @unique @text)");
+    run(&mut db, r#"put d {sku: "red fox"}"#);
+    let back = reopened(&db);
+    let two =
+        [DerivedKind::Hash, DerivedKind::Text].map(|k| ("d".to_string(), "sku".to_string(), k));
+    assert_eq!(back.unbuilt_indexes(&[]), two);
+    back.warm_index("d", "sku", DerivedKind::Text).unwrap();
+    let c = back.collection("d").unwrap();
+    assert!(c.texts["sku"].built().is_some());
+    assert!(c.hashes["sku"].built().is_none());
+    assert_eq!(back.unbuilt_indexes(&["d.sku".into()]), two[..1]);
+    assert_eq!(back.warm(&[]).unwrap(), 1);
+    assert!(back.collection("d").unwrap().hashes["sku"]
+        .built()
+        .is_some());
 }
 
 /// A write skips an unbuilt index, and the build reads the documents the

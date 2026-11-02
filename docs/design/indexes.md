@@ -1,6 +1,6 @@
 # Indexes
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Indexes*: `@unique`, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Indexes*: `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## @unique
 
@@ -29,9 +29,110 @@ under `nocase` the spelling written is not that one, and a sign-up as
 `SAMI.lindqvist@...` was told the row held `SAMI...` where it held
 `sami...`. A scoped token is told the field alone (`access::told`, in
 `within`): the clash names the other row's id and echoes its value, which
-told alice that bob's profile existed, where, and what it held.
+told alice that bob's profile existed, where, and what it held. A
+`@unique` beside a `@text` ([below](#two-indexes-on-a-field)) is this one:
+the field's own index, its bucket asked by every write as above.
 
-## Hash buckets
+## Two indexes on a field
+
+**A field keeps one index, and a text field `@text` beside a `@hash`,
+`@unique` or `@sorted`.** `Field::add_index` is the one rule -- for
+`create collection`, `alter collection ... add field`, `create index`
+(under the lock and beside the database), a description's `"also"` and
+`fennec_ql::schema_text` -- and any other second index is refused where it
+is declared, never dropped. The text one is `Field::beside`, every place
+that looks for a text index reading `Field::text_index`; the field's own
+stays `Field::index`, so every check of a hash, an ordered, a unique or an
+expiring index reads what it read. A schema writes the text one behind
+`TAG_BESIDE` (18) before the field's type, which a binary before it meets
+as an unknown type tag and refuses the file for.
+
+The cause. `field_def` took each `@` as `field.indexed(kind)`, which sets
+the field's one index: the last annotation won and the others were
+dropped without a word. `email text @unique @text` was a text index alone
+-- every write took a duplicate, `insert`, `put`, `set`, an upsert and a
+`/batch` alike, with `nocase` or without -- and `@text @unique` a unique
+index alone, whose `match` was refused for having no text index. Every
+other way a field is indexed already refused a second: `create index` on
+an indexed field was 409 (`check_index`), a description from statements
+said "has two indexes: a field takes one", and the TypeScript declarations
+`two indexes: fennecdb takes one a field`. The parser alone dropped one.
+
+Which two, and why. An index answers a kind of question: `@hash` and
+`@unique` equality, `@sorted` and `@ttl` equality, ranges and order,
+`@text` words, `@hnsw`, `@inverted` and `@geo` each its own type's. Two
+of the first four answer one question twice -- `@unique` is a `@hash`,
+`@sorted` answers `=` too, `@ttl` is an ordered index -- and a vector, a
+sparse vector or a point takes one index its type has. `@text` answers no
+question the others do, and none of them answers its: so it is the one
+index that stands beside another, and a text field is the one that wants
+it -- an email unique and found by a word of it, a title ordered and
+searched, a tag looked up and searched. `@unique @sorted` is refused with
+the rest, though the two answer different questions: the one-field
+unique-and-ordered key has no reader yet, and a field keeping three
+indexes, or two of the four, would be a list where every check of the own
+index looks today; `@unique(a, b)` over several fields is ordered and
+unique already. A path into a json field keeps one, as before.
+
+Rejected: `Field::index` made a list, which every one of some eighty
+places that read a field's index would walk, and the schema answers'
+`"index"` a list each client parses again, for pairs the rule refuses
+anyway; `@unique` beside `@text` written as a one-field unique index over
+several fields, which needs the `composite` feature for a check every
+build makes, and shows the field as two declarations it was not written
+as; and refusing `@unique @text` at definition, which leaves an email
+that cannot be both unique and searched.
+
+Kept up. The collection's indexes were already held by kind and field
+name (`hashes`, `texts`, `sorted`, ...), and every write keeps each map up
+by the name, so a field in two maps needed no write path of its own:
+`Collection::new` and `reset_index_structures` put the text one in
+`texts` beside the other, `build_index` builds both (`build_kind`, one
+kind), and `create index` builds only the one it adds. A block put back
+takes off only that one (`Undo::Indexed`'s flag), the field keeping what
+it had; a replica applying the schema builds only what changed of the two
+(`apply`), as a `create index` on an unindexed field always did. The
+declared plan compares the own index and the text one each as an index
+(`index_plan` twice), so a `@unique` declared beside a `@text` the
+database has is its `create index ... @unique`, and one taken off a
+refusal with the rebuild. The schema answers -- `/collections`, the
+module's, a description's field -- write `"also"` beside `"index"` only
+where there is one, so a schema without stays byte for byte; the sync's
+replica DDL (`schema_ddl`, `schemaDDL`) makes the text one too, the
+`@unique` a hash as ever, and the server refuses the duplicate.
+
+A file made before. Its schema holds the one index the parser kept, and
+nothing of the one it dropped: an open cannot know a `@unique` was meant,
+so it serves as it did. The `@unique` is put back by `create index ...
+@unique` -- or by a declared schema saying `@unique @text`, which plans
+that statement -- and over documents already holding a value twice it is
+refused naming the value and two of them, as `create index ... @unique`
+over any duplicates is, nothing built until each value is held once:
+taking the index and reporting the duplicates would have left a `@unique`
+that did not hold, which a write after it could not tell from one that
+did.
+
+The corpus (`make fennecql-corpus`), 10 095 texts against main: 13 read
+as another tree and 2 are refused that parsed, every one this change's
+own `@unique @text`, `@hash @text` and `@unique @sorted` texts -- no text
+main holds declares two indexes on a field. `Field`'s `Debug`, the form
+the corpus compares, writes `beside` only where it holds one: derived, it
+changed every field of 1 048 texts.
+
+Size and speed. No write or read path changed: the index upkeep walks the
+same maps, `unique_clash` asks the same bucket, and `text()` reads its
+spec through `text_index`'s one match; the parser's only new work is in
+`create collection`'s annotations. The browser module grew 2 666 bytes,
+1 266 gzip, 1 269 brotli (809.4, 333.5, 276.2 KB; the test builds without
+the indexes and with no feature 2.1 KB each): `build_kind` 172 net of the
+`build_index` it came out of, `Schema::decode`'s tag 316, `undo` 282,
+`add_index` and its refusal 265, the plan's second index 253, the rest a
+line or two each. Taken back: the plan's two indexes walked in a loop were
+224 bytes more than two calls, `undo` taking every index off and putting
+the text one back through `Taken` 417 more than removing the one, the
+refusal naming both annotations (`IndexKind::word`) 393, and a
+normalising `add_index` in `Schema::new` 91.
+
 
 **A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
 A bucket was a `Vec` in the order its ids came, and a row left it by
@@ -348,8 +449,10 @@ documents (`rebuild_indexes_with`): listed for every collection, they were
 `fennec_http::warm`). The first `match` after a start built its `@text`
 index inside the request: a shop's first search page took 2.68 s to its
 largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
-derived indexes nothing has built, `warm_index` builds one as its first read
-would, and a thread of the server's builds them one at a time, each under
+derived indexes nothing has built by field and kind (`DerivedKind`), a
+text field keeping `@text` beside its `@unique` listed twice; `warm_index`
+builds the one named as its first read would, and a thread of the server's
+builds them one at a time, each under
 the read lock on its own -- reads go on, one needing the index waits for
 that build, a write waits out one index at most. So a bench times nothing
 until its warm-up has read every index the writes keep up: `make

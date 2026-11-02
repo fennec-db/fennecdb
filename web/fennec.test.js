@@ -581,6 +581,35 @@ test('an insert if absent says whether it wrote, in the module', { skip: wasm ? 
   assert.equal((await locks.first()).owner, 'a');
 });
 
+test('a text index beside a unique one, in the module: both answer, the unique one refusing every write', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  // Kept as the last one written, `@unique @text` was a text index alone.
+  db.run('create collection a (email text nocase @unique @text, tag text @text @hash)');
+  db.run('insert a {email: "x@y.z", tag: "red fox"}');
+  db.run('insert a {email: "p@q.r", tag: "blue"}');
+  for (const sql of ['insert a {email: "X@y.z"}', 'put a {email: "x@y.z"}', 'put a {id: 2, email: "x@Y.z"}', 'set a {email: "x@y.z"} where id = 2']) {
+    assert.throws(() => db.run(sql), /is unique/, sql);
+  }
+  assert.throws(() => db.run('put a $1', [[{ email: 'x@y.Z' }]]), /is unique/);
+  await assert.rejects(db.from('a').insert({ email: 'X@Y.Z' }), /is unique/);
+  const refused = await db.batch([['insert a {email: $1}', ['n@x.y']], ['insert a {email: $1}', ['N@x.y']]]).catch((e) => e);
+  assert.equal(refused.at, 1);
+  assert.equal(db.rows('get a count')[0].count, 2);
+  // The upsert finds the row by its unique value.
+  assert.equal(db.run('put a {email: "X@Y.Z", tag: "green"} if absent else set {tag: new.tag}').count, 1);
+  assert.deepEqual(db.rows('get a select tag where id = 1'), [{ tag: 'green' }]);
+  assert.deepEqual(db.rows('get a select id match email "p"').map((r) => r.id), [2]);
+  assert.deepEqual(db.rows('get a select id match tag "green"').map((r) => r.id), [1]);
+  // Both in every schema answer, and in the FennecQL that makes it.
+  const text = 'text(k1=0.9, b=0.4)';
+  assert.deepEqual(db.schemas()[0].fields.map((f) => [f.name, f.index, f.also]), [['email', 'unique', text], ['tag', 'hash', text]]);
+  assert.equal(db.describe('fennecql').fennecql, `create collection a (email text nocase @unique @${text}, tag text @hash @${text})\n`);
+  // Any other second index is refused where it is declared.
+  assert.throws(() => db.run('create collection b (k text @unique @sorted)'), /`k` has two indexes it cannot keep together/);
+  db.close();
+});
+
 test('points in the module: kept as written, a radius, a box and the nearest', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
@@ -747,13 +776,32 @@ test('a file holding named statements opens in the module, which keeps them thro
   const { readFileSync } = await import('node:fs');
   const { Fennec } = await import('./fennec.js');
   // Written by a server's build (fennec-core's `stored::` tests): two
-  // definitions in its image, a third after it.
+  // definitions in its image, a third after it, and a statement bound to
+  // the rows `entries` makes (op 3).
   const file = readFileSync(new URL('../crates/fennec-core/tests/statements.fennec', import.meta.url));
   const db = await Fennec.open(wasm);
   db.load(new Uint8Array(file));
-  const texts = ['create statement transfer(', 'create statement like(', 'create statement stale('];
+  const texts = [
+    'create statement transfer(',
+    'create statement like(',
+    'create statement stale(',
+    'create statement credit after insert entries',
+  ];
   const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t));
   assert.ok(keeps(db.snapshot()), 'each text as it came');
+  // The module runs no binding: a write that may make a row of `entries`
+  // is refused before it changes anything, in its own words; what the
+  // binding does not bind writes as ever.
+  for (const write of ['insert entries {src: 1, dst: 1, amount: 5}', 'put entries {src: 1, amount: 5}']) {
+    assert.throws(
+      () => db.run(write),
+      /`entries` has statements bound to its writes, which this module does not run: write it through a server/,
+    );
+  }
+  assert.equal(db.run('get entries count').rows[0].count, 0);
+  db.run('set entries {amount: 1} where src = 1');
+  db.run('del entries where src = 1');
+  db.run('put accounts {owner: "ann", balance: 1}');
   // A schema change taking away what one reads lands here: the module
   // marks it broken, for the server that opens the file again to refuse.
   db.run('alter collection accounts drop field balance');

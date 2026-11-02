@@ -71,10 +71,14 @@ create the collection, or add it later with <code>create index</code>.</p>
 </pre>
 
 <ul>
-  <li><b>One index per field:</b> <code>@hash</code> for equality,
-    <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
-    text search, <code>@hnsw</code> for nearest neighbours, <code>@geo</code>
-    for points near a place. A path into a
+  <li><b>One index per field, and <code>@text</code> beside it:</b>
+    <code>@hash</code> for equality, <code>@sorted</code> for ranges and
+    order, <code>@text</code> for ranked text search, <code>@hnsw</code> for
+    nearest neighbours, <code>@geo</code> for points near a place. A text
+    field may keep <code>@text</code> beside a <code>@hash</code>,
+    <code>@unique</code> or <code>@sorted</code> — <code>email text
+    @unique @text</code> is unique and searchable (<a href="#two-indexes">two
+    indexes on a field</a>). A path into a
     <code>json</code> field takes <code>@hash</code>, <code>@unique</code>
     or <code>@sorted</code> of its own (<a href="fennecql-schema.html#json">Objects and
     paths</a>), and an index over several fields is the collection's, beside
@@ -98,7 +102,8 @@ create index on articles (title) @sorted
 create index on users (email) @unique             -- refused if a value is held twice
 </pre>
 
-<p>A field takes one index. <code>@hash</code> answers equality,
+<p>A field takes one index, and a text field <code>@text</code> beside
+it (<a href="#two-indexes">below</a>). <code>@hash</code> answers equality,
 <code>@sorted</code> ranges and order, <code>@text</code> ranked text
 retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
 for <code>int</code>, <code>float</code>, <code>timestamp</code> and
@@ -218,6 +223,47 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
   The browser module leaves this out.</p>
 </div>
 </details>
+
+<h3 id="two-indexes">Two indexes on a field</h3>
+
+<p>A text field may keep <code>@text</code> beside a <code>@hash</code>,
+<code>@unique</code> or <code>@sorted</code> of its own, in either order:
+<code>@text</code> answers words and none of the three does, and they
+answer <code>=</code> and order, which <code>@text</code> does not. Both
+are built and both are kept up by every write, and a <code>@unique</code>
+beside <code>@text</code> refuses exactly as it does alone —
+<code>insert</code>, <code>put</code>, <code>set</code>, an upsert,
+<code>put ... $1</code>, a <code>/batch</code>, under <code>nocase</code> by
+the fold. <code>create index</code> adds the other one to a field that has
+one.</p>
+
+<pre data-lang="fennecql">create collection users (
+  email  text nocase @unique @text,   -- unique, and found by a word of it
+  title  text @sorted @text,          -- ordered, and searched
+  tag    text @hash @text
+)
+create index on notes (body) @unique   -- beside the @text body has
+</pre>
+
+<p>Every other second index is refused where it is declared, never kept
+as one of the two: <code>@hash @unique</code> (<code>@unique</code> is a
+<code>@hash</code>), <code>@hash @sorted</code> or <code>@unique
+@sorted</code> (a field keeps one of them), <code>@sorted @ttl</code>, a
+third index, and a second index on a vector, a sparse vector, a point or
+a path into a <code>json</code> field. <code>create index</code> of one
+the field cannot keep is <code>409</code>, answered with nothing done under
+<code>if not exists</code>.</p>
+
+<p>A file made before a field kept two indexes holds only the one its
+<code>create collection</code> named last — <code>email text @unique
+@text</code> made a text index alone, and took duplicates. Put the other
+back with <code>create index on users (email) @unique</code>: over
+documents already holding a value twice it is refused, naming the value
+and two of the documents, as any <code>create index ... @unique</code> is,
+and nothing is built until each value is held once; a schema declared in
+code that says <code>@unique @text</code> plans that statement. A file
+keeping two indexes on a field is one a binary from before refuses to
+open, rather than open it with one.</p>
 
 <h2 id="ordered-indexes">Ordered indexes</h2>
 

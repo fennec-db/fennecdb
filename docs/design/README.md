@@ -1,6 +1,6 @@
 # Design notes
 
-The long form of the invariants in [CLAUDE.md](../../CLAUDE.md): what each measured, the alternatives it rejected and how it came to be. CLAUDE.md keeps each invariant's rule in a few sentences and links to its section here, and the paragraphs under the headings in these files were moved from it word for word, but for two facts the review of the move corrected: the collate generator's path in [text.md](text.md#collations) and `fennec-abi` beside `fennec-ql` in [browser-module.md](browser-module.md#index-features). An invariant added or changed is written in both, in the same pull request.
+The long form of the invariants in [CLAUDE.md](../../CLAUDE.md) and the area files its [index](../../CLAUDE.md#area-invariants) lists, each beside the code its rules bind: what each measured, the alternatives it rejected and how it came to be. Those files keep each invariant's rule in a few sentences and link to its section here, and the paragraphs under the headings in these files were moved word for word from the root CLAUDE.md, when it held every rule, but for two facts the review of the move corrected: the collate generator's path in [text.md](text.md#collations) and `fennec-abi` beside `fennec-ql` in [browser-module.md](browser-module.md#index-features). An invariant added or changed is written in both, in the same pull request.
 
 The invariants were written as one sequence, and "above" and "below" in them refer to that sequence, not to the file a paragraph is in now: [the original order](#the-original-order) lists it, each with the file that holds it. The files below are in the order of the first invariant each holds.
 
@@ -22,7 +22,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
-- [indexes.md](indexes.md) -- `@unique`, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
+- [indexes.md](indexes.md) -- `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
 - [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms
@@ -189,4 +189,5 @@ A proposal holds no invariant until it is built, and is listed apart:
 145. [A token is taken only from the issuers, for the audiences and clients, a server was told](access.md#whom-a-token-is-for) (added after the move, under *Access*)
 146. [A chunked body grows as it comes, held to the ceiling](http.md#chunked-bodies) (added after the move, under *The HTTP server*)
 147. [`--tls-cert` and `--tls-key` make a listener HTTPS alone](http.md#tls) (added after the move, under *The HTTP server*)
-148. [Every HTTP dial takes HTTPS by its URL](http.md#dialing-https) (added after the move, under *The HTTP server*)
+148. [A field keeps one index, and a text field `@text` beside a `@hash`, `@unique` or `@sorted`](indexes.md#two-indexes-on-a-field) (added after the move, under *Indexes*)
+149. [Every HTTP dial takes HTTPS by its URL](http.md#dialing-https) (added after the move, under *The HTTP server*)

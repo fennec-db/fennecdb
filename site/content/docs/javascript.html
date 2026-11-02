@@ -620,8 +620,12 @@ const top = await db.from(products).select('name').lookup('reviews', { where: { 
 <p>A column builder takes no name: the key is the field's name. Columns are
 nullable unless <code>.notNull()</code>, FennecQL's <code>required</code>. A
 field takes one index, declared on the column (<code>.unique()</code>) or in
-the third argument; two on one field are refused as the table is declared,
-as is anything FennecQL cannot hold. An index over several fields is
+the third argument, and a text field a <code>bm25</code> index beside a
+hash, unique or btree one — <code>text().unique()</code> with
+<code>index().using('bm25', t.email)</code> is unique and searchable
+(<a href="/docs/fennecql-indexes#two-indexes">Two indexes on a field</a>);
+any other two on one field are refused as the table is declared, as is
+anything FennecQL cannot hold. An index over several fields is
 <code>.on()</code> with several columns, each <code>.desc()</code> or
 <code>.asc()</code> as Drizzle writes it, beside a field's own
 (<a href="/docs/fennecql-indexes#composite">Indexes over several fields</a>), and
@@ -727,8 +731,8 @@ as a deploy step runs drizzle-kit's <code>migrate</code>.</p>
 
 <p>Every SDK's declarations compile to one description, versioned JSON:
 <code>{"format": 1, "collections": [...], "migrations": [...]}</code>, a
-field <code>{"name", "type", "required", "collate", "nocase", "index", "paths"}</code>
-and an index <code>{"kind": "hnsw", "metric", "m", ...}</code> holding what
+field <code>{"name", "type", "required", "collate", "nocase", "index", "also", "paths"}</code>
+(<code>"also"</code> the text index beside its own) and an index <code>{"kind": "hnsw", "metric", "m", ...}</code> holding what
 the declaration says, the engine's defaults for the rest — or the same
 collections as FennecQL text, <code>{"format": 1, "fennecql": "create
 collection ..."}</code>, which the module reads.

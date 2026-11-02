@@ -81,6 +81,9 @@ d('indexes on paths', `fennecTable('docs', { meta: json() }, (t) => [
 ])`);
 d('a name past ASCII', `fennecTable('kişiler', { 'ad': text(), 'yaş': integer() })`);
 d('two indexes on a field', `fennecTable('t', { a: text().unique() }, (t) => [index().on(t.a)])`);
+d('a text index beside a unique one', `fennecTable('t', { email: text().nocase().unique() }, (t) => [index('t_email_words').using('bm25', t.email)])`);
+d('a hash index beside a text one', `fennecTable('t', { tag: text() }, (t) => [index('t_tag_words').using('bm25', t.tag).with({ prefix: 3 }), index('t_tag').using('hash', t.tag)])`);
+d('two text indexes on a field', `fennecTable('t', { a: text() }, (t) => [index('x').using('bm25', t.a), index('y').using('bm25', t.a)])`);
 d('two indexes of one name', `fennecTable('t', { a: text(), b: text() }, (t) => [index('x').on(t.a), index('x').on(t.b)])`);
 d('an id declared', `fennecTable('t', { id: integer() })`);
 d('a name FennecQL does not read', `fennecTable('t', { 'a-b': integer() })`);
@@ -130,6 +133,8 @@ x('a collection twice', 'create collection t (a int)\ncreate collection t (b int
 x('a field twice', 'create collection t (a int, a text)');
 x('an id declared', 'create collection t (id int)');
 x('two indexes on a field', 'create collection t (a int @hash)\ncreate index on t (a) @sorted');
+x('two indexes declared on a field', 'create collection t (a text @unique @sorted)');
+x('a text index beside a unique one', 'create collection t (email text nocase @text @unique, tag text @hash)\ncreate index on t (tag) @text');
 x('an index on no collection', 'create index on t (a) @hash');
 x('an index on no field', 'create collection t (a int)\ncreate index on t (b) @hash');
 x('an expiry of a number', 'create collection t (a int @ttl(1h))');
@@ -160,6 +165,8 @@ p('a field and its indexes are added', [TODOS], `{ todos: fennecTable('todos', {
 p('an index is added where there is none', [TODOS], `{ todos: fennecTable('todos', { title: text().notNull(), done: boolean() }, (t) => [
   index().using('hash', t.done), index().using('bm25', t.title),
 ]) }`);
+p('a unique index is added beside a text one', ['create collection users (email text @text)'], `{ users: fennecTable('users', { email: text().unique() }, (t) => [index().using('bm25', t.email)]) }`);
+p('a unique index beside a text one taken off', ['create collection users (email text @unique @text)'], `{ users: fennecTable('users', { email: text() }, (t) => [index().using('bm25', t.email)]) }`);
 p('a field the code lacks', [TODOS], `{ todos: fennecTable('todos', { title: text().notNull() }) }`);
 p('a field renamed, it seems', [TODOS], `{ todos: fennecTable('todos', { name: text().notNull(), done: boolean() }, (t) => [index().using('hash', t.done)]) }`);
 p('a rename, as a migration', [TODOS, 'put todos {title: "a"}'], `{ todos: fennecTable('todos', { name: text().notNull(), done: boolean() }, (t) => [index().using('hash', t.done)]) }`, [

@@ -1442,7 +1442,7 @@ function restValue(v, field) {
 
 /**
  * `create collection` text from a schema: field name, type, collation,
- * `nocase` and index as is. The collation too: without it the replica's
+ * `nocase` and index as is, and the `@text` beside it (`also`). The collation too: without it the replica's
  * field compared its text by the bytes, and paged and ordered differently
  * from the server -- and without `nocase` its `=` missed what the server's
  * found.
@@ -1457,7 +1457,8 @@ function schemaDDL(schema) {
       (f.collate ? ` collate ${collation(f.collate)}` : '') +
       (f.nocase ? ' nocase' : '') +
       (f.required ? ' required' : '') +
-      (f.index ? ` @${f.index === 'unique' ? 'hash' : f.index}` : ''),
+      (f.index ? ` @${f.index === 'unique' ? 'hash' : f.index}` : '') +
+      (f.also ? ` @${f.also}` : ''),
   );
   for (const ix of schema.indexes ?? []) fields.push(`@${ix.replace(/^unique\(/, 'sorted(')}`);
   return `create collection if not exists ${ident(schema.name, 'collection')} (${fields.join(', ')})`;
