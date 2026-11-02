@@ -118,6 +118,11 @@ thread_local! {
     // names it for the operator writing the grant, where the token is told
     // no name.
     static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
+    // A statement bound to the writes of the request this thread serves
+    // refused a scoped writer's write, which was told its status and
+    // `reason` alone ([`told_bound`]): its `bound` line names the binding
+    // and the engine's words.
+    static TOLD_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The reason the request this thread serves is refused its token, for its
@@ -140,6 +145,45 @@ pub fn unwoken(binding: &str, why: &'static str) {
     if LOG.get().is_some() {
         UNWOKEN.with(|u| *u.borrow_mut() = Some((binding.to_string(), why)));
     }
+}
+
+/// A scoped writer's write a statement bound to it refused, the writer
+/// told its status and `reason` alone (`access::told_bound`,
+/// `docs/design/named-statements.md`, *Watching bindings*): its `bound`
+/// line, which [`bound`] writes once the answer is, names the binding and
+/// the engine's words for the operator. Held only with `--audit`.
+pub fn told_bound() {
+    if LOG.get().is_some() {
+        TOLD_BOUND.with(|t| t.set(true));
+    }
+}
+
+/// The request's `bound` line, where a binding refused a scoped writer's
+/// write ([`told_bound`]): the binding and the words the engine refused it
+/// with -- which the writer was not told, and which name values the token
+/// may not read -- from what the engine noted on this thread
+/// (`Runs::refusal`). Written once the answer is, outside the write lock,
+/// whatever the status: MCP answers its refusal inside a 200. A token that
+/// checked out was refused what its write caused, not its token: the line
+/// waits nothing and clears nothing.
+pub fn bound(req: &crate::http::Request, status: u16, runs: Option<&fennec_core::engine::Runs>) {
+    if !TOLD_BOUND.with(|t| t.replace(false)) {
+        return;
+    }
+    let Some((binding, words)) = runs.and_then(|r| r.refusal.as_ref()) else {
+        return;
+    };
+    let path = req.target.split('?').next().unwrap_or("");
+    event(
+        "bound",
+        &[
+            ("method", Field::Text(req.method.name())),
+            ("path", Field::Text(path)),
+            ("binding", Field::Text(binding)),
+            ("error", Field::Text(words)),
+            ("http_status", Field::Int(status as u64)),
+        ],
+    );
 }
 
 /// The header a node's answer to a forwarded request carries when a token
@@ -197,6 +241,7 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
     UNWOKEN.with(|u| u.borrow_mut().take());
+    TOLD_BOUND.with(|t| t.set(false));
     client
 }
 
@@ -348,6 +393,9 @@ pub enum Field<'a> {
     /// Two integers, `[a,b]`: a named statement's version, `[history,
     /// change]`, as `statements` answers it.
     Pair(u64, u64),
+    /// JSON the caller wrote, every string in it escaped
+    /// (`json::escape_into`): the slow line's `bound`, a list of lists.
+    Json(&'a str),
 }
 
 /// How much an event matters, as the line's `level` says it: what a log
@@ -434,6 +482,9 @@ pub fn line(name: &str, level: Level, fields: &[(&str, Field)]) -> String {
             Field::Pair(a, b) => {
                 line.push_str(&format!(",\"{k}\":[{a},{b}]"));
             }
+            Field::Json(j) => {
+                line.push_str(&format!(",\"{k}\":{j}"));
+            }
         }
     }
     line.push_str("}\n");
@@ -456,13 +507,20 @@ static REFUSED: AtomicU64 = AtomicU64::new(0);
 /// was logged as far as its first. Shaped as far as a definition's longest
 /// text (`named::MAX_TEXT`), past the 1 000 bytes a count keeps, so one is
 /// logged whole. A text the parser refuses is split on `;`, as it came.
-pub fn statement(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
+pub fn statement(
+    tenant: Option<&str>,
+    text: &str,
+    shape: &str,
+    failed: bool,
+    bound: Option<&fennec_core::engine::Runs>,
+) {
     if !on() {
         return;
     }
     // Most requests change no schema, and ask nothing more.
     if shape.split(';').any(changes_schema) {
-        schema_events(tenant, text, shape, failed);
+        let changed = bound.map_or(&[][..], |r| &r.changed[..]);
+        schema_events(tenant, text, shape, failed, changed);
     }
 }
 
@@ -470,7 +528,13 @@ pub fn statement(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
 /// path every statement takes stays as short as it was.
 #[cold]
 #[inline(never)]
-fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
+fn schema_events(
+    tenant: Option<&str>,
+    text: &str,
+    shape: &str,
+    failed: bool,
+    changed: &[(String, String, u8)],
+) {
     let mut each: Vec<String> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
@@ -497,8 +561,42 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
             fields.push(("tenant", Field::Text(t)));
         }
         fields.push(("failed", Field::Bool(failed)));
+        // A bound statement defined, replaced or dropped names what it
+        // binds -- which a drop's text does not say -- as the engine noted
+        // it (`Runs::changed`).
+        let bound =
+            statement_named(one).and_then(|n| changed.iter().rev().find(|(name, ..)| name == n));
+        let events = bound.map(|(_, _, e)| fennec_core::named::Binding::events_named(*e));
+        if let (Some((_, c, _)), Some(e)) = (bound, &events) {
+            fields.push(("bound_collection", Field::Text(c)));
+            fields.push(("bound_events", Field::Text(e)));
+        }
         event("schema", &fields);
     }
+}
+
+/// The statement a `create [or replace] statement` or a `drop statement
+/// [if exists]` names, from its shape.
+fn statement_named(shape: &str) -> Option<&str> {
+    let mut words = shape.split_ascii_whitespace();
+    let first = words.next()?;
+    if !first.eq_ignore_ascii_case("create") && !first.eq_ignore_ascii_case("drop") {
+        return None;
+    }
+    let mut word = words.next()?;
+    if word.eq_ignore_ascii_case("or") {
+        words.next()?;
+        word = words.next()?;
+    }
+    if !word.eq_ignore_ascii_case("statement") {
+        return None;
+    }
+    let mut name = words.next()?;
+    if name.eq_ignore_ascii_case("if") {
+        words.next()?;
+        name = words.next()?;
+    }
+    Some(name.split('(').next().unwrap_or(name))
 }
 
 /// Whether a statement, or its shape, starts with a word changing the

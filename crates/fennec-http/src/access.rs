@@ -3344,7 +3344,11 @@ pub fn within<T>(who: &Who, f: impl FnOnce() -> Result<T>) -> Result<T> {
     };
     let (r, woke) = with_scope(scope, f);
     r.map_err(|e| match woke {
-        true => told_bound(e),
+        // The operator's line names what the writer is not told.
+        true => {
+            crate::audit::told_bound();
+            told_bound(e)
+        }
         false => told(e),
     })
 }
@@ -3411,7 +3415,12 @@ pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> 
     match (who, stmt) {
         (Who::Scoped(scope), Statement::Call(c)) => {
             let _caller = Calling::note(scope);
-            f().map_err(|e| told_call(&c.name, e))
+            // A binding its body woke that refused it is named in the
+            // audit's `bound` line, where the engine noted one.
+            f().map_err(|e| {
+                crate::audit::told_bound();
+                told_call(&c.name, e)
+            })
         }
         _ => within(who, f),
     }

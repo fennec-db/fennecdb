@@ -169,3 +169,46 @@ fn every_page_size_is_one_shape() {
         a.body
     );
 }
+
+/// A statement bound to writes is a shape of its own, `after <name>`: its
+/// calls the statements that woke it, its rows theirs, its time its runs',
+/// an error where it refused the write -- beside the writer's shape, whose
+/// time holds it (`docs/design/named-statements.md`, *Watching bindings*).
+#[test]
+fn a_binding_is_a_shape_of_its_own_beside_its_writer_s() {
+    let path = tmp("statements", "bound.fennec");
+    let s = start(&["--http-token", TOKEN, "--file", path.to_str().unwrap()]);
+    let mut c = s.http().with_token(TOKEN);
+    c.run("create collection orders (status text, total int)");
+    c.run("create collection ledger (o int @hash, amount int)");
+    c.run(
+        "create statement paid after set orders where new.status = 'paid' and old.status = 'open'
+         as insert ledger {o: new.id, amount: new.total}",
+    );
+    c.run(
+        "create statement voided after set orders where new.status = 'void' as begin
+           get ledger select o where o = new.id limit 1 require 1 else 'no ledger line';
+           insert ledger {o: new.id, amount: 0}
+         end",
+    );
+    for t in [10, 20, 30] {
+        c.run(&format!("put orders {{status: 'open', total: {t}}}"));
+    }
+    c.run("set orders {status: 'paid'} where status = 'open'");
+    c.run("set orders {status: 'void'} where id = 1");
+    assert!(c.query("set orders {status: 'void'} where id = 9").is_ok());
+    c.run("put orders {status: 'open', total: 40}");
+    assert!(c.query("set orders {status: 'void'} where id = 4").is_err());
+
+    let json = stats(&mut c);
+    assert_eq!(field(&json, "after paid", "calls"), Some("1"), "{json}");
+    assert_eq!(field(&json, "after paid", "rows"), Some("3"), "{json}");
+    assert_eq!(field(&json, "after paid", "errors"), Some("0"), "{json}");
+    // Woken twice, once refusing: a statement setting no row woke it not.
+    assert_eq!(field(&json, "after voided", "calls"), Some("2"), "{json}");
+    assert_eq!(field(&json, "after voided", "rows"), Some("2"), "{json}");
+    assert_eq!(field(&json, "after voided", "errors"), Some("1"), "{json}");
+    let set = "set orders {status: $1} where id = $2";
+    assert_eq!(field(&json, set, "calls"), Some("3"), "{json}");
+    assert_eq!(field(&json, set, "errors"), Some("1"), "{json}");
+}

@@ -29,9 +29,13 @@ pub struct Prepared {
 /// Why a statement was not answered.
 pub enum Refused {
     /// The error, how many of the text's statements ran before it and
-    /// stayed, and -- for a text of several -- which one it stopped at,
-    /// from 0, as a `/batch` answers `at`.
-    Error(Error, usize, Option<usize>),
+    /// stayed, -- for a text of several -- which one it stopped at, from
+    /// 0, as a `/batch` answers `at`, and the statement bound to the
+    /// writes that refused it with the words it is told after
+    /// (`Database::refused_by`): an app holds its database's authority, and
+    /// is told the `binding` as a server's token is. Boxed: a refusal no
+    /// binding made carries a null word.
+    Error(Error, usize, Option<usize>, Option<Box<(String, String)>>),
     /// A json field is handed a list of numbers that came over as `f32`s:
     /// the places of those parameters, written as the answer lists them,
     /// for the caller to send them again as JSON.
@@ -41,7 +45,7 @@ pub enum Refused {
 impl From<Error> for Refused {
     #[inline(always)]
     fn from(e: Error) -> Refused {
-        Refused::Error(e, 0, None)
+        Refused::Error(e, 0, None, None)
     }
 }
 
@@ -203,16 +207,25 @@ fn run_text(
         match run(db, s, &p.params, ran) {
             Ok(r) => last = r,
             Err(e) if block => {
+                let bound = bound_of(db);
                 db.rollback();
-                return Err(Refused::Error(e, 0, at));
+                return Err(Refused::Error(e, 0, at, bound));
             }
-            Err(e) => return Err(Refused::Error(e, ran, at)),
+            Err(e) => return Err(Refused::Error(e, ran, at, bound_of(db))),
         }
     }
     if block {
         db.commit()?;
     }
     Ok(last)
+}
+
+/// The statement bound to the writes that refused the statement just run,
+/// read before its block is put back: `None` in the browser module, which
+/// runs no binding.
+#[inline(always)]
+fn bound_of(db: &Database) -> Option<Box<(String, String)>> {
+    (db.refused_by()).map(|(name, words)| Box::new((name.to_string(), words)))
 }
 
 /// Whether every statement only reads, for a caller that can then take a
@@ -239,7 +252,7 @@ pub fn query(db: &Database, p: &Prepared) -> std::result::Result<Response, Refus
     for (ran, s) in p.stmts.iter().enumerate() {
         match db.query(s, &p.params) {
             Ok(r) => last = r,
-            Err(e) => return Err(Refused::Error(e, ran, several.then_some(ran))),
+            Err(e) => return Err(Refused::Error(e, ran, several.then_some(ran), None)),
         }
     }
     Ok(last)
@@ -255,8 +268,34 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
             "{{\"kind\":\"error\",\"message\":\"a json field is handed a list of numbers \
              sent over as f32s\",\"exact\":[{places}]}}"
         ),
-        Err(Refused::Error(e, ran, at)) => refused(e, *ran, *at),
+        Err(Refused::Error(e, _, at, Some(bound))) => refused_bound(e, *at, bound),
+        Err(Refused::Error(e, ran, at, None)) => refused(e, *ran, *at),
     }
+}
+
+/// An error a statement bound to the writes refused, as JSON: the
+/// engine's words after the binding's, its `reason` as ever, and
+/// `binding` naming it, as a server answers its own token
+/// (`docs/design/named-statements.md`, *When a binding refuses*). Native
+/// alone: the module runs no binding, and a native build holds every
+/// chunk, so none is named here.
+#[cold]
+#[inline(never)]
+fn refused_bound(e: &Error, at: Option<usize>, (name, words): &(String, String)) -> String {
+    let mut out = String::from("{\"kind\":\"error\",\"message\":");
+    json::escape_into(&mut out, &format!("{words}{e}"));
+    if let Some(r) = e.reason() {
+        out.push_str(",\"reason\":");
+        json::escape_into(&mut out, r);
+    }
+    out.push_str(",\"binding\":");
+    json::escape_into(&mut out, name);
+    if let Some(at) = at {
+        out.push_str(",\"at\":");
+        out.push_str(&at.to_string());
+    }
+    out.push('}');
+    out
 }
 
 /// An error as JSON, and when what refused the statement was collation data
@@ -385,6 +424,11 @@ pub fn read(request: &str) -> Result<declared::Declared> {
     if let Some(text) = d.text.take() {
         fennec_ql::schema_into(&mut d, &text)?;
     }
+    // The bindings a JSON description lists beside their collections, as
+    // `GET /_schema` writes them: native alone, since the module reads a
+    // description as FennecQL.
+    #[cfg(not(target_arch = "wasm32"))]
+    fennec_ql::bound_into(&mut d)?;
     Ok(d)
 }
 
@@ -625,6 +669,50 @@ mod tests {
             r.starts_with(r#"{"kind":"error""#) && !r.contains("reason"),
             "{r}"
         );
+    }
+
+    /// A statement bound to the writes that refused one is named to the
+    /// app, which holds its database's authority as a server's token does:
+    /// `binding` beside the engine's words after the binding's, its
+    /// `reason` as ever, and `at` in a text of several, whose block is put
+    /// back whole. A refusal no binding made carries none.
+    #[test]
+    fn a_binding_s_refusal_names_it() {
+        fennec_ql::install();
+        let mut db = Database::new();
+        for sql in [
+            "create collection orders (status text); create collection ledger (o int @hash)",
+            "create statement voided after set orders where new.status = 'void' as begin
+               get ledger select o where o = new.id limit 1 require 1 else 'no ledger line';
+               insert ledger {o: new.id}
+             end",
+            "put orders {status: 'open'}",
+        ] {
+            let r = run(&mut db, sql, "", &[]);
+            assert!(!r.contains("error"), "{sql}: {r}");
+        }
+        let r = run(&mut db, "set orders {status: 'void'} where id = 1", "", &[]);
+        assert!(
+            r.starts_with(
+                r#"{"kind":"error","message":"bound statement `voided`, after `set` on `orders`, refused this write: unmet: no ledger line"#
+            ),
+            "{r}"
+        );
+        assert!(
+            r.ends_with(r#","reason":"no ledger line","binding":"voided"}"#),
+            "{r}"
+        );
+        let sql = "put orders {status: 'open'}; set orders {status: 'void'} where id = 1";
+        let r = run(&mut db, sql, "", &[]);
+        assert!(r.ends_with(r#","binding":"voided","at":1}"#), "{r}");
+        assert!(run(&mut db, "get orders count", "", &[]).contains(":1"));
+        let r = run(
+            &mut db,
+            "set orders {status: 'x'} where id = 1 require 2",
+            "",
+            &[],
+        );
+        assert!(!r.contains("binding"), "{r}");
     }
 
     /// A read answered under the shared lock is the answer `execute` gives.

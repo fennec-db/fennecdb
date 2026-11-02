@@ -954,8 +954,12 @@ fn run(db: &mut Database, src: &str) -> bool {
     for s in &stmts {
         let t0 = std::time::Instant::now();
         match db.execute(s) {
+            // A statement bound to the writes that refused it is named, as
+            // the server names it to its own token: the shell holds the
+            // file's authority.
             Err(e) => {
-                eprintln!("error: {e}");
+                let words = db.refused_by().map(|(_, w)| w).unwrap_or_default();
+                eprintln!("error: {words}{e}");
                 return false;
             }
             Ok(resp) => print_response(&resp, t0.elapsed()),

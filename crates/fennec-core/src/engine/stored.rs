@@ -725,7 +725,11 @@ impl super::Database {
             tree,
             misread: None,
         };
+        let after = stored.after.clone();
         self.statement_record(&stored.encode(), |t| t.put(stored))?;
+        if let Some((c, events)) = &after {
+            super::bound::note_changed(name, (c, *events));
+        }
         Ok(crate::query::Response::Ok(match replaced {
             true => format!("statement `{name}` replaced"),
             false => format!("statement `{name}` defined"),
@@ -745,8 +749,12 @@ impl super::Database {
                 false => Err(Error::NotFound(format!("statement `{name}`"))),
             };
         }
+        let after = self.statements.get(name).and_then(|s| s.after.clone());
         let body = dropped(name, (self.history.current(), self.next_change()));
         self.statement_record(&body, |t| drop(t.remove(name)))?;
+        if let Some((c, events)) = &after {
+            super::bound::note_changed(name, (c, *events));
+        }
         Ok(crate::query::Response::Ok(format!(
             "statement `{name}` dropped"
         )))

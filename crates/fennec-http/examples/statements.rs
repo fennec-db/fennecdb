@@ -15,7 +15,7 @@ fn per_call(text: &str, threads: usize, n: usize) -> f64 {
         for _ in 0..threads {
             s.spawn(|| {
                 for _ in 0..n {
-                    statements::record(None, text, Duration::from_micros(100), false);
+                    statements::record(None, text, Duration::from_micros(100), false, None);
                 }
             });
         }

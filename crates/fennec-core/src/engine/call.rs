@@ -652,9 +652,10 @@ fn columns(described: bool) -> Vec<String> {
         "writes",
         "comment",
         "broken",
+        "after",
     ];
     if described {
-        c.extend(["answers", "text", "depends"]);
+        c.extend(["answers", "text", "depends", "condition"]);
     }
     c.into_iter().map(String::from).collect()
 }
@@ -674,6 +675,15 @@ fn row(s: &super::Stored, described: bool) -> Row {
         def.and_then(|d| d.comment.as_deref())
             .map_or(Value::Null, text),
         s.broken.as_deref().map_or(Value::Null, text),
+        // What a binding is bound to, from its record -- read where its
+        // text is not -- as `["orders", "set or del"]`; `null` for a
+        // statement that is called.
+        s.after.as_ref().map_or(Value::Null, |(c, events)| {
+            Value::List(vec![
+                text(c),
+                Value::Text(crate::named::Binding::events_named(*events)),
+            ])
+        }),
     ];
     if described {
         values.push(def.map_or(Value::Null, |d| {
@@ -681,6 +691,10 @@ fn row(s: &super::Stored, described: bool) -> Row {
         }));
         values.push(text(&s.text));
         values.push(Value::List(s.depends.iter().map(|d| text(d)).collect()));
+        values.push(match s.after {
+            Some(_) => crate::named::condition_text(&s.text).map_or(Value::Null, text),
+            None => Value::Null,
+        });
     }
     Row {
         id: 0,

@@ -1354,13 +1354,38 @@ pub fn render_batch_error(e: &Error, completed: usize, version: &'static str) ->
     render_batch_stop(stop_of(e), completed, completed, version)
 }
 
-/// Why a batch stopped: the status, the words, and the reason a statement's
-/// `require <n> else '<reason>'` gave where that refused it.
-pub type Stop = (u16, String, Option<String>);
+/// Why a batch stopped: the status, the words, the reason a statement's
+/// `require <n> else '<reason>'` gave where that refused it, and the
+/// statement bound to the writes that refused it, named to the server's
+/// token alone ([`bound_stop`]).
+pub type Stop = (u16, String, Option<String>, Option<String>);
 
 /// An engine error as the [`Stop`] it makes of a batch.
 pub fn stop_of(e: &Error) -> Stop {
-    (status_of(e), e.to_string(), e.reason().map(String::from))
+    (
+        status_of(e),
+        e.to_string(),
+        e.reason().map(String::from),
+        None,
+    )
+}
+
+/// [`stop_of`], or where a statement bound to the write refused it --
+/// `bound`, its name and the words its refusal is told after
+/// (`Database::refused_by`), asked for the server's token alone -- the
+/// engine's words after the binding's, and `binding` beside them, as
+/// `/query` tells it (`docs/design/named-statements.md`, *When a binding
+/// refuses*).
+pub fn bound_stop(e: &Error, bound: Option<&(String, String)>) -> Stop {
+    match bound {
+        None => stop_of(e),
+        Some((name, words)) => (
+            status_of(e),
+            format!("{words}{e}"),
+            e.reason().map(String::from),
+            Some(name.clone()),
+        ),
+    }
 }
 
 /// A batch stopped at statement `at` (from 0) with `status` and `why`: an
@@ -1371,7 +1396,7 @@ pub fn stop_of(e: &Error) -> Stop {
 /// `require`, which a caller tells refusals apart by where `at` moves with
 /// every statement added in front.
 pub fn render_batch_stop(
-    (status, why, reason): Stop,
+    (status, why, reason, binding): Stop,
     completed: usize,
     at: usize,
     version: &'static str,
@@ -1380,6 +1405,10 @@ pub fn render_batch_stop(
     json::escape_into(&mut out, &why);
     out.push_str(&format!(",\"completed\":{completed},\"at\":{at}"));
     reason_into(&mut out, reason.as_deref());
+    if let Some(b) = binding {
+        out.push_str(",\"binding\":");
+        json::escape_into(&mut out, &b);
+    }
     out.push('}');
     Response::json(status, out).versioned(version)
 }

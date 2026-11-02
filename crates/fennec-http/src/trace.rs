@@ -523,6 +523,54 @@ pub fn end(status: u16) {
     }
 }
 
+/// The statements bound to the writes of this thread's request, a child
+/// span of it each a binding a statement -- never a row
+/// (`docs/design/named-statements.md`, *Watching bindings*): timed by the
+/// engine, which has no trace of its own (`Database::take_runs`), and
+/// recorded once the request has run, its `db.operation.name` `bound`,
+/// `db.stored_procedure.name` the binding and `fennec.rows_woken` its rows.
+/// Its time is the binding's runs' together, from its first: within the
+/// request's, which holds it.
+#[cold]
+pub fn bound_runs(runs: &fennec_core::engine::Runs) {
+    if !on() {
+        return;
+    }
+    CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        if !(c.active && c.sampled) || c.spans.is_empty() {
+            return;
+        }
+        let (unix, now) = (now_unix(), Instant::now());
+        let root = c.root;
+        // The binding that refused the write: its span is the failed one,
+        // with the engine's words, which a scoped writer is never told.
+        let refused = (runs.refusal.as_ref())
+            .and_then(|(n, words)| Some((runs.ran.iter().rposition(|r| r.name == *n)?, words)));
+        for (i, ran) in runs.ran.iter().enumerate() {
+            if c.spans.len() >= MAX_SPANS {
+                break;
+            }
+            let ago = now.saturating_duration_since(ran.at).as_nanos() as u64;
+            let start = unix.saturating_sub(ago);
+            c.spans.push(Rec {
+                name: Cow::Owned(format!("bound {}", ran.name)),
+                id: fresh().to_be_bytes(),
+                parent: Some(root),
+                kind: Kind::Internal,
+                start,
+                end: start.saturating_add(ran.took.as_nanos() as u64),
+                attrs: vec![
+                    ("db.operation.name", Val::from("bound")),
+                    ("db.stored_procedure.name", Val::from(ran.name.clone())),
+                    ("fennec.rows_woken", Val::Int(ran.rows as i64)),
+                ],
+                error: refused.filter(|(at, _)| *at == i).map(|(_, w)| w.clone()),
+            });
+        }
+    });
+}
+
 /// Lets this thread's request go without a span: one that takes the
 /// connection over -- a subscription, a replica's stream -- would hold its
 /// spans for as long as it lasts.

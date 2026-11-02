@@ -97,6 +97,61 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
     Ok(())
 }
 
+/// A description's bindings listed beside the collections they bind
+/// (`Declared::bound`, the JSON `GET /_schema` answers the server's token),
+/// read into its statements as [`schema_into`] reads a `create statement`
+/// after the collections: each text one bound definition, of the name it
+/// is listed by and bound to the collection it is listed beside, held to
+/// the collections declared. A build without named statements refuses a
+/// description listing one, as it refuses one written in FennecQL.
+pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
+    use fennec_core::declared::bad;
+    #[cfg(not(feature = "statements"))]
+    if let Some((_, name, _)) = d.bound.first() {
+        return Err(bad(
+            name,
+            "is a named statement, which this build does not read",
+        ));
+    }
+    #[cfg(feature = "statements")]
+    for (collection, name, text) in std::mem::take(&mut d.bound) {
+        {
+            let mut read = parse(&text)?;
+            let def = match (read.len(), read.pop()) {
+                (1, Some(Statement::CreateStatement(def))) => *def,
+                _ => {
+                    return Err(bad(
+                        &name,
+                        "is listed with a text that is not its definition",
+                    ))
+                }
+            };
+            let binds = def.after.as_ref().map(|b| b.collection.as_str());
+            if def.name != name || binds != Some(collection.as_str()) {
+                return Err(bad(
+                    &name,
+                    &fennec_core::declared::cat(&[
+                        "is listed beside `",
+                        &collection,
+                        "` with the text of another statement than one bound to it",
+                    ]),
+                ));
+            }
+            if d.statements.iter().any(|s| s.name == def.name) {
+                return Err(bad(&def.name, "is declared twice"));
+            }
+            let collections = &d.collections;
+            if let Err(e) = def.depends(&|c| collections.iter().find(|s| s.name == c)) {
+                let why =
+                    fennec_core::declared::cat(&["names what is not declared: ", &e.to_string()]);
+                return Err(bad(&def.name, &why));
+            }
+            d.statements.push(def);
+        }
+    }
+    Ok(())
+}
+
 fn schema_read(
     src: &str,
     #[cfg(feature = "statements")] statements: &mut Vec<fennec_core::named::Definition>,

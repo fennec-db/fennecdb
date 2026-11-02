@@ -129,13 +129,14 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
     });
     let root = Some("root");
 
-    // Its schema declares a named statement, which the router reads with
-    // the grammar before anything is placed.
+    // Its schema declares a named statement and one bound to a
+    // collection's writes, which the router reads with the grammar before
+    // anything is placed.
     let r = call(
         port,
         "PUT",
         "/_shard/tenants/acme",
-        r#"{"node":"n1","schema":"create collection stamps (at int); create statement stamp($at int) public as insert stamps {at: $at} returning id"}"#,
+        r#"{"node":"n1","schema":"create collection stamps (at int); create statement stamp($at int) public as insert stamps {at: $at} returning id; create collection marks (n int); create statement marked after insert stamps as insert marks {n: new.at}"}"#,
         root,
     );
     assert_eq!(r.0, 201, "{}", r.1);
@@ -149,6 +150,18 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         None,
     );
     assert_eq!(r.0, 200, "{}", r.1);
+    // The binding the node was sent ran with the call's insert, read on
+    // the node so that the router counts no more requests.
+    let marks = fennec_ql::parse_one("get marks select n").unwrap();
+    let tenant = n1.get("acme").unwrap();
+    let read = tenant.db.read().unwrap().query(&marks, &[]).unwrap();
+    assert_eq!(
+        fennec_core::json::response_to_string(&read)
+            .matches("7")
+            .count(),
+        1
+    );
+    drop(tenant);
     let r = call(port, "POST", "/t/acme/_call/nothing", "", None);
     assert_eq!(r.0, 404, "{}", r.1);
     for _ in 0..3 {

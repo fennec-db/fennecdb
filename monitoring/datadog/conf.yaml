@@ -37,6 +37,8 @@ instances:
       - statement_errors
       - statement_duration_seconds
       - slow_statements
+      - bound_runs
+      - bound_refused
       - refused
       - auto_compactions
       - connections

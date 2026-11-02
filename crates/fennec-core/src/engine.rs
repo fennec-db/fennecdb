@@ -36,6 +36,8 @@ pub use limit::{Landing, Limit};
 #[cfg(feature = "statements")]
 mod bound;
 #[cfg(feature = "statements")]
+pub use bound::{Ran, Runs, RUNS_KEPT};
+#[cfg(feature = "statements")]
 mod call;
 #[cfg(feature = "statements")]
 pub use call::{claims_carried, CallRead, Callee};
@@ -6614,6 +6616,15 @@ impl Database {
                 .map_err(|e| (stmts.len().saturating_sub(1), e))?;
         }
         Ok(out)
+    }
+
+    /// The statement bound to writes that refused the last write, with the
+    /// words its refusal is told after: in a build without named
+    /// statements -- the browser module -- none, since it runs no binding.
+    #[cfg(not(feature = "statements"))]
+    #[inline(always)]
+    pub fn refused_by(&self) -> Option<(&str, String)> {
+        None
     }
 
     /// One statement as a block runs it: its reads refused for collation

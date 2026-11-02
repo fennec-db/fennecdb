@@ -60,9 +60,14 @@ const SCHEMA: [&str; 11] = [
 struct Node {
     port: u16,
     access: Arc<Access>,
+    server: Arc<Server>,
 }
 
-fn serve(db: &Arc<RwLock<Database>>, access: &Arc<Access>, tune: impl FnOnce(&mut Config)) -> u16 {
+fn serve(
+    db: &Arc<RwLock<Database>>,
+    access: &Arc<Access>,
+    tune: impl FnOnce(&mut Config),
+) -> (u16, Arc<Server>) {
     let mut cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -75,13 +80,14 @@ fn serve(db: &Arc<RwLock<Database>>, access: &Arc<Access>, tune: impl FnOnce(&mu
         ..Config::default()
     };
     tune(&mut cfg);
-    let server = Server::new(Arc::clone(db), cfg);
+    let server = Arc::new(Server::new(Arc::clone(db), cfg));
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&server);
     std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
-    port
+    (port, server)
 }
 
 fn line(q: &str) -> String {
@@ -193,9 +199,11 @@ fn start_with(policy: &str, tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock
     fennec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let db = Arc::new(RwLock::new(Database::new()));
+    let (port, server) = serve(&db, &access, |_| {});
     let node = Node {
-        port: serve(&db, &access, |_| {}),
+        port,
         access: Arc::clone(&access),
+        server,
     };
     for s in SCHEMA {
         node.ok(ROOT, s);
@@ -208,9 +216,11 @@ fn start_with(policy: &str, tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock
             &format!("put orders {{status: 'open', total: {total}, by: '{by}'}}"),
         );
     }
+    let (port, server) = serve(&db, &access, tune);
     let tuned = Node {
-        port: serve(&db, &access, tune),
+        port,
         access,
+        server,
     };
     (tuned, db)
 }
@@ -469,6 +479,39 @@ fn a_binding_s_refusal_is_told_the_writer_as_its_token_may_know_it() {
     );
     assert!(body.contains(r#""reason":"no ledger line""#), "{body}");
     assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
+    // A keyed `/query` and a `/batch` name it to the server's token alike,
+    // the batch at the statement it stopped at.
+    let a = node.request(
+        "POST",
+        ROOT,
+        "/query",
+        &[("Idempotency-Key", "v-1")],
+        &line(q),
+    );
+    assert_eq!(a.status, 412, "{}", a.body);
+    assert!(a.body.contains(r#""binding":"voided""#), "{}", a.body);
+    assert!(a.body.contains("bound statement `voided`"), "{}", a.body);
+    assert!(
+        a.body.contains(r#""reason":"no ledger line""#),
+        "{}",
+        a.body
+    );
+    let (status, body) = node.post(
+        ROOT,
+        "/batch",
+        &[line("get orders count"), line(q)].join("\n"),
+    );
+    assert_eq!(status, 412, "{body}");
+    assert!(body.contains(r#""at":1"#), "{body}");
+    assert!(body.contains(r#""binding":"voided""#), "{body}");
+    assert!(
+        body.contains(
+            r#""error":"bound statement `voided`, after `set` on `orders`, refused this write: "#
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#""reason":"no ledger line""#), "{body}");
+    assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
 }
 
 /// A binding whose condition reads a field the token is not shown is
@@ -602,4 +645,110 @@ fn a_del_whose_binding_inserts_is_held_to_the_data_ceiling() {
     assert!(body.contains("data ceiling exceeded"), "{body}");
     // A `del` waking nothing is the way out, as ever.
     full.ok(ROOT, "del orders where total >= 0");
+}
+
+/// `statements` names what each binding is bound to, `describe statement`
+/// its condition as written; `GET /_schema` lists a collection's bindings
+/// beside it, and `?as=fennecql` after the collections, to the server's
+/// token alone -- a scoped token is told no binding's name, nor the
+/// collections a binding writes that it may not read -- and either reads
+/// back as a plan of nothing.
+#[test]
+fn the_listings_and_the_schema_name_a_binding_to_the_server_s_token_alone() {
+    let (node, _db) = start_with(GRANTED, |_| {});
+    let listed = node.ok(ROOT, "statements");
+    assert!(listed.contains(r#"["orders","set"]"#), "{listed}");
+    assert!(listed.contains(r#"["notes","del"]"#), "{listed}");
+    let paid = node.ok(ROOT, "describe statement paid");
+    assert!(
+        paid.contains(r#""new.status = 'paid' and old.status = 'open'""#),
+        "{paid}"
+    );
+    let voided = node.ok(ROOT, "describe statement voided");
+    assert!(voided.contains(r#""new.status = 'void'""#), "{voided}");
+    let pay = node.ok(ROOT, "describe statement pay");
+    assert!(
+        pay.contains(r#""after":null"#) && pay.ends_with(r#""condition":null}]"#),
+        "{pay}"
+    );
+
+    let a = node.request("GET", ROOT, "/_schema", &[], "");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let described = a.body;
+    assert!(
+        described.contains(r#""bindings":[{"name":"paid","events":"set","text":"create statement paid after set orders"#),
+        "{described}"
+    );
+    assert!(
+        described.contains(r#"{"name":"unnoted","events":"del""#),
+        "{described}"
+    );
+    let a = node.request("GET", ROOT, "/_schema?as=fennecql", &[], "");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let text = a.body;
+    let tally = text.find("create collection tally").unwrap();
+    let bound = text.find("create statement paid after set orders").unwrap();
+    assert!(tally < bound, "{text}");
+    assert!(!text.contains("create statement pay("), "{text}");
+    for (target, body) in [
+        ("/_schema/plan?mode=follow", described.as_str()),
+        ("/_schema/plan?mode=follow", text.as_str()),
+    ] {
+        let a = node.request("POST", ROOT, target, &[], body);
+        assert_eq!(a.status, 200, "{}", a.body);
+        assert!(
+            a.body.contains(r#""statements":[]"#) && a.body.contains(r#""refusals":[]"#),
+            "{}",
+            a.body
+        );
+    }
+
+    // A scoped token: no binding, no text, no name.
+    let u0 = node.customer("u0");
+    for target in ["/_schema", "/_schema?as=fennecql"] {
+        let a = node.request("GET", &u0, target, &[], "");
+        assert_eq!(a.status, 200, "{}", a.body);
+        for word in ["bindings", "paid", "voided", "create statement", "tally"] {
+            assert!(!a.body.contains(word), "{word} told in {}", a.body);
+        }
+    }
+    let (status, _) = node.query(&u0, "statements");
+    assert_eq!(status, 403);
+    let (status, _) = node.query(&u0, "describe statement paid");
+    assert_eq!(status, 404);
+}
+
+/// A `set` held on `ledger` (`Fennec-Wait`) is answered by the write that
+/// made the line it waits for -- a `set orders` whose binding inserts it
+/// -- through the collections the landed block noted, the binding's
+/// among them.
+#[test]
+fn a_claim_held_on_a_derived_collection_is_answered_by_the_write_making_its_row() {
+    let (node, db) = start(|_| {});
+    let port = node.port;
+    let held = std::thread::spawn(move || {
+        let body = line("set ledger {amount: 0} where o = 3");
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            s,
+            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {ROOT}\r\n\
+             Fennec-Wait: 20000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    });
+    let t = std::time::Instant::now();
+    while node.server.waits().held < 1 {
+        assert!(t.elapsed() < Duration::from_secs(20), "never held");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    node.ok(ROOT, "set orders {status: 'paid'} where id = 3");
+    let out = held.join().unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    assert!(out.ends_with(r#"{"affected":1}"#), "{out}");
+    assert_eq!(ledger(&db), [line_of(3, 0)]);
 }

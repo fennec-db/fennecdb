@@ -565,5 +565,20 @@ mod tests {
         let e = super::schema_description(&format!("{schema}; create statement s( as get a"))
             .unwrap_err();
         assert!(e.starts_with("the schema does not read: "), "{e}");
+        // A statement bound to a collection's writes reads after the
+        // collections it names, the one it binds and the one it writes.
+        let bound = "create statement b after insert or set a where new.x > 1 \
+                     as insert c {x: new.x}";
+        let made = "create collection c (x int)";
+        let d = super::schema_description(&format!("{schema}; {made}; {bound}")).unwrap();
+        assert!(
+            d.contains("create statement b after insert or set a"),
+            "{d}"
+        );
+        let e = super::schema_description(&format!("{schema}; {bound}; {made}")).unwrap_err();
+        assert!(e.starts_with("the schema does not read: "), "{e}");
+        let e =
+            super::schema_description(&format!("{schema}; {made}; {}", &bound[..40])).unwrap_err();
+        assert!(e.starts_with("the schema does not read: "), "{e}");
     }
 }

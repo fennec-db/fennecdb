@@ -232,6 +232,44 @@ fn a_durable_write_is_traced_through_the_lock_the_disk_and_the_replicas() {
         );
     }
 
+    // A statement bound to the write: a child span of the request a
+    // binding a statement, never a row -- its name and its rows, no value
+    // -- and the one that refused the write failed, with the engine's
+    // words, which the trace keeps.
+    http.run("create collection marks (n int)");
+    http.run(
+        "create statement marked after insert notes scans as begin
+           get marks select n limit 1 require 0 else 'marked once';
+           insert marks {n: new.id}
+         end",
+    );
+    let body = r#"{"query":"insert notes {title: 'secret5'}"}"#;
+    let a = http.ask_with("POST", "/query", body, &[("X-Request-Id", "req-12")]);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let a = http.ask_with("POST", "/query", body, &[("X-Request-Id", "req-13")]);
+    assert_eq!(a.status, 412, "{}", a.body);
+    let spans = recv.until("the bindings' spans", |s| {
+        s.iter()
+            .any(|g| g.attr("fennec.request_id") == Some("req-13"))
+    });
+    for (id, refused) in [("req-12", false), ("req-13", true)] {
+        let root = spans
+            .iter()
+            .find(|g| g.attr("fennec.request_id") == Some(id))
+            .unwrap();
+        let bound = children(&spans, root, "bound marked");
+        assert_eq!(bound.len(), 1, "{spans:#?}");
+        for (k, v) in [
+            ("db.operation.name", "bound"),
+            ("db.stored_procedure.name", "marked"),
+            ("fennec.rows_woken", "1"),
+        ] {
+            assert_eq!(bound[0].attr(k), Some(v), "{k} in {:#?}", bound[0]);
+        }
+        assert_eq!(bound[0].error, refused, "{:#?}", bound[0]);
+        assert!(!format!("{:?}", bound[0].attrs).contains("secret"));
+    }
+
     for post in recv.posts() {
         assert_eq!(post.path, "/v1/traces");
         let header = |k: &str| {

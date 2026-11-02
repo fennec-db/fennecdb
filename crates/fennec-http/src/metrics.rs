@@ -24,6 +24,7 @@ use crate::http::{Request, Response};
 use crate::replication::Replication;
 use crate::tenants::Stats;
 use crate::{constant_eq, Config};
+use fennec_core::engine::Runs;
 use fennec_core::prelude::*;
 use std::cell::Cell;
 use std::fmt::{Display, Write as _};
@@ -124,12 +125,18 @@ struct Shard {
     /// `[wrote]`.
     statements: [Series; 2],
     slow: AtomicU64,
+    /// The runs of statements bound to writes (`fennec_bound_runs_total`),
+    /// a row a binding each, and the writes a binding refused.
+    bound_runs: AtomicU64,
+    bound_refused: AtomicU64,
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
 const SHARD: Shard = Shard {
     statements: ROW,
     slow: ZERO,
+    bound_runs: ZERO,
+    bound_refused: ZERO,
 };
 
 static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
@@ -234,8 +241,16 @@ pub fn called(name: &str, version: Option<(u64, u64)>) {
 }
 
 /// Counts a statement that took `took`, and logs it when it is slow. `text`
-/// is asked for only then, and not for a call ([`called`]).
-pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnOnce() -> String) {
+/// is asked for only then, and not for a call ([`called`]). `bound` is what
+/// the statements bound to its writes did (`Database::take_runs`): their
+/// runs and refusals counted, and the slow line naming them.
+pub fn record(
+    took: Duration,
+    failed: bool,
+    tenant: Option<&str>,
+    text: impl FnOnce() -> String,
+    bound: Option<&Runs>,
+) {
     let wrote = WROTE.with(|w| w.replace(false));
     let called = CALLED.with(|c| c.borrow_mut().take());
     let shard = &SHARDS[shard()];
@@ -244,6 +259,11 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
     s.timings.add(took);
     if failed {
         s.errors.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(r) = bound {
+        let runs: u64 = r.ran.iter().map(|r| r.rows).sum();
+        shard.bound_runs.fetch_add(runs, Ordering::Relaxed);
+        (shard.bound_refused).fetch_add(r.refused as u64, Ordering::Relaxed);
     }
     if micros >= SLOW_MICROS.load(Ordering::Relaxed) {
         shard.slow.fetch_add(1, Ordering::Relaxed);
@@ -261,8 +281,53 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
             text.truncate(end);
             text.push_str("...");
         }
-        slow_line(micros, wrote, failed, tenant, &text, version);
+        let bound = bound.map(bound_json);
+        slow_line(
+            micros,
+            wrote,
+            failed,
+            tenant,
+            &text,
+            version,
+            bound.as_deref(),
+        );
     }
+}
+
+/// A binding's runs over a request: its name and version, the statements
+/// that woke it, its rows and the time its runs took.
+type ByBinding<'a> = (&'a str, (u64, u64), u64, u64, Duration);
+
+/// A request's bindings by name and version, in the order each first ran.
+fn by_binding(r: &Runs) -> Vec<ByBinding<'_>> {
+    let mut out: Vec<ByBinding<'_>> = Vec::new();
+    for ran in &r.ran {
+        match out
+            .iter_mut()
+            .find(|e| e.0 == ran.name && e.1 == ran.version)
+        {
+            Some(e) => (e.2, e.3, e.4) = (e.2 + 1, e.3 + ran.rows, e.4 + ran.took),
+            None => out.push((&ran.name, ran.version, 1, ran.rows, ran.took)),
+        }
+    }
+    out
+}
+
+/// The slow line's `bound`: each binding the request woke, with its
+/// version and rows, `[["paid_ledger",[3,41],12]]`
+/// (`docs/design/named-statements.md`, *Watching bindings*).
+fn bound_json(r: &Runs) -> String {
+    let mut out = String::from("[");
+    for (i, (name, (h, c), _, rows, _)) in by_binding(r).into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        fennec_core::json::escape_into(&mut out, name);
+        let _ = write!(out, ",[{h},{c}],{rows}]");
+    }
+    out.push(']');
+    out
 }
 
 /// A slow statement's JSON line on stderr: the audit log's shape
@@ -276,6 +341,7 @@ fn slow_line(
     tenant: Option<&str>,
     text: &str,
     version: Option<(u64, u64)>,
+    bound: Option<&str>,
 ) {
     use crate::audit::{Field, Level};
     let mut fields = vec![
@@ -289,6 +355,9 @@ fn slow_line(
     fields.push(("statement", Field::Text(text)));
     if let Some((history, change)) = version {
         fields.push(("version", Field::Pair(history, change)));
+    }
+    if let Some(b) = bound {
+        fields.push(("bound", Field::Json(b)));
     }
     let line = crate::audit::line("slow", Level::Warn, &fields);
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
@@ -435,6 +504,23 @@ fn render(source: Source) -> String {
     );
     let slow: u64 = SHARDS.iter().map(|s| load(&s.slow)).sum();
     out.sample("fennec_slow_statements_total", &[], slow);
+    // No label names a binding or its collection: a tenant's schema is its
+    // own, and `/_stats/statements` counts each binding by name to those
+    // who may read every shape.
+    out.family(
+        "fennec_bound_runs_total",
+        "counter",
+        "Runs of statements bound to writes: a row each binding ran for.",
+    );
+    let runs: u64 = SHARDS.iter().map(|s| load(&s.bound_runs)).sum();
+    out.sample("fennec_bound_runs_total", &[], runs);
+    out.family(
+        "fennec_bound_refused_total",
+        "counter",
+        "Writes a statement bound to them refused: its guard, a grant it lacked, a bound.",
+    );
+    let refused: u64 = SHARDS.iter().map(|s| load(&s.bound_refused)).sum();
+    out.sample("fennec_bound_refused_total", &[], refused);
     out.family(
         "fennec_refused_total",
         "counter",
