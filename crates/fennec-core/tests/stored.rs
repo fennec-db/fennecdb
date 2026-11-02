@@ -1087,6 +1087,39 @@ fn the_mask_follows_a_drop_a_rename_and_an_alter_of_the_bound_collection() {
     run(&mut db, "insert entries {src: 1}").unwrap();
 }
 
+/// A write waking several bindings is answered the same whichever comes
+/// first by name: 409 naming the first broken one where one is, else 400.
+#[test]
+fn a_write_waking_several_is_answered_whatever_their_names_order() {
+    let tap = Tap::default();
+    let mut db = binding(&tap);
+    let body = "after insert entries as set accounts {balance: balance + 1} where id = new.src";
+    run(&mut db, &format!("create statement audit {body}")).unwrap();
+    run(&mut db, BINDING).unwrap();
+    run(&mut db, &format!("create statement zeta {body}")).unwrap();
+    let e = run(&mut db, "insert entries {src: 1}").unwrap_err();
+    assert!(
+        matches!(&e, Error::Query(m) if m.contains("would wake `audit`")),
+        "{e}"
+    );
+    // `credit` broken, between two that are not: 409 naming it.
+    let rename =
+        fennec_ql::parse_one("alter collection entries rename field amount to sum").unwrap();
+    db.internally(|db| db.execute(&rename)).unwrap();
+    let says = "would wake `credit`, which is broken";
+    let e = run(&mut db, "insert entries {src: 1}").unwrap_err();
+    assert!(matches!(&e, Error::Exists(m) if m.contains(says)), "{e}");
+    // The one before it dropped, or the one after it: the same answer.
+    for name in ["audit", "zeta"] {
+        run(&mut db, &format!("drop statement {name}")).unwrap();
+        let e = run(&mut db, "insert entries {src: 1}").unwrap_err();
+        assert!(
+            matches!(&e, Error::Exists(m) if m.contains(says)),
+            "{name}: {e}"
+        );
+    }
+}
+
 #[test]
 fn after_del_and_ttl_refuse_each_other_whichever_comes_second() {
     let tap = Tap::default();
@@ -1259,6 +1292,70 @@ fn a_replacement_keeps_the_kind_the_binding_and_what_it_writes() {
     )
     .unwrap();
     assert!(db.statements().get("later").unwrap().broken.is_none());
+}
+
+/// What a body writes is counted as the write path counts it
+/// (`put_with`): `insert` and `put ... if absent` make a row; `put` and
+/// `put ... if absent else set` make one or set one; `set` sets one. A
+/// replacement widening by any of them is refused naming the kind it
+/// gained; one writing what it wrote, or less, is not. A body's text
+/// refuses `put` and an upsert today, so the trees are made by hand: the
+/// contract must not lean on that refusal.
+#[test]
+fn a_replacement_widening_by_a_put_or_an_upsert_is_refused() {
+    use fennec_core::query::{Expr, Statement};
+    let bound = |body: &str| {
+        fennec_ql::definition(&format!(
+            "create statement mirror after insert entries as {body}"
+        ))
+        .unwrap()
+    };
+    let insert = bound("insert likes {post: new.src, user: new.by}");
+    let with = |insert_: bool, if_absent_: bool, upsert: bool| {
+        let mut d = insert.clone();
+        match &mut d.body[0] {
+            Statement::Put {
+                insert,
+                if_absent,
+                else_set,
+                ..
+            } => {
+                (*insert, *if_absent) = (insert_, if_absent_);
+                *else_set = upsert.then(|| vec![("user".into(), Expr::Field("user".into()))]);
+            }
+            s => panic!("{s:?}"),
+        }
+        d
+    };
+    let put = with(false, false, false);
+    let absent = with(true, true, false);
+    let upsert = with(true, true, true);
+    let set = bound("set likes {user: new.by} where post = new.src");
+    let sets = "statement `mirror` sets rows of `likes`, which it did not";
+    let inserts = "statement `mirror` inserts into `likes`, which it did not";
+    let refused_as = |new: &fennec_core::named::Definition, old, says: &str| {
+        let e = new.breaks_contract(old).expect("refused");
+        assert!(e.contains(says) && e.contains("drop statement"), "{e}");
+    };
+
+    // Bound with an `insert` (or `if absent`): a `put` or an upsert may set
+    // a row.
+    for old in [&insert, &absent] {
+        refused_as(&put, old, sets);
+        refused_as(&upsert, old, sets);
+        assert_eq!(absent.breaks_contract(old), None);
+        assert_eq!(insert.breaks_contract(old), None);
+    }
+    // Bound with a `set`: each of them may make one.
+    for new in [&put, &upsert, &insert, &absent] {
+        refused_as(new, &set, inserts);
+    }
+    // Bound with a `put` or an upsert, each writes what it wrote, or less.
+    for old in [&put, &upsert] {
+        for new in [&put, &upsert, &set, &insert, &absent] {
+            assert_eq!(new.breaks_contract(old), None);
+        }
+    }
 }
 
 /// A text read as a binding of other writes than its record names -- or

@@ -711,14 +711,24 @@ name. A sync replica refuses them (`NAMED`); the router reads a tenant's
 with the grammar; readers upgrade before a primary defines one
 (RELEASING.md, `make upgrade-check`). `$name` is a definition's alone;
 `call` and `statements` reserve no word (`NAMED_COMMANDS`, never
-`COMMANDS`). The `statements` feature, fennec-core's and fennec-ql's, is
+`COMMANDS`). The `statements` feature (fennec-core's, fennec-ql's) is
 outside `full`, named by the server, the shell and the native library; the
-module refuses in words of its own, and a path only a definition takes is
-`#[cold]`, out of the hot parse. `Definition::canonical` writes a field
-only where it holds something and an operator by a byte of its own; a
-change reading a stored text otherwise raises `GRAMMAR_EPOCH`, and
-`make fennecql-corpus` holds every FennecQL text of the repository to
-main's tree.
+module refuses in its own words, a definition's own path `#[cold]`.
+`Definition::canonical` writes a field only where it holds something and
+an operator by a byte of its own; a change reading a stored text otherwise
+raises `GRAMMAR_EPOCH`, and `make fennecql-corpus` holds every FennecQL
+text of the repository to main's tree.
+
+**[A write-bound statement's record binds its collection's
+writes.](docs/design/named-statements.md#write-bound-statements-f2)** Kind
+13's op 3, which a binary from before refuses, holds the collection and
+events outside the text; every build reads them into `Collection::bound`,
+a mask every change keeps (`Database::rebind`), so a collection no binding
+names pays one byte's look a writing statement. Until the engine runs one,
+a definition is refused (`BOUND_NOT_BUILT`) and so is each write it binds,
+409 where one is broken or unread; `@ttl` and `after del` refuse each
+other; a replacement keeps the collection, the events and each kind of
+write, a `put` making and setting rows.
 
 ### Held writes
 

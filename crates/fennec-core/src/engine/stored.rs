@@ -228,12 +228,17 @@ pub struct Statements {
     /// names kept twice, sorted, retained and cloned with each table were
     /// 0.7 KB of the browser module. Made again whole wherever a bound
     /// statement is defined or dropped, or one is beside one, since each
-    /// definition and drop moves the places after it.
+    /// definition and drop moves the places after it. Not the browser
+    /// module's, which asks only each collection's events
+    /// ([`Self::events_of`]) at a schema change: the index, its walk and
+    /// its upkeep were bytes of a module that reads no binding's tree.
+    #[cfg(feature = "statements")]
     bound: Vec<u32>,
 }
 
 /// The collection a statement is bound to; `""`, which names none, for a
 /// callable one.
+#[cfg(feature = "statements")]
 fn bound_of(s: &Stored) -> &str {
     s.after.as_ref().map_or("", |a| a.0.as_str())
 }
@@ -257,6 +262,7 @@ impl Statements {
 
     /// The statements bound to `collection`'s writes, in name order,
     /// broken or not.
+    #[cfg(feature = "statements")]
     pub fn bound_to<'s>(&'s self, collection: &str) -> impl Iterator<Item = &'s Stored> + 's {
         let run = self.run(collection, false)..self.run(collection, true);
         self.bound[run].iter().map(|&i| &self.all[i as usize])
@@ -264,14 +270,27 @@ impl Statements {
 
     /// The events the statements bound to `collection` wake on, together:
     /// what its [`super::Collection::bound`] holds.
+    #[cfg(feature = "statements")]
     pub fn events_of(&self, collection: &str) -> u8 {
         self.bound_to(collection)
             .fold(0, |e, s| e | s.after.as_ref().map_or(0, |a| a.1))
     }
 
+    /// The same where no index is kept: the table walked, as the module
+    /// asks it, at a schema change alone.
+    #[cfg(not(feature = "statements"))]
+    pub fn events_of(&self, collection: &str) -> u8 {
+        self.all
+            .iter()
+            .filter_map(|s| s.after.as_ref())
+            .filter(|a| a.0 == collection)
+            .fold(0, |e, a| e | a.1)
+    }
+
     /// Where `collection`'s run in [`Self::bound`] begins, or -- `past` --
     /// ends. Walked rather than halved: a database binds a handful, and
     /// `partition_point`'s two copies were 0.3 KB of the browser module.
+    #[cfg(feature = "statements")]
     fn run(&self, collection: &str, past: bool) -> usize {
         use std::cmp::Ordering::{Equal, Less};
         let mut at = 0;
@@ -291,16 +310,19 @@ impl Statements {
 
     /// Defines `s`, or replaces the statement of its name.
     pub(super) fn put(&mut self, s: Stored) {
+        #[cfg(feature = "statements")]
         let bound = s.after.is_some();
         match self.at(&s.name) {
             Ok(i) => self.all[i] = s,
             Err(i) => self.all.insert(i, s),
         }
+        #[cfg(feature = "statements")]
         self.reindex(bound);
     }
 
     pub(super) fn remove(&mut self, name: &str) -> Option<Stored> {
         let s = self.at(name).ok().map(|i| self.all.remove(i))?;
+        #[cfg(feature = "statements")]
         self.reindex(s.after.is_some());
         Some(s)
     }
@@ -310,6 +332,7 @@ impl Statements {
     /// definition or a drop of a bound statement may change it, or one
     /// beside a bound one moves its place. A table binding nothing, as F1's
     /// are, walks nothing.
+    #[cfg(feature = "statements")]
     fn reindex(&mut self, bound: bool) {
         if !bound && self.bound.is_empty() {
             return;
@@ -820,16 +843,24 @@ impl super::Database {
     /// would write is the one thing a binding must never let happen: the
     /// writes stop, loudly, until it is dropped. A broken binding's refusal
     /// is the 409 it keeps once bindings run; the browser module, which
-    /// will never run one, says so in its own words.
+    /// will never run one, says so in its own words. Where the write would
+    /// wake several, the answer is the same whichever comes first by name:
+    /// the first broken or unread among them (409), else the first (400) --
+    /// a 409 is what stays once bindings run, and the status a client sees
+    /// is never a name's accident.
     #[cold]
     #[inline(never)]
     pub(super) fn bound_refused(&self, collection: &str, events: u8) -> Error {
         #[cfg(feature = "statements")]
-        if let Some((s, e)) = self
-            .statements
-            .bound_to(collection)
-            .find_map(|s| Some((s, s.after.as_ref()?.1 & events)).filter(|(_, e)| *e != 0))
-        {
+        if let Some((s, e)) = {
+            let woken = || {
+                self.statements.bound_to(collection).filter_map(|s| {
+                    Some((s, s.after.as_ref()?.1 & events)).filter(|(_, e)| *e != 0)
+                })
+            };
+            let stays = |(s, _): &(&Stored, u8)| s.broken.is_some() || s.tree.is_none();
+            woken().find(stays).or_else(|| woken().next())
+        } {
             let name = &s.name;
             return match (&s.broken, &s.tree) {
                 (Some(why), _) => Error::Exists(format!(

@@ -823,18 +823,38 @@ impl Definition {
     }
 
     /// What the body writes, by collection and kind of write: each
-    /// `(collection, Binding::INSERT | SET | DEL)` once.
+    /// `(collection, Binding::INSERT | SET | DEL)` once. Counted as the
+    /// write path counts what a statement may do to a row (`put_with`):
+    /// `insert` and `put ... if absent` make one; `put`, which writes over
+    /// a row its id names, and `if absent else set` make or set one; `set`
+    /// sets and `del` takes out. A `put` counted as an `insert` alone let
+    /// a replacement turning `insert` into `put` start setting rows no
+    /// grant said it would.
     fn written(&self) -> Vec<(&str, u8)> {
         let mut out: Vec<(&str, u8)> = Vec::new();
         for s in &self.body {
-            let w = match s {
-                Statement::Put { collection, .. } => (collection.as_str(), Binding::INSERT),
-                Statement::Update { collection, .. } => (collection.as_str(), Binding::SET),
-                Statement::Delete { collection, .. } => (collection.as_str(), Binding::DEL),
+            let (c, kinds) = match s {
+                Statement::Put {
+                    collection,
+                    insert,
+                    else_set,
+                    ..
+                } => (
+                    collection,
+                    match *insert && else_set.is_none() {
+                        true => Binding::INSERT,
+                        false => Binding::INSERT | Binding::SET,
+                    },
+                ),
+                Statement::Update { collection, .. } => (collection, Binding::SET),
+                Statement::Delete { collection, .. } => (collection, Binding::DEL),
                 _ => continue,
             };
-            if !out.contains(&w) {
-                out.push(w);
+            for kind in [Binding::INSERT, Binding::SET, Binding::DEL] {
+                let w = (c.as_str(), kind);
+                if kinds & kind != 0 && !out.contains(&w) {
+                    out.push(w);
+                }
             }
         }
         out
