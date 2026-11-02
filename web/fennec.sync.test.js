@@ -249,6 +249,24 @@ test('a nocase field syncs compared by its fold, as the server compares it', opt
   }
 });
 
+test('a text index beside a unique one syncs: the replica searches, the server refuses the duplicate', opts, async () => {
+  const s = await server();
+  await s.run('create collection users (key text @hash, email text nocase @unique @text, n int)');
+  await s.run('put users [{key: "1", email: "sami@x.io", n: 1}, {key: "2", email: "bob@x.io", n: 2}]');
+  const db = await sync({ url: s.url, local: await Fennec.open(wasm), leader: false, shapes: [{ collection: 'users', key: 'key' }] });
+  try {
+    await db.ready();
+    // The replica's collection keeps the text index beside the other.
+    assert.deepEqual(db.local.rows('get users select key match email "bob"').map((r) => r.key), ['2']);
+    // A second `SAMI@x.io` is the server's to refuse, and put back here.
+    await assert.rejects(db.from('users').insert({ key: '3', email: 'SAMI@x.io', n: 3 }), /is unique/);
+    assert.equal(await db.from('users').count(), 2);
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 test('a write on the server lands on the subscriber', opts, async () => {
   const s = await server();
   const db = await open(s.url);

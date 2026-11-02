@@ -112,6 +112,7 @@ export class Sidebar {
               h('span', { class: 'field-name' }, f.name),
               h('span', { class: 'field-type' }, f.type, f.collate ? ` collate ${f.collate}` : '', f.nocase ? ' nocase' : '', f.required ? ' required' : ''),
               f.index ? h('span', { class: 'field-index' }, indexLabel(f.index)) : null,
+              f.also ? h('span', { class: 'field-index' }, indexLabel(f.also)) : null,
             ),
           ),
         );

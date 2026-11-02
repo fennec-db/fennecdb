@@ -66,6 +66,13 @@ pub const TAG_COMPOSITES: u8 = 16;
 /// type tag and refuses the file, rather than open it comparing the bytes
 /// -- and take a second `Alice@x.com` a `@unique` one refuses.
 pub const TAG_NOCASE: u8 = 17;
+/// Never a value's: a schema writes it, then a `@text` index, before the
+/// type of a text field that keeps that index beside its own (`email text
+/// @unique @text`), after the tags above where it has them. A version that
+/// knows none meets an unknown type tag and refuses the file, rather than
+/// open it with one of the two -- and take the duplicate the `@unique`
+/// refuses, or answer `match` with nothing.
+pub const TAG_BESIDE: u8 = 18;
 
 // ------------------------------------------------------- half precision
 //
@@ -759,11 +766,19 @@ mod tests {
             TAG_OBJECT,
             TAG_JSON,
             TAG_GEO,
+            TAG_COMPOSITES,
+            TAG_NOCASE,
+            TAG_BESIDE,
         ];
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), 16);
+        assert_eq!(tags.len(), 19);
         assert!(decode_value(&[16], &mut 0).is_err());
+        // The schema's own tags are no type: a version before each meets
+        // it where a type is read, and refuses the file.
+        for tag in [TAG_COMPOSITES, TAG_NOCASE, TAG_BESIDE] {
+            assert!(decode_type(&[tag], &mut 0).is_err(), "{tag}");
+        }
         assert_eq!(decode_type(&[TAG_GEO], &mut 0).unwrap(), DataType::Geo);
         // A point cut short is damage, never a point of fewer bytes.
         assert!(decode_value(&[TAG_GEO, 0, 0, 0], &mut 0).is_err());

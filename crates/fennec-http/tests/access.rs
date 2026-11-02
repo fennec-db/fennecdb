@@ -631,6 +631,40 @@ fn a_unique_clash_tells_a_scoped_token_nothing_of_the_other_row() {
     );
 }
 
+/// The same of a `@unique` field that keeps `@text` beside it: the field
+/// alone, by every route, whatever spelling the fold takes as the same.
+#[test]
+fn a_unique_clash_beside_a_text_index_tells_a_scoped_token_the_field_alone() {
+    let n = start_with(
+        "profiles  read,write  where owner = $jwt.sub\n",
+        &[
+            "create collection profiles (owner text @hash, email text nocase @unique @text)",
+            r#"put profiles {owner: "bob", email: "bob@x.io"}"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let tries = [
+        n.query(&alice, r#"insert profiles {email: "BOB@x.io"}"#),
+        n.query(&alice, r#"put profiles {email: "bob@x.io"}"#),
+        n.call(Some(&alice), "POST", "/profiles", r#"{"email":"Bob@X.io"}"#),
+        n.call(
+            Some(&alice),
+            "POST",
+            "/batch",
+            r#"{"query":"put profiles {email: \"bob@x.io\"}"}"#,
+        ),
+    ];
+    for (status, body) in tries {
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("`profiles.email` is unique"), "{body}");
+        assert!(
+            !body.to_lowercase().contains("bob"),
+            "the value was told: {body}"
+        );
+        assert!(!body.contains("document"), "the row was told: {body}");
+    }
+}
+
 /// The same of a unique index over several fields: the fields alone, and
 /// a read through it held to the token's rows as any read is.
 #[test]

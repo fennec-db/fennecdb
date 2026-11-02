@@ -319,7 +319,10 @@ impl Database {
                 .field(field)
                 .ok_or_else(|| Error::NotFound(format!("field `{field}` in `{collection}`")))?,
         };
-        if f.index != IndexKind::None {
+        // One of its own, or `@text` beside a `@hash`, `@unique` or
+        // `@sorted` of its own (`Field::add_index`); a path keeps one.
+        let mut with = f.clone();
+        if (path.is_some() && f.index != IndexKind::None) || with.add_index(kind.clone()).is_err() {
             if if_not_exists {
                 return Ok(Some(Response::Ok(format!("`{field}` is already indexed"))));
             }
@@ -515,7 +518,9 @@ impl Database {
                 c.geo.push((copy.field.clone(), Derived::new(ix)));
             }
         }
-        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos].index = copy.kind;
+        // Beside its other where it has one, as `check_index` found it
+        // could be: the schema is the one it was then (`tail.schema`).
+        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos].add_index(copy.kind)?;
         let (cid, encoded) = (c.id, c.schema.encode());
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);

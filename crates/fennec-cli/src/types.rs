@@ -476,6 +476,9 @@ fn render(path: &str, name: &str, file: &File) -> String {
             if let Some(ix) = index_note(&f.index) {
                 note.push_str(&ix);
             }
+            if let Some(ix) = f.beside.and_then(|spec| index_note(&IndexKind::Text(spec))) {
+                note.push_str(&ix);
+            }
             if f.required {
                 note.push_str(" required");
             }
@@ -675,6 +678,14 @@ fn render_tables(path: &str, import: &str, schemas: &[Schema]) -> String {
                 index_code(s, &f.name, &member(&f.name), &f.ty, &f.index, &mut used)
             {
                 indexes.push(ix);
+            }
+            // The `@text` beside it, an index of its own name.
+            if let Some(spec) = f.beside {
+                let name = format!("{}_text", f.name);
+                let text = IndexKind::Text(spec);
+                if let Some(ix) = index_code(s, &name, &member(&f.name), &f.ty, &text, &mut used) {
+                    indexes.push(ix);
+                }
             }
             body.push_str(&format!("  {}: {chain},\n", key(&f.name)));
         }

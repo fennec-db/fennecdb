@@ -721,8 +721,10 @@ enum Undo {
     /// A collection dropped, with where its name stood among the others: it
     /// comes back as it was.
     Dropped(Box<Collection>, usize),
-    /// An index built over a collection's field: it goes.
-    Indexed(u32, usize),
+    /// An index built over a collection's field: it goes, and the field
+    /// keeps what it had -- `true` where it was the `@text` beside the
+    /// field's own, its text index otherwise its own again.
+    Indexed(u32, usize, bool),
     /// An index built on a path into a json field, by the path: it goes.
     PathIndexed(u32, String),
     /// A collection's fields changed: the schema before, and the indexes
@@ -1670,6 +1672,11 @@ impl Collection {
                 }
                 _ => {}
             }
+            // The `@text` beside its own index (`@unique @text`).
+            #[cfg(feature = "text")]
+            if let Some(spec) = f.beside {
+                texts.insert(f.name.clone(), Derived::new(TextIndex::new(spec)));
+            }
         }
         let mut store = Store::new();
         store.set_dropped(&schema.dropped);
@@ -1746,6 +1753,10 @@ impl Collection {
                     self.geo.push((f.name.clone(), Derived::unbuilt()));
                 }
                 _ => {}
+            }
+            #[cfg(feature = "text")]
+            if f.beside.is_some() {
+                self.texts.insert(f.name.clone(), Derived::unbuilt());
             }
         }
         self.composites.clear();
@@ -2105,7 +2116,7 @@ impl Collection {
         let (Some(d), Some(pos)) = (self.texts.get(field), self.schema.field_pos(field)) else {
             return Ok(None);
         };
-        let IndexKind::Text(spec) = self.schema.fields[pos].index else {
+        let Some(spec) = self.schema.fields[pos].text_index() else {
             return Ok(None);
         };
         d.or_build(|| text_of(&self.store, pos, spec)).map(Some)
@@ -2888,7 +2899,9 @@ fn not_built_on(c: &Collection, field: &str, what: &str) -> Option<Error> {
     if EVERY_INDEX {
         return None;
     }
-    let feature = missing_feature(&c.schema.field(field)?.index)?;
+    let f = c.schema.field(field)?;
+    let text = f.beside.map(IndexKind::Text);
+    let feature = missing_feature(&f.index).or_else(|| missing_feature(text.as_ref()?))?;
     Some(not_built(&format!("field `{field}`'s {what}"), feature))
 }
 
@@ -5780,18 +5793,26 @@ impl Database {
                 "a schema change moved the fields of `{name}`"
             )));
         }
-        // `create index` adds one -- on a field, or on a path -- and
-        // anything else rebuilds them all.
-        let changed: Vec<usize> = (0..schema.fields.len())
-            .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
-            .collect();
-        let added = changed
-            .iter()
-            .all(|&i| c.schema.fields[i].index == IndexKind::None);
+        // `create index` adds one -- on a field, beside a field's other,
+        // or on a path -- and anything else rebuilds them all. A field's
+        // text index and its own are two: one added beside the other
+        // leaves that one as it is.
+        let mut added = true;
+        let mut builds = Vec::new();
+        for (i, (was, now)) in c.schema.fields.iter().zip(&schema.fields).enumerate() {
+            if was.own_index() != now.own_index() {
+                added &= *was.own_index() == IndexKind::None;
+                builds.push((i, now.own_index().clone()));
+            }
+            if was.text_index() != now.text_index() {
+                added &= was.text_index().is_none();
+                builds.push((i, now.text_index().map_or(IndexKind::None, IndexKind::Text)));
+            }
+        }
         c.schema = SchemaCell::new(schema);
         if added {
-            for i in changed {
-                build_index(c, i)?;
+            for (i, kind) in builds {
+                build_kind(c, i, kind)?;
             }
             // A path's, and an index over several fields, built by the
             // first read.
@@ -6183,12 +6204,26 @@ impl Database {
                     self.collections.insert(name, *c);
                     of = None;
                 }
-                Undo::Indexed(cid, pos) => {
+                Undo::Indexed(cid, pos, beside) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
-                        let f = c.schema.fields[pos].name.clone();
-                        drop(c.take_indexes(&f));
-                        SchemaCell::make_mut(&mut c.schema).fields[pos].index = IndexKind::None;
+                        let field = &mut SchemaCell::make_mut(&mut c.schema).fields[pos];
+                        let f = field.name.clone();
+                        // What it kept before the one built: its own index
+                        // beside the text one that goes, or the text one,
+                        // its own again, beside the own one that goes.
+                        let text = field.beside.take();
+                        if !beside {
+                            field.index = text.map_or(IndexKind::None, IndexKind::Text);
+                        }
+                        let kept = text.filter(|_| !beside).and_then(|_| c.texts.remove(&f));
+                        match beside {
+                            true => drop(c.texts.remove(&f)),
+                            false => drop(c.take_indexes(&f)),
+                        }
+                        if let Some(ix) = kept {
+                            c.texts.insert(f, ix);
+                        }
                     }
                 }
                 Undo::PathIndexed(cid, path) => {
@@ -7398,7 +7433,10 @@ impl Database {
         let no_field = |f: &str| Error::NotFound(format!("field `{f}` in `{collection}`"));
         let (op, field, to) = match change {
             Alter::AddField(f) => {
-                if let Some(feature) = missing_feature(&f.index) {
+                let text = f.beside.map(IndexKind::Text);
+                if let Some(feature) =
+                    missing_feature(&f.index).or_else(|| missing_feature(text.as_ref()?))
+                {
                     return Err(not_built("the index", feature));
                 }
                 if f.required {
@@ -7554,14 +7592,18 @@ impl Database {
             build_path_index(c, field)?;
         } else {
             let pos = c.schema.field_pos(field).unwrap();
-            SchemaCell::make_mut(&mut c.schema).fields[pos].index = kind.resolved();
+            // Its own, or the `@text` beside it: `check_index` asked which.
+            let f = &mut SchemaCell::make_mut(&mut c.schema).fields[pos];
+            let had = f.beside;
+            f.add_index(kind.resolved())?;
+            let beside = had != f.beside && matches!(kind, IndexKind::Text(_));
             // Before the build, which a block that does not land -- or a
             // build that fails -- puts back with it.
             if let Some(b) = &mut self.block {
-                b.was.push(Undo::Indexed(cid, pos));
+                b.was.push(Undo::Indexed(cid, pos, beside));
             }
             let c = self.collections.get_mut(collection).unwrap();
-            build_index(c, pos)?;
+            build_kind(c, pos, kind.resolved())?;
         }
         let c = self.collections.get_mut(collection).unwrap();
         // Over documents that hold a value twice, a unique index is refused
@@ -10752,15 +10794,15 @@ impl Database {
         m: &Match,
         ctx: &EvalCtx,
     ) -> Result<(Option<crate::highlight::Terms>, Vec<MarkPlan>)> {
-        let index = c.schema.field(&m.field).map(|f| &f.index);
-        let (true, Some(IndexKind::Text(spec)), Value::Text(query)) = (
+        let index = c.schema.field(&m.field).and_then(|f| f.text_index());
+        let (true, Some(spec), Value::Text(query)) = (
             cfg!(feature = "text"),
             index,
             eval(&m.query, &mut NoRow, ctx)?,
         ) else {
             return Ok((None, Vec::new()));
         };
-        let mut terms = crate::highlight::Terms::new(&query, *spec);
+        let mut terms = crate::highlight::Terms::new(&query, spec);
         if m.fuzzy > 0 || m.prefix {
             if let Some(ix) = c.text(&m.field)? {
                 for w in ix.loose_words(&query, m.loose())? {
@@ -11832,15 +11874,27 @@ fn sparse_of(store: &Store, pos: usize) -> Result<SparseIndex> {
 /// inlined into each it was 2.2 KB more of it.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    build_kind(c, pos, c.schema.fields[pos].index.clone())?;
+    if let Some(spec) = c.schema.fields[pos].beside {
+        build_kind(c, pos, IndexKind::Text(spec))?;
+    }
+    Ok(())
+}
+
+/// Builds one of the indexes the field at `pos` keeps, `kind`, as
+/// [`build_index`] builds them all: what `create index` does, which adds
+/// one beside the field's other and builds that one alone.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn build_kind(c: &mut Collection, pos: usize, kind: IndexKind) -> Result<()> {
     // An index this build lacks is not built: a file's log replays the
     // `create index` that made it, and the file opens all the same. Asked
     // after `EVERY_INDEX`, or the bounds check of the lookup stays in the
     // module that has every index.
-    if !EVERY_INDEX && missing_feature(&c.schema.fields[pos].index).is_some() {
+    if !EVERY_INDEX && missing_feature(&kind).is_some() {
         return Ok(());
     }
     let field = c.schema.fields[pos].name.clone();
-    match c.schema.fields[pos].index.clone() {
+    match kind {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash { .. } => {
             let fold = c.schema.fields[pos].case_fold();

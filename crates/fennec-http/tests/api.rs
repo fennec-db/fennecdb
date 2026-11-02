@@ -1898,6 +1898,70 @@ fn a_unique_field_taken_is_a_conflict() {
     assert!(r.body.contains("\"unique\""), "{}", r.body);
 }
 
+/// A `@unique` field that keeps `@text` beside it refuses a value it holds
+/// on every route -- `POST`, `/query`, `/batch` -- and `match` searches it;
+/// the schema names both. Kept as the last one written, the `@unique` was
+/// dropped and every one of these took the duplicate.
+#[test]
+fn a_unique_field_beside_a_text_index_is_a_conflict_and_searched() {
+    let h = start_with(Config::default(), Database::new());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection a (email text nocase @unique @text)"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    for e in ["x@y.z", "p@q.r"] {
+        let r = call(
+            h.port,
+            "POST",
+            "/a",
+            Some(&format!(r#"{{"email": "{e}"}}"#)),
+        );
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let tries = [
+        call(h.port, "POST", "/a", Some(r#"{"email": "X@y.z"}"#)),
+        q(r#"{"query":"insert a {email: \"x@y.z\"}"}"#),
+        q(r#"{"query":"set a {email: \"x@y.z\"} where id = 2"}"#),
+        q(r#"{"query":"put a $1","params":[[{"email":"x@Y.z"}]]}"#),
+        call(
+            h.port,
+            "POST",
+            "/batch",
+            Some(concat!(
+                r#"{"query":"put a {email: \"n@x.y\"}"}"#,
+                "\n",
+                r#"{"query":"put a {email: \"N@x.y\"}"}"#
+            )),
+        ),
+    ];
+    for r in tries {
+        assert_eq!(r.status, 409, "{}", r.body);
+        assert!(r.body.contains("`a.email` is unique"), "{}", r.body);
+    }
+    assert_eq!(rows(&get(h.port, "/a").body), 2);
+    let r = q(r#"{"query":"get a select id match email \"p\""}"#);
+    assert!(
+        r.body.contains(r#""id":2"#) && !r.body.contains(r#""id":1"#),
+        "{}",
+        r.body
+    );
+    let r = get(h.port, "/collections");
+    assert!(
+        r.body
+            .contains(r#""index":"unique","also":"text(k1=0.9, b=0.4)""#),
+        "{}",
+        r.body
+    );
+    // Any other second index is refused where it is declared.
+    let r = q(r#"{"query":"create collection b (k text @unique @sorted)"}"#);
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body
+            .contains("`k` has two indexes it cannot keep together"),
+        "{}",
+        r.body
+    );
+}
+
 /// A `json` field over HTTP: an object in a body is its value, every number
 /// in it as written -- a list of numbers alone too, which is a vector in a
 /// typed field's place -- a path filters the query string and `/query`, and

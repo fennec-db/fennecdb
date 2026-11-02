@@ -412,11 +412,21 @@ impl IndexKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field {
     pub name: String,
     pub ty: DataType,
+    /// Its own index: the one it was declared with, or the one that is not
+    /// `@text` of the two it keeps.
     pub index: IndexKind,
+    /// The `@text` index a text field keeps beside a `@hash`, `@unique` or
+    /// `@sorted` of its own (`email text @unique @text`): a word is a
+    /// question none of those answers, and `=` and order are none a text
+    /// index answers, so the two never answer one question twice. Every
+    /// other second index is refused where it is declared
+    /// ([`Field::add_index`]); `@text` alone is `index`. Read through
+    /// [`Field::text_index`] wherever a text index is looked for.
+    pub beside: Option<TextIndexSpec>,
     pub required: bool,
     /// `collate tr`: the order its text compares in, wherever it compares
     /// -- `order`, `<` and `>`, `min` and `max`, a `@sorted` index -- rather
@@ -429,12 +439,32 @@ pub struct Field {
     pub nocase: bool,
 }
 
+/// `beside` written only where it holds an index, so a field of one reads
+/// as it did: the FennecQL corpus compares trees by this form
+/// (`tools/fennecql_corpus.py`), and every field of every text changed.
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Field");
+        d.field("name", &self.name)
+            .field("ty", &self.ty)
+            .field("index", &self.index);
+        if let Some(spec) = &self.beside {
+            d.field("beside", spec);
+        }
+        d.field("required", &self.required)
+            .field("collate", &self.collate)
+            .field("nocase", &self.nocase)
+            .finish()
+    }
+}
+
 impl Field {
     pub fn new(name: impl Into<String>, ty: DataType) -> Field {
         Field {
             name: name.into(),
             ty,
             index: IndexKind::None,
+            beside: None,
             required: false,
             collate: None,
             nocase: false,
@@ -443,6 +473,50 @@ impl Field {
     pub fn indexed(mut self, kind: IndexKind) -> Field {
         self.index = kind;
         self
+    }
+
+    /// Adds `kind` to the indexes it keeps, as a second annotation of
+    /// `create collection` and a `create index` on it do: its own index
+    /// where it has none, or `@text` beside a `@hash`, `@unique` or
+    /// `@sorted` -- in whichever order the two come. Any other second
+    /// index is refused here, where it is declared: kept as the last
+    /// written, `email text @unique @text` was a text index alone, and took
+    /// every duplicate the `@unique` was there to refuse.
+    pub fn add_index(&mut self, kind: IndexKind) -> Result<()> {
+        let beside = |k: &IndexKind| matches!(k, IndexKind::Hash { .. } | IndexKind::Sorted { .. });
+        match (&self.index, kind, self.beside) {
+            (IndexKind::None, kind, None) => self.index = kind,
+            (own, IndexKind::Text(spec), None) if beside(own) => self.beside = Some(spec),
+            (IndexKind::Text(spec), kind, None) if beside(&kind) => {
+                self.beside = Some(*spec);
+                self.index = kind;
+            }
+            _ => {
+                return Err(Error::Query(format!(
+                    "`{}` has two indexes it cannot keep together: a field keeps one, and a \
+                     text field @text beside a @hash, @unique or @sorted",
+                    self.name
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    /// Its text index: its own, or the one beside it.
+    pub fn text_index(&self) -> Option<TextIndexSpec> {
+        match self.index {
+            IndexKind::Text(spec) => Some(spec),
+            _ => self.beside,
+        }
+    }
+
+    /// The index that is not its text one, if it has one: `@unique` of
+    /// `@unique @text`, `None` of `@text` alone.
+    pub fn own_index(&self) -> &IndexKind {
+        match (&self.index, self.beside) {
+            (IndexKind::Text(_), None) => &IndexKind::None,
+            (own, _) => own,
+        }
     }
     pub fn required(mut self) -> Field {
         self.required = true;
@@ -748,6 +822,11 @@ impl Schema {
                 )));
             }
             f.index.check(&f.name, &f.ty)?;
+            // The text index beside its own, which `Field::add_index` let
+            // stand there, on a text field alone.
+            if let Some(spec) = f.beside {
+                IndexKind::Text(spec).check(&f.name, &f.ty)?;
+            }
             seen.push(f.name.clone());
         }
         one_expiry(&name, fields.iter())?;
@@ -1000,10 +1079,7 @@ impl Schema {
         self.fields
             .iter()
             .enumerate()
-            .filter_map(|(i, f)| match &f.index {
-                IndexKind::Text(spec) => Some((i, f, *spec)),
-                _ => None,
-            })
+            .filter_map(|(i, f)| f.text_index().map(|spec| (i, f, spec)))
             .collect()
     }
 
@@ -1042,6 +1118,10 @@ impl Schema {
             }
             if f.nocase {
                 out.push(TAG_NOCASE);
+            }
+            if let Some(spec) = f.beside {
+                out.push(TAG_BESIDE);
+                encode_index(&mut out, &IndexKind::Text(spec));
             }
             encode_type(&mut out, &f.ty);
             out.push(f.required as u8);
@@ -1133,6 +1213,16 @@ impl Schema {
             };
             let nocase = buf.get(*pos) == Some(&TAG_NOCASE);
             *pos += nocase as usize;
+            let beside = match buf.get(*pos) {
+                Some(&TAG_BESIDE) => {
+                    *pos += 1;
+                    match decode_index(buf, pos)? {
+                        IndexKind::Text(spec) => Some(spec),
+                        _ => return Err(Error::Corrupt("an index beside a field's own".into())),
+                    }
+                }
+                _ => None,
+            };
             let ty = decode_type(buf, pos)?;
             let required = *buf
                 .get(*pos)
@@ -1153,6 +1243,7 @@ impl Schema {
                 name: fname,
                 ty,
                 index,
+                beside,
                 required,
                 collate,
                 nocase,
