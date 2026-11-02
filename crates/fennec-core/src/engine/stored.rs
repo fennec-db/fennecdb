@@ -490,10 +490,19 @@ impl super::Database {
     ///
     /// Such a writer copies, or remakes, what another made: it runs
     /// [`Self::unbound`] too.
+    /// Given back on a panic too, as [`Self::unbound`] gives its flag
+    /// back: given back only on a return, a panic in a follower's apply
+    /// left every later schema change marking what it broke rather than
+    /// refused.
     pub fn internally<R>(&mut self, f: impl FnOnce(&mut super::Database) -> R) -> R {
         let was = std::mem::replace(&mut self.internal, true);
+        #[cfg(target_arch = "wasm32")]
         let r = self.unbound(f);
+        #[cfg(not(target_arch = "wasm32"))]
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.unbound(f)));
         self.internal = was;
+        #[cfg(not(target_arch = "wasm32"))]
+        let r = r.unwrap_or_else(|p| std::panic::resume_unwind(p));
         r
     }
 

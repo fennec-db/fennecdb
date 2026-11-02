@@ -140,7 +140,13 @@ lock.
 and a subscriber see all of it or none. A failed one is undone in memory,
 a schema change too (`Undo`, a variant each); whatever counts records
 counts their writes (`writes_in`), and what cannot be undone, a compact,
-is refused in a block (`Statement::fits_block`).
+is refused in a block (`Statement::fits_block`). A panic mid-write leaves
+what a failed write does, since a server takes a poisoned lock as it
+stands: the block put back whoever opened it (`Database::whole`,
+`Unlanded`, a server's between statements by `held::Writing`), the
+database failed only where the sink was writing, and nothing lent out
+around a write -- the registry, its hooks and `Check` (`Lent`), a flag --
+left out.
 
 ### Durability
 

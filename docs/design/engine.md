@@ -444,3 +444,45 @@ a sort was 4.6 KB of the browser module. The buffers are kept from one block to 
 the record's header written into room left before the frames: allocated
 anew they took a lone `put` from 832 to 985 ns; kept, a put cost 841
 against the 829 before blocks, a `del` 648 against 634.
+
+**A panic mid-write leaves the database as a failed write does.**
+`fennec-server` unwinds a connection's panic alone, and takes a lock it
+poisoned as it stands (`fennec_http::held`), so whatever the panic left is
+what every later request meets. It left two things. `put` and `set` took
+the registry out of the database, so that the rows' functions could be
+called while `&mut self` wrote them, and put it back after the statement:
+a panic in a hook or a function -- a scoped token's `Check`, a quota's, a
+`where` calling one -- skipped the put-back, and every later write on the
+server or tenant met an empty registry, no `Check`, no function. And the
+block it ran in stayed open, half its writes in memory: the next reader
+took them as landed, and the next lone statement ran in it
+(`execute_with` runs a statement in a block it finds open), its own writes
+never landing either. Now the registry is lent (`Lent`), given back on a
+return and by the loan's drop where a panic unwinds first; `execute_with`,
+`execute_block` and `commit` (`whole`) put back the block a panic finds
+open, whoever opened it -- the panic unwinds through its opener too, which
+never commits it -- and let go of the rows it woke; a block `commit` took
+out to land is held by `Unlanded` for a panic in a check the server
+plugged in (the fence, a quota) until the sink took its record, and a panic
+inside the sink's write stops writes as a storage error does
+(`Database::fail`), since what reached the file is unknown. A block the
+server opened and left between statements -- a keyed write's, a REST
+write's, an MCP call's -- is put back by `held::Writing` as the write lock
+drops, before anyone else takes it. `internally` gives its flag back on a
+panic as `unbound` does. `tests/unwinding.rs`,
+`access.rs`'s `a_panicking_write_leaves_the_rules_in_force` and `held.rs`'s
+test hold it: before, the scoped token's write after another connection's
+panic landed (201) where its policy refuses it (403).
+
+Each guard is forgotten on the way out, so its drop runs on an unwind
+alone: a lone `put` measured 349 ns against main's 357, a `set` 565
+against 570, a scan calling `lower()` a row the same 144 ns. The browser
+module aborts on a panic, so a guard's drop is no code there; the module
+grew 97 bytes (30 gzipped), the record's checks moved into `land`.
+Rejected: the registry shared (`Arc`), never taken out, 0.2 KB of the
+module for derefs it has no use for; given back as a drop on every path
+rather than a swap, 0.1 KB; `catch_unwind` around each write, 0.4 KB as
+`unbound`'s was; the database failed on any panic, which would let one
+connection's panic stop every write until a restart; and a poisoned lock
+put right by the next to take it, which a reader taking it first would
+read past.

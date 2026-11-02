@@ -313,11 +313,9 @@ impl Database {
     /// where it woke rows and succeeded, their bindings run, its answer
     /// standing only where every run did; where it failed, the rows are
     /// let go of with the block its caller puts back. Rows a panic left
-    /// half way are run as the next lone statement ends, in the block the
-    /// panic left open, which that statement runs in
-    /// ([`Database::execute_with`]): they land with the rows that woke
-    /// them or not at all. A block starting lets them go
-    /// ([`Self::settle_woken`]).
+    /// half way are let go of with the block it unwound out of, which is
+    /// put back ([`Database::execute_with`]); a block starting lets go of
+    /// any other ([`Self::settle_woken`]).
     #[cold]
     #[inline(never)]
     pub(super) fn ended(&mut self, out: &mut Result<Response>) {

@@ -3679,10 +3679,71 @@ impl RowAccess for NoRow {
     }
 }
 
+/// The registry lent out of the database for a statement that calls its
+/// functions while it writes through `&mut Database` -- a `put`'s, a
+/// `set`'s -- given back by [`Self::give_back`], or as the loan drops where
+/// a panic unwinds first. Shared (`Arc`) rather than lent, it cost the
+/// browser module, which aborts on a panic, 0.2 KB of derefs for nothing;
+/// given back as a drop on every path, 0.1 KB.
+struct Lent<'a> {
+    db: &'a mut Database,
+    registry: Registry,
+}
+
+impl<'a> Lent<'a> {
+    fn of(db: &'a mut Database) -> Self {
+        let registry = std::mem::take(&mut db.registry);
+        Lent { db, registry }
+    }
+
+    /// What it holds now the empty registry it lent in its place, which
+    /// holds no allocation to forget.
+    fn give_back(mut self) {
+        std::mem::swap(&mut self.db.registry, &mut self.registry);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        std::mem::swap(&mut self.db.registry, &mut self.registry);
+    }
+}
+
+/// What [`Database::unwinding`] runs if a panic unwinds before it is
+/// forgotten.
+struct Unwinding<'a>(&'a mut Database, fn(&mut Database));
+
+impl Drop for Unwinding<'_> {
+    fn drop(&mut self) {
+        (self.1)(self.0)
+    }
+}
+
+/// A block taken out of the database to land ([`Database::commit`]), put
+/// back as it drops: forgotten as [`Database::land`] returns, it drops
+/// only where a panic unwinds out of it.
+struct Unlanded<'a> {
+    db: &'a mut Database,
+    b: &'a mut Block,
+}
+
+impl Drop for Unlanded<'_> {
+    fn drop(&mut self) {
+        self.db.undo(std::mem::take(self.b));
+    }
+}
+
 pub struct Database {
     collections: Names<Collection>,
     order: Vec<String>,
     next_coll_id: u32,
+    /// Lent out for a statement that calls its functions while it writes
+    /// through `&mut self` ([`Lent`]), and given back however the statement
+    /// ends: put back by hand after it, a panic in a hook or a row's
+    /// function left the database an empty registry -- every later write
+    /// met no hook, a scoped token's `Check` among them, and called no
+    /// function (`docs/design/engine.md`, *Blocks*).
     registry: Registry,
     /// `Mutex` not for locking but for `Sync`: `Sink` is only required to be
     /// `Send` (a sink carrying a JS handle on the browser side cannot be
@@ -6109,6 +6170,10 @@ impl Database {
     /// refuses it, the block is put back, and the database takes no more
     /// writes (see `failed`).
     pub fn commit(&mut self) -> Result<()> {
+        self.whole(Self::commit_open)
+    }
+
+    fn commit_open(&mut self) -> Result<()> {
         // Linked before it lands, so that a block put back after all -- a
         // lapsed lease, a refused append -- is put back as any other.
         if DEFERS {
@@ -6121,71 +6186,23 @@ impl Database {
             self.spare(b);
             return Ok(());
         }
-        // A schema change that breaks a named statement, against the
-        // schema the block leaves: refused naming it, or marked broken. A
-        // look at a table that is empty for every other block.
-        #[cfg(feature = "statements")]
-        if !self.statements.is_empty() {
-            if let Err(e) = self.statements_hold(&mut b) {
+        // Out of `self.block` from here, so held by `Unlanded` for a panic
+        // unwinding out of a check the server plugged in -- the fence, a
+        // quota -- or the sink: dropped with nothing more, it left its writes
+        // in memory and in no record. Refused, it is put back here.
+        let g = Unlanded {
+            db: self,
+            b: &mut b,
+        };
+        let landed = g.db.land(&mut *g.b);
+        std::mem::forget(g);
+        let len = match landed {
+            Ok(len) => len,
+            Err(e) => {
                 self.undo(b);
                 return Err(e);
             }
-        }
-        // The lease may have lapsed since the block's first write was let
-        // through: a block that lands after it would be a write the tenant's
-        // next primary never sees.
-        if let Err(e) = self.fenced() {
-            self.undo(b);
-            return Err(e);
-        }
-        let seq = self.changes.seq() + b.heads.len() as u64;
-        #[cfg(not(target_arch = "wasm32"))]
-        let at = *self.appended.get_mut();
-        // A block that spilled lands as the spills it names and the rest.
-        #[cfg(not(target_arch = "wasm32"))]
-        let land = match b.spilled.is_empty() {
-            true => None,
-            false => Some(Self::land_record(&b)),
         };
-        // A quota is asked with the record's length to the byte, before any
-        // of it reaches the file (`limit.rs`).
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.limit.is_some() {
-            let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
-            let grows = b.grew || self.grows(&b, b.spilled_writes);
-            let writes = self.app_writes(&b, b.spilled_writes);
-            if let Err(e) = self.limited(grows, adds as u64, writes) {
-                self.undo(b);
-                return Err(e);
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        let landed = land.map(|record| {
-            let r = self.land_spilled(&mut b, seq, at, &record);
-            (r, record.len())
-        });
-        #[cfg(target_arch = "wasm32")]
-        let landed = None;
-        let (r, len) = if let Some(landed) = landed {
-            landed
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            let writes = b.notes.len() as u64;
-            let record = b.record();
-            let r = self.sink_mut().record(seq, &record);
-            // Where its frames are in the file, for the handover: the
-            // stores hold them as the record does.
-            #[cfg(not(target_arch = "wasm32"))]
-            if r.is_ok() && self.mapped {
-                handover::note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
-                self.landed_writes += writes;
-            }
-            (r, record.len())
-        };
-        if let Err(e) = self.storage(r) {
-            self.undo(b);
-            return Err(e);
-        }
         *self.appended.get_mut() += len as u64;
         self.dirty = true;
         #[cfg(not(target_arch = "wasm32"))]
@@ -6206,6 +6223,113 @@ impl Database {
         #[cfg(not(target_arch = "wasm32"))]
         self.hand_over_when_due();
         Ok(())
+    }
+
+    /// The open block's record, asked of what may refuse it and handed to
+    /// the sink: its length once the sink took it. Refused, the caller puts
+    /// the block back.
+    fn land(&mut self, b: &mut Block) -> Result<usize> {
+        // A schema change that breaks a named statement, against the
+        // schema the block leaves: refused naming it, or marked broken. A
+        // look at a table that is empty for every other block.
+        #[cfg(feature = "statements")]
+        if !self.statements.is_empty() {
+            self.statements_hold(b)?;
+        }
+        // The lease may have lapsed since the block's first write was let
+        // through: a block that lands after it would be a write the tenant's
+        // next primary never sees.
+        self.fenced()?;
+        let seq = self.changes.seq() + b.heads.len() as u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        let at = *self.appended.get_mut();
+        // A block that spilled lands as the spills it names and the rest.
+        #[cfg(not(target_arch = "wasm32"))]
+        let land = match b.spilled.is_empty() {
+            true => None,
+            false => Some(Self::land_record(b)),
+        };
+        // A quota is asked with the record's length to the byte, before any
+        // of it reaches the file (`limit.rs`).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.limit.is_some() {
+            let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
+            let grows = b.grew || self.grows(b, b.spilled_writes);
+            let writes = self.app_writes(b, b.spilled_writes);
+            self.limited(grows, adds as u64, writes)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let landed = land.map(|record| {
+            let r = self.sending(|db| db.land_spilled(b, seq, at, &record));
+            (r, record.len())
+        });
+        #[cfg(target_arch = "wasm32")]
+        let landed = None;
+        let (r, len) = if let Some(landed) = landed {
+            landed
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            let writes = b.notes.len() as u64;
+            let record = b.record();
+            let r = self.sending(|db| db.sink_mut().record(seq, &record));
+            // Where its frames are in the file, for the handover: the
+            // stores hold them as the record does.
+            #[cfg(not(target_arch = "wasm32"))]
+            if r.is_ok() && self.mapped {
+                handover::note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
+                self.landed_writes += writes;
+            }
+            (r, record.len())
+        };
+        self.storage(r)?;
+        Ok(len)
+    }
+
+    /// `f`, the sink writing a block's record: a panic unwinding out of it
+    /// leaves the file holding the record, part of it or none, which no one
+    /// can tell, so it stops writes as a storage error does
+    /// ([`Self::fail`]) and the block is put back.
+    fn sending<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.unwinding(f, |db| {
+            db.fail(&Error::Io(
+                "a panic while a block's record was written: what reached the file is unknown"
+                    .into(),
+            ))
+        })
+    }
+
+    /// `f`, a write -- a statement, a block of them, a commit -- after which
+    /// no block stays open half way: a panic unwinding out of it, from a
+    /// hook (a scoped token's `Check`, a quota's), a function or the engine
+    /// itself, puts back the block it finds open as a failed write's is,
+    /// whoever opened it -- the panic unwinds through its opener too, which
+    /// never commits it -- and lets go of the rows it woke. A server takes
+    /// a lock a panic poisoned as it stands (`fennec_http::held`): left
+    /// open, the block's writes were read as landed and the next lone
+    /// statement ran in it, its own writes never landing either.
+    #[inline(always)]
+    fn whole<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.unwinding(f, Self::unwound)
+    }
+
+    /// `f`, and `on` where a panic unwinds out of it: a guard forgotten on
+    /// the way out, so that a write pays nothing for it, and the browser
+    /// module, which aborts on a panic, carries none of `on` (a
+    /// `catch_unwind` and its resume were 0.4 KB of it).
+    #[inline(always)]
+    fn unwinding<T>(&mut self, f: impl FnOnce(&mut Self) -> T, on: fn(&mut Self)) -> T {
+        let g = Unwinding(self, on);
+        let r = f(&mut *g.0);
+        std::mem::forget(g);
+        r
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn unwound(&mut self) {
+        self.rollback();
+        #[cfg(feature = "statements")]
+        self.settle_woken();
     }
 
     /// Puts the open block's writes back: every store as it stood before
@@ -6399,6 +6523,13 @@ impl Database {
     /// it runs on its own ([`Statement::fits_block`]). A `put` of many
     /// documents is a block of its own ([`Self::execute_with`]).
     pub fn execute_block(
+        &mut self,
+        stmts: &[(&Statement, &[Value])],
+    ) -> std::result::Result<Vec<Response>, (usize, Error)> {
+        self.whole(|db| db.execute_many(stmts))
+    }
+
+    fn execute_many(
         &mut self,
         stmts: &[(&Statement, &[Value])],
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
@@ -6695,6 +6826,10 @@ impl Database {
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        self.whole(|db| db.execute_one(stmt, params))
+    }
+
+    fn execute_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
         // A call whose statement reads is a read: no block, no replica's or
@@ -7869,26 +8004,26 @@ impl Database {
         pick: Option<&Pick>,
         params: &[Value],
     ) -> Result<Response> {
-        // Taken out for the statement, as `set` takes it: an upsert's
+        // Lent out for the statement, as `set` lends it: an upsert's
         // values call its functions while the row is written.
         if let Some(on) = pick.and_then(|p| p.conflict.as_deref()) {
             let names_id = docs.iter().flatten().any(|(k, _)| k == "id") || docs_param.is_some();
             self.collection(collection)?.schema.arbiter(on, names_id)?;
         }
-        let registry = std::mem::take(&mut self.registry);
         let list = pick.and_then(|p| p.returning.as_ref());
         let mut answered = list.map(|_| (Vec::new(), Vec::new()));
-        let out = self.put_with(
+        let lent = Lent::of(self);
+        let out = lent.db.put_with(
             collection,
             docs,
             docs_param,
             (insert, if_absent),
             else_set,
-            &registry,
+            &lent.registry,
             params,
             answered.as_mut(),
         );
-        self.registry = registry;
+        lent.give_back();
         // `returning`: the rows it wrote, ids and all, each as the
         // statement left it, and each handed to the hooks as the write it
         // was -- a scoped token's read rules hold it (`Hook::answering`).
@@ -11379,12 +11514,14 @@ impl Database {
         params: &[Value],
     ) -> Result<Response> {
         let ids = self.picked_ids(collection, filter, pick, params)?;
-        // Taken out for the statement, so that the expressions can call its
-        // functions while each row is written through `&mut self`, and put
-        // back whatever the rows came to.
-        let registry = std::mem::take(&mut self.registry);
-        let out = self.update_rows(collection, set, &ids, &registry, params);
-        self.registry = registry;
+        // Lent out for the statement, so that the expressions can call its
+        // functions while each row is written through `&mut self`, and
+        // given back whatever the rows came to -- a panic too ([`Lent`]).
+        let lent = Lent::of(self);
+        let out = lent
+            .db
+            .update_rows(collection, set, &ids, &lent.registry, params);
+        lent.give_back();
         match (out, pick.and_then(|p| p.returning.as_ref())) {
             (Ok(_), Some(list)) => Ok(Response::Rows(self.returned(
                 collection,
