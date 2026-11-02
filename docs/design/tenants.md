@@ -494,6 +494,24 @@ across the calls -- so a failover on a lease finding the tenant held pins
 the copy it had then (`HeldTenant`), none where it had none -- and the
 replica recorded only once it follows.
 
+A repair with nothing to call or record for a tenant takes no claim on it:
+no node that answered its look is free to keep the replica, and every copy
+the look found is one the directory gives the tenant, none to note
+(`repair`'s `idle`, `no_node_for`). It answers the reason a claimed pass
+would have, and asks again under no claim whether the tenant still wants a
+replica there. Claimed for that look alone, a repair refused whatever
+came for the tenant meanwhile -- a delete, a move, a quota, a failover on
+a lease, which then waited as a `HeldTenant` -- 409, another operation in
+progress, and a node staying silent has the repair run again for minutes.
+`region_leases`' cut test met it under one CPU: its delete of a tenant
+whose failover left it no copy came during the repair that a move's
+failed attach on the silent node had set off 2 s before
+(`REPAIR_AGAIN_FIRST`). With the repair held 1.5 s at the tenant and the
+delete put off 2.5 s, that test failed 6 runs of 6 before and passed 6 of
+6 after; `a_repair_with_no_node_to_place_on_takes_no_claim` holds the
+claim as a delete would and asks for the repair's reason, which was
+"another operation is in progress" before.
+
 The tries are one count (`Retries`): a fresh failure is due
 `REPAIR_AGAIN_FIRST` after it whatever ran before -- counted from the last
 wait, an attach failing after a run of silent tries waited out its minute

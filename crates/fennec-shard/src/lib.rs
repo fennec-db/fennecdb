@@ -4310,30 +4310,35 @@ impl Router {
             kept.push(n.clone());
         }
         let Some(on) = self.replica_node(primary, holding, answering, &kept) else {
-            // Free nodes there are, none of them answering: one that does
-            // again is tried then.
-            if answering.is_some() && self.replica_node(primary, holding, None, &[]).is_some() {
-                return Err(Unplaced::Failed(
-                    "no node free to keep it answered the repair's look".into(),
-                ));
-            }
-            if self.replica_node(primary, holding, None, &[]).is_some() {
-                return Err(Unplaced::Failed(
-                    "every node free to keep it holds a file of it noted as left there, for an \
-                     operator"
-                        .into(),
-                ));
-            }
-            return Err(Unplaced::Nowhere(
-                match self.read_dir().region_of(primary) {
-                    "" => "there is no other node to keep it".into(),
-                    r => format!("there is no other node in {} to keep it", region_name(r)),
-                },
-            ));
+            return Err(self.no_node_for(primary, holding, answering));
         };
         self.attach(tenant, primary, &on)
             .map(|_| on)
             .map_err(Unplaced::Failed)
+    }
+
+    /// Why [`Self::replica_node`] picked no node for a replica of a tenant
+    /// on `primary`: free nodes there are, none of which answered the
+    /// repair's look -- one that does again is tried then -- or each holding
+    /// a file of it noted as left there; or there are none.
+    fn no_node_for(
+        &self,
+        primary: &str,
+        holding: &[String],
+        answering: Option<&[String]>,
+    ) -> Unplaced {
+        if self.replica_node(primary, holding, None, &[]).is_some() {
+            return Unplaced::Failed(match answering {
+                Some(_) => "no node free to keep it answered the repair's look".into(),
+                None => "every node free to keep it holds a file of it noted as left there, for \
+                         an operator"
+                    .into(),
+            });
+        }
+        Unplaced::Nowhere(match self.read_dir().region_of(primary) {
+            "" => "there is no other node to keep it".into(),
+            r => format!("there is no other node in {} to keep it", region_name(r)),
+        })
     }
 
     /// `POST /_shard/replicas`: every tenant in no pair, not moving, without
@@ -4414,31 +4419,56 @@ impl Router {
                 ));
                 continue;
             }
-            let Ok(_claim) = self.claim(&tenant) else {
-                again = true;
-                failed.push(why(&tenant, "another operation is in progress"));
-                continue;
-            };
-            // Asked again under the claim: the operation that held it -- a
-            // create's own try, a move, a failover, another repair -- may
-            // have given it a replica or taken it elsewhere meanwhile. One
-            // placed is placed once.
-            let still = {
+            let copies: Vec<String> = holding
+                .iter()
+                .filter(|(_, names)| names.contains(&tenant))
+                .map(|(node, _)| node.clone())
+                .collect();
+            // Asked again, under the claim where one is taken: the operation
+            // that held it -- a create's own try, a move, a failover,
+            // another repair -- may have given it a replica or taken it
+            // elsewhere meanwhile. One placed is placed once.
+            let still = || {
                 let dir = self.read_dir();
                 dir.placement(&tenant)
                     .is_some_and(|p| p.node == primary && p.state == State::Active)
                     && dir.replica(&tenant).is_none()
                     && dir.standby(&primary).is_none()
             };
-            if !still {
+            // No node that answered the look is free to keep it, and every
+            // copy found is one the directory gives it, none to note: this
+            // repair would call and record nothing for the tenant, so it
+            // takes no claim. One taken for the look alone refused a delete,
+            // move, quota or failover of the tenant arriving meanwhile (409,
+            // another operation in progress), and a node staying silent has
+            // the repair run again for minutes: region_leases' delete, under
+            // one CPU, of a tenant its failover left without a copy met the
+            // repair a move's failed attach on the silent node set off.
+            let idle = {
+                let dir = self.read_dir();
+                copies.iter().all(|n| Self::records_file(&dir, &tenant, n))
+            } && self
+                .replica_node(&primary, &copies, Some(&answering), &[])
+                .is_none();
+            let claim = match idle {
+                true => None,
+                false => match self.claim(&tenant) {
+                    Ok(claim) => Some(claim),
+                    Err(_) => {
+                        again = true;
+                        failed.push(why(&tenant, "another operation is in progress"));
+                        continue;
+                    }
+                },
+            };
+            if !still() {
                 continue;
             }
-            let copies: Vec<String> = holding
-                .iter()
-                .filter(|(_, names)| names.contains(&tenant))
-                .map(|(node, _)| node.clone())
-                .collect();
-            match self.place_replica(&tenant, &primary, &copies, Some(&answering)) {
+            let placed = match claim.is_some() {
+                true => self.place_replica(&tenant, &primary, &copies, Some(&answering)),
+                false => Err(self.no_node_for(&primary, &copies, Some(&answering))),
+            };
+            match placed {
                 Ok(on) => {
                     done.push(format!(
                         "{{\"tenant\":{},\"replica\":{}}}",
@@ -6374,6 +6404,67 @@ mod tests {
     }
 
     /// An address nothing listens on: its connect is refused.
+    /// A repair with no node to give a tenant's replica -- the only other
+    /// node silent -- takes no claim on it, so a delete, a move, a quota or
+    /// a failover of the tenant meanwhile is not refused 409, another
+    /// operation in progress. The claim held here as a delete's is, the
+    /// repair says why it placed nothing, never that the tenant was held:
+    /// it held it, and region_leases' delete of a tenant its failover left
+    /// without a copy met it under one CPU.
+    #[test]
+    fn a_repair_with_no_node_to_place_on_takes_no_claim() {
+        let mut d = Directory::in_memory();
+        for (name, addr) in [("n1", holding_acme()), ("n2", refusing())] {
+            let node = directory::Node {
+                addr,
+                token: "adm".into(),
+                ..directory::Node::default()
+            };
+            d.set_node(name, node).unwrap();
+        }
+        d.place("acme", "n1", State::Active).unwrap();
+        let r = router(d);
+        let Ok(_deleting) = r.claim("acme") else {
+            panic!("acme was claimed before the repair ran");
+        };
+        let answer = r.repair();
+        let body = String::from_utf8_lossy(&answer.body);
+        assert_eq!(answer.status, 502, "{body}");
+        assert!(
+            body.contains("no node free to keep it answered the repair's look"),
+            "{body}"
+        );
+        assert!(!body.contains("another operation"), "{body}");
+    }
+
+    /// A node answering each look (`GET /_admin/tenants`) that it holds
+    /// `acme`, every request a connection sends it: its address.
+    fn holding_acme() -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut conn) = conn else { return };
+                std::thread::spawn(move || {
+                    let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
+                    while let Ok(1) = std::io::Read::read(&mut conn, &mut byte) {
+                        head.push(byte[0]);
+                        if !head.ends_with(b"\r\n\r\n") {
+                            continue;
+                        }
+                        head.clear();
+                        let answer = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                      Content-Length: 8\r\n\r\n[\"acme\"]";
+                        if std::io::Write::write_all(&mut conn, answer.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
     fn refusing() -> String {
         let gone = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = gone.local_addr().unwrap().to_string();

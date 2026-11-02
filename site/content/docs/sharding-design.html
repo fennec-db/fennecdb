@@ -367,7 +367,10 @@ healthy nodes went 18 s without a write and one was failed over, and the
 dead node's tenants wrote again only after 30 s. In the same drill run
 locally, every unknown name sent to a resolver that never answers, the
 router now fails the dead node over 2.1 to 3.3 s after its kill at a lease
-of 2 s, and the region's other tenants never pause more than 19 ms.</p>
+of 2 s, and the region's other tenants never pause more than 19 ms. And a
+repair that finds no node to keep a tenant's replica holds nothing of the
+tenant while it looks, so a delete, a move or a quota of it meanwhile is
+never refused for it (409, another operation in progress).</p>
 
 <h3 id="lease-measured">Measured</h3>
 
