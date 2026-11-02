@@ -205,6 +205,11 @@ description: One database from the screen to the server: state your screens foll
       threads, in one process on an M1. A block of 1 000 writes builds its
       rows beside the readers and holds them for the 0.15 ms it lands. <a href="docs/benchmarks-requests.html#concurrency">Method
       and the rest of the table</a></p>
+    <p class="after rise">What a write derives lands in its block: a statement
+      bound to a collection's writes runs once a row, so a ledger line, a
+      counter or a denormalized field is in the file with the write that made
+      it, or neither is, for a crash, a replica and a subscriber.
+      <a href="docs/fennecql.html#write-bound-statements">Statements bound to writes</a></p>
   </div>
 </section>
 

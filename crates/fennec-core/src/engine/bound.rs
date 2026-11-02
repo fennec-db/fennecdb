@@ -22,8 +22,9 @@
 //! `del`'s row where it reads it, and a `put`'s row asks `wake` beside a
 //! `returning`'s look); nothing here is on its path.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{Database, NoRow};
 use crate::collate::TextOrder;
@@ -42,6 +43,9 @@ pub(super) struct Woken {
     /// The bindings the statement may wake, in name order: a row's
     /// `passed` is a bit each, by place (`named::MAX_BOUND` is 16).
     bound: Vec<Arc<Definition>>,
+    /// Each binding's version, `(history, change)`, by place: what a
+    /// server's slow line names a run by ([`Ran::version`]).
+    versions: Vec<(u64, u64)>,
     /// Which side of the pair each binding's body reads, by place: a bit
     /// for `new.` ([`NEW_SIDE`]) and one for `old.` ([`OLD_SIDE`]). A row
     /// keeps a copy of a side only where a binding it passed reads it: a
@@ -65,7 +69,10 @@ pub(super) struct Woken {
     /// The binding that refused the last write refused by one, for the
     /// server to tell ([`Database::woken`]); let go of as the next
     /// statement ends, or a block starts (`Database::bound_due`).
-    refused_by: Option<String>,
+    /// And the engine's words it refused with: a later error that never
+    /// reached the bindings -- a refusal before a statement ran -- is not
+    /// told as theirs ([`Database::refused_by`]).
+    refused_by: Option<(String, String)>,
 }
 
 /// A row that woke a binding: as written (`new.`), as it stood (`old.`),
@@ -82,6 +89,101 @@ thread_local! {
     /// collection no statement is bound to asks and keeps none. Counted on
     /// the bound path alone.
     static COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    /// What the bindings did on this thread since a server last took it
+    /// ([`Database::take_runs`]). The thread's, not the database's: every
+    /// way a write comes in -- `/query`, `/batch`, REST's routes, MCP's
+    /// `write`, a held write, a call's body -- runs it on the thread
+    /// serving the request, under the write lock, so the server takes it
+    /// once a request where it counts and logs the request, and no way in
+    /// can forget to hand it over. Noted on the bound path alone.
+    /// Whether [`RUNS`] holds anything: the one look a request where
+    /// nothing is bound pays ([`Database::runs_noted`]).
+    static NOTED: Cell<bool> = const { Cell::new(false) };
+    static RUNS: RefCell<Runs> = const {
+        RefCell::new(Runs {
+            ran: Vec::new(),
+            refused: 0,
+            changed: Vec::new(),
+            refusal: None,
+        })
+    };
+}
+
+/// What the statements bound to writes did on a thread since it was last
+/// taken ([`Database::take_runs`]): what a server counts, logs and traces
+/// a request's bindings by (`docs/design/named-statements.md`, *Watching
+/// bindings*) -- the engine times them, since the trace and the counts are
+/// the server's.
+#[derive(Debug, Default)]
+pub struct Runs {
+    /// Each binding a statement woke and ran, one entry a binding a
+    /// statement, in the order they first ran. A thread no server takes it
+    /// from -- the shell's, an app's through the native library -- keeps
+    /// at most [`RUNS_KEPT`], a binding's runs past it added to its last
+    /// entry, so the note never grows with the writes.
+    pub ran: Vec<Ran>,
+    /// The writes a binding refused -- its guard, a hook's judgment, a
+    /// bound or a unique value its body met.
+    pub refused: u32,
+    /// The last of them: the binding's name, and the error it refused
+    /// with, whose words a scoped writer is never told
+    /// (`docs/design/named-statements.md`, *When a binding refuses*) and
+    /// the server's audit line keeps. Its trace keeps the status and the
+    /// `else` reason alone: the words may hold a row's value -- a unique
+    /// clash names the value held.
+    pub refusal: Option<(String, Error)>,
+    /// The bound statements this thread defined, replaced or dropped, each
+    /// with what it binds -- its collection and events -- which a drop's
+    /// text does not say: the audit's `schema` line names them. At most
+    /// [`RUNS_KEPT`].
+    pub changed: Vec<(String, String, u8)>,
+}
+
+/// A binding's runs for one statement.
+#[derive(Debug, Clone)]
+pub struct Ran {
+    pub name: String,
+    /// Its definition's `(history, change)`, as `statements` lists it.
+    pub version: (u64, u64),
+    /// The rows it ran for: a run each.
+    pub rows: u64,
+    /// When its first run started, and the time its runs took together:
+    /// two clock reads a binding a statement, more only where the rows
+    /// interleave several bindings' runs.
+    pub at: Instant,
+    pub took: Duration,
+}
+
+/// Entries a thread keeps before a binding's runs are added to its last.
+pub const RUNS_KEPT: usize = 256;
+
+/// A bound statement defined, replaced or dropped on this thread, with the
+/// collection and events it binds ([`Runs::changed`]).
+#[cold]
+pub(super) fn note_changed(name: &str, (collection, events): (&str, u8)) {
+    NOTED.with(|n| n.set(true));
+    RUNS.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.changed.len() < RUNS_KEPT {
+            r.changed
+                .push((name.to_string(), collection.to_string(), events));
+        }
+    });
+}
+
+/// A binding's runs, noted on this thread.
+fn note_ran(ran: Ran) {
+    NOTED.with(|n| n.set(true));
+    RUNS.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.ran.len() < RUNS_KEPT {
+            return r.ran.push(ran);
+        }
+        if let Some(last) = r.ran.iter_mut().rev().find(|e| e.name == ran.name) {
+            last.rows += ran.rows;
+            last.took += ran.took;
+        }
+    });
 }
 
 impl Woken {
@@ -250,13 +352,16 @@ impl Database {
             return Ok(false);
         }
         let t = Arc::clone(&self.statements);
-        let mut bound = Vec::new();
+        let (mut bound, mut versions) = (Vec::new(), Vec::new());
         for s in t.bound_to(collection) {
             if s.after.as_ref().is_none_or(|a| a.1 & events == 0) {
                 continue;
             }
             match (&s.broken, &s.tree) {
-                (None, Some(tree)) => bound.push(Arc::clone(tree)),
+                (None, Some(tree)) => {
+                    bound.push(Arc::clone(tree));
+                    versions.push(s.version);
+                }
                 _ => return Err(self.bound_refused(collection, events)),
             }
         }
@@ -276,6 +381,7 @@ impl Database {
             })
             .collect();
         w.bound = bound;
+        w.versions = versions;
         w.schema = Some(schema);
         w.rows.clear();
         w.reached = 0;
@@ -339,11 +445,21 @@ impl Database {
         }
     }
 
-    /// The binding `name` refused the statement running: noted for the
-    /// server to tell, and let go of as the next statement ends.
-    fn refused(&mut self, name: &str) {
-        self.woken.refused_by = Some(name.to_string());
+    /// The binding `name` refused the statement running with `e`: noted
+    /// for the server to tell, and let go of as the next statement ends;
+    /// and on the thread, with the error, for the server to count, log and
+    /// trace ([`Self::take_runs`]).
+    #[cold]
+    #[inline(never)]
+    fn refused(&mut self, name: &str, e: &Error) {
         self.bound_due = true;
+        NOTED.with(|n| n.set(true));
+        RUNS.with(|r| {
+            let mut r = r.borrow_mut();
+            r.refused = r.refused.saturating_add(1);
+            r.refusal = Some((name.to_string(), e.clone()));
+        });
+        self.woken.refused_by = Some((name.to_string(), e.to_string()));
     }
 
     /// The bindings `w`'s rows woke, run: each hook asked first whether
@@ -364,7 +480,7 @@ impl Database {
             let rows = w.rows.iter().filter(|r| r.passed & (1 << i) != 0).count();
             for h in self.registry.hooks() {
                 if let Err(e) = h.waking(def, rows) {
-                    self.refused(&def.name);
+                    self.refused(&def.name, &e);
                     return Err(e);
                 }
             }
@@ -381,21 +497,45 @@ impl Database {
         // and by `waking` above. Swapped back with the clock, a panic
         // included, so no write after the runs misses it.
         self.registry.swap_beside();
+        // Each binding's first run and the time its runs took, by place:
+        // noted whether they all stood or one refused, the time being spent
+        // either way.
+        let mut timed = vec![(None, Duration::ZERO); w.bound.len()];
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match *self.calls.get_mut() {
-                0 => self.bounded(|db| db.runs(&w)),
-                _ => self.runs(&w),
+                0 => self.bounded(|db| db.runs(&w, &mut timed)),
+                _ => self.runs(&w, &mut timed),
             }
         }));
         self.registry.swap_beside();
         self.clock = clock;
         self.unbound = unbound;
-        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
+        let r = r.unwrap_or_else(|p| std::panic::resume_unwind(p));
+        for (i, (at, took)) in timed.into_iter().enumerate() {
+            let Some(at) = at else {
+                continue;
+            };
+            let rows = w.rows.iter().filter(|r| r.passed & (1 << i) != 0).count();
+            note_ran(Ran {
+                name: w.bound[i].name.clone(),
+                version: w.versions.get(i).copied().unwrap_or_default(),
+                rows: rows as u64,
+                at,
+                took,
+            });
+        }
+        r
     }
 
-    /// Each kept row's bindings run, the binding that refused noted.
-    fn runs(&mut self, w: &Woken) -> Result<()> {
-        for row in &w.rows {
+    /// Each kept row's bindings run, the binding that refused noted, and
+    /// each binding's time in `timed`: the clock read as the runs start and
+    /// end, and where the next run is another binding's than the last --
+    /// twice a binding a statement where one binding runs, or the rows
+    /// wake their bindings in turn.
+    fn runs(&mut self, w: &Woken, timed: &mut [(Option<Instant>, Duration)]) -> Result<()> {
+        let mut running: Option<(usize, Instant)> = None;
+        let mut out = Ok(());
+        'rows: for row in &w.rows {
             for (i, def) in w.bound.iter().enumerate() {
                 if row.passed & (1 << i) == 0 {
                     continue;
@@ -403,6 +543,14 @@ impl Database {
                 let Some(b) = def.after.as_deref() else {
                     continue;
                 };
+                if running.is_none_or(|(at, _)| at != i) {
+                    let now = Instant::now();
+                    if let Some((at, since)) = running {
+                        timed[at].1 += now - since;
+                    }
+                    timed[i].0.get_or_insert(now);
+                    running = Some((i, now));
+                }
                 let values: Vec<Value> = (b.places.iter())
                     .map(|p| {
                         let doc = if p.old { &row.old } else { &row.new };
@@ -411,13 +559,17 @@ impl Database {
                     .collect();
                 for s in &def.body {
                     if let Err(e) = self.run_one(s, &values) {
-                        self.refused(&def.name);
-                        return Err(e);
+                        self.refused(&def.name, &e);
+                        out = Err(e);
+                        break 'rows;
                     }
                 }
             }
         }
-        Ok(())
+        if let Some((at, since)) = running {
+            timed[at].1 += since.elapsed();
+        }
+        out
     }
 
     /// Rows a statement left kept, or a refusal's note, as a block or a
@@ -439,7 +591,62 @@ impl Database {
     /// by name, for the server to tell its writer; `None` where none did.
     /// Read under the lock the write ran under, before the next statement.
     pub fn woken(&self) -> Option<&str> {
-        self.woken.refused_by.as_deref()
+        self.woken
+            .refused_by
+            .as_ref()
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// [`Self::woken`]'s binding, where it refused the write with `e`, and
+    /// the words its refusal is told after -- "bound statement `voided`,
+    /// after `set` on `orders`, refused this write: " -- for a caller with
+    /// the database's authority to read beside the engine's words, its
+    /// answer carrying the name as `binding`: the server's token's every
+    /// error, the native library's and the shell's
+    /// (`docs/design/named-statements.md`, *When a binding refuses*). Never
+    /// a scoped token's, which is told no name. Asked with the error it is
+    /// told beside: the note stands until the next statement ends, and a
+    /// write refused before it ran -- a follower's, a storage failure's --
+    /// ends none, so its error is told as its own.
+    #[cold]
+    #[inline(never)]
+    pub fn refused_by(&self, e: &Error) -> Option<(&str, String)> {
+        let (name, words) = self.woken.refused_by.as_ref()?;
+        if *words != e.to_string() {
+            return None;
+        }
+        let (c, events) = self.statements.get(name)?.after.clone()?;
+        let words = format!(
+            "bound statement `{name}`, after `{}` on `{c}`, refused this write: ",
+            crate::named::Binding::events_named(events)
+        );
+        Some((name, words))
+    }
+
+    /// Whether the bindings did anything on this thread since it was last
+    /// taken ([`Self::take_runs`]): one thread-local `bool` a request where
+    /// nothing is bound, so that a server's connection loop -- the hottest
+    /// function there is -- holds nothing of a binding's and calls out of
+    /// line where one ran.
+    #[inline]
+    pub fn runs_noted() -> bool {
+        NOTED.with(Cell::get)
+    }
+
+    /// What the bindings did on this thread since it was last taken --
+    /// each binding's runs a statement, timed, the writes one refused and
+    /// the bound statements defined or dropped -- or `None` where nothing
+    /// was: what a server counts, logs and traces once a request
+    /// (`fennec_http`'s `/_metrics`, `/_stats/statements`, the slow line,
+    /// the spans and the audit), asked where [`Self::runs_noted`] says so.
+    #[inline(never)]
+    pub fn take_runs() -> Option<Runs> {
+        NOTED.with(|n| n.set(false));
+        RUNS.with(|r| {
+            let mut r = r.borrow_mut();
+            let any = !r.ran.is_empty() || r.refused != 0 || !r.changed.is_empty();
+            any.then(|| std::mem::take(&mut *r))
+        })
     }
 
     /// The rows asked a binding's condition and the rows kept, on this

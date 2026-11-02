@@ -1193,6 +1193,12 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let failed = resp.status >= 400;
             let what = describe(&req);
             let name = tenant.as_ref().map(|t| t.name());
+            // What the statements bound to its writes did, which the engine
+            // noted on this thread whichever way the write came in: a
+            // `bool`'s look where none ran, the rest out of line.
+            if fennec_core::engine::Database::runs_noted() {
+                bound_noted(name, took);
+            }
             metrics::record(took, failed, name, || what.clone());
             statements::record(name, &what, took, failed);
             if trace::recording() {
@@ -1241,6 +1247,24 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         timing::lap(timing::Phase::Write);
         timing::end();
     }
+}
+
+/// What the statements bound to the writes of the request this thread
+/// served did (`Database::take_runs`, `docs/design/named-statements.md`,
+/// *Watching bindings*): their runs and refusals counted, each binding a
+/// shape of its own, a span each a statement, and what the slow line and
+/// the audit's lines name held for them, written where they always are.
+/// Out of line: a request where nothing is bound never comes here.
+#[cold]
+#[inline(never)]
+fn bound_noted(tenant: Option<&str>, took: std::time::Duration) {
+    let Some(r) = fennec_core::engine::Database::take_runs() else {
+        return;
+    };
+    metrics::bound(&r, took);
+    statements::bound(tenant, &r);
+    trace::bound_runs(&r);
+    audit::bound(&r);
 }
 
 /// A request's answer, run again while `Fennec-Wait` holds it ([`waits`]):
@@ -2208,9 +2232,9 @@ fn rest_run(
     })
     .map(|r| shown(shows, mask, &guard, r));
     drop(running);
-    let bound = match result.is_err() {
-        true => bound_by(who, &guard),
-        false => None,
+    let bound = match &result {
+        Err(e) => bound_by(who, &guard, e),
+        Ok(_) => None,
     };
     let answer = |result: &fennec_core::error::Result<fennec_core::prelude::Response>| match result
     {
@@ -2375,18 +2399,60 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     };
     let outcome = match (req.method, req.segments().as_slice()) {
         (Method::Get | Method::Head, ["_schema"]) => {
-            let schemas = visible(&held::read(db));
+            let guard = held::read(db);
+            let schemas = visible(&guard);
+            // The statements bound to each collection's writes, to the
+            // server's token alone: a binding's name, its text and the
+            // collections it writes are the schema's, which a scoped token
+            // is told nothing of (it learns the names its `wake` lines
+            // grant from `/_whoami`).
+            let bound: Vec<(String, u8, String, String)> = match full {
+                true => (guard.statements().iter())
+                    .filter_map(|s| {
+                        let (c, events) = s.after.clone()?;
+                        Some((c, events, s.name.clone(), s.text.clone()))
+                    })
+                    .collect(),
+                false => Vec::new(),
+            };
+            drop(guard);
             // `?as=fennecql`: the same description with its collections as
             // the statements that make them -- what the studio shows a
             // collection as, written by the engine rather than again in
-            // the page, and a body `/_schema/plan` takes back as it is.
+            // the page, and a body `/_schema/plan` takes back as it is --
+            // the bindings after them, each after the collections it names.
             if req.query.iter().any(|(k, v)| k == "as" && v == "fennecql") {
+                let mut text = with_id_note(&schemas);
+                for (.., def) in &bound {
+                    text.push_str(def.trim_end_matches(|c: char| c == ';' || c.is_whitespace()));
+                    text.push_str(";\n");
+                }
                 let mut out = String::from("{\"format\":1,\"fennecql\":");
-                fennec_core::json::escape_into(&mut out, &with_id_note(&schemas));
+                fennec_core::json::escape_into(&mut out, &text);
                 out.push('}');
                 return Response::json(200, out);
             }
-            return Response::json(200, fennec_core::declared::describe(&schemas));
+            // Each collection's bindings beside it, by name, events and
+            // text: what `/_schema/plan` reads back (`fennec_ql::bound_into`).
+            let described = fennec_core::declared::describe_with(&schemas, |name, out| {
+                let mut first = true;
+                for (_, events, n, def) in bound.iter().filter(|b| b.0 == name) {
+                    out.push_str(if first { ",\"bindings\":[" } else { "," });
+                    first = false;
+                    out.push_str("{\"name\":");
+                    fennec_core::json::escape_into(out, n);
+                    out.push_str(",\"events\":");
+                    let named = fennec_core::named::Binding::events_named(*events);
+                    fennec_core::json::escape_into(out, &named);
+                    out.push_str(",\"text\":");
+                    fennec_core::json::escape_into(out, def);
+                    out.push('}');
+                }
+                if !first {
+                    out.push(']');
+                }
+            });
+            return Response::json(200, described);
         }
         (Method::Post, ["_schema", "plan"]) if follow => {
             // A scoped token compares what it may read: a collection it may
@@ -2908,8 +2974,8 @@ fn run_query(
             }
         }
         noted_call(&guard, &stmt);
-        if r.is_err() {
-            bound = bound_by(who, &guard);
+        if let Err(e) = &r {
+            bound = bound_by(who, &guard, e);
         }
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
@@ -3094,7 +3160,9 @@ fn keyed_query(
             };
             api::render_any(&r, fennec_core::VERSION)
         }
-        Err(e) => error_response(e),
+        // A binding's refusal named to the server's token, kept with the
+        // key as it was told.
+        Err(e) => told_response(e, bound_by(who, &guard, e).as_deref()),
     };
     // An MCP call tool's answer past its bounds, put back before it lands.
     // The tools send no key, so none reaches here today; held all the same.
@@ -3432,7 +3500,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         // Measured before each statement, as a lone one is: the batch
         // stops at the first the ceiling refuses, as at an error.
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
-            Some(why) => Err((507, why, None)),
+            Some(why) => Err((507, why, None, None)),
             None => match &unscoped {
                 None => access::judge_call(who, &guard, stmt, params)
                     .and_then(|_| {
@@ -3443,7 +3511,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }
-            .map_err(|e| api::stop_of(&e)),
+            .map_err(|e| api::bound_stop(&e, bound_by(who, &guard, &e).as_deref())),
         };
         match r {
             Ok(r) => {
@@ -3931,7 +3999,8 @@ fn error_response(e: &Error) -> Response {
 }
 
 /// The statement bound to a write of the server's token that refused it,
-/// read under the lock the write ran under (`Database::woken`): its name
+/// read under the lock the write ran under (`Database::refused_by`, held
+/// to the error `e` it is told beside): its name
 /// and the words its refusal is told after
 /// (`docs/design/named-statements.md`, *When a binding refuses*). Asked
 /// of a write that failed alone, and `None` for one no binding refused and
@@ -3942,16 +4011,11 @@ fn error_response(e: &Error) -> Response {
 /// instructions (`docs/design/named-statements.md`, F2's slice 4).
 #[cold]
 #[inline(never)]
-fn bound_by(who: &Who, db: &Database) -> Option<Box<(String, String)>> {
+fn bound_by(who: &Who, db: &Database, e: &Error) -> Option<Box<(String, String)>> {
     if who.scope().is_some() {
         return None;
     }
-    let name = db.woken()?;
-    let (c, events) = db.statements().get(name)?.after.clone()?;
-    let words = format!(
-        "bound statement `{name}`, after `{}` on `{c}`, refused this write: ",
-        fennec_core::named::Binding::events_named(events)
-    );
+    let (name, words) = db.refused_by(e)?;
     Some(Box::new((name.to_string(), words)))
 }
 

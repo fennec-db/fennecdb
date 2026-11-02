@@ -240,3 +240,77 @@ fn a_slow_statement_is_logged_with_its_text() {
     let log = s.server.log.lock().unwrap().clone();
     assert!(!log.contains(r#""event":"slow""#), "{log}");
 }
+
+/// The statements bound to writes: each run counted, a row a binding,
+/// and each write one refused, with no label naming a binding or a
+/// collection; and the slow line names the bindings a request woke, each
+/// with its version and rows (`docs/design/named-statements.md`,
+/// *Watching bindings*).
+#[test]
+fn a_binding_s_runs_and_refusals_are_counted_and_its_slow_line_names_it() {
+    let s = node("bound.fennec", &["--slow-ms", "0"]);
+    let mut c = s.server.http().with_token(TOKEN);
+    c.run("create collection orders (status text, total int)");
+    c.run("create collection ledger (o int @hash, amount int)");
+    c.run(
+        "create statement paid after set orders where new.status = 'paid' and old.status = 'open'
+         as insert ledger {o: new.id, amount: new.total}",
+    );
+    c.run(
+        "create statement voided after set orders where new.status = 'void' as begin
+           get ledger select o where o = new.id limit 1 require 1 else 'no ledger line';
+           insert ledger {o: new.id, amount: 0}
+         end",
+    );
+    for t in [10, 20, 30] {
+        c.run(&format!("put orders {{status: 'open', total: {t}}}"));
+    }
+    let before = s.scrape();
+    assert_eq!(value(&before, "fennec_bound_runs_total"), 0.0);
+    assert_eq!(value(&before, "fennec_bound_refused_total"), 0.0);
+    c.run("set orders {status: 'paid'} where status = 'open'");
+    c.run("put orders {status: 'open', total: 40}");
+    let (status, body) = c
+        .query("set orders {status: 'void'} where id = 4")
+        .unwrap_err();
+    assert_eq!(status, 412, "{body}");
+    let after = s.scrape();
+    // Three rows paid, and the one void whose guard refused it: a run
+    // each, and one refusal.
+    assert_eq!(value(&after, "fennec_bound_runs_total"), 4.0);
+    assert_eq!(value(&after, "fennec_bound_refused_total"), 1.0);
+    assert!(after
+        .keys()
+        .filter(|k| k.starts_with("fennec_bound_"))
+        .all(|k| !k.contains('{')));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let log = loop {
+        let log = s.server.log.lock().unwrap().clone();
+        if log.contains(r#""bound":[["voided""#) {
+            break log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no slow line naming `voided` in:\n{log}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let paid = log
+        .lines()
+        .find(|l| l.contains(r#""event":"slow""#) && l.contains(r#""bound":[["paid",["#))
+        .unwrap_or_else(|| panic!("no slow line naming `paid` in:\n{log}"));
+    assert!(paid.contains(r#""kind":"write""#), "{paid}");
+    assert!(
+        paid.ends_with(",3]]}"),
+        "its version and three rows: {paid}"
+    );
+    let plain = log
+        .lines()
+        .find(|l| l.contains(r#""event":"slow""#) && l.contains("total: 40"))
+        .unwrap();
+    assert!(
+        !plain.contains(r#""bound""#),
+        "a write waking nothing: {plain}"
+    );
+}

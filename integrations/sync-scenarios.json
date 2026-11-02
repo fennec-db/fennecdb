@@ -1277,6 +1277,87 @@
           "refused": [412], "pending": 0,
           "rows": {"tasks": [{"id": 1, "priority": 1}, {"id": 2, "priority": 5}]}}}
       ]
+    },
+    {
+      "name": "a synced write waking a statement bound to it is sent alone, and the row it derived comes through its collection's stream",
+      "covers": "sync.html#bound-statements: a replica holds its shapes' rows, never its server's statements, so it runs no binding: the optimistic view holds the write alone, the server runs the write and what it wakes in one block, and the derived row comes back through a shape following its collection, in the change the write's own Fennec-Seq names",
+      "collections": [
+        {"name": "tasks", "fields": [{"name": "key", "type": "text", "index": "unique", "required": false}, {"name": "title", "type": "text", "index": null, "required": false}, {"name": "status", "type": "text", "index": "hash", "required": false}, {"name": "priority", "type": "int", "index": null, "required": false}]},
+        {"name": "ledger", "fields": [{"name": "task", "type": "int", "index": "hash", "required": false}, {"name": "amount", "type": "int", "index": null, "required": false}]}
+      ],
+      "shapes": [{"collection": "tasks", "key": "key"}, {"collection": "ledger"}],
+      "steps": [
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes"}, {"path": "/ledger/changes"}]}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": false}},
+        {"do": "seed", "shape": 1, "seq": 3, "rows": [], "expect": {"ready": true}},
+        {"do": "write", "write": {"update": "tasks", "set": {"status": "done"}, "where": {"key": "a"}}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{"query": "set tasks {status: $1} where key = $2", "params": ["done", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "status": "done"}, {"id": 2, "status": "open"}], "ledger": []},
+          "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": [], "rows": {"ledger": []}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 1, "key": "a", "priority": 1, "status": "done", "title": "one"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "status": "done"}, {"id": 2, "status": "open"}], "ledger": []}}},
+        {"do": "change", "shape": 1, "seq": 4, "puts": [{"amount": 1, "id": 1, "task": 1}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "status": "done"}, {"id": 2}], "ledger": [{"id": 1, "task": 1, "amount": 1}]}}}
+      ]
+    },
+    {
+      "name": "a statement bound to a synced write that refuses it puts the write back, told its reason",
+      "covers": "sync.html#bound-statements: a binding's guard refusing the write on the server is a refusal of the write, put back with the reason its `else` gave, as a require's is; the token is told no binding's name",
+      "collections": [
+        {"name": "tasks", "fields": [{"name": "key", "type": "text", "index": "unique", "required": false}, {"name": "title", "type": "text", "index": null, "required": false}, {"name": "status", "type": "text", "index": "hash", "required": false}, {"name": "priority", "type": "int", "index": null, "required": false}]},
+        {"name": "ledger", "fields": [{"name": "task", "type": "int", "index": "hash", "required": false}, {"name": "amount", "type": "int", "index": null, "required": false}]}
+      ],
+      "shapes": [{"collection": "tasks", "key": "key"}, {"collection": "ledger"}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "seed", "shape": 1, "seq": 3, "rows": [], "expect": {"ready": true}},
+        {"do": "write", "write": {"update": "tasks", "set": {"status": "void"}, "where": {"key": "a"}}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{"query": "set tasks {status: $1} where key = $2", "params": ["void", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "status": "void"}, {"id": 2, "status": "open"}]},
+          "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "no ledger line (`this write` was put back: a write bound to it refused it)", "reason": "no ledger line"}, "expect": {
+          "refused": [{"status": 412, "quota": null, "reason": "no ledger line"}], "pending": 0, "waits": [], "requests": [],
+          "rows": {"tasks": [{"id": 1, "status": "open"}, {"id": 2, "status": "open"}], "ledger": []}}}
+      ]
+    },
+    {
+      "name": "a write whose answer was lost is sent again under its key, and the row its binding derived arrives once",
+      "covers": "sync.html#bound-statements: the server keeps a keyed write's answer with the write and what it woke in one block, so the same key sent again is answered from the first try and wakes nothing: one ledger line comes through the stream, never two",
+      "collections": [
+        {"name": "tasks", "fields": [{"name": "key", "type": "text", "index": "unique", "required": false}, {"name": "title", "type": "text", "index": null, "required": false}, {"name": "status", "type": "text", "index": "hash", "required": false}, {"name": "priority", "type": "int", "index": null, "required": false}]},
+        {"name": "ledger", "fields": [{"name": "task", "type": "int", "index": "hash", "required": false}, {"name": "amount", "type": "int", "index": null, "required": false}]}
+      ],
+      "shapes": [{"collection": "tasks", "key": "key"}, {"collection": "ledger"}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "seed", "shape": 1, "seq": 3, "rows": [], "expect": {"ready": true}},
+        {"do": "write", "write": {"update": "tasks", "set": {"status": "done"}, "where": {"key": "a"}}, "expect": {
+          "requests": [{"key": "<w1>", "body": [{"query": "set tasks {status: $1} where key = $2", "params": ["done", "a"]}]}],
+          "pending": 1}},
+        {"do": "answer", "status": 0, "expect": {"refused": [], "waits": [[250, 325]], "pending": 1,
+          "rows": {"tasks": [{"id": 1, "status": "done"}, {"id": 2}], "ledger": []}}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>", "body": [{"query": "set tasks {status: $1} where key = $2", "params": ["done", "a"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": []}},
+        {"do": "change", "shape": 1, "seq": 4, "puts": [{"amount": 1, "id": 1, "task": 1}], "dels": [], "expect": {
+          "rows": {"ledger": [{"id": 1, "task": 1}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 1, "key": "a", "priority": 1, "status": "done", "title": "one"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "status": "done"}, {"id": 2}], "ledger": [{"id": 1, "task": 1, "amount": 1}]}}}
+      ]
+    },
+    {
+      "name": "a statement bound to writes is the server's: its definition is refused on a replica",
+      "covers": "fennecql.html#write-bound-statements, sync.html#bound-statements: a definition, bound or called, is one the server never had, refused before anything of the text runs or is queued, as every named statement is",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"text": "create statement closed after set tasks where new.status = 'done' as insert tasks_log {task: new.id}"}, "expect": {
+          "error": "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client",
+          "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}}
+      ]
     }
   ]
 }

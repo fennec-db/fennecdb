@@ -260,6 +260,28 @@ impl Binding {
         }
         out
     }
+
+    /// The events [`Self::events_named`] wrote, read back -- in any order
+    /// and case, SQL's `update` and `delete` as the grammar reads them --
+    /// or `None` for a text naming another word.
+    pub fn events_read(text: &str) -> Option<u8> {
+        let mut words = text.split_whitespace();
+        let mut events = 0;
+        loop {
+            let word = words.next()?.to_ascii_lowercase();
+            events |= match word.as_str() {
+                "insert" => Self::INSERT,
+                "set" | "update" => Self::SET,
+                "del" | "delete" => Self::DEL,
+                _ => return None,
+            };
+            match words.next() {
+                None => return Some(events),
+                Some(or) if or.eq_ignore_ascii_case("or") => {}
+                Some(_) => return None,
+            }
+        }
+    }
 }
 
 /// A place of a bound statement's body: `new.<field>` or `old.<field>`.
@@ -1172,6 +1194,70 @@ pub fn check_refused(e: &Expr) -> Option<String> {
     why
 }
 
+/// A bound statement's condition as its text writes it -- what follows the
+/// `where` after its collection, up to its `comment`, `scans` or `as` --
+/// for `describe statement` to show beside the text: the tree holds the
+/// condition as read, and no build writes an expression back as text. Read
+/// from the stored text, so a binding this process holds no tree for shows
+/// it too; strings, comments and brackets are stepped over, and a word with
+/// a dot in it (`new.as`) is a field. `None` for a binding with no
+/// condition, or a text that is not one.
+#[cfg(feature = "statements")]
+pub fn condition_text(text: &str) -> Option<&str> {
+    let b = text.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c >= 0x80;
+    let ends = |w: &str| {
+        ["as", "comment", "scans"]
+            .iter()
+            .any(|e| w.eq_ignore_ascii_case(e))
+    };
+    let line_end = |i: usize| {
+        b[i..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(b.len(), |n| i + n)
+    };
+    // 0 before `after`, 1 between it and `where`, 2 in the condition.
+    let (mut i, mut depth, mut state, mut start) = (0, 0i32, 0u8, 0);
+    while i < b.len() {
+        match b[i] {
+            b'#' => i = line_end(i),
+            b'-' if b.get(i + 1) == Some(&b'-') => i = line_end(i),
+            q @ (b'\'' | b'"') => {
+                i += 1;
+                loop {
+                    match b.get(i) {
+                        None => return None,
+                        Some(b'\\') => i += 2,
+                        Some(&c) if c == q && b.get(i + 1) == Some(&q) => i += 2,
+                        Some(&c) if c == q => break i += 1,
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+            b'(' | b'[' | b'{' => (depth, i) = (depth + 1, i + 1),
+            b')' | b']' | b'}' => (depth, i) = (depth - 1, i + 1),
+            c if word(c) => {
+                let from = i;
+                while i < b.len() && word(b[i]) {
+                    i += 1;
+                }
+                let w = text.get(from..i)?;
+                match state {
+                    _ if depth != 0 => {}
+                    0 if w.eq_ignore_ascii_case("after") => state = 1,
+                    1 if w.eq_ignore_ascii_case("where") => (state, start) = (2, i),
+                    1 if ends(w) => return None,
+                    2 if ends(w) => return text.get(start..from).map(str::trim),
+                    _ => {}
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Why a bound statement's condition is refused, if it is: it reads the
 /// row the write wrote, as written and as it stood, and `now()` -- a read
 /// of another collection is its body's guard, whose refusal can say why.
@@ -2003,5 +2089,45 @@ impl Canon {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "statements"))]
+mod tests {
+    use super::condition_text;
+
+    /// A binding's condition as written, strings, comments and brackets
+    /// stepped over, a dotted word a field: what `describe statement`
+    /// shows.
+    #[test]
+    fn a_condition_is_read_from_its_text_as_written() {
+        let read = |t| condition_text(t);
+        assert_eq!(
+            read(
+                "create statement p after set orders where new.status = 'paid' as insert l {o: 1}"
+            ),
+            Some("new.status = 'paid'")
+        );
+        assert_eq!(
+            read(
+                "CREATE OR REPLACE STATEMENT p AFTER update OR delete orders\n  WHERE \
+                 new.note = 'as comment' -- as scans\n  and (old.n in (1, 2) or new.as = 1)\n  \
+                 COMMENT 'it' scans AS begin get x require 1; insert l {o: 1} end"
+            ),
+            Some("new.note = 'as comment' -- as scans\n  and (old.n in (1, 2) or new.as = 1)")
+        );
+        assert_eq!(
+            read("create statement p after insert t as insert l {o: new.id}"),
+            None
+        );
+        assert_eq!(
+            read("create statement p after insert t comment 'where' as insert l {o: 1}"),
+            None
+        );
+        assert_eq!(
+            read("create statement p($a int) as get t where a = $a"),
+            None
+        );
+        assert_eq!(read("create statement p after set t where 'open"), None);
     }
 }

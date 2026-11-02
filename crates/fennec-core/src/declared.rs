@@ -74,6 +74,16 @@ pub struct Declared {
     /// (`fennec_ql::schema_text`).
     pub text: Option<String>,
     pub migrations: Vec<Migration>,
+    /// The statements bound to a collection's writes that a description's
+    /// JSON lists beside it (`"bindings"`, as `GET /_schema` writes them to
+    /// the server's token): the collection, the statement's name, the
+    /// events it is listed with, where it is, and its text, for the caller
+    /// that has the parser to read into `statements`
+    /// (`fennec_ql::bound_into`), each held to the collection it is listed
+    /// beside and to the events listed: the text's are the binding's, and
+    /// a description claiming others is refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bound: Vec<(String, String, Option<String>, String)>,
 }
 
 /// One migration: run once, in order, and recorded.
@@ -178,7 +188,7 @@ pub fn parse(src: &str) -> Result<Declared> {
         None => Vec::new(),
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let collections = collections(list(member(top, "collections"), "collections")?)?;
+    let (collections, bound) = collections(list(member(top, "collections"), "collections")?)?;
     let mut migrations = Vec::new();
     for m in list(member(top, "migrations"), "migrations")? {
         migrations.push(match m {
@@ -205,20 +215,46 @@ pub fn parse(src: &str) -> Result<Declared> {
         collections,
         text,
         migrations,
+        #[cfg(not(target_arch = "wasm32"))]
+        bound,
     })
 }
 
+/// A description's bound statements, read from its collections
+/// ([`Declared::bound`]).
 #[cfg(not(target_arch = "wasm32"))]
-fn collections(list: &[Value]) -> Result<Vec<Schema>> {
+type Bound = Vec<(String, String, Option<String>, String)>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collections(all: &[Value]) -> Result<(Vec<Schema>, Bound)> {
     let mut out: Vec<Schema> = Vec::new();
-    for c in list {
+    let mut bound = Vec::new();
+    for c in all {
         let s = collection(c)?;
         if out.iter().any(|o| o.name == s.name) {
             return Err(bad(&s.name, "is declared twice"));
         }
+        let o = object(c, "a collection")?;
+        for b in list(member(o, "bindings"), "bindings")? {
+            let b = object(b, "a binding")?;
+            only(b, &["name", "events", "text"], "a binding")?;
+            let n = name(b, "name", "a binding")?;
+            let events = match member(b, "events") {
+                None => None,
+                Some(Value::Text(e)) => Some(e.clone()),
+                Some(_) => return Err(bad(&n, "is listed with `events` that are not a text")),
+            };
+            let Some(Value::Text(text)) = member(b, "text") else {
+                return Err(bad(
+                    &n,
+                    "is listed with its `text`, the definition as written",
+                ));
+            };
+            bound.push((s.name.clone(), n, events, text.clone()));
+        }
         out.push(s);
     }
-    Ok(out)
+    Ok((out, bound))
 }
 
 fn blank(t: &str) -> bool {
@@ -228,7 +264,11 @@ fn blank(t: &str) -> bool {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn collection(v: &Value) -> Result<Schema> {
     let o = object(v, "a collection")?;
-    only(o, &["name", "fields", "indexes"], "a collection")?;
+    only(
+        o,
+        &["name", "fields", "indexes", "bindings"],
+        "a collection",
+    )?;
     let cname = name(o, "name", "a collection")?;
     let mut fields = Vec::new();
     let mut paths = Vec::new();
@@ -570,6 +610,17 @@ fn whole(o: &[(String, Value)], key: &str, at: &str) -> Result<Option<i64>> {
 /// under its lock, the browser module the database's own -- cloned there,
 /// they were 3 KB of the module.
 pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
+    describe_with(schemas, |_, _| {})
+}
+
+/// [`describe`], `beside` writing what follows a collection's own members
+/// into its object: a server's `"bindings"`, the statements bound to its
+/// writes (`GET /_schema`, to the server's token). Generic, so the browser
+/// module's [`describe`] is the code it was.
+pub fn describe_with<S: Borrow<Schema>>(
+    schemas: &[S],
+    mut beside: impl FnMut(&str, &mut String),
+) -> String {
     let mut out = format!("{{\"format\":{FORMAT},\"collections\":[");
     for (i, s) in schemas
         .iter()
@@ -652,6 +703,7 @@ pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
             }
             out.push(']');
         }
+        beside(&s.name, &mut out);
         out.push('}');
     }
     out.push_str("]}");

@@ -22,6 +22,7 @@
 //! and not the node's to publish.
 
 use crate::http::{Method, Request, Response};
+use fennec_core::engine::{Database, Runs};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -131,6 +132,11 @@ pub fn call(name: &str) {
 pub fn clear() {
     TEXT.with(|t| t.borrow_mut().clear());
     ROWS.with(|r| r.set(0));
+    // And what the statements bound to its writes did, noted by the
+    // engine on this thread: a held run before put back what it woke.
+    if Database::runs_noted() {
+        drop(Database::take_runs());
+    }
 }
 
 /// Notes that the statement this thread is running returned or changed `n`
@@ -158,45 +164,96 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
             crate::audit::statement(tenant, source, &buf, failed);
             noted.clear();
         });
-        let id = hash(tenant, &buf);
-        let shard = &shards()[MINE.with(|m| *m)];
-        let mut map = shard.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(e) = map.get_mut(&id) {
+        let counted = Entry {
+            tenant: None,
+            text: String::new(),
+            id: hash(tenant, &buf),
+            calls: 1,
+            errors: failed as u64,
+            rows,
+            micros,
+            min_micros: micros,
+            max_micros: micros,
+        };
+        count(tenant, &buf, counted);
+    });
+}
+
+/// A shape's text as it is kept: cut at [`TEXT_MAX`] bytes.
+fn kept(shape: &str) -> String {
+    let mut text = shape.to_string();
+    if text.len() > TEXT_MAX {
+        let mut end = TEXT_MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("...");
+    }
+    text
+}
+
+/// Each statement bound to the request's writes that ran, counted as the
+/// shape `after <name>` (`docs/design/named-statements.md`, *Watching
+/// bindings*): its calls the statements that woke it, its rows theirs, its
+/// time its runs' -- which the writer's shape holds too, so an operator
+/// tuning a slow `set orders` sees what of it was the ledger -- and an
+/// error where it refused the write. Read as every shape is, by what reads
+/// every collection: a binding's name is the schema's.
+pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
+    let mut names: Vec<&str> = Vec::new();
+    for ran in &r.ran {
+        if !names.contains(&ran.name.as_str()) {
+            names.push(&ran.name);
+        }
+    }
+    let refused_by = r.refusal.as_ref().map(|(n, _)| n.as_str());
+    for name in names {
+        let shape = format!("after {name}");
+        let mut e = Entry {
+            tenant: None,
+            text: String::new(),
+            id: hash(tenant, &shape),
+            calls: 0,
+            errors: (refused_by == Some(name)) as u64,
+            rows: 0,
+            micros: 0,
+            min_micros: u64::MAX,
+            max_micros: 0,
+        };
+        for ran in r.ran.iter().filter(|ran| ran.name == name) {
+            let micros = ran.took.as_micros().min(u64::MAX as u128) as u64;
             e.calls += 1;
-            e.errors += failed as u64;
-            e.rows += rows;
+            e.rows += ran.rows;
             e.micros += micros;
             e.min_micros = e.min_micros.min(micros);
             e.max_micros = e.max_micros.max(micros);
-            return;
         }
-        if map.len() >= PER_SHARD {
-            forget(&mut map);
-        }
-        let mut text = buf.clone();
-        if text.len() > TEXT_MAX {
-            let mut end = TEXT_MAX;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str("...");
-        }
-        map.insert(
-            id,
-            Entry {
-                tenant: tenant.map(str::to_string),
-                text,
-                id,
-                calls: 1,
-                errors: failed as u64,
-                rows,
-                micros,
-                min_micros: micros,
-                max_micros: micros,
-            },
-        );
-    });
+        count(tenant, &shape, e);
+    }
+}
+
+/// `counted` -- one request's counts of `shape`, its `id` the shape's hash
+/// -- added to this thread's shard.
+fn count(tenant: Option<&str>, shape: &str, counted: Entry) {
+    let id = counted.id;
+    let shard = &shards()[MINE.with(|m| *m)];
+    let mut map = shard.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = map.get_mut(&id) {
+        e.add(&counted);
+        return;
+    }
+    if map.len() >= PER_SHARD {
+        forget(&mut map);
+    }
+    map.insert(
+        id,
+        Entry {
+            tenant: tenant.map(str::to_string),
+            text: kept(shape),
+            ..counted
+        },
+    );
 }
 
 /// `f` with the shape the last statement this thread counted was counted

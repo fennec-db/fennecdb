@@ -189,7 +189,7 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     // line grants: 403, the token told no name, and the line naming it for
     // the operator writing the grant. The token checked out: the refusal
     // is of what it may cause, and grows no count.
-    let policy = "orders  read,update  for customer\n";
+    let policy = "orders  read,update  for customer\nguarded  wake  for customer\n";
     let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let scoped = serve(Server::new(
         Arc::new(RwLock::new(Database::new())),
@@ -225,6 +225,34 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     assert!(!out.contains("paid`"), "{out}");
     assert_eq!(would_wait(LOCAL), ms(50), "a 403 grows no count");
 
+    // A bound statement's drop and definition name what it binds, which a
+    // drop's text does not say; and a binding refusing a scoped writer's
+    // granted write: the writer told its status and `reason` alone, the
+    // `bound` line naming the binding and the engine's words.
+    let dropped = r#"{"query":"drop statement paid"}"#;
+    assert_eq!(call(scoped, Some(ROOT), "POST", "/query", dropped), 200);
+    let guarded = r#"{"query":"create statement guarded after set orders where new.status = 'void' scans as begin get orders_log select o where o = new.id limit 1 require 1 else 'no log line'; insert orders_log {o: new.id} end"}"#;
+    assert_eq!(call(scoped, Some(ROOT), "POST", "/query", guarded), 200);
+    let void = r#"{"query":"set orders {status: \"void\"} where id = 1"}"#;
+    let (status, out) = ask(
+        scoped,
+        "POST",
+        "/query",
+        &format!("Authorization: Bearer {customer}\r\n"),
+        void,
+    );
+    assert_eq!(status, 412, "{out}");
+    assert!(out.contains(r#""reason":"no log line""#), "{out}");
+    assert!(
+        !out.contains("guarded") && !out.contains("orders_log"),
+        "{out}"
+    );
+    assert_eq!(
+        would_wait(LOCAL),
+        ms(50),
+        "a binding's refusal grows no count"
+    );
+
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let events: Vec<&str> = lines
@@ -238,7 +266,7 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         events,
         [
             "refused", "refused", "refused", "schema", "refused", "schema", "schema", "schema",
-            "schema", "schema", "schema", "unwoken"
+            "schema", "schema", "schema", "unwoken", "schema", "schema", "bound"
         ],
         "{text}"
     );
@@ -250,6 +278,22 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     );
     assert!(unwoken.contains(r#""http_status":403"#), "{unwoken}");
     assert!(unwoken.contains(r#""path":"/query""#), "{unwoken}");
+    for at in [10, 12, 13] {
+        let l = lines[at];
+        assert!(l.contains(r#""bound_collection":"orders""#), "{l}");
+        assert!(l.contains(r#""bound_events":"set""#), "{l}");
+    }
+    assert!(
+        lines[12].contains(r#""statement":"drop statement paid""#),
+        "{}",
+        lines[12]
+    );
+    assert!(!lines[9].contains("bound_collection"), "{}", lines[9]);
+    let bound = lines[14];
+    assert!(bound.contains(r#""binding":"guarded""#), "{bound}");
+    assert!(bound.contains("no log line"), "{bound}");
+    assert!(bound.contains(r#""http_status":412"#), "{bound}");
+    assert!(bound.contains(r#""path":"/query""#), "{bound}");
     for l in &lines {
         let doc = fennec_core::json::parse_object(l).unwrap();
         let field = |k: &str| doc.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());

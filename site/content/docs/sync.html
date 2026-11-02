@@ -323,6 +323,55 @@ has, the server's row stays, and a block of several is put back whole but
 for those rows.</p>
 </details>
 
+<h3 id="bound-statements">Statements bound to writes</h3>
+
+<p>A replica holds its shapes' rows, never its server's statements, so it runs
+no <a href="/docs/fennecql#write-bound-statements">statement bound to a
+collection's writes</a>. A synced write that wakes one is sent alone, and the
+optimistic view holds that write alone: the ledger line the binding makes is
+not there until the server has made it. The server runs the write and what it
+wakes in one block, and the derived rows come back through a shape following
+their collection, in the change numbered as the write's own
+<code>Fennec-Seq</code>.</p>
+
+<pre data-lang="ts">import { sync } from './fennec.js';
+
+const db = await sync({
+  url: 'https://api.example.com',
+  shapes: [
+    { collection: 'orders', key: 'key' },
+    { collection: 'ledger' },                      // what paid_ledger writes comes by its own shape
+  ],
+  persist: 'orders',
+  onRefused: (e) => toast(e.reason ?? `${e.status}: ${e.message}`),
+});
+
+// offline: the order reads paid at once, and the ledger has no line yet
+const paid = db.from('orders').where('key', 'o-17').update({ status: 'paid' });
+db.live(db.from('ledger').where('order', 17), (lines) => console.log(lines.length));   // 0, then 1
+await paid;                                        // the server ran the write and paid_ledger in one block
+</pre>
+
+<ul>
+  <li><b>An app taking orders offline can still write a bound collection.</b>
+    The order is paid in the replica at once and waits in the queue; the
+    ledger line arrives once the server has the write, and a replica with no
+    shape on <code>ledger</code> never hears of it.</li>
+  <li><b>A binding's refusal puts the write back.</b> A <code>412</code> with
+    its guard's <code>reason</code>, or a <code>409</code>, is a refusal like
+    any other <code>4xx</code>: the optimistic write is undone and
+    <code>onRefused</code> told, with <code>e.reason</code>. A scoped token is
+    told no binding's name, and its write waking one its policy does not grant
+    (<a href="/docs/http-access#wakes">Waking a bound statement</a>) is a
+    <code>403</code>.</li>
+  <li><b>The binding runs once.</b> A write sent again under its
+    <code>Idempotency-Key</code> after its answer was lost is answered from the
+    first try: one ledger line arrives, never two.</li>
+  <li><b>The server defines it.</b> <code>create statement ... after ...</code>
+    on a synced database is refused like every named statement (<a
+    href="#limits">Limits</a>).</li>
+</ul>
+
 <h2>Live queries</h2>
 
 <p><code>db.live(query, fn)</code> runs the query again whenever a collection

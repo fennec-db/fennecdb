@@ -69,6 +69,8 @@ are reported as gauges.</p>
 <tr><td><code>fennec_statement_errors_total{kind}</code></td><td>counter</td><td>statements answered with an error, the client's (a typo, a 404) or the server's</td></tr>
 <tr><td><code>fennec_statement_duration_seconds{kind}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
 <tr><td><code>fennec_slow_statements_total</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
+<tr><td><code>fennec_bound_runs_total</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#write-bound-statements">statements bound to writes</a>: one for each row a binding ran for. No label names a binding; <a href="#statements"><code>/_stats/statements</code></a> counts each by name</td></tr>
+<tr><td><code>fennec_bound_refused_total</code></td><td>counter</td><td>writes a bound statement refused: its guard, a <code>wake</code> grant the token lacked, a limit or a unique value its body met</td></tr>
 <tr><td><code>fennec_refused_total</code></td><td>counter</td><td>requests refused for their token (401), each also in the audit log</td></tr>
 <tr><td><code>fennec_connections</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
 <tr><td><code>fennec_connections_refused_total{reason}</code></td><td>counter</td><td>connections answered 503 with <code>Retry-After</code> as they were taken, never served: <code>ceiling</code>, past <code>--max-connections</code>; <code>no_thread</code>, the process could make no thread for one — at its thread limit (systemd's <code>TasksMax=</code>, a cgroup's <code>pids.max</code>, <code>ulimit -u</code>, macOS's 2 048 a process), said in the log a minute apart at most. Any <code>no_thread</code> is worth an alert</td></tr>
@@ -189,6 +191,13 @@ megabyte shows what it was without being all of it.</p>
 <code>"version":[history, change]</code>, the definition that ran, as
 <code>statements</code> lists it. Its span's
 <code>db.stored_procedure.name</code> is the statement's name.</p>
+
+<p>A request that woke <a href="/docs/fennecql#write-bound-statements">statements
+bound to its writes</a> adds <code>bound</code>: each binding it woke, its
+version as <code>statements</code> lists it, and the rows it ran for. The
+duration is the request's, which holds the bindings' runs.</p>
+
+<pre data-lang="json">{"at":"2026-10-05T09:31:40.870Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53114","request_id":"1c7e5a90d2b4f683","duration_ms":148.213,"kind":"write","failed":false,"statement":"POST /query {\"query\":\"set orders {status: 'paid'} where batch = 7\"}","bound":[["paid_ledger",[3,41],12]]}</pre>
 </details>
 
 <h2 id="statements">What each statement cost</h2>
@@ -224,6 +233,13 @@ data without a JWT's scope, or the admin token: a shape names every
 collection. A tenant node keeps each tenant's apart —
 <code>/t/&lt;tenant&gt;/_stats/statements</code> — and lists every
 tenant's, named, to its admin alone.</p>
+
+<p>Each <a href="/docs/fennecql#write-bound-statements">statement bound to
+writes</a> is a shape of its own, <code>after paid_ledger</code>: its calls
+are the statements that woke it, its rows the rows it ran for, its time its
+runs' and its errors the writes it refused. The writer's own shape holds the
+binding's time too, so an operator tuning a slow <code>set orders</code> sees
+what of it was the ledger. It is read with the rights every shape is.</p>
 </details>
 
 <h2 id="audit">The audit log</h2>
@@ -259,7 +275,21 @@ events:</p>
     <code>create</code>, <code>drop</code>, <code>alter</code> or
     <code>compact</code>. The statement is
     logged by its shape, as <a href="#statements"><code>/_stats/statements</code></a>
-    shows it, so no literal it held reaches the log.</li>
+    shows it, so no literal it held reaches the log. The line of a
+    <code>create statement ... after</code>, its replacement or its
+    <code>drop statement</code> carries <code>bound_collection</code> and
+    <code>bound_events</code> (<code>"orders"</code>, <code>"set or
+    del"</code>): a drop's text does not say what it bound.</li>
+  <li><b>A <a href="/docs/fennecql#write-bound-statements">bound statement</a>'s
+    refusal of a scoped writer's write.</b> The writer is told the status and
+    the guard's <code>reason</code> alone; a <code>bound</code> line holds the
+    <code>binding</code>, the engine's words as <code>error</code>, the
+    <code>method</code>, the <code>path</code> and the
+    <code>http_status</code>. A write refused for lacking the
+    <code>wake</code> grant writes an <code>unwoken</code> line, with the
+    <code>binding</code> and a <code>reason</code>
+    (<a href="/docs/http-access#wakes">Waking a bound statement</a>). The
+    token of either checked out, so neither adds to the wait below.</li>
   <li><b>A request to <code>/_admin/</code> or <code>/_shard/</code> that
     changes something</b>, with its status. <code>fennec-shard</code> takes
     <code>--audit</code> as well. A <a href="sharding-tenants.html#across-tenants">query
@@ -472,6 +502,7 @@ OTEL_SERVICE_NAME=orders-db fennec-server --file data.fennec \
 <tr><td><code>POST /query</code>, <code>GET /{collection}</code>, <code>POST /t/{tenant}/batch</code>…</td><td>server</td><td>the request, from its head read to its answer written: its method and route, never a value</td></tr>
 <tr><td><code>lock.wait</code></td><td>internal</td><td>the wait for the database's lock, <code>fennec.lock</code> <code>read</code> or <code>write</code>: a read waits out a write's block, a write every read</td></tr>
 <tr><td><code>execute</code></td><td>internal</td><td>the statement run, under the lock; a <code>/batch</code>'s statements together, <code>fennec.statements</code> of them, and a <code>create index</code> or <code>compact</code> beside the database with <code>fennec.beside</code></td></tr>
+<tr><td><code>bound &lt;name&gt;</code></td><td>internal</td><td>a <a href="/docs/fennecql#write-bound-statements">bound statement</a>'s runs for one statement of the request, a child of the request's span: <code>db.operation.name</code> <code>bound</code>, <code>db.stored_procedure.name</code> its name and <code>fennec.rows_woken</code> the rows it ran for, never a row's value. The one that refused the write is marked failed with the status it answered and its <code>else</code>'s reason (<code>412 no ledger line</code>), <code>error.type</code> the status: never the engine's words, which may hold a row's value</td></tr>
 <tr><td><code>durability</code></td><td>internal</td><td>a write's wait for the disk after the lock (<code>--sync always</code>); on a primary it holds <code>fsync</code> and <code>replication.wait_sent</code>, the wait for its replicas' streams to send the write</td></tr>
 <tr><td><code>fennec.wait_for_write</code></td><td>internal</td><td>a replica's wait for the write a <code>Fennec-After</code> names</td></tr>
 <tr><td><code>forward</code></td><td>client</td><td><code>fennec-shard</code>'s forward to the node, to its whole answer: the node's server span is its child</td></tr>

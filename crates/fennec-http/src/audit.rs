@@ -118,7 +118,25 @@ thread_local! {
     // names it for the operator writing the grant, where the token is told
     // no name.
     static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
+    // What the statements bound to the writes of the request this thread
+    // serves left for its lines ([`TOLD`], [`HELD`]): a `Cell` a request
+    // looks at, the rest held in [`HELD_BOUND`] where something is.
+    static BOUND: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    // The binding that refused a scoped writer's write and the engine's
+    // words, for the request's `bound` line, and the bound statements it
+    // defined, replaced or dropped, for its `schema` lines ([`bound`]).
+    static HELD_BOUND: RefCell<Held> = const { RefCell::new((None, Vec::new())) };
 }
+
+/// [`HELD_BOUND`]: a refusal's binding and words, and the bound statements
+/// defined or dropped with what each binds.
+type Held = (Option<(String, String)>, Vec<(String, String, u8)>);
+
+/// [`BOUND`]: a binding refused a scoped writer's write, told without its
+/// name ([`told_bound`]).
+const TOLD: u8 = 1;
+/// [`BOUND`]: [`HELD_BOUND`] holds the request's ([`bound`]).
+const HELD: u8 = 2;
 
 /// The reason the request this thread serves is refused its token, for its
 /// `refused` line: one of the server's own texts, never the token's. Set
@@ -140,6 +158,69 @@ pub fn unwoken(binding: &str, why: &'static str) {
     if LOG.get().is_some() {
         UNWOKEN.with(|u| *u.borrow_mut() = Some((binding.to_string(), why)));
     }
+}
+
+/// A scoped writer's write a statement bound to it refused, the writer
+/// told its status and `reason` alone (`access::told_bound`,
+/// `docs/design/named-statements.md`, *Watching bindings*): its `bound`
+/// line, which [`bound`] writes once the answer is, names the binding and
+/// the engine's words for the operator. Held only with `--audit`.
+pub fn told_bound() {
+    if LOG.get().is_some() {
+        BOUND.with(|b| b.set(b.get() | TOLD));
+    }
+}
+
+/// What the statements bound to the writes of the request this thread
+/// serves did (`Database::take_runs`), held for its lines: where a binding
+/// refused a scoped writer's write ([`told_bound`]), the binding and the
+/// engine's words for its `bound` line ([`http`]); and the bound
+/// statements it defined, replaced or dropped, with what each binds, for
+/// its `schema` lines ([`statement`]). Held only with `--audit`, and let go
+/// of by [`request`] as the next request begins.
+pub(crate) fn bound(r: &fennec_core::engine::Runs) {
+    if !on() {
+        return;
+    }
+    let told = BOUND.with(|b| b.get()) & TOLD != 0;
+    let refusal = (r.refusal.as_ref())
+        .filter(|_| told)
+        .map(|(n, e)| (n.clone(), e.to_string()));
+    HELD_BOUND.with(|h| *h.borrow_mut() = (refusal, r.changed.clone()));
+    BOUND.with(|b| b.set(b.get() | HELD));
+}
+
+/// What [`bound`] held for the request before, let go of: out of line, so
+/// that the request every connection reads pays a `Cell`'s look alone.
+#[cold]
+#[inline(never)]
+fn let_go_held() {
+    HELD_BOUND.with(|h| *h.borrow_mut() = (None, Vec::new()));
+}
+
+/// The request's `bound` line, where a binding refused a scoped writer's
+/// write ([`told_bound`]): the binding and the words the engine refused it
+/// with -- which the writer was not told, and which name values the token
+/// may not read -- as the engine noted them (`Runs::refusal`). Written once
+/// the answer is, outside the write lock, whatever the status: MCP answers
+/// its refusal inside a 200. A token that checked out was refused what its
+/// write caused, not its token: the line waits nothing and clears nothing.
+#[cold]
+#[inline(never)]
+fn bound_line(req: &crate::http::Request, path: &str, status: u16) {
+    let Some((binding, words)) = HELD_BOUND.with(|h| h.borrow_mut().0.take()) else {
+        return;
+    };
+    event(
+        "bound",
+        &[
+            ("method", Field::Text(req.method.name())),
+            ("path", Field::Text(path)),
+            ("binding", Field::Text(&binding)),
+            ("error", Field::Text(&words)),
+            ("http_status", Field::Int(status as u64)),
+        ],
+    );
 }
 
 /// The header a node's answer to a forwarded request carries when a token
@@ -197,6 +278,9 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
     UNWOKEN.with(|u| u.borrow_mut().take());
+    if BOUND.with(|b| b.replace(0)) & HELD != 0 {
+        let_go_held();
+    }
     client
 }
 
@@ -348,6 +432,9 @@ pub enum Field<'a> {
     /// Two integers, `[a,b]`: a named statement's version, `[history,
     /// change]`, as `statements` answers it.
     Pair(u64, u64),
+    /// JSON the caller wrote, every string in it escaped
+    /// (`json::escape_into`): the slow line's `bound`, a list of lists.
+    Json(&'a str),
 }
 
 /// How much an event matters, as the line's `level` says it: what a log
@@ -434,6 +521,9 @@ pub fn line(name: &str, level: Level, fields: &[(&str, Field)]) -> String {
             Field::Pair(a, b) => {
                 line.push_str(&format!(",\"{k}\":[{a},{b}]"));
             }
+            Field::Json(j) => {
+                line.push_str(&format!(",\"{k}\":{j}"));
+            }
         }
     }
     line.push_str("}\n");
@@ -471,6 +561,11 @@ pub fn statement(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
 #[cold]
 #[inline(never)]
 fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
+    // The bound statements the request defined or dropped ([`bound`]).
+    let changed = match BOUND.with(|b| b.get()) & HELD {
+        0 => Vec::new(),
+        _ => HELD_BOUND.with(|h| h.borrow().1.clone()),
+    };
     let mut each: Vec<String> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
@@ -497,8 +592,42 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
             fields.push(("tenant", Field::Text(t)));
         }
         fields.push(("failed", Field::Bool(failed)));
+        // A bound statement defined, replaced or dropped names what it
+        // binds -- which a drop's text does not say -- as the engine noted
+        // it (`Runs::changed`).
+        let bound =
+            statement_named(one).and_then(|n| changed.iter().rev().find(|(name, ..)| name == n));
+        let events = bound.map(|(_, _, e)| fennec_core::named::Binding::events_named(*e));
+        if let (Some((_, c, _)), Some(e)) = (bound, &events) {
+            fields.push(("bound_collection", Field::Text(c)));
+            fields.push(("bound_events", Field::Text(e)));
+        }
         event("schema", &fields);
     }
+}
+
+/// The statement a `create [or replace] statement` or a `drop statement
+/// [if exists]` names, from its shape.
+fn statement_named(shape: &str) -> Option<&str> {
+    let mut words = shape.split_ascii_whitespace();
+    let first = words.next()?;
+    if !first.eq_ignore_ascii_case("create") && !first.eq_ignore_ascii_case("drop") {
+        return None;
+    }
+    let mut word = words.next()?;
+    if word.eq_ignore_ascii_case("or") {
+        words.next()?;
+        word = words.next()?;
+    }
+    if !word.eq_ignore_ascii_case("statement") {
+        return None;
+    }
+    let mut name = words.next()?;
+    if name.eq_ignore_ascii_case("if") {
+        words.next()?;
+        name = words.next()?;
+    }
+    Some(name.split('(').next().unwrap_or(name))
 }
 
 /// Whether a statement, or its shape, starts with a word changing the
@@ -555,6 +684,9 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
                 ("http_status", Field::Int(status as u64)),
             ],
         );
+    }
+    if BOUND.with(|b| b.get()) & HELD != 0 {
+        bound_line(req, path, status);
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
     // A tenant's read for a router's query across tenants changes nothing,

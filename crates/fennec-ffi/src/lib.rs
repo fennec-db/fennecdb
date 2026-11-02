@@ -793,7 +793,7 @@ fn pinned(pin: &Pinned, p: &fennec_abi::Prepared) -> Option<Result<Response, Ref
     for (ran, s) in p.stmts.iter().enumerate() {
         match pin.query(s, &p.params)? {
             Ok(r) => last = r,
-            Err(e) => return Some(Err(Refused::Error(e, ran, several.then_some(ran)))),
+            Err(e) => return Some(Err(Refused::Error(e, ran, several.then_some(ran), None))),
         }
     }
     Some(Ok(last))

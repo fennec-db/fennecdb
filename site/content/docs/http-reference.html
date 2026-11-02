@@ -39,7 +39,7 @@ PATCH  /_changes/consumers/C    body: {"since": N} -- move C: commit what it rea
 GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
 GET    /_whoami                 who the server takes the token for, the roles it read, the rules that apply to it and the statements it may call
-GET    /_schema                 the schema as a description (Schema in code); ?as=fennecql: as its statements
+GET    /_schema                 the schema as a description (Schema in code), each collection's bound statements beside it; ?as=fennecql: as its statements, the bound ones after them
 POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
 POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
 POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
@@ -64,6 +64,18 @@ collections it reads. An apply takes the server's token, runs the
 migrations not yet recorded and the additions under the write lock as one
 block, and answers 409 with the refusals when anything is refused, having
 written nothing.</p>
+
+<p>To the server's token alone, each collection's object in
+<code>GET /_schema</code> carries the <a
+href="/docs/fennecql#write-bound-statements">statements bound to its
+writes</a>: <code>"bindings":[{"name":"paid","events":"set","text":"create
+statement paid after set orders ..."}]</code>. <code>?as=fennecql</code>
+writes each definition after the collections. Either body reads back
+through <code>POST /_schema/plan</code> and <code>/_schema/apply</code>, a
+plan reading the bindings listed; <code>events</code> may be left out, and
+a binding listed with events its <code>text</code> does not bind is
+refused (400). A scoped token sees no binding there, no
+name and no text.</p>
 
 <p>With <code>--mcp</code>, <code>/_mcp</code> is the Model Context
 Protocol's endpoint: an agent's <code>schema</code>, <code>search</code>,
@@ -317,6 +329,10 @@ href="/docs/queues#wait">Waiting for a job</a>).</p>
     <code>@ttl</code>. A filter that reads the time any other way is
     refused (400), as is a request holding a <code>put</code>, or a call
     whose body inserts. A call whose body only reads is answered at once.</li>
+  <li><b>A derived row</b> wakes it as any write does: a <code>set</code>
+    held on a collection a <a href="/docs/fennecql#write-bound-statements">bound
+    statement</a> writes is answered by the write whose binding made the
+    row it waits for.</li>
   <li><b>Wrote nothing</b> means no row written, or a
     <code>require</code> not met — for a call, nothing its body wrote,
     whatever its last statement answered; any other refusal is answered at
@@ -420,6 +436,10 @@ what to do about it; a <code>/batch</code> that stopped adds where
 (<code>at</code>) and what stayed applied (<code>completed</code>), a
 <code>require</code> that said why gives the words (<code>reason</code>, the
 statement's own, on a lone statement and a <code>/batch</code> alike), a
+<a href="/docs/fennecql#write-bound-statements">statement bound to the
+write</a> that refused it is named to the server's token
+(<code>binding</code>, the engine's words after the binding's; a scoped
+token is told the status and <code>reason</code> alone), a
 tenant's quota names itself (<code>quota</code>, and the
 <code>Fennec-Quota</code> header), and one to come back from says when
 (<code>retry_after</code>, the seconds of its <code>Retry-After</code>
@@ -472,6 +492,10 @@ Retry-After: 1
 HTTP/1.1 412 Precondition Failed
 
 {"error":"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)","completed":0,"at":1,"reason":"no account to credit"}
+
+HTTP/1.1 412 Precondition Failed
+
+{"error":"bound statement `voided`, after `set` on `orders`, refused this write: unmet: no ledger line (`get ledger` answered 0 rows, and requires 1)","completed":0,"at":1,"reason":"no ledger line","binding":"voided"}
 
 HTTP/1.1 500 Internal Server Error
 

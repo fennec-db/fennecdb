@@ -482,7 +482,9 @@ guard's <code>require</code> is a 412 with its <code>reason</code>, a unique
 value taken a 409 — and the block is put back whole, a
 <code>/batch</code>'s statements before it included. Under
 <code>Fennec-Wait</code> a binding's 412 is answered at once, never held:
-the wait is for the writer's own rows.</p>
+the wait is for the writer's own rows. A <code>set</code> held on a derived
+collection, <code>set ledger {...} where ...</code>, is answered by the write
+whose binding inserted the row it waits for.</p>
 
 <p>Depth one: a binding's own writes wake nothing, so one writing the
 collection it is bound to, one writing a collection another statement is
@@ -502,7 +504,9 @@ or dropped: a write never lands without its rows.</p>
 <p>The server's token defines one and its writes wake it at every way in —
 <code>/query</code>, <code>/batch</code>, the REST routes, MCP's
 <code>write</code>, a held write, a call's body, the shell and the native
-library, and a schema declared in code may declare it. A scoped token's
+library, and a schema declared in code may declare it, a tenant's at the
+router too, after the collections it binds and writes (<a
+href="/docs/sharding-tenants">Tenants</a>). A scoped token's
 write, or call, wakes one only where the policy's <code>wake</code> line
 grants it (<a href="/docs/http-access#wakes">Waking a bound statement</a>):
 its writes are then the statement's own, judged by no rule of the token's,
@@ -519,6 +523,46 @@ a binding binds, <i>write it through a server</i>. Before a primary defines
 the first one, every reader of its file runs a release that knows them: a
 binary from before refuses the record and stops there, in words (<a
 href="/docs/replication">Replication</a>).</p>
+
+<p>A binding's refusal is told to the server's token with the binding's
+name: the error carries <code>binding</code> beside the engine's words, which
+begin <code>bound statement `voided`, after `set` on `orders`, refused this
+write: </code>. It does on <code>/query</code>, keyed with an
+<code>Idempotency-Key</code> or not, on <code>/_call</code>, on the REST
+routes and on <code>/batch</code>, whose stop body also holds
+<code>at</code>, <code>completed</code> and the guard's <code>reason</code>
+(<a href="/docs/http-reference#statuses">Refusals and their statuses</a>).
+The native library answers <code>{"kind":"error","message":"bound statement
+`voided`, after `set` on `orders`, refused this write: unmet: ...","reason":"no
+ledger line","binding":"voided","at":1}</code>, its <code>at</code> only for a
+text of several, and the shell prints <code>error: bound statement `voided`,
+after `set` on `orders`, refused this write: ...</code>: an app and the shell
+hold their file's authority. A scoped token is told its status and
+<code>reason</code> alone, never the binding's name.</p>
+
+<p><code>statements</code> has an <code>after</code> column,
+<code>["orders","set"]</code> for a binding's collection and events and
+<code>null</code> for a statement that is called, and <code>describe
+statement</code> adds <code>condition</code>, the <code>where</code> as
+written (<code>new.status = 'paid' and old.status = 'open'</code>) or
+<code>null</code>; both are the server's token's. <code>GET /_schema</code>
+lists each collection's bindings beside it, <code>"bindings":[{"name":"paid",
+"events":"set","text":"create statement paid after set orders ..."}]</code>,
+and <code>?as=fennecql</code> writes each definition after the collections.
+Either reads back through <code>POST /_schema/plan</code> and
+<code>/_schema/apply</code>, which plan the bindings listed: a binding's
+<code>text</code> says what it binds, and one listed with
+<code>events</code> its text does not bind is refused. A scoped token
+sees no binding there, no name and no text (<a
+href="/docs/http-reference">HTTP reference</a>).</p>
+
+<p>How often a binding ran, how long it took and what it refused are counted
+in <a href="/docs/monitoring#statements"><code>/_stats/statements</code></a>
+(the shape <code>after paid_ledger</code>) and in <code>/_metrics</code>,
+named in the <a href="/docs/monitoring#slow">slow-statement line</a>, given a
+<a href="/docs/monitoring#tracing">span</a> each and written to the <a
+href="/docs/monitoring#audit">audit log</a> when it is defined, dropped or
+refuses a scoped writer.</p>
 
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
