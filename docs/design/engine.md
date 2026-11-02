@@ -492,7 +492,8 @@ Each guard is forgotten on the way out, so its drop runs on an unwind
 alone: a lone `put` measured 349 ns against main's 357, a `set` 565
 against 570, a scan calling `lower()` a row the same 144 ns. The browser
 module aborts on a panic, so a guard's drop is no code there; the module
-grew 97 bytes (30 gzipped), the record's checks moved into `land`.
+grew 97 bytes (30 gzipped), the record's checks moved into `land`, and
+24 more (6) for the `landing` mark, set and cleared around the sink call.
 Rejected: the registry shared (`Arc`), never taken out, 0.2 KB of the
 module for derefs it has no use for; given back as a drop on every path
 rather than a swap, 0.1 KB; `catch_unwind` around each write, 0.4 KB as
