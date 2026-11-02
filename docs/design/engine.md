@@ -1,6 +1,6 @@
 # The engine's lock and blocks
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The engine's lock and blocks*: the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [the root CLAUDE.md](../../CLAUDE.md) and [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) list under *The engine's lock and blocks*: the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Single writer
 

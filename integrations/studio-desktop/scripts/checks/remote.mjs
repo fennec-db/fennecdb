@@ -215,9 +215,18 @@ assert.match(unreachable.message, /nothing is listening/);
 assert.deepEqual(unreachable.actions, ['edit']);
 
 step('removing a connection removes its Keychain item');
-for (const c of [id, bad, none, nostudio, dead, mover, stale, twice, moved]) cmd({ cmd: 'rmconn', id: c });
-await waitFor((l) => l.what === 'conn-removed' && l.id === moved, 10000, 'all removed');
-assert.ok(![id, bad, mover, stale, twice, moved].some(keychainHas), 'every item is gone');
+const removing = [id, bad, none, nostudio, dead, mover, stale, twice, moved];
+for (const c of removing) cmd({ cmd: 'rmconn', id: c });
+// Each id's report, not the last one's: the app reads these lines in looks
+// 150 ms apart, and a look falling between two of them runs the two halves
+// side by side, so the last id can be reported while the first half is still
+// deleting its items (a hosted runner's Keychain takes about 130 ms a
+// removal). A report comes only once its item is gone (removeConnection).
+await until(() => {
+  const removed = new Set(lines().filter((l) => l.what === 'conn-removed').map((l) => l.id));
+  return removing.every((c) => removed.has(c));
+}, 10000, 'all removed');
+assert.deepEqual(removing.filter(keychainHas), [], 'every item is gone');
 assert.deepEqual(state().connections, []);
 
 step('quit with windows open: nothing of the app is left (the remote server is not the app\'s)');

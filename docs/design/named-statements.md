@@ -681,7 +681,7 @@ Each a pull request of its own, green and measured, carrying its own docs, as F1
 - *Availability.* A broken binding stops its collection's writes until it is defined again or dropped, loud by choice; only an internal writer or a grammar change can break one, which the commit's check and the corpus rule keep rare.
 - *An older node promoted* stops at op 3 rather than writing without the binding: the upgrade's order keeps the cluster writing.
 - *The sync's optimistic view* shows a write before its derived rows, said on the sync page and held by a scenario.
-- *CLAUDE.md's room*: 62 321 bytes of 64 000, and the rule below about 1 300, so slice 3 makes it room in F1's rules, as #462 made room before, every rule kept.
+- *CLAUDE.md's room*: 62 321 bytes of 64 000, and the rule below about 1 300, so slice 3 was to make it room in F1's rules, as #462 made room before, every rule kept; since, the FennecQL rules are in [crates/fennec-ql/CLAUDE.md](../../crates/fennec-ql/CLAUDE.md), an area file under 24 000 bytes with room for it.
 
 ### What CLAUDE.md would gain from F2
 

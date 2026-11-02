@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
