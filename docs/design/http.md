@@ -310,7 +310,12 @@ answered 204 before any token is asked, where `--http-cors` lets its origin
 in (`cors_allows`): authenticated first, it was 401 and a page on another
 origin could send nothing.
 Reads and writes are no events, but for an MCP write tool's call (`mcp`)
-and a quota's refusal (`quota`), above. A test that opens the log is a
+and a quota's refusal (`quota`), above, and a scoped writer's write a
+statement bound to it refused: for want of a `wake` grant (`unwoken`), or
+by its guard or a bound (`bound`), each naming the binding the writer is
+not told ([named-statements.md](named-statements.md#what-f2-has-built));
+a bound statement's `schema` line names the collection and events it binds
+(`bound_collection`, `bound_events`). A test that opens the log is a
 `[[test]]`
 of its own: the log and the counts are the process's.
 

@@ -2218,9 +2218,9 @@ fn rest_run(
     })
     .map(|r| shown(shows, mask, &guard, r));
     drop(running);
-    let bound = match result.is_err() {
-        true => bound_by(who, &guard),
-        false => None,
+    let bound = match &result {
+        Err(e) => bound_by(who, &guard, e),
+        Ok(_) => None,
     };
     let answer = |result: &fennec_core::error::Result<fennec_core::prelude::Response>| match result
     {
@@ -2960,8 +2960,8 @@ fn run_query(
             }
         }
         noted_call(&guard, &stmt);
-        if r.is_err() {
-            bound = bound_by(who, &guard);
+        if let Err(e) = &r {
+            bound = bound_by(who, &guard, e);
         }
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
@@ -3148,7 +3148,7 @@ fn keyed_query(
         }
         // A binding's refusal named to the server's token, kept with the
         // key as it was told.
-        Err(e) => told_response(e, bound_by(who, &guard).as_deref()),
+        Err(e) => told_response(e, bound_by(who, &guard, e).as_deref()),
     };
     // An MCP call tool's answer past its bounds, put back before it lands.
     // The tools send no key, so none reaches here today; held all the same.
@@ -3497,7 +3497,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }
-            .map_err(|e| api::bound_stop(&e, bound_by(who, &guard).as_deref())),
+            .map_err(|e| api::bound_stop(&e, bound_by(who, &guard, &e).as_deref())),
         };
         match r {
             Ok(r) => {
@@ -3985,7 +3985,8 @@ fn error_response(e: &Error) -> Response {
 }
 
 /// The statement bound to a write of the server's token that refused it,
-/// read under the lock the write ran under (`Database::woken`): its name
+/// read under the lock the write ran under (`Database::refused_by`, held
+/// to the error `e` it is told beside): its name
 /// and the words its refusal is told after
 /// (`docs/design/named-statements.md`, *When a binding refuses*). Asked
 /// of a write that failed alone, and `None` for one no binding refused and
@@ -3996,11 +3997,11 @@ fn error_response(e: &Error) -> Response {
 /// instructions (`docs/design/named-statements.md`, F2's slice 4).
 #[cold]
 #[inline(never)]
-fn bound_by(who: &Who, db: &Database) -> Option<Box<(String, String)>> {
+fn bound_by(who: &Who, db: &Database, e: &Error) -> Option<Box<(String, String)>> {
     if who.scope().is_some() {
         return None;
     }
-    let (name, words) = db.refused_by()?;
+    let (name, words) = db.refused_by(e)?;
     Some(Box::new((name.to_string(), words)))
 }
 

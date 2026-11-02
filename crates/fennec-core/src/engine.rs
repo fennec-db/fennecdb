@@ -6623,7 +6623,7 @@ impl Database {
     /// statements -- the browser module -- none, since it runs no binding.
     #[cfg(not(feature = "statements"))]
     #[inline(always)]
-    pub fn refused_by(&self) -> Option<(&str, String)> {
+    pub fn refused_by(&self, _: &Error) -> Option<(&str, String)> {
         None
     }
 

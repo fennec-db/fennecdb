@@ -958,7 +958,7 @@ fn run(db: &mut Database, src: &str) -> bool {
             // the server names it to its own token: the shell holds the
             // file's authority.
             Err(e) => {
-                let words = db.refused_by().map(|(_, w)| w).unwrap_or_default();
+                let words = db.refused_by(&e).map(|(_, w)| w).unwrap_or_default();
                 eprintln!("error: {words}{e}");
                 return false;
             }

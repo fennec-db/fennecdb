@@ -69,7 +69,10 @@ pub(super) struct Woken {
     /// The binding that refused the last write refused by one, for the
     /// server to tell ([`Database::woken`]); let go of as the next
     /// statement ends, or a block starts (`Database::bound_due`).
-    refused_by: Option<String>,
+    /// And the engine's words it refused with: a later error that never
+    /// reached the bindings -- a refusal before a statement ran -- is not
+    /// told as theirs ([`Database::refused_by`]).
+    refused_by: Option<(String, String)>,
 }
 
 /// A row that woke a binding: as written (`new.`), as it stood (`old.`),
@@ -441,13 +444,14 @@ impl Database {
     #[cold]
     #[inline(never)]
     fn refused(&mut self, name: &str, e: &Error) {
-        self.woken.refused_by = Some(name.to_string());
+        let words = e.to_string();
         self.bound_due = true;
         RUNS.with(|r| {
             let mut r = r.borrow_mut();
             r.refused = r.refused.saturating_add(1);
-            r.refusal = Some((name.to_string(), e.to_string()));
+            r.refusal = Some((name.to_string(), words.clone()));
         });
+        self.woken.refused_by = Some((name.to_string(), words));
     }
 
     /// The bindings `w`'s rows woke, run: each hook asked first whether
@@ -579,20 +583,30 @@ impl Database {
     /// by name, for the server to tell its writer; `None` where none did.
     /// Read under the lock the write ran under, before the next statement.
     pub fn woken(&self) -> Option<&str> {
-        self.woken.refused_by.as_deref()
+        self.woken
+            .refused_by
+            .as_ref()
+            .map(|(name, _)| name.as_str())
     }
 
-    /// [`Self::woken`]'s binding and the words its refusal is told after
-    /// -- "bound statement `voided`, after `set` on `orders`, refused this
-    /// write: " -- for a caller with the database's authority to read
-    /// beside the engine's words, its answer carrying the name as
-    /// `binding`: the server's token's every error, the native library's
-    /// and the shell's (`docs/design/named-statements.md`, *When a binding
-    /// refuses*). Never a scoped token's, which is told no name.
+    /// [`Self::woken`]'s binding, where it refused the write with `e`, and
+    /// the words its refusal is told after -- "bound statement `voided`,
+    /// after `set` on `orders`, refused this write: " -- for a caller with
+    /// the database's authority to read beside the engine's words, its
+    /// answer carrying the name as `binding`: the server's token's every
+    /// error, the native library's and the shell's
+    /// (`docs/design/named-statements.md`, *When a binding refuses*). Never
+    /// a scoped token's, which is told no name. Asked with the error it is
+    /// told beside: the note stands until the next statement ends, and a
+    /// write refused before it ran -- a follower's, a storage failure's --
+    /// ends none, so its error is told as its own.
     #[cold]
     #[inline(never)]
-    pub fn refused_by(&self) -> Option<(&str, String)> {
-        let name = self.woken()?;
+    pub fn refused_by(&self, e: &Error) -> Option<(&str, String)> {
+        let (name, words) = self.woken.refused_by.as_ref()?;
+        if *words != e.to_string() {
+            return None;
+        }
         let (c, events) = self.statements.get(name)?.after.clone()?;
         let words = format!(
             "bound statement `{name}`, after `{}` on `{c}`, refused this write: ",

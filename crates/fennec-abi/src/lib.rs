@@ -207,11 +207,14 @@ fn run_text(
         match run(db, s, &p.params, ran) {
             Ok(r) => last = r,
             Err(e) if block => {
-                let bound = bound_of(db);
+                let bound = bound_of(db, &e);
                 db.rollback();
                 return Err(Refused::Error(e, 0, at, bound));
             }
-            Err(e) => return Err(Refused::Error(e, ran, at, bound_of(db))),
+            Err(e) => {
+                let bound = bound_of(db, &e);
+                return Err(Refused::Error(e, ran, at, bound));
+            }
         }
     }
     if block {
@@ -224,8 +227,8 @@ fn run_text(
 /// read before its block is put back: `None` in the browser module, which
 /// runs no binding.
 #[inline(always)]
-fn bound_of(db: &Database) -> Option<Box<(String, String)>> {
-    (db.refused_by()).map(|(name, words)| Box::new((name.to_string(), words)))
+fn bound_of(db: &Database, e: &Error) -> Option<Box<(String, String)>> {
+    (db.refused_by(e)).map(|(name, words)| Box::new((name.to_string(), words)))
 }
 
 /// Whether every statement only reads, for a caller that can then take a
