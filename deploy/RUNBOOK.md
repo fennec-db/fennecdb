@@ -62,11 +62,17 @@ to follow, held to the binaries by `make deploy-check` and `make drill`.
 
 ### The network
 
-fennecdb speaks no TLS and no part of it should face the internet. Nodes,
-routers and archivers talk over a private network: a VPC within a region,
-and between regions WireGuard or the provider's encrypted peering --
-relays, the global directory, read replicas and moves cross it. The only
-public way in is Cloudflare's edge, through the tunnels. A tunnel's
+No part of fennecdb should face the internet. Nodes, routers and archivers
+talk over a private network: a VPC within a region, and between regions
+WireGuard or the provider's encrypted peering -- relays, the global
+directory, read replicas and moves cross it. The units here start every
+part on plain HTTP, as that network needs. A node and a router can also
+serve HTTPS (`--tls-cert`, `--tls-key`), and each dials an `https://` URL
+over TLS -- the router's nodes, a region's routers, `--global`, a standby's
+`--replica-of`, an archiver's primary -- held to Mozilla's roots, or to a
+private CA's file given as `--tls-ca`; that is for a link the private
+network is not trusted to carry, and the way in is not changed by it. The
+only public way in is Cloudflare's edge, through the tunnels. A tunnel's
 hostname is public -- anyone may ask it, not the entry Worker alone -- so
 two things stand in front of each router:
 
@@ -313,7 +319,10 @@ token; `g1` the global router's private address.
         -d '{"addr":"10.1.0.11:8081","token":"<eu-a FENNEC_ADMIN_TOKEN>","region":"eu","zone":"fra"}'
    ```
    The router checks the node with the token before it records it, and
-   leases it from then on.
+   leases it from then on. A node that serves HTTPS is recorded at
+   `"addr":"https://10.1.0.11:8081"`, a name or address its certificate
+   holds, and only once every router and node runs a release that dials
+   HTTPS (Upgrading with no downtime).
 5. **The tunnels**: `cloudflared` on each router's machine, its hostname
    routed to that router alone (`cloudflared/config.yml`). Each tunnel is
    made on an operator's machine -- `cloudflared tunnel login` leaves the
@@ -350,8 +359,10 @@ curl -X POST https://db.example.com/t/acme/notes -H "Authorization: Bearer $DATA
 ## Adding a node
 
 Start it with `node.env` (its own admin token) and record it with its
-region and zone, as in bring-up. New tenants and new replicas go to it by
-the rules: a replica to a node of another zone first, then the fewest. A
+region and zone, as in bring-up. A node serving HTTPS is recorded at an
+`https://` address only after every router (each region's, each standby)
+and every node was upgraded to a release that dials one: see Upgrading with
+no downtime. New tenants and new replicas go to it by the rules: a replica to a node of another zone first, then the fewest. A
 region of a single zone gives each tenant a replica in its own zone where
 nothing else is free, logs it, and counts it in
 `fennec_router_same_zone_copies` (alert `FennecSameZoneCopies`): a
@@ -806,7 +817,13 @@ stopped and it goes on from where it stood: nothing was misread or lost
 (RELEASING.md; `make upgrade-check` drives each).
 
 What a mix of versions tolerates is said release by release in the
-changelog; the docs hold these today: a router from before regions reads
+changelog; the docs hold these today: nothing records an `https://` node
+address until every router (each region's, each standby) and every node is
+upgraded to the release that dials HTTPS. A router from before it cannot
+resolve such an address: it sends that node nothing, never plain text,
+relays nothing to it and grants it no lease, so the node's lease lapses and,
+with a standby, it is failed over; a node from before it refuses to follow an
+`https://` primary. A router from before regions reads
 the directory as it always did, forwarding every tenant where it is and,
 promoted, placing without regard to regions; one from before regional
 directories answers 404 for a tenant of a region keeping its own -- so

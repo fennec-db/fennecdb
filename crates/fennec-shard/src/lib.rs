@@ -3614,6 +3614,8 @@ impl Router {
                     .into(),
             ));
         }
+        let addr = node_addr(addr).map_err(|e| Fail(400, e))?;
+        let addr = addr.as_str();
         let (region, zone) = (place_field(body, "region")?, place_field(body, "zone")?);
         let mut node = Node {
             addr: addr.into(),
@@ -3913,7 +3915,7 @@ impl Router {
         // so one landing late on a file made there since is refused.
         let follow = format!("{base}/follow");
         let follow_over = |named: &[u64]| {
-            let mut body = format!("{{\"from\":{}", quote(&format!("http://{}", p.addr)));
+            let mut body = format!("{{\"from\":{}", quote(&fennec_http::dial::url_of(&p.addr)));
             if !named.is_empty() {
                 let ids: Vec<String> = named
                     .iter()
@@ -5911,6 +5913,29 @@ fn quota_member(
 struct At<'a> {
     node: Option<&'a str>,
     region: Option<&'a str>,
+}
+
+/// A node's address as the directory records it and the pool dials it:
+/// `host:port`, or `https://host:port` for a node serving HTTPS
+/// (`--tls-cert`), which every dial to it takes over TLS
+/// ([`fennec_http::dial::tls_of`]). `http://host:port` is recorded bare,
+/// as every address was before. The scheme rides in the address rather
+/// than a field beside it so a router from before reading the directory --
+/// a standby following it, a binary put back -- can only fail to resolve
+/// `https://...` and send nothing, where it would ignore an unknown field
+/// and send the node's admin token in the clear (RELEASING.md). A path is
+/// refused: a node is reached at its root.
+pub(crate) fn node_addr(addr: &str) -> std::result::Result<String, String> {
+    if !addr.contains("://") {
+        return Ok(addr.to_string());
+    }
+    let (a, path) = fennec_http::dial::split_url(addr)?;
+    if !path.is_empty() {
+        return Err(format!(
+            "a node's address is host:port or https://host:port, with no path: `{addr}`"
+        ));
+    }
+    Ok(a)
 }
 
 /// A region's or a zone's name in a body, where it has one: a tenant's

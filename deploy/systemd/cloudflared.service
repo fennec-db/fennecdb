@@ -1,9 +1,9 @@
 # Cloudflare Tunnel from this router's machine to Cloudflare's edge: the
 # global entry Worker reaches the router at an HTTPS hostname of the
 # tunnel's (integrations/cloudflare/entry's REGIONS), and the router needs
-# no public address, port or certificate -- fennecdb speaks no TLS, and a
-# Worker fetches no bare IP address. One on each router's machine, the
-# standby's too, each tunnel its own hostname.
+# no public address, port or certificate of its own -- the tunnel ends the
+# client's TLS -- and a Worker fetches no bare IP address. One on each
+# router's machine, the standby's too, each tunnel its own hostname.
 #
 # The tunnel is made on an operator's machine, not here: `tunnel login`
 # leaves cert.pem, the account's certificate that makes and deletes every

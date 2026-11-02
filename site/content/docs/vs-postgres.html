@@ -121,8 +121,8 @@ and is alpha software.</p>
 <p>What fennecdb gives up for its size is listed in <a
 href="limits.html">Limits</a>: no SQL dialect (<a href="sql.html">its everyday spellings</a> aside) and a join only on a key (a query reads one
 collection and attaches related rows with <code>lookup</code>), one writer
-a file, no transaction held open across requests, and TLS only on the ports
-clients reach, not yet between servers. PostgreSQL's server has none of those
+a file, no transaction held open across requests, and no client certificates
+for the TLS it serves or dials. PostgreSQL's server has none of those
 limits.</p>
 
 <p>pgvector's HNSW indexes take <code>vector</code> up to 2 000

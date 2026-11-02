@@ -1107,9 +1107,119 @@ stream's wait, nothing on a request's.
 
 *Renewal* is a restart: the files are read once, at the start. A reload
 on a signal, the next connections taking the new certificate, is a
-follow-up. *What still dials plain HTTP*: a replica's `--replica-of`, the
-router's links to its nodes and the regions' relays, and the `fennec mcp`
-bridge -- the dials are the next slice's, so a node, a primary that a
-replica follows, and a server the bridge reaches keep plain HTTP on a
-private network until then, and the router, which ends clients' TLS,
-forwards to its nodes in the clear.
+follow-up. What fennecdb dials takes HTTPS by its URL
+([below](#dialing-https)).
+
+## Dialing HTTPS
+
+**Every HTTP dial takes HTTPS by its URL** (`fennec_http::dial`). An
+address dialed over TLS says so, `https://host:port` where a plain one is
+`host:port` (`dial::tls_of`), and one module dials both: a replica's
+follower and `fennec backup`/`archive` (`replication::Upstream`), a node's
+archive stream (`node_archive`), a tenant following its primary at the
+router's word, the router's pool -- every forward, relay to a region's
+routers, query across tenants, `/_admin/` call, health probe and lease
+grant (`fennec_shard::upstream::dial`) -- the OTLP exporter
+(`trace::Endpoint`) and the `fennec mcp --url` bridge. `--follow` is
+PostgreSQL's wire, fennec-wire's, TLS since slice 1. Nothing else in the
+crates dials: `/_metrics` is scraped, never pushed, and the Datadog kit
+reads the scrape.
+
+*The handshake is the dial's last step, bounded.* `dial::connect`, the
+router's `dial` and `connect_watching` connect, then `dial::secure` runs
+`fennec_tls::Client::dial_within`: the whole handshake inside the dial's own
+bound (`replication::CONNECT`'s 5 s, the pool's connect bound, the
+exporter's timeout), each read and write waiting the time left, as
+`Server::accept_within` bounds an accept -- rustls's `complete_io` bounded
+each read, and a server trickling a byte short of it held a lease grant as
+long as it liked (`dial_within_bounds_the_whole_handshake`,
+`a_handshake_never_answered_is_a_timeout_at_the_dial_s_bound`). Nothing of
+the caller's goes before the handshake ends, so a certificate refused --
+an unknown issuer, another name -- is refused before a byte of a request,
+its token among them: the server reads the client's alert (counted under
+`alert` in `fennec_tls_handshakes_failed_total`) and no request
+(`a_name_the_certificate_does_not_hold_is_refused_before_a_byte_is_sent`,
+`a_replica_follows_its_primary_over_https`). The name held to the
+certificate is the URL's host, sent as SNI; ALPN offers `http/1.1`.
+
+*Whom it trusts.* Mozilla's roots, compiled in (`webpki-roots`), or with
+`--tls-ca <pem>` -- on `fennec-server`, `fennec-shard`, and `fennec backup`,
+`archive` and `mcp` -- that file's CAs in their place, never beside them:
+a cluster on a private CA is not also reachable by whatever a public CA
+signs for an address of its network. One flag a binary rather than one a
+URL: every dial of a process has one trust (`dial::trust_ca`, set as the
+flags are read, before any dial), one `fennec_tls::Client` whose session
+cache resumes a session across connections to one server. A refusal under
+Mozilla's roots says `--tls-ca` names a private CA. No client certificate
+is sent; a node knows its router by the admin token, as before.
+
+*A stream is either.* `dial::Stream` is `Plain(TcpStream)` or a boxed
+`TlsStream`, `Read` and `Write`, `socket()` for options, `poll` and the
+shutdowns: a replica's halt and a failover's cut shut the socket beneath
+the session, and the thread reading through it meets its end. Without
+the `tls` feature the TLS variant is a type of no value, as `conn::Conn`'s
+is. A request's head and body go in as one plaintext
+(`http::write_parts`, `Write::write_vectored`), one record under 16 KiB
+and its records one `writev`, flushed once; that flush tells a failure to
+send what the session took, so a request that never left is still told
+unsent. A connection kept is looked at through its session (`open`,
+`Stream::peer`): a session ticket or key update is no answer, a
+`close_notify` -- the node's idle timeout, which slice 2's server sends --
+the end it is. A held request watches the node's socket for its answer,
+and over TLS reads what moved as TLS before it stops watching its client:
+a fresh connection's session tickets arrive as its first request waits,
+and taken for the answer, the head's read waited on and a client's end
+went unpassed (`a_held_request_watches_its_client_past_the_session_s_tickets`).
+The client's end is passed on as a `close_notify` and the socket shut for
+writing (`Stream::end_writing`), which the node reads through its session.
+
+*The router's addresses carry the scheme.* A node recorded at
+`https://host:port` is dialed over TLS; `http://host:port` is recorded bare,
+as before (`node_addr`); a region's routers and a copy's `follows` are URLs
+already, and `dial::url_of` writes a node's (`https://` kept, `http://`
+before a bare one) where a node is told whom to follow. The pool's key is
+the address as recorded, so a node's TLS connections are kept apart from
+any plain ones, and `Host` is the authority alone. A field beside the
+address (`tls: true`) was the alternative: a router from before -- a
+standby following the directory, a binary rolled back -- reads a
+directory's unknown field as nothing and would dial the node in plain HTTP,
+the node's admin token in its first request, where a scheme it cannot
+resolve sends nothing. That is the upgrade's order (RELEASING.md, `make
+upgrade-check`): every router -- each region's, each standby -- and every
+node a tenant may follow from before a node is recorded at `https://`.
+An older router fails to resolve such an address, so it relays nothing to
+the node and grants it no lease (its lease lapses, and with a standby it is
+failed over); an older node refuses to follow an `https://` primary
+(`--replica-of names a node`), taking nothing.
+
+*What it holds.* The pool's rules are the transport's, not the socket's:
+a pooled connection looked at first, a resend judged by `Stage`, the cut
+by the descriptor under its word (`ANSWERING`, `CLOSED` before the close
+-- the session's socket closes as its `Conn` drops, after its flight is
+marked), each over TLS as in plain HTTP (`a_cut_ends_a_request_out_over_tls`,
+`a_tls_connection_is_kept_and_let_go_of_at_its_close_notify`); a node
+whose handshake fails was sent nothing, `Stage::Unsent`, the router's 503.
+A replica's `Feed::wait_sent`, `SENT_WAIT` and `Sender::held` are the
+primary's side and unchanged: what the stream writes it writes through
+`&Conn`, over TLS since slice 2. `a_router_relays_leases_and_fails_over_nodes_serving_https`
+runs three leasing nodes on HTTPS under a router: a tenant made, written
+and read through it, its copy following over TLS, a lease round, then
+its node cut off, failed over and written again.
+
+*What it costs.* `make tls-dial-bench BASE=<main's fennec-shard>`, macOS
+arm64, five rounds each begun under a 1-minute load of 2.5, the turns
+rotated, a row by id relayed through the router to a `--dir` node, eight
+clients kept alive: main's router 70 493 requests a second at a p50 of
+42.5 us, this tree's over the same plain node 69 983 at 42.7 us, and over
+the node serving HTTPS 67 632 at 46.3 us -- a record sealed and opened each
+way on the router's link. The plain figures are a match per read and write
+and a prefix test a request apart; a second run of nine rounds is in the
+PR. A lease round over three nodes, its connections kept, p50 61.0 us plain
+and 61.1 over TLS (p99 88.0 and 103.5); a dial alone, the lookup, connect
+and handshake a grant to a node with no kept connection pays first, 31 us
+plain and 595 us over TLS -- against a lease's seconds and a grant's third
+of one, nothing a round waits on. `fennec-shard` grew 5 251 968 -> 5 550 256
+bytes (+291 KB: rustls's client half, webpki's verifier and Mozilla's roots,
+the router's first dial over TLS), `fennec-server` and `fennec` one 16 KB
+page each (6 064 144 -> 6 080 672, 4 459 632 -> 4 476 176), the client half
+being theirs already for `--follow` and `fennec import`.

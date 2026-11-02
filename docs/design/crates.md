@@ -31,8 +31,10 @@ features, so a crate gets TLS only by asking, and `cargo build -p X
 nothing from outside the workspace, as before. The first slice dials
 PostgreSQL (`sslmode`, [replication.md](replication.md#follow)); the
 second has `fennec-server` and `fennec-shard` serve HTTPS
-(`--tls-cert`, [http.md](http.md#tls)); the replication client, the OTLP
-exporter and the router dialing its nodes come in by the same crate.
+(`--tls-cert`, [http.md](http.md#tls)); the third has every HTTP dial
+take an `https://` URL -- a replica's, the router's to its nodes and
+regions, the OTLP exporter's, `fennec backup` and `mcp --url`
+([http.md](http.md#dialing-https)) -- by the same crate.
 
 **Why.** The user's decision, on 2026-11-01. Almost no Rust project writes
 TLS itself, and a client of our own -- the handshake and its state machine,
@@ -84,7 +86,10 @@ Serving HTTPS, the second slice ([http.md](http.md#tls)), measured on
 2026-11-02 the same way: `fennec-server` 5777 -> 5922 KB (rustls's server
 half and the listener's code), without `tls` 4741 -> 4758; `fennec-shard`,
 which took no TLS before, 4256 -> 5113 KB; the image's binary arm64 6.11
-MB, amd64 7.18.
+MB, amd64 7.18. Dialing HTTPS, the third
+([http.md](http.md#dialing-https)): `fennec-shard` 5 251 968 -> 5 550 256
+bytes (rustls's client half, the verifier and Mozilla's roots, its first
+dial), `fennec-server` and `fennec` one 16 KB page each.
 
 **What must never happen.** A dependency in `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm`, the browser module or `fennec-ffi`, the

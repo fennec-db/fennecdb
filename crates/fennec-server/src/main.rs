@@ -117,6 +117,10 @@ usage: fennec-server [options]
                             its private key, both or neither. --metrics
                             speaks it too. Read at the start: a renewed
                             certificate takes a restart
+      --tls-ca <pem>        the CAs every https:// this server dials is held
+                            to -- --replica-of's primary, --otlp-endpoint,
+                            a tenant's primary -- in place of Mozilla's
+                            roots, which it trusts without it
 
       --http-token <value>  require `Authorization: Bearer <value>`. Also read
                             from FENNEC_HTTP_TOKEN: argv shows up in `ps`
@@ -257,8 +261,8 @@ usage: fennec-server [options]
       --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
                             to this collector: http://localhost:4318 (the
                             OpenTelemetry Collector, the Datadog Agent's OTLP
-                            receiver). No TLS: a collector on this host or
-                            network forwards over TLS. Also read from
+                            receiver), or an https:// one, its certificate
+                            held to --tls-ca or Mozilla's roots. Also read from
                             OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
                             OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
       --otlp-header <k=v>   a header on every post, such as an API key;
@@ -275,7 +279,8 @@ usage: fennec-server [options]
                             tenant has one of its own under
                             /t/<tenant>/_replication. Refuses --sync off.
                             Also read from FENNEC_REPLICATION_TOKEN
-      --replica-of <url>    follow the primary at http://host:port and take
+      --replica-of <url>    follow the primary at http://host:port, or
+                            https://host:port over TLS (--tls-ca), and take
                             no write of its own (403). With --dir it
                             follows that node's tenant of the same name, and
                             a failover promotes them one at a time
@@ -324,7 +329,8 @@ flag is refused at the start.
 
 With --tls-cert and --tls-key fennec-server serves HTTPS itself, no proxy
 in front needed; without them it speaks plain HTTP, for loopback or a TLS
-terminator such as nginx or Caddy.
+terminator such as nginx or Caddy. What it dials -- a primary, a collector
+-- it dials over TLS where the URL says https://.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -820,6 +826,10 @@ fn main() {
             "--insecure" => http_cfg.insecure = true,
             "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
             "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
+            // Before any dial: every one is made after the flags are read.
+            "--tls-ca" => {
+                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
+            }
             "--studio" => studio = true,
             "--mcp" => {
                 mcp.get_or_insert_with(Default::default);

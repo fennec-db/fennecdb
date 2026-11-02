@@ -28,9 +28,13 @@ usage: fennec-shard [options]
                             to the nodes, which check it against --http-token
       --insecure            allow a non-loopback address without --token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
-      --tls-key <pem>       chain and its private key, both or neither; the
-                            nodes are still asked over plain HTTP. Read at
-                            the start: a renewed certificate takes a restart
+      --tls-key <pem>       chain and its private key, both or neither. Read
+                            at the start: a renewed certificate takes a
+                            restart. A node is asked over TLS where its
+                            address is https://host:port
+      --tls-ca <pem>        the CAs every https:// the router dials is held
+                            to -- its nodes, a region's routers, --replica-of
+                            and --global -- in place of Mozilla's roots
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com), as fennec-server takes it:
                             on every answer the router gives, its own and
@@ -119,9 +123,10 @@ usage: fennec-shard [options]
                             named by OTEL_SERVICE_NAME  default: fennec-shard
       --replication-token <value>  serve the directory to standby routers at
                             /_replication, and present this to a primary
-      --replica-of <url>    follow the primary router at http://host:port:
-                            the directory arrives from it, /_shard/ changes
-                            are refused here, and forwarding goes on as ever
+      --replica-of <url>    follow the primary router at http://host:port
+                            (https:// over TLS): the directory arrives from
+                            it, /_shard/ changes are refused here, and
+                            forwarding goes on as ever
       --promote             take writes on a standby's directory file: its
                             history forks here. A standby's file opens only
                             with --replica-of or this
@@ -136,7 +141,7 @@ usage: fennec-shard [options]
                             /_shard/regions/<name> {\"routers\": [..]}. With
                             --replica-of, a standby of the region's router,
                             promoted as any standby router is
-      --global <url>        the global router, http://host:port, repeatable or
+      --global <url>        the global router, http(s)://host:port, repeatable or
                             comma-separated, the one keeping the global
                             directory first: a region's router follows its
                             directory from it -- where every other tenant
@@ -243,6 +248,10 @@ fn main() {
             "--insecure" => cfg.insecure = true,
             "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
             "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
+            // Before any dial: every one is made after the flags are read.
+            "--tls-ca" => {
+                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
+            }
             "--http-cors" => cfg.cors = Some(next(&mut i, "--http-cors")),
             "--studio" => {
                 let s = fennec_http::studio::Studio::new(fennec_http::studio::ASSETS, None)

@@ -502,6 +502,14 @@ handshake is counted by reason and logged a minute apart at most; an end on
 purpose sends `close_notify`, the shutdown's too (`conn::end_all`), never
 after a failed write or `Conn::cut`.
 
+**[Every HTTP dial takes HTTPS by its URL.](docs/design/http.md#dialing-https)**
+`https://host:port` -- a primary, a node, a region's router, the OTLP
+collector, `fennec backup` and `mcp --url` -- is dialed over TLS
+(`dial::tls_of`), its handshake inside the dial and bounded
+(`dial_within`), so a refused certificate sends nothing; the CAs are
+Mozilla's or `--tls-ca`'s, never both. A node's scheme is in its address,
+never a field an older router would skip (RELEASING.md).
+
 ### The HNSW graph
 
 **[The HNSW graph is derived data, not a

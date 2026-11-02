@@ -12,6 +12,7 @@ mod changes;
 mod chunked;
 mod claim_values;
 mod claims;
+mod dials;
 mod empty_tokens;
 mod es256;
 mod fields;

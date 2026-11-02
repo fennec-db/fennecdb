@@ -34,7 +34,9 @@ answer a line on stdout, logs on stderr.
     --max-bytes <size>    the most bytes a tool answers  default: 64K
   --url <url>             a server started with --mcp: its endpoint,
                           http://127.0.0.1:8080/_mcp, or /t/<tenant>/_mcp. The
-                          tools are the server's
+                          tools are the server's. https:// is dialed over TLS
+    --tls-ca <pem>        the CAs an https:// endpoint is held to, in place
+                          of Mozilla's roots
     --token-env <name>    the environment variable holding the token
                           default: FENNEC_TOKEN
 
@@ -67,6 +69,16 @@ pub fn main(args: &[String]) -> i32 {
             }
             "--file" => value().map(|v| file = Some(v)).is_some(),
             "--url" => value().map(|v| url = Some(v)).is_some(),
+            "--tls-ca" => match value() {
+                Some(v) => match fennec_http::dial::trust_ca(&v) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("fennec mcp: {e}");
+                        return 2;
+                    }
+                },
+                None => false,
+            },
             "--token-env" => value().map(|v| token_env = v).is_some(),
             "--read-only" => {
                 read_only = true;

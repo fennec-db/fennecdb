@@ -11,17 +11,20 @@
 //! server, held to its options and to the token's rules, so the bridge
 //! decides nothing. A failure of its own -- the server down, an answer that
 //! is not JSON-RPC -- is answered as an error naming the bridge, so it is
-//! never taken for the server's. Plain HTTP only: fennecdb speaks no TLS, and
-//! a client reaches an https endpoint with its own HTTP transport.
+//! never taken for the server's. An `https://` endpoint is reached over TLS,
+//! its certificate held to Mozilla's roots or `--tls-ca`'s
+//! ([`crate::dial::trust_ca`]) before the token is sent.
 
+use crate::conn::Peer;
+use crate::dial::Stream;
 use fennec_core::json;
 use fennec_core::prelude::*;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// Where the bridge posts: the endpoint's address, its `Host`, its path,
-/// and the token sent with every message.
+/// Where the bridge posts: the endpoint's address -- `host:port`, or
+/// `https://host:port` over TLS ([`crate::dial::tls_of`]) -- its `Host`,
+/// its path, and the token sent with every message.
 #[derive(Clone, Debug)]
 pub struct Upstream {
     pub addr: String,
@@ -31,36 +34,23 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    /// `http://host:port/_mcp`, or `/t/<tenant>/_mcp` on a tenant node or a
-    /// router; the path is `/_mcp` when the URL names none.
+    /// `http://host:port/_mcp` or `https://...`, or `/t/<tenant>/_mcp` on a
+    /// tenant node or a router; the path is `/_mcp` when the URL names
+    /// none.
     pub fn parse(url: &str, token: Option<String>) -> std::result::Result<Upstream, String> {
-        let Some(rest) = url.strip_prefix("http://") else {
-            return Err(match url.starts_with("https://") {
-                true => "fennecdb speaks no TLS, and neither does this bridge: give an https \
-                         endpoint to the client's own HTTP transport (\"type\": \"http\", \"url\")"
-                    .into(),
-                false => format!("`{url}` is not an http:// URL: http://127.0.0.1:8080/_mcp"),
-            });
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/_mcp"),
-        };
-        if authority.is_empty() {
-            return Err(format!("`{url}` names no host"));
+        if !url.starts_with("http://") && !url.starts_with(crate::dial::HTTPS) {
+            return Err(format!(
+                "`{url}` is not an http:// or https:// URL: http://127.0.0.1:8080/_mcp"
+            ));
         }
-        let has_port = match authority.rfind(']') {
-            Some(close) => authority[close..].contains(':'),
-            None => authority.contains(':'),
-        };
-        let addr = match has_port {
-            true => authority.to_string(),
-            false => format!("{authority}:80"),
-        };
+        let (addr, path) = crate::dial::split_url(url)?;
         Ok(Upstream {
+            host: crate::dial::authority(&addr).to_string(),
             addr,
-            host: authority.to_string(),
-            path: path.to_string(),
+            path: match path.as_str() {
+                "" => "/_mcp".to_string(),
+                _ => path,
+            },
             token,
         })
     }
@@ -132,7 +122,7 @@ fn own_error(id: Option<&Value>, why: &str) -> String {
 /// Posts each line of `input` to `up` and writes each answer to `output`,
 /// until the input ends.
 pub fn bridge(up: &Upstream, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
-    let mut conn: Option<BufReader<TcpStream>> = None;
+    let mut conn: Option<BufReader<Stream>> = None;
     // The revision an `initialize` agreed on, which a handshake client's
     // later requests carry as a header the bridge adds for it.
     let mut negotiated: Option<String> = None;
@@ -232,44 +222,31 @@ fn agreed(m: &[(String, Value)]) -> Option<String> {
     }
 }
 
-fn connect(addr: &str) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-    for a in addr.to_socket_addrs()? {
-        match TcpStream::connect_timeout(&a, Duration::from_secs(5)) {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                return Ok(s);
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+/// A connection to the endpoint, its name looked up, its connect and over
+/// TLS its handshake each within 5 s ([`crate::dial::connect`]).
+fn connect(addr: &str) -> io::Result<Stream> {
+    crate::dial::connect(addr, Duration::from_secs(5))
 }
 
 /// Whether a kept connection was closed by the server meanwhile -- its idle
 /// timeout -- so the message goes on a new one rather than be sent into a
-/// closed one and sent again: a write sent twice is two rows.
-fn closed(conn: &BufReader<TcpStream>) -> bool {
+/// closed one and sent again: a write sent twice is two rows. Over TLS what
+/// arrived is read as TLS, so a `close_notify` is the end it is
+/// ([`Stream::peer`]).
+fn closed(conn: &mut BufReader<Stream>) -> bool {
     if !conn.buffer().is_empty() {
         return true;
     }
-    let s = conn.get_ref();
-    if s.set_nonblocking(true).is_err() {
-        return true;
-    }
-    let gone =
-        !matches!(s.peek(&mut [0u8; 1]), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock);
-    let _ = s.set_nonblocking(false);
-    gone
+    !matches!(conn.get_mut().peer(), Ok(Peer::Quiet))
 }
 
 fn post(
-    conn: &mut Option<BufReader<TcpStream>>,
+    conn: &mut Option<BufReader<Stream>>,
     up: &Upstream,
     headers: &[(&str, String)],
     body: &[u8],
 ) -> io::Result<(u16, Vec<u8>)> {
-    if conn.as_ref().is_some_and(closed) {
+    if conn.as_mut().is_some_and(closed) {
         *conn = None;
     }
     if conn.is_none() {
@@ -291,10 +268,8 @@ fn post(
     }
     head.push_str("\r\n");
     let answer = (|| {
-        let s = r.get_mut();
-        s.write_all(head.as_bytes())?;
-        s.write_all(body)?;
-        s.flush()?;
+        // Head and body in one write: over TLS, one plaintext.
+        crate::http::write_parts(r.get_mut(), head.as_bytes(), body)?;
         response(r)
     })();
     match answer {
@@ -313,7 +288,7 @@ fn post(
 
 /// An HTTP answer: its status, its body -- by `Content-Length`, chunked, or
 /// to the end -- and whether the connection stays open.
-fn response(r: &mut BufReader<TcpStream>) -> io::Result<(u16, Vec<u8>, bool)> {
+fn response(r: &mut BufReader<Stream>) -> io::Result<(u16, Vec<u8>, bool)> {
     let mut line = String::new();
     r.read_line(&mut line)?;
     let status: u16 = line
@@ -398,9 +373,17 @@ mod tests {
         );
         let up = Upstream::parse("http://[::1]:9000/_mcp", None).unwrap();
         assert_eq!(up.addr, "[::1]:9000");
-        assert!(Upstream::parse("https://db.example/_mcp", None)
-            .unwrap_err()
-            .contains("TLS"));
+        if cfg!(feature = "tls") {
+            let up = Upstream::parse("https://db.example/_mcp", None).unwrap();
+            assert_eq!(
+                (up.addr.as_str(), up.host.as_str(), up.path.as_str()),
+                ("https://db.example:443", "db.example:443", "/_mcp")
+            );
+        } else {
+            assert!(Upstream::parse("https://db.example/_mcp", None)
+                .unwrap_err()
+                .contains("TLS"));
+        }
         assert!(Upstream::parse("db.example/_mcp", None).is_err());
     }
 

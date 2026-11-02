@@ -154,12 +154,25 @@ fn a_session_over_a_server_carries_the_token_from_the_environment() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    // An https URL is refused with what to do instead.
+    // An https URL is dialed over TLS, held to --tls-ca's CAs: a file that
+    // is not there is refused, naming it, before anything is dialed.
     let out = Command::new(BIN)
-        .args(["mcp", "--url", "https://db.example/_mcp"])
+        .args([
+            "mcp",
+            "--url",
+            "https://db.example/_mcp",
+            "--tls-ca",
+            "/nowhere/ca.pem",
+        ])
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("TLS"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/nowhere/ca.pem"));
+    let out = Command::new(BIN)
+        .args(["mcp", "--url", "ftp://db.example/_mcp"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("https://"));
 }
 
 /// A local session lists the file's statements as tools of their own and

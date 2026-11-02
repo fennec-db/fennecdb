@@ -71,6 +71,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENNEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code>, <code>--tls-key &lt;pem&gt;</code></td><td>Serves HTTPS alone, with this certificate chain (the server's certificate first, then its intermediates) and its private key; both or neither. <code>--metrics</code> speaks it too. Read at the start: a renewed certificate takes a restart (<a href="#tls">HTTPS</a>).</td></tr>
+<tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>The CAs every <code>https://</code> this server dials is held to, in place of Mozilla's roots, which it trusts without the flag: a replica's <code>--replica-of</code> primary, <code>--otlp-endpoint</code>, a tenant's primary. A PEM file of one or more CAs, for a private CA (<a href="#dialing-https">Dialing HTTPS</a>).</td></tr>
 <tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--jwt-tenant-claim</code>, <code>--jwt-unbound-tenants</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
 <tr><td><code>--jwt-issuer &lt;iss&gt;</code>, <code>--jwt-audience &lt;aud&gt;</code></td><td>Takes only a token whose <code>iss</code> is one of the issuers given, and whose <code>aud</code> (a text or a list) holds one of the audiences given; each repeatable, the two lists independent rather than paired. A token refused is 401 naming the check. Without them any token the keys sign is taken, as before, and with <code>--jwt-keys</code> the server says so as it starts. Required for Firebase, whose keys sign every project's tokens; not enough where the caller names its own audience (Google identity tokens, GitHub Actions, Kubernetes), where the rules pin <code>sub</code> too (<a href="/docs/http-access#whom-a-token-is-for">Whom a token is for</a>).</td></tr>
 <tr><td><code>--jwt-client &lt;id&gt;</code></td><td>Takes only a token whose <code>azp</code>, or <code>client_id</code> where it names no <code>azp</code>, is one of the clients given; repeatable. For a Cognito pool, <code>--jwt-client</code> takes its access tokens and <code>--jwt-audience</code> its ID tokens.</td></tr>
@@ -248,16 +249,6 @@ itself. No proxy goes in front.</p>
     restart is planned.</li>
 </ul>
 
-<div class="note trap">
-  <p><b>Only the ports clients reach speak TLS in this release.</b> What
-  fennecdb dials itself still dials <code>http://</code>: a replica's
-  <code>--replica-of</code>, the router's links to its nodes, the regions'
-  relays and the <code>fennec mcp</code> bridge. Put <code>--tls-cert</code> on
-  the router and on a server that clients reach directly. Keep the nodes, the
-  primaries that replicas follow and the servers the MCP bridge reaches on plain
-  HTTP, on a private network, for now. TLS on those links is planned next.</p>
-</div>
-
 <details class="deep"><summary>Handshakes, refused connections, health checks and a proxy in front</summary>
 <p>Each handshake runs on its connection's own thread and is bounded at 10 s,
 so a client that stalls in it holds up no other. A handshake that fails is
@@ -286,6 +277,47 @@ own machine, and it carries no token.</p>
 for a certificate setup shared with other services; the server then speaks
 plain HTTP to it, on a private network.</p>
 </details>
+
+<h3 id="dialing-https">Dialing HTTPS</h3>
+
+<p>What the server dials itself takes <code>https://</code> too. The URL's
+scheme says so; <code>http://</code> works as it did.</p>
+
+<ul>
+  <li><b>Where.</b> A replica's <code>--replica-of https://host:port</code>
+    (and a tenant's follow, which the router sets), <code>--otlp-endpoint
+    https://...</code> (also <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>; a
+    port left out is 443), <code>fennec backup</code> and <code>fennec
+    archive</code> from an <code>https://</code> primary or node, the router's
+    links to its nodes and a region's routers
+    (<a href="/docs/sharding-reference">Sharding reference</a>), and <code>fennec
+    mcp --url https://.../_mcp</code> (<a href="/docs/mcp">MCP</a>).</li>
+  <li><b>What is checked.</b> The server's certificate: its chain and the
+    URL's host name, which is also sent as the server name. Mozilla's roots are
+    compiled in and are the default.</li>
+  <li><b>A private CA.</b> <code>--tls-ca &lt;pem&gt;</code> names a PEM file of
+    CAs and <i>replaces</i> Mozilla's roots, never adds to them. It is a flag of
+    <code>fennec-server</code>, <code>fennec-shard</code>, <code>fennec
+    backup</code>, <code>fennec archive</code> and <code>fennec mcp</code>. A
+    file that cannot be read, or holds no certificate, is refused at the
+    start, naming it.</li>
+  <li><b>A refusal sends nothing.</b> A certificate from an unknown issuer, or
+    one that does not hold the URL's host name, is refused in the handshake,
+    before any byte of the request is sent, the token included. Under
+    Mozilla's roots the message says that <code>--tls-ca</code> names a private
+    CA. The handshake is bounded inside the dial, so a replica's 5 s connect
+    bound covers it.</li>
+  <li><b>No client certificates.</b> These dials present none; the token is
+    what identifies them.</li>
+</ul>
+
+<div class="note trap">
+  <p><b>Upgrade before you record an <code>https://</code> address.</b> A node
+  from before this release refuses to follow an <code>https://</code> primary,
+  and a router from before cannot dial an <code>https://</code> node
+  (<a href="/docs/sharding-reference#https-nodes">Sharding reference</a>).
+  Upgrade every router and node first.</p>
+</div>
 
 <h2 id="durability">Durability</h2>
 

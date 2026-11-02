@@ -80,7 +80,7 @@ image:</p>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there. <code>{"lineage", "history"}</code>, as the router sends them, refuse a copy of another lineage, or one lacking that history that has not heard from the node it follows since it was last told to follow it (409); without them, a copy with no write and no word from its primary since it opened or was told to follow is refused; <code>{"force": true}</code> promotes it whatever it holds, an audit event</td></tr>
-<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code></td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, or <code>https://host:port</code> (<a href="server.html#dialing-https">Dialing HTTPS</a>), kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -106,9 +106,10 @@ under <code>/_shard/</code>.</p>
     router</b>, as it would on a node: <code>fennec-shard --http-cors
     https://app.example</code>.</li>
   <li><b>The router ends the clients' TLS</b> when it has
-    <code>--tls-cert</code> and <code>--tls-key</code>, and asks its nodes over
-    plain HTTP in this release: keep the nodes on a private network
-    (<a href="server.html#tls">HTTPS</a>).</li>
+    <code>--tls-cert</code> and <code>--tls-key</code>, and asks a node over
+    TLS when the node is recorded at an <code>https://</code> address
+    (<a href="#https-nodes">Nodes that serve HTTPS</a>,
+    <a href="server.html#tls">HTTPS</a>). The two are independent.</li>
 </ul>
 
 <details class="deep"><summary>The directory, the node and tenant routes, and CORS through the router</summary>
@@ -124,7 +125,7 @@ does not return them.</p>
 <thead><tr><th>Route</th><th>Does</th></tr></thead>
 <tbody>
 <tr><td><code>GET /_shard/nodes</code></td><td>name, address, region and zone of each node</td></tr>
-<tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token, region, zone}</code>; checked against the node before it is recorded; a region or zone left out is the one recorded</td></tr>
+<tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token, region, zone}</code>; <code>addr</code> is <code>host:port</code> or <code>https://host:port</code> (<a href="#https-nodes">Nodes that serve HTTPS</a>); checked against the node before it is recorded; a region or zone left out is the one recorded</td></tr>
 <tr><td><code>DELETE /_shard/nodes/&lt;n&gt;</code></td><td>refused while the node holds a tenant</td></tr>
 <tr><td><code>GET /_shard/tenants</code></td><td>name, node, state and region of each tenant; with <code>?bytes</code>, its bytes on disk, asked of each node; with <code>?region=&lt;r&gt;</code>, one region's</td></tr>
 <tr><td><code>GET /_shard/tenants/&lt;t&gt;</code></td><td>one tenant: its node, state, region and zone, and the node holding its copy</td></tr>
@@ -164,6 +165,46 @@ flag the router sends none of its own and passes a node's through as the node
 wrote them, and a preflight goes to the node.</p>
 </details>
 
+<h3 id="https-nodes">Nodes that serve HTTPS</h3>
+
+<p>A node started with <code>--tls-cert</code> and <code>--tls-key</code> is
+recorded with its scheme in the address:</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/nodes/n1 -H 'Authorization: Bearer root' \
+     -d '{"addr":"https://node1.internal:8081","token":"a1"}'</pre>
+
+<ul>
+  <li><b>What goes over TLS.</b> Every call the router makes to that node:
+    forwarded requests, <code>/_admin/</code> calls, lease grants, health
+    probes and the reads of a query across tenants. A tenant on it that
+    another node follows is followed over <code>https://</code> too, by a node
+    that holds <code>--tls-ca</code> where the CA is a private one.</li>
+  <li><b>The name in the URL.</b> The URL's host must be a name or an address
+    the node's certificate holds. The router checks the chain and that name
+    against Mozilla's roots, or against <code>--tls-ca</code>'s CAs in their
+    place for a private CA. A certificate refused ends the handshake before a
+    byte of the request is sent, so the node's token is not sent either.</li>
+  <li><b>Other spellings.</b> <code>http://host:port</code> and a bare
+    <code>host:port</code> are recorded as a bare <code>host:port</code>, as
+    before. An address with a path is refused (400): a node is reached at its
+    root.</li>
+  <li><b>The same for the routers.</b> A region's routers
+    (<code>PUT /_shard/regions/&lt;name&gt;</code> with
+    <code>{"routers": ["https://..."]}</code>), <code>--global</code> and a
+    standby router's <code>--replica-of</code> take an <code>https://</code>
+    URL, dialed the same way.</li>
+</ul>
+
+<div class="note trap">
+  <p><b>Upgrade every router and node before you record an
+  <code>https://</code> address.</b> That is each region's routers, each
+  standby router and every node. A router from before this release cannot
+  resolve an <code>https://</code> address: it sends that node nothing, never
+  plain text, relays nothing to it and grants it no lease, so the node's lease
+  lapses and, with a standby, it is failed over. A node from before refuses to
+  follow an <code>https://</code> primary.</p>
+</div>
+
 <h2 id="router-flags">Router flags</h2>
 
 <p>Every flag of <code>fennec-shard</code>, as <code>fennec-shard --help</code>
@@ -181,7 +222,8 @@ it.</p>
 <tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without <code>--token</code>. Off by default.</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code></td><td>Serves clients HTTPS alone, with this certificate chain: the router's certificate first, then its intermediates. Needs <code>--tls-key</code>, both or neither; a file that cannot be read or parsed, or a key that is not the certificate's, is refused at the start. A plain HTTP request is answered 400, naming <code>https://</code>. Read at the start: a renewed certificate takes a restart (<a href="server.html#tls">HTTPS</a>).</td></tr>
-<tr><td><code>--tls-key &lt;pem&gt;</code></td><td>The private key of that certificate, PKCS#8, PKCS#1 or SEC1. The router ends the clients' TLS and still asks its nodes over plain HTTP in this release, and so are its <code>--replica-of</code> link and the regions' relays: keep them on a private network.</td></tr>
+<tr><td><code>--tls-key &lt;pem&gt;</code></td><td>The private key of that certificate, PKCS#8, PKCS#1 or SEC1. The router ends the clients' TLS with it; what the router dials itself does not need it.</td></tr>
+<tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>The CAs every <code>https://</code> the router dials is held to &mdash; its nodes, a region's routers, <code>--replica-of</code> and <code>--global</code> &mdash; in place of Mozilla's roots, which it trusts without the flag. A file that cannot be read, or holds no certificate, is refused at the start (<a href="#https-nodes">Nodes that serve HTTPS</a>).</td></tr>
 <tr><td><code>--http-cors &lt;origin&gt;</code></td><td><code>Access-Control-Allow-Origin</code> on every answer the router gives, its own and the nodes' it forwards, whose CORS headers it replaces, and a browser's preflight answered here (<a href="#cors">the router's CORS rule</a>).</td></tr>
 <tr><td><code>--studio</code></td><td>Serves fennec studio, the admin pages, at <code>/_studio/</code>: a tenant's collections and rows in a browser, through this router, with the token pasted in. Keep it on a private network. Off by default.</td></tr>
 <tr><td><code>--entry-token &lt;value&gt;</code></td><td>The global entry's <code>ENTRY_TOKEN</code>: a request whose <code>Fennec-Client</code> header carries the entry's mark for its address, made within 60 s of this clock, is that client's (<a href="sharding-entry.html#global-entry">One URL for every region</a>).</td></tr>
@@ -197,15 +239,15 @@ it.</p>
 <tr><td><code>--replicas</code></td><td>Gives each tenant created on a node in no pair a replica on another node of its region &mdash; one in another zone first, then the one holding the fewest. The nodes need <code>--replication-token</code>, the same one (<a href="sharding-failover.html#replicas-of-their-own">Replicas of their own</a>). Off by default.</td></tr>
 <tr><td><code>--default-region &lt;name&gt;</code></td><td>The region a tenant created naming neither a region nor a node is placed in. Without it, such a tenant goes to the node with the fewest bytes whatever its region (<a href="sharding-regions.html#regions">Regions</a>).</td></tr>
 <tr><td><code>--auto-failover &lt;s&gt;</code></td><td>Leases each node the tenants it holds for this long, renewed every third of it, and fails a node over on its own once it has gone a tenth past it unrenewed. The nodes need <code>--lease</code>. 5 is a start (<a href="sharding-failover.html#automatic-failover">Automatic failover</a>). Off by default.</td></tr>
-<tr><td><code>--otlp-endpoint &lt;url&gt;</code></td><td>Sends OpenTelemetry traces, OTLP over HTTP as JSON, to this collector. No TLS. Also read from <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> and <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>. Off by default.</td></tr>
+<tr><td><code>--otlp-endpoint &lt;url&gt;</code></td><td>Sends OpenTelemetry traces, OTLP over HTTP as JSON, to this collector: <code>http://</code>, or <code>https://</code> over TLS, its certificate held to <code>--tls-ca</code> or Mozilla's roots, a port left out 443. Also read from <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> and <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>. Off by default.</td></tr>
 <tr><td><code>--otlp-header &lt;k=v&gt;</code></td><td>A header on every post, such as an API key; repeatable. Also read from <code>OTEL_EXPORTER_OTLP_HEADERS</code>.</td></tr>
 <tr><td><code>--trace-sample &lt;ratio&gt;</code></td><td>The share of the requests that start a trace here that are kept, 0 to 1. A request whose <code>traceparent</code> was sampled is traced whatever the ratio. The service is named by <code>OTEL_SERVICE_NAME</code> (<code>fennec-shard</code> by default). Default <code>1</code> with an endpoint.</td></tr>
 <tr><td><code>--replication-token &lt;value&gt;</code></td><td>Serves the directory to standby routers at <code>/_replication</code>, and presents this to a primary (<a href="sharding-failover.html#standby-router">A standby router</a>).</td></tr>
-<tr><td><code>--replica-of &lt;url&gt;</code></td><td>Follows the primary router at <code>http://host:port</code>: the directory arrives from it, <code>/_shard/</code> changes are refused here, and forwarding goes on as ever.</td></tr>
+<tr><td><code>--replica-of &lt;url&gt;</code></td><td>Follows the primary router at <code>http://host:port</code>, or <code>https://host:port</code> over TLS: the directory arrives from it, <code>/_shard/</code> changes are refused here, and forwarding goes on as ever.</td></tr>
 <tr><td><code>--promote</code></td><td>Takes writes on a standby's directory file: its history forks here. A standby's file opens only with <code>--replica-of</code> or this. Off by default.</td></tr>
 <tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>Directory writes kept for standbys that fall behind. Default <code>8</code>.</td></tr>
 <tr><td><code>--region &lt;name&gt;</code></td><td>Keeps this region's own directory in <code>--directory</code>: its nodes and tenants, leased and failed over by this router with no word from another region. Needs <code>--global</code> and <code>--replication-token</code> (<a href="sharding-regions.html#region-directories">A region that keeps its own directory</a>).</td></tr>
-<tr><td><code>--global &lt;url&gt;</code></td><td>The global router, <code>http://host:port</code>, repeatable or comma-separated, the one keeping the global directory first: a region's router follows its directory from it and sends it the changes it takes.</td></tr>
+<tr><td><code>--global &lt;url&gt;</code></td><td>The global router, <code>http://host:port</code> or <code>https://host:port</code>, repeatable or comma-separated, the one keeping the global directory first: a region's router follows its directory from it and sends it the changes it takes.</td></tr>
 <tr><td><code>--global-directory &lt;path&gt;</code></td><td>The region's router's copy of the global directory. Default: the <code>--directory</code> file with <code>.global</code> before <code>.fennec</code>.</td></tr>
 <tr><td><code>--near &lt;region&gt;</code></td><td>The region this router stands in: a read its client marks (<code>Fennec-Read: replica</code>) of a tenant with a read replica there goes to it, every other request home. A region's router (<code>--region</code>) is near its region already (<a href="sharding-read-replicas.html#read-replicas">Read replicas</a>).</td></tr>
 <tr><td><code>--replica-timeout &lt;ms&gt;</code></td><td>How long a read replica has to answer such a read, past the wait its <code>Fennec-After</code> asks for; one that does not is let be for 5 s, its region's reads going home. Default <code>2000</code>.</td></tr>

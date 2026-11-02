@@ -33,6 +33,8 @@ pub struct Node {
     pub dir: PathBuf,
     /// What the router and the replicas reach the node through.
     pub proxy: Proxy,
+    /// Whether it serves HTTPS alone, with `fennec-http/tests/certs`.
+    pub tls: bool,
 }
 
 impl Drop for Node {
@@ -42,6 +44,17 @@ impl Drop for Node {
 }
 
 pub fn node(tag: &str, lease: bool) -> Node {
+    node_with(tag, lease, false)
+}
+
+/// The test CA's certificates, `fennec-http/tests/certs`: good for
+/// `localhost`, `127.0.0.1` and `::1`.
+pub fn certs() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fennec-http/tests/certs")
+}
+
+/// [`node`], serving HTTPS alone where `tls` is set.
+pub fn node_with(tag: &str, lease: bool, tls: bool) -> Node {
     let dir = std::env::temp_dir().join(format!("fennec-leases-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -58,6 +71,10 @@ pub fn node(tag: &str, lease: bool) -> Node {
         addr: "127.0.0.1:0".into(),
         admin_token: Some(format!("adm-{tag}")),
         sync_on_write: true,
+        tls: tls.then(|| {
+            let (pem, key) = (certs().join("server.pem"), certs().join("server.key"));
+            Arc::new(fennec_http::conn::Tls::from_pem_files(&pem, &key).unwrap())
+        }),
         ..fennec_http::Config::default()
     };
     let server = fennec_http::Server::with_tenants(Arc::new(tenants), cfg);
@@ -71,6 +88,45 @@ pub fn node(tag: &str, lease: bool) -> Node {
         port: addr.port(),
         dir,
         proxy: Proxy::to(&addr.to_string()),
+        tls,
+    }
+}
+
+impl Node {
+    /// What the router records it at: over TLS, `https://` and its proxy.
+    pub fn addr(&self) -> String {
+        match self.tls {
+            true => format!("https://{}", self.proxy.addr),
+            false => self.proxy.addr.clone(),
+        }
+    }
+
+    /// `sql` on the node itself, over HTTPS where it serves it.
+    pub fn query(&self, path: &str, sql: &str) -> (u16, String) {
+        if !self.tls {
+            return query(self.port, path, sql);
+        }
+        let mut body = String::from("{\"query\":");
+        fennec_core::json::escape_into(&mut body, sql);
+        body.push('}');
+        let s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        s.set_read_timeout(Some(WITHIN)).unwrap();
+        let ca = certs().join("ca.pem");
+        let client = fennec_tls::Client::trusting_pem_file(&ca).unwrap();
+        let mut s = client.dial(s, "localhost").unwrap();
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).unwrap();
+        s.write_all(body.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
+        let out = String::from_utf8_lossy(&out);
+        let status = out.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let body = out.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        (status, body.to_string())
     }
 }
 
@@ -422,7 +478,23 @@ pub fn three_leased(
     term: Duration,
     upstream: Duration,
 ) -> ([Node; 3], u16, Arc<Router>) {
-    let nodes = [1, 2, 3].map(|i| node(&format!("{tag}{i}"), lease));
+    three_leased_with(tag, lease, term, upstream, false)
+}
+
+/// [`three_leased`], the nodes serving HTTPS where `tls` is set, recorded
+/// at `https://` addresses: the router, and each node following another,
+/// dials them over TLS, the test CA trusted by the process.
+pub fn three_leased_with(
+    tag: &str,
+    lease: bool,
+    term: Duration,
+    upstream: Duration,
+    tls: bool,
+) -> ([Node; 3], u16, Arc<Router>) {
+    if tls {
+        fennec_http::dial::trust_ca(certs().join("ca.pem").to_str().unwrap()).unwrap();
+    }
+    let nodes = [1, 2, 3].map(|i| node_with(&format!("{tag}{i}"), lease, tls));
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         upstream_timeout: upstream,
@@ -439,11 +511,7 @@ pub fn three_leased(
         let _ = serving.serve_on(listener);
     });
     for (i, nd) in nodes.iter().enumerate() {
-        let body = format!(
-            r#"{{"addr":"{}","token":"adm-{tag}{}"}}"#,
-            nd.proxy.addr,
-            i + 1
-        );
+        let body = format!(r#"{{"addr":"{}","token":"adm-{tag}{}"}}"#, nd.addr(), i + 1);
         let (status, body) = call(
             port,
             "PUT",
