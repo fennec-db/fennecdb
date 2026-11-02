@@ -44,7 +44,8 @@ open http://127.0.0.1:8080/_studio/
 step. The server embeds the files, so the binary is all you deploy. Its
 first load is 71 KB of JavaScript and CSS, gzipped, its modules preloaded
 together from the page; the query editor, the schema, the live rows and the
-admin view are fetched the first time each is opened, 7 to 19 KB more. The server sends the
+admin view are fetched the first time each is opened: the first with what the
+views share, 18 to 24 KB, each after it 3 to 9 KB more. The server sends the
 files as they are, uncompressed; a proxy in front may compress them.</p>
 <p>A router serves it too: <code>fennec-shard --studio</code> puts the
 same pages on the router's address, where each tenant is reached through
