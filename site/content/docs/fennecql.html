@@ -503,10 +503,13 @@ or dropped: a write never lands without its rows.</p>
 <code>/query</code>, <code>/batch</code>, the REST routes, MCP's
 <code>write</code>, a held write, a call's body, the shell and the native
 library, and a schema declared in code may declare it. A scoped token's
-write, or call, that would wake one is refused (403) before anything runs:
-no policy grants one yet, and a binding never runs on a token's behalf
-without one. A write waking none — a row its condition does not pass, an
-event it is not bound to — is a token's as ever. What copies or loads rows
+write, or call, wakes one only where the policy's <code>wake</code> line
+grants it (<a href="/docs/http-access#wakes">Waking a bound statement</a>):
+its writes are then the statement's own, judged by no rule of the token's,
+and otherwise the write is refused (403) before anything runs — a binding
+never runs on a token's behalf without one, and never skips. A write waking
+none — a row its condition does not pass, an event it is not bound to — is
+a token's as ever. What copies or loads rows
 wakes nothing, its derived rows made elsewhere or by its operator: a
 replica's apply and a restore, which take the bound rows from the record,
 <code>fennec import</code>, <code>--follow</code>'s mirror, a declared

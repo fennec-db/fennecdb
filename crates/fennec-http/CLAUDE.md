@@ -46,7 +46,14 @@ its token (`admitted`), a stream's before its head.
 writes.](../../docs/design/access.md#scoped-tokens)** A new path that runs a
 statement must go through `scoped()` or it reads everything; a scoped write
 outside `within()` goes unchecked, so only a named statement's call runs
-one there (`run_as`). A write over a row meets `before_overwrite` with the
+one there (`run_as`), and a binding's writes, which the `Check` hook passes
+over (`Hook::writer_only`) once `Hook::waking` judged it -- a row passing
+its condition or not where that reads a field the token is not shown
+(`Scope::reads_unshown`): a `wake` line
+grants it (`* wake` refused), its body reaches no `append-only` collection
+(403, the audit's `unwoken` line naming it), its runs charged to
+`--call-rate` (`calls::charge_runs`), and `judge_call` holds a body to the
+same. A write over a row meets `before_overwrite` with the
 row as it was, judging `update(a, b)` and transitions (`new.`, granting
 `update` alone); `append-only` binds every scoped token. Scoped, a stream
 tells deletions only of ids it sent, a poll's tag digests its answer

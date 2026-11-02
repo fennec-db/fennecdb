@@ -523,6 +523,26 @@ and 1.17 to write out; `select` reads a row in one pass now (`one_pass`,
 100 such rows went 0.355 -> 0.254 ms for 353 bytes brotli; `make
 load-bench`'s pages read back 165.8k -> 212.0k rows a second.
 
+*Its frame is aligned to a cache line.* The columns' array is
+`align(128)`, a line on Apple's cores, so the compiler aligns
+`query_json`'s frame, and the slots of its callees lie on the same lines
+whatever the frames above it hold. F2's slice 4 grew `run_query`'s frame
+32 bytes, and a page of 20 as a `POST /query` over HTTP went +5% under
+the server's token, +3.7% `plain` and +5.5% `reach` (7 pairs), `fields`,
+answered through `query`, +0.2%: the same bytes in the same one `writev`,
+and over a client and its server 278 thousand instructions a request on
+both, all on the performance cores, but 78 thousand cycles against 73.
+`sample` put the time in `query_json`, 170 samples against main's 31, at
+the load of `codec::text_at`'s answer: its 16-byte store of the text's
+pointer and length lay across two lines, which a load right after cannot
+take from the store queue, and waited for it to reach the cache, once a
+text field. Padding `run_query` 32 bytes more gave main's cycles back;
+aligning the frame did too, and kept them with `run_query` padded 16 bytes:
+the prologue's mask and stack probe are a few instructions a read, and
+in-process counts through `handle` now stand for the HTTP path, whose
+stack above the handler differs. Natively alone (`query_json` is not built
+for wasm32).
+
 ## Connections without a thread
 
 **A connection no thread can be made for is answered 503, as one past the

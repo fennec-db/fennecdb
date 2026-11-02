@@ -7,7 +7,7 @@
 //! `Database::unbound` waking nothing.
 
 use fennec_core::codec::{encode_str, put_uvarint};
-use fennec_core::named::{GRAMMAR_EPOCH, MAX_WOKEN};
+use fennec_core::named::{Definition, GRAMMAR_EPOCH, MAX_WOKEN};
 use fennec_core::prelude::*;
 
 const SCHEMA: &str = "create collection orders (status text, total int, account int);
@@ -496,9 +496,14 @@ fn an_unbound_writer_and_a_replica_wake_nothing() {
 }
 
 /// A hook refusing a binding -- where a policy meets one -- refuses the
-/// write before the binding runs, its block put back.
+/// write before the binding runs, its block put back. A write whose rows
+/// reach a binding by its event and pass none of its condition asks it
+/// with no rows, so a policy may judge a writer whatever a condition
+/// reading what the writer is not shown answered; one reaching none is
+/// asked nothing.
 #[test]
 fn a_hook_refusing_a_wake_puts_the_write_back() {
+    static UNPASSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     struct NoWake;
     impl Hook for NoWake {
         fn name(&self) -> &str {
@@ -507,8 +512,13 @@ fn a_hook_refusing_a_wake_puts_the_write_back() {
         fn rewrites(&self) -> bool {
             false
         }
-        fn waking(&self, binding: &str, rows: usize) -> Result<()> {
-            Err(Error::Denied(format!("`{binding}` for {rows} rows")))
+        fn waking(&self, binding: &Definition, rows: usize) -> Result<()> {
+            if rows == 0 {
+                UNPASSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+            let (name, n) = (&binding.name, binding.body.len());
+            Err(Error::Denied(format!("`{name}` of {n} for {rows} rows")))
         }
     }
     impl Plugin for NoWake {
@@ -530,11 +540,83 @@ fn a_hook_refusing_a_wake_puts_the_write_back() {
     db.install_plugin(&NoWake).unwrap();
     let seq = db.change_seq();
     let e = run(&mut db, "put items [{n: 1}, {n: 0}, {n: 2}]").unwrap_err();
-    assert_eq!(e, Error::Denied("`mk` for 2 rows".into()));
+    assert_eq!(e, Error::Denied("`mk` of 1 for 2 rows".into()));
     assert_eq!(db.woken(), Some("mk"));
     assert_eq!(db.change_seq(), seq);
-    // A write waking none is asked nothing.
+    // A row reaching `mk` and passing no condition: asked with none.
+    let unpassed = || UNPASSED.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(unpassed(), 0);
     run(&mut db, "put items {n: 0}").unwrap();
+    assert_eq!(unpassed(), 1);
+    // A write of another event reaches no binding, and is asked nothing.
+    run(&mut db, "del items where n = 0").unwrap();
+    assert_eq!(unpassed(), 1);
+}
+
+/// A hook judging its writer (`Hook::writer_only`, a scoped token's rules)
+/// is passed over by a binding's writes -- its text's authority, never its
+/// writer's -- and meets the writer's own, before the runs and after
+/// them; every other hook meets both.
+#[test]
+fn a_hook_judging_its_writer_is_passed_over_by_a_binding_s_writes() {
+    struct Refuse {
+        writer_only: bool,
+    }
+    impl Hook for Refuse {
+        fn name(&self) -> &str {
+            match self.writer_only {
+                true => "writer",
+                false => "every",
+            }
+        }
+        fn rewrites(&self) -> bool {
+            false
+        }
+        fn writer_only(&self) -> bool {
+            self.writer_only
+        }
+        fn before_write(&self, schema: &Schema, _op: WriteOp, _doc: &mut Document) -> Result<()> {
+            match schema.name == "log" {
+                true => Err(Error::Denied(format!("{} refuses log", Hook::name(self)))),
+                false => Ok(()),
+            }
+        }
+    }
+    impl Plugin for Refuse {
+        fn name(&self) -> &str {
+            Hook::name(self)
+        }
+        fn init(&self, reg: &mut Registry) -> Result<()> {
+            let writer_only = self.writer_only;
+            reg.register_hook(std::sync::Arc::new(Refuse { writer_only }));
+            Ok(())
+        }
+    }
+    let mut db = database();
+    run(
+        &mut db,
+        "create statement mk after insert items where new.n > 0
+         as insert log {kind: 'mk', n: new.n}",
+    )
+    .unwrap();
+    db.install_plugin(&Refuse { writer_only: true }).unwrap();
+    // The writer's own write to `log` meets it.
+    let e = run(&mut db, "insert log {kind: 'own', n: 1}").unwrap_err();
+    assert_eq!(e, Error::Denied("writer refuses log".into()));
+    // The binding's does not.
+    run(&mut db, "put items [{n: 1}, {n: 2}]").unwrap();
+    assert_eq!(rows(&mut db, "get log where kind = 'mk'").len(), 2);
+    // And it is in place again after the runs.
+    let e = run(&mut db, "insert log {kind: 'own', n: 3}").unwrap_err();
+    assert_eq!(e, Error::Denied("writer refuses log".into()));
+    // A hook judging what is written meets the binding's writes: the
+    // write is put back whole.
+    db.install_plugin(&Refuse { writer_only: false }).unwrap();
+    let seq = db.change_seq();
+    let e = run(&mut db, "put items {n: 4}").unwrap_err();
+    assert_eq!(e, Error::Denied("every refuses log".into()));
+    assert_eq!(db.woken(), Some("mk"));
+    assert_eq!(db.change_seq(), seq);
 }
 
 /// What a collection no statement is bound to pays: no row asked, none

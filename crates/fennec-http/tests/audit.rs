@@ -185,6 +185,46 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
       set ledger {n: n + 1} where n >= 0; get ledger select n end"}"#;
     assert_eq!(call(port, Some(ROOT), "POST", "/query", defined), 200);
 
+    // A scoped token's write waking a statement bound to it that no `wake`
+    // line grants: 403, the token told no name, and the line naming it for
+    // the operator writing the grant. The token checked out: the refusal
+    // is of what it may cause, and grows no count.
+    let policy = "orders  read,update  for customer\n";
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
+    let scoped = serve(Server::new(
+        Arc::new(RwLock::new(Database::new())),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some(ROOT.into()),
+            access: Some(Arc::clone(&access)),
+            ..Config::default()
+        },
+    ));
+    for q in [
+        r#"{"query":"create collection orders (status text)"}"#,
+        r#"{"query":"create statement paid after set orders as insert orders_log {o: new.id}"}"#,
+    ] {
+        let created = r#"{"query":"create collection orders_log (o int)"}"#;
+        if q.contains("statement") {
+            assert_eq!(call(scoped, Some(ROOT), "POST", "/query", created), 200);
+        }
+        assert_eq!(call(scoped, Some(ROOT), "POST", "/query", q), 200);
+    }
+    let put = r#"{"query":"put orders {status: \"open\"}"}"#;
+    assert_eq!(call(scoped, Some(ROOT), "POST", "/query", put), 200);
+    let customer = access.mint(r#"{"sub":"c","role":"customer"}"#).unwrap();
+    let set = r#"{"query":"set orders {status: \"paid\"} where id = 1"}"#;
+    let (status, out) = ask(
+        scoped,
+        "POST",
+        "/query",
+        &format!("Authorization: Bearer {customer}\r\n"),
+        set,
+    );
+    assert_eq!(status, 403, "{out}");
+    assert!(!out.contains("paid`"), "{out}");
+    assert_eq!(would_wait(LOCAL), ms(50), "a 403 grows no count");
+
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let events: Vec<&str> = lines
@@ -196,9 +236,20 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         .collect();
     assert_eq!(
         events,
-        ["refused", "refused", "refused", "schema", "refused", "schema", "schema", "schema"],
+        [
+            "refused", "refused", "refused", "schema", "refused", "schema", "schema", "schema",
+            "schema", "schema", "schema", "unwoken"
+        ],
         "{text}"
     );
+    let unwoken = lines[11];
+    assert!(unwoken.contains(r#""binding":"paid""#), "{unwoken}");
+    assert!(
+        unwoken.contains(r#""reason":"no `wake` line grants it to the token""#),
+        "{unwoken}"
+    );
+    assert!(unwoken.contains(r#""http_status":403"#), "{unwoken}");
+    assert!(unwoken.contains(r#""path":"/query""#), "{unwoken}");
     for l in &lines {
         let doc = fennec_core::json::parse_object(l).unwrap();
         let field = |k: &str| doc.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());

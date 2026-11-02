@@ -6760,7 +6760,18 @@ impl Database {
         // when these were `Vec`s.
         const ID: usize = usize::MAX;
         const MOST: usize = 64;
-        let mut cols: [(&str, usize); MOST] = [("", ID); MOST];
+        // Aligned to a cache line (128 bytes on Apple's cores), which
+        // aligns this frame: its slots, and its callees', then lie on the
+        // same lines whatever the frames above it are. Unaligned, a frame
+        // above growing 32 bytes (`run_query`, F2's slice 4) left
+        // `codec::text_at`'s 16-byte store of its answer across two lines,
+        // which a load right after cannot take from the store queue: the
+        // same instructions took some 5 000 more cycles a page of 20 over
+        // HTTP, +6% (docs/design/http.md, *JSON from stored rows*).
+        #[repr(C, align(128))]
+        struct Cols<'a>([(&'a str, usize); MOST]);
+        let mut cols = Cols([("", ID); MOST]);
+        let cols = &mut cols.0;
         fn put<'a>(
             cols: &mut [(&'a str, usize)],
             width: &mut usize,
@@ -6778,9 +6789,9 @@ impl Database {
         let mut fits = true;
         match &sel.project {
             None => {
-                fits &= put(&mut cols, &mut width, ("id", ID));
+                fits &= put(cols, &mut width, ("id", ID));
                 for (p, f) in c.schema.fields.iter().enumerate() {
-                    fits &= put(&mut cols, &mut width, (&f.name, c.schema.place(p)));
+                    fits &= put(cols, &mut width, (&f.name, c.schema.place(p)));
                 }
             }
             Some(list) => {
@@ -6795,7 +6806,7 @@ impl Database {
                             (_, Some(_)) => return Ok(None),
                         },
                     };
-                    fits &= put(&mut cols, &mut width, (col, place));
+                    fits &= put(cols, &mut width, (col, place));
                 }
             }
         }

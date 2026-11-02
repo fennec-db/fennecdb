@@ -225,7 +225,8 @@ usage: fennec-server [options]
                             are kept, in seconds. default: 86400
       --call-max-rows <n>   the most rows a named statement's call examines;
                             past it the call is put back  default: 100000
-      --call-rate <n>       calls a second from one scoped token's subject
+      --call-rate <n>       calls a second from one scoped token's subject,
+                            and runs of the statements bound to its writes
                             (0 = no bound)  default: 100
       --http-max-streams <n>  ceiling on a database's concurrent subscriptions,
                             on a --dir node each tenant's (0 = unlimited)

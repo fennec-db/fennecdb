@@ -185,6 +185,7 @@
 //! token's value.
 
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
+use fennec_core::named::Definition;
 use fennec_core::prelude::*;
 use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
 use std::cell::RefCell;
@@ -231,11 +232,9 @@ pub struct Access {
     /// Whether a rule reads another collection: a token's rules are then
     /// bound for a `not` as well ([`hold`]).
     reaching: bool,
-    /// The collections no scoped token updates or deletes in (`append-only`
-    /// lines), `*` for every one.
-    append_only: Arc<[String]>,
-    /// The `call` lines: the named statements a role may call.
-    calls: Vec<CallLine>,
+    /// The `append-only`, `call` and `wake` lines, which every scope
+    /// shares ([`Lines`]).
+    lines: Arc<Lines>,
     /// Tokens already verified, by their text: a client sends the same one
     /// for as long as it lives, and an RS256 verification takes 38 us (166
     /// in 32-bit limbs), an ES256 one 145, an HS256 token's with its parses
@@ -532,6 +531,24 @@ struct CallLine {
     role: Option<String>,
 }
 
+/// The policy's lines a token's scope reads beside its rules, one `Arc`
+/// every scope shares: a line's role is asked of the token as its grant is
+/// ([`Scope::granted`]), never as a scope is made. A scope is made for
+/// every request, and collecting there the names a token's roles are
+/// granted -- a `Vec` and a `String` made and freed for one `wake` line --
+/// cost every write of a token a line granted 918 instructions, 2.7% of a
+/// scoped `set` (`docs/design/named-statements.md`, F2's slice 4).
+struct Lines {
+    /// The collections no scoped token updates or deletes in (`append-only`
+    /// lines), `*` for every one.
+    append_only: Vec<String>,
+    /// The `call` lines: the named statements a role may call.
+    calls: Vec<CallLine>,
+    /// The `wake` lines: the statements bound to writes a role's writes
+    /// may wake.
+    wakes: Vec<CallLine>,
+}
+
 /// A token's rules, its claims bound in.
 pub struct Scope {
     subject: Option<String>,
@@ -546,17 +563,22 @@ pub struct Scope {
     tenants: Option<Vec<String>>,
     /// A token naming no tenant reaches every one (`--jwt-unbound-tenants`).
     unbound: bool,
-    /// The policy's `append-only` collections, `*` for every one.
-    append_only: Arc<[String]>,
-    /// The named statements the token may call, by the policy's `call`
-    /// lines for its roles: none unless a line names one.
-    calls: Vec<String>,
+    /// The policy's `append-only` collections, and its `call` and `wake`
+    /// lines, a role's grant asked of `roles` as it is ([`Self::granted`]):
+    /// none unless a line names one.
+    lines: Arc<Lines>,
     /// Whether a read rule of the token names its fields (`read(a, b)`):
     /// a token none of whose do takes the path it took before them.
     fielded: bool,
+    /// What the runs of the statements bound to the request's writes are
+    /// charged to ([`crate::calls::Runs`]): nothing until the request is
+    /// known ([`Self::charge`]).
+    runs: crate::calls::Runs,
     /// The token's claims and the claim a rule's `for` reads, for
     /// `/_whoami` to say which roles the server took (the studio shows
-    /// them): read there alone, so a request pays two reference counts.
+    /// them) and a `call` or `wake` line's role to be asked of
+    /// ([`Self::granted`]): read there alone, so a request pays two
+    /// reference counts.
     roles: (Claims, Arc<str>),
 }
 
@@ -624,6 +646,7 @@ impl Access {
         let mut rules = Vec::new();
         let mut append_only = Vec::new();
         let mut calls = Vec::new();
+        let mut wakes = Vec::new();
         let mut lines = Vec::new();
         for (n, line) in policy.lines().enumerate() {
             let line = uncommented(line).trim();
@@ -633,6 +656,10 @@ impl Access {
             let at = |e: String| format!("policy line {}: {e}", n + 1);
             if let Some(c) = call_line(line, n + 1).map_err(at)? {
                 calls.push(c);
+                continue;
+            }
+            if let Some(w) = wake_line(line, n + 1).map_err(at)? {
+                wakes.push(w);
                 continue;
             }
             let mut words = line.split_whitespace();
@@ -670,8 +697,11 @@ impl Access {
             source,
             reaching: rules.iter().any(|r| !r.reads.is_empty()),
             rules,
-            append_only: append_only.into(),
-            calls,
+            lines: Arc::new(Lines {
+                append_only,
+                calls,
+                wakes,
+            }),
             verified: Default::default(),
             role_claim: Arc::from(Demands::default().role_claim.as_str()),
             demands: Demands::default(),
@@ -683,9 +713,14 @@ impl Access {
     /// tenant opens, and as a `drop` takes one away -- a typo grants
     /// nothing, silently, otherwise.
     pub fn call_grants(&self) -> impl Iterator<Item = (usize, &str)> {
-        self.calls
-            .iter()
-            .flat_map(|c| c.names.iter().map(move |n| (c.line, n.as_str())))
+        (self.lines.calls.iter()).flat_map(|c| c.names.iter().map(move |n| (c.line, n.as_str())))
+    }
+
+    /// Each statement a `wake` line names, with its line: logged where a
+    /// database holds none of that name or holds it callable, as
+    /// [`Self::call_grants`]' are.
+    pub fn wake_grants(&self) -> impl Iterator<Item = (usize, &str)> {
+        (self.lines.wakes.iter()).flat_map(|c| c.names.iter().map(move |n| (c.line, n.as_str())))
     }
 
     /// The same keys and policy, holding tokens to `demands`. A token kept
@@ -892,12 +927,6 @@ impl Access {
         let fielded = rules
             .iter()
             .any(|r| r.ops & READ != 0 && r.read_fields.is_some());
-        let calls = self
-            .calls
-            .iter()
-            .filter(|c| c.role.as_deref().is_none_or(has_role))
-            .flat_map(|c| c.names.iter().cloned())
-            .collect();
         Ok(Scope {
             // `""` is no one: taken for a subject, its Idempotency-Keys were
             // kept under the server token's own, whose answers it was then
@@ -911,9 +940,9 @@ impl Access {
             reaching,
             tenants,
             unbound: self.demands.unbound_tenants,
-            append_only: Arc::clone(&self.append_only),
-            calls,
+            lines: Arc::clone(&self.lines),
             fielded,
+            runs: Default::default(),
             roles: (Arc::clone(&claims), Arc::clone(&self.role_claim)),
         })
     }
@@ -1053,6 +1082,48 @@ impl Access {
 /// nothing -- and `* call` is refused: a statement defined later would be
 /// granted by a line no one reads again.
 fn call_line(line: &str, at: usize) -> std::result::Result<Option<CallLine>, String> {
+    grant_line(line, at, Grant::Call)
+}
+
+/// A `wake` line, `paid_ledger, count_likes wake [for customer]`, line `at`
+/// of the policy: the statements bound to writes that a role's writes may
+/// wake (`docs/design/named-statements.md`, *A binding's authority*), held
+/// as a `call` line is ([`call_line`]): alone on its line, no filter, and
+/// `* wake` refused, with or without a role, since a binding defined later
+/// would run on a token's behalf by a line no one reads again.
+fn wake_line(line: &str, at: usize) -> std::result::Result<Option<CallLine>, String> {
+    grant_line(line, at, Grant::Wake)
+}
+
+/// What a line naming statements grants of them.
+#[derive(Clone, Copy, PartialEq)]
+enum Grant {
+    Call,
+    Wake,
+}
+
+/// A `call` or `wake` line, read as [`call_line`] says.
+fn grant_line(line: &str, at: usize, word: Grant) -> std::result::Result<Option<CallLine>, String> {
+    let (name, alone, filter, every) = match word {
+        Grant::Call => (
+            "call",
+            "`call` stands alone on its line: a statement is called whole, never read or \
+             written beside it",
+            "`call` takes no filter: a statement's own `check` and `where`s say what it \
+             allows; write `<statement>, ... call [for <role>]`",
+            "`* call` grants no statement: one defined later would be granted by a line no \
+             one reads again; name each",
+        ),
+        Grant::Wake => (
+            "wake",
+            "`wake` stands alone on its line: it grants the writes a token may cause, never \
+             what it reads or writes itself",
+            "`wake` takes no filter: a bound statement's own `where` and guards say what it \
+             does; write `<statement>, ... wake [for <role>]`",
+            "`* wake` grants no statement: one bound later would run on a token's behalf by \
+             a line no one reads again; name each",
+        ),
+    };
     let mut names = Vec::new();
     let mut rest = line;
     loop {
@@ -1068,32 +1139,20 @@ fn call_line(line: &str, at: usize) -> std::result::Result<Option<CallLine>, Str
     }
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     let (grant, rest) = rest.split_at(end);
-    if grant != "call" {
-        if grant.split(',').any(|g| g.trim() == "call") {
-            return Err(
-                "`call` stands alone on its line: a statement is called whole, never \
-                        read or written beside it"
-                    .into(),
-            );
+    if grant != name {
+        if grant.split(',').any(|g| g.trim() == name) {
+            return Err(alone.into());
         }
         return Ok(None);
     }
     let (rest, role) = role_of(rest)?;
     if !rest.trim().is_empty() {
-        return Err(
-            "`call` takes no filter: a statement's own `check` and `where`s say what \
-                    it allows; write `<statement>, ... call [for <role>]`"
-                .into(),
-        );
+        return Err(filter.into());
     }
     let mut out = Vec::with_capacity(names.len());
     for n in names {
         if n == "*" {
-            return Err(
-                "`* call` grants no statement: one defined later would be granted by a \
-                        line no one reads again; name each"
-                    .into(),
-            );
+            return Err(every.into());
         }
         if !fennec_core::named::valid_name(n) {
             return Err(fennec_core::named::name_refused(n));
@@ -2267,6 +2326,19 @@ impl Scope {
         format!("{iss}\u{0}{}", self.subject.as_deref().unwrap_or(""))
     }
 
+    /// The request this scope was made for, its database and
+    /// `--call-rate`: what the runs of the statements bound to its writes
+    /// are charged to (`calls::charge_runs`).
+    pub(crate) fn charge(&mut self, runs: crate::calls::Runs) {
+        self.runs = runs;
+    }
+
+    /// What the runs of the statements bound to the request's writes are
+    /// charged to, and were charged so far.
+    pub(crate) fn runs(&self) -> &crate::calls::Runs {
+        &self.runs
+    }
+
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
@@ -2275,7 +2347,97 @@ impl Scope {
     /// Whether a `call` line grants the token's roles the statement `name`:
     /// the statements MCP lists for it as `call_<name>` tools.
     pub fn may_call(&self, name: &str) -> bool {
-        self.calls.iter().any(|c| c == name)
+        self.grants(&self.lines.calls, name)
+    }
+
+    /// Whether a `wake` line grants the token's roles waking the statement
+    /// bound to writes named `name`: what [`Check::waking`] asks of each
+    /// binding a write of the token's wakes, and [`judge_call`] of each a
+    /// call's body may.
+    pub fn may_wake(&self, name: &str) -> bool {
+        self.grants(&self.lines.wakes, name)
+    }
+
+    /// Whether `line` -- one of the policy's `call` or `wake` lines --
+    /// grants the token: a line with no role grants every token, one with
+    /// a role a token holding it in the claim the server reads roles from,
+    /// as a rule's `for` is asked ([`Access::scope`]). Asked as a grant
+    /// is, never as the scope is made ([`Lines`]).
+    fn granted(&self, line: &CallLine) -> bool {
+        let Some(role) = line.role.as_deref() else {
+            return true;
+        };
+        let (claims, claim) = &self.roles;
+        match (claims.iter().find(|(k, _)| k == claim.as_ref())).map(|(_, v)| v) {
+            Some(Value::Text(r)) => r == role,
+            Some(Value::List(l)) => l.iter().any(|v| v.as_text() == Some(role)),
+            _ => false,
+        }
+    }
+
+    /// Whether one of `lines` names `name` and grants the token
+    /// ([`Self::granted`]).
+    fn grants(&self, lines: &[CallLine], name: &str) -> bool {
+        (lines.iter()).any(|c| c.names.iter().any(|n| n == name) && self.granted(c))
+    }
+
+    /// The statements `lines` grant the token, in the policy's order, as a
+    /// JSON list: `/_whoami`'s `calls` and `wakes`.
+    fn granted_into(&self, out: &mut String, lines: &[CallLine]) {
+        out.push('[');
+        let mut first = true;
+        for name in lines
+            .iter()
+            .filter(|c| self.granted(c))
+            .flat_map(|c| &c.names)
+        {
+            if !std::mem::take(&mut first) {
+                out.push(',');
+            }
+            fennec_core::json::escape_into(out, name);
+        }
+        out.push(']');
+    }
+
+    /// The first collection `body` updates or deletes in that an
+    /// `append-only` line holds: what no scoped token does, through a
+    /// call, a statement bound to its writes or otherwise.
+    fn reshapes<'b>(&self, body: &'b [Statement]) -> Option<&'b str> {
+        body.iter().find_map(|st| {
+            let (Statement::Update { collection, .. } | Statement::Delete { collection, .. }) = st
+            else {
+                return None;
+            };
+            let held = (self.lines.append_only.iter()).any(|a| a == "*" || a == collection);
+            held.then_some(collection.as_str())
+        })
+    }
+
+    /// Whether the token's writes may wake the statement bound to writes
+    /// `name`, whose statements are `body`: a `wake` line grants it to the
+    /// token's roles, and its body updates or deletes in no `append-only`
+    /// collection, since `append-only` binds every scoped token. Refused
+    /// (403) naming no binding -- an ungranted statement is no name to a
+    /// token -- and the audit's line names it ([`crate::audit::unwoken`]),
+    /// for the operator writing the grant.
+    fn held_from(&self, name: &str, body: &[Statement]) -> Result<()> {
+        if !self.may_wake(name) {
+            crate::audit::unwoken(name, "no `wake` line grants it to the token");
+            return Err(denied(
+                "the write would wake a statement bound to it that no `wake` line grants this \
+                 token: nothing was written"
+                    .into(),
+            ));
+        }
+        if self.reshapes(body).is_some() {
+            crate::audit::unwoken(name, "it updates or deletes in an append-only collection");
+            return Err(denied(
+                "the write would wake a statement bound to it that updates or deletes in an \
+                 append-only collection, which no scoped token's write does: nothing was written"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// The token's claims, as a call it makes is bound with them: MCP holds
@@ -2354,9 +2516,11 @@ impl Scope {
         out.push_str(",\"unbound\":");
         out.push_str(if self.unbound { "true" } else { "false" });
         out.push_str(",\"append_only\":");
-        texts_into(out, Some(&self.append_only));
+        texts_into(out, Some(&self.lines.append_only));
         out.push_str(",\"calls\":");
-        texts_into(out, Some(&self.calls));
+        self.granted_into(out, &self.lines.calls);
+        out.push_str(",\"wakes\":");
+        self.granted_into(out, &self.lines.wakes);
         out.push_str(",\"rules\":[");
         for (i, r) in self.rules.iter().enumerate() {
             if i > 0 {
@@ -2395,7 +2559,7 @@ impl Scope {
 
     /// Whether `collection` is `append-only` in the policy.
     fn append_only(&self, collection: &str) -> bool {
-        self.append_only.iter().any(|a| a == "*" || a == collection)
+        (self.lines.append_only.iter()).any(|a| a == "*" || a == collection)
     }
 
     /// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows
@@ -2529,9 +2693,9 @@ impl Scope {
             rules,
             tenants: self.tenants.clone(),
             unbound: self.unbound,
-            append_only: Arc::clone(&self.append_only),
-            calls: self.calls.clone(),
+            lines: Arc::clone(&self.lines),
             fielded: self.fielded,
+            runs: self.runs.copied(),
             roles: (Arc::clone(&self.roles.0), Arc::clone(&self.roles.1)),
         })
     }
@@ -2904,7 +3068,7 @@ impl Scope {
             // the caller's field lists. A definition and a drop are schema
             // changes, refused below.
             Statement::Call(mut c) => {
-                if !self.calls.contains(&c.name) {
+                if !self.may_call(&c.name) {
                     return Err(Error::NotFound(format!("statement `{}`", c.name)));
                 }
                 if c.claims.is_some() {
@@ -3135,21 +3299,88 @@ impl RowAccess for Pair<'_> {
     }
 }
 
+/// The scope the write running on this thread is made under ([`CURRENT`]).
+struct Current {
+    scope: Arc<Scope>,
+    /// Whether the statement let a statement bound to its writes run
+    /// ([`Check::waking`]): an error it ends with after that is the
+    /// binding's -- its runs come after the statement's rows, hooks and
+    /// `require` -- told as [`told_bound`] tells it. Set by the hook, read
+    /// by [`within`] as it puts back what was installed before: in the
+    /// scope's slot, so a write that wakes nothing touches no other
+    /// thread-local than it did before bindings (a `Cell` of its own beside
+    /// it was two more thread-local lookups a scoped write).
+    woke: bool,
+}
+
 thread_local! {
     /// The scope the write running on this thread is made under. A
     /// thread-local, not a parameter: the check runs as a write hook, deep
     /// in the engine's write path, which knows nothing of tokens.
-    static CURRENT: RefCell<Option<Arc<Scope>>> = const { RefCell::new(None) };
+    static CURRENT: RefCell<Option<Current>> = const { RefCell::new(None) };
+    /// The scoped token whose call's body runs on this thread, with no
+    /// scope installed ([`run_as`]), last: the caller the runs of the
+    /// statements bound to the body's writes are charged to
+    /// (`calls::charge_runs`). Noted for a call alone, never for every
+    /// request ([`Calling`]).
+    static CALLING: RefCell<Vec<Arc<Scope>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The scoped token a statement bound to the write running on this thread
+/// charges its runs to (`calls::charge_runs`): the writer's ([`CURRENT`])
+/// or a call's caller ([`CALLING`]).
+fn charged_to() -> Option<Arc<Scope>> {
+    (CURRENT.with(|c| c.borrow().as_ref().map(|c| Arc::clone(&c.scope))))
+        .or_else(|| CALLING.with(|c| c.borrow().last().cloned()))
 }
 
 /// Runs `f` -- a statement executing under the write lock -- as `who`: the
 /// documents it writes are checked against the token's rules, and what a
-/// refusal tells is what the token may know ([`told`]).
+/// refusal tells is what the token may know ([`told`], and [`told_bound`]
+/// for a statement bound to its writes that refused it).
 pub fn within<T>(who: &Who, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let Who::Scoped(scope) = who else {
         return f();
     };
-    with_scope(scope, f).map_err(told)
+    let (r, woke) = with_scope(scope, f);
+    r.map_err(|e| match woke {
+        true => told_bound(e),
+        false => told(e),
+    })
+}
+
+/// A refusal a statement bound to a scoped token's write ended the write
+/// with, as the token is told it (`docs/design/named-statements.md`, *When
+/// a binding refuses*): its status, and the `reason` its guard's `else`
+/// wrote -- the definer's words, written to be told -- in "a write bound to
+/// this one refused it", never the binding's name or the engine's words,
+/// which say what the schema does and name values the token may not read.
+/// The server's trace keeps them. Every kind a binding's statements or the
+/// hooks they meet may answer is told so -- a `ReadOnly` too, which
+/// fennec-server's guard of a mirrored collection answers naming the
+/// collection a binding writes, and a lapsed lease's, which the route
+/// answers 503 whatever its words (`answered_under_lease`). A quota's and
+/// the disk's refusals are the block's as it lands, told as ever, the
+/// quota's naming its bound alone. Matched whole: a kind added is told one
+/// way or the other on purpose.
+fn told_bound(e: Error) -> Error {
+    const TOLD: &str = "a write bound to this one refused it: nothing was written";
+    match e {
+        Error::Unmet(_) => Error::Unmet(match e.reason() {
+            Some(r) => format!("{r} (`this write` was put back: a write bound to it refused it)"),
+            None => TOLD.into(),
+        }),
+        Error::Duplicate(_) => Error::Duplicate(TOLD.into()),
+        Error::Query(_) => Error::Query(TOLD.into()),
+        Error::Type(_) => Error::Type(TOLD.into()),
+        Error::NotFound(_) => Error::NotFound(TOLD.into()),
+        Error::Exists(_) => Error::Exists(TOLD.into()),
+        Error::Denied(_) => Error::Denied(TOLD.into()),
+        Error::Plugin(_) => Error::Plugin(TOLD.into()),
+        Error::ReadOnly(_) => Error::ReadOnly(TOLD.into()),
+        Error::Corrupt(_) => Error::Corrupt(TOLD.into()),
+        e @ (Error::Quota(_) | Error::Io(_)) => e,
+    }
 }
 
 /// A refusal as a scoped token is told it. A `@unique` clash names the
@@ -3178,7 +3409,10 @@ fn told(e: Error) -> Error {
 /// are told as [`told_call`] tells them.
 pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> Result<T> {
     match (who, stmt) {
-        (Who::Scoped(_), Statement::Call(c)) => f().map_err(|e| told_call(&c.name, e)),
+        (Who::Scoped(scope), Statement::Call(c)) => {
+            let _caller = Calling::note(scope);
+            f().map_err(|e| told_call(&c.name, e))
+        }
         _ => within(who, f),
     }
 }
@@ -3189,9 +3423,10 @@ pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> 
 /// broken (409) -- [`Database::callee`] -- and then the policy's
 /// `append-only` collections, which no scoped token updates or deletes in,
 /// a call's body included (403), and the statements bound to the writes it
-/// makes, which no scoped token wakes yet (403, [`unwoken`]). Nothing for
-/// any other statement or token: the server's token's calls are judged as
-/// they run.
+/// makes, which the token wakes only where a `wake` line grants each and
+/// none updates or deletes in an `append-only` one (403, [`wakes_held`]).
+/// Nothing for any other statement or token: the server's token's calls
+/// are judged as they run.
 pub fn judge_call(who: &Who, db: &Database, stmt: &Statement, params: &[Value]) -> Result<()> {
     match (who, stmt) {
         (Who::Scoped(_), Statement::Call(c)) => judged(who, db, c, params).map(drop),
@@ -3211,6 +3446,17 @@ pub fn judged(
     let Who::Scoped(scope) = who else {
         return db.callee(c, params);
     };
+    // A statement bound to writes is called by none: to a scoped token it
+    // is the 404 a missing one is, as an ungranted one is, so a `call`
+    // line naming it (logged as the server starts, `calls::log_unheld`)
+    // tells the token nothing the engine's words would -- what it binds.
+    if db
+        .statements()
+        .get(&c.name)
+        .is_some_and(|s| s.after.is_some())
+    {
+        return Err(Error::NotFound(format!("statement `{}`", c.name)));
+    }
     let callee = db.callee(c, params).map_err(|e| match e {
         // Why it is broken names what the schema lacks: the server's.
         Error::Exists(_) => Error::Exists(format!(
@@ -3219,50 +3465,54 @@ pub fn judged(
         )),
         e => e,
     })?;
-    for st in &callee.def.body {
-        let (Statement::Update { collection, .. } | Statement::Delete { collection, .. }) = st
-        else {
-            continue;
-        };
-        if scope
-            .append_only
-            .iter()
-            .any(|a| a == "*" || a == collection)
-        {
-            return Err(denied(format!(
-                "statement `{}` updates or deletes in `{collection}`, which is append-only: no \
-                 scoped token does, through a call or otherwise",
-                c.name
-            )));
-        }
+    if let Some(collection) = scope.reshapes(&callee.def.body) {
+        return Err(denied(format!(
+            "statement `{}` updates or deletes in `{collection}`, which is append-only: no \
+             scoped token does, through a call or otherwise",
+            c.name
+        )));
     }
-    unwoken(db, &callee.def)?;
+    wakes_held(scope, db, &callee.def)?;
     Ok(callee)
 }
 
 /// A scoped token's call whose body may wake a statement bound to the
-/// writes it makes, refused (403) before the body runs: its body runs
-/// outside [`within`], where the `Check` hook finds no scope to refuse a
-/// binding by, so the call is judged by what its text writes -- each
-/// collection and kind of write, against the events bound to it. No
-/// scoped token wakes a binding until a policy's lines grant it by name
-/// (`docs/design/named-statements.md`, *A binding's authority*): fail
-/// closed, never a binding run on a token's behalf with no grant. The
-/// binding is named to no token, as an ungranted statement is no name.
-fn unwoken(db: &Database, def: &fennec_core::named::Definition) -> Result<()> {
+/// writes it makes, held before the body runs: its body runs outside
+/// [`within`], where the `Check` hook finds no scope to judge a binding by,
+/// so the call is judged by what its text writes -- each collection and
+/// kind of write, against the bindings of that collection and event -- as a
+/// write of the token's is as it wakes one ([`Check::waking`]): each must
+/// be granted by a `wake` line, and none may update or delete in an
+/// `append-only` collection (403). A call's writes are fixed by its text,
+/// so what they may wake is known before they run, where a write's rows
+/// are not. The binding is named to no token, as an ungranted statement is
+/// no name, and to the audit's line (`audit::unwoken`) for the operator.
+fn wakes_held(scope: &Scope, db: &Database, def: &fennec_core::named::Definition) -> Result<()> {
     let t = db.statements();
-    match def
-        .written()
-        .into_iter()
-        .find(|(c, kind)| t.events_of(c) & kind != 0)
-    {
-        Some((c, _)) => Err(denied(format!(
-            "statement `{}` writes `{c}`, whose writes wake a statement bound to them, which no \
-             scoped token's write wakes: nothing was written",
-            def.name
-        ))),
-        None => Ok(()),
+    for (c, kind) in def.written() {
+        if t.events_of(c) & kind == 0 {
+            continue;
+        }
+        for b in t.bound_to(c) {
+            if b.after
+                .as_ref()
+                .is_none_or(|(_, events)| events & kind == 0)
+            {
+                continue;
+            }
+            // A binding read from no tree here is broken or unread, and
+            // refuses the write itself (409) as it wakes.
+            let body = b.tree.as_ref().map_or(&[][..], |d| &d.body[..]);
+            if scope.held_from(&b.name, body).is_err() {
+                return Err(denied(format!(
+                    "statement `{}` writes `{c}`, whose writes wake a statement bound to them \
+                     that this token's writes may not: nothing was written",
+                    def.name
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
 /// A call's refusal as a scoped token is told it: its kind, and a guard's
@@ -3280,6 +3530,8 @@ fn told_call(name: &str, e: Error) -> Error {
         }),
         Error::Duplicate(_) => Error::Duplicate(ran("met a unique value taken")),
         Error::Query(m) if m.starts_with("a call examines at most") => Error::Query(m),
+        // Its runs' charge to `--call-rate`, the caller's own to know.
+        Error::Query(m) if m.starts_with(crate::calls::TOO_MANY_RUNS) => Error::Query(m),
         Error::Query(_) | Error::Type(_) | Error::NotFound(_) | Error::Exists(_) => {
             Error::Query(ran("could not run"))
         }
@@ -3288,17 +3540,54 @@ fn told_call(name: &str, e: Error) -> Error {
     }
 }
 
-fn with_scope<T>(scope: &Arc<Scope>, f: impl FnOnce() -> T) -> T {
-    let before = CURRENT.with(|c| c.replace(Some(Arc::clone(scope))));
-    struct Restore(Option<Arc<Scope>>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let prev = self.0.take();
-            CURRENT.with(|c| *c.borrow_mut() = prev);
+/// `f` run with `scope` installed for the `Check` hook ([`CURRENT`]), and
+/// whether a statement bound to its writes ran ([`Current::woke`]).
+fn with_scope<T>(scope: &Arc<Scope>, f: impl FnOnce() -> T) -> (T, bool) {
+    /// What was installed before, put back as `f` ends, a panic included.
+    struct Restore(Option<Option<Current>>);
+    impl Restore {
+        /// What `f` left installed, once what was before is put back.
+        fn put_back(&mut self) -> Option<Current> {
+            let before = self.0.take()?;
+            CURRENT.with(|c| c.replace(before))
         }
     }
-    let _restore = Restore(before);
-    f()
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            self.put_back();
+        }
+    }
+    let current = Current {
+        scope: Arc::clone(scope),
+        woke: false,
+    };
+    let mut restore = Restore(Some(CURRENT.with(|c| c.replace(Some(current)))));
+    let out = f();
+    let woke = restore.put_back().is_some_and(|c| c.woke);
+    (out, woke)
+}
+
+/// A scoped token's call's caller, noted for the runs its body's writes
+/// wake ([`CALLING`]) while the body runs with no scope installed, and let
+/// go as the body ends, a panic included. Out of line and holding nothing:
+/// [`run_as`] is inlined into every path that runs a statement, and a note
+/// inlined there, or a guard holding what it put back, was 2 to 3 KB of
+/// `fennec-server`.
+struct Calling;
+
+impl Calling {
+    #[inline(never)]
+    fn note(scope: &Arc<Scope>) -> Calling {
+        CALLING.with(|c| c.borrow_mut().push(Arc::clone(scope)));
+        Calling
+    }
+}
+
+impl Drop for Calling {
+    #[inline(never)]
+    fn drop(&mut self) {
+        CALLING.with(|c| c.borrow_mut().pop());
+    }
 }
 
 /// The `WITH CHECK` half: every document a scoped write puts or rewrites has
@@ -3317,7 +3606,8 @@ impl Hook for Check {
         false
     }
     fn before_write(&self, schema: &Schema, op: WriteOp, doc: &mut Document) -> Result<()> {
-        let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
+        let Some(scope) = CURRENT.with(|c| c.borrow().as_ref().map(|c| Arc::clone(&c.scope)))
+        else {
             return Ok(());
         };
         let op = match op {
@@ -3340,7 +3630,8 @@ impl Hook for Check {
         )))
     }
     fn before_overwrite(&self, schema: &Schema, old: &Document, doc: &Document) -> Result<()> {
-        let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
+        let Some(scope) = CURRENT.with(|c| c.borrow().as_ref().map(|c| Arc::clone(&c.scope)))
+        else {
             return Ok(());
         };
         // The row written over is one the token may update: a `set` found
@@ -3355,24 +3646,55 @@ impl Hook for Check {
         }
         scope.overwrites(schema, old, doc, &self.registry)
     }
-    /// A scoped token's write waking a statement bound to it, refused
-    /// (403) before the binding runs, its block put back: no scoped token
-    /// wakes one until a policy's lines grant it by name, so none runs on
-    /// a token's behalf with no grant -- fail closed, never a binding run
-    /// as its writer. Asked as a binding wakes, a row passing its
-    /// condition: a write waking none needs nothing. The token is told no
-    /// name; the engine notes it (`Database::woken`), which no line writes
-    /// yet: the audit's refusal line naming it for the operator is F2's
-    /// slice 5 (`docs/design/named-statements.md`).
-    fn waking(&self, _binding: &str, _rows: usize) -> Result<()> {
-        if CURRENT.with(|c| c.borrow().is_none()) {
-            return Ok(());
+    /// It judges whoever writes: a binding's writes, its text's authority,
+    /// pass over it once [`Self::waking`] let the binding run.
+    fn writer_only(&self) -> bool {
+        true
+    }
+    /// A scoped token's write waking a statement bound to it, judged
+    /// before the binding runs (`docs/design/named-statements.md`, *A
+    /// binding's authority*): one no `wake` line grants the token's roles,
+    /// or whose body updates or deletes in an `append-only` collection, is
+    /// refused (403), its block put back -- a binding never skips, and
+    /// never runs on a token's behalf with no grant. Asked as a binding
+    /// wakes, a row passing its condition: a write waking none needs
+    /// nothing -- but where the condition reads a field the token is not
+    /// shown ([`Scope::reads_unshown`]), of every write a row of which
+    /// reached the binding, passing or not (`rows` 0), so that a 403
+    /// against a 200 tells the token nothing of a value it may not read.
+    /// The token is told no name; the audit's line names it
+    /// ([`Scope::held_from`]). Then the runs are charged to the caller's
+    /// `--call-rate` ([`crate::calls::charge_runs`]) -- a scoped call's
+    /// body's too, which runs with no scope installed and was judged
+    /// before it ran ([`judge_call`]) -- and the statement's error after
+    /// this is the binding's, told as [`told_bound`] tells it.
+    fn waking(&self, binding: &Definition, rows: usize) -> Result<()> {
+        let held = |scope: &Scope| match (rows, binding.after.as_deref()) {
+            (0, Some(b)) => {
+                (b.condition.as_ref()).is_some_and(|c| scope.reads_unshown(&b.collection, c))
+            }
+            _ => true,
+        };
+        let scoped = CURRENT.with(|c| match c.borrow().as_ref() {
+            Some(c) if held(&c.scope) => c
+                .scope
+                .held_from(&binding.name, &binding.body)
+                .map(|_| true),
+            _ => Ok(false),
+        });
+        if rows == 0 {
+            return scoped.map(drop);
         }
-        Err(denied(
-            "the write would wake a statement bound to it, which no scoped token's write \
-             wakes: nothing was written"
-                .to_string(),
-        ))
+        // No binding runs where one is refused, those let through before
+        // it included: the refusal is the policy's, told as it is.
+        let r = scoped
+            .and_then(|s| crate::calls::charge_runs(charged_to().as_deref(), rows).map(|_| s));
+        CURRENT.with(|c| {
+            if let Some(c) = c.borrow_mut().as_mut() {
+                c.woke = matches!(r, Ok(true)) || (r.is_ok() && c.woke);
+            }
+        });
+        r.map(drop)
     }
     fn answering(&self, schema: &Schema, op: WriteOp, doc: &Document) -> Result<()> {
         // A delete's rows were picked through the read rules as they stood
@@ -3382,7 +3704,8 @@ impl Hook for Check {
         if op == WriteOp::Delete {
             return Ok(());
         }
-        let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
+        let Some(scope) = CURRENT.with(|c| c.borrow().as_ref().map(|c| Arc::clone(&c.scope)))
+        else {
             return Ok(());
         };
         if scope.admits(schema, READ, doc, &self.registry)? {
@@ -3496,6 +3819,29 @@ mod tests {
         Access::new(SECRET, policy).unwrap()
     }
 
+    /// A binding's refusal tells a scoped writer its status and nothing it
+    /// names: fennec-server's guard of a mirrored collection answers
+    /// `ReadOnly` naming the collection the binding writes, which went
+    /// through as it was. A quota's names its bound alone, told as ever.
+    #[test]
+    fn a_binding_s_refusal_names_nothing_to_a_scoped_writer() {
+        let mirrored = "`payroll` mirrors a PostgreSQL table: its writes come from there";
+        for e in [
+            Error::ReadOnly(mirrored.into()),
+            Error::Corrupt(format!("{mirrored}, torn")),
+            Error::Plugin(mirrored.into()),
+        ] {
+            let told = told_bound(e.clone());
+            assert_eq!(std::mem::discriminant(&told), std::mem::discriminant(&e));
+            assert!(!told.to_string().contains("payroll"), "{told}");
+            assert!(told
+                .to_string()
+                .contains("a write bound to this one refused it"));
+        }
+        let quota = Error::Quota("the tenant holds 1000 rows at most".into());
+        assert_eq!(told_bound(quota.clone()), quota);
+    }
+
     /// A `call` line grants statements by name, to its role or to every
     /// token; `* call`, `call` beside another grant or a filter, and a name
     /// no statement may have are refused at startup.
@@ -3518,15 +3864,77 @@ mod tests {
         let a = access("transfer, refund  call  for teller\nboard call\nnotes read\n");
         let calls = |claims: &str| {
             let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
-            s.calls.clone()
+            let mut out = String::new();
+            s.granted_into(&mut out, &s.lines.calls);
+            out
         };
         assert_eq!(
             calls(r#"{"sub":"t","role":"teller"}"#),
-            ["transfer", "refund", "board"]
+            r#"["transfer","refund","board"]"#
         );
-        assert_eq!(calls(r#"{"sub":"c"}"#), ["board"]);
+        assert_eq!(calls(r#"{"sub":"c"}"#), r#"["board"]"#);
+        let s = a
+            .scope(&a.mint(r#"{"sub":"t","role":"teller"}"#).unwrap(), 0)
+            .unwrap();
+        assert!(s.may_call("refund") && s.may_call("board") && !s.may_call("notes"));
+        let s = a
+            .scope(
+                &a.mint(r#"{"sub":"c","role":["clerk","teller"]}"#).unwrap(),
+                0,
+            )
+            .unwrap();
+        assert!(s.may_call("transfer"));
         let lines: Vec<_> = a.call_grants().collect();
         assert_eq!(lines, [(1, "transfer"), (1, "refund"), (2, "board")]);
+    }
+
+    /// A `wake` line grants waking the statements it names, to its role or
+    /// every token, and is held as a `call` line is: alone on its line, no
+    /// filter, never `*`, with or without a role.
+    #[test]
+    fn a_wake_line_grants_bindings_by_name_alone() {
+        for (bad, says) in [
+            ("* wake", "`* wake` grants no statement"),
+            ("* wake for customer", "`* wake` grants no statement"),
+            ("paid, * wake", "`* wake` grants no statement"),
+            ("paid read,wake", "`wake` stands alone"),
+            ("paid wake,call", "stands alone"),
+            ("paid call,wake", "`call` stands alone"),
+            ("paid wake where $jwt.sub = 'a'", "`wake` takes no filter"),
+            ("pa-id wake", ""),
+        ] {
+            let e = Access::new(SECRET, bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad}"));
+            assert!(
+                e.starts_with("policy line 1") && e.contains(says),
+                "{bad}: {e}"
+            );
+        }
+        let a = access("paid, voided  wake  for customer\ncounted wake\npay call\n");
+        let scope = |claims: &str| a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+        let listed = |s: &Scope, lines: &[CallLine]| {
+            let mut out = String::new();
+            s.granted_into(&mut out, lines);
+            out
+        };
+        let s = scope(r#"{"sub":"c","role":"customer"}"#);
+        assert_eq!(listed(&s, &s.lines.wakes), r#"["paid","voided","counted"]"#);
+        assert!(s.may_wake("paid") && !s.may_wake("pay"));
+        // A `wake` grants no call, and a `call` no wake.
+        assert_eq!(listed(&s, &s.lines.calls), r#"["pay"]"#);
+        assert!(s.may_call("pay") && !s.may_call("paid"));
+        let d = scope(r#"{"sub":"d"}"#);
+        assert_eq!(listed(&d, &d.lines.wakes), r#"["counted"]"#);
+        assert!(d.may_wake("counted") && !d.may_wake("paid"));
+        let lines: Vec<_> = a.wake_grants().collect();
+        assert_eq!(lines, [(1, "paid"), (1, "voided"), (2, "counted")]);
+        let mut out = String::new();
+        s.summary_into(&mut out);
+        assert!(
+            out.contains(r#""wakes":["paid","voided","counted"]"#),
+            "{out}"
+        );
     }
 
     /// The token from RFC 7515's era of examples that jwt.io shows, with

@@ -53,6 +53,12 @@ pub(super) struct Woken {
     /// Each row passing a condition, in the order the statement wrote
     /// them.
     pub(super) rows: Vec<Woke>,
+    /// The bindings a row reached by its event, a bit each by place,
+    /// whether it passed the condition or not: those none passed are
+    /// asked of the hooks all the same (`Hook::waking`, its rows 0), so a
+    /// policy judges a writer the same whatever a condition reading a
+    /// field the writer is not shown answered.
+    reached: u32,
     /// `now()`, read as the first row is asked a condition: the one time
     /// every condition and every run of the write reads.
     now: Option<i64>,
@@ -133,6 +139,7 @@ impl Woken {
             if b.events & event == 0 {
                 continue;
             }
+            self.reached |= 1 << i;
             let pass = match &b.condition {
                 None => true,
                 Some(c) => {
@@ -271,6 +278,7 @@ impl Database {
         w.bound = bound;
         w.schema = Some(schema);
         w.rows.clear();
+        w.reached = 0;
         w.now = None;
         self.bound_due = true;
         Ok(true)
@@ -323,7 +331,7 @@ impl Database {
         // allocation.
         self.bound_due = false;
         let w = std::mem::take(&mut *self.woken);
-        if w.rows.is_empty() || out.is_err() {
+        if w.reached == 0 || out.is_err() {
             return;
         }
         if let Err(e) = self.wake(w) {
@@ -340,7 +348,8 @@ impl Database {
 
     /// The bindings `w`'s rows woke, run: each hook asked first whether
     /// the writer may wake each (`Hook::waking`, where a policy meets a
-    /// binding), then the rows in the order written and, on each, the
+    /// binding) -- each a row reached, its condition passed or not -- then
+    /// the rows in the order written and, on each, the
     /// bindings it passed in name order, every body's statements through
     /// `run_one` with the row's values by place. The runs read the
     /// waking statement's `now()`, wake nothing themselves (depth one)
@@ -349,26 +358,36 @@ impl Database {
     /// call's body. Each given back as the runs end, on a panic too.
     fn wake(&mut self, w: Woken) -> Result<()> {
         for (i, def) in w.bound.iter().enumerate() {
-            let rows = w.rows.iter().filter(|r| r.passed & (1 << i) != 0).count();
-            if rows == 0 {
+            if w.reached & (1 << i) == 0 {
                 continue;
             }
+            let rows = w.rows.iter().filter(|r| r.passed & (1 << i) != 0).count();
             for h in self.registry.hooks() {
-                if let Err(e) = h.waking(&def.name, rows) {
+                if let Err(e) = h.waking(def, rows) {
                     self.refused(&def.name);
                     return Err(e);
                 }
             }
         }
+        if w.rows.is_empty() {
+            return Ok(());
+        }
         let now = w.now.or(self.clock);
         let clock = std::mem::replace(&mut self.clock, now);
         let unbound = std::mem::replace(&mut self.unbound, true);
+        // The body's writes are its text's, never its writer's: a hook
+        // judging the writer (`Hook::writer_only`, a scoped token's rules)
+        // is passed over, the writer judged already by its own statement
+        // and by `waking` above. Swapped back with the clock, a panic
+        // included, so no write after the runs misses it.
+        self.registry.swap_beside();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match *self.calls.get_mut() {
                 0 => self.bounded(|db| db.runs(&w)),
                 _ => self.runs(&w),
             }
         }));
+        self.registry.swap_beside();
         self.clock = clock;
         self.unbound = unbound;
         r.unwrap_or_else(|p| std::panic::resume_unwind(p))
@@ -409,6 +428,7 @@ impl Database {
     pub(super) fn settle_woken(&mut self) {
         if self.bound_due {
             self.woken.rows.clear();
+            self.woken.reached = 0;
             self.bound_due = false;
             self.woken.refused_by = None;
         }

@@ -113,6 +113,11 @@ thread_local! {
     // -- an issuer, an audience, an expiry -- and never a value of the
     // token, every reason being a text of the server's own.
     static REASON: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    // The statement bound to writes that the request this thread serves
+    // was refused for waking, and why ([`unwoken`]): its `unwoken` line
+    // names it for the operator writing the grant, where the token is told
+    // no name.
+    static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
 }
 
 /// The reason the request this thread serves is refused its token, for its
@@ -121,6 +126,20 @@ thread_local! {
 /// begins, so a line never names a reason of the request before.
 pub fn refusal(why: &'static str) {
     REASON.with(|r| r.set(Some(why)));
+}
+
+/// A scoped token's write or call refused (403) for waking the statement
+/// bound to writes `binding`, `why` the policy's reason
+/// (`docs/design/named-statements.md`, *A binding's authority*): held for
+/// the request's `unwoken` line, which [`http`] writes once the answer is,
+/// outside the write lock it was refused under, and let go by [`request`]
+/// as the next request begins. A token that checked out was refused what
+/// it may cause, not its token: the line waits nothing and clears nothing
+/// (`verified` was asked where the token was). Held only with `--audit`.
+pub fn unwoken(binding: &str, why: &'static str) {
+    if LOG.get().is_some() {
+        UNWOKEN.with(|u| *u.borrow_mut() = Some((binding.to_string(), why)));
+    }
 }
 
 /// The header a node's answer to a forwarded request carries when a token
@@ -177,6 +196,7 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     // connection to many clients -- verified nothing of this one's.
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
+    UNWOKEN.with(|u| u.borrow_mut().take());
     client
 }
 
@@ -345,7 +365,7 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         return;
     };
     let level = match name {
-        "refused" | "quota" => Level::Warn,
+        "refused" | "quota" | "unwoken" => Level::Warn,
         _ => Level::Info,
     };
     let line = line(name, level, fields);
@@ -521,6 +541,20 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
             std::thread::sleep(failed(named().or(ip)));
         }
         return;
+    }
+    // MCP answers a tool's refusal inside a 200, so the line is written
+    // whatever the status, beside it.
+    if let Some((binding, why)) = UNWOKEN.with(|u| u.borrow_mut().take()) {
+        event(
+            "unwoken",
+            &[
+                ("method", Field::Text(req.method.name())),
+                ("path", Field::Text(path)),
+                ("binding", Field::Text(&binding)),
+                ("reason", Field::Text(why)),
+                ("http_status", Field::Int(status as u64)),
+            ],
+        );
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
     // A tenant's read for a router's query across tenants changes nothing,

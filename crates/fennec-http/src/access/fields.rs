@@ -722,6 +722,36 @@ enum Col {
 }
 
 impl Scope {
+    /// Whether `condition` -- a statement bound to `collection`'s writes,
+    /// reading `new.<field>` and `old.<field>` -- reads a field this token
+    /// is not shown on every row: one a read rule over the collection
+    /// leaves out of its list, or any but `id` where no read rule reaches
+    /// it. `Check::waking` then judges the token's write whether a row
+    /// passed the condition or not: judged where one passed alone, its
+    /// 403 against a 200 told the token the field's value
+    /// (`docs/design/named-statements.md`, *A binding's authority*).
+    pub(super) fn reads_unshown(&self, collection: &str, condition: &Expr) -> bool {
+        fn walk(e: &Expr, unshown: &mut dyn FnMut(&str) -> bool) -> bool {
+            if let Expr::Field(name) = e {
+                let f = (name.strip_prefix(super::NEW))
+                    .or_else(|| name.strip_prefix("old."))
+                    .unwrap_or(name);
+                return unshown(base(f));
+            }
+            let mut any = false;
+            e.each_child(&mut |c| any = any || walk(c, unshown));
+            any
+        }
+        let readers: Vec<&Bound> = (self.rules.iter())
+            .filter(|r| {
+                r.ops & READ != 0 && r.collection.as_deref().is_none_or(|c| c == collection)
+            })
+            .collect();
+        walk(condition, &mut |f| {
+            f != "id" && (readers.is_empty() || !readers.iter().all(|r| View::grants(r, f)))
+        })
+    }
+
     /// `resp` as this token is shown it: [`Self::shown_rows`] of its rows.
     pub fn shown(&self, mask: &Mask, db: &Database, resp: &mut Response) {
         if let Response::Rows(rs) = resp {
