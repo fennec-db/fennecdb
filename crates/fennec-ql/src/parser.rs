@@ -303,6 +303,10 @@ struct Names {
     /// read the row a write wrote, and no `$` names anything.
     #[cfg(feature = "statements")]
     bound: Option<Bound>,
+    /// A scheduled statement's body: where `slot()` reads the instant of
+    /// its slot, and no `$`, `new.` or `old.` names anything.
+    #[cfg(feature = "statements")]
+    scheduled: bool,
 }
 
 /// What a bound statement's `new.<field>` and `old.<field>` are read by.
@@ -716,6 +720,17 @@ fn row_field(name: &str) -> Option<(bool, &str)> {
     } else {
         None
     }
+}
+
+/// What `new.<field>` or `old.<field>` in a scheduled statement is refused
+/// with: no write runs it, so no row is new or old.
+#[cfg(feature = "statements")]
+#[cold]
+fn scheduled_row(name: &str) -> String {
+    format!(
+        "`{name}`: a scheduled statement runs on no write, so no row is new or old -- it reads \
+         the data, `now()` and `slot()`"
+    )
 }
 
 /// Why a call's argument is no value, if it is not: it reads no row, so it
@@ -3740,6 +3755,9 @@ impl Parser {
         if self.def.as_deref().is_some_and(|d| d.bound.is_some()) {
             return self.error(&BOUND_VALUES);
         }
+        if self.def.as_deref().is_some_and(|d| d.scheduled) {
+            return self.error(&fennec_core::named::SCHEDULED_VALUES);
+        }
         self.error(&format!(
             "`${}`: the statement declares {declared} parameters, read by name or by place, and \
              its claims by name, `$jwt.<claim>`",
@@ -3802,6 +3820,9 @@ impl Parser {
         if d.bound.is_some() {
             return self.err(BOUND_VALUES);
         }
+        if d.scheduled {
+            return self.err(fennec_core::named::SCHEDULED_VALUES);
+        }
         if n == "jwt" {
             return self
                 .err("`$jwt` is the caller's token: a body reads a claim it declares, `$jwt.sub`");
@@ -3849,6 +3870,9 @@ impl Parser {
         let name = self.statement_name()?;
         if self.peek_kw("after") {
             return self.bound_statement(replace, name, at);
+        }
+        if self.peek_among(&["every", "at"]) {
+            return self.scheduled_statement(replace, name, at);
         }
         if self.peek_kw("before") {
             return self.err(BEFORE);
@@ -3928,6 +3952,7 @@ impl Parser {
                         .map(|c: &Claim| c.name.clone())
                         .collect(),
                     bound: None,
+                    scheduled: false,
                 }));
                 let at = self.i;
                 let e = self.expr();
@@ -3943,6 +3968,10 @@ impl Parser {
                 // parentheses are what is refused.
                 self.i = paren;
                 return self.err(BOUND_VALUES);
+            } else if self.peek_among(&["every", "at"]) {
+                // Run by the clock: no one hands it a value.
+                self.i = paren;
+                return self.err(fennec_core::named::SCHEDULED_VALUES);
             } else if self.peek_kw("before") {
                 return self.err(BEFORE);
             } else {
@@ -3960,6 +3989,7 @@ impl Parser {
             params: params.iter().map(|p| p.name.clone()).collect(),
             claims: claims.iter().map(|c| c.name.clone()).collect(),
             bound: None,
+            scheduled: false,
         }));
         let body = self.body();
         self.def = None;
@@ -3977,6 +4007,7 @@ impl Parser {
             block,
             text: String::new(),
             after: None,
+            schedule: None,
         };
         self.defined(def, &starts, at)
     }
@@ -4068,6 +4099,7 @@ impl Parser {
                     condition,
                     places: Vec::new(),
                 }),
+                scheduled: false,
             }))
         };
         let mut condition = None;
@@ -4108,6 +4140,8 @@ impl Parser {
                 scans = true;
             } else if self.peek_among(&["claims", "check", "public"]) {
                 return self.err(BOUND_VALUES);
+            } else if self.peek_among(&["every", "at"]) {
+                return self.err(fennec_core::named::SCHEDULED_AND_BOUND);
             } else {
                 break;
             }
@@ -4145,8 +4179,183 @@ impl Parser {
                 condition,
                 places,
             })),
+            schedule: None,
         };
         self.defined(def, &starts, at)
+    }
+
+    /// `create [or replace] statement <name> (every <interval> | at
+    /// '<cron>') [in '<zone>'] [comment '<text>'] [scans] as <body>`, at
+    /// `every` or `at`: a statement run by the clock, with no parameters,
+    /// claims, `check` or `public` -- no one calls it -- whose body reads
+    /// `slot()`. The schedule is read into what it means, `bucket`'s
+    /// interval or cron's masks, each refusal the text alone answers at
+    /// the word it is about. Out of line, as every path only a definition
+    /// takes.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn scheduled_statement(&mut self, replace: bool, name: String, at: usize) -> Result<Statement> {
+        use fennec_core::named::{
+            Cron, Definition, Schedule, When, SCHEDULED_AND_BOUND, SCHEDULED_VALUES,
+        };
+        let when = if self.eat_kw("every") {
+            let from = self.i;
+            let (n, unit) = match (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok)) {
+                (Tok::Int(n), Some(Tok::Ident(u)))
+                    if !among(u, &["as", "in", "comment", "scans"]) =>
+                {
+                    (*n, u.to_ascii_lowercase())
+                }
+                (Tok::Int(_), next) => {
+                    // `every 1` at the text's end: the unit may be the next
+                    // line's, so the shell goes on rather than refuse.
+                    self.cut |= matches!(next, Some(Tok::Eof) | None);
+                    return Err(self.taught(
+                        "`every` takes an interval, a whole number and its unit: `every 15m`, \
+                         `every 1h`, `every 1d`, `every 1w`, `every 1mo`",
+                    ));
+                }
+                _ => {
+                    return Err(self.taught(
+                        "`every` takes an interval, a whole number and its unit: `every 15m`, \
+                         `every 1h`, `every 1d`, `every 1w`, `every 1mo`",
+                    ))
+                }
+            };
+            match fennec_core::named::period(n, &unit) {
+                Ok(iv) => {
+                    self.i += 2;
+                    When::Every(iv)
+                }
+                Err(why) => {
+                    self.i = from;
+                    return self.err(why);
+                }
+            }
+        } else {
+            self.skip();
+            let from = self.i;
+            let cron = self.quoted_text(
+                "`at` takes a cron expression in quotes, its five fields `minute hour \
+                 day-of-month month day-of-week`: `at '0 3 * * *'`",
+            )?;
+            match Cron::read(&cron) {
+                Ok(c) => When::At(c),
+                Err(why) => {
+                    self.i = from;
+                    return self.err(why);
+                }
+            }
+        };
+        let mut zone = None;
+        if self.eat_kw("in") {
+            let from = self.i;
+            let z = self.quoted_text(
+                "`in` names the clock the schedule reads, in quotes: one of IANA's zones, `in \
+                 'Europe/Berlin'`, or an offset, `in '+03:00'`",
+            )?;
+            // The binary's table, as `bucket` reads it: a zone it lacks is
+            // a clock no run of this build could read.
+            if fennec_core::tz::zone_of(&Value::Text(z.as_str().into())).is_err() {
+                self.i = from;
+                return self.err(format!(
+                    "`'{z}'` is no time zone this build holds: one of IANA's by its name, \
+                     `'Europe/Berlin'`, or an offset, `'+03:00'`"
+                ));
+            }
+            zone = Some(z);
+        }
+        let (mut comment, mut scans) = (None, false);
+        loop {
+            if self.peek_kw("comment") {
+                if comment.is_some() {
+                    return self.err("`comment` is written once");
+                }
+                self.skip();
+                comment = Some(self.quoted_text(
+                    "`comment` takes what the statement does, in quotes: `comment 'Lapses each \
+                     hold whose time is up'`",
+                )?);
+            } else if self.peek_kw("scans") {
+                if scans {
+                    return self.err("`scans` is written once");
+                }
+                self.skip();
+                scans = true;
+            } else if self.peek_among(&["claims", "check", "public"])
+                || matches!(self.peek(), Tok::LParen)
+            {
+                return self.err(SCHEDULED_VALUES);
+            } else if self.peek_kw("after") {
+                return self.err(SCHEDULED_AND_BOUND);
+            } else if self.peek_among(&["every", "at"]) {
+                return self.err(
+                    "a statement has one schedule: two times are two statements, or one cron \
+                     expression naming both, `at '0 9,17 * * *'`",
+                );
+            } else if self.peek_kw("in") {
+                return self.err(
+                    "`in '<zone>'` follows the schedule whose clock it names: `every 1d in \
+                     'Europe/Berlin' comment '...'`",
+                );
+            } else {
+                break;
+            }
+        }
+        if !self.eat_kw("as") {
+            return Err(self.taught(
+                "a scheduled statement's body follows its schedule and `as`: `as del sessions \
+                 where until < now()`, or `as begin <statement>; ... end`",
+            ));
+        }
+        self.def = Some(Box::new(Names {
+            params: Vec::new(),
+            claims: Vec::new(),
+            bound: None,
+            scheduled: true,
+        }));
+        let body = self.body();
+        self.def = None;
+        let (body, starts, block) = body?;
+        let def = Definition {
+            name,
+            replace,
+            params: Vec::new(),
+            claims: Vec::new(),
+            public: false,
+            scans,
+            comment,
+            check: None,
+            body,
+            block,
+            text: String::new(),
+            after: None,
+            schedule: Some(Box::new(Schedule { when, zone })),
+        };
+        self.defined(def, &starts, at)
+    }
+
+    /// `slot()` in a definition, its `(` read: the instant of the slot a
+    /// scheduled statement runs for, read in its body alone, as `new.` is
+    /// in a binding's. Out of a definition it is what it is on main, a
+    /// call the engine finds no function for.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn slot(&mut self) -> Result<Expr> {
+        if !self.def.as_deref().is_some_and(|d| d.scheduled) {
+            self.i -= 2;
+            return self.err(
+                "`slot()` is the instant of the slot a scheduled statement runs for, read in its \
+                 body alone: `create statement <name> every 1d as set plans {period: slot()} ...`",
+            );
+        }
+        if !matches!(self.peek(), Tok::RParen) {
+            return self.err("`slot()` takes no argument: it is the instant of the run's slot");
+        }
+        self.skip();
+        Ok(Expr::Call("slot".into(), Vec::new()))
     }
 
     /// `new.<field>` or `old.<field>` in a bound statement, `name` stepped
@@ -4159,6 +4368,10 @@ impl Parser {
     #[inline(never)]
     fn defined_field(&mut self, name: String) -> Result<Expr> {
         use fennec_core::named::{Binding, Place};
+        if row_field(&name).is_some() && self.def.as_deref().is_some_and(|d| d.scheduled) {
+            self.i -= 1;
+            return self.err(scheduled_row(&name));
+        }
         let Some((events, condition)) = self
             .def
             .as_deref()
@@ -4245,6 +4458,10 @@ impl Parser {
     #[cold]
     #[inline(never)]
     fn pair_named(&mut self, name: &str) -> Result<()> {
+        if row_field(name).is_some() && self.def.as_deref().is_some_and(|d| d.scheduled) {
+            self.i -= 1;
+            return self.err(scheduled_row(name));
+        }
         let bound = self.def.as_deref().is_some_and(|d| d.bound.is_some());
         if bound && row_field(name).is_some() {
             self.i -= 1;
@@ -5186,6 +5403,8 @@ impl Parser {
         match name.as_str() {
             "exists" => return self.exists(),
             "match" => return self.err(FULLTEXT),
+            #[cfg(feature = "statements")]
+            "slot" if self.def.is_some() => return self.slot(),
             _ => {}
         }
         let mut args = Vec::new();
@@ -5655,6 +5874,14 @@ mod tests {
         "create or replace statement count_likes after insert or set likes scans as set posts {likes: likes + 1} where id = new.post",
         "create statement unlike after delete likes where old.n > 0 as set posts {likes: likes - 1} where id = old.post order id limit 1",
         "create statement debit after update orders as update accounts set balance = balance - new.total where id = new.account require 1",
+        // A scheduled statement: its schedule, its zone, its comment and
+        // its body each go on with the next line until `as` and the body
+        // read whole -- `in '<zone>'` after the schedule too, which the
+        // form never reads before `as`.
+        "create statement lapse_holds every 1m comment 'Lapses each hold whose time is up' as set holds {state: 'lapsed', lapsed_at: now()} where state = 'held' and until < now() order until limit 1000",
+        "create or replace statement monthly_reset at '0 0 1 * *' in 'Europe/Berlin' scans as set plans {used: 0, period: slot()} where used > 0",
+        "create statement nightly every 1 d in '+03:00' as begin get runs select id where at > now() limit 1 require 0 else 'ran'; insert runs {at: slot()}; end",
+        "create statement weekdays at '30 9 * * mon-fri' as update reports set due = slot() where due is null",
         "drop statement if exists transfer",
         "statements",
         "describe statement transfer",

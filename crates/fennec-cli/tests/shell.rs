@@ -214,6 +214,30 @@ fn a_binding_over_lines_reads_as_one_statement() {
     assert_eq!(count(&f, ""), 6);
 }
 
+/// A statement run by the clock, written over lines -- its schedule, its
+/// unit on a line of its own, its zone and its body each going on with the
+/// next line -- reads whole, and is refused once, in the engine's words,
+/// until a server runs schedules (F3's slice 1); the lines after it run.
+#[test]
+fn a_schedule_over_lines_reads_as_one_statement() {
+    let d = Dir::new("schedule");
+    let f = d.notes();
+    let out = piped(
+        &f,
+        "create statement tidy\n  every 1\n  d in\n  'Europe/Berlin'\n  comment 'Tidies'\nas \
+         del notes\n  where topic = 4\nget notes count\n",
+    );
+    let err = text(&out.stderr);
+    let errors: Vec<&str> = err.lines().filter(|l| l.starts_with("error:")).collect();
+    assert_eq!(errors.len(), 1, "{err}");
+    assert!(
+        errors[0].contains("scheduled statements are not built yet"),
+        "{err}"
+    );
+    assert!(!err.contains("begins no statement"), "{err}");
+    assert_eq!(tables(&text(&out.stdout)), [["5"]]);
+}
+
 /// A script of statements, each over several lines -- a schema, a
 /// document, a `set`, a `del` that picks its row, reads -- runs as
 /// written, and a blank line between two lines of a statement is white

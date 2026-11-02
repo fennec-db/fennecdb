@@ -398,10 +398,16 @@ fn the_signature_s_refusals() {
         "`comment` takes what the statement does",
         "''",
     );
+    // A schedule is F3's, with no parentheses: no one hands it a value.
     refused_at(
         "create statement s() every 1h as get t select a",
+        "a scheduled statement is called by no one",
+        "()",
+    );
+    refused_at(
+        "create statement s() hourly as get t select a",
         "a statement's body follows `as`",
-        "every",
+        "hourly",
     );
     refused_at(
         "create statement s($a int) check a > 0 as get t select a",

@@ -691,6 +691,45 @@ fn a_binding_s_text_in_a_callable_record_is_marked_broken() {
     );
 }
 
+/// No record this build writes holds a schedule (op 4 is F3's slice 2): a
+/// definition's record whose text reads as one, its digest and all, is
+/// marked broken, never loaded as a statement a call runs.
+#[test]
+fn a_schedule_s_text_in_a_callable_record_is_marked_broken() {
+    let tap = Tap::default();
+    let db = schema(&tap);
+    let mut file = db.snapshot();
+    let text = "create statement zero every 1d in 'Europe/Berlin' as set accounts {balance: 0} \
+                where balance < 0";
+    let mut body = vec![1u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, db.change_seq() + 1);
+    put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+    body.extend_from_slice(&digest(text).to_le_bytes());
+    encode_str(&mut body, "zero");
+    put_uvarint(&mut body, 1);
+    encode_str(&mut body, "accounts");
+    encode_str(&mut body, text);
+    file.push(13);
+    put_uvarint(&mut file, 0);
+    put_uvarint(&mut file, body.len() as u64);
+    file.extend_from_slice(&body);
+    let mut db = opened(&file);
+    let zero = db.statements().get("zero").unwrap();
+    assert!(zero.tree.is_none());
+    let why = zero.broken.clone().unwrap_or_default();
+    assert!(
+        why.starts_with("its text reads as a scheduled statement"),
+        "{why}"
+    );
+    let call = fennec_ql::parse_one("call zero").unwrap();
+    let e = db.execute(&call).unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.contains("reads as a scheduled statement")),
+        "{e}"
+    );
+}
+
 // ------------------------------------------------- write-bound statements
 //
 // F2's slice 2 (named-statements.md, *F2 in slices*): a binding's record,

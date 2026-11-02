@@ -1048,3 +1048,30 @@ fn a_binding_is_the_server_token_s_to_define() {
     node.ok(ROOT, bound);
     assert!(node.ok(ROOT, "statements").contains("noted"));
 }
+
+/// A statement run by the clock is refused wherever a statement runs until
+/// a server runs schedules (F3's slices 1 and 2): the server's token is
+/// told so (400), alone and in a `/batch` behind a write, which lands
+/// nothing; a scoped token meets the schema change it is. Never a schedule
+/// stored that no one runs.
+#[test]
+fn a_schedule_is_refused_until_schedules_run() {
+    let node = start(|_| {});
+    let scheduled = "create statement tidy at '0 3 * * *' in 'Europe/Berlin' as del journal \
+                     where what = 'debit'";
+    let (status, body) = node.query(ROOT, scheduled);
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("scheduled statements are not built yet"),
+        "{body}"
+    );
+    let before = node.number("get journal count");
+    let batch = [line("insert journal {what: 'x'}"), line(scheduled)].join("\n");
+    let (status, body) = node.post(ROOT, "/batch", &batch);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("not built yet"), "{body}");
+    assert_eq!(node.number("get journal count"), before);
+    let (status, body) = node.query(&node.customer("u0"), scheduled);
+    assert_eq!(status, 403, "{body}");
+    assert!(!node.ok(ROOT, "statements").contains("tidy"));
+}
