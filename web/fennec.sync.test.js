@@ -1270,6 +1270,34 @@ test('a batch over HTTP lands whole, once a key, and names the statement that st
   }
 });
 
+// A statement bound to a write that refuses it is named in the error, to
+// the server's token: `binding` beside the guard's `reason`, a lone
+// statement's and a batch's, and none where no binding refused.
+test('a binding that refuses a write over HTTP is named in the error', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  const db = client.connect(s.url);
+  try {
+    await db.run('create collection orders (status text)');
+    await db.run('create collection ledger (o int @hash)');
+    await db.run(`create statement voided after set orders where new.status = 'void' as begin
+      get ledger select o where o = new.id limit 1 require 1 else 'no ledger line';
+      insert ledger {o: new.id}
+    end`);
+    await db.run("put orders {status: 'open'}");
+    const e = await db.from('orders').where('id', 1).update({ status: 'void' }).catch((x) => x);
+    assert.ok(e instanceof client.FennecError);
+    assert.deepEqual([e.status, e.reason, e.binding], [412, 'no ledger line', 'voided']);
+    assert.match(e.message, /bound statement `voided`, after `set` on `orders`/);
+    const b = await db.batch(["put orders {status: 'open'}", "set orders {status: 'void'} where id = 1"]).catch((x) => x);
+    assert.deepEqual([b.status, b.at, b.binding], [412, 1, 'voided']);
+    assert.equal(await db.from('orders').count(), 1);
+    const none = await db.run("set orders {status: 'x'} where id = 1 require 2").catch((x) => x);
+    assert.deepEqual([none.status, none.binding], [412, undefined]);
+  } finally {
+    s.close();
+  }
+});
+
 // A claim held at the server until a job comes (`{ wait }`, `Fennec-Wait`):
 // taken by the builder's update and by `run`, ended on time with no row,
 // and given up by an AbortSignal; a database in the page refuses `wait`.

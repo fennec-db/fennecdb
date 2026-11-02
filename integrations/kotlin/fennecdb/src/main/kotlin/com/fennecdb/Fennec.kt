@@ -48,6 +48,13 @@ class FennecException internal constructor(
      * statement gave none.
      */
     val reason: String? = null,
+    /**
+     * The statement bound to the write (`create statement ... after`) that
+     * refused it, by name: a guard's `require` not met, a write of its body
+     * refused. From the library and the server's token alike, a scoped
+     * token told the [reason] and no name; null otherwise.
+     */
+    val binding: String? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)
 

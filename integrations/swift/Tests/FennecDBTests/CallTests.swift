@@ -47,6 +47,17 @@ let kindArguments: Value = [
     "meta": ["lang": "tr", "rank": 2], "v": .floats([0.5, -0.25, 1]),
 ]
 
+/// A statement bound to a write, whose guard refuses it: `voided` after a
+/// `set` making an order `void` with no ledger line.
+let bindingStatements = [
+    "create collection orders (status text)",
+    "create collection ledger (o int @hash)",
+    "create statement voided after set orders where new.status = 'void' as begin "
+        + "get ledger select o where o = new.id limit 1 require 1 else 'no ledger line'; "
+        + "insert ledger {o: new.id} end",
+    "put orders {status: 'open'}",
+]
+
 @Suite struct CallBuilder {
     /// What Swift types as arguments: a `Codable` struct in its fields'
     /// order, a dictionary with its keys sorted, a `Row` or `Value` in the
@@ -147,6 +158,17 @@ let kindArguments: Value = [
         return db
     }
 
+    /// A binding's refusal through the library names it beside its reason;
+    /// one no binding made names none.
+    @Test func aBindingThatRefusesAWriteIsNamed() async throws {
+        let db = try Fennec.memory()
+        for text in bindingStatements { try await db.execute(text) }
+        let e = await refusal { try await db.run("set orders {status: 'void'} where id = 1") }
+        #expect(e?.code == .unmet && e?.reason == "no ledger line" && e?.binding == "voided", "\(String(describing: e))")
+        let none = await refusal { try await db.run("set orders {status: 'x'} where id = 1 require 2") }
+        #expect(none?.code == .unmet && none?.binding == nil)
+    }
+
     private static func balances(_ db: Fennec) async throws -> [Int?] {
         try await db.from("accounts").select("balance").order("id").rows().map { $0["balance"]?.int }
     }
@@ -232,6 +254,19 @@ let kindArguments: Value = [
             try await db.execute("create statement stamp() public as insert notes {body: 'z'} returning id")
             try await db.execute("create statement mine() claims (sub text) as get notes select body where by = $jwt.sub")
             return db
+        }
+
+        /// A binding's refusal over HTTP names it to the server's token;
+        /// one no binding made names none.
+        @Test func aBindingThatRefusesAWriteIsNamed() async throws {
+            let s = try await Server("binding")
+            defer { s.stop() }
+            let db = Fennec.connect(url: s.url)
+            for text in bindingStatements { try await db.execute(text) }
+            let e = await refusal { try await db.run("set orders {status: 'void'} where id = 1") }
+            #expect(e?.status == 412 && e?.reason == "no ledger line" && e?.binding == "voided", "\(String(describing: e))")
+            let none = await refusal { try await db.run("set orders {status: 'x'} where id = 1 require 2") }
+            #expect(none?.status == 412 && none?.binding == nil)
         }
 
         /// `call <name> $1` over `/query`: the answer is `run`'s, a

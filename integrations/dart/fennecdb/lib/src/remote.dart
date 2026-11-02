@@ -349,7 +349,8 @@ class FennecRemote {
   void close() => _shared.client.close();
 
   /// A refusal as the error it is: its status and message, where a batch
-  /// stopped, what a `require n else '<reason>'` that refused it said, and
+  /// stopped, what a `require n else '<reason>'` that refused it said and
+  /// the statement bound to the write that refused it, and
   /// where a tenant's quota refused it the quota and how long to wait -- to
   /// the millisecond where the body says it (`retry_after_ms`), else
   /// `Retry-After`, or the same in the body.
@@ -369,7 +370,8 @@ class FennecRemote {
         completed: m?['completed'] as int?,
         quota: quota,
         retryAfter: wait,
-        reason: m?['reason'] as String?);
+        reason: m?['reason'] as String?,
+        binding: m?['binding'] as String?);
   }
 
   /// An HTTP status as the error kind the engine would have said; the

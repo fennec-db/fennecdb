@@ -606,6 +606,9 @@ function refused(res, body, message) {
   if (typeof body?.at === 'number') e.at = body.at;
   // What a `require n else '<reason>'` said: the statement's own words.
   if (typeof body?.reason === 'string') e.reason = body.reason;
+  // The statement bound to the write that refused it, by name: told the
+  // server's token alone, never a scoped one.
+  if (typeof body?.binding === 'string') e.binding = body.binding;
   if (typeof body?.completed === 'number') e.completed = body.completed;
   const quota = body?.quota ?? res.headers?.get?.('fennec-quota');
   if (quota) e.quota = quota;

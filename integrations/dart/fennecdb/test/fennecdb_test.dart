@@ -231,6 +231,30 @@ void main() {
     expect(FennecRemote.refused(412, {'error': 'unmet'}, null).reason, isNull);
   });
 
+  // A statement bound to a write, whose guard refuses it: named beside its
+  // reason, the library's and a server's alike; null where no binding
+  // refused.
+  test('a binding that refuses a write is named', () async {
+    final db = await Fennec.memory();
+    await db.execute('create collection orders (status text)');
+    await db.execute('create collection ledger (o int @hash)');
+    await db.execute("create statement voided after set orders where new.status = 'void' as begin "
+        "get ledger select o where o = new.id limit 1 require 1 else 'no ledger line'; "
+        'insert ledger {o: new.id} end');
+    await db.execute("put orders {status: 'open'}");
+    await expectLater(
+        db.execute("set orders {status: 'void'} where id = 1"),
+        throwsA(isA<FennecException>()
+            .having((e) => (e.code, e.reason, e.binding), 'refusal', (FennecCode.unmet, 'no ledger line', 'voided'))));
+    await expectLater(db.execute("set orders {status: 'x'} where id = 1 require 2"),
+        throwsA(isA<FennecException>().having((e) => e.binding, 'binding', isNull)));
+    await db.close();
+    final remote = FennecRemote.refused(
+        412, {'error': 'bound statement `voided` ...', 'reason': 'no ledger line', 'binding': 'voided', 'at': 1}, null);
+    expect((remote.at, remote.reason, remote.binding), (1, 'no ledger line', 'voided'));
+    expect(FennecRemote.refused(412, {'error': 'unmet'}, null).binding, isNull);
+  });
+
   // The builder's call beside the golden file's cases (golden_test.dart):
   // what a typed language adds, a value to keep and to change after.
   test('a call is a value taken as it is made', () {

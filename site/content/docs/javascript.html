@@ -197,7 +197,10 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     words a <code>require</code> gave for its refusal (<code>{ require: 1,
     reason: 'sold out' }</code> on a write, <code>.require(1, { reason })</code>
     on a read; 1 to 200 bytes, written into the statement, never a
-    parameter), undefined where it gave none. It is the same from the module
+    parameter), undefined where it gave none, and <code>binding</code>, the
+    name of the <a href="fennecql.html#write-bound-statements">statement
+    bound to the write</a> that refused it, told the server's token alone
+    over HTTP. It is the same from the module
     (<code>db.run</code>), over HTTP and on a synced write the server
     refused (<a href="/docs/sync">Sync</a>). A database in the page
     names it the same way: <code>db.run</code> of several statements, one

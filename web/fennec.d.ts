@@ -563,6 +563,15 @@ export declare class FennecError extends Error {
    */
   reason?: string;
   /**
+   * The statement bound to the write (`create statement ... after`) whose
+   * refusal this is, by name, over HTTP (`connect`): a guard's `require`
+   * not met (412), a write of its body refused, `--call-max-rows` passed.
+   * Told the server's token alone, a scoped one the `reason` and no name;
+   * never set in the page, whose module runs no binding, nor on a write
+   * `FennecSync` was refused, which says its `reason`.
+   */
+  binding?: string;
+  /**
    * How many statements of a stopped `/batch` stayed applied: none, but
    * for a batch holding a `compact`, whose statements run on their own.
    */

@@ -538,7 +538,16 @@ ledger line","binding":"voided","at":1}</code>, its <code>at</code> only for a
 text of several, and the shell prints <code>error: bound statement `voided`,
 after `set` on `orders`, refused this write: ...</code>: an app and the shell
 hold their file's authority. A scoped token is told its status and
-<code>reason</code> alone, never the binding's name.</p>
+<code>reason</code> alone, never the binding's name. Every SDK reads it from
+its error as it reads <code>reason</code>: JavaScript's and Python's
+<code>FennecError.binding</code>, Go's <code>Error.Binding</code>, .NET's
+<code>FennecException.Binding</code>, Swift's <code>FennecError.binding</code>
+and Kotlin's and Dart's <code>FennecException.binding</code>, the last three
+from the native library too (<a href="languages.html#builder">Languages</a>).
+<a href="studio.html">fennec studio</a> lists a collection's bindings in its
+schema view, each opened in the query editor as <code>create or replace
+statement ...</code> and none given a call form, and the shell's
+<code>.help</code> gives the form.</p>
 
 <p><code>statements</code> has an <code>after</code> column,
 <code>["orders","set"]</code> for a binding's collection and events and

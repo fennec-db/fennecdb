@@ -56,7 +56,13 @@ class FennecException implements Exception {
   /// alike; null where the statement gave none.
   final String? reason;
 
-  FennecException(this.code, this.message, [this.exact, this.reason])
+  /// The statement bound to the write (`create statement ... after`) that
+  /// refused it, by name: a guard's `require` not met, a write of its body
+  /// refused. From the library and the server's token alike, a scoped token
+  /// told the [reason] and no name; null otherwise.
+  final String? binding;
+
+  FennecException(this.code, this.message, [this.exact, this.reason, this.binding])
       : status = null,
         at = null,
         completed = null,
@@ -65,9 +71,9 @@ class FennecException implements Exception {
 
   /// A server's refusal: its status and, for a batch, where it stopped; for
   /// a tenant's quota, which one and how long to wait; for a `require`, the
-  /// reason it gave.
+  /// reason it gave; for a statement bound to the write, its name.
   FennecException.http(this.code, this.message,
-      {required int this.status, this.at, this.completed, this.quota, this.retryAfter, this.reason})
+      {required int this.status, this.at, this.completed, this.quota, this.retryAfter, this.reason, this.binding})
       : exact = null;
 
   @override
@@ -332,7 +338,7 @@ class Fennec {
       }
     })();
     throw FennecException(FennecCode.of(code), v['message'] as String? ?? 'error $code',
-        (v['exact'] as List?)?.cast<int>(), v['reason'] as String?);
+        (v['exact'] as List?)?.cast<int>(), v['reason'] as String?, v['binding'] as String?);
   }
 
   // ------------------------------------------------------------- running

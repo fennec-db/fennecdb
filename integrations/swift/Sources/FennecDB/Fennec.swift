@@ -42,6 +42,11 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
     /// statement put in front of it. From the library and a server alike;
     /// nil where the statement gave none.
     public let reason: String?
+    /// The statement bound to the write (`create statement ... after`)
+    /// that refused it, by name: a guard's `require` not met, a write of
+    /// its body refused. From the library and the server's token alike, a
+    /// scoped token told the `reason` and no name; nil otherwise.
+    public let binding: String?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
 
@@ -49,7 +54,7 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.init(code: code, message: message, exact: nil)
     }
 
-    init(code: Code, message: String, exact: [Int]?, reason: String? = nil) {
+    init(code: Code, message: String, exact: [Int]?, reason: String? = nil, binding: String? = nil) {
         self.code = code
         self.message = message
         self.exact = exact
@@ -59,11 +64,13 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.quota = nil
         self.retryAfter = nil
         self.reason = reason
+        self.binding = binding
     }
 
     init(
         code: Code, message: String, status: Int, at: Int?, completed: Int?,
-        quota: String? = nil, retryAfter: Double? = nil, reason: String? = nil
+        quota: String? = nil, retryAfter: Double? = nil, reason: String? = nil,
+        binding: String? = nil
     ) {
         self.code = code
         self.message = message
@@ -74,6 +81,7 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.quota = quota
         self.retryAfter = retryAfter
         self.reason = reason
+        self.binding = binding
     }
 
     public var description: String { message }
@@ -471,7 +479,8 @@ public final class Fennec: @unchecked Sendable {
             code: FennecError.Code(rawValue: code) ?? .panic,
             message: v["message"]?.string ?? "error \(code)",
             exact: v["exact"]?.array?.compactMap(\.int),
-            reason: v["reason"]?.string
+            reason: v["reason"]?.string,
+            binding: v["binding"]?.string
         )
     }
 

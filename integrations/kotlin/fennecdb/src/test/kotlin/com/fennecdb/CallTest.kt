@@ -104,6 +104,16 @@ class CallBuilderTest {
     }
 }
 
+/** A statement bound to a write, whose guard refuses it: `voided` after a `set` making an order `void` with no ledger line. */
+internal val bindingStatements = listOf(
+    "create collection orders (status text)",
+    "create collection ledger (o int @hash)",
+    "create statement voided after set orders where new.status = 'void' as begin " +
+        "get ledger select o where o = new.id limit 1 require 1 else 'no ledger line'; " +
+        "insert ledger {o: new.id} end",
+    "put orders {status: 'open'}",
+)
+
 /**
  * `db.call` on the embedded database: `call <name> $1` through the library,
  * its claims the embedder's `as`.
@@ -158,6 +168,18 @@ class CallLocalTest {
         assertEquals(listOf("a", "b"), kinds["tags"])
         assertEquals("tr", kinds.row("meta")!!.string("lang"))
         assertEquals(listOf(0.5f, -0.25f, 1f), kinds.floats("v")!!.toList())
+        db.close()
+    }
+
+    /** A binding's refusal through the library names it beside its reason; one no binding made names none. */
+    @Test
+    fun aBindingThatRefusesAWriteIsNamed() = runBlocking {
+        val db = Fennec.memory()
+        for (text in bindingStatements) db.execute(text)
+        val e = assertFailsWith<FennecException> { db.execute("set orders {status: 'void'} where id = 1") }
+        assertEquals(listOf<Any?>(FennecException.Code.UNMET, "no ledger line", "voided"), listOf(e.code, e.reason, e.binding))
+        val none = assertFailsWith<FennecException> { db.execute("set orders {status: 'x'} where id = 1 require 2") }
+        assertEquals(listOf<Any?>(FennecException.Code.UNMET, null), listOf(none.code, none.binding))
         db.close()
     }
 
@@ -281,6 +303,17 @@ class CallRemoteTest {
         assertEquals(listOf(0.5f, -0.25f, 1f), kinds.floats("v")!!.toList())
         // And on the calling thread.
         assertEquals(1000L - 300 - 1, db.callBlocking("transfer", mapOf("from" to 1, "to" to 2, "amount" to 1)).rows.single().long("balance"))
+    }
+
+    /** A binding's refusal over HTTP names it to the server's token; one no binding made names none. */
+    @Test
+    fun aBindingThatRefusesAWriteIsNamed() = runBlocking {
+        val db = Fennec.connect(server("binding").url)
+        for (text in bindingStatements) db.execute(text)
+        val e = assertFailsWith<FennecException> { db.execute("set orders {status: 'void'} where id = 1") }
+        assertEquals(listOf<Any?>(412, "no ledger line", "voided"), listOf(e.status, e.reason, e.binding))
+        val none = assertFailsWith<FennecException> { db.execute("set orders {status: 'x'} where id = 1 require 2") }
+        assertEquals(listOf<Any?>(412, null), listOf(none.status, none.binding))
     }
 
     @Test

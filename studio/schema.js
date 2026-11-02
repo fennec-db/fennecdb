@@ -108,17 +108,19 @@ export function mount(host, ctx) {
       rows = named.names.map((n) => h('tr', {}, h('td', { class: 'mono' }, n), h('td', { class: 'muted' }, 'granted to your token'), h('td', { class: 'sc-row-actions' }, callBtn(n, null))));
     } else {
       if (!named.rows.length) return hint('The database holds none: create statement in the query editor defines one.');
+      // A statement bound to the writes of a collection (`after`) is run by
+      // them, never called: listed by what it is bound to, with no call form.
       rows = named.rows.map((s) =>
         h(
           'tr',
           { dataset: { statement: s.name } },
-          h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.writes ? 'writes' : 'reads')),
-          h('td', { class: 'mono muted' }, s.signature ?? ''),
+          h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.after ? 'bound' : s.writes ? 'writes' : 'reads')),
+          h('td', { class: 'mono muted' }, s.after ? `after ${s.after[1]} ${s.after[0]}` : (s.signature ?? '')),
           h('td', {}, s.broken ? h('span', { class: 'ed-error' }, `Broken: ${s.broken}`) : (s.comment ?? '')),
           h(
             'td',
             { class: 'sc-row-actions' },
-            callBtn(s.name, s.signature ?? '()', Boolean(s.broken)),
+            s.after ? null : callBtn(s.name, s.signature ?? '()', Boolean(s.broken)),
             h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `The definition of ${s.name}`, onclick: () => definition(s.name) }, 'Definition'),
           ),
         ),
@@ -144,7 +146,13 @@ export function mount(host, ctx) {
       `Statement ${n}`,
       statementsBlock(text.split('\n')),
       s.broken ? h('p', { class: 'form-error' }, `Broken: ${s.broken}`) : null,
-      h('p', { class: 'hint' }, `Answers ${(s.answers ?? []).join(', ') || 'no field'}; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`),
+      h(
+        'p',
+        { class: 'hint' },
+        s.after
+          ? `Runs after ${s.after[1]} on ${s.after[0]}${s.condition ? ` where ${s.condition}` : ''}, in the write's block; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`
+          : `Answers ${(s.answers ?? []).join(', ') || 'no field'}; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`,
+      ),
       h(
         'div',
         { class: 'dialog-actions' },
@@ -300,6 +308,22 @@ export function mount(host, ctx) {
         ),
       );
     });
+    // The statements bound to its writes, as `/_schema` lists them to the
+    // server's token: each opened in the query editor as its replacement,
+    // `create or replace statement ...`; none is called.
+    const bindings = (c.bindings ?? []).map((b) =>
+      h(
+        'tr',
+        { dataset: { binding: b.name } },
+        h('td', { class: 'mono' }, b.name),
+        h('td', { class: 'mono muted' }, `after ${b.events}`),
+        h(
+          'td',
+          { class: 'sc-row-actions' },
+          h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `Replace ${b.name} in the query editor`, onclick: () => ctx.query(S.replacing(b.text)) }, 'Replace'),
+        ),
+      ),
+    );
     fill(
       body,
       h('div', { class: 'sc-head' }, h('h2', {}, 'As FennecQL'), copy, h('button', { type: 'button', class: 'btn ghost small', onclick: () => ctx.query(`get ${name} limit 100`) }, 'Query it')),
@@ -315,6 +339,12 @@ export function mount(host, ctx) {
         ? [
             h('h2', {}, 'Indexes over several fields'),
             h('table', { class: 'sc-fields sc-composites' }, h('thead', {}, h('tr', {}, h('th', {}, 'Index'), h('th', {}, h('span', { class: 'sr' }, 'Changes')))), h('tbody', {}, composites)),
+          ]
+        : null,
+      bindings.length
+        ? [
+            h('h2', {}, 'Statements bound to its writes'),
+            h('table', { class: 'sc-fields sc-bindings' }, h('thead', {}, h('tr', {}, h('th', {}, 'Statement'), h('th', {}, 'Runs'), h('th', {}, h('span', { class: 'sr' }, 'Changes')))), h('tbody', {}, bindings)),
           ]
         : null,
       statementsPart(),

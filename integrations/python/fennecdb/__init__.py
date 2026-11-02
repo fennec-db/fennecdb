@@ -141,6 +141,11 @@ class FennecError(Exception):
     with every statement added in front of it. None where the statement
     gave none.
 
+    A statement bound to the write (`create statement ... after`) that
+    refused it is named (`binding`): a guard's `require` not met, a write
+    of its body refused. Told the server's token alone, a scoped one the
+    `reason` and no name; None otherwise.
+
     A tenant's quota names itself (`quota`): "bytes" and "rows" answer 507,
     and room is made by deleting; "streams", "held", "requests", "writes"
     and "write_bytes" answer 429, with the seconds to wait before sending
@@ -170,12 +175,14 @@ class FennecError(Exception):
         seq: int | None = None,
         history: str | None = None,
         reason: str | None = None,
+        binding: str | None = None,
     ):
         super().__init__(message)
         self.status = status
         self.at = at
         self.completed = completed
         self.reason = reason
+        self.binding = binding
         self.quota = quota
         self.retry_after = retry_after
         self.outcome = outcome
@@ -712,7 +719,7 @@ def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
-    at = completed = quota = retry_after = outcome = seq = history = reason = None
+    at = completed = quota = retry_after = outcome = seq = history = reason = binding = None
     try:
         body = json.loads(raw)
         message = body.get("error", raw.decode(errors="replace"))
@@ -720,6 +727,8 @@ def _answer(status: int, raw: bytes) -> Any:
         # What a `require n else '<reason>'` that refused said, a batch's
         # stop's beside its `at`.
         reason = body.get("reason")
+        # The statement bound to the write that refused it, by name.
+        binding = body.get("binding")
         # A quota's refusal says which, and the wait its `Retry-After`
         # says -- a quota's 429, a move's 503 -- in the body too: what is
         # read here has no headers. To the millisecond where it says it: a
@@ -745,6 +754,7 @@ def _answer(status: int, raw: bytes) -> Any:
         seq=seq,
         history=history,
         reason=reason,
+        binding=binding,
     )
 
 
