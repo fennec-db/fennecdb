@@ -246,6 +246,8 @@ export async function boot(): Promise<boolean> {
 	onFact(report);
 	if (CONTROL) {
 		let offset = 0;
+		// A look's lines run in turn, but the next look does not wait for them:
+		// commands read in two looks run side by side and report in either order.
 		setInterval(async () => {
 			let text = "";
 			try {
