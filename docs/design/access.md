@@ -470,7 +470,11 @@ node and the directory when refused): applying it took the nodes'
 held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
-and a scoped write to a tenant went unchecked.
+and a scoped write to a tenant went unchecked. Once installed it stays:
+a panic on one connection's write took the registry it lives in out of
+the database and never put it back, and every later scoped write on the
+server or tenant went unchecked (*A panic mid-write* in
+[engine.md](engine.md#blocks)).
 
 ## Whom a token is for
 

@@ -73,6 +73,8 @@ pub(super) fn note(landed: &mut Vec<Landed>, bytes: &mut u64, cid: u32, len: usi
 /// stores whose frames it held are left out of the handovers until the next
 /// rewrite: their segments hold more than their runs account for.
 pub(super) fn note_record(landed: &mut Vec<Landed>, bytes: &mut u64, at: u64, record: &[u8]) {
+    #[cfg(test)]
+    super::unwinding::panic_at("noted");
     let mut pos = 0;
     let Ok(r) = record_at(record, &mut pos) else {
         return;
@@ -340,7 +342,7 @@ impl Database {
             .iter()
             .map(|&(s, n)| file.get(s as usize..(s + n) as usize).unwrap_or(&[]))
             .collect();
-        let r = self.sink_mut().land(seq, &spilled, record);
+        let r = self.handing().land(seq, &spilled, record);
         if r.is_ok() {
             note_record(&mut self.landed, &mut self.landed_bytes, at, record);
         }

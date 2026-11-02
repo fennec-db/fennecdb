@@ -2167,7 +2167,7 @@ fn rest_run(
     cfg: &Config,
     who: &Who,
     key: Option<idempotent::Key>,
-    mut guard: std::sync::RwLockWriteGuard<'_, Database>,
+    mut guard: held::Writing<'_>,
     run: Run<'_>,
     ready: &mut fennec_core::engine::Prepared,
 ) -> Response {

@@ -59,6 +59,7 @@
 //! to free with `fennec_free_string`. JSON writes a NUL as `\u0000`, so an
 //! answer never holds one.
 
+use fennec_abi::held::Writing;
 use fennec_abi::lock::FileLock;
 use fennec_abi::Refused;
 use fennec_core::engine::{CompactPolicy, Compactor, Prepared};
@@ -68,7 +69,7 @@ use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 #[cfg(feature = "jni")]
 mod jni;
@@ -254,8 +255,14 @@ impl Native {
         self.sync.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn write(&self) -> Result<RwLockWriteGuard<'_, Database>, Failed> {
-        let db = self.db.write().unwrap_or_else(|e| e.into_inner());
+    /// The write side, past a poisoned lock as [`Self::read`] is: a block
+    /// a panic leaves open between its statements -- `run_text`'s, a
+    /// sync's `remake` -- is put back as the lock drops ([`Writing`]),
+    /// before the panic is caught at the boundary and the next call takes
+    /// the lock. Left open, that call read its writes as landed and ran its
+    /// own in it, never landing.
+    fn write(&self) -> Result<Writing<'_>, Failed> {
+        let db = Writing::take(&self.db);
         match self.closed.load(Ordering::Acquire) {
             true => Err(closed()),
             false => Ok(db),

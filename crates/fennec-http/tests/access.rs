@@ -37,6 +37,11 @@ fn start() -> Node {
 }
 
 fn start_with(policy: &str, setup: &[&str]) -> Node {
+    start_on(policy, setup, |_| {})
+}
+
+/// As [`start_with`], the database handed to `f` before the server takes it.
+fn start_on(policy: &str, setup: &[&str], f: fn(&mut Database)) -> Node {
     // The wait after a refusal is the process's, counted by address and
     // doubled to 5 s: every test here asks from 127.0.0.1, so the refusals
     // of the tests running at once held one's 401 past its read timeout.
@@ -47,6 +52,7 @@ fn start_with(policy: &str, setup: &[&str]) -> Node {
     for sql in setup {
         db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
     }
+    f(&mut db);
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -329,6 +335,57 @@ fn a_write_outside_the_rules_is_refused() {
     );
     let (_, list) = n.query(&alice, "collections");
     assert!(!list.contains("secrets"), "{list}");
+}
+
+/// A panic on one connection's write -- a function's, a hook's -- leaves
+/// the database its hooks and no block of it open: the server takes the
+/// lock the panic poisoned as it stands, and the registry taken out for
+/// the statement and never put back let every later scoped write past its
+/// rules.
+#[test]
+fn a_panicking_write_leaves_the_rules_in_force() {
+    let setup = ["create collection notes (owner text @hash, title text)"];
+    let n = start_on(POLICY, &setup, |db| {
+        let boom =
+            |_: &[Value]| -> fennec_core::error::Result<Value> { panic!("a function's bug") };
+        db.registry_mut()
+            .register_fn("boom", Arc::new(boom))
+            .unwrap();
+    });
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    for token in [ROOT, &alice] {
+        // The connection's thread unwinds: no answer, the connection shut.
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = r#"{"query":"put notes [{title: \"x\"}, {title: boom()}]"}"#;
+        write!(
+            s,
+            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert!(!out.starts_with("HTTP/1.1 2"), "{out}");
+    }
+    // The next requests are served, the rules in force for a write...
+    let (status, body) = n.call(
+        Some(&alice),
+        "POST",
+        "/notes",
+        r#"{"owner":"bob","title":"spoof"}"#,
+    );
+    assert_eq!(status, 403, "{body}");
+    let spoof = r#"put notes {owner: "bob", title: "spoof"}"#;
+    assert_eq!(n.query(&alice, spoof).0, 403);
+    // ...and nothing of the writes that panicked landed, or reads as if
+    // it had: the first document of each went with its block.
+    let (status, body) = n.call(Some(&alice), "POST", "/notes", r#"{"title":"a1"}"#);
+    assert_eq!(status, 201, "{body}");
+    let (_, rows) = n.call(Some(ROOT), "GET", "/notes", "");
+    assert_eq!(count(&rows, "\"title\""), 1, "{rows}");
+    assert!(rows.contains("a1") && rows.contains("alice"), "{rows}");
 }
 
 #[test]
