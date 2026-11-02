@@ -1885,6 +1885,49 @@ fn the_bridge_carries_a_stdio_client_to_a_server_s_endpoint() {
     assert!(String::from_utf8(out).unwrap().contains("could not reach"));
 }
 
+/// `fennec mcp --url https://...`: the bridge reaches a server serving
+/// HTTPS, its certificate held to the process's CAs (`--tls-ca`), every
+/// message on one kept connection.
+#[cfg(feature = "tls")]
+#[test]
+fn the_bridge_reaches_an_https_endpoint() {
+    let certs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/certs");
+    fennec_http::dial::trust_ca(certs.join("ca.pem").to_str().unwrap()).unwrap();
+    let tls = fennec_http::conn::Tls::from_pem_files(
+        &certs.join("server.pem"),
+        &certs.join("server.key"),
+    )
+    .unwrap();
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            mcp: Some(Arc::new(opts())),
+            tls: Some(Arc::new(tls)),
+            ..Config::default()
+        },
+        DOCS,
+    );
+    let url = format!("https://localhost:{}/_mcp", n.port);
+    let up = mcp::bridge::Upstream::parse(&url, Some(ROOT.into())).unwrap();
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query","arguments":{"query":"get docs"}}}"#,
+    ]
+    .join("\n");
+    let mut out = Vec::new();
+    mcp::bridge::bridge(&up, input.as_bytes(), &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    let v = fennec_core::json::parse_json(lines[1]).unwrap();
+    assert!(
+        matches!(at(&v, &["result", "structuredContent", "count"]), Value::Int(n) if *n > 0),
+        "{}",
+        lines[1]
+    );
+}
+
 #[test]
 fn tool_calls_are_counted_by_tool_in_the_metrics() {
     let n = start(opts());

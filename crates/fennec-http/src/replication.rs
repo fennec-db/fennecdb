@@ -1445,21 +1445,14 @@ pub enum Message {
 }
 
 impl Upstream {
-    /// `url` is the primary's HTTP address, `http://host:port`, and for one
-    /// tenant of a node `http://host:port/t/<tenant>`. There is no TLS here
-    /// either: across an open network, a tunnel carries it.
+    /// `url` is the primary's address, `http://host:port` or
+    /// `https://host:port`, and for one tenant of a node
+    /// `http://host:port/t/<tenant>`. Over `https://` the stream is TLS,
+    /// the primary's certificate held to the process's CAs
+    /// ([`crate::dial::trust_ca`], `--tls-ca`) before the token is sent.
     pub fn new(url: &str, token: String) -> std::result::Result<Upstream, String> {
-        let rest = url.strip_prefix("http://").ok_or_else(|| {
-            format!("a primary is http://host:port, not `{url}` (there is no TLS)")
-        })?;
-        let rest = rest.trim_end_matches('/');
-        let (addr, base) = match rest.split_once('/') {
-            None => (rest.to_string(), String::new()),
-            Some((a, path)) => (a.to_string(), format!("/{path}")),
-        };
-        if addr.is_empty() {
-            return Err(format!("a primary is http://host:port, not `{url}`"));
-        }
+        let (addr, base) = crate::dial::split_url(url)
+            .map_err(|e| format!("a primary is http://host:port or https://host:port: {e}"))?;
         Ok(Upstream {
             url: url.trim_end_matches('/').to_string(),
             addr,
@@ -1480,7 +1473,8 @@ impl Upstream {
     pub fn check_node(url: &str) -> std::result::Result<(), String> {
         if !Upstream::new(url, String::new())?.base.is_empty() {
             return Err(format!(
-                "--replica-of names a node, http://host:port, not a path on one: `{url}`"
+                "--replica-of names a node, http://host:port or https://host:port, not a path \
+                 on one: `{url}`"
             ));
         }
         Ok(())
@@ -1494,7 +1488,13 @@ impl Upstream {
 
     /// [`Upstream::open`] over `s`, a connection to the primary made
     /// already: the request, and the answer's head.
-    fn request(&self, s: TcpStream, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
+    fn request(
+        &self,
+        mut s: crate::dial::Stream,
+        since: u64,
+        history: u64,
+        image: bool,
+    ) -> io::Result<Receiver> {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
         let request = format!(
@@ -1502,11 +1502,12 @@ impl Upstream {
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
             self.base,
             if image { "&image=1" } else { "" },
-            self.addr,
+            crate::dial::authority(&self.addr),
             self.token
         );
-        (&s).write_all(request.as_bytes())?;
-        let conn = s.try_clone()?;
+        s.write_all(request.as_bytes())?;
+        s.flush()?;
+        let conn = s.socket().try_clone()?;
         let mut r = BufReader::with_capacity(MESSAGE + 64, s);
         let (status, length) = read_head(&mut r)?;
         if status != 200 {
@@ -1521,15 +1522,16 @@ impl Upstream {
     }
 }
 
-/// An open stream.
+/// An open stream, and its socket, which a halt shuts down.
 pub struct Receiver {
-    r: BufReader<TcpStream>,
+    r: BufReader<crate::dial::Stream>,
     conn: TcpStream,
 }
 
 impl Receiver {
     /// A handle to cut the stream from another thread: a read waiting on
-    /// it returns.
+    /// it returns -- through a TLS session too, which reads the socket's
+    /// end as the stream's.
     pub fn handle(&self) -> io::Result<TcpStream> {
         self.conn.try_clone()
     }
@@ -1743,8 +1745,9 @@ impl Follower {
         let s = crate::dial::connect_unless(&self.upstream.addr, CONNECT, &self.stop)?;
         // Handed to `halt` before the request goes out, so a primary that
         // takes the connection and never answers is cut as a stream is, not
-        // waited for to the head's SILENCE.
-        *lock(&self.conn) = Some(s.try_clone()?);
+        // waited for to the head's SILENCE. The socket beneath a TLS
+        // session: shut down, a read through the session meets its end.
+        *lock(&self.conn) = Some(s.socket().try_clone()?);
         if self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -1928,7 +1931,9 @@ impl Follower {
     }
 }
 
-pub(crate) fn connect(addr: &str) -> io::Result<TcpStream> {
+/// A connection to a primary's address, `https://` dialed over TLS, its
+/// handshake within [`CONNECT`] too.
+pub(crate) fn connect(addr: &str) -> io::Result<crate::dial::Stream> {
     crate::dial::connect(addr, CONNECT)
 }
 

@@ -288,6 +288,28 @@ load of 3; one run whose load rose to 3.7 left out changes neither), and
 grew `__text` by 1 280 bytes (3 003 648 to 3 004 928), constants
 unchanged.
 
+*Over TLS.* A node recorded at `https://host:port` is dialed over TLS
+([http.md](http.md#dialing-https)), its handshake the dial's last step and
+bounded by what is left of the connect's bound, so a refused certificate
+or a stalled handshake is a dial that failed: `Stage::Unsent`, the
+router's 503 marked `Fennec-Unsent`, as a refused connect is -- or, its
+tenant's bucket moved before the handshake's first byte or as it failed,
+`Ended::Moved`, the directory read again, as after a connect
+(`connect_watching`). Every rule above holds over the
+session: the look at a kept connection reads what arrived as TLS
+(`Wire::is_open`: a session ticket is no reason to let a connection go, the node's
+`close_notify` at its idle timeout is its end); head and body go into the
+session as one plaintext, its records one `writev` and flushed once, the
+flush's failure the write's -- so a request whose records never left is
+still unsent; a held request reads what moves on the node's socket as TLS
+before it stops watching its client, and passes the client's end on as a
+`close_notify` and a shutdown for writing. A connection's key in the pool
+is the address as recorded, `https://` and all, so no plain connection
+answers for a TLS one; its entry reads the scheme once, as it is made,
+and the pool, the exchange and an answer's reads are generic over the
+transport (`upstream::Wire`), so a plain request runs no match on it
+([http.md](http.md#dialing-https)).
+
 ## Failover cuts
 
 **A failover ends what the router has out to the node for the tenants it
@@ -659,6 +681,16 @@ statements and the row's check 4.9, the thread and `serve_on`, which
 `Pool::cut_marks` 2.6, `grant_cut_onto`'s refusal 1.2, `connection` 1.6
 smaller. The browser module is the same to the byte: no crate it is built
 from changed.
+
+*Over TLS*, a cut is the same shutdown of the same descriptor: a
+connection's flight takes the socket beneath the session
+(`Flight::of(stream.socket())`), the thread reading the session meets the
+socket's end and the one writing its refusal, and the word's states are
+the connection's, not the transport's -- `ANSWERING` set at the head's
+first line read through the session, `CLOSED` written as the `Conn` drops,
+before the session's socket closes after it, so a cut never shuts a
+descriptor reused (`a_cut_ends_a_request_out_over_tls`, and the whole
+failover over HTTPS nodes in `tests/tls_nodes.rs`).
 
 ## Queries across tenants
 

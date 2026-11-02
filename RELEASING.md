@@ -154,6 +154,38 @@ running. `make upgrade-check` drives each against `OP3_BASE`, beside the
 server, a replica and `fennec types` refusing fennec-core's
 `tests/statements.fennec`.
 
+**A node recorded at `https://` waits for every router and node.** From
+the release that dials HTTPS (TLS slice 3), a node serving HTTPS
+(`--tls-cert`) is recorded at its `https://host:port` address (`PUT
+/_shard/nodes/<n>`), and a region's routers may be `https://` URLs. The
+scheme rides in the address rather than in a field beside it, so a
+binary from before cannot dial it in the clear; the order is:
+
+1. every router -- each region's, and each standby following a
+   directory;
+2. every node, among them each one a tenant may follow or be moved to;
+3. only then is a node recorded at `https://`, or a region's router
+   named by one.
+
+Where it is not kept, a router from before cannot resolve
+`https://host:port`: it sends that node nothing -- never its admin token
+in plain HTTP -- relays nothing to it and grants it no lease, so the
+node's lease lapses and, where it has a standby, its tenants are failed
+over; and a node from before refuses to follow an `https://` primary and
+takes nothing. `make upgrade-check` drives both against the binaries of
+its base, beside this tree's router dialing the same node over TLS.
+
+An older router *reading* such a record -- a standby following the
+directory, a binary rolled back over its file -- is not driven: it holds
+the address as text and dials it as the one it refused at `PUT
+/_shard/nodes` does, through `dial::resolve`, so it skips the node as that
+check shows, never misreading it. The address is no socket address, and
+the system's lookup is handed `https://host` as a name, the port being
+what follows the last colon -- not a host name, refused by the resolver
+(`nodename nor servname provided` on macOS) before any byte goes to the
+node. A record of the directory carries the address alone, so no
+field of it is read another way.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |

@@ -178,6 +178,12 @@ curl -X PUT router.eu.internal:8090/_shard/tenants/acme -H "Authorization: Beare
 <ul>
   <li><b>Inside the region, nothing waits for another:</b> leases, failovers,
     repairs, moves between its nodes, quotas and its nodes are its router's.</li>
+  <li><b>Routers and nodes may be reached over HTTPS:</b> a router's URL in
+    <code>routers</code> or <code>--global</code>, and a node's <code>addr</code>,
+    may be <code>https://</code>, held to Mozilla's roots or to
+    <code>--tls-ca</code>'s CAs. Upgrade every router and node before the
+    first one is recorded that way
+    (<a href="sharding-reference.html#https-nodes">Nodes that serve HTTPS</a>).</li>
   <li><b>What needs every region waits for them:</b> a create (the name is
     global), a delete and a move across regions go through the global router
     and are refused with <code>503</code> and <code>Retry-After</code> while a

@@ -54,7 +54,21 @@ writes before an image stayed until it reached 64 MB. `fennec verify` reads
 an archive as a restore would. A segment is closed and fsynced before the
 next begins and an image renamed into place, so a sync tool's copy, taken
 a file at a time while the archive writes, is the archive up to a moment:
-fennecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
+fennecdb speaks no S3, and S3 and R2 are reached with `rclone`.
+
+*Over TLS.* A primary serving HTTPS (`--tls-cert`) is followed at
+`https://host:port` (`--replica-of`, a tenant's follow, `fennec backup`
+and `archive`): the stream is the same bytes in a TLS session
+(`dial::Stream`, [http.md](http.md#dialing-https)), the primary's
+certificate held to `--tls-ca` or Mozilla's roots before the request -- the
+token in it -- goes out. The dial's handshake is inside `CONNECT`'s 5 s and
+on `connect_unless`'s thread, so a halt still walks away from it; the
+socket beneath the session is what `halt` shuts. Nothing the primary does
+changes: `Feed::wait_sent` waits for a stream to have written a write into
+its connection, which over TLS is into the session's records and their
+send (`Conn::write_or_hold`, slice 2), `SENT_WAIT` bounds it as before, and
+a stream whose send would block marks itself `Sender::held` first, as
+plain.
 
 A segment is made in three calls -- the file, its magic, its first write
 (`Archive::take`) -- so a copy or a crash between them finds one holding no

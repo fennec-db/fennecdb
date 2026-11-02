@@ -29,10 +29,11 @@ fennec-abi.workspace = true
 [features]
 default = ["import", "backup", "mcp", "tls"]
 import = ["dep:fennec-import"]
-# TLS to PostgreSQL for `fennec import` (`sslmode`): rustls and ring, the
+# TLS to PostgreSQL for `fennec import` (`sslmode`), and to an https://
+# server for `fennec backup`, `archive` and `mcp --url`: rustls and ring, the
 # only dependencies from outside the workspace a shipped binary takes
 # (docs/design/crates.md#zero-dependencies). Nothing without `import`.
-tls = ["fennec-import?/tls"]
+tls = ["fennec-import?/tls", "fennec-http?/tls"]
 backup = ["dep:fennec-http"]
 mcp = ["dep:fennec-http"]
 

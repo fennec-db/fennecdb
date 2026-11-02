@@ -449,10 +449,14 @@ OTEL_SERVICE_NAME=orders-db fennec-server --file data.fennec \
 </pre>
 
 <ul>
-  <li><b>A collector on loopback.</b> The exporter speaks no TLS, so the endpoint
-    is a collector on the same host or network — the OpenTelemetry
-    Collector, the Datadog Agent's OTLP receiver, Grafana Alloy — which
-    forwards over TLS: <a href="/docs/datadog#tracing">their setup</a>.</li>
+  <li><b>A collector on loopback.</b> The endpoint is usually a collector on
+    the same host or network — the OpenTelemetry Collector, the Datadog
+    Agent's OTLP receiver, Grafana Alloy — which forwards over TLS:
+    <a href="/docs/datadog#tracing">their setup</a>.</li>
+  <li><b>Or an <code>https://</code> endpoint.</b> It is dialed over TLS, its
+    certificate held to Mozilla's roots or to <code>--tls-ca</code>'s CAs in
+    their place (<a href="/docs/server#dialing-https">Dialing HTTPS</a>). A
+    port left out is 443, and a refused certificate sends no span.</li>
   <li><b>W3C <code>traceparent</code>.</b> A request carrying one continues
     the caller's trace; <code>fennec-shard</code> continues it and hands it to
     the node, so the router's spans and the node's are one tree.</li>
@@ -516,8 +520,7 @@ service (<code>fennec-server</code>, <code>fennec-shard</code>) and
 HTTP with JSON, <code>POST /v1/traces</code> with
 <code>application/json</code>, the collector's port 4318: an
 <code>OTEL_EXPORTER_OTLP_PROTOCOL</code> of <code>grpc</code> is refused
-at the start rather than sent to a port that cannot read it, and an
-<code>https://</code> endpoint likewise.</p>
+at the start rather than sent to a port that cannot read it.</p>
 
 <p>A finished request's spans go into a queue of
 <code>OTEL_BSP_MAX_QUEUE_SIZE</code> spans (2 048), and a thread of their

@@ -7,7 +7,7 @@
 //! before its tenants take them elsewhere -- no tenant with two primaries.
 
 #[path = "lease_nodes.rs"]
-mod nodes;
+pub(crate) mod nodes;
 
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
