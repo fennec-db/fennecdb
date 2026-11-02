@@ -200,6 +200,9 @@ pub(crate) fn http(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> R
         Ok(admitted) => admitted,
         Err(refused) => return refused,
     };
+    // A scoped `write`'s runs of the statements bound to it, charged to
+    // the caller's `--call-rate` as `/query`'s are.
+    let _runs = crate::calls::charging(cfg.call_rate, &who, db);
     let Ok(text) = std::str::from_utf8(&req.body) else {
         let r = Reply::error(400, None, PARSE_ERROR, "the body is not UTF-8");
         return Response::json(400, r.body.unwrap_or_default());

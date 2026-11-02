@@ -356,7 +356,7 @@ impl Database {
                 continue;
             }
             for h in self.registry.hooks() {
-                if let Err(e) = h.waking(&def.name, rows) {
+                if let Err(e) = h.waking(&def.name, rows, &def.body) {
                     self.refused(&def.name);
                     return Err(e);
                 }
@@ -365,12 +365,19 @@ impl Database {
         let now = w.now.or(self.clock);
         let clock = std::mem::replace(&mut self.clock, now);
         let unbound = std::mem::replace(&mut self.unbound, true);
+        // The body's writes are its text's, never its writer's: a hook
+        // judging the writer (`Hook::writer_only`, a scoped token's rules)
+        // is passed over, the writer judged already by its own statement
+        // and by `waking` above. Swapped back with the clock, a panic
+        // included, so no write after the runs misses it.
+        self.registry.swap_beside();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match *self.calls.get_mut() {
                 0 => self.bounded(|db| db.runs(&w)),
                 _ => self.runs(&w),
             }
         }));
+        self.registry.swap_beside();
         self.clock = clock;
         self.unbound = unbound;
         r.unwrap_or_else(|p| std::panic::resume_unwind(p))

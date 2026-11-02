@@ -125,7 +125,7 @@ binds. `Database::unbound` (implied by `internally` and a binding's runs)
 wakes and refuses nothing: `--follow`'s mirror, `fennec import`, a declared
 migration and the sync's apply run under it, and a new internal writer owes
 it; an apply, a restore, a compact and the sweep never reach `run_one`. A
-scoped token's write or call that would wake one is refused (403,
-`Hook::waking`, `judge_call`) until a policy grants it. `@ttl` and `after
-del` refuse each other; a replacement keeps collection, events and kinds of
-write (a `put` makes and sets).
+scoped token wakes only what a `wake` line grants it (403, never a skipped
+binding, `Hook::waking`, `judge_call`), told its status and `reason` alone
+(`told_bound`). `@ttl` and `after del` refuse each other; a replacement
+keeps collection, events and kinds of write (a `put` makes and sets).

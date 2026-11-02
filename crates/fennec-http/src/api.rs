@@ -1577,6 +1577,9 @@ pub fn status_of(e: &Error) -> u16 {
         // is not the one it found. Apart from 409 so a client tells a lost
         // race on a balance from a value taken.
         Error::Unmet(_) => 412,
+        // A write's runs of the statements bound to it past its caller's
+        // `--call-rate`, which waiting lets through (`calls::charge_runs`).
+        Error::Query(m) if m.starts_with(crate::calls::RUNS_WAIT) => 429,
         Error::Type(_) | Error::Query(_) => 400,
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
         // As `--http-read-only` answers: the write is not this server's to take.

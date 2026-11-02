@@ -79,6 +79,7 @@ orders         update(status, run_at)  where customer = $jwt.sub and status = "r
 orders         read(pickup, run_at)    where run_at &lt;= now()                    for courier
 positions      read           where courier in (get orders select courier where customer = $jwt.sub)
 transfer       call                                               for customer
+paid_ledger    wake                                               for customer
 *              read                                               for dashboard
 </pre>
 
@@ -106,6 +107,11 @@ transfer       call                                               for customer
     lets the token call <code>transfer</code>, which runs with its own text's
     authority, and the token needs no rule on the collections it moves
     (<a href="#calls">Calling a named statement</a>).</li>
+  <li><b>A statement bound to writes</b> is granted by name too:
+    <code>paid_ledger wake</code> lets the token's writes wake
+    <code>paid_ledger</code>, whose ledger line lands with the write though
+    the token has no rule on <code>ledger</code>
+    (<a href="#wakes">Waking a bound statement</a>).</li>
   <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
     goes after <code>in</code>.</li>
   <li><b>Another collection.</b> <code>in (get …)</code> reads a rule's
@@ -354,6 +360,69 @@ end
     <code>0</code> for none, and answers 429 with <code>Retry-After</code> past it; the
     server's token is not held. <code>--call-max-rows</code> bounds the rows
     one call examines (<a href="/docs/limits#fixed-limits">Limits</a>).</li>
+  <li id="wakes"><b>Waking a bound statement.</b> A statement bound to a
+    collection's writes (<a href="/docs/fennecql#write-bound-statements">Statements bound to
+    writes</a>) runs in the block of the write that woke it, once a row.
+    A scoped token's write wakes one only where a line grants it by name,
+    to a role or to every token. <code>wake</code> stands alone on it, as
+    <code>call</code> does:
+<pre data-lang="text"># statements       access  role
+paid_ledger        wake    for customer
+orders             read,insert,update(status)  where account in $jwt.accounts  for customer
+</pre>
+<pre data-lang="fennecql">create statement paid_ledger
+  after set orders where new.status = 'paid' and old.status = 'open'
+as begin
+  get accounts select id where id = new.account limit 1 require 1 else 'no such account';
+  insert ledger {order: new.id, account: new.account, amount: new.total, at: now()};
+  set accounts {balance: balance - new.total} where id = new.account
+end
+</pre>
+    A customer who sets an order's status to <code>paid</code> lands the
+    ledger line and the debit with it, or nothing, with no rule on
+    <code>ledger</code> or <code>accounts</code>: the statement's writes are
+    its own text's, never the token's. The token's own write is judged by
+    its rules first, so the policy over <code>orders</code> is the binding's
+    guard — what a customer may write into <code>new.account</code> is what
+    it debits.
+    <ul>
+      <li><b>Asked as it wakes.</b> The grant is asked of a write whose row
+        passes the statement's condition: a courier moving an order's
+        <code>location</code> wakes nothing and needs no line, and a write
+        that would wake one not granted is refused (403), nothing landed —
+        a bound statement never skips. A call is asked before its body runs,
+        of every bound statement its body's writes may wake.</li>
+      <li><b><code>append-only</code> binds it.</b> A bound statement that
+        updates or deletes in an <code>append-only</code> collection is
+        refused a scoped token's write (403), granted or not; the server's
+        token's same write runs it.</li>
+      <li><b>Named to no token.</b> The 403 names no statement, as an
+        ungranted statement is no name to a token; the audit log's
+        <code>unwoken</code> line (<code>--audit</code>) names it, with the
+        path, for the operator writing the grant. A refusal the statement
+        makes — a guard's <code>require</code> — tells a scoped writer the
+        status and the guard's <code>reason</code>, in <i>a write bound to
+        it refused it</i>, and the server's token the statement's name as
+        <code>binding</code> and the engine's words.</li>
+      <li><b>Held to <code>--call-rate</code>.</b> Each run a scoped
+        token's write wakes is charged to its subject's calls a second:
+        past them 429 with <code>Retry-After</code>, the write put back; a
+        request waking more runs than a second's worth at once is 400 and
+        would never be let through. The server's token is not held.</li>
+      <li><b>Never called.</b> A bound statement is run by the writes it
+        binds alone: to a scoped token a <code>call</code> of one is the 404
+        a missing one is, and MCP lists no tool for it.</li>
+      <li><b>Checked at startup.</b> <code>* wake</code> stops the server,
+        with or without a role, since a statement bound later would run on
+        a token's behalf by a line no one reads again; so do
+        <code>wake</code> beside another grant and a <code>where</code>. A
+        <code>wake</code> line naming a statement the database does not
+        hold, or holds callable, and a <code>call</code> line naming a bound
+        one, are logged as the server starts, as each tenant opens and
+        after a <code>drop</code>, and grant nothing.
+        <code>/_whoami</code> lists what a token may wake as
+        <code>wakes</code>.</li>
+    </ul></li>
   <li><b>List claims.</b> A claim that is a JSON array goes after
     <code>in</code>: <code>room in $jwt.rooms</code> matches the rooms it
     lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,

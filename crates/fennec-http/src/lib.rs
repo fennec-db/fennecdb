@@ -2013,6 +2013,9 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         Ok(who) => who,
         Err(deny) => return deny,
     };
+    // The runs of the statements bound to a scoped token's writes, charged
+    // to its `--call-rate` as they wake, whichever way the write came.
+    let _runs = calls::charging(cfg.call_rate, &who, db);
 
     // A preflight request never reaches the database.
     if req.method == Method::Options {
@@ -2195,13 +2198,14 @@ fn rest_run(
     })
     .map(|r| shown(shows, mask, &guard, r));
     drop(running);
+    let bound = bound_by(who, &guard, result.is_err());
     let answer = |result: &fennec_core::error::Result<fennec_core::prelude::Response>| match result
     {
         Ok(resp) => {
             statements::rows(counted(resp));
             api::render(resp, shape, fennec_core::VERSION)
         }
-        Err(e) => error_response(e),
+        Err(e) => told_response(e, bound.as_ref()),
     };
     // A key keeps the answer, so it is made under the lock; without
     // one, after it, as before.
@@ -2690,6 +2694,8 @@ fn run_query(
     let mut seq = None;
     // A read's `ETag` ([`etag`]).
     let mut tagged = None;
+    // The statement bound to a write that refused it ([`bound_by`]).
+    let mut bound = None;
     let result = if stmt.is_read_only() {
         // A long read is pinned under the read lock and run with none held
         // ([`Database::pin`]), so a writer waits for the pin rather than
@@ -2889,6 +2895,7 @@ fn run_query(
             }
         }
         noted_call(&guard, &stmt);
+        bound = bound_by(who, &guard, r.is_err());
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
         }
@@ -2925,7 +2932,7 @@ fn run_query(
                 false => out,
             }
         }
-        Err(e) => error_response(&e),
+        Err(e) => told_response(&e, bound.as_ref()),
     };
     timing::lap(timing::Phase::Render);
     resp
@@ -3508,6 +3515,19 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
 /// `quota: <kind>: <why>` as the engine's error says it.
 fn batch_stop(stop: api::Stop, completed: usize, at: usize) -> Response {
     let status = stop.0;
+    // A write's runs past `--call-rate`: when to send the batch again, in
+    // the body too, as every wait the server names is.
+    if status == 429 {
+        let wait = calls::wait_of(&stop.1);
+        let mut out = String::from("{\"error\":");
+        fennec_core::json::escape_into(&mut out, &stop.1);
+        out.push_str(&format!(
+            ",\"completed\":{completed},\"at\":{at},\"retry_after\":{wait}}}"
+        ));
+        return Response::json(429, out)
+            .versioned(fennec_core::VERSION)
+            .header("Retry-After", &wait.to_string());
+    }
     let Some((kind, text)) = stop.1.strip_prefix("quota: ").and_then(quota::split) else {
         return api::render_batch_stop(stop, completed, at, fennec_core::VERSION);
     };
@@ -3873,15 +3893,75 @@ fn error_response(e: &Error) -> Response {
         // A quota's refusal names the quota (`quota::limit`).
         Error::Quota(m) => return quota::engine_refusal(m),
     };
+    let status = api::status_of(e);
+    if status == 429 {
+        return Response::retry_after(429, msg, calls::wait_of(msg));
+    }
     // A `require` that said why: `{"error": ..., "reason": ...}`.
     let Some(reason) = e.reason() else {
-        return Response::error(api::status_of(e), msg);
+        return Response::error(status, msg);
     };
     let mut body = String::from("{\"error\":");
     fennec_core::json::escape_into(&mut body, msg);
     api::reason_into(&mut body, Some(reason));
     body.push('}');
+    Response::json(status, body)
+}
+
+/// The statement bound to a write of the server's token that refused it,
+/// read under the lock the write ran under (`Database::woken`): its name
+/// and the words its refusal is told after
+/// (`docs/design/named-statements.md`, *When a binding refuses*). `None`
+/// for a write that succeeded, one no binding refused, and every scoped
+/// token's, which is told no name (`access::told_bound`).
+fn bound_by(who: &Who, db: &Database, failed: bool) -> Option<(String, String)> {
+    if !failed || who.scope().is_some() {
+        return None;
+    }
+    let name = db.woken()?;
+    let (c, events) = db.statements().get(name)?.after.clone()?;
+    let words = format!(
+        "bound statement `{name}`, after `{}` on `{c}`, refused this write: ",
+        fennec_core::named::Binding::events_named(events)
+    );
+    Some((name.to_string(), words))
+}
+
+/// [`error_response`], or, where a statement bound to the write refused it
+/// ([`bound_by`]), the engine's words after the binding's, and `binding`
+/// beside them for the server's token to tell which.
+fn told_response(e: &Error, bound: Option<&(String, String)>) -> Response {
+    let Some((name, words)) = bound else {
+        return error_response(e);
+    };
+    let Some(msg) = message_of(e) else {
+        return error_response(e);
+    };
+    let mut body = String::from("{\"error\":");
+    fennec_core::json::escape_into(&mut body, &format!("{words}{msg}"));
+    body.push_str(",\"binding\":");
+    fennec_core::json::escape_into(&mut body, name);
+    api::reason_into(&mut body, e.reason());
+    body.push('}');
     Response::json(api::status_of(e), body)
+}
+
+/// An error's own words, but a quota's, which its own answer tells.
+fn message_of(e: &Error) -> Option<&str> {
+    match e {
+        Error::Quota(_) => None,
+        Error::NotFound(m)
+        | Error::Exists(m)
+        | Error::Duplicate(m)
+        | Error::Type(m)
+        | Error::Query(m)
+        | Error::Corrupt(m)
+        | Error::Io(m)
+        | Error::Plugin(m)
+        | Error::ReadOnly(m)
+        | Error::Denied(m)
+        | Error::Unmet(m) => Some(m),
+    }
 }
 
 /// Whether `--http-cors` lets `req`'s origin in ([`cors::allows`]).

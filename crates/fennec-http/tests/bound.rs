@@ -1,14 +1,20 @@
 //! Write-bound statements over HTTP (`docs/design/named-statements.md`,
-//! F2's slice 3): the server's token defines one and every way it writes
-//! wakes it -- `/query`, `/batch`, a call's body -- in the block of the
-//! write; a scoped token's write or call that would wake one is refused
-//! (403) before the binding runs, nothing landed, until a policy's lines
-//! grant it (slice 4), while its writes waking none land as ever;
-//! `--max-memory` holds a `del` by the rows its binding inserts; and no
-//! statement is bound to the database's own collections or writes one.
+//! F2's slices 3 and 4): the server's token defines one and every way it
+//! writes wakes it -- `/query`, `/batch`, a call's body -- in the block of
+//! the write. A scoped token wakes one only where a policy's `wake` line
+//! grants it, at every way in -- `/query`, `/batch`, `/_call`, MCP's
+//! `write`, an `Idempotency-Key` write, a held write -- the binding's
+//! writes its text's authority, never the token's rules; one not granted,
+//! or one updating or deleting in an `append-only` collection, is refused
+//! (403) before it runs, nothing landed, and its runs are charged to
+//! `--call-rate`. A binding's refusal is told the token with its status
+//! and `reason` alone, the server's token with its name. `--max-memory`
+//! holds a `del` by the rows its binding inserts; and no statement is
+//! bound to the database's own collections or writes one.
 
 use fennec_core::prelude::*;
 use fennec_http::access::Access;
+use fennec_http::mcp::Options;
 use fennec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -17,19 +23,38 @@ use std::time::Duration;
 
 const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 const ROOT: &str = "root-token";
+/// No `wake` line: a customer's write waking a binding is refused.
 const POLICY: &str = "orders  read,insert,update(status)  where by = $jwt.sub  for customer
 ledger  read  for customer
-pay, open  call  for customer
+notes  read,insert,delete  for customer
+tally  append-only
+pay, open, unnote, paid  call  for customer
 ";
-const SCHEMA: [&str; 7] = [
+/// The same, with each binding's waking granted to a customer -- and
+/// nothing on `ledger` or `tally` but what it had.
+const GRANTED: &str = "orders  read,insert,update(status)  where by = $jwt.sub  for customer
+ledger  read  for customer
+notes  read,insert,delete  for customer
+tally  append-only
+pay, open, unnote, paid  call  for customer
+paid, voided, unnoted, untally  wake  for customer
+";
+const SCHEMA: [&str; 11] = [
     "create collection orders (status text, total int, by text)",
     "create collection ledger (o int, amount int)",
     "create collection notes (n int)",
+    "create collection tally (n int)",
     "create statement paid after set orders where new.status = 'paid' and old.status = 'open'
      as insert ledger {o: new.id, amount: new.total}",
+    "create statement voided after set orders where new.status = 'void' scans as begin
+       get ledger select o where o = new.id limit 1 require 1 else 'no ledger line';
+       insert ledger {o: new.id, amount: 0}
+     end",
     "create statement unnoted after del notes as insert ledger {o: old.n, amount: 0}",
+    "create statement untally after del notes scans as del tally where n = old.n",
     "create statement pay($id int) public as set orders {status: 'paid'} where id = $id",
     "create statement open($n int) public as insert orders {status: 'open', total: $n, by: 'x'}",
+    "create statement unnote($n int) public scans as del notes where n = $n",
 ];
 
 struct Node {
@@ -43,6 +68,10 @@ fn serve(db: &Arc<RwLock<Database>>, access: &Arc<Access>, tune: impl FnOnce(&mu
         token: Some(ROOT.into()),
         access: Some(Arc::clone(access)),
         call_rate: 0,
+        mcp: Some(Arc::new(Options {
+            write: true,
+            ..Options::default()
+        })),
         ..Config::default()
     };
     tune(&mut cfg);
@@ -62,21 +91,48 @@ fn line(q: &str) -> String {
     body
 }
 
+/// An answer: its status, head and body.
+struct Answer {
+    status: u16,
+    head: String,
+    body: String,
+}
+
 impl Node {
-    fn post(&self, token: &str, target: &str, body: &str) -> (u16, String) {
+    fn request(
+        &self,
+        method: &str,
+        token: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Answer {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let extra: String = headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}\r\n"))
+            .collect();
         write!(
             s,
-            "POST {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{extra}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
         .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
-        let body = out.split_once("\r\n\r\n").map_or("", |(_, b)| b);
-        (out[9..12].parse().unwrap(), body.to_string())
+        let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+        Answer {
+            status: out[9..12].parse().unwrap(),
+            head: head.to_ascii_lowercase(),
+            body: body.to_string(),
+        }
+    }
+
+    fn post(&self, token: &str, target: &str, body: &str) -> (u16, String) {
+        let a = self.request("POST", token, target, &[], body);
+        (a.status, a.body)
     }
 
     fn query(&self, token: &str, q: &str) -> (u16, String) {
@@ -89,6 +145,38 @@ impl Node {
         body
     }
 
+    /// MCP's `write` tool, as a model calls it: whether it answered an
+    /// error, and what.
+    fn mcp_write(&self, token: &str, statement: &str) -> (bool, String) {
+        let mut args = String::from("{\"statement\":");
+        fennec_core::json::escape_into(&mut args, statement);
+        args.push('}');
+        let a = self.mcp(
+            token,
+            "tools/call",
+            &format!(r#"{{"name":"write","arguments":{args}}}"#),
+        );
+        assert_eq!(a.status, 200, "{}", a.body);
+        (a.body.contains(r#""isError":true"#), a.body)
+    }
+
+    fn mcp(&self, token: &str, method: &str, params: &str) -> Answer {
+        const MODERN: &str = "2026-07-28";
+        let meta = format!(
+            r#""_meta":{{"io.modelcontextprotocol/protocolVersion":"{MODERN}","io.modelcontextprotocol/clientCapabilities":{{}},"io.modelcontextprotocol/clientInfo":{{"name":"test","version":"1"}}}}"#
+        );
+        let params = match params.trim() {
+            "{}" => format!("{{{meta}}}"),
+            p => format!("{},{meta}}}", &p[..p.len() - 1]),
+        };
+        let body = format!(r#"{{"jsonrpc":"2.0","id":7,"method":"{method}","params":{params}}}"#);
+        let mut headers = vec![("MCP-Protocol-Version", MODERN), ("Mcp-Method", method)];
+        if method == "tools/call" {
+            headers.push(("Mcp-Name", "write"));
+        }
+        self.request("POST", token, "/_mcp", &headers, &body)
+    }
+
     fn customer(&self, sub: &str) -> String {
         let claims = format!(r#"{{"sub":"{sub}","role":"customer"}}"#);
         self.access.mint(&claims).unwrap()
@@ -96,8 +184,14 @@ impl Node {
 }
 
 fn start(tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock<Database>>) {
+    start_with(POLICY, tune)
+}
+
+/// A server under `policy`: the schema above, and orders 1, 2 and 4 to 10
+/// a customer `u0`'s, 3 `u1`'s, each open and of ten times its id.
+fn start_with(policy: &str, tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock<Database>>) {
     fennec_http::audit::set_delay(0);
-    let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let db = Arc::new(RwLock::new(Database::new()));
     let node = Node {
         port: serve(&db, &access, |_| {}),
@@ -106,7 +200,9 @@ fn start(tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock<Database>>) {
     for s in SCHEMA {
         node.ok(ROOT, s);
     }
-    for (by, total) in [("u0", 10), ("u0", 20), ("u1", 30), ("u0", 40)] {
+    for id in 1..=10 {
+        let by = if id == 3 { "u1" } else { "u0" };
+        let total = id * 10;
         node.ok(
             ROOT,
             &format!("put orders {{status: 'open', total: {total}, by: '{by}'}}"),
@@ -119,17 +215,87 @@ fn start(tune: impl FnOnce(&mut Config)) -> (Node, Arc<RwLock<Database>>) {
     (tuned, db)
 }
 
-fn ledger(db: &Arc<RwLock<Database>>) -> Vec<Vec<Value>> {
-    let q = fennec_ql::parse_one("get ledger select o, amount order id").unwrap();
+fn rows(db: &Arc<RwLock<Database>>, q: &str) -> Vec<Vec<Value>> {
+    let q = fennec_ql::parse_one(q).unwrap();
     match db.read().unwrap().query(&q, &[]).unwrap() {
         Response::Rows(rs) => rs.rows.into_iter().map(|r| r.values).collect(),
         other => panic!("{other:?}"),
     }
 }
 
+fn ledger(db: &Arc<RwLock<Database>>) -> Vec<Vec<Value>> {
+    rows(db, "get ledger select o, amount order id")
+}
+
 fn line_of(o: i64, amount: i64) -> Vec<Value> {
     vec![Value::Int(o), Value::Int(amount)]
 }
+
+/// The orders still open, by id.
+fn open(db: &Arc<RwLock<Database>>) -> Vec<i64> {
+    let ids = rows(db, "get orders select id where status = 'open' order id");
+    ids.iter()
+        .map(|r| match r[0] {
+            Value::Int(i) => i,
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+/// Each way a scoped token writes paying order `id`, granted or not: a
+/// write passing `paid`'s condition, its answer's status and body.
+fn pay_by(node: &Node, token: &str, way: &str, id: i64) -> (u16, String) {
+    let q = format!("set orders {{status: 'paid'}} where id = {id}");
+    match way {
+        "/query" => node.query(token, &q),
+        "/batch" => node.post(
+            token,
+            "/batch",
+            &[line(&q), line("get ledger count")].join("\n"),
+        ),
+        "/_call" => node.post(
+            token,
+            "/_call/pay",
+            &format!(r#"{{"params":{{"id":{id}}}}}"#),
+        ),
+        "mcp" => match node.mcp_write(token, &q) {
+            (true, body) if body.contains("403") || body.contains("would wake") => (403, body),
+            (true, body) => (500, body),
+            (false, body) => (200, body),
+        },
+        "key" => {
+            let key = format!("pay-{id}");
+            let a = node.request(
+                "POST",
+                token,
+                "/query",
+                &[("Idempotency-Key", &key)],
+                &line(&q),
+            );
+            (a.status, a.body)
+        }
+        "wait" => {
+            let a = node.request(
+                "POST",
+                token,
+                "/query",
+                &[("Fennec-Wait", "2000")],
+                &line(&q),
+            );
+            (a.status, a.body)
+        }
+        _ => unreachable!(),
+    }
+}
+
+const WAYS: [(&str, i64); 6] = [
+    ("/query", 1),
+    ("/batch", 2),
+    ("/_call", 4),
+    ("mcp", 5),
+    ("key", 6),
+    ("wait", 7),
+];
 
 #[test]
 fn the_server_s_token_wakes_a_binding_at_every_way_in() {
@@ -159,41 +325,201 @@ fn the_server_s_token_wakes_a_binding_at_every_way_in() {
     assert_eq!(ledger(&db).len(), 3);
 }
 
+/// A customer granted `paid wake`, and nothing on `ledger`, pays an order
+/// at every way in: the line its binding writes lands with the write, no
+/// rule of the customer's judging it.
 #[test]
-fn a_scoped_write_waking_a_binding_is_refused_until_a_grant() {
+fn a_granted_scoped_write_wakes_its_binding_at_every_way_in() {
+    let (node, db) = start_with(GRANTED, |_| {});
+    let u0 = node.customer("u0");
+    for (way, id) in WAYS {
+        let (status, body) = pay_by(&node, &u0, way, id);
+        assert_eq!(status, 200, "{way}: {body}");
+    }
+    let expected: Vec<_> = WAYS.iter().map(|&(_, id)| line_of(id, id * 10)).collect();
+    assert_eq!(ledger(&db), expected);
+    // A keyed write sent again is answered as the first time, and wakes
+    // nothing again.
+    let (status, body) = pay_by(&node, &u0, "key", 6);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ledger(&db).len(), WAYS.len());
+    // The customer's own write to `ledger` is still refused: the binding's
+    // authority is its text's, never lent to its writer.
+    let (status, body) = node.query(&u0, "insert ledger {o: 99, amount: 1}");
+    assert_eq!(status, 403, "{body}");
+    // Its rules still judge its own write: an order of another's is none
+    // it may pay, and wakes nothing.
+    let (status, body) = node.query(&u0, "set orders {status: 'paid'} where id = 3 require 1");
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(ledger(&db).len(), WAYS.len());
+}
+
+/// No `wake` line: each way in refused (403) before the binding runs,
+/// nothing landed, no binding named; writes waking none land as ever.
+#[test]
+fn an_ungranted_scoped_write_is_refused_at_every_way_in() {
     let (node, db) = start(|_| {});
     let u0 = node.customer("u0");
-    // Its write passing the condition: refused before the binding runs,
-    // nothing landed, no binding named.
-    let (status, body) = node.query(&u0, "set orders {status: 'paid'} where id = 1");
-    assert_eq!(status, 403, "{body}");
-    assert!(
-        body.contains("would wake a statement bound to it"),
-        "{body}"
-    );
-    assert!(!body.contains("paid`"), "no name told: {body}");
+    for (way, id) in WAYS {
+        let (status, body) = pay_by(&node, &u0, way, id);
+        assert_eq!(status, 403, "{way}: {body}");
+        assert!(!body.contains("paid`"), "{way}: no name told: {body}");
+    }
     assert!(ledger(&db).is_empty());
-    let status_of = |id: i64| node.ok(ROOT, &format!("get orders select status where id = {id}"));
-    assert!(status_of(1).contains("open"), "{}", status_of(1));
+    assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
+    // A refused keyed write keeps no key: granted later, it would run.
+    let (status, body) = node.query(ROOT, "get _idempotency count");
+    assert_eq!(status, 404, "no key was ever kept: {body}");
     // Its writes waking none land as ever: a row the condition does not
     // pass, and a row made, which nothing is bound to.
-    node.ok(&u0, "set orders {status: 'held'} where id = 2");
+    node.ok(&u0, "set orders {status: 'held'} where id = 8");
     node.ok(&u0, "insert orders {status: 'open', total: 5, by: 'u0'}");
-    assert!(ledger(&db).is_empty());
-    // A call whose body may wake one: refused before the body runs, by
-    // what its text writes; one whose body wakes none runs.
-    let (status, body) = node.query(&u0, "call pay(4)");
-    assert_eq!(status, 403, "{body}");
-    assert!(status_of(4).contains("open"), "{}", status_of(4));
     node.ok(&u0, "call open(7)");
+    assert!(ledger(&db).is_empty());
     // The server's token's same write lands, the line with it.
     node.ok(ROOT, "set orders {status: 'paid'} where id = 1");
     assert_eq!(ledger(&db), [line_of(1, 10)]);
 }
 
+/// A binding updating or deleting in an `append-only` collection is
+/// refused a scoped token's write, granted or not, and a call whose body
+/// may wake it before the body runs; the server's token's write lands.
+#[test]
+fn a_binding_reaching_an_append_only_collection_is_refused_a_scoped_write() {
+    let (node, db) = start_with(GRANTED, |_| {});
+    let u0 = node.customer("u0");
+    node.ok(ROOT, "insert tally {n: 1}");
+    node.ok(&u0, "insert notes {n: 1}");
+    let (status, body) = node.query(&u0, "del notes where n = 1");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("append-only"), "{body}");
+    assert!(!body.contains("untally"), "{body}");
+    let (status, body) = node.query(&u0, "call unnote(1)");
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(rows(&db, "get notes select n").len(), 1);
+    assert!(ledger(&db).is_empty());
+    node.ok(ROOT, "del notes where n = 1");
+    assert!(rows(&db, "get tally select n").is_empty());
+    assert_eq!(ledger(&db), [line_of(1, 0)]);
+}
+
+/// A granted call wakes what its body writes; an ungranted one is refused
+/// before its body runs (403), and a bound statement is called by none --
+/// to a scoped token the 404 a missing one is, though a `call` line names
+/// it, to the server's a 400 saying why -- and is no MCP tool.
+#[test]
+fn a_call_is_judged_by_what_its_body_may_wake() {
+    let (granted, db) = start_with(GRANTED, |_| {});
+    let u0 = granted.customer("u0");
+    granted.ok(&u0, "call pay(4)");
+    assert_eq!(ledger(&db), [line_of(4, 40)]);
+    let (status, body) = granted.query(&u0, "call paid");
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("statement `paid`"), "{body}");
+    assert!(!body.contains("bound"), "{body}");
+    let (status, body) = granted.query(ROOT, "call paid");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("bound after"), "{body}");
+    let tools = granted.mcp(&u0, "tools/list", "{}");
+    assert_eq!(tools.status, 200, "{}", tools.body);
+    assert!(tools.body.contains("call_pay"), "{}", tools.body);
+    assert!(!tools.body.contains("call_paid"), "{}", tools.body);
+
+    let (refused, db) = start(|_| {});
+    let u0 = refused.customer("u0");
+    let (status, body) = refused.query(&u0, "call pay(4)");
+    assert_eq!(status, 403, "{body}");
+    assert!(!body.contains("paid`"), "{body}");
+    assert!(ledger(&db).is_empty());
+    assert!(open(&db).contains(&4));
+}
+
+/// A binding's refusal is its writer's: the block put back whole, a
+/// scoped writer told its status and the guard's `reason` alone, never the
+/// binding's name or the engine's words; the server's token both.
+#[test]
+fn a_binding_s_refusal_is_told_the_writer_as_its_token_may_know_it() {
+    let (node, db) = start_with(GRANTED, |_| {});
+    let u0 = node.customer("u0");
+    let q = "set orders {status: 'void'} where id = 1";
+    let (status, body) = node.query(&u0, q);
+    assert_eq!(status, 412, "{body}");
+    assert!(body.contains(r#""reason":"no ledger line""#), "{body}");
+    assert!(body.contains("a write bound to it refused it"), "{body}");
+    assert!(
+        !body.contains("voided") && !body.contains("get ledger"),
+        "{body}"
+    );
+    let (status, body) = node.post(
+        &u0,
+        "/batch",
+        &[line("get orders count"), line(q)].join("\n"),
+    );
+    assert_eq!(status, 412, "{body}");
+    assert!(body.contains(r#""at":1"#), "{body}");
+    assert!(body.contains(r#""reason":"no ledger line""#), "{body}");
+    assert!(!body.contains("voided"), "{body}");
+    assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
+    let (status, body) = node.query(ROOT, q);
+    assert_eq!(status, 412, "{body}");
+    assert!(body.contains(r#""binding":"voided""#), "{body}");
+    assert!(
+        body.contains("bound statement `voided`, after `set` on `orders`, refused this write:"),
+        "{body}"
+    );
+    assert!(body.contains(r#""reason":"no ledger line""#), "{body}");
+    assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
+}
+
+/// A scoped writer's runs are charged to its `--call-rate`: past the
+/// bucket 429 with when to come back, its block put back; more runs than
+/// a full bucket holds 400, never told to come back; a write waking none
+/// charged nothing, and the server's token unheld.
+#[test]
+fn a_scoped_writer_s_runs_are_charged_to_its_call_rate() {
+    let (node, db) = start_with(GRANTED, |c| c.call_rate = 1);
+    let u0 = node.customer("u0");
+    node.ok(&u0, "set orders {status: 'paid'} where id = 1");
+    // The bucket is empty for the second that follows.
+    let q = line("set orders {status: 'paid'} where id = 2");
+    let a = node.request("POST", &u0, "/query", &[], &q);
+    assert_eq!(a.status, 429, "{}", a.body);
+    assert!(a.head.contains("retry-after: 1"), "{}", a.head);
+    assert!(a.body.contains(r#""retry_after":1"#), "{}", a.body);
+    assert!(a.body.contains("--call-rate"), "{}", a.body);
+    assert_eq!(ledger(&db), [line_of(1, 10)]);
+    // More runs than a full bucket holds: never let through.
+    let (status, body) = node.query(&u0, "set orders {status: 'paid'} where id = 4 or id = 5");
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("--call-rate") && body.contains("never"),
+        "{body}"
+    );
+    // A write waking none is charged nothing.
+    node.ok(&u0, "set orders {status: 'held'} where id = 6");
+    // The server's token is unheld.
+    node.ok(ROOT, "set orders {status: 'paid'} where status = 'open'");
+    assert_eq!(ledger(&db).len(), 9);
+}
+
+/// `/_whoami` lists the bindings a token's writes may wake.
+#[test]
+fn whoami_lists_a_token_s_wakes() {
+    let (node, _db) = start_with(GRANTED, |_| {});
+    let u0 = node.customer("u0");
+    let a = node.request("GET", &u0, "/_whoami", &[], "");
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert!(
+        a.body
+            .contains(r#""wakes":["paid","voided","unnoted","untally"]"#),
+        "{}",
+        a.body
+    );
+}
+
 /// The database's own collections are written beside a client's write --
 /// a scoped token's `Idempotency-Key` row outside `within()`, where no
-/// hook refuses its wake -- so no statement is bound to one or writes one.
+/// hook judges its wake -- so no statement is bound to one or writes one.
 #[test]
 fn no_statement_is_bound_to_the_database_s_own_collections() {
     let (node, db) = start(|_| {});

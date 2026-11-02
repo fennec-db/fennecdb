@@ -1273,7 +1273,9 @@ pub(super) fn callable(ctx: &Ctx, name: &str) -> Option<bool> {
 /// call runs under: whether it writes is asked again there
 /// ([`super::open`], `read_call`).
 fn callable_stored(ctx: &Ctx, s: &fennec_core::engine::Stored) -> Option<bool> {
-    let def = s.tree.as_ref().filter(|_| s.broken.is_none())?;
+    // A statement bound to writes is called by none: no tool, whatever a
+    // `call` line names.
+    let def = (s.tree.as_ref()).filter(|_| s.broken.is_none() && s.after.is_none())?;
     let granted = match ctx.who.scope() {
         Some(scope) => {
             scope.may_call(&s.name) && fennec_core::engine::claims_carried(def, scope.claims())

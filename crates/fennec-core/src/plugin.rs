@@ -10,6 +10,7 @@
 //! collection with it.
 
 use crate::error::{Error, Result};
+use crate::query::Statement;
 use crate::schema::Schema;
 use crate::value::{Document, Value};
 use std::sync::Arc;
@@ -83,13 +84,27 @@ pub trait Hook: Send + Sync {
     }
     /// Called once a statement's rows are written, before the first run
     /// of a statement bound to its writes that `rows` of them woke, named
-    /// `binding` (`docs/design/named-statements.md`, *A binding's
-    /// authority*): where a policy meets a binding. Returning `Err` refuses
-    /// the write, whose block is put back, and no binding runs: a binding
-    /// never skips. fennec-http's `access` refuses every scoped token's
-    /// write here until a policy's lines grant one.
-    fn waking(&self, _binding: &str, _rows: usize) -> Result<()> {
+    /// `binding`, whose statements are `body`: each binding the statement
+    /// woke, in name order, before any of them runs
+    /// (`docs/design/named-statements.md`, *A binding's authority*). Where
+    /// a policy meets a binding, the writer's own judgment still in place.
+    /// Returning `Err` refuses the write, whose block is put back, and no
+    /// binding runs: a binding never skips. fennec-http's `access` refuses
+    /// a scoped token's write waking one its policy's `wake` lines do not
+    /// grant it, or one whose body updates or deletes in an `append-only`
+    /// collection, and charges its runs to `--call-rate`.
+    fn waking(&self, _binding: &str, _rows: usize, _body: &[Statement]) -> Result<()> {
         Ok(())
+    }
+    /// Whether the hook judges whoever wrote rather than what was written
+    /// -- fennec-http's `Check`, a scoped token's rules -- so that a
+    /// binding's writes, its text's authority and never its writer's, pass
+    /// over it once [`Self::waking`] let them run. Asked once, as the hook
+    /// is registered, as a `rewrites` might be: a binding's statements run
+    /// over the hooks that do not (`Registry::swap_beside`), a list swapped
+    /// in and back around the runs, never a flag every write asks.
+    fn writer_only(&self) -> bool {
+        false
     }
 }
 
@@ -110,6 +125,11 @@ pub struct Registry {
     /// scan took 158 -> 160 ns a row.
     functions: Vec<Entry>,
     hooks: Vec<Arc<dyn Hook>>,
+    /// The hooks a binding's writes meet: every one but those judging
+    /// their writer ([`Hook::writer_only`]), swapped into `hooks`' place
+    /// while a binding runs ([`Self::swap_beside`]).
+    #[cfg(feature = "statements")]
+    beside: Vec<Arc<dyn Hook>>,
     plugins: Vec<(String, String)>,
 }
 
@@ -142,7 +162,21 @@ impl Registry {
     }
 
     pub fn register_hook(&mut self, h: Arc<dyn Hook>) {
+        #[cfg(feature = "statements")]
+        if !h.writer_only() {
+            self.beside.push(Arc::clone(&h));
+        }
         self.hooks.push(h);
+    }
+
+    /// The hooks a binding's writes meet put in the place of every hook,
+    /// or, asked again, put back: around a binding's runs
+    /// (`engine/bound.rs`), which pass over a hook judging its writer
+    /// ([`Hook::writer_only`]). Two vectors swapped, so a write that wakes
+    /// nothing asks nothing more of a hook than it did.
+    #[cfg(feature = "statements")]
+    pub(crate) fn swap_beside(&mut self) {
+        std::mem::swap(&mut self.hooks, &mut self.beside);
     }
 
     pub fn function(&self, name: &str) -> Option<&Arc<dyn ScalarFn>> {
