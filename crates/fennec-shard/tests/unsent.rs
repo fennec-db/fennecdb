@@ -46,12 +46,19 @@ fn serve(router: std::sync::Arc<Router>) -> String {
     front
 }
 
-/// An address nothing listens on: its connect is refused.
-fn refusing() -> String {
-    let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = gone.local_addr().unwrap().to_string();
-    drop(gone);
-    addr
+/// An address nothing listens on: its connect is refused. Port 1, which no
+/// test's server takes, as `cors.rs`'s `dead_addr`: a port the system
+/// picked and that was let go of was the next listener's to take -- Linux
+/// hands one out at random, and a binary's tests run side by side -- and
+/// the relay to a region whose routers refuse it reached another test's
+/// router, which answered its own 503 naming its node (once in 300 runs of
+/// `unsent::`, Docker's Linux, three cores beside six busy loops). A node
+/// let go of after it answered keeps its port while the connection it
+/// accepted is open or closing, which Linux's `bind` to port 0 passes
+/// over, and macOS hands its ports out in turn
+/// (`docs/design/conventions.md`, *Ports*).
+pub(crate) fn refusing() -> String {
+    "127.0.0.1:1".into()
 }
 
 /// A listener that answers no connect, as a machine gone does: its queue
