@@ -1,6 +1,6 @@
 # Quotas and retries
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Quotas and retries*: a tenant's quotas, how the sync meets them, and the wait every 503 names. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Quotas and retries*: a tenant's quotas, how the sync meets them, and the wait every 503 names. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Tenant quotas
 

@@ -1,6 +1,6 @@
 # Read replicas
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Read replicas*: a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-shard/CLAUDE.md](../../crates/fennec-shard/CLAUDE.md) lists under *Read replicas*: a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Marked reads
 

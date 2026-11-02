@@ -1,0 +1,115 @@
+# CLAUDE.md
+
+FennecQL's invariants -- SQL's spellings and joins, parameters, inner `get`s, `alter`, json paths, the shell, declared schemas and named statements -- for code in `crates/fennec-ql/` and the statements fennec-core runs for it. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+
+## Invariants
+
+### FennecQL and schemas
+
+**[SQL's spellings are FennecQL, read by the one
+parser](../../docs/design/fennecql.md#sql-spellings)** into the same statements:
+no mode, no second front end, no pg wire. What has no FennecQL meaning is
+refused naming the FennecQL to write, without consuming its word; `"name"`
+where SQL reads a column (`Parser::quoted`) and a regex-like `~`
+(`regex_like`) are refused, `<>` stays `!=`.
+
+**[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
+the other's rows a filter](../../docs/design/fennecql.md#sql-joins-subqueries-and-schema)**
+(`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
+rendered by `ResultSet::answered` after a token's masks; a join that would
+answer otherwise is refused. Every table it names is held to a token's read
+rules (`Scope::select`) and every name to its table's fields (`Flat::names`,
+a `*`'s to what the rules show, `Flat::shown`), read or not; a join found by
+`id` whose list passes 100 000 values is read as the `lookup`'s probe
+(`Flat::probe`, `Select::probed`). `create table` maps types by
+`fennec_ql::sqltypes`, as `fennec import` does; pgvector's `<->` is `near`
+held to the index's metric (`Near::metric`); SQL's `order by 1` names the
+list's first item.
+
+**[`limit`, `offset` and `top` take a parameter, read where the plan reads
+them](../../docs/design/fennecql.md#count-parameters)** (`Count::at`); a value is
+refused as its literal is (`Select::check_counts`).
+
+**[`in (get ...)` is answered before the query, as the list it
+is.](../../docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
+`Expr::In` in its place on every path, so `eval` never meets one.
+[`in $n`](../../docs/design/fennecql.md#list-parameters) is its list written
+out (`Expr::in_list`), held to it before the plan (`Statement::lists_held`)
+and read exactly (`Database::exactly`).
+
+**[`alter collection` rewrites no document; positions are not
+places.](../../docs/design/fennecql.md#alter-collection)** A drop keeps its place
+until `compact`; `read_fields` takes places (`Schema::place`), never
+positions, and wherever the schema changes the store is told its dropped
+places (`Store::set_dropped`).
+
+**[A `json` field holds any value, and a path is a
+name.](../../docs/design/fennecql.md#json-fields-and-paths)** A field name holds
+no dot, so a path is an `Expr::Field`; a list of numbers read with no
+schema is `f32`s, so `Database::exactly` must walk every place a statement
+holds a value.
+
+**[The shell runs a statement once nothing after it can go on with
+it](../../docs/design/fennecql.md#the-shell)** (`fennec_ql::reading`). A new
+statement form or lexer syntax owes a place in fennec-cli's `kind`, a mark in
+`Parser::cut` wherever the text's end decides a reading the parser
+backtracks over, `lexer::Unclosed` taught any new string, comment or
+bracket, and a line in `a_statement_written_over_lines_reads_as_one`'s
+corpus.
+
+**[A schema declared in code is checked at every open, in the
+engine.](../../docs/design/fennecql.md#declared-schemas)** `declared::plan`
+plans additions alone, never guessing a rename; `make schema-golden`
+writes `integrations/schema-golden.json`.
+
+**[Named statements are records of their database, called with their own
+text's authority.](../../docs/design/named-statements.md#what-is-built)**
+`create statement`, `drop statement` and `call` parse into
+`fennec_core::named`'s trees, boxed so a `Statement` stays a `get`'s size.
+A definition is record kind 13 (`engine/stored.rs`), one write `writes_in`
+counts, alone or in a block (`Undo::Statements`), kept by every image,
+`Beside` and build, applied by a replica and passed over by `/_changes`.
+With the feature an open reads its text back (`fennec_ql::install`) and
+holds its digest. A schema change's commit holds its `depends`: refused
+naming it, or marked broken (`Database::internally`, an apply, an open),
+never failing; the mark is derived, never stored. A replacement keeps the
+old tree's contract; a writing body reads through an index or says `scans`
+(`body_checked`). Whether a call writes is asked under the lock it then
+runs under, never of its statement or apart (`call_reads`,
+`Database::reads`): a writing body runs in its caller's block under the
+write lock (`Database::call`), a reading one over `&Database` (`read_call`,
+pinned by `pin_call`), refusing a write and taking no write lock, block or
+counter, so replicas, read-only servers, marked reads and cross-tenant
+queries answer it. A call is judged statement, claims, arguments, `check`,
+broken (`callee`), answers its last statement and is put back past
+`--call-max-rows`, its rows its thread's (`call::LEFT`). A scoped token
+calls what a `call` line grants (else a missing one's 404; `* call`
+refused), as itself (`as` 403), alone in its `/batch`, held to
+`--call-rate`; `judge_call` holds the body to `append-only` under the lock,
+and `run_as`, the one statement so, runs it outside `within()`, unmasked,
+its refusals told (`told_call`). `POST /_call/<name>` is `call <name> $1`
+run as `/query` runs it: a writing one meets a read-only server's 403 after
+its judgment (at `/batch` too), a freeze's or lapsed lease's refusal before
+it unless this copy reads it. A call is counted, logged and traced as that
+shape (`db.stored_procedure.name`), the router's route `call`, never its
+name. A sync replica refuses them (`NAMED`); the router reads a tenant's
+with the grammar; readers upgrade before a primary defines one
+(RELEASING.md, `make upgrade-check`). `$name` is a definition's alone;
+`call` and `statements` reserve no word (`NAMED_COMMANDS`, never
+`COMMANDS`). The `statements` feature (fennec-core's, fennec-ql's) is
+outside `full`, named by the server, the shell and the native library; the
+module refuses in its own words, a definition's own path `#[cold]`.
+`Definition::canonical` writes a field only where it holds something, an
+operator by a byte of its own; reading a stored text otherwise raises
+`GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
+texts to main's trees.
+
+**[A write-bound statement's record binds its collection's
+writes.](../../docs/design/named-statements.md#write-bound-statements-f2)** Kind
+13 op 3, refused by a binary from before, holds collection and events
+outside the text, read into `Collection::bound`, a mask every change keeps
+(`Database::rebind`): an unbound collection pays one byte's look a writing
+statement. Until the engine runs one, a definition and each write it binds
+are refused (`BOUND_NOT_BUILT`, 409 where one is broken or unread); `@ttl`
+and `after del` refuse each other; a replacement keeps collection, events
+and kinds of write (a `put` makes and sets).

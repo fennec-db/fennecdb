@@ -1,6 +1,6 @@
 # Durability
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [the root CLAUDE.md](../../CLAUDE.md), [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Storage errors
 

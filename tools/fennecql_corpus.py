@@ -13,7 +13,7 @@ The texts are harvested from the files git tracks:
 - the docs' `<pre data-lang="fennecql">` and `"sql"` blocks, and every inline
   `<code>` that begins a statement (site/content);
 - Markdown's ```fennecql and ```sql blocks, and every inline code span that
-  begins a statement (docs/, README.md, CLAUDE.md, each integration's);
+  begins a statement (docs/, README.md, every CLAUDE.md, each integration's);
 - every string of the golden files and the sync's scenarios that begins a
   statement (integrations/*.json);
 - every string literal of the Rust, JS, TS, Python, Go, C#, Swift, Kotlin
