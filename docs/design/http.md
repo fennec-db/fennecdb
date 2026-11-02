@@ -1000,9 +1000,9 @@ A read or a write on such a socket returns at once, what is left to read
 and then the end or the reset, so a timeout has nothing to bound there:
 `handshake_by`, `TlsStream::readable` and fennec-http's
 `conn::unless_gone` take EINVAL, ECONNRESET or ENOTCONN from setting one as
-set, and the next read tells the end. After it none of 40 failed; with a
-pause forced before the timeouts went back, each of 300 handshakes met the
-reset and each client's bytes were read.
+set, and the next read tells the end. After it none of 40 failed. A 2 ms
+pause forced before the timeouts went back failed the first handshake
+before the change; after it, all 300 clients' bytes were read.
 
 *A plain request to it* is looked at before rustls reads a byte: a peek at
 the first, 0x16 for a handshake's record, a capital letter for a method.
