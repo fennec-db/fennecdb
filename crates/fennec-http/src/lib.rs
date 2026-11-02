@@ -499,7 +499,15 @@ impl Server {
 /// It stands apart from `handle` because of the subscription path: that path
 /// produces no response and takes the connection over -- but it cannot skip
 /// authentication.
-fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Response> {
+/// The token `req` carries, checked. `db`, where the request runs in one
+/// (`handle`, MCP's endpoint), is what a scoped token's writes charge the
+/// runs of the statements bound to them to, beside `--call-rate`
+/// (`calls::Runs`): in the scope, made for this request alone.
+fn authenticate(
+    cfg: &Config,
+    req: &Request,
+    db: Option<&Arc<RwLock<Database>>>,
+) -> std::result::Result<Who, Response> {
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "));
@@ -521,8 +529,11 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             return match access.scope(given, now) {
-                Ok(scope) => {
+                Ok(mut scope) => {
                     audit::verified();
+                    if let Some(db) = db {
+                        scope.charge(calls::Runs::to(cfg.call_rate, db));
+                    }
                     Ok(Who::Scoped(Arc::new(scope)))
                 }
                 Err(why) => Err(refuse(why)),
@@ -549,7 +560,7 @@ fn whoami(cfg: &Config, req: &Request, node: &str, tenant: Option<&str>) -> Resp
     if !matches!(req.method, Method::Get | Method::Head) {
         return Response::error(405, "/_whoami is read with GET");
     }
-    let who = match authenticate(cfg, req) {
+    let who = match authenticate(cfg, req, None) {
         Ok(who) => who,
         Err(deny) => return deny,
     };
@@ -579,7 +590,7 @@ fn whoami(cfg: &Config, req: &Request, node: &str, tenant: Option<&str>) -> Resp
 /// reads the data there without a scope, or the admin token. A JWT's user
 /// is held to its rows, and the statements name every collection.
 fn full(cfg: &Config, req: &Request) -> bool {
-    matches!(authenticate(cfg, req), Ok(Who::Full)) || metrics::allowed(cfg, req, true)
+    matches!(authenticate(cfg, req, None), Ok(Who::Full)) || metrics::allowed(cfg, req, true)
 }
 
 /// The statement as `who` may run it, and in `mask` what its answer must
@@ -1031,7 +1042,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if req.segments().first() == Some(&"_changes") {
             let consumer = matches!(req.method, Method::Post | Method::Patch | Method::Delete)
                 && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
-            let resp = match (authenticate(cfg, &req), repl.and_then(|r| r.feed())) {
+            let resp = match (authenticate(cfg, &req, None), repl.and_then(|r| r.feed())) {
                 (Err(deny), _) => deny,
                 (Ok(Who::Scoped(_)), _) => {
                     Response::error(403, "a scoped token cannot read the change stream")
@@ -1098,7 +1109,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // connection over and never returns.
         if is_stream(&req) {
             trace::discard();
-            let who = match authenticate(cfg, &req) {
+            let who = match authenticate(cfg, &req, None) {
                 Ok(who) => who,
                 Err(deny) => {
                     audit::http(&req, deny.status, peer);
@@ -1607,7 +1618,7 @@ fn route_tenant(
                 .header("WWW-Authenticate", "Bearer"));
         }
         audit::verified();
-    } else if let Who::Scoped(scope) = authenticate(cfg, req)? {
+    } else if let Who::Scoped(scope) = authenticate(cfg, req, None)? {
         // A token is held to the tenant it names here, before the tenant
         // is looked up and once for every route below the prefix: the
         // statements, REST, `/batch`, subscriptions, `/_changes`,
@@ -1909,8 +1920,8 @@ fn called(req: &Request) -> Option<Option<&str>> {
 /// is 0.27 us a check from the verified cache, a wait up to 30 s.
 fn admitted(cfg: &Config, req: &Request) -> bool {
     match is_mcp(req) {
-        true => mcp::admit(cfg, req).is_ok(),
-        false => authenticate(cfg, req).is_ok(),
+        true => mcp::admit(cfg, req, None).is_ok(),
+        false => authenticate(cfg, req, None).is_ok(),
     }
 }
 
@@ -2009,13 +2020,12 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     if is_mcp(req) {
         return mcp::http(db, cfg, req);
     }
-    let who = match authenticate(cfg, req) {
+    // A scoped token's scope holds the database the runs of the statements
+    // bound to its writes are charged in (`calls::Runs`).
+    let who = match authenticate(cfg, req, Some(db)) {
         Ok(who) => who,
         Err(deny) => return deny,
     };
-    // The runs of the statements bound to a scoped token's writes, charged
-    // to its `--call-rate` as they wake, whichever way the write came.
-    let _runs = calls::charging(cfg.call_rate, &who, db);
 
     // A preflight request never reaches the database.
     if req.method == Method::Options {
@@ -2198,14 +2208,17 @@ fn rest_run(
     })
     .map(|r| shown(shows, mask, &guard, r));
     drop(running);
-    let bound = bound_by(who, &guard, result.is_err());
+    let bound = match result.is_err() {
+        true => bound_by(who, &guard),
+        false => None,
+    };
     let answer = |result: &fennec_core::error::Result<fennec_core::prelude::Response>| match result
     {
         Ok(resp) => {
             statements::rows(counted(resp));
             api::render(resp, shape, fennec_core::VERSION)
         }
-        Err(e) => told_response(e, bound.as_ref()),
+        Err(e) => told_response(e, bound.as_deref()),
     };
     // A key keeps the answer, so it is made under the lock; without
     // one, after it, as before.
@@ -2895,7 +2908,9 @@ fn run_query(
             }
         }
         noted_call(&guard, &stmt);
-        bound = bound_by(who, &guard, r.is_err());
+        if r.is_err() {
+            bound = bound_by(who, &guard);
+        }
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
         }
@@ -2932,7 +2947,7 @@ fn run_query(
                 false => out,
             }
         }
-        Err(e) => told_response(&e, bound.as_ref()),
+        Err(e) => told_response(&e, bound.as_deref()),
     };
     timing::lap(timing::Phase::Render);
     resp
@@ -3918,11 +3933,17 @@ fn error_response(e: &Error) -> Response {
 /// The statement bound to a write of the server's token that refused it,
 /// read under the lock the write ran under (`Database::woken`): its name
 /// and the words its refusal is told after
-/// (`docs/design/named-statements.md`, *When a binding refuses*). `None`
-/// for a write that succeeded, one no binding refused, and every scoped
-/// token's, which is told no name (`access::told_bound`).
-fn bound_by(who: &Who, db: &Database, failed: bool) -> Option<(String, String)> {
-    if !failed || who.scope().is_some() {
+/// (`docs/design/named-statements.md`, *When a binding refuses*). Asked
+/// of a write that failed alone, and `None` for one no binding refused and
+/// for every scoped token's, which is told no name
+/// (`access::told_bound`). Cold, and a box: a write that succeeds holds
+/// one null word for it, where a pair of `String`s asked of every write
+/// and dropped at its end cost the server token's `set` some 46
+/// instructions (`docs/design/named-statements.md`, F2's slice 4).
+#[cold]
+#[inline(never)]
+fn bound_by(who: &Who, db: &Database) -> Option<Box<(String, String)>> {
+    if who.scope().is_some() {
         return None;
     }
     let name = db.woken()?;
@@ -3931,12 +3952,14 @@ fn bound_by(who: &Who, db: &Database, failed: bool) -> Option<(String, String)> 
         "bound statement `{name}`, after `{}` on `{c}`, refused this write: ",
         fennec_core::named::Binding::events_named(events)
     );
-    Some((name.to_string(), words))
+    Some(Box::new((name.to_string(), words)))
 }
 
 /// [`error_response`], or, where a statement bound to the write refused it
 /// ([`bound_by`]), the engine's words after the binding's, and `binding`
 /// beside them for the server's token to tell which.
+#[cold]
+#[inline(never)]
 fn told_response(e: &Error, bound: Option<&(String, String)>) -> Response {
     let Some((name, words)) = bound else {
         return error_response(e);

@@ -196,13 +196,12 @@ impl Reply {
 /// request, answered with one JSON object -- never a stream, since no tool
 /// here has anything to say before its answer.
 pub(crate) fn http(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
-    let (opts, who) = match admit(cfg, req) {
+    // A scoped `write`'s runs of the statements bound to it are charged to
+    // the caller's `--call-rate` as `/query`'s are (`calls::Runs`).
+    let (opts, who) = match admit(cfg, req, Some(db)) {
         Ok(admitted) => admitted,
         Err(refused) => return refused,
     };
-    // A scoped `write`'s runs of the statements bound to it, charged to
-    // the caller's `--call-rate` as `/query`'s are.
-    let _runs = crate::calls::charging(cfg.call_rate, &who, db);
     let Ok(text) = std::str::from_utf8(&req.body) else {
         let r = Reply::error(400, None, PARSE_ERROR, "the body is not UTF-8");
         return Response::json(400, r.body.unwrap_or_default());
@@ -231,6 +230,7 @@ pub(crate) fn http(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> R
 pub(crate) fn admit<'a>(
     cfg: &'a Config,
     req: &Request,
+    db: Option<&Arc<RwLock<Database>>>,
 ) -> std::result::Result<(&'a Options, Who), Response> {
     let Some(opts) = cfg.mcp.as_deref() else {
         return Err(Response::error(
@@ -257,7 +257,7 @@ pub(crate) fn admit<'a>(
             )
         }
     }
-    Ok((opts, crate::authenticate(cfg, req)?))
+    Ok((opts, crate::authenticate(cfg, req, db)?))
 }
 
 /// Why a request is refused for where it comes from, if it is: an

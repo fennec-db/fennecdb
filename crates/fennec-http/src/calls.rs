@@ -4,7 +4,7 @@
 //! statements bound to its writes, and the log of a `call` or `wake` line
 //! naming a statement its database does not hold as that line grants it.
 
-use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -12,7 +12,7 @@ use fennec_core::engine::Database;
 use fennec_core::error::Error;
 use fennec_core::query::Statement;
 
-use crate::access::{Access, Who};
+use crate::access::{Access, Scope, Who};
 use crate::http::Response;
 
 /// What `--call-rate` is unless told: the calls a second one caller -- a
@@ -149,11 +149,7 @@ pub fn admitted<'a>(
         .charge(key, rate as f64, now)
     else {
         // Its runs are charged beside it, out of what the call left.
-        RUNS.with(|r| {
-            if let Some(runs) = r.borrow_mut().as_mut() {
-                runs.called = true;
-            }
-        });
+        scope.runs().called.store(true, Ordering::Relaxed);
         return None;
     };
     Some(Response::retry_after(
@@ -176,64 +172,50 @@ pub const RUNS_WAIT: &str = "too many runs: ";
 
 /// What a scoped request's runs of statements bound to its writes are
 /// charged to (`docs/design/named-statements.md`, *A binding's
-/// authority*): the database it runs in and its caller, as its calls are
-/// ([`admitted`]), the rate, and what the request was charged so far.
-struct Runs {
-    db: usize,
-    scope: Arc<crate::access::Scope>,
-    rate: u32,
+/// authority*): the database it runs in, as its calls are ([`admitted`]),
+/// and the rate, where the request is charged at all ([`Runs::to`]), and
+/// what the request was charged so far. Held in the token's scope, which
+/// is made for each request (`authenticate`), and read only as a binding
+/// wakes ([`charge_runs`]): a scoped write waking nothing pays nothing for
+/// it. A thread-local set and put back around every scoped request, as it
+/// was first, cost each some 50 instructions (F2's slice 4).
+#[derive(Default)]
+pub struct Runs {
+    to: Option<(usize, u32)>,
     /// Whether the request was charged a call as it was admitted: a
     /// call's runs are charged beside it, out of the same second.
-    called: bool,
+    called: AtomicBool,
     /// The runs the request was charged since.
-    spent: u32,
+    spent: AtomicU32,
 }
 
-thread_local! {
-    /// The scoped request this thread serves, while it is served
-    /// ([`charging`]): the `Check` hook charges each binding its writes
-    /// wake here, under the write lock, deep in the engine, which knows
-    /// nothing of tokens -- a call's body included, which runs with no
-    /// scope installed.
-    static RUNS: RefCell<Option<Runs>> = const { RefCell::new(None) };
-}
+impl Runs {
+    /// The runs a scoped token's request into `db` wakes, held to `rate`:
+    /// set where a request's token and database are known (`handle`, MCP's
+    /// endpoint), so every way a write is sent -- `/query`, `/batch`,
+    /// `/_call`, REST, MCP's `write`, a held write's runs, each a `handle`
+    /// whole -- is charged. Nothing under `--call-rate 0`.
+    pub fn to(rate: u32, db: &Arc<RwLock<Database>>) -> Runs {
+        Runs {
+            to: (rate != 0).then_some((Arc::as_ptr(db) as usize, rate)),
+            ..Runs::default()
+        }
+    }
 
-/// What [`charging`] set, put back as the request ends.
-pub struct Charging(Option<Option<Runs>>);
-
-impl Drop for Charging {
-    fn drop(&mut self) {
-        if let Some(before) = self.0.take() {
-            RUNS.with(|r| *r.borrow_mut() = before);
+    /// The same request's, for the scope bound for its statements
+    /// (`Scope::bound`), which its writes then run as.
+    pub fn copied(&self) -> Runs {
+        Runs {
+            to: self.to,
+            called: AtomicBool::new(self.called.load(Ordering::Relaxed)),
+            spent: AtomicU32::new(self.spent.load(Ordering::Relaxed)),
         }
     }
 }
 
-/// Holds the runs a scoped token's request into `db` wakes to `rate`, for
-/// as long as what it hands back lives: set where a request's token and
-/// database are known (`handle`, MCP's endpoint), so every way a write is
-/// sent -- `/query`, `/batch`, `/_call`, REST, MCP's `write`, a held
-/// write's runs, each a `handle` whole -- is charged. Nothing for the
-/// server's token, which is unheld, or under `--call-rate 0`.
-pub fn charging(rate: u32, who: &Who, db: &Arc<RwLock<Database>>) -> Charging {
-    let Who::Scoped(scope) = who else {
-        return Charging(None);
-    };
-    if rate == 0 {
-        return Charging(None);
-    }
-    let runs = Runs {
-        db: Arc::as_ptr(db) as usize,
-        scope: Arc::clone(scope),
-        rate,
-        called: false,
-        spent: 0,
-    };
-    Charging(Some(RUNS.with(|r| r.borrow_mut().replace(runs))))
-}
-
-/// `rows` runs of a statement bound to a write of the scoped request this
-/// thread serves, charged to its caller's `--call-rate` bucket in that
+/// `rows` runs of a statement bound to a write of `caller`'s request --
+/// the token whose write is running or whose call's body is
+/// (`access::charged_to`) -- charged to its `--call-rate` bucket in that
 /// database before they run: a binding's run is a body run under the write
 /// lock on a token's behalf, as a call's is. Past the bucket the write is
 /// refused 429, its block put back, and what the request was charged for
@@ -241,52 +223,57 @@ pub fn charging(rate: u32, who: &Who, db: &Arc<RwLock<Database>>) -> Charging {
 /// is told is for every run it woke and its retry is let through. A
 /// request waking more runs than a full bucket holds, beside its call,
 /// would wait for ever: refused (400), never told to come back, as a quota
-/// where waiting makes no room is a refusal. Nothing outside a scoped
-/// request ([`charging`]).
-pub fn charge_runs(rows: usize) -> fennec_core::error::Result<()> {
-    RUNS.with(|r| {
-        let mut r = r.borrow_mut();
-        let Some(runs) = r.as_mut() else {
-            return Ok(());
-        };
-        let (rate, n) = (runs.rate, u32::try_from(rows).unwrap_or(u32::MAX));
-        let woken = runs.spent.saturating_add(n);
-        if woken.saturating_add(runs.called as u32) > rate {
-            let beside = if runs.called { " beside its call" } else { "" };
-            return Err(Error::Query(format!(
-                "{TOO_MANY_RUNS} at once: the request's writes wake {woken} runs of statements \
-                 bound to them{beside}, more than the {rate} a second --call-rate lets one \
-                 caller make, so it would never be let through: write fewer rows at once"
-            )));
-        }
-        let key = (runs.db, runs.scope.caller());
-        let now = Instant::now();
-        let mut held = CALLERS_HELD.lock().unwrap_or_else(|e| e.into_inner());
-        let callers = held.get_or_insert_with(|| Callers::new(now));
-        if callers
-            .take(key.clone(), n as f64, rate as f64, now)
-            .is_ok()
-        {
-            runs.spent = woken;
-            return Ok(());
-        }
-        // Every run charged before is in the block this refusal puts
-        // back, so none of them landed: a scoped request's writes are one
-        // block -- `/query`, REST and MCP's `write` one statement, MCP no
-        // JSON-RPC batch, a `/batch` one block (a scoped token compacts
-        // nothing, so its every batch fits one: `handle_batch` asserts
-        // it), a held write's every try a `handle` charged afresh. A path
-        // landing a scoped request's statements as blocks of their own
-        // must refund those of the block put back alone.
-        callers.refund(&key, runs.spent as f64, rate as f64);
-        let wait_ms = (callers.take(key, woken as f64, rate as f64, now)).map_or_else(|w| w, |_| 1);
-        // Taken where the refund made room after all: handed back too.
-        runs.spent = 0;
-        Err(Error::Query(format!(
-            "{RUNS_WAIT}this server runs {rate} statements bound to writes a second for one \
-             caller (--call-rate), and the write woke {woken}; write again in {wait_ms} ms"
-        )))
-    })
+/// where waiting makes no room is a refusal. Nothing for the server's
+/// token, which is unheld, or a request charged nothing ([`Runs::to`]).
+pub fn charge_runs(caller: Option<&Scope>, rows: usize) -> fennec_core::error::Result<()> {
+    let Some(scope) = caller else {
+        return Ok(());
+    };
+    let runs = scope.runs();
+    let Some((db, rate)) = runs.to else {
+        return Ok(());
+    };
+    let n = u32::try_from(rows).unwrap_or(u32::MAX);
+    let (called, spent) = (
+        runs.called.load(Ordering::Relaxed),
+        runs.spent.load(Ordering::Relaxed),
+    );
+    let woken = spent.saturating_add(n);
+    if woken.saturating_add(called as u32) > rate {
+        let beside = if called { " beside its call" } else { "" };
+        return Err(Error::Query(format!(
+            "{TOO_MANY_RUNS} at once: the request's writes wake {woken} runs of statements \
+             bound to them{beside}, more than the {rate} a second --call-rate lets one \
+             caller make, so it would never be let through: write fewer rows at once"
+        )));
+    }
+    let key = (db, scope.caller());
+    let now = Instant::now();
+    let mut held = CALLERS_HELD.lock().unwrap_or_else(|e| e.into_inner());
+    let callers = held.get_or_insert_with(|| Callers::new(now));
+    if callers
+        .take(key.clone(), n as f64, rate as f64, now)
+        .is_ok()
+    {
+        runs.spent.store(woken, Ordering::Relaxed);
+        return Ok(());
+    }
+    // Every run charged before is in the block this refusal puts back, so
+    // none of them landed: a scoped request's writes are one block --
+    // `/query`, REST and MCP's `write` one statement, MCP no JSON-RPC
+    // batch, a `/batch` one block (a scoped token compacts nothing, so its
+    // every batch fits one: `handle_batch` asserts it), a held write's
+    // every try a `handle` charged afresh. A path landing a scoped
+    // request's statements as blocks of their own must refund those of the
+    // block put back alone.
+    callers.refund(&key, spent as f64, rate as f64);
+    let wait_ms = (callers.take(key, woken as f64, rate as f64, now)).map_or_else(|w| w, |_| 1);
+    // Taken where the refund made room after all: handed back too.
+    runs.spent.store(0, Ordering::Relaxed);
+    Err(Error::Query(format!(
+        "{RUNS_WAIT}this server runs {rate} statements bound to writes a second for one \
+         caller (--call-rate), and the write woke {woken}; write again in {wait_ms} ms"
+    )))
 }
 
 /// The seconds a refusal of [`RUNS_WAIT`]'s says to wait: its `Retry-After`.
