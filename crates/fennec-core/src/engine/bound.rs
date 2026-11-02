@@ -83,7 +83,10 @@ impl Woken {
     /// the row as it stood and as written -- asked each binding of that
     /// event's condition, and kept with the bindings it passed where it
     /// passed one. The 10 001st row passing one refuses the write as it is
-    /// written, never cut: no binding runs a part of a write.
+    /// written, never cut: no binding runs a part of a write. Out of line:
+    /// `erase` calls it in place, and a collection's every `del` runs
+    /// `erase`.
+    #[inline(never)]
     pub(super) fn keep(
         &mut self,
         registry: &Registry,
@@ -273,6 +276,38 @@ impl Database {
         Ok(true)
     }
 
+    /// A row a `put` wrote, asked its bindings' conditions
+    /// ([`Woken::keep`]): made, or a live row written over -- one past
+    /// its time at `expiry` (its `@ttl` field's position and the cut) made,
+    /// as every read saw it gone and a binding is told what every read
+    /// saw. Out of line, and whether the row was past its time read again
+    /// here from the row as it stood rather than carried through `put`'s
+    /// loop: a flag live across that loop moved its registers, 12
+    /// instructions an insert of a collection no statement is bound to
+    /// (*What a binding costs a write*, named-statements.md).
+    #[inline(never)]
+    pub(super) fn woke_put(
+        &mut self,
+        registry: &Registry,
+        expiry: Option<(usize, i64)>,
+        old: Option<&Document>,
+        new: &Document,
+    ) -> Result<()> {
+        let w = &mut *self.woken;
+        let past = |o: &Document| {
+            let schema = w.schema.as_deref();
+            expiry.zip(schema).is_some_and(|((at, cut), s)| {
+                let f = s.fields.get(at).map(|f| f.name.as_str());
+                matches!(f.and_then(|f| o.get(f)), Some(Value::Timestamp(t)) if *t <= cut)
+            })
+        };
+        let (event, old) = match old.filter(|o| !past(o)) {
+            Some(o) => (super::stored::SET, Some(o)),
+            None => (super::stored::INSERT, None),
+        };
+        w.keep(registry, self.clock, event, old, Some(new))
+    }
+
     /// The statement `out` answered has ended with a binding's work due
     /// (`Database::bound_due`): the note of the statement before let go of, and
     /// where it woke rows and succeeded, their bindings run, its answer
@@ -285,17 +320,17 @@ impl Database {
     /// ([`Self::settle_woken`]).
     #[cold]
     #[inline(never)]
-    pub(super) fn ended(&mut self, out: Result<Response>) -> Result<Response> {
+    pub(super) fn ended(&mut self, out: &mut Result<Response>) {
         // The note let go of with the rows: in the box, which keeps its
         // allocation.
         self.bound_due = false;
         let w = std::mem::take(&mut *self.woken);
-        if w.rows.is_empty() {
-            return out;
+        if w.rows.is_empty() || out.is_err() {
+            return;
         }
-        let out = out?;
-        self.wake(w)?;
-        Ok(out)
+        if let Err(e) = self.wake(w) {
+            *out = Err(e);
+        }
     }
 
     /// The binding `name` refused the statement running: noted for the

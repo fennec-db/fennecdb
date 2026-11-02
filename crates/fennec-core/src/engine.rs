@@ -6451,17 +6451,20 @@ impl Database {
     /// One statement as a block runs it: its reads refused for collation
     /// data the module has not been handed.
     fn run_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
-        let out = self.execute_inner(stmt, params);
+        #[cfg_attr(not(feature = "statements"), allow(unused_mut))]
+        let mut out = self.execute_inner(stmt, params);
         // The statements bound to its rows' writes, run as it ends -- its
         // rows, hooks and `require` behind it -- and before its block is
         // due to spill: what it woke lands with it or nothing does. A
         // statement that woke no row, after one no binding refused, looks
-        // at a byte, and nothing else of a binding's as it starts.
+        // at a byte, and nothing else of a binding's as it starts. The
+        // answer is changed where it lies: handed through `ended` and back,
+        // it was copied on every statement, bound or not, 8 to 12
+        // instructions of an insert, a `set` or a `del` by id.
         #[cfg(feature = "statements")]
-        let out = match self.bound_due {
-            false => out,
-            true => self.ended(out),
-        };
+        if self.bound_due {
+            self.ended(&mut out);
+        }
         // A block that outgrew its bound spills what it holds into the file,
         // a statement's writes at a time: a /batch's statements, a `put` of
         // many rows.
@@ -8005,11 +8008,6 @@ impl Database {
             None => None,
         };
 
-        // What a row written asks beyond its write -- its bindings'
-        // conditions, a `returning`'s ids -- behind one look a row, as the
-        // ids alone were: a collection no statement is bound to pays no
-        // look a row for its bindings.
-        let beside = wake || answered.is_some();
         let mut n = 0usize;
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
         for (i, mut doc) in built.into_iter().enumerate() {
@@ -8032,14 +8030,11 @@ impl Database {
             // The row an upsert sets rather than the document written.
             let mut held = None;
             let named = doc.id != 0;
-            // Whether the row its id names is past its time: an update to
-            // the hooks, and a row made to a binding.
-            let mut gone = false;
             let op = if doc.id == 0 {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
             } else if c.store.contains(doc.id) {
-                gone = match expiry {
+                let gone = match expiry {
                     Some(cut) => expired(c, doc.id, cut)?,
                     None => false,
                 };
@@ -8157,25 +8152,19 @@ impl Database {
                     for h in hooks {
                         h.after_write(collection, op, &doc)?;
                     }
-                    if beside {
-                        // Asked its bindings' conditions as it is written: a
-                        // row made, or a live one written over.
-                        #[cfg(feature = "statements")]
-                        if wake {
-                            let (event, old) = match op == WriteOp::Insert || gone {
-                                true => (stored::INSERT, None),
-                                false => (stored::SET, old.as_ref()),
-                            };
-                            let clock = self.clock;
-                            self.woken.keep(registry, clock, event, old, Some(&doc))?;
-                        }
-                        if let Some((ids, ops)) = answered.as_deref_mut() {
-                            ids.push(doc.id);
-                            ops.push(op);
-                        }
+                    // Asked its bindings' conditions as it is written, out of
+                    // line, where whether it was past its time is read
+                    // again: the loop over a collection no statement is
+                    // bound to keeps the registers it had (*What a binding
+                    // costs a write*, named-statements.md).
+                    #[cfg(feature = "statements")]
+                    if wake {
+                        self.woke_put(registry, expiry, old.as_ref(), &doc)?;
                     }
-                    #[cfg(not(feature = "statements"))]
-                    let _ = gone;
+                    if let Some((ids, ops)) = answered.as_deref_mut() {
+                        ids.push(doc.id);
+                        ops.push(op);
+                    }
                     written.push(doc);
                     n += 1;
                     continue;
@@ -11683,7 +11672,8 @@ impl Database {
     /// row as it stood asked its bindings' conditions as it goes, here
     /// where it was read -- handed back out instead, each row of a `del`
     /// of a collection no statement is bound to was moved through the
-    /// caller.
+    /// caller. Asked beside the hooks, before anything is taken out: a
+    /// refusal leaves nothing to put back.
     fn erase(
         &mut self,
         collection: &str,
@@ -11698,21 +11688,27 @@ impl Database {
             for h in hooks {
                 h.after_write(collection, WriteOp::Delete, doc)?;
             }
+            #[cfg(feature = "statements")]
+            if wake {
+                let (del, clock) = (stored::DEL, self.clock);
+                self.woken
+                    .keep(&self.registry, clock, del, Some(doc), None)?;
+            }
             c.unindex_doc(doc, None);
         }
+        // Natively let go of before the append and the log: held across
+        // them, 3 instructions a `del` by id that wakes nothing. The
+        // browser module, which runs no binding, lets go of it at the end,
+        // 52 bytes smaller than where it is read.
+        #[cfg(feature = "statements")]
+        drop(gone);
+        #[cfg(not(feature = "statements"))]
+        let _ = wake;
         let (mark, was) = (c.store.mark(), c.store.loc(id));
         let frame = c.store.append(OP_DEL, id, &[]);
         self.remember(cid, id, was, mark);
         self.wal(REC_DATA, cid, &frame)?;
         self.note(cid, id);
-        #[cfg(feature = "statements")]
-        if let (true, Some(old)) = (wake, &gone) {
-            let (del, clock) = (stored::DEL, self.clock);
-            self.woken
-                .keep(&self.registry, clock, del, Some(old), None)?;
-        }
-        #[cfg(not(feature = "statements"))]
-        let _ = wake;
         Ok(())
     }
 
