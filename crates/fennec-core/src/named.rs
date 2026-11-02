@@ -260,6 +260,28 @@ impl Binding {
         }
         out
     }
+
+    /// The events [`Self::events_named`] wrote, read back -- in any order
+    /// and case, SQL's `update` and `delete` as the grammar reads them --
+    /// or `None` for a text naming another word.
+    pub fn events_read(text: &str) -> Option<u8> {
+        let mut words = text.split_whitespace();
+        let mut events = 0;
+        loop {
+            let word = words.next()?.to_ascii_lowercase();
+            events |= match word.as_str() {
+                "insert" => Self::INSERT,
+                "set" | "update" => Self::SET,
+                "del" | "delete" => Self::DEL,
+                _ => return None,
+            };
+            match words.next() {
+                None => return Some(events),
+                Some(or) if or.eq_ignore_ascii_case("or") => {}
+                Some(_) => return None,
+            }
+        }
+    }
 }
 
 /// A place of a bound statement's body: `new.<field>` or `old.<field>`.

@@ -101,21 +101,23 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 /// (`Declared::bound`, the JSON `GET /_schema` answers the server's token),
 /// read into its statements as [`schema_into`] reads a `create statement`
 /// after the collections: each text one bound definition, of the name it
-/// is listed by and bound to the collection it is listed beside, held to
-/// the collections declared. A build without named statements refuses a
+/// is listed by and bound to the collection it is listed beside, and to
+/// the events listed beside it where they are -- the text's are the
+/// binding's, so a description claiming others is refused, never taken --
+/// held to the collections declared. A build without named statements refuses a
 /// description listing one, as it refuses one written in FennecQL.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
     use fennec_core::declared::bad;
     #[cfg(not(feature = "statements"))]
-    if let Some((_, name, _)) = d.bound.first() {
+    if let Some((_, name, ..)) = d.bound.first() {
         return Err(bad(
             name,
             "is a named statement, which this build does not read",
         ));
     }
     #[cfg(feature = "statements")]
-    for (collection, name, text) in std::mem::take(&mut d.bound) {
+    for (collection, name, events, text) in std::mem::take(&mut d.bound) {
         {
             let mut read = parse(&text)?;
             let def = match (read.len(), read.pop()) {
@@ -137,6 +139,22 @@ pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
                         "` with the text of another statement than one bound to it",
                     ]),
                 ));
+            }
+            let binds = def.after.as_ref().map_or(0, |b| b.events);
+            if let Some(listed) = events {
+                use fennec_core::named::Binding;
+                if Binding::events_read(&listed) != Some(binds) {
+                    return Err(bad(
+                        &name,
+                        &fennec_core::declared::cat(&[
+                            "is listed with the events `",
+                            &listed,
+                            "`, and its text binds `",
+                            &Binding::events_named(binds),
+                            "`",
+                        ]),
+                    ));
+                }
             }
             if d.statements.iter().any(|s| s.name == def.name) {
                 return Err(bad(&def.name, "is declared twice"));

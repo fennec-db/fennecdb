@@ -125,10 +125,13 @@ pub struct Runs {
     /// The writes a binding refused -- its guard, a hook's judgment, a
     /// bound or a unique value its body met.
     pub refused: u32,
-    /// The last of them: the binding's name, and the engine's words, which
-    /// a scoped writer is never told (`docs/design/named-statements.md`,
-    /// *When a binding refuses*) and the server's audit line keeps.
-    pub refusal: Option<(String, String)>,
+    /// The last of them: the binding's name, and the error it refused
+    /// with, whose words a scoped writer is never told
+    /// (`docs/design/named-statements.md`, *When a binding refuses*) and
+    /// the server's audit line keeps. Its trace keeps the status and the
+    /// `else` reason alone: the words may hold a row's value -- a unique
+    /// clash names the value held.
+    pub refusal: Option<(String, Error)>,
     /// The bound statements this thread defined, replaced or dropped, each
     /// with what it binds -- its collection and events -- which a drop's
     /// text does not say: the audit's `schema` line names them. At most
@@ -444,20 +447,19 @@ impl Database {
 
     /// The binding `name` refused the statement running with `e`: noted
     /// for the server to tell, and let go of as the next statement ends;
-    /// and on the thread, with the engine's words, for the server to count
-    /// and log ([`Self::take_runs`]).
+    /// and on the thread, with the error, for the server to count, log and
+    /// trace ([`Self::take_runs`]).
     #[cold]
     #[inline(never)]
     fn refused(&mut self, name: &str, e: &Error) {
-        let words = e.to_string();
         self.bound_due = true;
         NOTED.with(|n| n.set(true));
         RUNS.with(|r| {
             let mut r = r.borrow_mut();
             r.refused = r.refused.saturating_add(1);
-            r.refusal = Some((name.to_string(), words.clone()));
+            r.refusal = Some((name.to_string(), e.clone()));
         });
-        self.woken.refused_by = Some((name.to_string(), words));
+        self.woken.refused_by = Some((name.to_string(), e.to_string()));
     }
 
     /// The bindings `w`'s rows woke, run: each hook asked first whether

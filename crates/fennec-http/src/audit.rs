@@ -183,7 +183,9 @@ pub(crate) fn bound(r: &fennec_core::engine::Runs) {
         return;
     }
     let told = BOUND.with(|b| b.get()) & TOLD != 0;
-    let refusal = r.refusal.clone().filter(|_| told);
+    let refusal = (r.refusal.as_ref())
+        .filter(|_| told)
+        .map(|(n, e)| (n.clone(), e.to_string()));
     HELD_BOUND.with(|h| *h.borrow_mut() = (refusal, r.changed.clone()));
     BOUND.with(|b| b.set(b.get() | HELD));
 }

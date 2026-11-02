@@ -702,6 +702,32 @@ fn the_listings_and_the_schema_name_a_binding_to_the_server_s_token_alone() {
             a.body
         );
     }
+    // A binding's events are its text's: listed in another order and case
+    // they read back alike, and a description claiming events the text
+    // does not bind is refused, never taken.
+    let listed = r#""name":"paid","events":"set""#;
+    for (events, taken) in [("SET", true), ("update", true), ("insert or set", false)] {
+        let claimed = format!(r#""name":"paid","events":"{events}""#);
+        let body = described.replacen(listed, &claimed, 1);
+        assert_ne!(body, described);
+        let a = node.request("POST", ROOT, "/_schema/plan?mode=follow", &[], &body);
+        if taken {
+            assert_eq!(a.status, 200, "{events}: {}", a.body);
+            assert!(a.body.contains(r#""statements":[]"#), "{}", a.body);
+        } else {
+            assert_eq!(a.status, 400, "{events}: {}", a.body);
+            assert!(
+                a.body
+                    .contains("paid is listed with the events `insert or set`")
+                    && a.body.contains("its text binds `set`"),
+                "{}",
+                a.body
+            );
+        }
+    }
+    let body = described.replacen(listed, r#""name":"paid","events":"set or touch""#, 1);
+    let a = node.request("POST", ROOT, "/_schema/plan?mode=follow", &[], &body);
+    assert_eq!(a.status, 400, "{}", a.body);
 
     // A scoped token: no binding, no text, no name.
     let u0 = node.customer("u0");

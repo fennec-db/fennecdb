@@ -164,44 +164,18 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
             crate::audit::statement(tenant, source, &buf, failed);
             noted.clear();
         });
-        let id = hash(tenant, &buf);
-        let shard = &shards()[MINE.with(|m| *m)];
-        let mut map = shard.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(e) = map.get_mut(&id) {
-            e.calls += 1;
-            e.errors += failed as u64;
-            e.rows += rows;
-            e.micros += micros;
-            e.min_micros = e.min_micros.min(micros);
-            e.max_micros = e.max_micros.max(micros);
-            return;
-        }
-        if map.len() >= PER_SHARD {
-            forget(&mut map);
-        }
-        let mut text = buf.clone();
-        if text.len() > TEXT_MAX {
-            let mut end = TEXT_MAX;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str("...");
-        }
-        map.insert(
-            id,
-            Entry {
-                tenant: tenant.map(str::to_string),
-                text,
-                id,
-                calls: 1,
-                errors: failed as u64,
-                rows,
-                micros,
-                min_micros: micros,
-                max_micros: micros,
-            },
-        );
+        let counted = Entry {
+            tenant: None,
+            text: String::new(),
+            id: hash(tenant, &buf),
+            calls: 1,
+            errors: failed as u64,
+            rows,
+            micros,
+            min_micros: micros,
+            max_micros: micros,
+        };
+        count(tenant, &buf, counted);
     });
 }
 

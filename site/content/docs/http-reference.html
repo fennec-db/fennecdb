@@ -72,7 +72,9 @@ writes</a>: <code>"bindings":[{"name":"paid","events":"set","text":"create
 statement paid after set orders ..."}]</code>. <code>?as=fennecql</code>
 writes each definition after the collections. Either body reads back
 through <code>POST /_schema/plan</code> and <code>/_schema/apply</code>, a
-plan reading the bindings listed. A scoped token sees no binding there, no
+plan reading the bindings listed; <code>events</code> may be left out, and
+a binding listed with events its <code>text</code> does not bind is
+refused (400). A scoped token sees no binding there, no
 name and no text.</p>
 
 <p>With <code>--mcp</code>, <code>/_mcp</code> is the Model Context

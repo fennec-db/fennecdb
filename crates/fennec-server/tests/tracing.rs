@@ -234,8 +234,9 @@ fn a_durable_write_is_traced_through_the_lock_the_disk_and_the_replicas() {
 
     // A statement bound to the write: a child span of the request a
     // binding a statement, never a row -- its name and its rows, no value
-    // -- and the one that refused the write failed, with the engine's
-    // words, which the trace keeps.
+    // -- and the one that refused the write failed, with the status and
+    // its `else`'s reason alone: the statement's text, never the engine's
+    // words.
     http.run("create collection marks (n int)");
     http.run(
         "create statement marked after insert notes scans as begin
@@ -267,7 +268,42 @@ fn a_durable_write_is_traced_through_the_lock_the_disk_and_the_replicas() {
             assert_eq!(bound[0].attr(k), Some(v), "{k} in {:#?}", bound[0]);
         }
         assert_eq!(bound[0].error, refused, "{:#?}", bound[0]);
+        let message = refused.then_some("412 marked once");
+        assert_eq!(bound[0].message.as_deref(), message, "{:#?}", bound[0]);
+        assert_eq!(bound[0].attr("error.type"), refused.then_some("412"));
         assert!(!format!("{:?}", bound[0].attrs).contains("secret"));
+    }
+
+    // A binding whose body meets a unique value taken: the engine's words
+    // name the value the row holds, and the span tells the status alone --
+    // the value is nowhere in what was exported.
+    http.run("create collection tags (label text @unique)");
+    http.run("insert tags {label: 'clash-value-91'}");
+    http.run("create collection pins (label text)");
+    http.run(
+        "create statement tagged after insert pins scans as begin
+           insert tags {label: new.label}
+         end",
+    );
+    let body = r#"{"query":"insert pins {label: $1}","params":["clash-value-91"]}"#;
+    let a = http.ask_with("POST", "/query", body, &[("X-Request-Id", "req-14")]);
+    assert_eq!(a.status, 409, "{}", a.body);
+    assert!(a.body.contains("clash-value-91"), "{}", a.body);
+    let spans = recv.until("the clash's spans", |s| {
+        s.iter()
+            .any(|g| g.attr("fennec.request_id") == Some("req-14"))
+    });
+    let root = spans
+        .iter()
+        .find(|g| g.attr("fennec.request_id") == Some("req-14"))
+        .unwrap();
+    let bound = children(&spans, root, "bound tagged");
+    assert_eq!(bound.len(), 1, "{spans:#?}");
+    assert!(bound[0].error, "{:#?}", bound[0]);
+    assert_eq!(bound[0].message.as_deref(), Some("409"), "{:#?}", bound[0]);
+    assert_eq!(bound[0].attr("error.type"), Some("409"), "{:#?}", bound[0]);
+    for post in recv.posts() {
+        assert!(!post.body.contains("clash-value-91"), "{}", post.body);
     }
 
     for post in recv.posts() {

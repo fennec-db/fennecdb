@@ -26,6 +26,8 @@ pub struct Got {
     pub end: u64,
     pub attrs: Vec<(String, String)>,
     pub error: bool,
+    /// The status's message, where it has one.
+    pub message: Option<String>,
 }
 
 impl Got {
@@ -42,6 +44,8 @@ impl Got {
 pub struct Post {
     pub path: String,
     pub headers: Vec<(String, String)>,
+    /// The post as sent: every span, attribute and status of it.
+    pub body: String,
 }
 
 #[derive(Default)]
@@ -185,7 +189,11 @@ fn serve(s: impl Read + Write, held: &Mutex<Held>) {
         let spans = parse(&text);
         {
             let mut held = held.lock().unwrap();
-            held.posts.push(Post { path, headers });
+            held.posts.push(Post {
+                path,
+                headers,
+                body: text,
+            });
             held.spans.extend(spans);
         }
         let w = r.get_mut();
@@ -278,7 +286,9 @@ fn parse(text: &str) -> Vec<Got> {
                     Some(Value::Int(2)) => true,
                     other => panic!("status {other:?}"),
                 };
+                let message = s.member("status").and_then(|st| text_of(st, "message"));
                 out.push(Got {
+                    message,
                     service: service.clone(),
                     attrs: attrs(&s),
                     state: text_of(&s, "traceState"),

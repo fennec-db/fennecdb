@@ -76,12 +76,14 @@ pub struct Declared {
     pub migrations: Vec<Migration>,
     /// The statements bound to a collection's writes that a description's
     /// JSON lists beside it (`"bindings"`, as `GET /_schema` writes them to
-    /// the server's token): the collection, the statement's name and its
-    /// text, for the caller that has the parser to read into `statements`
+    /// the server's token): the collection, the statement's name, the
+    /// events it is listed with, where it is, and its text, for the caller
+    /// that has the parser to read into `statements`
     /// (`fennec_ql::bound_into`), each held to the collection it is listed
-    /// beside.
+    /// beside and to the events listed: the text's are the binding's, and
+    /// a description claiming others is refused.
     #[cfg(not(target_arch = "wasm32"))]
-    pub bound: Vec<(String, String, String)>,
+    pub bound: Vec<(String, String, Option<String>, String)>,
 }
 
 /// One migration: run once, in order, and recorded.
@@ -221,7 +223,7 @@ pub fn parse(src: &str) -> Result<Declared> {
 /// A description's bound statements, read from its collections
 /// ([`Declared::bound`]).
 #[cfg(not(target_arch = "wasm32"))]
-type Bound = Vec<(String, String, String)>;
+type Bound = Vec<(String, String, Option<String>, String)>;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn collections(all: &[Value]) -> Result<(Vec<Schema>, Bound)> {
@@ -237,13 +239,18 @@ fn collections(all: &[Value]) -> Result<(Vec<Schema>, Bound)> {
             let b = object(b, "a binding")?;
             only(b, &["name", "events", "text"], "a binding")?;
             let n = name(b, "name", "a binding")?;
+            let events = match member(b, "events") {
+                None => None,
+                Some(Value::Text(e)) => Some(e.clone()),
+                Some(_) => return Err(bad(&n, "is listed with `events` that are not a text")),
+            };
             let Some(Value::Text(text)) = member(b, "text") else {
                 return Err(bad(
                     &n,
                     "is listed with its `text`, the definition as written",
                 ));
             };
-            bound.push((s.name.clone(), n, text.clone()));
+            bound.push((s.name.clone(), n, events, text.clone()));
         }
         out.push(s);
     }

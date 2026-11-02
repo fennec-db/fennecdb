@@ -545,15 +545,33 @@ pub fn bound_runs(runs: &fennec_core::engine::Runs) {
         let (unix, now) = (now_unix(), Instant::now());
         let root = c.root;
         // The binding that refused the write: its span is the failed one,
-        // with the engine's words, which a scoped writer is never told.
-        let refused = (runs.refusal.as_ref())
-            .and_then(|(n, words)| Some((runs.ran.iter().rposition(|r| r.name == *n)?, words)));
+        // marked with the status the error answers and the reason its
+        // `else` wrote -- the statement's own text -- alone, never the
+        // engine's words, which may hold a row's value: a unique clash's
+        // name the value held, and a span names a shape, never a value.
+        let refused = (runs.refusal.as_ref()).and_then(|(n, e)| {
+            let status = crate::api::status_of(e);
+            let why = match e.reason() {
+                Some(reason) => format!("{status} {reason}"),
+                None => status.to_string(),
+            };
+            Some((runs.ran.iter().rposition(|r| r.name == *n)?, status, why))
+        });
         for (i, ran) in runs.ran.iter().enumerate() {
             if c.spans.len() >= MAX_SPANS {
                 break;
             }
             let ago = now.saturating_duration_since(ran.at).as_nanos() as u64;
             let start = unix.saturating_sub(ago);
+            let mut attrs = vec![
+                ("db.operation.name", Val::from("bound")),
+                ("db.stored_procedure.name", Val::from(ran.name.clone())),
+                ("fennec.rows_woken", Val::Int(ran.rows as i64)),
+            ];
+            let failed = (refused.as_ref()).filter(|(at, ..)| *at == i);
+            if let Some((_, status, _)) = failed {
+                attrs.push(("error.type", Val::from(status.to_string())));
+            }
             c.spans.push(Rec {
                 name: Cow::Owned(format!("bound {}", ran.name)),
                 id: fresh().to_be_bytes(),
@@ -561,12 +579,8 @@ pub fn bound_runs(runs: &fennec_core::engine::Runs) {
                 kind: Kind::Internal,
                 start,
                 end: start.saturating_add(ran.took.as_nanos() as u64),
-                attrs: vec![
-                    ("db.operation.name", Val::from("bound")),
-                    ("db.stored_procedure.name", Val::from(ran.name.clone())),
-                    ("fennec.rows_woken", Val::Int(ran.rows as i64)),
-                ],
-                error: refused.filter(|(at, _)| *at == i).map(|(_, w)| w.clone()),
+                attrs,
+                error: failed.map(|(.., why)| why.clone()),
             });
         }
     });

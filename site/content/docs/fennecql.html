@@ -550,7 +550,9 @@ lists each collection's bindings beside it, <code>"bindings":[{"name":"paid",
 "events":"set","text":"create statement paid after set orders ..."}]</code>,
 and <code>?as=fennecql</code> writes each definition after the collections.
 Either reads back through <code>POST /_schema/plan</code> and
-<code>/_schema/apply</code>, which plan the bindings listed. A scoped token
+<code>/_schema/apply</code>, which plan the bindings listed: a binding's
+<code>text</code> says what it binds, and one listed with
+<code>events</code> its text does not bind is refused. A scoped token
 sees no binding there, no name and no text (<a
 href="/docs/http-reference">HTTP reference</a>).</p>
 
