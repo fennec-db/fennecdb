@@ -48,9 +48,11 @@ cleanup() {
         [ -n "$p" ] && kill "$p" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    if [ -d "$WORK/old" ]; then
-        git -C "$ROOT" worktree remove --force "$WORK/old" 2>/dev/null || true
-    fi
+    for tree in "$WORK/old" "$WORK/old3"; do
+        if [ -d "$tree" ]; then
+            git -C "$ROOT" worktree remove --force "$tree" 2>/dev/null || true
+        fi
+    done
     rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
@@ -330,3 +332,67 @@ for n in n3 n4 n5; do
 done
 echo "old router:   a create, its replica, a move and a delete on this tree's nodes"
 echo "ok: the binaries from before stop in words at the first definition"
+
+# Op 3 (docs/design/named-statements.md, F2): a statement bound to a
+# collection's writes is kind 13's op 3, whose collection and events stand
+# outside its text. A binary from before it -- OP3_BASE, the last main
+# before the op -- reads kind 13 and refuses an op it does not read, never
+# taking the binding for a callable statement whose writes would land
+# without its rows. No server defines one before the engine runs it, so
+# the file is fennec-core's fixture, written by its tests with a binding
+# after F1's records (`tests/statements.fennec`):
+#
+#   - the old server refuses to open it, in words;
+#   - an old replica of this tree's server serving it refuses the image it
+#     is sent, in words, holds nothing of it, and connects again;
+#   - the old `fennec types`, a tool that only looks, refuses it too.
+OP3_BASE=${OP3_BASE:-b73ce4ca}
+if [ -n "${OLD3_BIN_DIR:-}" ]; then
+    OLD3=$OLD3_BIN_DIR
+else
+    echo "building fennec-server and fennec at $OP3_BASE ..."
+    git -C "$ROOT" worktree add --detach --quiet "$WORK/old3" "$OP3_BASE"
+    CARGO_TARGET_DIR="$WORK/old3-target" "${CARGO:-cargo}" build --quiet \
+        --manifest-path "$WORK/old3/Cargo.toml" -p fennec-server -p fennec-cli
+    OLD3="$WORK/old3-target/debug"
+fi
+UNREAD='a statement record this version does not read'
+cp "$ROOT/crates/fennec-core/tests/statements.fennec" "$WORK/bound.fennec"
+cp "$WORK/bound.fennec" "$WORK/bound-old.fennec"
+
+"$OLD3/fennec-server" --file "$WORK/bound-old.fennec" --http 127.0.0.1:0 \
+    >"$WORK/bound-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 3"
+grep -q "$UNREAD" "$WORK/bound-open.log" || fail "the old server said nothing of op 3"
+echo "old open:     $(grep -m1 "$UNREAD" "$WORK/bound-open.log")"
+
+"$NEW/fennec-server" --file "$WORK/bound.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/bound-primary.log" &
+PIDS+=($!)
+BOUND=$(address "$WORK/bound-primary.log")
+query "$BOUND" "get accounts count" | grep -q '"error"' &&
+    fail "this tree's server answered no read of the file holding op 3"
+query "$BOUND" "insert entries {src: 1, dst: 1, amount: 5}" | grep -q 'would wake `credit`' ||
+    fail "this tree's server took a write its binding binds"
+
+"$OLD3/fennec-server" --file "$WORK/bound-replica.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$BOUND" 2>"$WORK/bound-replica.log" &
+PIDS+=($!)
+BOUND_REPLICA=$(address "$WORK/bound-replica.log")
+said "$WORK/bound-replica.log" "$UNREAD" || fail "the old replica said nothing of op 3"
+query "$BOUND_REPLICA" "get accounts count" | grep -q '"count"' &&
+    fail "the old replica took the image holding op 3"
+echo "old replica:  $(grep -m1 "$UNREAD" "$WORK/bound-replica.log")"
+
+if "$OLD3/fennec" types "$WORK/bound-old.fennec" >"$WORK/bound-types.log" 2>&1; then
+    fail "the old \`fennec types\` read a file holding op 3"
+fi
+grep -q "$UNREAD" "$WORK/bound-types.log" || fail "the old \`fennec types\` said nothing of op 3"
+echo "old types:    $(grep -m1 "$UNREAD" "$WORK/bound-types.log")"
+echo "ok: the binaries from before stop in words at a binding (op 3)"

@@ -20,14 +20,38 @@ use crate::error::{Error, Result};
 use crate::schema::{IndexKind, Schema};
 
 /// A named statement defined or dropped: `[13][0][length][op][history]
-/// [change][epoch][digest][name][depends][text]`. A write, which moves the
-/// change counter by one (`writes_in`), rides in a block, and is applied by
-/// a replica as a schema change is; an image writes each live definition
+/// [change][epoch][digest][name][depends][text]`, and a bound one's
+/// definition `[3][history][change][epoch][digest][name][depends]
+/// [collection][events][text]`. A write, which moves the change counter by
+/// one (`writes_in`) whatever its op, rides in a block, and is applied by a
+/// replica as a schema change is; an image writes each live definition
 /// again after the collections. A version before it refuses it ("unknown
 /// record kind 13") and a block holding one, never misreads it.
 pub(super) const REC_STATEMENT: u8 = 13;
 const OP_DEFINE: u8 = 1;
 const OP_DROP: u8 = 2;
+/// A statement bound to a collection's writes (F2): op 1's fields, then the
+/// collection and its events outside the text, so a build that cannot read
+/// the text -- the browser module, a process with no reader -- still knows
+/// which writes it binds. A build before it refuses the op as a record it
+/// does not read, never taking it for a callable statement whose writes
+/// land without their rows (`docs/design/named-statements.md`, *A
+/// binding's record*).
+const OP_BOUND: u8 = 3;
+
+/// The events of a bound statement, a bit each, as its record writes them
+/// and `named::Binding` names them: a row made, written over, taken out.
+/// Here, beside the record, because every build reads them into a
+/// collection's [`super::Collection::bound`], the module's among them.
+pub(super) const INSERT: u8 = 1;
+pub(super) const SET: u8 = 2;
+pub(super) const DEL: u8 = 4;
+#[cfg(feature = "statements")]
+const _: () = assert!(
+    INSERT == crate::named::Binding::INSERT
+        && SET == crate::named::Binding::SET
+        && DEL == crate::named::Binding::DEL
+);
 
 /// One named statement, as its database keeps it.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +77,10 @@ pub struct Stored {
     pub depends: Vec<String>,
     /// The definition's own bytes, from `create` to its end.
     pub text: String,
+    /// What a bound statement is bound to, from its record (op 3), never
+    /// from its text: the collection and the events ([`INSERT`], [`SET`],
+    /// [`DEL`]). `None` for a callable statement (op 1).
+    pub after: Option<(String, u8)>,
     /// Why it cannot be called, where it cannot: never stored -- an open
     /// finds it again, from the digest and the schema.
     pub broken: Option<String>,
@@ -73,24 +101,36 @@ pub struct Stored {
 impl Stored {
     /// The record's body for a definition.
     pub(super) fn encode(&self) -> Vec<u8> {
-        encode(
-            OP_DEFINE,
+        let op = match self.after {
+            Some(_) => OP_BOUND,
+            None => OP_DEFINE,
+        };
+        let mut out = encode(
+            op,
             self.version,
             self.epoch,
             self.digest,
             &self.name,
             &self.depends,
-            &self.text,
-        )
+        );
+        if let Some((collection, events)) = &self.after {
+            encode_str(&mut out, collection);
+            out.push(*events);
+        }
+        encode_str(&mut out, &self.text);
+        out
     }
 }
 
 /// The record's body for a drop of `name`, at `version`.
 #[cfg(feature = "statements")]
 pub(super) fn dropped(name: &str, version: (u64, u64)) -> Vec<u8> {
-    encode(OP_DROP, version, 0, 0, name, &[], "")
+    let mut out = encode(OP_DROP, version, 0, 0, name, &[]);
+    encode_str(&mut out, "");
+    out
 }
 
+/// A record's body up to its dependencies, which every op writes.
 fn encode(
     op: u8,
     (history, change): (u64, u64),
@@ -98,9 +138,8 @@ fn encode(
     digest: u64,
     name: &str,
     depends: &[String],
-    text: &str,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32 + name.len() + text.len());
+    let mut out = Vec::with_capacity(64 + name.len());
     out.push(op);
     put_uvarint(&mut out, history);
     put_uvarint(&mut out, change);
@@ -111,18 +150,18 @@ fn encode(
     for d in depends {
         encode_str(&mut out, d);
     }
-    encode_str(&mut out, text);
     out
 }
 
 /// A kind-13 record's body, read: a definition, or `Err` naming the
-/// statement a drop takes away. An operation or a byte past the text this
-/// version does not know is refused, never read as something else.
+/// statement a drop takes away. An operation, an event or a byte past the
+/// text this version does not know is refused, never read as something
+/// else.
 pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>> {
     let cut = || Error::Corrupt("a record cut short".into());
     let op = *body.first().ok_or_else(cut)?;
     let unread = || Error::Corrupt("a statement record this version does not read".into());
-    if op != OP_DEFINE && op != OP_DROP {
+    if !matches!(op, OP_DEFINE | OP_DROP | OP_BOUND) {
         return Err(unread());
     }
     let mut p = 1;
@@ -137,6 +176,20 @@ pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>>
     for _ in 0..n {
         depends.push(decode_str(body, &mut p)?);
     }
+    let after = match op {
+        OP_BOUND => {
+            let collection = decode_str(body, &mut p)?;
+            let events = *body.get(p).ok_or_else(cut)?;
+            p += 1;
+            // No event, or one a later version names -- a bit past these
+            // three: a binding this version cannot keep.
+            if events == 0 || events & !(INSERT | SET | DEL) != 0 {
+                return Err(unread());
+            }
+            Some((collection, events))
+        }
+        _ => None,
+    };
     let text = decode_str(body, &mut p)?;
     if p != body.len() {
         return Err(unread());
@@ -151,6 +204,7 @@ pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>>
         digest: u64::from_le_bytes(d),
         depends,
         text,
+        after,
         broken: None,
         #[cfg(feature = "statements")]
         tree: None,
@@ -162,42 +216,103 @@ pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>>
 /// The live named statements of a database, by name: in a cell of its own
 /// (`Database::statements`), as a collection's schema is, so a reader holds
 /// the table it read under a short lock and a definition changes it by a
-/// new `Arc`, never in place.
+/// new `Arc`, never in place. The bound ones are indexed by their
+/// collection besides.
 #[derive(Debug, Clone, Default)]
-pub struct Statements(Vec<Stored>);
+pub struct Statements {
+    all: Vec<Stored>,
+    /// Each bound statement's `(collection, name)`, in that order: a
+    /// collection's bindings are a run, in name order -- the order a row
+    /// runs them in.
+    bound: Vec<(String, String)>,
+}
 
 impl Statements {
     pub fn get(&self, name: &str) -> Option<&Stored> {
-        self.at(name).ok().map(|i| &self.0[i])
+        self.at(name).ok().map(|i| &self.all[i])
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Stored> {
-        self.0.iter()
+        self.all.iter()
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.all.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.all.is_empty()
+    }
+
+    /// The statements bound to `collection`'s writes, in name order,
+    /// broken or not.
+    pub fn bound_to<'s>(&'s self, collection: &'s str) -> impl Iterator<Item = &'s Stored> + 's {
+        let from = self.bound.partition_point(|(c, _)| c.as_str() < collection);
+        self.bound[from..]
+            .iter()
+            .take_while(move |(c, _)| c == collection)
+            .filter_map(|(_, name)| self.get(name))
+    }
+
+    /// The events the statements bound to `collection` wake on, together:
+    /// what its [`super::Collection::bound`] holds.
+    pub fn events_of(&self, collection: &str) -> u8 {
+        self.bound_to(collection)
+            .fold(0, |e, s| e | s.after.as_ref().map_or(0, |a| a.1))
     }
 
     fn at(&self, name: &str) -> std::result::Result<usize, usize> {
-        self.0.binary_search_by(|s| s.name.as_str().cmp(name))
+        self.all.binary_search_by(|s| s.name.as_str().cmp(name))
     }
 
     /// Defines `s`, or replaces the statement of its name.
     pub(super) fn put(&mut self, s: Stored) {
+        let key = s.after.as_ref().map(|(c, _)| (c.clone(), s.name.clone()));
         match self.at(&s.name) {
-            Ok(i) => self.0[i] = s,
-            Err(i) => self.0.insert(i, s),
+            Ok(i) => {
+                let old = std::mem::replace(&mut self.all[i], s);
+                self.unindex(&old);
+            }
+            Err(i) => self.all.insert(i, s),
+        }
+        if let Some(key) = key {
+            let at = self.bound.partition_point(|k| *k < key);
+            self.bound.insert(at, key);
         }
     }
 
     pub(super) fn remove(&mut self, name: &str) -> Option<Stored> {
-        self.at(name).ok().map(|i| self.0.remove(i))
+        let s = self.at(name).ok().map(|i| self.all.remove(i))?;
+        self.unindex(&s);
+        Some(s)
     }
+
+    fn unindex(&mut self, s: &Stored) {
+        if let Some((c, _)) = &s.after {
+            self.bound.retain(|(bc, n)| !(bc == c && *n == s.name));
+        }
+    }
+}
+
+/// Where `s` is bound after `del` on a collection whose rows expire, what
+/// it is in words. A row `@ttl` takes out leaves with no write -- every
+/// read left it out at its time, and the sweep wakes nothing -- so a
+/// binding promising to see every row its collection loses would miss
+/// each, and a count kept by `after insert` and `after del` would count
+/// them for ever: the two refuse each other, whichever comes second.
+#[cfg(feature = "statements")]
+pub(super) fn expiring<'a>(
+    s: &Stored,
+    schema_of: &dyn Fn(&str) -> Option<&'a Schema>,
+) -> Option<String> {
+    let (c, events) = s.after.as_ref()?;
+    let expires = schema_of(c)?.fields.iter().any(|f| f.index.ttl().is_some());
+    (events & DEL != 0 && expires).then(|| expiring_words(c))
+}
+
+#[cfg(feature = "statements")]
+pub(super) fn expiring_words(c: &str) -> String {
+    format!("is bound after `del` on `{c}`, whose rows `@ttl` takes out with no write to wake it")
 }
 
 /// The first of `s`'s dependencies `schema_of` no longer holds, and what
@@ -334,6 +449,7 @@ impl super::Database {
             Ok(s) => changed(&mut self.statements).put(s),
             Err(name) => drop(changed(&mut self.statements).remove(&name)),
         }
+        self.rebind();
         Ok(())
     }
 
@@ -361,11 +477,19 @@ impl super::Database {
             if let (None, Some(read)) = (&s.tree, crate::named::reader()) {
                 match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
                     // A definition's record (op 1) holds a callable
-                    // statement; a binding is op 3's (F2's slice 2), so
-                    // one read here, digest and all, is none this build
-                    // wrote, and never loaded as callable.
-                    Ok((_, d)) if d.after.is_some() => {
-                        marks.push((i, Some(misread(s, "reads as a bound statement"))));
+                    // statement, and a bound one's (op 3) the collection
+                    // and events its text binds: a text reading as the
+                    // other kind, or bound to other writes, digest and
+                    // all, is none this build wrote -- never loaded as
+                    // callable, and never bound to writes its record does
+                    // not name, which the collection's mask is read from.
+                    Ok((_, d)) if d.bound_as() != s.after.as_ref().map(|(c, e)| (&**c, *e)) => {
+                        let how = match (&d.after, &s.after) {
+                            (Some(_), None) => "reads as a bound statement",
+                            (None, _) => "reads as a callable statement",
+                            (Some(_), Some(_)) => "binds other writes than its record",
+                        };
+                        marks.push((i, Some(misread(s, how))));
                         continue;
                     }
                     Ok((digest, d)) if digest == s.digest => trees.push((i, Arc::new(d))),
@@ -380,12 +504,12 @@ impl super::Database {
                     }
                 }
             }
-            let why = unmet(s, &schema_of).map(|what| {
-                let mut why = String::from("it ");
-                why.push_str(&what);
-                why.push_str(", which the schema no longer holds");
-                why
-            });
+            let why = match unmet(s, &schema_of) {
+                Some(what) => Some(format!("it {what}, which the schema no longer holds")),
+                // An internal writer made the collection `@ttl` under an
+                // `after del` binding, which refuses its writes since.
+                None => expiring(s, &schema_of).map(|what| format!("it {what}")),
+            };
             if why != s.broken {
                 marks.push((i, why));
             }
@@ -395,13 +519,13 @@ impl super::Database {
         }
         let t = changed(&mut self.statements);
         for (i, why) in marks {
-            t.0[i].broken = why;
+            t.all[i].broken = why;
         }
         for (i, tree) in trees {
-            t.0[i].tree = Some(tree);
+            t.all[i].tree = Some(tree);
         }
         for (i, tree) in misreads {
-            t.0[i].misread = Some(tree);
+            t.all[i].misread = Some(tree);
         }
     }
 
@@ -419,7 +543,7 @@ impl super::Database {
             let collections = &self.collections;
             let schema_of = |c: &str| collections.get(c).map(|c| &*c.schema);
             for s in self.statements.iter().filter(|s| s.broken.is_none()) {
-                if let Some(what) = unmet(s, &schema_of) {
+                if let Some(what) = unmet(s, &schema_of).or_else(|| expiring(s, &schema_of)) {
                     return Err(Error::Query(format!(
                         "statement `{}` {what}: replace or drop it first",
                         s.name
@@ -447,10 +571,12 @@ impl super::Database {
     ) -> Result<crate::query::Response> {
         use crate::named::{BOUND_NOT_BUILT, GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
         // First, before a name held or the schema is asked: nothing runs a
-        // binding yet, and one stored would let the writes it binds land
-        // without its rows -- here every way in (`/query`, `/batch`, the
-        // shell, the native library, a declared schema's apply) meets it.
-        if def.after.is_some() {
+        // binding yet, and one stored would bind writes no build runs it
+        // for -- refused by every build until the engine runs it (F2's
+        // slice 3), so here every way in (`/query`, `/batch`, the shell,
+        // the native library, a declared schema's apply) meets it. A test
+        // lets one through ([`Self::allow_bindings`]) to hold its record.
+        if def.after.is_some() && !self.bindings {
             return Err(Error::Query(BOUND_NOT_BUILT.into()));
         }
         let name = &def.name;
@@ -461,13 +587,20 @@ impl super::Database {
                     "statement `{name}`: `create or replace statement` replaces it"
                 )));
             }
+            // The kind, and a binding's collection and events, from the
+            // record: known where the old text reads no tree here, and
+            // what a `call` or `wake` line names it for.
+            let was = old.after.as_ref().map(|(c, e)| (c.as_str(), *e));
+            if let Some(why) = crate::named::kind_kept(name, def.bound_as(), was) {
+                return Err(Error::Query(why));
+            }
             // Held to the contract wherever the old tree is, broken or
             // not, as `declared::plan_statements` holds it: a mark is the
             // schema's lack, and a grant names the statement whatever
             // the schema holds -- a replacement that writes where the old
             // one read would start meaning more under the same line. A
             // text that misreads keeps no tree, and is defined again as
-            // anything.
+            // anything of its kind.
             if let Some(tree) = &old.tree {
                 if let Some(why) = def.breaks_contract(tree) {
                     return Err(Error::Query(why));
@@ -482,6 +615,9 @@ impl super::Database {
             return Err(Error::Query(format!(
                 "a definition is its text, of 1 to {MAX_TEXT} bytes, as the parser read it"
             )));
+        }
+        if let Some(b) = &def.after {
+            self.binding_checked(name, b)?;
         }
         let collections = &self.collections;
         let depends = def.depends(&|c| collections.get(c).map(|c| &*c.schema))?;
@@ -502,6 +638,7 @@ impl super::Database {
             digest,
             depends,
             text: def.text.clone(),
+            after: def.after.as_ref().map(|b| (b.collection.clone(), b.events)),
             broken: None,
             tree,
             misread: None,
@@ -552,10 +689,138 @@ impl super::Database {
         self.note(0, crate::changes::SCHEMA_MARK);
         let before = self.statements.clone();
         change(changed(&mut self.statements));
+        self.rebind();
         if let Some(b) = &mut self.block {
             b.was.push(super::Undo::Statements(before));
         }
         Ok(())
+    }
+
+    /// Lets `create statement ... after` run on this database. Every way
+    /// in refuses a binding's definition (`named::BOUND_NOT_BUILT`) until
+    /// the engine runs one (F2's slice 3): defined here, its record is
+    /// written and kept and the writes it binds are refused, which a test
+    /// holds -- as F1's slice 2 let a definition run only where a test
+    /// let it. Never a server's.
+    #[doc(hidden)]
+    #[cfg(feature = "statements")]
+    pub fn allow_bindings(&mut self) {
+        self.bindings = true;
+    }
+
+    /// What a binding's definition is held to beside a callable one's: its
+    /// collection held, bound by at most `named::MAX_BOUND` statements,
+    /// `after del` refused where its rows expire, and each field `new.`
+    /// and `old.` read held by it.
+    #[cfg(feature = "statements")]
+    fn binding_checked(&self, name: &str, b: &crate::named::Binding) -> Result<()> {
+        use crate::named::MAX_BOUND;
+        let c = &b.collection;
+        let schema = &self.collection(c)?.schema;
+        if self
+            .statements
+            .bound_to(c)
+            .filter(|s| s.name != name)
+            .count()
+            >= MAX_BOUND
+        {
+            return Err(Error::Query(format!(
+                "a collection is bound by at most {MAX_BOUND} statements, and `{c}` is"
+            )));
+        }
+        if b.events & DEL != 0 && schema.fields.iter().any(|f| f.index.ttl().is_some()) {
+            return Err(Error::Query(format!(
+                "statement `{name}` {}: bind it after `insert` or `set` alone, or take `@ttl` \
+                 off `{c}` first",
+                expiring_words(c)
+            )));
+        }
+        if let Some(f) = b.unheld(schema) {
+            return Err(Error::Query(format!(
+                "statement `{name}`: `{c}` holds no field `{f}`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A `@ttl` about to be given `collection`, held to the statements
+    /// bound after `del` to it: refused naming the first, from a writer
+    /// that may refuse -- what a block's commit refuses
+    /// ([`Self::statements_hold`]), asked here too by a `create index`
+    /// built beside the database, which lands outside it. A writer that
+    /// cannot refuse marks it broken as the change lands.
+    #[cfg(feature = "statements")]
+    pub(super) fn expiry_held(&self, collection: &str) -> Result<()> {
+        if self.internal {
+            return Ok(());
+        }
+        let del = |s: &&Stored| s.after.as_ref().is_some_and(|a| a.1 & DEL != 0);
+        match self
+            .statements
+            .bound_to(collection)
+            .find(|s| s.broken.is_none() && del(s))
+        {
+            Some(s) => Err(Error::Query(format!(
+                "statement `{}` {}: replace or drop it first",
+                s.name,
+                expiring_words(collection)
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Each collection's [`super::Collection::bound`] set from the table,
+    /// wherever the table or the collections change: a definition or a
+    /// drop, a block put back, an open, a replica's apply, an image
+    /// adopted, a collection made. A look at each collection, at a schema
+    /// change alone.
+    pub(super) fn rebind(&mut self) {
+        let t = &self.statements;
+        for (name, c) in self.collections.iter_mut() {
+            c.bound = t.events_of(name);
+        }
+    }
+
+    /// A writing statement over `collection` that may wake the statements
+    /// bound to it on `events` -- its [`super::Collection::bound`] and what
+    /// the statement may do to a row -- refused before it changes
+    /// anything, the condition unread. No build runs a binding yet (F2's
+    /// slice 3 does), and a write landing without the rows its binding
+    /// would write is the one thing a binding must never let happen: the
+    /// writes stop, loudly, until it is dropped. A broken binding's refusal
+    /// is the 409 it keeps once bindings run; the browser module, which
+    /// will never run one, says so in its own words.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn bound_refused(&self, collection: &str, events: u8) -> Error {
+        #[cfg(feature = "statements")]
+        if let Some((s, e)) = self
+            .statements
+            .bound_to(collection)
+            .find_map(|s| Some((s, s.after.as_ref()?.1 & events)).filter(|(_, e)| *e != 0))
+        {
+            let name = &s.name;
+            return match (&s.broken, &s.tree) {
+                (Some(why), _) => Error::Exists(format!(
+                    "the write would wake `{name}`, which is broken: {why}: define it again or \
+                     drop it"
+                )),
+                (None, None) => Error::Exists(format!(
+                    "the write would wake `{name}`, whose text this process holds unread (no \
+                     FennecQL reader installed): define it again or drop it"
+                )),
+                (None, Some(_)) => Error::Query(format!(
+                    "the write would wake `{name}`, bound after `{}` on `{collection}`, and \
+                     write-bound statements are not run yet: drop it to write `{collection}`",
+                    crate::named::Binding::events_named(e)
+                )),
+            };
+        }
+        let _ = events;
+        Error::Query(format!(
+            "`{collection}` has statements bound to its writes, which this module does not \
+             run: write it through a server"
+        ))
     }
 }
 

@@ -1618,6 +1618,14 @@ pub struct Collection {
     /// The indexes over several fields, each beside the declaration it was
     /// made from, in the schema's order ([`Self::fit_composites`]).
     pub composites: Vec<(Composite, Derived<CompositeIndex>)>,
+    /// The events of the statements bound to its writes, together (a bit
+    /// each: 1 a row made, 2 written over, 4 taken out), broken or unread
+    /// ones among them: set from the table by `Database::rebind` wherever
+    /// the table or the collections change, and read once a writing
+    /// statement, where its collection is looked up already -- so a
+    /// collection no statement is bound to pays a byte's look a statement,
+    /// never a row's.
+    pub bound: u8,
 }
 
 impl Collection {
@@ -1684,6 +1692,7 @@ impl Collection {
             sparse,
             geo,
             composites: Vec::new(),
+            bound: 0,
         };
         // A new collection's are empty, and as built as its documents.
         let Collection {
@@ -3758,6 +3767,10 @@ pub struct Database {
     /// ([`Self::internally`]).
     #[cfg_attr(not(feature = "statements"), allow(dead_code))]
     internal: bool,
+    /// Whether a binding may be defined here: a test's
+    /// ([`Self::allow_bindings`]), until the engine runs them.
+    #[cfg(feature = "statements")]
+    bindings: bool,
     /// The calls running over this database, a write's under its lock and
     /// reads' beside each other: while none runs, a statement asks nothing
     /// more of `--call-max-rows` ([`Self::set_call_max_rows`]), and while
@@ -3838,6 +3851,8 @@ impl Database {
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
             internal: false,
+            #[cfg(feature = "statements")]
+            bindings: false,
             #[cfg(feature = "statements")]
             calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
@@ -4905,6 +4920,9 @@ impl Database {
         self.rebuild_indexes_with(&restored, &touched)?;
         #[cfg(feature = "statements")]
         self.read_statements();
+        // A collection made after the binding it is bound by was read --
+        // dropped and made again -- is bound all the same.
+        self.rebind();
         *self.appended.get_mut() = whole as u64;
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_landed();
@@ -5762,8 +5780,9 @@ impl Database {
             }
             self.next_coll_id = self.next_coll_id.max(cid + 1);
             self.order.push(schema.name.clone());
-            self.collections
-                .insert(schema.name.clone(), Collection::new(cid, schema));
+            let mut c = Collection::new(cid, schema);
+            c.bound = self.statements.events_of(&c.schema.name);
+            self.collections.insert(c.schema.name.clone(), c);
             return Ok(());
         }
         let name = self.named(cid).ok_or_else(|| missing(cid))?;
@@ -5898,6 +5917,7 @@ impl Database {
         self.next_coll_id = fresh.next_coll_id;
         self.history = fresh.history;
         self.statements = fresh.statements;
+        self.rebind();
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
         self.adoptions += 1;
@@ -6139,6 +6159,7 @@ impl Database {
         // The collection the last document was of: a block's writes come in
         // runs of one collection.
         let mut of: Option<(u32, String)> = None;
+        let mut rebound = false;
         while let Some(u) = undo.pop() {
             match u {
                 // Each write on its own, the last first: its document out of
@@ -6182,6 +6203,7 @@ impl Database {
                     self.order.insert(at.min(self.order.len()), name.clone());
                     self.collections.insert(name, *c);
                     of = None;
+                    rebound = true;
                 }
                 Undo::Indexed(cid, pos) => {
                     if let Some(name) = self.named(cid) {
@@ -6239,7 +6261,10 @@ impl Database {
                     }
                 }
                 #[cfg(feature = "statements")]
-                Undo::Statements(t) => self.statements = t,
+                Undo::Statements(t) => {
+                    self.statements = t;
+                    rebound = true;
+                }
                 Undo::Uncomposed(cid, at, b) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
@@ -6251,6 +6276,12 @@ impl Database {
                     }
                 }
             }
+        }
+        // A collection back, or the table as it was: each mask from the
+        // table the block leaves -- a dropped collection came back with
+        // the byte it had, under a table the block may have changed after.
+        if rebound {
+            self.rebind();
         }
         for &(cid, mark) in marks {
             if let Some(name) = self.named(cid) {
@@ -6670,7 +6701,7 @@ impl Database {
                 "del",
                 collection,
                 require,
-                self.delete(collection, filter, pick.as_deref(), params),
+                self.delete(collection, filter, pick.as_deref(), params, true),
             ),
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
@@ -7324,7 +7355,7 @@ impl Database {
         }
         let collection = collection.to_string();
         self.open_block();
-        match self.delete(&collection, &filter, None, &[]) {
+        match self.delete(&collection, &filter, None, &[], false) {
             Ok(Response::Affected(n)) => self.commit().map(|_| n),
             Ok(_) => self.commit().map(|_| 0),
             Err(e) => {
@@ -7349,8 +7380,11 @@ impl Database {
         let name = schema.name.clone();
         self.wal(REC_CREATE, cid, &schema.encode())?;
         self.note(cid, SCHEMA_MARK);
-        self.collections
-            .insert(name.clone(), Collection::new(cid, schema));
+        // Bound already where a binding outlived the collection it binds,
+        // dropped by a writer that could not refuse.
+        let mut c = Collection::new(cid, schema);
+        c.bound = self.statements.events_of(&name);
+        self.collections.insert(name.clone(), c);
         self.order.push(name.clone());
         if let Some(b) = &mut self.block {
             b.was.push(Undo::Created(cid));
@@ -7759,10 +7793,21 @@ impl Database {
         // The collection looked up once, and its hooks borrowed rather than
         // copied: a lookup by name is a hash of the name, and the copy an
         // allocation, every statement.
-        let (schema, cid) = {
+        let (schema, cid, bound) = {
             let c = self.collection(collection)?;
-            (c.schema.clone(), c.id)
+            (c.schema.clone(), c.id, c.bound)
         };
+        // What a row of it may be: made, and -- by a `put`, or an upsert's
+        // `else set` -- written over. A write over an expired row makes
+        // one, as every read saw it gone. Asked before anything is taken
+        // or written; a collection no statement is bound to is a byte.
+        let events = match insert && else_set.is_none() {
+            true => stored::INSERT,
+            false => stored::INSERT | stored::SET,
+        };
+        if bound & events != 0 {
+            return Err(self.bound_refused(collection, bound & events));
+        }
         let hooks = registry.hooks();
         let ctx = EvalCtx {
             params,
@@ -11330,8 +11375,13 @@ impl Database {
         registry: &Registry,
         params: &[Value],
     ) -> Result<usize> {
-        let schema = self.collection(collection)?.schema.clone();
-        let cid = self.collection(collection)?.id;
+        let (schema, cid, bound) = {
+            let c = self.collection(collection)?;
+            (c.schema.clone(), c.id, c.bound)
+        };
+        if bound & stored::SET != 0 {
+            return Err(self.bound_refused(collection, stored::SET));
+        }
         let hooks: Vec<_> = registry.hooks().to_vec();
         let ctx = EvalCtx {
             params,
@@ -11417,12 +11467,16 @@ impl Database {
         Ok(true)
     }
 
+    /// A `del`'s rows taken out -- a statement's, `waking` the statements
+    /// bound to them, or the sweep's, which wakes none: every read left
+    /// its rows out at their time, and no binding sees a row expire.
     fn delete(
         &mut self,
         collection: &str,
         filter: &Option<Expr>,
         pick: Option<&Pick>,
         params: &[Value],
+        waking: bool,
     ) -> Result<Response> {
         let ids = self.picked_ids(collection, filter, pick, params)?;
         if collate::PARTIAL {
@@ -11433,7 +11487,13 @@ impl Database {
             Some(list) => Some(self.returned(collection, list, &ids, &[WriteOp::Delete])?),
             None => None,
         };
-        let schema = self.collection(collection)?.schema.clone();
+        let (schema, bound) = {
+            let c = self.collection(collection)?;
+            (c.schema.clone(), c.bound)
+        };
+        if waking && bound & stored::DEL != 0 {
+            return Err(self.bound_refused(collection, stored::DEL));
+        }
         let hooks: Vec<_> = self.registry.hooks().to_vec();
         let n = ids.len();
         for id in ids {

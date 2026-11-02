@@ -293,7 +293,9 @@ impl Database {
     /// the cost out of the definitions that never meant it.
     pub(super) fn body_checked(&self, def: &Definition) -> Result<()> {
         let schema_of = |c: &str| self.collections.get(c).map(|c| &*c.schema);
-        let holes = vec![Value::Null; def.params.len() + def.claims.len()];
+        // A binding's places stand where a callable one's parameters do.
+        let places = def.after.as_ref().map_or(0, |b| b.places.len());
+        let holes = vec![Value::Null; def.params.len() + def.claims.len() + places];
         for (i, st) in def.body.iter().enumerate() {
             let at = |why: String| {
                 Error::Query(format!(

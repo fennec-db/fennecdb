@@ -747,13 +747,32 @@ test('a file holding named statements opens in the module, which keeps them thro
   const { readFileSync } = await import('node:fs');
   const { Fennec } = await import('./fennec.js');
   // Written by a server's build (fennec-core's `stored::` tests): two
-  // definitions in its image, a third after it.
+  // definitions in its image, a third after it, and a statement bound to
+  // the rows `entries` makes (op 3).
   const file = readFileSync(new URL('../crates/fennec-core/tests/statements.fennec', import.meta.url));
   const db = await Fennec.open(wasm);
   db.load(new Uint8Array(file));
-  const texts = ['create statement transfer(', 'create statement like(', 'create statement stale('];
+  const texts = [
+    'create statement transfer(',
+    'create statement like(',
+    'create statement stale(',
+    'create statement credit after insert entries',
+  ];
   const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t));
   assert.ok(keeps(db.snapshot()), 'each text as it came');
+  // The module runs no binding: a write that may make a row of `entries`
+  // is refused before it changes anything, in its own words; what the
+  // binding does not bind writes as ever.
+  for (const write of ['insert entries {src: 1, dst: 1, amount: 5}', 'put entries {src: 1, amount: 5}']) {
+    assert.throws(
+      () => db.run(write),
+      /`entries` has statements bound to its writes, which this module does not run: write it through a server/,
+    );
+  }
+  assert.equal(db.run('get entries count').rows[0].count, 0);
+  db.run('set entries {amount: 1} where src = 1');
+  db.run('del entries where src = 1');
+  db.run('put accounts {owner: "ann", balance: 1}');
   // A schema change taking away what one reads lands here: the module
   // marks it broken, for the server that opens the file again to refuse.
   db.run('alter collection accounts drop field balance');

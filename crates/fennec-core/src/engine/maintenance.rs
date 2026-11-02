@@ -329,6 +329,8 @@ impl Database {
         if kind.ttl().is_some() {
             let other = crate::schema::Field::new(field, f.ty.clone()).indexed(kind.clone());
             crate::schema::one_expiry(collection, c.schema.fields.iter().chain([&other]))?;
+            #[cfg(feature = "statements")]
+            self.expiry_held(collection)?;
         }
         Ok(None)
     }
@@ -422,6 +424,13 @@ impl Database {
         let tail = tail.ok_or_else(changed)?;
         if tail.schema || self.named(copy.cid).as_deref() != Some(&copy.collection) {
             return Err(changed());
+        }
+        // A statement bound after `del` meanwhile -- a definition notes no
+        // collection's tail -- refuses a `@ttl` here as at the start: this
+        // lands outside `commit`, where a block's schema change is held.
+        #[cfg(feature = "statements")]
+        if copy.kind.ttl().is_some() {
+            self.expiry_held(&copy.collection)?;
         }
         let c = self.collections.get_mut(&copy.collection).unwrap();
         let pos = copy.pos;
@@ -687,6 +696,9 @@ impl Database {
         for (mut p, t) in parts.into_iter().zip(tails) {
             let live = &self.collections[&p.name];
             let c = &mut p.collection;
+            // Bound as the collection it takes the place of is now: a
+            // definition meanwhile notes no collection of its own.
+            c.bound = live.bound;
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
