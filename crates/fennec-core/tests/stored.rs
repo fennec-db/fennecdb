@@ -875,6 +875,38 @@ fn each_event_refuses_the_writes_that_may_make_it() {
     }
 }
 
+/// A collection's bindings are a run of the table's index, in name order,
+/// whatever is defined or dropped beside them.
+#[test]
+fn a_collection_s_bindings_are_read_in_name_order() {
+    let tap = Tap::default();
+    let mut db = binding(&tap);
+    let body = "as set accounts {balance: 0} where id = 1";
+    for text in [
+        format!("create statement b after del likes {body}"),
+        format!("create statement d after insert entries {body}"),
+        format!("create statement a after insert likes {body}"),
+        "create statement c() as get accounts select id".into(),
+        format!("create statement aa after set likes {body}"),
+    ] {
+        run(&mut db, &text).unwrap();
+    }
+    let names = |db: &Database, c: &str| -> Vec<String> {
+        db.statements()
+            .bound_to(c)
+            .map(|s| s.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&db, "likes"), ["a", "aa", "b"]);
+    assert_eq!(names(&db, "entries"), ["d"]);
+    assert!(names(&db, "accounts").is_empty());
+    assert_eq!((mask(&db, "likes"), mask(&db, "entries")), (7, 1));
+    run(&mut db, "drop statement aa; drop statement c").unwrap();
+    assert_eq!(names(&db, "likes"), ["a", "b"]);
+    assert_eq!(mask(&db, "likes"), 5);
+    assert_eq!(names(&opened(&tap.bytes()), "likes"), ["a", "b"]);
+}
+
 #[test]
 fn an_open_an_image_a_replica_a_compact_and_a_restore_keep_a_binding() {
     fennec_ql::install();

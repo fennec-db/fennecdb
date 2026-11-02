@@ -221,10 +221,21 @@ pub(super) fn decode(body: &[u8]) -> Result<std::result::Result<Stored, String>>
 #[derive(Debug, Clone, Default)]
 pub struct Statements {
     all: Vec<Stored>,
-    /// Each bound statement's `(collection, name)`, in that order: a
-    /// collection's bindings are a run, in name order -- the order a row
-    /// runs them in.
-    bound: Vec<(String, String)>,
+    /// Where each bound statement stands in `all`, by its collection and,
+    /// within one, by name: a collection's bindings are a run, in the
+    /// order a row runs them in. Places, not names: a copy of the table
+    /// copies numbers, and the run is the statements themselves -- the
+    /// names kept twice, sorted, retained and cloned with each table were
+    /// 0.9 KB of the browser module. Made again whole wherever a bound
+    /// statement is defined or dropped, or one is beside one, since each
+    /// definition and drop moves the places after it.
+    bound: Vec<u32>,
+}
+
+/// The collection a statement is bound to; `""`, which names none, for a
+/// callable one.
+fn bound_of(s: &Stored) -> &str {
+    s.after.as_ref().map_or("", |a| a.0.as_str())
 }
 
 impl Statements {
@@ -246,12 +257,9 @@ impl Statements {
 
     /// The statements bound to `collection`'s writes, in name order,
     /// broken or not.
-    pub fn bound_to<'s>(&'s self, collection: &'s str) -> impl Iterator<Item = &'s Stored> + 's {
-        let from = self.bound.partition_point(|(c, _)| c.as_str() < collection);
-        self.bound[from..]
-            .iter()
-            .take_while(move |(c, _)| c == collection)
-            .filter_map(|(_, name)| self.get(name))
+    pub fn bound_to<'s>(&'s self, collection: &str) -> impl Iterator<Item = &'s Stored> + 's {
+        let run = self.run(collection, false)..self.run(collection, true);
+        self.bound[run].iter().map(|&i| &self.all[i as usize])
     }
 
     /// The events the statements bound to `collection` wake on, together:
@@ -261,35 +269,57 @@ impl Statements {
             .fold(0, |e, s| e | s.after.as_ref().map_or(0, |a| a.1))
     }
 
+    /// Where `collection`'s run in [`Self::bound`] begins, or -- `past` --
+    /// ends. Walked rather than halved: a database binds a handful, and
+    /// `partition_point`'s two copies were 0.3 KB of the browser module.
+    fn run(&self, collection: &str, past: bool) -> usize {
+        use std::cmp::Ordering::{Equal, Less};
+        let mut at = 0;
+        for &i in &self.bound {
+            match bound_of(&self.all[i as usize]).cmp(collection) {
+                Less => at += 1,
+                Equal if past => at += 1,
+                _ => break,
+            }
+        }
+        at
+    }
+
     fn at(&self, name: &str) -> std::result::Result<usize, usize> {
         self.all.binary_search_by(|s| s.name.as_str().cmp(name))
     }
 
     /// Defines `s`, or replaces the statement of its name.
     pub(super) fn put(&mut self, s: Stored) {
-        let key = s.after.as_ref().map(|(c, _)| (c.clone(), s.name.clone()));
+        let bound = s.after.is_some();
         match self.at(&s.name) {
-            Ok(i) => {
-                let old = std::mem::replace(&mut self.all[i], s);
-                self.unindex(&old);
-            }
+            Ok(i) => self.all[i] = s,
             Err(i) => self.all.insert(i, s),
         }
-        if let Some(key) = key {
-            let at = self.bound.partition_point(|k| *k < key);
-            self.bound.insert(at, key);
-        }
+        self.reindex(bound);
     }
 
     pub(super) fn remove(&mut self, name: &str) -> Option<Stored> {
         let s = self.at(name).ok().map(|i| self.all.remove(i))?;
-        self.unindex(&s);
+        self.reindex(s.after.is_some());
         Some(s)
     }
 
-    fn unindex(&mut self, s: &Stored) {
-        if let Some((c, _)) = &s.after {
-            self.bound.retain(|(bc, n)| !(bc == c && *n == s.name));
+    /// [`Self::bound`] made again from `all`, walked in name order, each
+    /// bound statement put at the end of its collection's run -- where a
+    /// definition or a drop of a bound statement may change it, or one
+    /// beside a bound one moves its place. A table binding nothing, as F1's
+    /// are, walks nothing.
+    fn reindex(&mut self, bound: bool) {
+        if !bound && self.bound.is_empty() {
+            return;
+        }
+        self.bound.clear();
+        for i in 0..self.all.len() {
+            if self.all[i].after.is_some() {
+                let at = self.run(bound_of(&self.all[i]), true);
+                self.bound.insert(at, i as u32);
+            }
         }
     }
 }
@@ -773,7 +803,8 @@ impl super::Database {
     /// wherever the table or the collections change: a definition or a
     /// drop, a block put back, an open, a replica's apply, an image
     /// adopted, a collection made. A look at each collection, at a schema
-    /// change alone.
+    /// change alone, and out of line: each place calls it.
+    #[inline(never)]
     pub(super) fn rebind(&mut self) {
         let t = &self.statements;
         for (name, c) in self.collections.iter_mut() {
