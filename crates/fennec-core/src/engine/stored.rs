@@ -226,7 +226,7 @@ pub struct Statements {
     /// order a row runs them in. Places, not names: a copy of the table
     /// copies numbers, and the run is the statements themselves -- the
     /// names kept twice, sorted, retained and cloned with each table were
-    /// 0.9 KB of the browser module. Made again whole wherever a bound
+    /// 0.7 KB of the browser module. Made again whole wherever a bound
     /// statement is defined or dropped, or one is beside one, since each
     /// definition and drop moves the places after it.
     bound: Vec<u32>,

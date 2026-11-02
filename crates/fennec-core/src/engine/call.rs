@@ -67,6 +67,16 @@ impl Database {
             .statements
             .get(&call.name)
             .ok_or_else(|| missing(&call.name))?;
+        // A bound statement's values are a row's: the writes it binds run
+        // it, never a call, which would run its body with none.
+        if let Some((c, events)) = &s.after {
+            return Err(Error::Query(format!(
+                "statement `{}` is bound after `{}` on `{c}`: the writes it binds run it, and \
+                 no call does",
+                call.name,
+                crate::named::Binding::events_named(*events)
+            )));
+        }
         // Judged by the tree it runs, or, where its text reads as another
         // statement here, by that one's signature: the mark below comes
         // after the claims, the arguments and `check`, as the design orders

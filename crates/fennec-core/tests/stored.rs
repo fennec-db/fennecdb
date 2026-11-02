@@ -843,6 +843,11 @@ fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_are_refused() {
          \"cy\", balance: 1}",
     )
     .unwrap();
+    // Never called: its values are a row's.
+    let e = refused(run(&mut db, "call credit"));
+    let says =
+        "statement `credit` is bound after `insert` on `entries`: the writes it binds run it";
+    assert!(e.contains(says), "{e}");
 
     // Dropped, the writes it bound land.
     run(&mut db, "drop statement credit").unwrap();
