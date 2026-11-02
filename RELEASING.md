@@ -127,6 +127,12 @@ upgraded. A failover onto a standby from before is not driven: it is the
 replica's case, the standby having stopped at the record before it could
 be promoted.
 
+A field keeping `@text` beside its `@hash`, `@unique` or `@sorted` takes
+the same order: its schema writes type tag 18 (`TAG_BESIDE`), and a replica
+from before stops following at it ("unknown type tag 18"), as one does at
+`TAG_NOCASE`'s 17, so every reader upgrades before any primary gives a field
+its second index. `make upgrade-check` drives record kind 13 alone.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |

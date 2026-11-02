@@ -449,8 +449,10 @@ documents (`rebuild_indexes_with`): listed for every collection, they were
 `fennec_http::warm`). The first `match` after a start built its `@text`
 index inside the request: a shop's first search page took 2.68 s to its
 largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
-derived indexes nothing has built, `warm_index` builds one as its first read
-would, and a thread of the server's builds them one at a time, each under
+derived indexes nothing has built by field and kind (`DerivedKind`), a
+text field keeping `@text` beside its `@unique` listed twice; `warm_index`
+builds the one named as its first read would, and a thread of the server's
+builds them one at a time, each under
 the read lock on its own -- reads go on, one needing the index waits for
 that build, a write waits out one index at most. So a bench times nothing
 until its warm-up has read every index the writes keep up: `make

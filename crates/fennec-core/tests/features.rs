@@ -173,6 +173,27 @@ fn a_unique_field_beside_a_text_index_refuses_without_it() {
     assert!(e.is_ok(), "{e:?}");
 }
 
+/// A field keeping `@text` beside its `@sorted`, in a build with neither:
+/// `match` is refused naming the index it reads, `text`, never the field's
+/// other one, and a range is answered by the scan.
+#[test]
+fn match_beside_an_ordered_index_names_the_text_feature() {
+    let mut db = Database::new();
+    run(&mut db, "create collection s (title text @sorted @text)").unwrap();
+    run(&mut db, r#"put s [{title: "a rust"}, {title: "b go"}]"#).unwrap();
+    let e = run(&mut db, r#"get s match title "rust""#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("`text`")
+            && !e.contains("`sorted`")
+            && e.contains("this build was made without"),
+        "{e}"
+    );
+    let r = run(&mut db, r#"get s where title >= "b" count"#).unwrap();
+    assert_eq!(ints(&r, 0), [1]);
+}
+
 /// A path's ordered index is declared in the file as a field's is: a build
 /// without `sorted` opens it, answers its comparisons and its order by the
 /// scan, and refuses to make one.

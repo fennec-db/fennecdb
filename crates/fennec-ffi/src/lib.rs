@@ -961,8 +961,8 @@ pub unsafe extern "C" fn fennec_warm(
             .filter(|s| !s.is_empty())
             .collect();
         let todo = n.read()?.unbuilt_indexes(&only);
-        for (c, f) in &todo {
-            n.read()?.warm_index(c, f).map_err(|e| failed(&e))?;
+        for (c, f, kind) in &todo {
+            n.read()?.warm_index(c, f, *kind).map_err(|e| failed(&e))?;
         }
         Ok(Some(format!("{{\"built\":{}}}", todo.len())))
     })

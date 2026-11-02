@@ -437,6 +437,13 @@ impl Database {
                 .ok()
                 .and_then(|k| copy.values[k].1.as_ref())
         };
+        // Beside its other where it has one, as `check_index` found it
+        // could be: the schema is the one it was then (`tail.schema`).
+        // Asked of a copy before any index goes into its map, and put in
+        // place only once one has: a refusal here or a failed read below
+        // leaves the maps and the schema both as they were.
+        let mut field = c.schema.fields[pos].clone();
+        field.add_index(copy.kind.clone())?;
         // The writes made during the build, applied as the write path would
         // have: out with the value the build saw, in with the one there now.
         match index {
@@ -518,9 +525,7 @@ impl Database {
                 c.geo.push((copy.field.clone(), Derived::new(ix)));
             }
         }
-        // Beside its other where it has one, as `check_index` found it
-        // could be: the schema is the one it was then (`tail.schema`).
-        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos].add_index(copy.kind)?;
+        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos] = field;
         let (cid, encoded) = (c.id, c.schema.encode());
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);
