@@ -2672,7 +2672,10 @@ fn run_query(
     // Asked of a write that may grow the data, under a ceiling: the read
     // lock taken for every write, ceiling or none, paid for the one a call
     // that reads takes to ask its statement ([`read_call`]). A call is
-    // asked here too, by its body, only under a ceiling.
+    // asked here too, by its body, only under a ceiling. A `del` is asked
+    // under the write lock it takes anyway, below: it grows the data only
+    // by what a statement bound to it writes ([`grows_bound`]), which its
+    // collection's byte answers there, so a `del` takes no lock it did not.
     if cfg.max_memory != 0 && grows(&stmt) {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
@@ -2854,6 +2857,11 @@ fn run_query(
             Some(_) => fennec_core::engine::Prepared::default(),
         };
         let mut guard = held::write(db);
+        if cfg.max_memory != 0 && matches!(*stmt, Statement::Delete { .. }) {
+            if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
+                return refused(why);
+            }
+        }
         let before = waits::now_ms();
         let mark = waits::Mark::of(&guard);
         // An MCP call tool's write, in a block of its own so that its
@@ -3736,6 +3744,25 @@ fn grows(stmt: &Statement) -> bool {
     )
 }
 
+/// Whether `stmt`, which [`grows`] passes, grows the data by what it wakes:
+/// a `del` of a collection a statement is bound after `del` to whose body
+/// inserts or sets, held as the insert it makes. Asked under the lock, of
+/// the collection's byte first (`Collection::bound`): a `del` of one no
+/// statement is bound to after `del` reads no table.
+fn grows_bound(db: &Database, stmt: &Statement) -> bool {
+    let Statement::Delete { collection, .. } = stmt else {
+        return false;
+    };
+    let del = fennec_core::named::Binding::DEL;
+    if !db.collection(collection).is_ok_and(|c| c.bound & del != 0) {
+        return false;
+    }
+    db.statements()
+        .bound_to(collection)
+        .filter(|s| s.after.as_ref().is_some_and(|a| a.1 & del != 0))
+        .any(|s| s.tree.as_ref().is_some_and(|d| d.body.iter().any(grows)))
+}
+
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.
 ///
 /// Only a statement that grows the data is stopped: `del` and `compact` are
@@ -3744,7 +3771,7 @@ fn grows(stmt: &Statement) -> bool {
 /// for both listeners: fennec-server held only its own writes to it, and a client
 /// writing over HTTP never met it.
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
-    if max == 0 || !grows(stmt) {
+    if max == 0 || !(grows(stmt) || grows_bound(db, stmt)) {
         return None;
     }
     // A call grows the data as its body does: one that inserts or sets is
@@ -3753,6 +3780,7 @@ pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<Strin
     // so its body's writes went past `--max-memory`. One naming no
     // statement that can run writes nothing, refused as the call is judged.
     if let Statement::Call(c) = stmt {
+        let grows = |s: &Statement| grows(s) || grows_bound(db, s);
         if !db.call_body(c).is_some_and(|body| body.iter().any(grows)) {
             return None;
         }

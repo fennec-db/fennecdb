@@ -133,6 +133,27 @@ from before stops following at it ("unknown type tag 18"), as one does at
 `TAG_NOCASE`'s 17, so every reader upgrades before any primary gives a field
 its second index. `make upgrade-check` drives record kind 13 alone.
 
+**A statement bound to a collection's writes moves it once more.** From
+the release whose engine runs them (`docs/design/named-statements.md`,
+F2's slice 3), a primary writes one by `create statement ... after`, a
+declared schema's apply or a tenant created with one: kind 13's op 3,
+whose collection and events stand outside its text, and which a binary
+from before it -- the last main before the op, `b73ce4ca` -- reads as a
+statement record it does not read and refuses, never taking it for a
+callable statement whose writes would land without its rows. Its notes
+name `after` as the clause that moves the format, under the same upgrade
+heading and in the same order: every archiver, router and node upgraded
+before any primary defines a binding. Where the order is not kept, each
+older binary stops in words ("a statement record this version does not
+read"): a replica stops following at the record and connects again, taking
+no write past it; an archiver keeps the stream and takes no image of its
+own, and its `fennec restore` refuses the archive this tree's restores; the
+server refuses to open the file that restore wrote; a move onto an older
+node fails at its install, the tenant staying on its source, its binding
+running. `make upgrade-check` drives each against `OP3_BASE`, beside the
+server, a replica and `fennec types` refusing fennec-core's
+`tests/statements.fennec`.
+
 **A node recorded at `https://` waits for every router and node.** From
 the release that dials HTTPS (TLS slice 3), a node serving HTTPS
 (`--tls-cert`) is recorded at its `https://host:port` address (`PUT

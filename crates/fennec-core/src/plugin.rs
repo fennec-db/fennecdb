@@ -81,6 +81,16 @@ pub trait Hook: Send + Sync {
     fn answering(&self, _schema: &Schema, _op: WriteOp, _doc: &Document) -> Result<()> {
         Ok(())
     }
+    /// Called once a statement's rows are written, before the first run
+    /// of a statement bound to its writes that `rows` of them woke, named
+    /// `binding` (`docs/design/named-statements.md`, *A binding's
+    /// authority*): where a policy meets a binding. Returning `Err` refuses
+    /// the write, whose block is put back, and no binding runs: a binding
+    /// never skips. fennec-http's `access` refuses every scoped token's
+    /// write here until a policy's lines grant one.
+    fn waking(&self, _binding: &str, _rows: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A function as the registry holds it: its name, lowered, the function,

@@ -280,7 +280,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 - The shell runs a statement once nothing after it can go on with it
 - A schema declared in code is checked at every open, in the engine.
 - Named statements are records of their database, called with their own text's authority.
-- A write-bound statement's record binds its collection's writes.
+- A write-bound statement runs in the block of the write that woke it, once a row.
 
 ### `crates/fennec-http/CLAUDE.md`
 

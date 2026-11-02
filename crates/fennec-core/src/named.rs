@@ -271,12 +271,12 @@ pub struct Place {
     pub field: String,
 }
 
-/// What every way of running a statement answers a bound one's definition
-/// with until the engine runs bindings: one defined with nothing to run it
-/// would let the writes it binds land without its rows.
-pub const BOUND_NOT_BUILT: &str = "write-bound statements are not built yet: a statement \
-                                   defined `after` a collection's writes is refused until the \
-                                   engine runs it in the block of every write it binds";
+/// The rows one statement may wake the statements bound to its writes for
+/// (`docs/design/named-statements.md`, *When a binding runs*), a row
+/// counted once whatever number of bindings it passes: the 10 001st
+/// refuses the write as it is written, never cut -- the bound `near`,
+/// `match` and a facet hold to.
+pub const MAX_WOKEN: usize = 10_000;
 
 /// `$name type [= literal]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -830,7 +830,7 @@ impl Definition {
     /// sets and `del` takes out. A `put` counted as an `insert` alone let
     /// a replacement turning `insert` into `put` start setting rows no
     /// grant said it would.
-    fn written(&self) -> Vec<(&str, u8)> {
+    pub fn written(&self) -> Vec<(&str, u8)> {
         let mut out: Vec<(&str, u8)> = Vec::new();
         for s in &self.body {
             let (c, kinds) = match s {

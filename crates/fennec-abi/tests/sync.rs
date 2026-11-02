@@ -474,6 +474,39 @@ impl World {
     }
 }
 
+/// The sync applies a stream's rows unbound: a statement bound to a
+/// collection the replica follows -- here one another database defined,
+/// its record (kind 13, op 3) written by hand -- is never woken by them,
+/// nor does it refuse them as it refuses every other writer's.
+#[test]
+fn a_stream_s_rows_wake_no_statement_bound_to_them() {
+    use fennec_core::codec::{encode_str, put_uvarint};
+    let mut body = vec![3u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, 1);
+    put_uvarint(&mut body, fennec_core::named::GRAMMAR_EPOCH as u64);
+    body.extend_from_slice(&1u64.to_le_bytes());
+    encode_str(&mut body, "tally");
+    put_uvarint(&mut body, 0);
+    encode_str(&mut body, "tasks");
+    body.push(7);
+    encode_str(
+        &mut body,
+        "create statement tally after insert or set or del tasks ...",
+    );
+    let mut file = Database::new().snapshot();
+    file.push(13);
+    put_uvarint(&mut file, 0);
+    put_uvarint(&mut file, body.len() as u64);
+    file.extend_from_slice(&body);
+    let mut client = Database::new();
+    client.load(&file).unwrap();
+    let mut w = World::with(Server::new(), client);
+    w.deliver();
+    assert_eq!(w.client.collection("tasks").unwrap().bound, 7);
+    assert_eq!(w.titles(), ["one", "two"]);
+}
+
 #[test]
 fn an_offline_write_lands_once_its_answer_lost() {
     let mut w = World::new();

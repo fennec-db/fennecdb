@@ -104,12 +104,28 @@ operator by a byte of its own; reading a stored text otherwise raises
 `GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
 texts to main's trees.
 
-**[A write-bound statement's record binds its collection's
-writes.](../../docs/design/named-statements.md#write-bound-statements-f2)** Kind
-13 op 3, refused by a binary from before, holds collection and events
+**[A write-bound statement runs in the block of the write that woke it,
+once a row.](../../docs/design/named-statements.md#write-bound-statements-f2)**
+`create statement <n> after insert|set|del <c> [where ...] as ...` is kind
+13's op 3, refused by a binary from before, its collection and events
 outside the text, read into `Collection::bound`, a mask every change keeps
 (`Database::rebind`): an unbound collection pays one byte's look a writing
-statement. Until the engine runs one, a definition and each write it binds
-are refused (`BOUND_NOT_BUILT`, 409 where one is broken or unread); `@ttl`
-and `after del` refuse each other; a replacement keeps collection, events
-and kinds of write (a `put` makes and sets).
+statement, and `run_one` a length. A bound write asks each row the
+conditions as it is written (`Database::bind`, `Woken::keep`), keeping a
+passing row's pair alone, a write over an expired row an `insert`;
+`run_one` alone runs them, after the statement's rows, hooks and `require`
+and before the block lands, rows then names, one `now()`; past `MAX_WOKEN`
+rows or `--call-max-rows` (fresh a statement, a call's own in a call) a
+write is refused, never cut, its block put back and the binding noted
+(`Database::woken`). Depth one: its writes wake none, a binding of its own
+collection or a chain is refused at definition, one bound to or writing
+a `_` collection by its text (`declared::own`), and none is called. A
+broken or unread one, or a build without the feature, refuses the writes it
+binds. `Database::unbound` (implied by `internally` and a binding's runs)
+wakes and refuses nothing: `--follow`'s mirror, `fennec import`, a declared
+migration and the sync's apply run under it, and a new internal writer owes
+it; an apply, a restore, a compact and the sweep never reach `run_one`. A
+scoped token's write or call that would wake one is refused (403,
+`Hook::waking`, `judge_call`) until a policy grants it. `@ttl` and `after
+del` refuse each other; a replacement keeps collection, events and kinds of
+write (a `put` makes and sets).

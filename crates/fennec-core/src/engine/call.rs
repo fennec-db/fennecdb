@@ -232,7 +232,7 @@ impl Database {
     /// among them, was refused as a call past its rows until it was opened
     /// again -- a connection's panic must unwind alone. [`Bound`]'s work,
     /// for a body that takes the database whole.
-    fn bounded<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+    pub(super) fn bounded<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         *self.calls.get_mut() += 1;
         let before = LEFT.with(|l| l.replace(self.call_max_rows));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));

@@ -7,6 +7,7 @@
 mod access;
 mod api;
 mod archive;
+mod bound;
 mod cdc;
 mod changes;
 mod chunked;

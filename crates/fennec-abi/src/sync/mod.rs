@@ -1359,7 +1359,7 @@ impl Sync {
                 .map(|s| (s.spec.collection.clone(), s.cursor))
                 .collect::<Vec<_>>()
             {
-                self.drop_passed(db, &c.0, c.1)?;
+                db.unbound(|db| self.drop_passed(db, &c.0, c.1))?;
             }
             db.commit()
         })();
@@ -1391,7 +1391,7 @@ impl Sync {
             db.begin()?;
             if let Value::List(steps) = json::parse_json(&op.undo)? {
                 for step in steps.iter().rev() {
-                    self.undo_step(db, step)?;
+                    db.unbound(|db| self.undo_step(db, step))?;
                 }
             }
             rebased = self.rebase(db, &op)?;
@@ -1694,8 +1694,11 @@ impl Sync {
                 return;
             }
             let r = match ev.name.as_str() {
-                "seed" => self.seed(db, i, &ev.data),
-                "change" if self.shapes[i].seeded => self.change(db, i, &ev.data),
+                // A stream's rows are the server's, what its bindings
+                // wrote among them: applied, they wake nothing here
+                // (`Database::unbound`).
+                "seed" => db.unbound(|db| self.seed(db, i, &ev.data)),
+                "change" if self.shapes[i].seeded => db.unbound(|db| self.change(db, i, &ev.data)),
                 "error" => Err(Error::Query(
                     members(&ev.data)
                         .ok()

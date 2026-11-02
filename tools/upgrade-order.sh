@@ -389,14 +389,19 @@ echo "ok: the binaries from before stop in words at the first definition"
 # outside its text. A binary from before it -- OP3_BASE, the last main
 # before the op -- reads kind 13 and refuses an op it does not read, never
 # taking the binding for a callable statement whose writes would land
-# without its rows. No server defines one before the engine runs it, so
-# the file is fennec-core's fixture, written by its tests with a binding
-# after F1's records (`tests/statements.fennec`):
+# without its rows. This tree's primary defines one by `/query`, as a
+# client does since the engine runs them (F2's slice 3):
 #
-#   - the old server refuses to open it, in words;
-#   - an old replica of this tree's server serving it refuses the image it
-#     is sent, in words, holds nothing of it, and connects again;
-#   - the old `fennec types`, a tool that only looks, refuses it too.
+#   - an old replica following it refuses the record in words, takes no
+#     write past it, and connects again;
+#   - an old archiver keeps the stream's bytes but takes no image of its
+#     own; the old `fennec restore` refuses what it kept, this tree's
+#     restores it, and the old server refuses to open the file it wrote;
+#   - a move onto an old node fails at its install, the tenant left on its
+#     source, answering, its binding running;
+#   - the old server, an old replica of a server serving it and the old
+#     `fennec types` refuse fennec-core's fixture, written by its tests with
+#     a binding after F1's records (`tests/statements.fennec`).
 OP3_BASE=${OP3_BASE:-b73ce4ca}
 if [ -n "${OLD3_BIN_DIR:-}" ]; then
     OLD3=$OLD3_BIN_DIR
@@ -408,6 +413,116 @@ else
     OLD3="$WORK/old3-target/debug"
 fi
 UNREAD='a statement record this version does not read'
+BINDING="create statement paid after set orders where new.status = 'paid' as insert ledger {o: new.id}"
+
+"$NEW/fennec-server" --file "$WORK/p3.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/p3.log" &
+PIDS+=($!)
+P3=$(address "$WORK/p3.log")
+"$OLD3/fennec-server" --file "$WORK/r3.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$P3" 2>"$WORK/r3.log" &
+PIDS+=($!)
+R3=$(address "$WORK/r3.log")
+"$OLD3/fennec" archive "$P3" "$WORK/archive3" --token r --image-every 1s \
+    2>"$WORK/archiver3.log" &
+ARCHIVER3=$!
+PIDS+=($ARCHIVER3)
+
+query "$P3" "create collection orders (status text)" >/dev/null
+query "$P3" "create collection ledger (o int)" >/dev/null
+query "$P3" "put orders {status: 'open'}" >/dev/null
+for _ in $(seq 1 600); do
+    query "$R3" "get orders count" | grep -q '"count":1' && break
+    sleep 0.05
+done
+query "$R3" "get orders count" | grep -q '"count":1' ||
+    fail "the old replica never followed this tree's primary"
+said "$WORK/archiver3.log" "image at change" || fail "the old archiver took no image"
+
+# The first binding, defined as a client defines one, and a write it wakes.
+query "$P3" "$BINDING" | grep -q '"error"' && fail "the primary refused the binding"
+query "$P3" "set orders {status: 'paid'} where id = 1" | grep -q '"error"' &&
+    fail "the primary refused the write its binding binds"
+query "$P3" "get ledger count" | grep -q '"count":1' ||
+    fail "the primary's write landed without its binding's row"
+
+said "$WORK/r3.log" "$UNREAD" || fail "the old replica said nothing of op 3"
+query "$R3" "get orders select status" | grep -q 'paid' &&
+    fail "the old replica took a write past the binding it refused"
+said "$WORK/archiver3.log" "$UNREAD" || fail "the old archiver said nothing of op 3"
+echo "old replica:  $(grep -m1 "$UNREAD" "$WORK/r3.log")"
+echo "old archiver: $(grep -m1 "$UNREAD" "$WORK/archiver3.log")"
+
+kill "$ARCHIVER3" 2>/dev/null || true
+wait "$ARCHIVER3" 2>/dev/null || true
+if TMPDIR="$WORK" "$OLD3/fennec" restore "$WORK/archive3" "$WORK/restored3-old.fennec" \
+    >"$WORK/restore3-old.log" 2>&1; then
+    fail "the old restore read an archive holding op 3"
+fi
+grep -q "$UNREAD" "$WORK/restore3-old.log" || fail "the old restore said nothing of op 3"
+TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive3" "$WORK/restored3.fennec" \
+    >"$WORK/restore3-new.log" 2>&1 || fail "this tree's restore refused the archive"
+"$OLD3/fennec-server" --file "$WORK/restored3.fennec" --http 127.0.0.1:0 \
+    >"$WORK/restored3-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a restore holding op 3"
+grep -q "$UNREAD" "$WORK/restored3-open.log" || fail "the old server said nothing of op 3"
+echo "old restore:  $(grep -m1 "$UNREAD" "$WORK/restore3-old.log")"
+echo "old open:     $(grep -m1 "$UNREAD" "$WORK/restored3-open.log")"
+
+# A move onto an old node: this tree's router places the tenant, its
+# binding and all, on this tree's node; the move to the old one fails at
+# its install, and the tenant stays on its source, its binding running.
+"$NEW/fennec-server" --dir "$WORK/n6" --http 127.0.0.1:0 --admin-token a6 \
+    >"$WORK/n6.log" 2>&1 &
+PIDS+=($!)
+N6=$(address "$WORK/n6.log")
+"$OLD3/fennec-server" --dir "$WORK/n7" --http 127.0.0.1:0 --admin-token a7 \
+    >"$WORK/n7.log" 2>&1 &
+PIDS+=($!)
+N7=$(address "$WORK/n7.log")
+"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router3.fennec" \
+    --token root >"$WORK/router3.log" 2>&1 &
+PIDS+=($!)
+ROUTER3=$(address "$WORK/router3.log")
+for n in "n6 ${N6#http://} a6" "n7 ${N7#http://} a7"; do
+    set -- $n
+    code=$(admin "$ROUTER3" PUT "/_shard/nodes/$1" "{\"addr\":\"$2\",\"token\":\"$3\"}")
+    case "$code" in
+    2??) ;;
+    *) fail "the router did not take $1 ($code): $(cat "$WORK/admin.out")" ;;
+    esac
+done
+code=$(admin "$ROUTER3" PUT /_shard/tenants/shop '{"node":"n6"}')
+case "$code" in
+2??) ;;
+*) fail "this tree's router did not place the tenant ($code): $(cat "$WORK/admin.out")" ;;
+esac
+query "$ROUTER3/t/shop" "create collection orders (status text)" >/dev/null
+query "$ROUTER3/t/shop" "create collection ledger (o int)" >/dev/null
+query "$ROUTER3/t/shop" "$BINDING" | grep -q '"error"' && fail "the tenant refused the binding"
+query "$ROUTER3/t/shop" "put orders {status: 'open'}" >/dev/null
+code=$(admin "$ROUTER3" POST /_shard/tenants/shop/move '{"to":"n7"}')
+case "$code" in
+2??) fail "the move onto the old node answered $code: $(cat "$WORK/admin.out")" ;;
+esac
+grep -q "$UNREAD" "$WORK/admin.out" "$WORK/n7.log" ||
+    fail "the failed move said nothing of op 3: $(cat "$WORK/admin.out")"
+echo "old node:     $code $(cat "$WORK/admin.out")"
+admin "$ROUTER3" GET /_shard/tenants/shop >/dev/null
+grep -q '"node":"n6"' "$WORK/admin.out" ||
+    fail "the tenant left its source: $(cat "$WORK/admin.out")"
+query "$ROUTER3/t/shop" "set orders {status: 'paid'} where id = 1" | grep -q '"error"' &&
+    fail "the tenant on its source took no write"
+query "$ROUTER3/t/shop" "get ledger count" | grep -q '"count":1' ||
+    fail "the tenant on its source wrote without its binding's row"
+
+# The fixture: a file holding a binding after F1's records.
 cp "$ROOT/crates/fennec-core/tests/statements.fennec" "$WORK/bound.fennec"
 cp "$WORK/bound.fennec" "$WORK/bound-old.fennec"
 
@@ -429,8 +544,8 @@ PIDS+=($!)
 BOUND=$(address "$WORK/bound-primary.log")
 query "$BOUND" "get accounts count" | grep -q '"error"' &&
     fail "this tree's server answered no read of the file holding op 3"
-query "$BOUND" "insert entries {src: 1, dst: 1, amount: 5}" | grep -q 'would wake `credit`' ||
-    fail "this tree's server took a write its binding binds"
+query "$BOUND" "insert entries {src: 1, dst: 1, amount: 5}" | grep -q '"error"' &&
+    fail "this tree's server refused a write its binding runs for"
 
 "$OLD3/fennec-server" --file "$WORK/bound-replica.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r --replica-of "$BOUND" 2>"$WORK/bound-replica.log" &
