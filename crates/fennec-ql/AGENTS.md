@@ -134,3 +134,23 @@ native library's, the shell's -- names it (`binding`,
 spans and audit, and described (`statements`, `GET /_schema`) to the
 server's token alone. `@ttl` and `after del` refuse each other; a replacement
 keeps collection, events and kinds of write (a `put` makes and sets).
+
+**[A scheduled statement's record is kept by every build, and run by none
+yet.](../../docs/design/named-statements.md#what-f3-has-built)**
+`create statement <n> every <interval> | at '<cron>' [in '<zone>'] as ...`
+is kind 13's op 4, its schedule and `since` outside its text, and a slot's
+mark op 5 (`SlotMark`): each one write `writes_in` counts, refused by a
+binary from before, never misread. Every build reads both into
+`Stored::schedule` and `Stored::last` and keeps them through every image,
+each schedule's last mark alone, and a compact beside the database writes
+the marks at its swap (`last_marks`; `Statements::defines_as`, so a mark
+meanwhile fails none); a replica applies them, `/_changes` passes over
+them. A run's mark lands in its block; one of a run that wrote nothing
+waits in `Database::pending` for the next block `commit` lands, kept by
+one put back and written by an image. A mark of a definition replaced
+counts for nothing; a replacement clears the mark, moves `since` and keeps
+the kind (`named::Kind`). `grows` and a rate pass over op 5;
+`MAX_SCHEDULED` bounds them; `Database::due` is each one's slot, a pure
+function of the table, the marks and a time (`AHEAD_MAX`). Until a server
+runs one, every way in refuses a definition (`SCHEDULED_NOT_BUILT`) but a
+test's (`Database::allow_schedules`), and no call runs one.

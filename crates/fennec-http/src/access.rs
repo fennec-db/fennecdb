@@ -3462,7 +3462,7 @@ pub fn judged(
     if db
         .statements()
         .get(&c.name)
-        .is_some_and(|s| s.after.is_some())
+        .is_some_and(|s| !s.called())
     {
         return Err(Error::NotFound(format!("statement `{}`", c.name)));
     }

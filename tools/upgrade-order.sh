@@ -48,7 +48,7 @@ cleanup() {
         [ -n "$p" ] && kill "$p" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    for tree in "$WORK/old" "$WORK/old3"; do
+    for tree in "$WORK/old" "$WORK/old3" "$WORK/old4"; do
         if [ -d "$tree" ]; then
             git -C "$ROOT" worktree remove --force "$tree" 2>/dev/null || true
         fi
@@ -562,3 +562,81 @@ fi
 grep -q "$UNREAD" "$WORK/bound-types.log" || fail "the old \`fennec types\` said nothing of op 3"
 echo "old types:    $(grep -m1 "$UNREAD" "$WORK/bound-types.log")"
 echo "ok: the binaries from before stop in words at a binding (op 3)"
+
+# Ops 4 and 5 (docs/design/named-statements.md, F3): a statement run by the
+# clock is kind 13's op 4, its schedule and `since` outside its text, and
+# the mark of a slot it ran for op 5. A binary from before them --
+# OP4_BASE, the last main before the ops -- refuses an op it does not read,
+# never taking a schedule for a callable statement nobody runs. No server
+# defines one yet (F3's slice 3 runs them): fennec-core's fixture holds one
+# and a mark, written by its tests (`tests/statements.fennec`), and
+#
+#   - the old server refuses to open it, in words;
+#   - this tree's server opens it, answers its reads and takes its writes;
+#   - an old replica of that server refuses the image holding op 4, and an
+#     old archiver takes no image of its own;
+#   - the old `fennec types` refuses it.
+OP4_BASE=${OP4_BASE:-cd907d6c}
+if [ -n "${OLD4_BIN_DIR:-}" ]; then
+    OLD4=$OLD4_BIN_DIR
+else
+    echo "building fennec-server and fennec at $OP4_BASE ..."
+    git -C "$ROOT" worktree add --detach --quiet "$WORK/old4" "$OP4_BASE"
+    CARGO_TARGET_DIR="$WORK/old4-target" "${CARGO:-cargo}" build --quiet \
+        --manifest-path "$WORK/old4/Cargo.toml" -p fennec-server -p fennec-cli
+    OLD4="$WORK/old4-target/debug"
+fi
+cp "$ROOT/crates/fennec-core/tests/statements.fennec" "$WORK/scheduled.fennec"
+cp "$WORK/scheduled.fennec" "$WORK/scheduled-old.fennec"
+
+"$OLD4/fennec-server" --file "$WORK/scheduled-old.fennec" --http 127.0.0.1:0 \
+    >"$WORK/scheduled-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 4"
+grep -q "$UNREAD" "$WORK/scheduled-open.log" || fail "the old server said nothing of op 4"
+echo "old open:     $(grep -m1 "$UNREAD" "$WORK/scheduled-open.log")"
+
+"$NEW/fennec-server" --file "$WORK/scheduled.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/scheduled-primary.log" &
+PIDS+=($!)
+SCHEDULED=$(address "$WORK/scheduled-primary.log")
+query "$SCHEDULED" "get holds select state" | grep -q 'lapsed' ||
+    fail "this tree's server answered no read of the file holding op 4"
+query "$SCHEDULED" "call lapse" | grep -q 'runs by the clock' ||
+    fail "this tree's server ran a schedule by a call"
+
+# The old archiver keeps the primary's image as it came; the image of its
+# own it takes once a write follows reads op 4.
+"$OLD4/fennec" archive "$SCHEDULED" "$WORK/archive4" --token r --image-every 1s \
+    2>"$WORK/archiver4.log" &
+ARCHIVER4=$!
+PIDS+=($ARCHIVER4)
+said "$WORK/archiver4.log" "image at change" || fail "the old archiver took no image"
+query "$SCHEDULED" "put holds {state: 'held'}" | grep -q '"error"' &&
+    fail "this tree's server refused a write beside a schedule"
+said "$WORK/archiver4.log" "$UNREAD" || fail "the old archiver said nothing of op 4"
+echo "old archiver: $(grep -m1 "$UNREAD" "$WORK/archiver4.log")"
+kill "$ARCHIVER4" 2>/dev/null || true
+wait "$ARCHIVER4" 2>/dev/null || true
+
+"$OLD4/fennec-server" --file "$WORK/scheduled-replica.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$SCHEDULED" \
+    2>"$WORK/scheduled-replica.log" &
+PIDS+=($!)
+SCHEDULED_REPLICA=$(address "$WORK/scheduled-replica.log")
+said "$WORK/scheduled-replica.log" "$UNREAD" || fail "the old replica said nothing of op 4"
+query "$SCHEDULED_REPLICA" "get holds count" | grep -q '"count"' &&
+    fail "the old replica took the image holding op 4"
+echo "old replica:  $(grep -m1 "$UNREAD" "$WORK/scheduled-replica.log")"
+
+if "$OLD4/fennec" types "$WORK/scheduled-old.fennec" >"$WORK/scheduled-types.log" 2>&1; then
+    fail "the old \`fennec types\` read a file holding op 4"
+fi
+grep -q "$UNREAD" "$WORK/scheduled-types.log" || fail "the old \`fennec types\` said nothing of op 4"
+echo "old types:    $(grep -m1 "$UNREAD" "$WORK/scheduled-types.log")"
+echo "ok: the binaries from before stop in words at a schedule (op 4) and its mark (op 5)"

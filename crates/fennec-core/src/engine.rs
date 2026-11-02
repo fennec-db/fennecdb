@@ -41,10 +41,14 @@ pub use bound::{Ran, Runs, RUNS_KEPT};
 mod call;
 #[cfg(feature = "statements")]
 pub use call::{claims_carried, CallRead, Callee};
+#[cfg(feature = "statements")]
+mod due;
+#[cfg(feature = "statements")]
+pub use due::Due;
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
-pub use stored::{Statements, Stored};
+pub use stored::{SlotMark, Statements, Stored, Times, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3934,6 +3938,19 @@ pub struct Database {
     /// `--call-max-rows`.
     #[cfg(feature = "statements")]
     call_max_rows: usize,
+    /// The marks of slots whose runs wrote nothing, by statement, each
+    /// landing as the last record of the next block that lands
+    /// ([`Self::mark_slot`], `engine/due.rs`): the schedules' table in
+    /// memory beside the statements'. A word of the database's, `None`
+    /// while none waits, so a commit asks a word it holds in its line and
+    /// follows no pointer (*What a schedule costs*, named-statements.md).
+    #[cfg(feature = "statements")]
+    #[allow(clippy::box_collection)]
+    pending: Option<Box<Vec<(String, SlotMark)>>>,
+    /// Whether a scheduled statement may be defined: a test's, until a
+    /// server runs one ([`Self::allow_schedules`]).
+    #[cfg(feature = "statements")]
+    scheduling: bool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -4013,6 +4030,10 @@ impl Database {
             calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
             call_max_rows: crate::named::CALL_MAX_ROWS,
+            #[cfg(feature = "statements")]
+            pending: None,
+            #[cfg(feature = "statements")]
+            scheduling: false,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -4520,12 +4541,17 @@ impl Database {
             }
         }
         // After the collections they read, each with its version, epoch
-        // and digest: a compact keeps them as they were.
+        // and digest: a compact keeps them as they were. Then each
+        // schedule's last mark, after its definition.
         for st in self.statements.iter() {
             let body = st.encode();
             out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
             out.write(&body)?;
         }
+        self.last_marks(&mut |body| {
+            out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
+            out.write(body)
+        })?;
         let body_len = out.at() - body_at;
         out.patch(head_at + 9, &body_len.to_le_bytes())
     }
@@ -6083,6 +6109,12 @@ impl Database {
         self.next_coll_id = fresh.next_coll_id;
         self.history = fresh.history;
         self.statements = fresh.statements;
+        // Runs of a history the image need not continue: a following
+        // database runs none, and marks none.
+        #[cfg(feature = "statements")]
+        {
+            self.pending = None;
+        }
         self.rebind();
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
@@ -6203,6 +6235,12 @@ impl Database {
             self.spare(b);
             return Ok(());
         }
+        // The marks of runs that wrote nothing ride the first block that
+        // lands, as its last records: a block put back keeps them pending.
+        #[cfg(feature = "statements")]
+        if self.pending.is_some() {
+            self.carry_pending(&mut b);
+        }
         // Out of `self.block` from here, so held by `Unlanded` for a panic
         // unwinding out of a check the server plugged in -- the fence, a
         // quota: dropped with nothing more, it left its writes in memory and
@@ -6227,6 +6265,10 @@ impl Database {
         // does.
         *self.appended.get_mut() += len as u64;
         self.dirty = true;
+        #[cfg(feature = "statements")]
+        if self.pending.is_some() {
+            self.landed_pending();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let before = self.changes.seq();
         for &(cid, id) in &b.notes {
