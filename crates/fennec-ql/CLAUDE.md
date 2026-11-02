@@ -118,7 +118,8 @@ and before the block lands, rows then names, one `now()`; past `MAX_WOKEN`
 rows or `--call-max-rows` (fresh a statement, a call's own in a call) a
 write is refused, never cut, its block put back and the binding noted
 (`Database::woken`). Depth one: its writes wake none, a binding of its own
-collection or a chain is refused at definition, and none is called. A
+collection or a chain is refused at definition, one bound to or writing
+a `_` collection by its text (`declared::own`), and none is called. A
 broken or unread one, or a build without the feature, refuses the writes it
 binds. `Database::unbound` (implied by `internally` and a binding's runs)
 wakes and refuses nothing: `--follow`'s mirror, `fennec import`, a declared

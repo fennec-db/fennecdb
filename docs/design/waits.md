@@ -28,7 +28,14 @@ ran. Whether it wrote is asked of the database -- the change counter and
 the open block's writes (`waits::Mark`) -- never of its answer, which is
 its last statement's: a body whose first `set` wrote and whose last found
 no row, held, ran that `set` again at every look
-([named-statements.md](named-statements.md#what-is-built), slice 4). Two
+([named-statements.md](named-statements.md#what-is-built), slice 4). An
+unmet `require` is a write that wrote nothing only where it is the
+writer's own: one of a statement bound to the write, which the engine
+notes (`Database::woken`), is answered at once with that binding's
+`reason` -- its guard reads a collection no write to the writer's wakes a
+look for, so held, it would sleep out the wait and answer the same 412
+([named-statements.md](named-statements.md#what-f2-has-built), F2's slice
+3). Two
 things wake one: a write to a collection it
 reads -- `Hub::landed` under the write lock, with the collections the
 block wrote (below), a load when nothing is held -- and the time reaching

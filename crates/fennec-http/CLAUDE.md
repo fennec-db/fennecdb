@@ -203,8 +203,9 @@ most), each run `handle` whole, token and all; a `put`, or the time read
 but as a field against `now()` plus or minus integers or parameters, is
 refused (`holdable`). A call is held by its body, an `insert` refused, and
 whether it wrote is asked of the database (`waits::Mark`), never its last
-statement's answer. The builders refuse `wait` on a database in the
-page (`LOCAL_WAIT`).
+statement's answer; a binding's unmet `require` (`Database::woken`) is
+answered at once, never held. The builders refuse `wait` on a database in
+the page (`LOCAL_WAIT`).
 
 **[A write wakes the held writes reading what it wrote, a row going to the
 group ranking it first](../../docs/design/waits.md#waking-held-writes)**

@@ -3361,8 +3361,9 @@ impl Hook for Check {
     /// a token's behalf with no grant -- fail closed, never a binding run
     /// as its writer. Asked as a binding wakes, a row passing its
     /// condition: a write waking none needs nothing. The token is told no
-    /// name; the audit's refusal line and the engine's note
-    /// (`Database::woken`) hold it for the operator.
+    /// name; the engine notes it (`Database::woken`), which no line writes
+    /// yet: the audit's refusal line naming it for the operator is F2's
+    /// slice 5 (`docs/design/named-statements.md`).
     fn waking(&self, _binding: &str, _rows: usize) -> Result<()> {
         if CURRENT.with(|c| c.borrow().is_none()) {
             return Ok(());

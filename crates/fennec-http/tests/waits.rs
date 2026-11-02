@@ -458,6 +458,41 @@ fn the_wait_ends_on_time_with_no_row_having_run_nothing() {
     assert_eq!(a.status, 412, "{}", a.body);
 }
 
+/// A `require` unmet by a statement bound to the write is the binding's
+/// refusal, never the writer's: its guard reads what no write to the
+/// writer's collection wakes a look for, so it is answered at once, its
+/// `reason` the binding's, nothing landed -- never held for the wait.
+#[test]
+fn a_binding_s_unmet_require_is_answered_at_once() {
+    let node = start();
+    let mut c = Conn::open(node.port);
+    for q in [
+        "create collection gate (n int)",
+        "create statement gated after set jobs where new.attempts > 2 as \
+         get gate select id where n = 1 limit 1 require 1 else 'the gate is shut'",
+        "put jobs {kind: 'a', owner: 'w1', attempts: 0}",
+    ] {
+        let a = c.query(q, "[]");
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    let t = Instant::now();
+    let a = c.post(
+        "/query",
+        &line("set jobs {attempts: 3} where owner = 'w1'", "[]"),
+        &[("Fennec-Wait", "30000")],
+    );
+    let took = t.elapsed();
+    assert_eq!(a.status, 412, "{}", a.body);
+    assert!(a.body.contains("the gate is shut"), "{}", a.body);
+    // Held, it would have answered once the 30 s it asked for had passed.
+    assert!(took < Duration::from_secs(15), "{took:?}");
+    let s = node.server.waits();
+    assert_eq!((s.held, s.runs), (0, 0), "{s:?}");
+    let a = c.query("get jobs select attempts", "[]");
+    let got: Vec<i64> = rows(&a.body).iter().map(|r| int(&r["attempts"])).collect();
+    assert_eq!(got, [0], "{}", a.body);
+}
+
 /// Twenty held workers and one job: one gets it, the one held longest, and
 /// the job costs one look and one run, not twenty. The rest stay held and
 /// take the next jobs, one each, the longest held first.

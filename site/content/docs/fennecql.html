@@ -480,12 +480,16 @@ together — a call's own budget when the write is in a call's body: past
 either, nothing lands, never a part. A binding's error is its writer's — a
 guard's <code>require</code> is a 412 with its <code>reason</code>, a unique
 value taken a 409 — and the block is put back whole, a
-<code>/batch</code>'s statements before it included.</p>
+<code>/batch</code>'s statements before it included. Under
+<code>Fennec-Wait</code> a binding's 412 is answered at once, never held:
+the wait is for the writer's own rows.</p>
 
 <p>Depth one: a binding's own writes wake nothing, so one writing the
 collection it is bound to, one writing a collection another statement is
 bound to and one bound to a collection another binding writes are each
-refused as they are defined. A collection is bound by at most 16
+refused as they are defined, as is one bound to or writing a collection
+whose name starts with <code>_</code>, the database's own
+(<code>_idempotency</code>, <code>_consumers</code>). A collection is bound by at most 16
 statements; <code>after del</code> is refused on a collection whose rows
 expire (<code>@ttl</code>), and <code>@ttl</code> under one, since no
 binding sees a row expire. A binding is never called (400). A replacement

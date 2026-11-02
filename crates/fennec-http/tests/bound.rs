@@ -3,8 +3,9 @@
 //! wakes it -- `/query`, `/batch`, a call's body -- in the block of the
 //! write; a scoped token's write or call that would wake one is refused
 //! (403) before the binding runs, nothing landed, until a policy's lines
-//! grant it (slice 4), while its writes waking none land as ever; and
-//! `--max-memory` holds a `del` by the rows its binding inserts.
+//! grant it (slice 4), while its writes waking none land as ever;
+//! `--max-memory` holds a `del` by the rows its binding inserts; and no
+//! statement is bound to the database's own collections or writes one.
 
 use fennec_core::prelude::*;
 use fennec_http::access::Access;
@@ -188,6 +189,27 @@ fn a_scoped_write_waking_a_binding_is_refused_until_a_grant() {
     // The server's token's same write lands, the line with it.
     node.ok(ROOT, "set orders {status: 'paid'} where id = 1");
     assert_eq!(ledger(&db), [line_of(1, 10)]);
+}
+
+/// The database's own collections are written beside a client's write --
+/// a scoped token's `Idempotency-Key` row outside `within()`, where no
+/// hook refuses its wake -- so no statement is bound to one or writes one.
+#[test]
+fn no_statement_is_bound_to_the_database_s_own_collections() {
+    let (node, db) = start(|_| {});
+    for q in [
+        "create statement keyed after insert _idempotency as insert ledger {o: 0, amount: 0}",
+        "create statement consumed after set or del _consumers as insert ledger {o: 0}",
+        "create statement keys after set orders as insert _idempotency {key: 'x'}",
+    ] {
+        let (status, body) = node.query(ROOT, q);
+        assert_eq!(status, 400, "{q}: {body}");
+        assert!(body.contains("is the database's own"), "{q}: {body}");
+    }
+    let (status, body) = node.query(ROOT, "statements");
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("keyed") && !body.contains("consumed"), "{body}");
+    assert!(ledger(&db).is_empty());
 }
 
 #[test]

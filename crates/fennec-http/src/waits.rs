@@ -467,7 +467,11 @@ impl Mark {
 
 /// Whether `stmt`, answered `r`, wrote nothing: a count of 0, no row
 /// answered, or a `require` it did not meet -- whose block was put back. A
-/// call, by `db` against where it stood before it ran ([`Mark`]).
+/// call, by `db` against where it stood before it ran ([`Mark`]). A
+/// `require` of a statement bound to the write, which the engine notes
+/// (`Database::woken`), is the binding's refusal, never the writer's: its
+/// guard reads what no write to the writer's collection wakes a look for,
+/// so it is answered at once, its `reason` the binding's, never held.
 pub fn wrote_nothing(
     stmt: &Statement,
     r: &fennec_core::error::Result<Response>,
@@ -475,7 +479,7 @@ pub fn wrote_nothing(
     before: Mark,
 ) -> bool {
     match r {
-        Err(Error::Unmet(_)) => true,
+        Err(Error::Unmet(_)) => db.woken().is_none(),
         Err(_) => false,
         Ok(_) if matches!(stmt, Statement::Call(_)) => !before.moved(db),
         Ok(r) => nothing_written(stmt, r),
