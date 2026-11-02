@@ -78,6 +78,7 @@
 //! ([`Pool::connect_watching`]).
 
 use fennec_http::conn::{Conn as Client, Peer};
+use fennec_http::dial::Stream;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -398,15 +399,17 @@ impl Flight {
 }
 
 /// A connection to a node and its flight, marked closed as it is dropped,
-/// before its descriptor is.
+/// before its descriptor is -- a TLS session's too, which closes the
+/// descriptor as it is dropped after.
 pub struct Conn {
-    stream: TcpStream,
+    stream: Stream,
     flight: Arc<Flight>,
 }
 
 impl Read for Conn {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        (&self.stream).read(buf)
+        self.stream.read(buf)
     }
 }
 
@@ -696,8 +699,12 @@ impl Pool {
     ) -> Result<Conn, Failure> {
         let unsent = |e| Failure(Stage::Unsent, e);
         let moved = || self.moved(flying.mark) != flying.seen;
-        let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-        let found = fennec_http::dial::resolve(addr, within);
+        let (tls, authority) = fennec_http::dial::tls_of(addr);
+        let mut last = io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{authority} does not resolve"),
+        );
+        let found = fennec_http::dial::resolve(authority, within);
         for a in found.map_err(|e| {
             if moved() {
                 moved_meanwhile()
@@ -713,7 +720,9 @@ impl Pool {
                 }
                 match TcpStream::connect_timeout(&a, left.min(CONNECT_LOOK)) {
                     Ok(s) => {
-                        let s = ready(s, write).map_err(unsent)?;
+                        let s = secured(s, tls, authority, within)
+                            .and_then(|s| ready(s, write))
+                            .map_err(unsent)?;
                         return Ok(self.register(addr, s, flying.mark));
                     }
                     Err(_) if moved() => return Err(moved_meanwhile()),
@@ -732,8 +741,8 @@ impl Pool {
     /// to find, the closed ones let go of: a lock a connection made. Its
     /// word is `mark`'s `WAITING` before it is listed, under the lock, as
     /// [`Pool::take`] writes a pooled one's.
-    fn register(&self, addr: &str, s: TcpStream, mark: u64) -> Conn {
-        let flight = Arc::new(Flight::of(&s, mark | WAITING));
+    fn register(&self, addr: &str, s: Stream, mark: u64) -> Conn {
+        let flight = Arc::new(Flight::of(s.socket(), mark | WAITING));
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
         let flights = &mut idle.entry(addr.to_string()).or_default().flights;
         flights.retain(|f| !f.closed());
@@ -1045,7 +1054,8 @@ impl Pool {
     ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within, write_timeout) = times;
         let mut req = String::with_capacity(256);
-        for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
+        let host = fennec_http::dial::authority(addr);
+        for part in [method, " ", target, " HTTP/1.1\r\nHost: ", host, "\r\n"] {
             req.push_str(part);
         }
         for (k, v) in headers {
@@ -1088,8 +1098,8 @@ impl Pool {
         // The node closes its idle connections together, so a closed one
         // found here is let go of and the next one looked at.
         let mut whole = false;
-        while let Some(idle) = self.take(addr, flying.mark) {
-            if !open(&idle.conn.stream) {
+        while let Some(mut idle) = self.take(addr, flying.mark) {
+            if !open(&mut idle.conn.stream) {
                 continue;
             }
             let set = (Some(idle.read_timeout), idle.write_timeout);
@@ -1130,7 +1140,7 @@ impl Pool {
     fn exchange(
         &self,
         addr: &str,
-        s: Conn,
+        mut s: Conn,
         set: (Option<Duration>, Duration),
         (head, body): (&[u8], &[u8]),
         want: (Duration, Duration),
@@ -1156,11 +1166,14 @@ impl Pool {
         {
             return Err(self.unsent_moved(addr, s, want, flying.mark));
         }
-        let mut w = &s.stream;
-        // Head and body in one `writev`. Written apart, a node that had
-        // answered the connection as it took it (`fennec_http::accept`'s
-        // 503) and closed it had Linux take the reset its closed socket sent
-        // the head back inside the head's own `write`, and the body's met
+        // Head and body in one `writev`; over TLS one write into the
+        // session, its records sent at once and flushed once, a failure
+        // sending them `write_parts`' flush's to tell, so a request whose
+        // records never left is unsent as a plain one is. Written apart, a
+        // node that had answered the connection as it took it
+        // (`fennec_http::accept`'s 503) and closed it had Linux take the
+        // reset its closed socket sent the head back inside the head's own
+        // `write`, and the body's met
         // EPIPE: unsent, its 503 unread, the write was told 502 (CI; in
         // Docker's Linux, three cores beside six busy loops, 809 and 853
         // puts through a router of 20 000, none since). A write that fails
@@ -1169,7 +1182,7 @@ impl Pool {
         // its bytes -- Linux takes none, but macOS's `dofilewrite` answers
         // EPIPE with -1 where part of the call went out. An empty body
         // writes nothing, and the head's last byte is then the last.
-        let early = match fennec_http::http::write_parts(&mut w, head, body) {
+        let early = match fennec_http::http::write_parts(&mut s.stream, head, body) {
             Ok(()) => None,
             // Timed out, the node is there and not reading: sent again, it
             // would wait as long.
@@ -1181,7 +1194,7 @@ impl Pool {
             // takes met the reset after it. A pooled connection's byte may
             // be no answer of this request's (`open` looked before the
             // write), and its failure goes on to a fresh one.
-            Err(e) if set.0.is_none() && answer_waiting(&s.stream) => Some(e),
+            Err(e) if set.0.is_none() && answer_waiting(&mut s.stream) => Some(e),
             Err(e) => return Err(failed(&s.flight, Stage::Unsent, e)),
         };
         // The client's end, passed on as the node reads one from a client
@@ -1190,10 +1203,12 @@ impl Pool {
         // not kept for another request.
         let mut client_ended = false;
         if let (Some(client), None) = (client, &early) {
-            match answered_or_gone(&s.stream, client, read_timeout) {
+            match answered_or_gone(&mut s.stream, client, read_timeout) {
                 Ok(Watched::Answering) => {}
                 Ok(Watched::Ended) => {
-                    let _ = s.stream.shutdown(std::net::Shutdown::Write);
+                    // Over TLS a `close_notify` first: the node watches its
+                    // client through the session.
+                    let _ = s.stream.end_writing();
                     client_ended = true;
                 }
                 Err(f @ Failure(Stage::Abandoned, _)) => return Err(f),
@@ -1395,15 +1410,36 @@ pub(crate) fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
 /// timeout said. Every dial goes through here: a forwarded request, a
 /// relay to a region's router, a query across tenants, a read replica's
 /// read and its upkeep, a health probe, a lease grant.
-fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-    for a in fennec_http::dial::resolve(addr, within)? {
+///
+/// A node recorded as `https://host:port` is dialed over TLS
+/// ([`fennec_http::dial::tls_of`]), its handshake the dial's last step,
+/// bounded by `within` as the connect is ([`secured`]): a certificate
+/// refused, or a handshake past its bound, is a dial that failed with no
+/// byte of the request sent.
+fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<Stream> {
+    let (tls, authority) = fennec_http::dial::tls_of(addr);
+    let mut last = io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("{authority} does not resolve"),
+    );
+    for a in fennec_http::dial::resolve(authority, within)? {
         match TcpStream::connect_timeout(&a, within) {
-            Ok(s) => return ready(s, write),
+            Ok(s) => return ready(secured(s, tls, authority, within)?, write),
             Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+/// `s`, just connected to `authority`, as the dial asked: itself, or over
+/// TLS once its handshake is done within `within`
+/// ([`fennec_http::dial::secure`]).
+#[inline]
+fn secured(s: TcpStream, tls: bool, authority: &str, within: Duration) -> io::Result<Stream> {
+    match tls {
+        false => Ok(Stream::Plain(s)),
+        true => fennec_http::dial::secure(s, authority, within),
+    }
 }
 
 /// How long a forward's connect waits on a try before it looks whether its
@@ -1411,8 +1447,8 @@ fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> 
 const CONNECT_LOOK: Duration = Duration::from_secs(1);
 
 /// `s`, just connected, as every request through the pool wants it.
-fn ready(s: TcpStream, write: Duration) -> io::Result<TcpStream> {
-    let _ = s.set_nodelay(true);
+fn ready(s: Stream, write: Duration) -> io::Result<Stream> {
+    let _ = s.socket().set_nodelay(true);
     // Once a connection: the same for every request but a read replica's,
     // which sets its own and is tracked with the connection
     // (`Idle::write_timeout`).
@@ -1438,16 +1474,27 @@ fn ended(e: &io::Error) -> bool {
 /// Whether a pooled connection is still open: a read that does not wait
 /// finds nothing to read. One the node closed reads its end, one it reset
 /// an error, and one holding bytes no request asked for is no use either.
-fn open(s: &TcpStream) -> bool {
-    matches!(peek_now(s), Err(e) if e.kind() == io::ErrorKind::WouldBlock)
+/// Over TLS what arrived is read as TLS ([`Stream::peer`]): a session
+/// ticket the node sent after the handshake is no answer, and its
+/// `close_notify` at its idle timeout the end it is, where a peek took
+/// either for bytes of one and let a healthy connection go.
+#[inline]
+fn open(s: &mut Stream) -> bool {
+    match s {
+        Stream::Plain(s) => matches!(peek_now(s), Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+        s => matches!(s.peer(), Ok(Peer::Quiet)),
+    }
 }
 
 /// Whether bytes of an answer wait on `s`, read with no wait: after the
 /// reset that failed a write, too, since macOS and Linux both hand a
-/// socket's received bytes over before its error.
+/// socket's received bytes over before its error. Over TLS, plaintext.
 #[cold]
-fn answer_waiting(s: &TcpStream) -> bool {
-    matches!(peek_now(s), Ok(1..))
+fn answer_waiting(s: &mut Stream) -> bool {
+    match s {
+        Stream::Plain(s) => matches!(peek_now(s), Ok(1..)),
+        s => matches!(s.peer(), Ok(Peer::Sent)),
+    }
 }
 
 /// A `recv` of `MSG_PEEK | MSG_DONTWAIT`: one system call, where
@@ -1556,7 +1603,7 @@ mod sys {
 /// reset alone says the client can read nothing more.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn answered_or_gone(
-    node: &TcpStream,
+    node: &mut Stream,
     client: &Client,
     within: Duration,
 ) -> Result<Watched, Failure> {
@@ -1585,7 +1632,7 @@ fn answered_or_gone(
         let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
         let mut fds = [
             PollFd {
-                fd: node.as_raw_fd(),
+                fd: node.socket().as_raw_fd(),
                 events: POLLIN,
                 revents: 0,
             },
@@ -1605,7 +1652,12 @@ fn answered_or_gone(
             // The wait is the head's read's, as it was before the watch.
             return Ok(Watched::Answering);
         }
-        if fds[0].revents != 0 {
+        // Over TLS the node's socket moves for records with no answer in
+        // them too -- the session tickets a server sends after its
+        // handshake, which come as a fresh connection's first request is
+        // held -- and the client is watched on past them: taken for the
+        // answer, the head's read waited on and the client went unwatched.
+        if fds[0].revents != 0 && (!node.is_tls() || !matches!(node.peer(), Ok(Peer::Quiet))) {
             return Ok(Watched::Answering);
         }
         if watched == 2 && fds[1].revents != 0 {
@@ -1621,7 +1673,7 @@ fn answered_or_gone(
 
 /// No `poll` declared here: the head is waited for as an unheld request's.
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-fn answered_or_gone(_: &TcpStream, _: &Client, _: Duration) -> Result<Watched, Failure> {
+fn answered_or_gone(_: &mut Stream, _: &Client, _: Duration) -> Result<Watched, Failure> {
     Ok(Watched::Answering)
 }
 
@@ -1896,8 +1948,14 @@ pub fn answers_health(addr: &str, within: Duration) -> bool {
     let Ok(mut s) = dial(addr, within, within) else {
         return false;
     };
-    let asked = format!("GET /_health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if s.write_all(asked.as_bytes()).is_err() {
+    let asked = format!(
+        "GET /_health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        fennec_http::dial::authority(addr)
+    );
+    if s.write_all(asked.as_bytes())
+        .and_then(|()| s.flush())
+        .is_err()
+    {
         return false;
     }
     // An answer's first bytes, each read bounded by what is left.
@@ -2011,10 +2069,18 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// `s` as a dialed stream, plain: the same socket.
+    fn plain(s: &TcpStream) -> Stream {
+        Stream::Plain(s.try_clone().unwrap())
+    }
+
     /// `s` as a connection the pool did not make: no cut finds it.
     fn unpooled(s: TcpStream) -> Conn {
         let flight = Arc::new(Flight::of(&s, WAITING));
-        Conn { flight, stream: s }
+        Conn {
+            flight,
+            stream: Stream::Plain(s),
+        }
     }
 
     /// A connection, and the node's end of it.
@@ -2059,18 +2125,18 @@ mod tests {
     #[test]
     fn the_look_tells_an_open_connection_from_a_closed_or_reset_one() {
         let (ours, theirs) = pair();
-        assert!(open(&ours));
+        assert!(open(&mut plain(&ours)));
         drop(theirs);
         assert_eq!(arrived(&ours).unwrap(), 0);
-        assert!(!open(&ours));
+        assert!(!open(&mut plain(&ours)));
 
-        assert!(!open(&reset()));
+        assert!(!open(&mut plain(&reset())));
 
         // Bytes no request asked for.
         let (ours, mut theirs) = pair();
         theirs.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
         assert_eq!(arrived(&ours).unwrap(), 1);
-        assert!(!open(&ours));
+        assert!(!open(&mut plain(&ours)));
     }
 
     /// How far a request of one write got over `s`. Of two, the node's
@@ -2128,14 +2194,14 @@ mod tests {
         let (client, client_end) = pair();
         drop(client_end);
         assert_eq!(
-            answered_or_gone(&node, &Client::Plain(client), long).ok(),
+            answered_or_gone(&mut plain(&node), &Client::Plain(client), long).ok(),
             Some(Watched::Ended)
         );
         let (node, _node_end) = pair();
         let (client, client_end) = pair();
         client_end.shutdown(std::net::Shutdown::Write).unwrap();
         assert_eq!(
-            answered_or_gone(&node, &Client::Plain(client), long).ok(),
+            answered_or_gone(&mut plain(&node), &Client::Plain(client), long).ok(),
             Some(Watched::Ended)
         );
         // Its reset, left for the wait to find: Linux reports a reset to
@@ -2150,7 +2216,11 @@ mod tests {
         assert_eq!(client_end.peek(&mut [0u8]).unwrap(), 1);
         drop(client_end);
         let gone = |r: Result<Watched, Failure>| matches!(r, Err(Failure(Stage::Abandoned, _)));
-        assert!(gone(answered_or_gone(&node, &Client::Plain(client), long)));
+        assert!(gone(answered_or_gone(
+            &mut plain(&node),
+            &Client::Plain(client),
+            long
+        )));
         // Bytes of a next request, then its end: whichever the wait sees
         // first, the bytes come before the end, and the node alone is
         // waited for -- to the wait's end, a timeout, as with nothing from
@@ -2164,14 +2234,14 @@ mod tests {
             .unwrap();
         drop(client_end);
         assert!(timed(answered_or_gone(
-            &node,
+            &mut plain(&node),
             &Client::Plain(client),
             short
         )));
         let (node, _node_end) = pair();
         let (client, _client_end) = pair();
         assert!(timed(answered_or_gone(
-            &node,
+            &mut plain(&node),
             &Client::Plain(client),
             short
         )));
@@ -2182,7 +2252,7 @@ mod tests {
         assert_eq!(arrived(&node).unwrap(), 1);
         drop(client_end);
         assert_eq!(
-            answered_or_gone(&node, &Client::Plain(client), long).ok(),
+            answered_or_gone(&mut plain(&node), &Client::Plain(client), long).ok(),
             Some(Watched::Answering)
         );
     }
@@ -2401,7 +2471,7 @@ mod tests {
         std::thread::ScopedJoinHandle<'s, Result<Answer, Failure>>,
     ) {
         let (ours, theirs) = pair();
-        let conn = pool.register("n1", ours, flying.mark);
+        let conn = pool.register("n1", Stream::Plain(ours), flying.mark);
         let want = (pool.timeout, pool.timeout);
         let set = (None, pool.timeout);
         let exchange =
@@ -2707,8 +2777,8 @@ mod tests {
             let idle = pool.idle.lock().unwrap();
             let kept = &idle["n1"];
             assert_eq!(kept.idle.len(), 1);
-            assert_eq!(kept.idle[0].conn.stream.as_raw_fd(), fd);
-            assert!(open(&kept.idle[0].conn.stream));
+            assert_eq!(kept.idle[0].conn.stream.socket().as_raw_fd(), fd);
+            assert!(open(&mut plain(kept.idle[0].conn.stream.socket())));
             assert_eq!(kept.flights.len(), 1);
             assert!(Arc::ptr_eq(&kept.flights[0], &kept.idle[0].conn.flight));
         });
@@ -2932,5 +3002,191 @@ mod tests {
             sent.map(|a| a.status)
         );
         node.join().unwrap();
+    }
+
+    /// The pool over a node recorded at `https://`: what a plain
+    /// connection does, a TLS one does through its session.
+    #[cfg(feature = "tls")]
+    mod over_tls {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc;
+
+        fn certs() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fennec-http/tests/certs")
+        }
+
+        /// A node serving HTTPS with the test CA's certificate, the CA
+        /// trusted by the process: each request answered `200 ok`, but
+        /// `/end`, answered and then ended with its `close_notify`, and
+        /// `/hold`, answered never, the connection read to its end. Its
+        /// address, the connections it took, and what each did.
+        fn node() -> (String, Arc<AtomicUsize>, mpsc::Receiver<&'static str>) {
+            let certs = certs();
+            fennec_http::dial::trust_ca(certs.join("ca.pem").to_str().unwrap()).unwrap();
+            let server = fennec_tls::Server::from_pem_files(
+                &certs.join("server.pem"),
+                &certs.join("server.key"),
+            )
+            .unwrap()
+            .alpn(&[b"http/1.1"]);
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = format!("https://localhost:{}", l.local_addr().unwrap().port());
+            let (accepted, said) = (Arc::new(AtomicUsize::new(0)), mpsc::channel());
+            let (count, tell) = (Arc::clone(&accepted), said.0);
+            std::thread::spawn(move || {
+                for sock in l.incoming().flatten() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let (server, tell) = (server.clone(), tell.clone());
+                    std::thread::spawn(move || {
+                        let Ok(s) = server.accept_within(sock, Duration::from_secs(10)) else {
+                            return;
+                        };
+                        let _ = s.get_ref().set_read_timeout(Some(Duration::from_secs(30)));
+                        serve(s, &tell);
+                    });
+                }
+            });
+            (addr, accepted, said.1)
+        }
+
+        fn serve(s: fennec_tls::TlsStream, tell: &mpsc::Sender<&'static str>) {
+            let mut r = BufReader::new(s);
+            loop {
+                let mut first = String::new();
+                if r.read_line(&mut first).unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+                if path == "/hold" {
+                    let _ = tell.send("held");
+                    let mut rest = Vec::new();
+                    let _ = r.read_to_end(&mut rest);
+                    let _ = tell.send("held one ended");
+                    return;
+                }
+                let w = r.get_mut();
+                w.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .unwrap();
+                w.flush().unwrap();
+                if path == "/end" {
+                    w.close().unwrap();
+                    let _ = tell.send("closed");
+                    // Kept open, so the end is the `close_notify` alone.
+                    let mut rest = Vec::new();
+                    let _ = r.read_to_end(&mut rest);
+                    return;
+                }
+            }
+        }
+
+        fn ok(pool: &Pool, addr: &str, path: &str) {
+            let a = pool.send(addr, "GET", path, &[], b"").unwrap();
+            assert_eq!(a.status, 200);
+            assert_eq!(a.read_body(pool, false).unwrap(), b"ok");
+        }
+
+        /// A TLS connection is kept and asked again, its session's
+        /// records with no answer in them -- the tickets a server sends
+        /// after its handshake -- no reason to let it go; one the node
+        /// ended with its `close_notify` is looked at, let go of, and the
+        /// request goes on a new one.
+        #[test]
+        fn a_tls_connection_is_kept_and_let_go_of_at_its_close_notify() {
+            let (addr, accepted, said) = node();
+            let pool = Pool::new(Duration::from_secs(30));
+            for _ in 0..3 {
+                ok(&pool, &addr, "/a");
+            }
+            assert_eq!(accepted.load(Ordering::SeqCst), 1);
+            ok(&pool, &addr, "/end");
+            assert_eq!(
+                said.recv_timeout(Duration::from_secs(10)).unwrap(),
+                "closed"
+            );
+            // The pooled connection is looked at until its `close_notify`
+            // is in -- with the answer it ended, or after.
+            let started = Instant::now();
+            loop {
+                let mut kept = pool.take(&addr, 0).unwrap();
+                let still = open(&mut kept.conn.stream);
+                pool.put(&addr, kept);
+                if !still {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the node's close_notify never arrived"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            ok(&pool, &addr, "/a");
+            assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        }
+
+        /// A held request on a fresh TLS connection watches its client
+        /// past the session tickets that arrive as it waits: the node's
+        /// socket moved for records with no answer in them, and the
+        /// client's end is still seen, where taken for the answer the
+        /// head's read waited and the client went unwatched.
+        #[test]
+        fn a_held_request_watches_its_client_past_the_session_s_tickets() {
+            let (addr, _, _) = node();
+            let mut s = dial(&addr, Duration::from_secs(10), Duration::from_secs(10)).unwrap();
+            assert!(s.is_tls());
+            let started = Instant::now();
+            while !matches!(peek_now(s.socket()), Ok(1..)) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "no session ticket came after the handshake"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let (client, client_end) = pair();
+            drop(client_end);
+            let watched = answered_or_gone(&mut s, &Client::Plain(client), Duration::from_secs(10));
+            assert_eq!(watched.ok(), Some(Watched::Ended));
+        }
+
+        /// A request out over TLS whose answer has not begun is what a
+        /// failover's cut of its tenant ends: the socket beneath the
+        /// session shut down, the exchange told it was cut, and the node
+        /// reading the connection's end.
+        #[test]
+        fn a_cut_ends_a_request_out_over_tls() {
+            let (addr, _, said) = node();
+            let pool = Pool::new(Duration::from_secs(60));
+            std::thread::scope(|sc| {
+                let flying = Flying::of("acme", &pool);
+                let s = dial(&addr, Duration::from_secs(10), pool.timeout).unwrap();
+                let conn = pool.register(&addr, s, flying.mark);
+                let (want, set) = ((pool.timeout, pool.timeout), (None, pool.timeout));
+                let asked: &[u8] = b"GET /hold HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+                let addr = addr.as_str();
+                let pool = &pool;
+                let exchange = sc.spawn(move || {
+                    pool.exchange(addr, conn, set, (asked, b""), want, None, flying)
+                });
+                assert_eq!(said.recv_timeout(Duration::from_secs(10)).unwrap(), "held");
+                assert_eq!(state_of(pool, addr), WAITING);
+                let cuts = pool.cut(addr, "acme");
+                assert_eq!(cuts.waiting, 1);
+                assert_eq!(ended(exchange.join().unwrap()), Ended::Cut { whole: true });
+                assert_eq!(
+                    said.recv_timeout(Duration::from_secs(10)).unwrap(),
+                    "held one ended"
+                );
+                assert_eq!(state_of(pool, addr), CLOSED);
+            });
+        }
     }
 }

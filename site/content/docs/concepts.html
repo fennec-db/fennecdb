@@ -483,8 +483,8 @@ outside packages. That keeps the WebAssembly module small and every line of
 it auditable. The one exception is TLS: the server and the shell take
 <a href="https://github.com/rustls/rustls">rustls</a>, with ring and
 Mozilla's roots, to reach PostgreSQL encrypted, and the server and the router
-use it to serve HTTPS (<a href="/docs/server#tls">HTTPS</a>). The browser
-module and the engine never do.</p>
+use it to serve HTTPS and to dial it (<a href="/docs/server#tls">HTTPS</a>).
+The browser module and the engine never do.</p>
 
 <details class="deep"><summary>Why there are no dependencies, and what it costs</summary>
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
@@ -508,7 +508,8 @@ one crate, <code>fennec-tls</code>: rustls 0.23 with ring rather than its
 default aws-lc-rs, which wants cmake, and webpki-roots, compiled in, so a
 static binary in an empty container still knows the public CAs. The same
 crate serves HTTPS for <code>fennec-server</code> and the router
-(<code>--tls-cert</code>). Twelve
+(<code>--tls-cert</code>) and dials it for every HTTP client in the crates
+(<code>--tls-ca</code>). Twelve
 crates in all. The crates that take it take it behind a <code>tls</code>
 feature, on in <code>fennec-server</code>, <code>fennec-shard</code> and
 <code>fennec</code>, so

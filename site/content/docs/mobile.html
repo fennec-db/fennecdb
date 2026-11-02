@@ -495,7 +495,9 @@ nginx, the server's <code>X-Accel-Buffering: no</code> does the same. A
 proxy that closes an idle connection sooner than the server's keepalive
 (a comment every 20 s) cuts the stream, which then opens again from its
 cursor -- harmless, a round trip each time. fennecdb's own HTTP client, the
-server's, dials plain HTTP in this release and is not used on a device.</p>
+server's, dials <code>https://</code> as well as <code>http://</code>
+(<a href="/docs/server#dialing-https">Dialing HTTPS</a>) and is not used on a
+device.</p>
 </details>
 
 <h3 id="background">Battery and the background</h3>

@@ -1,6 +1,6 @@
 # A node's archive copied to a bucket (S3, R2, any rclone remote), run by
-# fennec-archive-sync@<node>.timer. fennecdb speaks no TLS and no S3: rclone
-# does both, through ../bin/fennec-archive-sync, which says what a run does
+# fennec-archive-sync@<node>.timer. fennecdb speaks no S3: rclone
+# does it, through ../bin/fennec-archive-sync, which says what a run does
 # and why: no first copy from a new disk over the bucket's archive,
 # `rclone copy --local-no-check-updated`, and the success written for
 # node_exporter.

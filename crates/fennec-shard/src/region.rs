@@ -153,7 +153,11 @@ pub(crate) fn label(region: &str) -> String {
     format!("{HOME}{region}")
 }
 
-/// A router's URL as the pool takes it: `host:port`.
+/// A router's URL as the pool takes it: `host:port`, or `https://host:port`
+/// for one serving HTTPS, which the pool dials over TLS
+/// ([`fennec_http::dial::tls_of`]). A router from before keeps `https://`
+/// in what it dials too, which resolves to nothing: it relays nothing to
+/// such a router, in the clear least of all.
 pub(crate) fn host(url: &str) -> &str {
     url.strip_prefix("http://")
         .unwrap_or(url)
@@ -1520,6 +1524,7 @@ mod tests {
         assert_eq!(host("http://10.0.0.1:8090"), "10.0.0.1:8090");
         assert_eq!(host("http://h:1/"), "h:1");
         assert_eq!(host("h:1"), "h:1");
+        assert_eq!(host("https://h:1/"), "https://h:1");
         assert_eq!(label("us"), "@us");
     }
 }

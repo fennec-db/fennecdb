@@ -8,7 +8,7 @@
 
 use fennec_core::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,7 @@ struct Held {
 pub struct Receiver {
     pub addr: String,
     held: Arc<Mutex<Held>>,
+    tls: bool,
 }
 
 impl Receiver {
@@ -68,12 +69,47 @@ impl Receiver {
                 std::thread::spawn(move || serve(s, &into));
             }
         });
-        Receiver { addr, held }
+        Receiver {
+            addr,
+            held,
+            tls: false,
+        }
     }
 
-    /// `http://` and the address: what `--otlp-endpoint` takes.
+    /// [`Receiver::start`] over HTTPS, with the certificate chain and key
+    /// of two PEM files: a vendor's collector, reached at `localhost`.
+    pub fn start_tls(cert: &str, key: &str) -> Receiver {
+        let server = fennec_tls::Server::from_pem_files(
+            std::path::Path::new(cert),
+            std::path::Path::new(key),
+        )
+        .unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("localhost:{}", l.local_addr().unwrap().port());
+        let held = Arc::new(Mutex::new(Held::default()));
+        let into = Arc::clone(&held);
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let (into, server) = (Arc::clone(&into), server.clone());
+                std::thread::spawn(move || {
+                    if let Ok(s) = server.accept_within(s, Duration::from_secs(10)) {
+                        serve(s, &into);
+                    }
+                });
+            }
+        });
+        Receiver {
+            addr,
+            held,
+            tls: true,
+        }
+    }
+
+    /// `http://` or `https://` and the address: what `--otlp-endpoint`
+    /// takes.
     pub fn url(&self) -> String {
-        format!("http://{}", self.addr)
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}", self.addr)
     }
 
     pub fn spans(&self) -> Vec<Got> {
@@ -117,9 +153,8 @@ pub fn closed() -> String {
     url
 }
 
-fn serve(s: TcpStream, held: &Mutex<Held>) {
-    let mut r = BufReader::new(s.try_clone().unwrap());
-    let mut w = s;
+fn serve(s: impl Read + Write, held: &Mutex<Held>) {
+    let mut r = BufReader::new(s);
     loop {
         let mut line = String::new();
         if r.read_line(&mut line).unwrap_or(0) == 0 {
@@ -153,9 +188,11 @@ fn serve(s: TcpStream, held: &Mutex<Held>) {
             held.posts.push(Post { path, headers });
             held.spans.extend(spans);
         }
+        let w = r.get_mut();
         let _ = w.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         );
+        let _ = w.flush();
     }
 }
 

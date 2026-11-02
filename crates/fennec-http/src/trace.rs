@@ -30,20 +30,22 @@
 //! in, each post bounded by a timeout. A request never waits on the
 //! collector: an endpoint that is down, or that takes the connection and
 //! never answers, costs the requests nothing and the spans their place.
-//! fennecdb speaks no TLS, so the endpoint is a collector on the same host
-//! or network -- the OpenTelemetry Collector, the Datadog Agent's OTLP
-//! receiver -- which forwards over TLS.
+//! The endpoint is `http://` or `https://`: a collector on the same host or
+//! network -- the OpenTelemetry Collector, the Datadog Agent's OTLP
+//! receiver -- or a vendor's over TLS, its certificate held to the
+//! process's CAs ([`crate::dial::trust_ca`], `--tls-ca`).
 //!
 //! **Off, it is free.** Every hook asks one relaxed atomic first and
 //! returns: a server started with no endpoint does what it did before,
 //! within the noise of `make requests-bench`.
 
+use crate::dial::Stream;
 use crate::http::Request;
 use crate::metrics::Text;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{self, BufRead, BufReader, Read};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -991,47 +993,51 @@ fn percent_decoded(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Where spans are posted: `http://host:port/path`.
+/// Where spans are posted: `http://host:port/path`, or `https://` over TLS.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     /// `host:port`, for the connection and the `Host` header.
     pub authority: String,
     pub path: String,
+    /// Posted over TLS.
+    pub tls: bool,
 }
 
 impl Endpoint {
     pub fn parse(url: &str) -> std::result::Result<Endpoint, String> {
         let url = url.trim();
-        if url.starts_with("https://") {
+        if !url.starts_with("http://") && !url.starts_with(crate::dial::HTTPS) {
             return Err(format!(
-                "{url}: fennecdb speaks no TLS. Point it at a collector on this host or \
-                 network -- the OpenTelemetry Collector, the Datadog Agent's OTLP receiver \
-                 (http://localhost:4318) -- which forwards over TLS"
+                "{url}: the OTLP endpoint is an http:// or https:// URL"
             ));
         }
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| format!("{url}: the OTLP endpoint is an http:// URL"))?;
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || !header_safe(authority) || !header_safe(path) {
+        let (addr, path) = crate::dial::split_url(url).map_err(|e| format!("{url}: {e}"))?;
+        let (tls, authority) = crate::dial::tls_of(&addr);
+        if !header_safe(authority) || !header_safe(&path) {
             return Err(format!("{url}: no host to send spans to"));
         }
-        let authority = match authority.rsplit_once(':') {
-            Some((_, p)) if p.parse::<u16>().is_ok() => authority.to_string(),
-            _ => format!("{authority}:80"),
+        let path = match path.as_str() {
+            "" => "/v1/traces".to_string(),
+            _ => path,
         };
-        let path = match path {
-            "" | "/" => "/v1/traces".to_string(),
-            p => p.to_string(),
-        };
-        Ok(Endpoint { authority, path })
+        Ok(Endpoint {
+            authority: authority.to_string(),
+            path,
+            tls,
+        })
     }
 
     pub fn url(&self) -> String {
-        format!("http://{}{}", self.authority, self.path)
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}{}", self.authority, self.path)
+    }
+
+    /// The address a dial takes ([`crate::dial::tls_of`]).
+    fn addr(&self) -> Cow<'_, str> {
+        match self.tls {
+            true => Cow::Owned(format!("{}{}", crate::dial::HTTPS, self.authority)),
+            false => Cow::Borrowed(&self.authority),
+        }
     }
 }
 
@@ -1187,7 +1193,7 @@ impl Exporter {
     }
 
     fn run(&self) {
-        let mut conn: Option<BufReader<TcpStream>> = None;
+        let mut conn: Option<BufReader<Stream>> = None;
         let mut body = String::new();
         let mut last_error: Option<Instant> = None;
         loop {
@@ -1258,7 +1264,7 @@ impl Exporter {
 
     /// One post, on the connection kept from the last when there is one --
     /// and on a new one if that one was closed meanwhile.
-    fn post(&self, conn: &mut Option<BufReader<TcpStream>>, body: &[u8]) -> io::Result<()> {
+    fn post(&self, conn: &mut Option<BufReader<Stream>>, body: &[u8]) -> io::Result<()> {
         let s = &self.settings;
         let mut head = String::with_capacity(256);
         for part in [
@@ -1293,14 +1299,14 @@ impl Exporter {
                 Err(e) => return Err(e),
             }
         }
-        let mut r = BufReader::new(connect(&s.endpoint.authority, s.timeout)?);
+        let mut r = BufReader::new(connect(&s.endpoint.addr(), s.timeout)?);
         let (status, keep) = exchange(&mut r, head.as_bytes(), body, deadline)?;
         *conn = Some(r);
         answered(conn, status, keep)
     }
 }
 
-fn answered(conn: &mut Option<BufReader<TcpStream>>, status: u16, keep: bool) -> io::Result<()> {
+fn answered(conn: &mut Option<BufReader<Stream>>, status: u16, keep: bool) -> io::Result<()> {
     if !keep {
         *conn = None;
     }
@@ -1312,13 +1318,14 @@ fn answered(conn: &mut Option<BufReader<TcpStream>>, status: u16, keep: bool) ->
 
 /// The collector's name is looked up within the post's bound too
 /// ([`crate::dial`]): unbounded, a resolver slow to refuse it held the
-/// exporter, the queue filling and its spans dropped meanwhile.
-fn connect(authority: &str, timeout: Duration) -> io::Result<TcpStream> {
-    crate::dial::connect(authority, timeout)
+/// exporter, the queue filling and its spans dropped meanwhile. Over TLS
+/// the handshake is bounded by it too.
+fn connect(addr: &str, timeout: Duration) -> io::Result<Stream> {
+    crate::dial::connect(addr, timeout)
 }
 
 /// Sets a socket's timeouts to what is left before `deadline`.
-fn bound(s: &TcpStream, deadline: Instant) -> io::Result<()> {
+fn bound(s: &Stream, deadline: Instant) -> io::Result<()> {
     let left = deadline
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
@@ -1330,18 +1337,14 @@ fn bound(s: &TcpStream, deadline: Instant) -> io::Result<()> {
 /// Sends a post and reads its answer whole: the status, and whether the
 /// connection may carry the next one.
 fn exchange(
-    r: &mut BufReader<TcpStream>,
+    r: &mut BufReader<Stream>,
     head: &[u8],
     body: &[u8],
     deadline: Instant,
 ) -> io::Result<(u16, bool)> {
     bound(r.get_ref(), deadline)?;
-    {
-        let mut w = r.get_ref();
-        w.write_all(head)?;
-        w.write_all(body)?;
-        w.flush()?;
-    }
+    // Head and body in one write: over TLS, one plaintext.
+    crate::http::write_parts(r.get_mut(), head, body)?;
     let mut line = String::new();
     bound(r.get_ref(), deadline)?;
     if r.read_line(&mut line)? == 0 {
@@ -1613,13 +1616,28 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(s.endpoint.url(), "http://127.0.0.1:4318/v1/traces");
-        let err = Options {
+        // A vendor's endpoint over TLS, its port 443 where it names none.
+        let https = Options {
             endpoint: Some("https://api.honeycomb.io".into()),
             ..Options::default()
         }
+        .settings_from("s", &env(&[]));
+        if cfg!(feature = "tls") {
+            let s = https.unwrap().unwrap();
+            assert_eq!(s.endpoint.url(), "https://api.honeycomb.io:443/v1/traces");
+            assert_eq!(s.endpoint.authority, "api.honeycomb.io:443");
+            assert_eq!(s.endpoint.addr(), "https://api.honeycomb.io:443");
+        } else {
+            let err = https.unwrap_err();
+            assert!(err.contains("TLS"), "{err}");
+        }
+        assert!(Options {
+            endpoint: Some("ftp://x:1".into()),
+            ..Options::default()
+        }
         .settings_from("s", &env(&[]))
-        .unwrap_err();
-        assert!(err.contains("no TLS"), "{err}");
+        .unwrap_err()
+        .contains("http:// or https://"));
         assert!(Options {
             endpoint: Some("http://x:4317".into()),
             ..Options::default()

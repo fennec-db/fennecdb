@@ -329,4 +329,55 @@ for n in n3 n4 n5; do
     done
 done
 echo "old router:   a create, its replica, a move and a delete on this tree's nodes"
+
+# A node serving HTTPS, recorded at its https:// address (TLS slice 3,
+# docs/design/http.md#dialing-https). This tree's router dials it over TLS,
+# the test CA its --tls-ca; a router from before cannot resolve such an
+# address and sends the node nothing -- never its admin token in the
+# clear, which a field beside the address it passed over would have sent;
+# and a node from before refuses to follow an https:// primary. So every
+# router and node is upgraded before a node is recorded at https://.
+CERTS="$ROOT/crates/fennec-http/tests/certs"
+"$NEW/fennec-server" --dir "$WORK/tls-node" --http 127.0.0.1:0 --admin-token atls \
+    --tls-cert "$CERTS/server.pem" --tls-key "$CERTS/server.key" >"$WORK/tls-node.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 1 200); do
+    grep -q 'listening on: https://' "$WORK/tls-node.log" && break
+    sleep 0.05
+done
+TLS_PORT=$(grep -o 'listening on: https://[^ ]*' "$WORK/tls-node.log" | head -1 | sed 's/.*://')
+[ -n "$TLS_PORT" ] || fail "the node serving HTTPS said no address"
+TLS_NODE="{\"addr\":\"https://localhost:$TLS_PORT\",\"token\":\"atls\"}"
+plain_refused() {
+    curl -sS --cacert "$CERTS/ca.pem" -H 'Authorization: Bearer atls' \
+        "https://localhost:$TLS_PORT/_metrics" |
+        grep 'fennec_tls_handshakes_failed_total{reason="plain_http"}' | awk '{print $2}'
+}
+"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/tls-router.fennec" \
+    --token root --tls-ca "$CERTS/ca.pem" >"$WORK/tls-router.log" 2>&1 &
+PIDS+=($!)
+NEW_ROUTER=$(address "$WORK/tls-router.log")
+code=$(admin "$NEW_ROUTER" PUT /_shard/nodes/t1 "$TLS_NODE")
+case "$code" in
+2??) ;;
+*) fail "this tree's router did not take the https node ($code): $(cat "$WORK/admin.out")" ;;
+esac
+code=$(admin "$NEW_ROUTER" PUT /_shard/tenants/secure '{"node":"t1"}')
+[ "$code" = 201 ] || fail "no tenant on the https node ($code): $(cat "$WORK/admin.out")"
+query "$NEW_ROUTER/t/secure" "create collection notes (title text)" | grep -q '"error"' &&
+    fail "the router's relay to the https node failed"
+before=$(plain_refused)
+code=$(admin "$OLD_ROUTER" PUT /_shard/nodes/t1 "$TLS_NODE")
+case "$code" in
+2??) fail "the old router took an https:// address it cannot dial ($code)" ;;
+esac
+[ "$(plain_refused)" = "$before" ] ||
+    fail "the old router sent the https node plain HTTP: $before -> $(plain_refused)"
+echo "old router:   an https:// node refused ($code), nothing sent to it"
+if "$OLD/fennec-server" --file "$WORK/tls-replica.fennec" --http 127.0.0.1:0 \
+    --replication-token r --replica-of "https://localhost:$TLS_PORT" \
+    >"$WORK/tls-replica.log" 2>&1; then
+    fail "the old server followed an https:// primary"
+fi
+echo "old replica:  $(grep -m1 -i 'tls\|https' "$WORK/tls-replica.log")"
 echo "ok: the binaries from before stop in words at the first definition"

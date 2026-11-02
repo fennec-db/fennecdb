@@ -251,3 +251,131 @@ fn an_audit_line_names_https() {
     };
     assert!(line.contains("\"proto\":\"https\""), "{line}");
 }
+
+/// A request over HTTPS to `port`, trusting the test CA: its whole answer.
+fn ask_tls(port: u16, method: &str, path: &str, body: &str) -> String {
+    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let client = fennec_tls::Client::trusting_pem_file(Path::new(&cert("ca.pem"))).unwrap();
+    let mut s = client.dial(s, "localhost").unwrap();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    s.write_all(head.as_bytes()).unwrap();
+    s.write_all(body.as_bytes()).unwrap();
+    s.flush().unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A statement over HTTPS, which must be answered 200.
+fn run_tls(port: u16, q: &str) {
+    let body = format!("{{\"query\":{}}}", crate::support::json_string(q));
+    let answer = ask_tls(port, "POST", "/query", &body);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{q}: {answer}");
+}
+
+/// What a scrape over HTTPS says `name` is, 0 where it says nothing.
+fn scraped(port: u16, name: &str) -> f64 {
+    let scrape = ask_tls(port, "GET", "/_metrics", "");
+    scrape
+        .lines()
+        .find_map(|l| l.strip_prefix(name))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// `--replica-of https://...`: the replica dials its primary over TLS, the
+/// primary's certificate held to `--tls-ca`, and follows it as over plain
+/// HTTP. Without `--tls-ca`, Mozilla's roots refuse the test CA's
+/// certificate before the token goes out -- the primary counts the
+/// replica's alert, a failed handshake -- and the replica says which flag
+/// names a private CA.
+#[test]
+fn a_replica_follows_its_primary_over_https() {
+    const TOKEN: &str = "repl-tls";
+    let (pem, key, ca) = (cert("server.pem"), cert("server.key"), cert("ca.pem"));
+    let pf = tmp("https", "primary.fennec");
+    let primary = start(&[
+        "--file",
+        pf.to_str().unwrap(),
+        "--tls-cert",
+        &pem,
+        "--tls-key",
+        &key,
+        "--replication-token",
+        TOKEN,
+    ]);
+    run_tls(primary.port, "create collection items (name text)");
+    run_tls(primary.port, r#"put items {name: "a"}"#);
+    let upstream = format!("https://localhost:{}", primary.port);
+    let alerts = "fennec_tls_handshakes_failed_total{reason=\"alert\"}";
+
+    let before = scraped(primary.port, alerts);
+    let rf = tmp("https", "unknown-issuer.fennec");
+    let stranger = start(&[
+        "--file",
+        rf.to_str().unwrap(),
+        "--replica-of",
+        &upstream,
+        "--replication-token",
+        TOKEN,
+    ]);
+    assert!(
+        stranger.logged("UnknownIssuer", Duration::from_secs(30)),
+        "{}",
+        stranger.log.lock().unwrap()
+    );
+    assert!(stranger.log.lock().unwrap().contains("--tls-ca"));
+    let after = scraped(primary.port, alerts);
+    assert!(after > before, "{before} -> {after}");
+    drop(stranger);
+
+    let rf = tmp("https", "replica.fennec");
+    let replica = start(&[
+        "--file",
+        rf.to_str().unwrap(),
+        "--replica-of",
+        &upstream,
+        "--replication-token",
+        TOKEN,
+        "--tls-ca",
+        &ca,
+    ]);
+    run_tls(primary.port, r#"put items {name: "b"}"#);
+    let mut c = replica.http();
+    let started = std::time::Instant::now();
+    while !c
+        .query("get items count")
+        .is_ok_and(|b| crate::support::count(&b) == 2)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{}",
+            replica.log.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `--otlp-endpoint https://...`: spans go to a collector over TLS, its
+/// certificate held to `--tls-ca`.
+#[test]
+fn spans_go_to_an_https_collector() {
+    let (pem, key, ca) = (cert("server.pem"), cert("server.key"), cert("ca.pem"));
+    let collector = crate::otlp::Receiver::start_tls(&pem, &key);
+    assert!(collector.url().starts_with("https://localhost:"));
+    let server = start(&[
+        "--otlp-endpoint",
+        &collector.url(),
+        "--trace-sample",
+        "1",
+        "--tls-ca",
+        &ca,
+    ]);
+    server.http().run("create collection notes (title text)");
+    collector.until("a request's span", |s| !s.is_empty());
+    assert!(collector.posts().iter().all(|p| p.path == "/v1/traces"));
+}

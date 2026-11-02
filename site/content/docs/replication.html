@@ -34,6 +34,12 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
   <li><b>Writes are refused</b> until it is promoted, by hand.</li>
   <li><b>A failover can lose</b> only what the primary's <code>--sync</code>
     had not yet put on disk.</li>
+  <li><b>The stream can run over HTTPS.</b> Give the replica
+    <code>--replica-of https://primary:8443</code> for a primary that serves
+    it. Its certificate, chain and host name, is checked against Mozilla's
+    roots, or against the CAs of <code>--tls-ca &lt;pem&gt;</code> in their place
+    for a private CA, and a certificate refused is refused before the token is
+    sent (<a href="/docs/server#dialing-https">Dialing HTTPS</a>).</li>
 </ul>
 
 <details class="deep"><summary>What a replica is and answers</summary>
@@ -296,7 +302,10 @@ the other way on the two; everything else answers identically.</p>
 
 <p>An archive is the replication stream written to a directory: base images
 and every write after them, timestamped. From it, <code>fennec restore</code>
-rebuilds the database as it stood at any moment or change.</p>
+rebuilds the database as it stood at any moment or change. A primary or node
+that serves HTTPS is given as <code>https://host:port</code> to <code>fennec
+backup</code> and <code>fennec archive</code>, with <code>--tls-ca &lt;pem&gt;</code>
+for a private CA (<a href="/docs/server#dialing-https">Dialing HTTPS</a>).</p>
 
 <pre data-lang="bash"># the running database, taken whole: a file that opens as a database of its own
 fennec backup http://primary:8080 nightly.fennec --token "$REPL"
@@ -669,7 +678,8 @@ feeding and how far each has been sent.</p>
 <table>
 <tbody>
 <tr><td><code>--replication-token &lt;value&gt;</code></td><td>turns replication on; needs <code>--file</code>, and <code>--http</code> to feed replicas. Also read from <code>FENNEC_REPLICATION_TOKEN</code></td></tr>
-<tr><td><code>--replica-of http://host:port</code></td><td>follows that primary into <code>--file</code>; needs the token</td></tr>
+<tr><td><code>--replica-of http://host:port</code></td><td>follows that primary into <code>--file</code>; needs the token. <code>https://host:port</code> follows it over TLS</td></tr>
+<tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>the CAs an <code>https://</code> primary is held to, in place of Mozilla's roots; also a flag of <code>fennec backup</code> and <code>fennec archive</code></td></tr>
 <tr><td><code>--promote</code></td><td>opens a replica's file to take writes, forking its history</td></tr>
 <tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>writes kept for replicas that fall behind, and for <code>/_changes</code>; default 64</td></tr>
 <tr><td><code>--cdc</code></td><td>keeps the writes for <a href="/docs/http-reference#changes"><code>GET /_changes</code></a> with no replica fed; on already with <code>--replication-token</code></td></tr>
@@ -687,10 +697,6 @@ feeding and how far each has been sent.</p>
     can have one: nodes that take its lease stop writing when they lose it,
     and are failed over after (<a href="/docs/sharding-failover#automatic-failover">Automatic
     failover</a>).</li>
-  <li><b>No TLS on the stream yet.</b> A replica's <code>--replica-of</code>
-    dials <code>http://</code> only in this release, so the primary it follows
-    stays on a private network, or a tunnel carries the stream across an open
-    one. TLS on that link is planned (<a href="/docs/server#tls">HTTPS</a>).</li>
   <li><b>No object-storage client.</b> An archive is a directory; a sync
     tool carries it to S3, R2 or GCS (<a href="#object-storage">In object
     storage</a>).</li>

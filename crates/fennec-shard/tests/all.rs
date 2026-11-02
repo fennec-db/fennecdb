@@ -17,6 +17,7 @@ mod replicas;
 mod router;
 mod standby;
 mod tls;
+mod tls_nodes;
 mod tokens;
 mod unsent;
 mod upstream;

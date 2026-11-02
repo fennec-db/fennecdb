@@ -42,7 +42,6 @@ use fennec_core::history::History;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -610,18 +609,18 @@ fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// The node's stream, asked for from where the archives stand.
 fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
-    let s = replication::connect(&upstream.addr)?;
+    let mut s = replication::connect(&upstream.addr)?;
     s.set_read_timeout(Some(replication::SILENCE))?;
     s.set_write_timeout(Some(replication::SILENCE))?;
     let request = format!(
         "POST /_replication/tenants HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
-        upstream.addr,
+        crate::dial::authority(&upstream.addr),
         upstream.token,
         places.len()
     );
-    (&s).write_all(request.as_bytes())?;
-    (&s).write_all(places.as_bytes())?;
+    // Head and body in one write: over TLS, one plaintext.
+    crate::http::write_parts(&mut s, request.as_bytes(), places.as_bytes())?;
     let mut r = BufReader::with_capacity(MESSAGE + 64, s);
     let (status, length) = read_head(&mut r)?;
     if status != 200 {
@@ -636,7 +635,7 @@ fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
 }
 
 struct Receiver {
-    r: BufReader<TcpStream>,
+    r: BufReader<crate::dial::Stream>,
 }
 
 impl Receiver {

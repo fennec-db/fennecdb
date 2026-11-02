@@ -308,6 +308,12 @@ fennec-shard --listen 127.0.0.1:8091 --directory standby.fennec --replication-to
 <ul>
   <li><b>Promote:</b> <code>POST /_replication/promote</code> on the
     standby.</li>
+  <li><b>Over HTTPS:</b> <code>--replica-of https://host:port</code> follows a
+    primary router that serves it, its certificate held to Mozilla's roots or to
+    <code>--tls-ca</code>'s CAs. Upgrade a standby before any node is recorded
+    at an <code>https://</code> address: one from before cannot reach it, and
+    forwards nothing to it once promoted
+    (<a href="sharding-reference.html#https-nodes">Nodes that serve HTTPS</a>).</li>
 </ul>
 
 <details class="deep"><summary>How a standby router follows the directory</summary>
