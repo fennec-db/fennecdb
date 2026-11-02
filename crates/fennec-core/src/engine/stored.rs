@@ -511,9 +511,16 @@ impl super::Database {
     /// let every later write land without its rows.
     pub fn unbound<R>(&mut self, f: impl FnOnce(&mut super::Database) -> R) -> R {
         let was = std::mem::replace(&mut self.unbound, true);
+        // The browser module aborts on a panic, with nothing left to give
+        // back to: its catch and its resume were 0.4 KB of it.
+        #[cfg(target_arch = "wasm32")]
+        let r = f(self);
+        #[cfg(not(target_arch = "wasm32"))]
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.unbound = was;
-        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
+        #[cfg(not(target_arch = "wasm32"))]
+        let r = r.unwrap_or_else(|p| std::panic::resume_unwind(p));
+        r
     }
 
     /// A kind-13 record into the table, as a load or a replica's apply
