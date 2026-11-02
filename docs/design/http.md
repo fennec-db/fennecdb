@@ -987,6 +987,23 @@ own thread and slot under `--max-connections`, as an idle plain connection
 holds them under `--idle-timeout`, and no other
 (`a_stalled_handshake_holds_up_no_other`).
 
+*A timeout put back after the peer may have gone is left.* A TLS 1.3
+server sends its session tickets after the client's `Finished`, and a
+client that writes its request and closes at once has its kernel answer
+them with a reset. macOS refuses any option on a socket shut both ways
+with EINVAL, so the reset landing between the tickets and the timeouts put
+back after the handshake failed a handshake already done -- "Invalid
+argument (os error 22)", the request unread: 13 runs in 40 of
+`a_client_closing_right_after_its_handshake_is_read` (300 connections a
+run) beside twelve busy loops, and `tests/dials.rs` on CI's macOS runner.
+A read or a write on such a socket returns at once, what is left to read
+and then the end or the reset, so a timeout has nothing to bound there:
+`handshake_by`, `TlsStream::readable` and fennec-http's
+`conn::unless_gone` take EINVAL, ECONNRESET or ENOTCONN from setting one as
+set, and the next read tells the end. After it none of 40 failed; with a
+pause forced before the timeouts went back, each of 300 handshakes met the
+reset and each client's bytes were read.
+
 *A plain request to it* is looked at before rustls reads a byte: a peek at
 the first, 0x16 for a handshake's record, a capital letter for a method.
 rustls answers a method with an alert, which a plain client prints as a

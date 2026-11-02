@@ -590,7 +590,7 @@ fn handshake_by<D>(
         }
         let left = left.max(Duration::from_millis(1));
         if conn.wants_write() {
-            sock.set_write_timeout(Some(left))?;
+            unless_gone(sock.set_write_timeout(Some(left)))?;
             match conn.write_tls(sock) {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -601,7 +601,7 @@ fn handshake_by<D>(
             }
             continue;
         }
-        sock.set_read_timeout(Some(left))?;
+        unless_gone(sock.set_read_timeout(Some(left)))?;
         match conn.read_tls(sock) {
             Ok(0) => {
                 return Err(Error::Io(io::Error::new(
@@ -624,9 +624,35 @@ fn handshake_by<D>(
             return Err(Error::of_tls(&e, peer));
         }
     }
-    sock.set_read_timeout(None)?;
-    sock.set_write_timeout(None)?;
+    // The handshake is done: a client that wrote and closed at once has
+    // its kernel answer the session tickets just sent with a reset, which
+    // can land before these, and the stream goes back all the same.
+    unless_gone(sock.set_read_timeout(None))?;
+    unless_gone(sock.set_write_timeout(None))?;
     Ok(())
+}
+
+/// A socket timeout set, or left where the connection is gone: macOS
+/// refuses any option on a socket shut both ways -- a peer's reset does
+/// that -- with EINVAL, and a reset or an end may be told as ECONNRESET or
+/// ENOTCONN. A read or a write on such a socket returns at once (what is
+/// left to read, then the end or the reset), so the timeout has nothing to
+/// bound; failing on it failed a handshake already done, its client's
+/// request unread. std's own refusal, a zero timeout, carries no OS code.
+/// fennec-http's `conn::unless_gone` is the same rule for its sockets.
+fn unless_gone(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e)
+            if e.raw_os_error().is_some()
+                && matches!(
+                    e.kind(),
+                    ErrorKind::InvalidInput | ErrorKind::ConnectionReset | ErrorKind::NotConnected
+                ) =>
+        {
+            Ok(())
+        }
+        set => set,
+    }
 }
 
 /// A peer's address for an error, or "the client".
@@ -740,13 +766,16 @@ impl TlsStream {
             let before = self.sock.read_timeout()?;
             // A zero timeout is refused by the socket, and means "forever"
             // to the kernel.
-            self.sock
-                .set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
+            unless_gone(
+                self.sock
+                    .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
+            )?;
             let got = match &mut self.conn {
                 Conn::Client(c) => c.read_tls(&mut self.sock),
                 Conn::Server(c) => c.read_tls(&mut self.sock),
             };
-            self.sock.set_read_timeout(before)?;
+            // What the read took in is read whatever the peer did since.
+            unless_gone(self.sock.set_read_timeout(before))?;
             match got {
                 Ok(0) => {
                     return Err(io::Error::new(
@@ -1233,6 +1262,38 @@ mod tests {
         // The trickle goes on for ten seconds: cut well before it ends.
         assert!(took < Duration::from_secs(5), "{took:?}");
         trickle.join().unwrap();
+    }
+
+    /// A client that finishes its handshake, writes and closes at once is
+    /// read: its kernel answers the session tickets the server sends after
+    /// the handshake with a reset, and macOS refuses a timeout on a socket
+    /// reset (EINVAL), which failed a handshake already done as the
+    /// timeouts were put back. Many times over, for the reset to land in
+    /// the gap between the tickets and the timeouts.
+    #[test]
+    fn a_client_closing_right_after_its_handshake_is_read() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let client = trusting(&ca);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for _ in 0..300 {
+            let c = client.clone();
+            let writer = thread::spawn(move || {
+                let mut s = dial(&c, port, "localhost").unwrap();
+                s.write_all(b"ping").unwrap();
+                s.flush().unwrap();
+            });
+            let (sock, _) = listener.accept().unwrap();
+            let mut s = server.accept_within(sock, Duration::from_secs(10)).unwrap();
+            writer.join().unwrap();
+            // Its end, a reset or not, comes after what it wrote; the
+            // timeout bounds the read should it not.
+            unless_gone(s.get_ref().set_read_timeout(Some(Duration::from_secs(10)))).unwrap();
+            let mut got = Vec::new();
+            let _ = s.read_to_end(&mut got);
+            assert_eq!(got, b"ping");
+        }
     }
 
     /// A dial bounded as a whole: a server trickling its first record a

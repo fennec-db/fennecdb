@@ -49,9 +49,13 @@ fn stand_in() -> (u16, mpsc::Receiver<Result<Vec<u8>, String>>) {
         let got = match server.accept_within(sock, Duration::from_secs(10)) {
             Err(e) => Err(e.to_string()),
             Ok(mut s) => {
-                s.get_ref()
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
+                // A client that wrote and closed may have reset the socket
+                // by now (its kernel answering the session tickets), which
+                // macOS tells as EINVAL here: what it wrote is read still.
+                fennec_http::conn::unless_gone(
+                    s.get_ref().set_read_timeout(Some(Duration::from_secs(10))),
+                )
+                .unwrap();
                 let mut got = Vec::new();
                 let _ = s.read_to_end(&mut got);
                 Ok(got)

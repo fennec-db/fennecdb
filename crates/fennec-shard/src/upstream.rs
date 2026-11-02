@@ -2224,7 +2224,8 @@ impl Answer {
         if mark != 0 && pool.moved(mark) != seen {
             return Err(io::Error::other(Ended::Cut { whole: true }));
         }
-        socket.set_read_timeout(None)?;
+        // A node that answered and reset leaves its answer to read.
+        fennec_http::conn::unless_gone(socket.set_read_timeout(None))?;
         Ok(reader)
     }
 }
@@ -2239,11 +2240,14 @@ fn due<S: Wire>(
     move |reader: &BufReader<Conn<S>>, timeout: &mut Duration| {
         if reader.buffer().is_empty() {
             let left = left_until(deadline)?.min(*timeout);
-            reader
-                .get_ref()
-                .stream
-                .socket()
-                .set_read_timeout(Some(left))?;
+            // What a node that reset sent before it is read still.
+            fennec_http::conn::unless_gone(
+                reader
+                    .get_ref()
+                    .stream
+                    .socket()
+                    .set_read_timeout(Some(left)),
+            )?;
             *timeout = left;
         }
         Ok(())

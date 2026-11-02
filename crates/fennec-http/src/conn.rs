@@ -335,6 +335,32 @@ pub enum Peer {
     Ended,
 }
 
+/// A socket timeout set, or left where the connection is gone: macOS
+/// refuses any option on a socket shut both ways -- a peer's reset does
+/// that -- with EINVAL, and a reset or an end may be told as ECONNRESET or
+/// ENOTCONN. A read or a write on such a socket returns at once (what is
+/// left to read, then the end or the reset), so the timeout has nothing to
+/// bound: a timeout set after the peer may have gone, with bytes of its
+/// still to read, goes through here, or the bytes are lost to an
+/// "Invalid argument". std's own refusal, a zero timeout, carries no OS
+/// code. fennec-tls keeps the same rule for its handshakes.
+pub fn unless_gone(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e)
+            if e.raw_os_error().is_some()
+                && matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidInput
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::NotConnected
+                ) =>
+        {
+            Ok(())
+        }
+        set => set,
+    }
+}
+
 /// A served connection. Read and written through `&Conn`, as std reads and
 /// writes a `&TcpStream`, so a request's reader and its answers' writer
 /// borrow one value.
