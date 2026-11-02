@@ -495,12 +495,11 @@ no handshake runs on the accepting thread.
 
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](docs/design/http.md#tls)**, `--metrics` too, each handshake on its
-connection's thread within `Tls::handshake` (`conn::Conn::open`), a plain
-request a 400. Every route reads and writes the `&Conn`; without the flags
-it is the `TcpStream` it was, no allocation or dispatch added. A failed
-handshake is counted by reason and logged a minute apart at most; an end on
-purpose sends `close_notify`, the shutdown's too (`conn::end_all`), never
-after a failed write or `Conn::cut`.
+connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request
+a 400; without the flags the `&Conn` is the `TcpStream` it was, nothing
+added. A failed handshake is counted by reason, logged a minute apart at
+most; an end on purpose sends `close_notify` (`conn::end_all`), never after
+a failed write or `Conn::cut`.
 
 ### The HNSW graph
 
@@ -694,8 +693,8 @@ runs under, never of its statement or apart (`call_reads`,
 `Database::reads`): a writing body runs in its caller's block under the
 write lock (`Database::call`), a reading one over `&Database` (`read_call`,
 pinned by `pin_call`), refusing a write and taking no write lock, block or
-counter, so a replica, a read-only server, a marked read and a query across
-tenants answer it. A call is judged statement, claims, arguments, `check`,
+counter, so replicas, read-only servers, marked reads and cross-tenant
+queries answer it. A call is judged statement, claims, arguments, `check`,
 broken (`callee`), answers its last statement and is put back past
 `--call-max-rows`, its rows its thread's (`call::LEFT`). A scoped token
 calls what a `call` line grants (else a missing one's 404; `* call`
@@ -714,21 +713,20 @@ with the grammar; readers upgrade before a primary defines one
 `COMMANDS`). The `statements` feature (fennec-core's, fennec-ql's) is
 outside `full`, named by the server, the shell and the native library; the
 module refuses in its own words, a definition's own path `#[cold]`.
-`Definition::canonical` writes a field only where it holds something and
-an operator by a byte of its own; a change reading a stored text otherwise
-raises `GRAMMAR_EPOCH`, and `make fennecql-corpus` holds every FennecQL
-text of the repository to main's tree.
+`Definition::canonical` writes a field only where it holds something, an
+operator by a byte of its own; reading a stored text otherwise raises
+`GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
+texts to main's trees.
 
 **[A write-bound statement's record binds its collection's
 writes.](docs/design/named-statements.md#write-bound-statements-f2)** Kind
-13's op 3, which a binary from before refuses, holds the collection and
-events outside the text; every build reads them into `Collection::bound`,
-a mask every change keeps (`Database::rebind`), so a collection no binding
-names pays one byte's look a writing statement. Until the engine runs one,
-a definition is refused (`BOUND_NOT_BUILT`) and so is each write it binds,
-409 where one is broken or unread; `@ttl` and `after del` refuse each
-other; a replacement keeps the collection, the events and each kind of
-write, a `put` making and setting rows.
+13 op 3, refused by a binary from before, holds collection and events
+outside the text, read into `Collection::bound`, a mask every change keeps
+(`Database::rebind`): an unbound collection pays one byte's look a writing
+statement. Until the engine runs one, a definition and each write it binds
+are refused (`BOUND_NOT_BUILT`, 409 where one is broken or unread); `@ttl`
+and `after del` refuse each other; a replacement keeps collection, events
+and kinds of write (a `put` makes and sets).
 
 ### Held writes
 
@@ -1160,10 +1158,9 @@ its checksum.
   time: it holds what it races (`Replica.setOnline(false)` before a write it
   reads back) and bounds only the wait for what must happen. A step
   launching Chrome reads Chrome's files first (`warm`, `warm-chrome.mjs`),
-  never waiting longer for its port. A CI log names every failing test with
-  its assertion (`node --test --test-reporter=spec`, Gradle's
-  `testLogging`, `dart test`'s GitHub reporter); a failing mobile job uploads
-  `test-reports-android` or `test-results-apple`.
+  never waiting longer for its port. A CI log names each failing test and
+  its assertion (spec reporters, Gradle's `testLogging`); a failing mobile
+  job uploads `test-reports-android` or `test-results-apple`.
 - [A test reads the clock from below](docs/design/conventions.md#the-clock)
   (`took >= wait`), bounding it from above only where the time is the
   property, by what it stands against with seconds to spare; elsewhere it
@@ -1171,11 +1168,10 @@ its checksum.
   `Router::grants_waiting`, `Router::round_grants`). A timeout given a
   test's servers or clients bounds every request they make.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
-  listens on port 0, never a fixed port or one found free and handed over,
-  found by its `listening on: http://<address>` stderr line, a router told
-  its nodes by the addresses they said; only a site needing its address
-  before it binds takes a port the system picks, a stand-in listener
-  holding it till then.
+  listens on port 0, never a fixed or found-free port, found by its
+  `listening on: http://<address>` stderr line, a router told its nodes by
+  the addresses they said; only a site needing its address before it binds
+  takes a system-picked port, held by a stand-in listener till then.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs
@@ -1185,9 +1181,9 @@ its checksum.
   the next `site` deploy's `search-embeddings` artifact as
   `site/search-embeddings.json` where it differs.
 - An invariant's rule goes in CLAUDE.md in a few sentences: what must hold,
-  what must never be done, what enforces it and what a change owes. Its
-  measurements, rejected alternatives and history go in its `docs/design/`
-  file, in the same pull request; a new invariant gets both.
+  must never be done, enforces it and a change owes; its measurements,
+  rejected alternatives and history in its `docs/design/` file, in the same
+  pull request; a new invariant gets both.
 - Comments explain *why* -- a measured cost, a trap that was hit, an
   alternative rejected; match that when adding code.
 - All prose in the repo (comments, docs, README) is English.
