@@ -1,6 +1,6 @@
 # The native library and sync
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The native library and sync*: `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-ffi/CLAUDE.md](../../crates/fennec-ffi/CLAUDE.md) and [crates/fennec-abi/CLAUDE.md](../../crates/fennec-abi/CLAUDE.md) list under *The native library and sync*: `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## The native library
 

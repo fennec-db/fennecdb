@@ -1,6 +1,6 @@
 # The browser module
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The browser module*: threads and features, what is core, and the bytes the module holds. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *The browser module*: threads and features, what is core, and the bytes the module holds. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## No threads in WASM
 

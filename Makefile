@@ -161,8 +161,9 @@ studio-desktop-test: studio-desktop
 studio-highlight:
 	python3 site/build.py --studio-highlight
 
-## AGENTS.md written again from CLAUDE.md: the same text under its own
-## title (tools/agents_md.py; CI runs it with --check)
+## each AGENTS.md written again from the CLAUDE.md beside it, the root's
+## and every area file its index lists: the same text under its own title
+## (tools/agents_md.py; CI runs it with --check)
 agents-md:
 	python3 tools/agents_md.py
 

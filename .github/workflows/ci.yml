@@ -27,7 +27,7 @@ jobs:
 
       - run: cargo fmt --all --check
 
-      - name: AGENTS.md is CLAUDE.md under its own title, CLAUDE.md under 64 000 bytes
+      - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 
       # docs/design/crates.md#zero-dependencies: only fennec-tls (rustls,

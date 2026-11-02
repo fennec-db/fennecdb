@@ -1,6 +1,6 @@
 # Vector search
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Vector search*: the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Vector search*: the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## SIMD
 
