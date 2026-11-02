@@ -163,6 +163,11 @@ public class FennecException : Exception
     /// none.</summary>
     public string? Reason { get; }
 
+    /// <summary>The statement bound to the write (<c>create statement ... after</c>) that refused it, by name: a
+    /// guard's require not met, a write of its body refused. Told the server's token alone, a scoped one the
+    /// <see cref="Reason"/> and no name; <c>null</c> otherwise.</summary>
+    public string? Binding { get; }
+
     /// <summary>The tenant's quota that refused the request: <c>bytes</c> and <c>rows</c> answer 507, and room
     /// is made by deleting; <c>streams</c>, <c>held</c>, <c>requests</c>, <c>writes</c> and <c>write_bytes</c>
     /// answer 429 with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
@@ -174,9 +179,10 @@ public class FennecException : Exception
 
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
     /// which one stopped it; for a tenant's quota, which quota and how long to wait; for a require that said
-    /// why, its reason.</summary>
+    /// why, its reason; for a statement bound to the write that refused it, its name.</summary>
     public FennecException(int status, string message, int completed = 0, int? at = null,
-        string? quota = null, TimeSpan? retryAfter = null, string? reason = null) : base(message)
+        string? quota = null, TimeSpan? retryAfter = null, string? reason = null, string? binding = null)
+        : base(message)
     {
         Status = status;
         Code = CodeOf(status);
@@ -185,6 +191,7 @@ public class FennecException : Exception
         Quota = quota;
         RetryAfter = retryAfter;
         Reason = reason;
+        Binding = binding;
     }
 
     /// <summary>A write whose outcome is unknown: <c>outcome_unknown</c>, and where it left the database.</summary>
@@ -240,7 +247,10 @@ public class FennecException : Exception
                     wait,
                     // What a require n else '<reason>' that refused said, a batch's stop's beside its at.
                     r.TryGetProperty("reason", out var why) && why.ValueKind == JsonValueKind.String
-                        ? why.GetString() : null);
+                        ? why.GetString() : null,
+                    // The statement bound to the write that refused it, by name.
+                    r.TryGetProperty("binding", out var bound) && bound.ValueKind == JsonValueKind.String
+                        ? bound.GetString() : null);
             }
         }
         catch (JsonException) { }

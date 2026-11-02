@@ -166,6 +166,30 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal((412, "no such account"), (e.Status, e.Reason));
     }
 
+    // A statement bound to a write, whose guard refuses it: 412 with its reason and its name, a batch's beside
+    // its At; none where no binding refused.
+    [Fact]
+    public async Task ABindingThatRefusesAWriteIsNamed()
+    {
+        using var db = Root();
+        string orders = Fresh("orders"), ledger = Fresh("ledger"), voided = Fresh("voided");
+        await db.ExecAsync($"create collection {orders} (status text)");
+        await db.ExecAsync($"create collection {ledger} (o int @hash)");
+        await db.ExecAsync($"create statement {voided} after set {orders} where new.status = 'void' as begin " +
+            $"get {ledger} select o where o = new.id limit 1 require 1 else 'no ledger line'; " +
+            $"insert {ledger} {{o: new.id}} end");
+        await db.ExecAsync($"put {orders} {{status: 'open'}}");
+        var e = await Assert.ThrowsAsync<FennecException>(() =>
+            db.ExecAsync($"set {orders} {{status: 'void'}} where id = 1"));
+        Assert.Equal((412, "no ledger line", voided), (e.Status, e.Reason, e.Binding));
+        e = await Assert.ThrowsAsync<FennecException>(() => db.BatchAsync([
+            new($"put {orders} {{status: 'open'}}"), new($"set {orders} {{status: 'void'}} where id = 1")]));
+        Assert.Equal((412, (int?)1, voided), (e.Status, e.At, e.Binding));
+        e = await Assert.ThrowsAsync<FennecException>(() =>
+            db.ExecAsync($"set {orders} {{status: 'x'}} where id = 1 require 2"));
+        Assert.Equal((412, null), (e.Status, e.Binding));
+    }
+
     // A job queue's claim: Order and Limit pick the rows UpdateAsync writes, and returning hands them back in
     // ExecResult.Rows; an ack by another owner is 412.
     [Fact]

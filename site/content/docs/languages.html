@@ -616,6 +616,16 @@ options (<code>require=1, reason="..."</code> in Python,
 <code>Error.Reason</code> in Go, <code>FennecException.Reason</code> in .NET,
 <code>FennecException.reason</code> in Kotlin and the error's
 <code>reason</code> in Dart.</p>
+
+<p>A <a href="fennecql.html#write-bound-statements">statement bound to the
+write</a> that refused it is named beside the reason, to the server's token
+(a scoped one is told the reason alone): <code>FennecError.binding</code> in
+Python and Swift, <code>Error.Binding</code> in Go,
+<code>FennecException.Binding</code> in .NET and
+<code>FennecException.binding</code> in Kotlin and Dart, from a server and,
+on Swift's, Kotlin's and Dart's own database, from the native library
+alike; <code>FennecError.binding</code> in JavaScript. None where no binding
+refused.</p>
 </details>
 
 <h2 id="named-statements">Named statements</h2>

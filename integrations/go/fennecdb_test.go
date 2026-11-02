@@ -333,6 +333,32 @@ func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
 
 // A job queue's claim: Order and Limit pick the rows Update writes, and
 // Returning hands them back in Result.Rows; an ack by another owner is 412.
+// A statement bound to a write, whose guard refuses it: 412 with its reason
+// and its name, a batch's beside its At; none where no binding refused.
+func TestABindingThatRefusesAWriteIsNamed(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	orders, ledger, voided := fresh("orders"), fresh("ledger"), fresh("voided")
+	must(db.Exec(ctx, "create collection "+orders+" (status text)")).of(t)
+	must(db.Exec(ctx, "create collection "+ledger+" (o int @hash)")).of(t)
+	must(db.Exec(ctx, "create statement "+voided+" after set "+orders+" where new.status = 'void' as begin "+
+		"get "+ledger+" select o where o = new.id limit 1 require 1 else 'no ledger line'; "+
+		"insert "+ledger+" {o: new.id} end")).of(t)
+	must(db.Exec(ctx, "put "+orders+" {status: 'open'}")).of(t)
+	_, err := db.Exec(ctx, "set "+orders+" {status: 'void'} where id = 1")
+	if e := statusOf(t, err); e.Status != 412 || e.Reason != "no ledger line" || e.Binding != voided {
+		t.Fatalf("a binding's refusal: %+v", e)
+	}
+	_, err = db.Batch(ctx, fennecdb.Stmt("put "+orders+" {status: 'open'}"), fennecdb.Stmt("set "+orders+" {status: 'void'} where id = 1"))
+	if e := statusOf(t, err); e.Status != 412 || e.At != 1 || e.Binding != voided {
+		t.Fatalf("a binding's refusal in a batch: %+v", e)
+	}
+	_, err = db.Exec(ctx, "set "+orders+" {status: 'x'} where id = 1 require 2")
+	if e := statusOf(t, err); e.Status != 412 || e.Binding != "" {
+		t.Fatalf("a refusal no binding made: %+v", e)
+	}
+}
+
 func TestAClaimAnswersTheRowsItTook(t *testing.T) {
 	ctx := context.Background()
 	db := root()

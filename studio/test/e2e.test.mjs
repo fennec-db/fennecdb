@@ -699,6 +699,41 @@ test('the schema: the named statements, a definition, and a call from its form i
   await p.close();
 });
 
+// A statement bound to a collection's writes: listed beside the collection
+// it is bound to, opened in the editor as its replacement, and listed among
+// the named statements by what it is bound to, with no call form.
+test('the schema: a collection\'s bindings, each opened as its replacement, none called', async () => {
+  await query(server.url, 'create collection bills (amount int)');
+  await query(server.url, 'create collection bill_lines (bill int)');
+  await query(server.url, "create statement billed after insert or set bills where new.amount > 0 comment 'A line a bill' as insert bill_lines {bill: new.id}");
+  try {
+    await query(server.url, 'put bills {amount: 5}');
+    assert.equal(await count('get bill_lines count'), 1);
+    const p = await page();
+    await signIn(p, TOKEN);
+    await open(p, 'bills');
+    await view(p, 'schema', 'tr[data-binding="billed"]');
+    assert.equal(await p.$eval('tr[data-binding="billed"]', (e) => e.textContent), 'billedafter insert or setReplace');
+    await p.click('button[aria-label="Replace billed in the query editor"]');
+    await p.waitForFunction(() => /^create or replace statement billed after insert or set bills where new\.amount > 0/.test(document.querySelector('#query')?.value ?? ''), { timeout: 10_000 });
+    // Among the named statements: what it is bound to, no call form; its
+    // definition's dialog says when it runs.
+    await view(p, 'schema', 'tr[data-statement="billed"]');
+    assert.match(await p.$eval('tr[data-statement="billed"]', (e) => e.textContent), /^billedboundafter insert or set billsA line a bill/);
+    assert.equal(await p.$('button[aria-label="Call billed"]'), null);
+    await p.click('button[aria-label="The definition of billed"]');
+    await p.waitForFunction(() => /Runs after insert or set on bills where new\.amount > 0/.test(document.querySelector('dialog[open]')?.textContent ?? ''), { timeout: 10_000 });
+    await p.click('dialog[open] .dialog-actions .btn.primary');
+    await p.waitForFunction(() => /^create or replace statement billed after/.test(document.querySelector('#query')?.value ?? ''), { timeout: 10_000 });
+    assert.deepEqual(p.problems, []);
+    await p.close();
+  } finally {
+    await query(server.url, 'drop statement if exists billed');
+    await query(server.url, 'drop collection if exists bills');
+    await query(server.url, 'drop collection if exists bill_lines');
+  }
+});
+
 test('the live view: rows arrive as they are written, and pause', async () => {
   const p = await page();
   await signIn(p, TOKEN);

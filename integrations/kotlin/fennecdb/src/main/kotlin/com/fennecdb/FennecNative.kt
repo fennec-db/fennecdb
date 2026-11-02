@@ -60,6 +60,7 @@ internal object FennecNative {
         throw FennecException(
             FennecException.Code.of(code), v?.get("message") as? String ?: "error $code", exact,
             reason = v?.get("reason") as? String,
+            binding = v?.get("binding") as? String,
         )
     }
 }

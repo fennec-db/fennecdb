@@ -205,7 +205,7 @@ KEYWORDS = {
         null true false collections describe compact begin commit on match fuse
         lookup group insert set del rerank absent returning fuzzy prefix like ilike
         between require else end call statement statements claims public scans
-        replace""".split(),
+        replace after new old""".split(),
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),

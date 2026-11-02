@@ -294,7 +294,8 @@ public final class FennecRemote: @unchecked Sendable {
     }
 
     /// A refusal as the error it is: its status and message, where a batch
-    /// stopped, what a `require n else '<reason>'` that refused it said,
+    /// stopped, what a `require n else '<reason>'` that refused it said and
+    /// the statement bound to the write that refused it,
     /// and where a tenant's quota refused it the quota and how
     /// many seconds to wait -- to the millisecond where the body says it
     /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
@@ -306,7 +307,8 @@ public final class FennecRemote: @unchecked Sendable {
             code: quota == nil ? FennecRemote.code(status) : .quota,
             message: v?["error"]?.string ?? "HTTP \(status)",
             status: status, at: v?["at"]?.int, completed: v?["completed"]?.int,
-            quota: quota, retryAfter: wait, reason: v?["reason"]?.string)
+            quota: quota, retryAfter: wait, reason: v?["reason"]?.string,
+            binding: v?["binding"]?.string)
     }
 
     /// An HTTP status as the error kind the engine would have said; the

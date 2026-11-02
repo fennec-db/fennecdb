@@ -549,7 +549,10 @@ of them or none. One that stops it is an error naming its place
 its <code>reason</code> where the <code>require</code> gave one
 (<code>reason:</code> beside <code>require:</code>, Kotlin's with
 <code>=</code>; <a href="/docs/fennecql-writing#require-reason">A reason for the
-refusal</a>). A
+refusal</a>), and the name of the <a
+href="/docs/fennecql#write-bound-statements">statement bound to the write</a>
+that refused it in <code>binding</code>, from the server's token's request and
+from the app's own database alike. A
 retry after a timeout cannot tell whether the write ran, so a write that
 must not run twice goes under an idempotency key: the second answer is the
 first one kept (<code>replayed</code>), and the key sent with another

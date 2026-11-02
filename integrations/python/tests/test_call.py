@@ -148,6 +148,36 @@ def test_a_refusal_is_the_clients_error_with_its_status_and_reason(client, bank)
     assert (bank.balance(1), bank.balance(2)) == (1000, 1000)
 
 
+def test_a_binding_that_refuses_a_write_is_named_in_the_error(client):
+    # A statement bound to a write, whose guard refuses it: 412 with its
+    # reason and its name, a batch's beside its `at`; none where no binding
+    # refused.
+    tag = fresh("b")
+    orders, ledger, voided = f"orders_{tag}", f"ledger_{tag}", f"voided_{tag}"
+    client.query(f"create collection {orders} (status text)")
+    client.query(f"create collection {ledger} (o int @hash)")
+    try:
+        client.query(
+            f"create statement {voided} after set {orders} where new.status = 'void' as begin "
+            f"get {ledger} select o where o = new.id limit 1 require 1 else 'no ledger line'; "
+            f"insert {ledger} {{o: new.id}} end"
+        )
+        client.query(f"put {orders} {{status: 'open'}}")
+        with pytest.raises(FennecError) as e:
+            client.query(f"set {orders} {{status: 'void'}} where id = 1")
+        assert (e.value.status, e.value.reason, e.value.binding) == (412, "no ledger line", voided)
+        with pytest.raises(FennecError) as e:
+            client.batch([(f"put {orders} {{status: 'open'}}", []), (f"set {orders} {{status: 'void'}} where id = 1", [])])
+        assert (e.value.status, e.value.at, e.value.binding) == (412, 1, voided)
+        with pytest.raises(FennecError) as e:
+            client.query(f"set {orders} {{status: 'x'}} where id = 1 require 2")
+        assert (e.value.status, e.value.binding) == (412, None)
+    finally:
+        client.query(f"drop statement if exists {voided}")
+        for name in (orders, ledger):
+            client.query(f"drop collection if exists {name}")
+
+
 def test_claims_are_the_as_part_of_the_server_token_s_call(client, bank):
     assert client.call(bank.mine, claims={"sub": "alice"}) == [{"body": "hello"}]
     assert client.call(bank.mine, None, claims={"sub": "bob"}) == [{"body": "hi"}]

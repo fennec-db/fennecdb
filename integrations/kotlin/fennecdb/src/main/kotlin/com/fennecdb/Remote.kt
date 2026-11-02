@@ -384,7 +384,8 @@ class FennecRemote private constructor(
 
         /**
          * A refusal as the error it is: its status and message, where a batch stopped, what a
-         * `require n else '<reason>'` that refused it said, and where a tenant's quota refused it the
+         * `require n else '<reason>'` that refused it said and the statement bound to the write that
+         * refused it, and where a tenant's quota refused it the
          * quota and how many seconds to wait -- to the millisecond where the body says it
          * (`retry_after_ms`), else `Retry-After`, or the same in the body.
          */
@@ -398,6 +399,7 @@ class FennecRemote private constructor(
                 quota = quota,
                 retryAfter = ms ?: retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
                 reason = r?.string("reason"),
+                binding = r?.string("binding"),
             )
         }
 

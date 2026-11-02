@@ -77,6 +77,9 @@ Named statements
   create [or replace] statement <name>($a int, $b text = 'x') [claims (sub text)]
            [public] [scans] [comment '...'] [check <expr>]
            as <statement>  |  as begin <statement>; <statement>; ... end
+  create [or replace] statement <name> after insert|set|del [or ...] <collection>
+           [where new.status = 'paid' and old.status = 'open'] [comment '...'] [scans]
+           as ...    -- bound: run by each write it binds, a row at a time, in its block
   call <name> {a: 1, b: 'y'} [as {sub: 'alice'}]   -- or CALL name(1, b => 'y')
   statements | describe statement <name> | drop statement [if exists] <name>
 
