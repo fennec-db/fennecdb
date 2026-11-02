@@ -130,7 +130,7 @@ binding, `Hook::waking`, `judge_call`), told its status and `reason` alone
 (`told_bound`); every other answer -- the server's token's, `/batch`'s, the
 native library's, the shell's -- names it (`binding`,
 `Database::refused_by`). What they did is noted on the writing thread
-(`Database::take_runs`), taken once a request for its counts, slow line,
+(`Database::take_runs`), taken where `runs_noted` says, out of line, for its counts, slow line,
 spans and audit, and described (`statements`, `GET /_schema`) to the
 server's token alone. `@ttl` and `after del` refuse each other; a replacement
 keeps collection, events and kinds of write (a `put` makes and sets).

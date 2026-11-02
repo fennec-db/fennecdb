@@ -33,7 +33,10 @@ to the router instead, and the app needs the router's token alone:</p>
     may follow the collections they read, <code>create statement
     transfer(...) ... as begin ... end</code>: the router reads them with the
     grammar before anything is placed, and the node defines them as it
-    applies the rest. A router from before named statements refuses such a
+    applies the rest. One <a href="/docs/fennecql#write-bound-statements">bound
+    to a collection's writes</a>, <code>create statement paid after set orders
+    ... as ...</code>, follows the collections it binds and writes, and the
+    node runs it. A router from before named statements refuses such a
     schema as one that does not read (400): upgrade the routers, and every
     node and archiver, before a tenant defines one.</li>
 </ul>
