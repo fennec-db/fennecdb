@@ -697,7 +697,7 @@ impl Router {
             }
         };
         let node = self.reader_node(tenant, region)?;
-        let url = format!("http://{addr}");
+        let url = fennec_http::dial::url_of(&addr);
         // Its trace in the global directory first, before any copy exists:
         // a create of the name asks the regions traced there alone.
         self.trace_globally(tenant, "PUT").map_err(|w| {
@@ -2043,7 +2043,7 @@ impl Router {
                     || bound_before(r, was)
                     || node.as_deref() == Some(r.node.as_str())
                     || n.is_some_and(|n| n.addr == *addr || n.region == *region)
-                    || r.follows != format!("http://{addr}")
+                    || r.follows != fennec_http::dial::url_of(addr)
                     || self
                         .reader_lost
                         .lock()
@@ -2474,7 +2474,7 @@ impl Router {
                     why = "as its tenant moved into its region";
                     self.take_reader(tenant, r).err()
                 } else {
-                    let url = format!("http://{addr}");
+                    let url = fennec_http::dial::url_of(addr);
                     why = "where it was";
                     let lost = self
                         .reader_lost

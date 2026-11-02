@@ -319,6 +319,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A plain `get` is written as JSON from the stored documents.
 - A connection no thread can be made for is answered 503.
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
+- Every HTTP dial takes HTTPS by its URL.
 
 *Held writes*
 - `Fennec-Wait` holds a `set` or a `del` that writes nothing until it can

@@ -112,12 +112,15 @@ impl Error {
         let Some(tls) = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) else {
             return Error::Io(io::Error::new(e.kind(), format!("TLS with {peer}: {e}")));
         };
-        match tls {
-            rustls::Error::InvalidCertificate(c) => Error::Certificate(format!(
-                "{peer}: {}",
-                rustls::Error::InvalidCertificate(c.clone())
-            )),
-            other => Error::refused(other, peer),
+        Error::of_tls(tls, peer)
+    }
+
+    /// rustls's error of a handshake, sorted: a certificate refused, an
+    /// alert the peer sent, or the rest.
+    fn of_tls(e: &rustls::Error, peer: &str) -> Error {
+        match e {
+            rustls::Error::InvalidCertificate(_) => Error::Certificate(format!("{peer}: {e}")),
+            _ => Error::refused(e, peer),
         }
     }
 
@@ -296,6 +299,39 @@ impl Client {
             conn.complete_io(&mut sock)
                 .map_err(|e| Error::of_handshake(e, server_name))?;
         }
+        Ok(TlsStream {
+            conn: Conn::Client(conn),
+            sock,
+        })
+    }
+
+    /// [`Client::dial`] bounded as a whole, as [`Server::accept_within`]
+    /// bounds an accept: past `within` the handshake is a timeout
+    /// (`ErrorKind::TimedOut`) however the server trickles its bytes, each
+    /// read and write waiting the time left and no more. fennecdb's own
+    /// HTTP dials take it -- a router's to its nodes, a replica's to its
+    /// primary -- so a node that took the connection and never finishes a
+    /// handshake holds a lease grant or a forward no longer than its
+    /// connect could. The socket is left with neither timeout set, for the
+    /// caller to set its own.
+    pub fn dial_within(
+        &self,
+        mut sock: TcpStream,
+        server_name: &str,
+        within: Duration,
+    ) -> Result<TlsStream, Error> {
+        let deadline = Instant::now() + within;
+        let name = self.server_name(&sock, server_name)?;
+        let mut conn = ClientConnection::new(Arc::clone(&self.config), name)
+            .map_err(|e| config(format!("TLS with {server_name}: {e}")))?;
+        handshake_by(
+            &mut conn,
+            &mut sock,
+            deadline,
+            within,
+            server_name,
+            "server",
+        )?;
         Ok(TlsStream {
             conn: Conn::Client(conn),
             sock,
@@ -518,66 +554,79 @@ impl Server {
     pub fn accept_within(&self, mut sock: TcpStream, within: Duration) -> Result<TlsStream, Error> {
         let deadline = Instant::now() + within;
         let mut conn = ServerConnection::new(Arc::clone(&self.config)).map_err(config)?;
-        let late = |sock: &TcpStream| {
-            Error::Io(io::Error::new(
-                ErrorKind::TimedOut,
-                format!(
-                    "TLS with {}: no handshake within {within:?}",
-                    sock_peer(sock)
-                ),
-            ))
-        };
-        while conn.is_handshaking() || conn.wants_write() {
-            // Rounded up to a millisecond: a zero timeout is refused by the
-            // socket, and is "forever" to the kernel.
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(late(&sock));
-            }
-            let left = left.max(Duration::from_millis(1));
-            if conn.wants_write() {
-                sock.set_write_timeout(Some(left))?;
-                match conn.write_tls(&mut sock) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                        return Err(late(&sock))
-                    }
-                    Err(e) => return Err(Error::of_handshake(e, &sock_peer(&sock))),
-                }
-                continue;
-            }
-            sock.set_read_timeout(Some(left))?;
-            match conn.read_tls(&mut sock) {
-                Ok(0) => {
-                    return Err(Error::Io(io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        format!(
-                            "TLS with {}: the client ended the handshake",
-                            sock_peer(&sock)
-                        ),
-                    )))
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    return Err(late(&sock))
-                }
-                Err(e) => return Err(Error::of_handshake(e, &sock_peer(&sock))),
-            }
-            if let Err(e) = conn.process_new_packets() {
-                // The alert rustls queued for the client, then the error.
-                let _ = conn.write_tls(&mut sock);
-                return Err(Error::refused(&e, &sock_peer(&sock)));
-            }
-        }
-        sock.set_read_timeout(None)?;
-        sock.set_write_timeout(None)?;
+        let peer = sock_peer(&sock);
+        handshake_by(&mut conn, &mut sock, deadline, within, &peer, "client")?;
         Ok(TlsStream {
             conn: Conn::Server(conn),
             sock,
         })
     }
+}
+
+/// A handshake driven to its end by `deadline`, `within` from its start,
+/// each read and write waiting the time left: [`Server::accept_within`]'s
+/// and [`Client::dial_within`]'s, `peer` named in an error and `them` the
+/// side that may end it early. The socket is left with neither timeout set.
+fn handshake_by<D>(
+    conn: &mut rustls::ConnectionCommon<D>,
+    sock: &mut TcpStream,
+    deadline: Instant,
+    within: Duration,
+    peer: &str,
+    them: &str,
+) -> Result<(), Error> {
+    let late = || {
+        Error::Io(io::Error::new(
+            ErrorKind::TimedOut,
+            format!("TLS with {peer}: no handshake within {within:?}"),
+        ))
+    };
+    while conn.is_handshaking() || conn.wants_write() {
+        // Rounded up to a millisecond: a zero timeout is refused by the
+        // socket, and is "forever" to the kernel.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(late());
+        }
+        let left = left.max(Duration::from_millis(1));
+        if conn.wants_write() {
+            sock.set_write_timeout(Some(left))?;
+            match conn.write_tls(sock) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Err(late())
+                }
+                Err(e) => return Err(Error::of_handshake(e, peer)),
+            }
+            continue;
+        }
+        sock.set_read_timeout(Some(left))?;
+        match conn.read_tls(sock) {
+            Ok(0) => {
+                return Err(Error::Io(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    format!("TLS with {peer}: the {them} ended the handshake"),
+                )))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(late())
+            }
+            Err(e) => return Err(Error::of_handshake(e, peer)),
+        }
+        if let Err(e) = conn.process_new_packets() {
+            // The alert rustls queued for the peer, then the error: a
+            // client refusing a certificate tells the server so, with no
+            // byte of its own sent.
+            let _ = conn.write_tls(sock);
+            return Err(Error::of_tls(&e, peer));
+        }
+    }
+    sock.set_read_timeout(None)?;
+    sock.set_write_timeout(None)?;
+    Ok(())
 }
 
 /// A peer's address for an error, or "the client".
@@ -1184,6 +1233,70 @@ mod tests {
         // The trickle goes on for ten seconds: cut well before it ends.
         assert!(took < Duration::from_secs(5), "{took:?}");
         trickle.join().unwrap();
+    }
+
+    /// A dial bounded as a whole: a server trickling its first record a
+    /// byte a while is a timeout at the bound, and one that finishes is
+    /// dialed, the socket's timeouts left unset; a certificate refused is
+    /// told so, the server told by an alert with nothing of the client's
+    /// sent.
+    #[test]
+    fn dial_within_bounds_the_whole_handshake() {
+        let (ca, theirs) = (ca("fennec test CA"), ca("another CA"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let trickle = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            // A record header claiming a ServerHello, then a byte a while.
+            let _ = s.write_all(&[0x16, 0x03, 0x03, 0x02, 0x00]);
+            for _ in 0..100 {
+                thread::sleep(Duration::from_millis(100));
+                if s.write_all(&[0x02]).is_err() {
+                    return;
+                }
+            }
+        });
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let within = Duration::from_millis(600);
+        let started = Instant::now();
+        let e = trusting(&ca)
+            .dial_within(sock, "localhost", within)
+            .unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(&e, Error::Io(io) if io.kind() == ErrorKind::TimedOut),
+            "{e}"
+        );
+        assert!(took >= within, "{took:?}");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        trickle.join().unwrap();
+
+        let (port, served) = serve(server_for(&ca, &["localhost"]), b"pong");
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut s = trusting(&ca)
+            .dial_within(sock, "localhost", Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(s.get_ref().read_timeout().unwrap(), None);
+        assert_eq!(ping(&mut s), b"pong");
+        served.recv().unwrap().unwrap();
+
+        // Another CA's certificate, and the CA's for another name.
+        for (signer, name, why) in [
+            (&theirs, "localhost", "UnknownIssuer"),
+            (&ca, "other.example", "not valid for name"),
+        ] {
+            let (port, served) = serve(server_for(signer, &["localhost"]), b"pong");
+            let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let refused = trusting(&ca)
+                .dial_within(sock, name, Duration::from_secs(10))
+                .unwrap_err();
+            assert!(matches!(&refused, Error::Certificate(_)), "{refused}");
+            assert!(refused.to_string().contains(why), "{refused}");
+            // The server reads the client's alert, never a byte of a
+            // request.
+            let e = served.recv().unwrap().unwrap_err();
+            assert!(e.contains("alert"), "{e}");
+        }
     }
 
     /// [`REFUSAL`], written in place of a handshake, is an alert a client

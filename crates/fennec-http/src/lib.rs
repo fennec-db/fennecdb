@@ -17,8 +17,11 @@
 //! of one process, `fennec-server`, which keeps the sync policy, the
 //! checkpoint and the memory ceiling in one place.
 //!
-//! There is no TLS: a non-loopback address wants a token, and a TLS
-//! terminator is needed in front of it on an open network.
+//! A non-loopback address wants a token. With `Config::tls` (`--tls-cert`)
+//! the listener speaks HTTPS alone ([`conn`]), and what the server dials --
+//! a primary, a collector -- it dials over TLS where its URL says
+//! `https://` ([`dial`]); without it, a TLS terminator goes in front on an
+//! open network.
 //!
 //! With [`Server::with_tenants`] one listener serves many databases, one
 //! file each, under `/t/<tenant>/...` -- the same surface as a single file

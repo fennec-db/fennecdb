@@ -28,16 +28,16 @@ behaviour worth knowing before it surprises you.</p>
     fixed.</b> A <code>json</code> field holds objects, lists and scalars,
     and a path (<code>meta.lang</code>) reads into it
     (<a href="/docs/fennecql-schema#json">Objects and paths</a>).</li>
-  <li><b>TLS on the ports clients reach, not yet between servers.</b>
-    <code>--tls-cert</code> makes the server and the router serve HTTPS; the
-    links between servers are plain HTTP, for a private network
-    (<a href="/docs/server#tls">Server</a>).</li>
+  <li><b>TLS on the ports clients reach, and on the links between
+    servers.</b> <code>--tls-cert</code> makes the server and the router serve
+    HTTPS; what they dial themselves takes an <code>https://</code> URL, held
+    to Mozilla's roots or to <code>--tls-ca</code>'s CAs, with no client
+    certificates (<a href="/docs/server#tls">Server</a>).</li>
 </ul>
 
 <p>Deliberately not done: JOIN, SQL as the query language, several writers to
 one file, multi-writer replication, a field's type changed in place (it
-would rewrite every document under the write lock). Not done yet, and
-planned: TLS on the links between servers, in the repository's <code>ROADMAP.md</code>. A row's
+would rewrite every document under the write lock). A row's
 expiry is <a href="/docs/fennecql-indexes#ttl"><code>@ttl</code></a>, a filter by
 another collection's rows is
 <a href="/docs/fennecql-lookup#subqueries"><code>in (get …)</code></a>, a unique field is
@@ -475,8 +475,8 @@ HTTPS itself once it is given a certificate.</p>
 
 <ul>
   <li><b>HTTPS needs a certificate:</b> without <code>--tls-cert</code> the
-    server speaks plain HTTP, and the links it dials itself are plain HTTP in
-    this release.</li>
+    server speaks plain HTTP. What it dials itself takes an
+    <code>https://</code> URL without one.</li>
   <li><b>No interactive transactions:</b> a <code>/batch</code> is the unit
     that lands whole.</li>
   <li><b>Too many connections are refused,</b> not queued.</li>
@@ -484,14 +484,16 @@ HTTPS itself once it is given a certificate.</p>
 
 <details class="deep"><summary>The server's limits on TLS, transactions and connections</summary>
 <ul>
-  <li><b>TLS only where clients reach it.</b> With <code>--tls-cert</code> and
+  <li><b>TLS both ways, and no client certificates.</b> With <code>--tls-cert</code> and
     <code>--tls-key</code> the HTTP and <code>--metrics</code> listeners speak
     HTTPS alone; without them a token travels in the clear on an open network.
     What the server dials itself — a replica's <code>--replica-of</code>, the
-    router's links to its nodes, the regions' relays, the <code>fennec mcp</code>
-    bridge — dials <code>http://</code> only in this release: keep those on a
-    private network. A renewed certificate takes a restart
-    (<a href="/docs/server#tls">HTTPS</a>). Listening on a non-loopback
+    router's links to its nodes, the regions' relays, the OTLP exporter, the
+    <code>fennec mcp</code> bridge — dials <code>https://</code> over TLS, with
+    no client certificates, its certificate held to Mozilla's roots or to
+    <code>--tls-ca</code>'s CAs in their place
+    (<a href="/docs/server#dialing-https">Dialing HTTPS</a>). A renewed
+    certificate takes a restart (<a href="/docs/server#tls">HTTPS</a>). Listening on a non-loopback
     address with no token is refused without <code>--insecure</code>.</li>
   <li><b>No transaction held open across requests.</b> There is one writer,
     and a transaction a client held open between its requests would hold

@@ -182,9 +182,19 @@ fn replication_refuses_what_it_cannot_do() {
             "--replication-token",
         ),
         (
-            vec!["--replication-token", TOKEN, "--replica-of", "https://x:1"],
-            "no TLS",
+            vec!["--replication-token", TOKEN, "--replica-of", "ftp://x:1"],
+            "no http:// or https:// URL",
         ),
+        (
+            vec![
+                "--replication-token",
+                TOKEN,
+                "--replica-of",
+                "https://x:1/t/a",
+            ],
+            "not a path on one",
+        ),
+        (vec!["--tls-ca", "/nowhere/ca.pem"], "/nowhere/ca.pem"),
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_fennec-server"))
             .args(["--http", "127.0.0.1:0", "--file"])

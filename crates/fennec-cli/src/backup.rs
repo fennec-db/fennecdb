@@ -39,9 +39,11 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
   each but `key` takes --key-file <path> (or FENNEC_KEY_FILE): the archive's
   files, or the backup file, sealed with it
 
-  <primary> is its HTTP address, http://host:port, <node> a --dir node's,
-  and <t> its --replication-token (also read from FENNEC_REPLICATION_TOKEN;
-  set and empty, it is unset). An empty --token, and an empty key file from
+  <primary> is its HTTP address, http://host:port -- https://host:port for
+  one serving HTTPS, its certificate held to Mozilla's roots or to
+  --tls-ca <pem>'s CAs in their place -- <node> a --dir node's, and <t>
+  its --replication-token (also read from FENNEC_REPLICATION_TOKEN; set
+  and empty, it is unset). An empty --token, and an empty key file from
   --key-file or FENNEC_KEY_FILE, are refused.
 
   backup    the database as it stands, taken while the server runs: into a
@@ -150,6 +152,9 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             "--tenants" => tenants = true,
             "--force" => force = true,
             "--key-file" => key_file = Some(next(&mut i, "--key-file")),
+            "--tls-ca" => {
+                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
+            }
             "--to" => {
                 let v = next(&mut i, "--to");
                 match fennec_core::time::parse(&v) {
