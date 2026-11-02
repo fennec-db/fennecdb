@@ -208,7 +208,10 @@ fn no_statement_is_bound_to_the_database_s_own_collections() {
     }
     let (status, body) = node.query(ROOT, "statements");
     assert_eq!(status, 200, "{body}");
-    assert!(!body.contains("keyed") && !body.contains("consumed"), "{body}");
+    assert!(
+        !body.contains("keyed") && !body.contains("consumed"),
+        "{body}"
+    );
     assert!(ledger(&db).is_empty());
 }
 
