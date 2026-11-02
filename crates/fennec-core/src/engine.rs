@@ -3831,22 +3831,19 @@ pub struct Database {
     /// only where a collection is bound: the byte comes first.
     unbound: bool,
     /// The rows the statement running woke, each with its pair and the
-    /// bindings it passed, run by [`Self::run_one`] as the statement ends
-    /// (`engine/bound.rs`).
+    /// bindings it passed, run by [`Self::run_one`] as the statement ends,
+    /// and the binding that refused the last write refused by one
+    /// (`engine/bound.rs`). Boxed: a word of the database's where it was
+    /// 120 bytes, which moved the fields after it, and the writes by id
+    /// of a collection no statement is bound to with them (*What a
+    /// binding costs a write*, named-statements.md).
     #[cfg(feature = "statements")]
-    woken: bound::Woken,
-    /// The binding that refused the last write refused by one, for the
-    /// server to tell ([`Self::woken`]); let go of as the next statement
-    /// ends, or a block starts ([`Self::bound_due`]).
-    #[cfg(feature = "statements")]
-    refused_by: Option<String>,
+    woken: Box<bound::Woken>,
     /// Whether the statement ending has a binding's work to settle: it
     /// asked a binding's conditions (`bind` held some), or the statement
-    /// before it was refused by one ([`Self::refused_by`]). Set on the
-    /// bound path alone, and the one look [`Self::run_one`] pays for
-    /// bindings as a statement ends -- a flag of the database's own, where
-    /// it lies beside the other flags: in `Woken` it grew that by a word,
-    /// moving the fields after it, and a `del` by id measured +5 to +27%.
+    /// before it was refused by one ([`Self::woken`]). Set on the bound
+    /// path alone, and the one look [`Self::run_one`] pays for bindings
+    /// as a statement ends, a flag beside the database's others.
     #[cfg(feature = "statements")]
     bound_due: bool,
     /// The calls running over this database, a write's under its lock and
@@ -3931,9 +3928,7 @@ impl Database {
             internal: false,
             unbound: false,
             #[cfg(feature = "statements")]
-            woken: bound::Woken::default(),
-            #[cfg(feature = "statements")]
-            refused_by: None,
+            woken: Box::default(),
             #[cfg(feature = "statements")]
             bound_due: false,
             #[cfg(feature = "statements")]

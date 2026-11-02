@@ -56,6 +56,10 @@ pub(super) struct Woken {
     /// `now()`, read as the first row is asked a condition: the one time
     /// every condition and every run of the write reads.
     now: Option<i64>,
+    /// The binding that refused the last write refused by one, for the
+    /// server to tell ([`Database::woken`]); let go of as the next
+    /// statement ends, or a block starts (`Database::bound_due`).
+    refused_by: Option<String>,
 }
 
 /// A row that woke a binding: as written (`new.`), as it stood (`old.`),
@@ -282,9 +286,10 @@ impl Database {
     #[cold]
     #[inline(never)]
     pub(super) fn ended(&mut self, out: Result<Response>) -> Result<Response> {
+        // The note let go of with the rows: in the box, which keeps its
+        // allocation.
         self.bound_due = false;
-        self.refused_by = None;
-        let w = std::mem::take(&mut self.woken);
+        let w = std::mem::take(&mut *self.woken);
         if w.rows.is_empty() {
             return out;
         }
@@ -296,7 +301,7 @@ impl Database {
     /// The binding `name` refused the statement running: noted for the
     /// server to tell, and let go of as the next statement ends.
     fn refused(&mut self, name: &str) {
-        self.refused_by = Some(name.to_string());
+        self.woken.refused_by = Some(name.to_string());
         self.bound_due = true;
     }
 
@@ -310,7 +315,6 @@ impl Database {
     /// for a statement a client sent, what the call has left inside a
     /// call's body. Each given back as the runs end, on a panic too.
     fn wake(&mut self, w: Woken) -> Result<()> {
-        self.refused_by = None;
         for (i, def) in w.bound.iter().enumerate() {
             let rows = w.rows.iter().filter(|r| r.passed & (1 << i) != 0).count();
             if rows == 0 {
@@ -373,7 +377,7 @@ impl Database {
         if self.bound_due {
             self.woken.rows.clear();
             self.bound_due = false;
-            self.refused_by = None;
+            self.woken.refused_by = None;
         }
     }
 
@@ -382,7 +386,7 @@ impl Database {
     /// by name, for the server to tell its writer; `None` where none did.
     /// Read under the lock the write ran under, before the next statement.
     pub fn woken(&self) -> Option<&str> {
-        self.refused_by.as_deref()
+        self.woken.refused_by.as_deref()
     }
 
     /// The rows asked a binding's condition and the rows kept, on this
