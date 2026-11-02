@@ -744,6 +744,11 @@ test('named statements are a server\'s: the module refuses a definition and a ca
   for (const text of [
     'create statement s() as get t select a',
     'create or replace statement s($a int) as begin get t select a where a = $a; end',
+    // A schedule too (F3's slice 1): the module runs none, and refuses it
+    // before reading its schedule, a bad one among them.
+    "create statement purge every 1h as del t where a = 1",
+    "create statement reset at '0 0 1 * *' in 'Europe/Berlin' as set t {a: 0} where a > 0",
+    "create statement never at '0 0 30 2 *' as del t where a = 1",
     'call s',
     'call s {a: 1} as {sub: "x"}',
     'CALL s(1, b => 2)',
