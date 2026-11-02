@@ -40,6 +40,11 @@ pub(super) struct Woken {
     /// The bindings the statement may wake, in name order: a row's
     /// `passed` is a bit each, by place (`named::MAX_BOUND` is 16).
     bound: Vec<Arc<Definition>>,
+    /// Which side of the pair each binding's body reads, by place: a bit
+    /// for `new.` ([`NEW_SIDE`]) and one for `old.` ([`OLD_SIDE`]). A row
+    /// keeps a copy of a side only where a binding it passed reads it: a
+    /// `set` binding reading `new.` alone keeps no `old` row.
+    sides: Vec<u8>,
     /// The bound collection's schema, which a condition compares each
     /// field by (its collation and case fold, `Field::text_order`).
     schema: Option<SchemaCell>,
@@ -111,7 +116,7 @@ impl Woken {
             clock: Some(now),
         };
         let schema = self.schema.as_deref().expect("bound before a row is kept");
-        let mut passed = 0u32;
+        let (mut passed, mut sides) = (0u32, 0u8);
         for (i, def) in self.bound.iter().enumerate() {
             let Some(b) = def.after.as_deref() else {
                 continue;
@@ -128,6 +133,7 @@ impl Woken {
             };
             if pass {
                 passed |= 1 << i;
+                sides |= self.sides[i];
             }
         }
         if passed == 0 {
@@ -138,8 +144,8 @@ impl Woken {
         }
         COUNTS.with(|c| c.set((c.get().0, c.get().1 + 1)));
         self.rows.push(Woke {
-            new: new.cloned(),
-            old: old.cloned(),
+            new: new.filter(|_| sides & NEW_SIDE != 0).cloned(),
+            old: old.filter(|_| sides & OLD_SIDE != 0).cloned(),
             passed,
         });
         Ok(())
@@ -172,6 +178,10 @@ struct Pair<'a> {
 /// What `new.` and `old.` name.
 const NEW: &str = "new.";
 const OLD: &str = "old.";
+
+/// A binding's body reads the row as written, or as it stood.
+const NEW_SIDE: u8 = 1;
+const OLD_SIDE: u8 = 2;
 
 impl RowAccess for Pair<'_> {
     fn id(&self) -> DocId {
@@ -239,6 +249,16 @@ impl Database {
         }
         let schema = self.collection(collection)?.schema.clone();
         let w = &mut self.woken;
+        w.sides = (bound.iter())
+            .map(|d| {
+                d.after.as_ref().map_or(0, |b| {
+                    b.places.iter().fold(0, |s, p| match p.old {
+                        true => s | OLD_SIDE,
+                        false => s | NEW_SIDE,
+                    })
+                })
+            })
+            .collect();
         w.bound = bound;
         w.schema = Some(schema);
         w.rows.clear();
