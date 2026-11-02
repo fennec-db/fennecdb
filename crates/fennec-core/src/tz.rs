@@ -319,6 +319,32 @@ pub fn zone_of(v: &Value) -> Result<Zone> {
     }
 }
 
+/// The zone `name` names as a schedule's tree holds it
+/// (`named::Schedule`), its meaning and never its spelling: `None` for UTC
+/// however written -- `'UTC'`, `'utc'`, `'Z'`, `'+00:00'`, `'-00'` -- the
+/// clock a schedule with no zone reads; another fixed offset as `+hh:mm`;
+/// and a zone of the table by the table's spelling of its name,
+/// `'europe/berlin'` as `Europe/Berlin`. A link is a name of its own:
+/// which name one leads to moves with tzdata (`Europe/Kiev` became
+/// `Europe/Kyiv`'s in 2022b), and what a definition's digest covers must not
+/// move with a binary's table. Refused as [`zone_of`] refuses it.
+#[cold]
+pub fn spelled(name: &str) -> Result<Option<String>> {
+    Ok(match zone_of(&Value::Text(name.into()))? {
+        Zone::Fixed(0) => None,
+        Zone::Fixed(off) => {
+            let m = off.unsigned_abs() / 60_000;
+            let sign = if off < 0 { '-' } else { '+' };
+            Some(format!("{sign}{:02}:{:02}", m / 60, m % 60))
+        }
+        // `zone_of` found it in the table, so the table holds its name.
+        Zone::Rules(_) => Some(match table().and_then(|t| t.entry(name)) {
+            Some((n, _)) => String::from_utf8_lossy(n).into_owned(),
+            None => name.to_owned(),
+        }),
+    })
+}
+
 thread_local! {
     /// The zone a call named last, by its name: `bucket(at, 1d, $3)` in a
     /// `where` names it once a row, and a lookup reads the names and an
@@ -530,12 +556,19 @@ impl<'a> Table<'a> {
 
     /// The zone named `name`, in any case.
     fn find(&self, name: &str) -> Option<Zone> {
+        self.zone(self.entry(name)?.1)
+    }
+
+    /// The name `name` is in any case, as the table spells it, and its
+    /// entry.
+    fn entry(&self, name: &str) -> Option<(&'a [u8], usize)> {
         let b = self.bytes;
         let mut p = self.names + 2;
         for _ in 0..le(at(b, self.names, 2)?) {
             let len = *b.get(p)? as usize;
-            if at(b, p + 1, len)?.eq_ignore_ascii_case(name.as_bytes()) {
-                return self.zone(le(at(b, p + 1 + len, 2)?) as usize);
+            let spelled = at(b, p + 1, len)?;
+            if spelled.eq_ignore_ascii_case(name.as_bytes()) {
+                return Some((spelled, le(at(b, p + 1 + len, 2)?) as usize));
             }
             p += len + 3;
         }

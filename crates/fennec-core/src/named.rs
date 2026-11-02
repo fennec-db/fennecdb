@@ -122,7 +122,10 @@ pub const MAX_NAME: usize = 59;
 /// [public] [scans] [comment '<text>'] [check <expr>] as <body>`, or one
 /// bound to a collection's writes, `create [or replace] statement <name>
 /// after <event> [or <event> ...] <collection> [where <condition>]
-/// [comment '<text>'] [scans] as <body>` ([`Binding`]). Two are equal where
+/// [comment '<text>'] [scans] as <body>` ([`Binding`]), or one run by the
+/// clock, `create [or replace] statement <name> (every <interval> | at
+/// '<cron>') [in '<zone>'] [comment '<text>'] [scans] as <body>`
+/// ([`Schedule`]). Two are equal where
 /// everything but their [`Definition::text`] is: the same statement
 /// written over one line or several. Its `Debug` form is its tree's, the
 /// text left out, which `make fennecql-corpus` compares.
@@ -167,6 +170,11 @@ pub struct Definition {
     /// `check` or `public` -- its values are the row's. Boxed: a callable
     /// definition carries a pointer for it.
     pub after: Option<Box<Binding>>,
+    /// `every <interval>` or `at '<cron>'`, `in '<zone>'`: a statement run
+    /// by the clock, never called, with no parameters, claims, `check` or
+    /// `public` -- no one hands it a value -- whose body reads `slot()`, the
+    /// instant of the slot it runs for. Boxed, as a binding is.
+    pub schedule: Option<Box<Schedule>>,
 }
 
 /// What a bound statement is bound to (`docs/design/named-statements.md`,
@@ -291,6 +299,311 @@ pub struct Place {
     pub old: bool,
     /// The field, or a path into a `json` one (`meta.source`).
     pub field: String,
+}
+
+/// What a statement run by the clock is defined to run at
+/// (`docs/design/named-statements.md`, *Scheduled statements (F3)*): the
+/// edges `bucket` cuts, or the times a cron expression names, on a zone's
+/// clock. Nothing runs one yet: the engine refuses its definition
+/// ([`SCHEDULED_NOT_BUILT`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Schedule {
+    pub when: When,
+    /// `in '<zone>'` as [`crate::tz::spelled`] writes the zone
+    /// `crate::tz::zone_of` reads: one of IANA's zones the binary's table
+    /// holds, by the table's spelling of its name, or a fixed offset as
+    /// `+hh:mm`. `None` is UTC, however written.
+    pub zone: Option<String>,
+}
+
+/// `every <interval>` or `at '<cron>'`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum When {
+    /// `every <interval>`: the starts of the buckets `bucket(t, <interval>,
+    /// <zone>)` gives, counted from the epoch -- a week from a Monday --
+    /// never from the definition, so a slot is the same instant wherever
+    /// it is computed. Whole minutes at least ([`MIN_PERIOD`]), or months.
+    Every(crate::query::Interval),
+    /// `at '<cron>'`: its five fields read into the sets they name.
+    At(Cron),
+}
+
+/// A cron expression's five fields, each the set of values it names as a
+/// mask: bit `m` of `minutes` (0-59), `h` of `hours` (0-23), `d - 1` of
+/// `days` (1-31), `m - 1` of `months` (1-12) and `w` of `weekdays` (0-6,
+/// Sunday 0 and 7). Read by [`Cron::read`], which refuses an expression
+/// with no meaning or two, so no mask is empty, and never both `days` and
+/// `weekdays` short of every value: the day matches where each holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cron {
+    pub minutes: u64,
+    pub hours: u32,
+    pub days: u32,
+    pub months: u16,
+    pub weekdays: u8,
+}
+
+/// The finest period a schedule runs at, in milliseconds: a minute, cron's
+/// finest step and the sweep's period (F3's decision 3). `every 30s` and
+/// `every 90s` are refused at definition.
+pub const MIN_PERIOD: i64 = 60_000;
+
+/// What the engine refuses a scheduled statement's definition with until a
+/// server runs one (F3's slices 1 and 2): a schedule defined where nothing
+/// runs it would be a slot no one runs without a word.
+pub const SCHEDULED_NOT_BUILT: &str =
+    "scheduled statements are not built yet: no server runs one, so none is defined";
+
+/// What a parameter, a claim, `check`, `public` or parentheses in a
+/// scheduled statement are refused with.
+pub const SCHEDULED_VALUES: &str = "a scheduled statement is called by no one: it takes no \
+                                    parameters, claims, `check` or `public`, and reads the data, \
+                                    `now()` and `slot()`";
+
+/// What a schedule beside `after` is refused with: a binding runs on its
+/// writer's row, a schedule on none.
+pub const SCHEDULED_AND_BOUND: &str =
+    "a statement runs by the clock or after a write, not both: two statements, `create statement \
+     <n> every 1h as ...` and `create statement <m> after set <collection> as ...`";
+
+/// `every <n><unit>`'s interval, `bucket`'s ([`crate::query::Interval`]),
+/// held to the floor: whole minutes, a minute at least, or calendar months.
+/// The refusal names the form to write.
+pub fn period(n: i64, unit: &str) -> std::result::Result<crate::query::Interval, String> {
+    use crate::query::Interval;
+    let written = format!("{n}{unit}");
+    match Interval::of(&Value::Text(written.as_str().into())) {
+        Ok(Interval::Ms(step, _)) if step < MIN_PERIOD || step % MIN_PERIOD != 0 => Err(format!(
+            "`every {written}`: a schedule runs at most once a minute, its period a whole number \
+             of minutes -- `every 1m`, `every 15m`, `every 1h`"
+        )),
+        Ok(iv) => Ok(iv),
+        Err(_) => Err(format!(
+            "`every {written}`: a schedule's interval is a whole number of minutes, hours, days, \
+             weeks, months or years -- `every 15m`, `1h`, `1d`, `1w`, `1mo`, `1y`"
+        )),
+    }
+}
+
+/// Each cron field's name, its lowest and highest value, and the names it
+/// takes for them.
+const CRON_FIELDS: [(&str, u32, u32); 5] = [
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of the month", 1, 31),
+    ("month", 1, 12),
+    ("day of the week", 0, 7),
+];
+const MONTH_NAMES: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+const DAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+/// The most days each month holds, 29 February admitted.
+const MONTH_DAYS: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+impl Cron {
+    /// `at '<cron>'`: minute, hour, day of month, month and day of week,
+    /// each `*`, a number, a range `a-b`, a list `a,b`, or a step `*/n` or
+    /// `a-b/n`, Sunday 0 or 7, and the three-letter English names of
+    /// months and days in any case -- what pg_cron, Cloud Scheduler and
+    /// PocketBase take. Refused, naming the form to write: other than five
+    /// fields, a value outside its field, a step of 0, a range running
+    /// backwards, Quartz's `?`, `L`, `W` and `#`, pg_cron's `$`, a macro, a
+    /// day of month and a day of week both written as other than `*`, and
+    /// an expression that never fires.
+    pub fn read(text: &str) -> std::result::Result<Cron, String> {
+        let t = text.trim();
+        if let Some(m) = t.strip_prefix('@') {
+            return Err(cron_macro(m));
+        }
+        for (c, whose) in [
+            ('?', "Quartz's `?`"),
+            ('#', "Quartz's `#`"),
+            ('$', "pg_cron's `$`"),
+        ] {
+            if t.contains(c) {
+                return Err(format!(
+                    "`{t}`: {whose} is not read here -- five fields of `*`, numbers, ranges `a-b`, \
+                     lists `a,b` and steps `*/n`"
+                ));
+            }
+        }
+        let f: Vec<&str> = t.split_ascii_whitespace().collect();
+        if f.len() == 6 {
+            return Err(format!(
+                "`{t}` has six fields, Quartz's with seconds first: a schedule runs at most once \
+                 a minute -- five fields, `minute hour day-of-month month day-of-week`, or \
+                 `every 1m`"
+            ));
+        }
+        if f.len() != 5 {
+            return Err(format!(
+                "`{t}`: a cron expression is five fields, `minute hour day-of-month month \
+                 day-of-week` -- `'0 3 * * *'` is 03:00 every day"
+            ));
+        }
+        let mut masks = [0u64; 5];
+        for (k, m) in masks.iter_mut().enumerate() {
+            *m = cron_field(f[k], k)?;
+        }
+        // Sunday is 0 and 7: one bit.
+        let weekdays = ((masks[4] | masks[4] >> 7) & 0x7f) as u8;
+        let cron = Cron {
+            minutes: masks[0],
+            hours: masks[1] as u32,
+            days: masks[2] as u32,
+            months: masks[3] as u16,
+            weekdays,
+        };
+        // By the text, never the masks: POSIX's crontab, Vixie cron and
+        // pg_cron count a field not starting with `*` as restricted and run
+        // on either day where both are, so `0 0 1-31 * mon` runs every day
+        // there and `0 0 13 * 0-6` too, where the masks ANDed would run on
+        // Mondays and on the 13th alone. Only `*` is open to every reader:
+        // a step is no POSIX form, Vixie cron counts any field starting
+        // with `*` open, `*/2` too, robfig's Go cron `*/1` and not `*/2`,
+        // so `*/1` is held to the rule as well.
+        if f[2] != "*" && f[4] != "*" {
+            return Err(format!(
+                "`{t}` restricts both the day of the month (`{}`) and the day of the week \
+                 (`{}`) -- a field is open as `*` alone -- which cron runs on either and a \
+                 reader takes for both: two statements, `at '{} {} {} {} *'` and `at '{} {} * {} \
+                 {}'`, say either, and one of them with a guard in its body says both",
+                f[2], f[4], f[0], f[1], f[2], f[3], f[0], f[1], f[3], f[4]
+            ));
+        }
+        // The lowest day named, held to the longest month named.
+        let first = cron.days.trailing_zeros() + 1;
+        let fits = (0..12).any(|m| cron.months & 1 << m != 0 && first <= MONTH_DAYS[m]);
+        if !fits {
+            return Err(format!(
+                "`{t}` never runs: no month it names has a day it names (29 February is one)"
+            ));
+        }
+        Ok(cron)
+    }
+}
+
+/// A cron macro's refusal: each named as the schedule it is.
+#[cold]
+fn cron_macro(m: &str) -> String {
+    let lower = m.to_ascii_lowercase();
+    let as_written = match lower.as_str() {
+        "hourly" => "`every 1h`",
+        "daily" | "midnight" => "`every 1d`",
+        "weekly" => "`at '0 0 * * 0'`, Sunday's midnight (`every 1w` starts on a Monday)",
+        "monthly" => "`every 1mo`",
+        "yearly" | "annually" => "`every 1y`",
+        "reboot" => {
+            return "`@reboot` is no time: a schedule runs at the times its clock reads, never as \
+                    a server starts"
+                .into()
+        }
+        _ => "five fields, `minute hour day-of-month month day-of-week`",
+    };
+    format!("`@{m}` is written {as_written}")
+}
+
+/// One cron field read into the mask of the values it names, bit `v -
+/// lowest` for each; the day of the week's 7 is bit 7, folded into
+/// Sunday's by the caller.
+fn cron_field(text: &str, k: usize) -> std::result::Result<u64, String> {
+    let (what, lo, hi) = CRON_FIELDS[k];
+    let mut mask = 0u64;
+    for item in text.split(',') {
+        let (range, step) = match item.split_once('/') {
+            Some((r, s)) => (r, Some(s)),
+            None => (item, None),
+        };
+        let (a, b) = match range.split_once('-') {
+            _ if range == "*" => (lo, hi),
+            Some((a, b)) => (cron_value(a, k)?, cron_value(b, k)?),
+            None if step.is_some() => {
+                return Err(format!(
+                    "`{item}`: a step follows `*` or a range -- `*/n`, or `{range}-{hi}/n` from \
+                     {range}"
+                ))
+            }
+            None => {
+                let v = cron_value(range, k)?;
+                (v, v)
+            }
+        };
+        if b < a {
+            let sunday = if k == 4 && b == 0 {
+                ", Sunday 7 at its end"
+            } else {
+                ""
+            };
+            return Err(format!(
+                "`{item}` runs backwards: a range runs from the lower {what} to the higher{sunday}"
+            ));
+        }
+        let step = match step {
+            None => 1,
+            Some(s) => match small_number(s) {
+                Some(n) if (1..=hi).contains(&n) => n,
+                _ => {
+                    return Err(format!(
+                        "`{item}`: a step of the {what} field is 1 to {hi}{}",
+                        if k < 2 {
+                            ", and a period past it `every`'s"
+                        } else {
+                            ""
+                        }
+                    ))
+                }
+            },
+        };
+        let mut v = a;
+        while v <= b {
+            mask |= 1 << (v - lo);
+            v += step;
+        }
+    }
+    Ok(mask)
+}
+
+/// A number of one to three digits, all a cron field's value or step can
+/// be: no sign, no space, nothing `str::parse` would take beside.
+fn small_number(text: &str) -> Option<u32> {
+    if text.is_empty() || text.len() > 3 {
+        return None;
+    }
+    text.bytes().try_fold(0u32, |n, b| {
+        b.is_ascii_digit().then(|| n * 10 + u32::from(b - b'0'))
+    })
+}
+
+/// One value of cron field `k`: a number within it, or a month's or a
+/// day's three-letter name.
+fn cron_value(text: &str, k: usize) -> std::result::Result<u32, String> {
+    let (what, lo, hi) = CRON_FIELDS[k];
+    let names: &[&str] = match k {
+        3 => &MONTH_NAMES,
+        4 => &DAY_NAMES,
+        _ => &[],
+    };
+    if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(text)) {
+        return Ok(i as u32 + lo);
+    }
+    if let Some(v) = small_number(text).filter(|v| (lo..=hi).contains(v)) {
+        return Ok(v);
+    }
+    let quartz = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !quartz.is_empty() && quartz.chars().all(|c| matches!(c, 'L' | 'W' | 'l' | 'w')) {
+        return Err(format!(
+            "`{text}`: Quartz's `L` and `W` are not read here -- a {what} is {lo} to {hi}"
+        ));
+    }
+    let named = match k {
+        3 => ", or `jan` to `dec`",
+        4 => " (Sunday 0 or 7), or `sun` to `sat`",
+        _ => "",
+    };
+    Err(format!(
+        "`{text}` is no {what}: a {what} is {lo} to {hi}{named}"
+    ))
 }
 
 /// The rows one statement may wake the statements bound to its writes for
@@ -447,6 +760,11 @@ impl Definition {
                 );
             }
         }
+        // A scheduled statement's answer goes nowhere either, and no one
+        // hands it a value.
+        if self.schedule.is_some() {
+            return self.scheduled_refused();
+        }
         // A bound statement's answer goes nowhere and it reads no claim:
         // its values are the row's, its writes on behalf of whoever wrote
         // it.
@@ -502,6 +820,47 @@ impl Definition {
         None
     }
 
+    /// What a scheduled statement refuses beyond a callable one's: no one
+    /// calls it, so nothing hands it a value and its rows go nowhere -- a
+    /// `get` is a guard, with `require`, nothing answers `returning`, and a
+    /// body of guards alone is a run that changes nothing. Its parameters,
+    /// claims, `check`, `public`, `new.` and `old.` the parser refuses at
+    /// the word; a tree made otherwise is held here too.
+    #[cold]
+    #[inline(never)]
+    fn scheduled_refused(&self) -> Option<(Option<usize>, String)> {
+        if self.after.is_some() {
+            return Some((None, SCHEDULED_AND_BOUND.into()));
+        }
+        if !self.params.is_empty() || !self.claims.is_empty() || self.check.is_some() || self.public
+        {
+            return Some((None, SCHEDULED_VALUES.into()));
+        }
+        for (i, s) in self.body.iter().enumerate() {
+            let why = match s {
+                Statement::Select(sel) if sel.require.is_none() => {
+                    "a scheduled statement answers no one, so its `get` is a guard, which counts \
+                     its rows: `get holds select id where state = 'held' limit 1 require 1 else \
+                     'nothing held'`"
+                }
+                _ if s.pick().is_some_and(|p| p.returning.is_some()) => {
+                    "a scheduled statement answers no one: its writes say nothing with `returning`"
+                }
+                _ => continue,
+            };
+            return Some((Some(i), why.into()));
+        }
+        if !self.writes() {
+            return Some((
+                None,
+                "a scheduled statement's body of guards alone changes nothing a run could leave: \
+                 it writes, `insert`, `set` or `del`"
+                    .into(),
+            ));
+        }
+        None
+    }
+
     /// The canonical tree's digest: [`crate::hll::hash`] of
     /// [`Self::canonical`]. Equal for every text that parses to the same
     /// statement -- white space, comments, a keyword's case, SQL's spelling
@@ -538,6 +897,7 @@ impl Definition {
             block: _,
             text: _,
             after,
+            schedule,
         } = self;
         let mut c = Canon(Vec::new());
         c.node(1);
@@ -592,6 +952,12 @@ impl Definition {
             });
             c.end();
         }
+        // Tag 10 only where the statement is scheduled, as tag 9: no other
+        // definition's bytes move.
+        if let Some(s) = schedule {
+            c.tag(10);
+            c.schedule(s);
+        }
         c.end();
         Ok(c.0)
     }
@@ -615,6 +981,9 @@ impl std::fmt::Debug for Definition {
         if let Some(b) = &self.after {
             d.field("after", b);
         }
+        if let Some(s) = &self.schedule {
+            d.field("schedule", s);
+        }
         d.finish()
     }
 }
@@ -634,6 +1003,7 @@ impl PartialEq for Definition {
             block,
             text: _,
             after,
+            schedule,
         } = self;
         (name, replace, params, claims, public, scans)
             == (
@@ -641,6 +1011,7 @@ impl PartialEq for Definition {
             )
             && (comment, check, body, block) == (&o.comment, &o.check, &o.body, &o.block)
             && *after == o.after
+            && *schedule == o.schedule
     }
 }
 
@@ -1514,6 +1885,36 @@ fn arith_byte(op: ArithOp) -> u64 {
 struct Canon(Vec<u8>);
 
 impl Canon {
+    /// A schedule, a node of kind 6: `every`'s interval as `bucket` holds
+    /// it -- a step of milliseconds (1) from an origin (2, a week's Monday),
+    /// or months (3) -- or cron's five masks (4 to 8), then the zone (9),
+    /// none for UTC. Its meaning, not its spelling: `every 60m` is `every
+    /// 1h`, `'*/15 * * * *'` is `'0,15,30,45 * * * *'`, and `in 'utc'` no
+    /// zone, as the parser reads it (`crate::tz::spelled`). Out of line: no
+    /// other definition reaches it.
+    #[cold]
+    #[inline(never)]
+    fn schedule(&mut self, s: &Schedule) {
+        use crate::query::Interval;
+        self.node(6);
+        match s.when {
+            When::Every(Interval::Ms(step, origin)) => {
+                self.num(1, step as u64);
+                self.num(2, origin as u64);
+            }
+            When::Every(Interval::Months(n)) => self.num(3, n as u64),
+            When::At(c) => {
+                self.num(4, c.minutes);
+                self.num(5, c.hours.into());
+                self.num(6, c.days.into());
+                self.num(7, c.months.into());
+                self.num(8, c.weekdays.into());
+            }
+        }
+        self.opt_text(9, s.zone.as_deref());
+        self.end();
+    }
+
     fn tag(&mut self, t: u8) {
         self.0.push(t);
     }

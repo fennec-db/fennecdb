@@ -567,6 +567,13 @@ impl super::Database {
             }
             if let (None, Some(read)) = (&s.tree, crate::named::reader()) {
                 match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
+                    // No record this build writes holds a schedule (op 4
+                    // is F3's slice 2): a text reading as one, digest and
+                    // all, is never loaded as callable or bound.
+                    Ok((_, d)) if d.schedule.is_some() => {
+                        marks.push((i, Some(misread(s, "reads as a scheduled statement"))));
+                        continue;
+                    }
                     // A definition's record (op 1) holds a callable
                     // statement, and a bound one's (op 3) the collection
                     // and events its text binds: a text reading as the
@@ -660,7 +667,14 @@ impl super::Database {
         &mut self,
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
-        use crate::named::{GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
+        use crate::named::{GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT, SCHEDULED_NOT_BUILT};
+        // First, before a name held or the schema is asked: nothing runs a
+        // schedule yet, and one stored would be a slot no one runs without
+        // a word -- here every way in (`/query`, `/batch`, the shell, the
+        // native library, a declared schema's apply) meets it.
+        if def.schedule.is_some() {
+            return Err(Error::Query(SCHEDULED_NOT_BUILT.into()));
+        }
         let name = &def.name;
         let held = self.statements.get(name);
         if let Some(old) = held {
