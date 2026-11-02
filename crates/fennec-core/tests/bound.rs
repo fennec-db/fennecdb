@@ -7,7 +7,7 @@
 //! `Database::unbound` waking nothing.
 
 use fennec_core::codec::{encode_str, put_uvarint};
-use fennec_core::named::{GRAMMAR_EPOCH, MAX_WOKEN};
+use fennec_core::named::{Definition, GRAMMAR_EPOCH, MAX_WOKEN};
 use fennec_core::prelude::*;
 
 const SCHEMA: &str = "create collection orders (status text, total int, account int);
@@ -496,9 +496,14 @@ fn an_unbound_writer_and_a_replica_wake_nothing() {
 }
 
 /// A hook refusing a binding -- where a policy meets one -- refuses the
-/// write before the binding runs, its block put back.
+/// write before the binding runs, its block put back. A write whose rows
+/// reach a binding by its event and pass none of its condition asks it
+/// with no rows, so a policy may judge a writer whatever a condition
+/// reading what the writer is not shown answered; one reaching none is
+/// asked nothing.
 #[test]
 fn a_hook_refusing_a_wake_puts_the_write_back() {
+    static UNPASSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     struct NoWake;
     impl Hook for NoWake {
         fn name(&self) -> &str {
@@ -507,9 +512,13 @@ fn a_hook_refusing_a_wake_puts_the_write_back() {
         fn rewrites(&self) -> bool {
             false
         }
-        fn waking(&self, binding: &str, rows: usize, body: &[Statement]) -> Result<()> {
-            let n = body.len();
-            Err(Error::Denied(format!("`{binding}` of {n} for {rows} rows")))
+        fn waking(&self, binding: &Definition, rows: usize) -> Result<()> {
+            if rows == 0 {
+                UNPASSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+            let (name, n) = (&binding.name, binding.body.len());
+            Err(Error::Denied(format!("`{name}` of {n} for {rows} rows")))
         }
     }
     impl Plugin for NoWake {
@@ -534,8 +543,14 @@ fn a_hook_refusing_a_wake_puts_the_write_back() {
     assert_eq!(e, Error::Denied("`mk` of 1 for 2 rows".into()));
     assert_eq!(db.woken(), Some("mk"));
     assert_eq!(db.change_seq(), seq);
-    // A write waking none is asked nothing.
+    // A row reaching `mk` and passing no condition: asked with none.
+    let unpassed = || UNPASSED.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(unpassed(), 0);
     run(&mut db, "put items {n: 0}").unwrap();
+    assert_eq!(unpassed(), 1);
+    // A write of another event reaches no binding, and is asked nothing.
+    run(&mut db, "del items where n = 0").unwrap();
+    assert_eq!(unpassed(), 1);
 }
 
 /// A hook judging its writer (`Hook::writer_only`, a scoped token's rules)

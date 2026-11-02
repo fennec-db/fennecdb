@@ -368,7 +368,9 @@ end
     <code>call</code> does:
 <pre data-lang="text"># statements       access  role
 paid_ledger        wake    for customer
-orders             read,insert,update(status)  where account in $jwt.accounts  for customer
+orders             read            where account in $jwt.accounts  for customer
+orders             insert          where account in $jwt.accounts and status = "open" and total &gt; 0  for customer
+orders             update(status)  where account in $jwt.accounts and status = "open" and new.status = "paid"  for customer
 </pre>
 <pre data-lang="fennecql">create statement paid_ledger
   after set orders where new.status = 'paid' and old.status = 'open'
@@ -384,14 +386,26 @@ end
     its own text's, never the token's. The token's own write is judged by
     its rules first, so the policy over <code>orders</code> is the binding's
     guard — what a customer may write into <code>new.account</code> is what
-    it debits.
+    it debits. A bound statement runs with its definer's authority, as a
+    <code>SECURITY DEFINER</code> function does, so every input the writer
+    controls — each <code>new.</code> field it may write — must be held by
+    the writer's rules: here an order is inserted <code>open</code> with a
+    <code>total</code> above zero and only moves from <code>open</code> to
+    <code>paid</code>, its <code>total</code> and <code>account</code> fixed.
+    Without that, a customer inserting an order of a negative total and
+    paying it would credit the account.
     <ul>
       <li><b>Asked as it wakes.</b> The grant is asked of a write whose row
         passes the statement's condition: a courier moving an order's
         <code>location</code> wakes nothing and needs no line, and a write
         that would wake one not granted is refused (403), nothing landed —
-        a bound statement never skips. A call is asked before its body runs,
-        of every bound statement its body's writes may wake.</li>
+        a bound statement never skips. Where the condition reads a field the
+        token is not shown — one its read rules' field lists leave out, or
+        any of a collection it may not read — the grant is asked of every
+        write of its event, its rows passing the condition or not, so a 403
+        against a 200 tells the token nothing of that field. A call is asked
+        before its body runs, of every bound statement its body's writes may
+        wake.</li>
       <li><b><code>append-only</code> binds it.</b> A bound statement that
         updates or deletes in an <code>append-only</code> collection is
         refused a scoped token's write (403), granted or not; the server's

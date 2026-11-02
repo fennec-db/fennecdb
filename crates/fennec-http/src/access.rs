@@ -185,6 +185,7 @@
 //! token's value.
 
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
+use fennec_core::named::Definition;
 use fennec_core::prelude::*;
 use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
 use std::cell::RefCell;
@@ -3282,8 +3283,14 @@ pub fn within<T>(who: &Who, f: impl FnOnce() -> Result<T>) -> Result<T> {
 /// wrote -- the definer's words, written to be told -- in "a write bound to
 /// this one refused it", never the binding's name or the engine's words,
 /// which say what the schema does and name values the token may not read.
-/// The server's trace keeps them. A quota's, a lapsed lease's and the
-/// disk's refusals are the block's as it lands, told as ever.
+/// The server's trace keeps them. Every kind a binding's statements or the
+/// hooks they meet may answer is told so -- a `ReadOnly` too, which
+/// fennec-server's guard of a mirrored collection answers naming the
+/// collection a binding writes, and a lapsed lease's, which the route
+/// answers 503 whatever its words (`answered_under_lease`). A quota's and
+/// the disk's refusals are the block's as it lands, told as ever, the
+/// quota's naming its bound alone. Matched whole: a kind added is told one
+/// way or the other on purpose.
 fn told_bound(e: Error) -> Error {
     const TOLD: &str = "a write bound to this one refused it: nothing was written";
     match e {
@@ -3298,7 +3305,9 @@ fn told_bound(e: Error) -> Error {
         Error::Exists(_) => Error::Exists(TOLD.into()),
         Error::Denied(_) => Error::Denied(TOLD.into()),
         Error::Plugin(_) => Error::Plugin(TOLD.into()),
-        e => e,
+        Error::ReadOnly(_) => Error::ReadOnly(TOLD.into()),
+        Error::Corrupt(_) => Error::Corrupt(TOLD.into()),
+        e @ (Error::Quota(_) | Error::Io(_)) => e,
     }
 }
 
@@ -3535,17 +3544,32 @@ impl Hook for Check {
     /// refused (403), its block put back -- a binding never skips, and
     /// never runs on a token's behalf with no grant. Asked as a binding
     /// wakes, a row passing its condition: a write waking none needs
-    /// nothing. The token is told no name; the audit's line names it
+    /// nothing -- but where the condition reads a field the token is not
+    /// shown ([`Scope::reads_unshown`]), of every write a row of which
+    /// reached the binding, passing or not (`rows` 0), so that a 403
+    /// against a 200 tells the token nothing of a value it may not read.
+    /// The token is told no name; the audit's line names it
     /// ([`Scope::held_from`]). Then the runs are charged to the caller's
     /// `--call-rate` ([`crate::calls::charge_runs`]) -- a scoped call's
     /// body's too, which runs with no scope installed and was judged
     /// before it ran ([`judge_call`]) -- and the statement's error after
     /// this is the binding's, told as [`told_bound`] tells it.
-    fn waking(&self, binding: &str, rows: usize, body: &[Statement]) -> Result<()> {
+    fn waking(&self, binding: &Definition, rows: usize) -> Result<()> {
+        let held = |scope: &Scope| match (rows, binding.after.as_deref()) {
+            (0, Some(b)) => {
+                (b.condition.as_ref()).is_some_and(|c| scope.reads_unshown(&b.collection, c))
+            }
+            _ => true,
+        };
         let scoped = CURRENT.with(|c| match c.borrow().as_deref() {
-            Some(scope) => scope.held_from(binding, body).map(|_| true),
-            None => Ok(false),
+            Some(scope) if held(scope) => {
+                scope.held_from(&binding.name, &binding.body).map(|_| true)
+            }
+            _ => Ok(false),
         });
+        if rows == 0 {
+            return scoped.map(drop);
+        }
         // No binding runs where one is refused, those let through before
         // it included: the refusal is the policy's, told as it is.
         let r = scoped.and_then(|s| crate::calls::charge_runs(rows).map(|_| s));
@@ -3672,6 +3696,29 @@ mod tests {
 
     fn access(policy: &str) -> Access {
         Access::new(SECRET, policy).unwrap()
+    }
+
+    /// A binding's refusal tells a scoped writer its status and nothing it
+    /// names: fennec-server's guard of a mirrored collection answers
+    /// `ReadOnly` naming the collection the binding writes, which went
+    /// through as it was. A quota's names its bound alone, told as ever.
+    #[test]
+    fn a_binding_s_refusal_names_nothing_to_a_scoped_writer() {
+        let mirrored = "`payroll` mirrors a PostgreSQL table: its writes come from there";
+        for e in [
+            Error::ReadOnly(mirrored.into()),
+            Error::Corrupt(format!("{mirrored}, torn")),
+            Error::Plugin(mirrored.into()),
+        ] {
+            let told = told_bound(e.clone());
+            assert_eq!(std::mem::discriminant(&told), std::mem::discriminant(&e));
+            assert!(!told.to_string().contains("payroll"), "{told}");
+            assert!(told
+                .to_string()
+                .contains("a write bound to this one refused it"));
+        }
+        let quota = Error::Quota("the tenant holds 1000 rows at most".into());
+        assert_eq!(told_bound(quota.clone()), quota);
     }
 
     /// A `call` line grants statements by name, to its role or to every

@@ -270,6 +270,14 @@ pub fn charge_runs(rows: usize) -> fennec_core::error::Result<()> {
             runs.spent = woken;
             return Ok(());
         }
+        // Every run charged before is in the block this refusal puts
+        // back, so none of them landed: a scoped request's writes are one
+        // block -- `/query`, REST and MCP's `write` one statement, MCP no
+        // JSON-RPC batch, a `/batch` one block (a scoped token compacts
+        // nothing, so its every batch fits one: `handle_batch` asserts
+        // it), a held write's every try a `handle` charged afresh. A path
+        // landing a scoped request's statements as blocks of their own
+        // must refund those of the block put back alone.
         callers.refund(&key, runs.spent as f64, rate as f64);
         let wait_ms = (callers.take(key, woken as f64, rate as f64, now)).map_or_else(|w| w, |_| 1);
         // Taken where the refund made room after all: handed back too.

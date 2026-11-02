@@ -47,7 +47,9 @@ writes.](../../docs/design/access.md#scoped-tokens)** A new path that runs a
 statement must go through `scoped()` or it reads everything; a scoped write
 outside `within()` goes unchecked, so only a named statement's call runs
 one there (`run_as`), and a binding's writes, which the `Check` hook passes
-over (`Hook::writer_only`) once `Hook::waking` judged it: a `wake` line
+over (`Hook::writer_only`) once `Hook::waking` judged it -- a row passing
+its condition or not where that reads a field the token is not shown
+(`Scope::reads_unshown`): a `wake` line
 grants it (`* wake` refused), its body reaches no `append-only` collection
 (403, the audit's `unwoken` line naming it), its runs charged to
 `--call-rate` (`calls::charge_runs`), and `judge_call` holds a body to the

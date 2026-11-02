@@ -22,7 +22,9 @@ writer's `within()`, scope and all, but the engine runs them over the hooks
 that do not judge their writer (`Hook::writer_only`, which `Check` says it
 is), swapped in around the runs, once `Hook::waking` let it wake -- a `wake`
 line granting it, its body updating or deleting in no `append-only`
-collection, its runs charged to `--call-rate`
+collection, its runs charged to `--call-rate`, and asked whether a row
+passed the condition or not where the condition reads a field the token is
+not shown (`Scope::reads_unshown`), or its 403 told the token that field
 ([named-statements.md](named-statements.md#a-bindings-authority)). The
 tests of each take each part out: a granted binding's line lands at every
 way in with nothing granted on `ledger`, an ungranted one's write lands

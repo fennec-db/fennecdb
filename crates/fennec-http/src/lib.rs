@@ -3383,6 +3383,13 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     let mut guard = held::write(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
+    // A scoped token compacts nothing (`Scope::rewrite`), so its batch is
+    // one block, put back whole: what `calls::charge_runs` refunds as a
+    // binding's runs are refused never landed.
+    debug_assert!(
+        block || who.scope().is_none(),
+        "a scoped /batch is one block"
+    );
     if key.is_some() && !block {
         return Response::error(
             400,

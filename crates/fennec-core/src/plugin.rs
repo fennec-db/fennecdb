@@ -10,7 +10,8 @@
 //! collection with it.
 
 use crate::error::{Error, Result};
-use crate::query::Statement;
+#[cfg(feature = "statements")]
+use crate::named::Definition;
 use crate::schema::Schema;
 use crate::value::{Document, Value};
 use std::sync::Arc;
@@ -83,17 +84,23 @@ pub trait Hook: Send + Sync {
         Ok(())
     }
     /// Called once a statement's rows are written, before the first run
-    /// of a statement bound to its writes that `rows` of them woke, named
-    /// `binding`, whose statements are `body`: each binding the statement
-    /// woke, in name order, before any of them runs
-    /// (`docs/design/named-statements.md`, *A binding's authority*). Where
-    /// a policy meets a binding, the writer's own judgment still in place.
-    /// Returning `Err` refuses the write, whose block is put back, and no
-    /// binding runs: a binding never skips. fennec-http's `access` refuses
-    /// a scoped token's write waking one its policy's `wake` lines do not
-    /// grant it, or one whose body updates or deletes in an `append-only`
-    /// collection, and charges its runs to `--call-rate`.
-    fn waking(&self, _binding: &str, _rows: usize, _body: &[Statement]) -> Result<()> {
+    /// of a statement bound to its writes, `binding`, that `rows` of them
+    /// woke: each binding a row of the statement reached by its event, in
+    /// name order, before any of them runs (`docs/design/named-statements.md`,
+    /// *A binding's authority*). Where a policy meets a binding, the
+    /// writer's own judgment still in place. `rows` is 0 for a binding a
+    /// row reached and none passed its condition, which no run follows:
+    /// asked so that a hook may judge a writer whatever a condition
+    /// reading what the writer may not see answered. Returning `Err`
+    /// refuses the write, whose block is put back, and no binding runs: a
+    /// binding never skips. fennec-http's `access` refuses a scoped
+    /// token's write waking one its policy's `wake` lines do not grant it,
+    /// or one whose body updates or deletes in an `append-only`
+    /// collection -- of a condition reading a field the token is not
+    /// shown, whether a row passed it or not -- and charges its runs to
+    /// `--call-rate`.
+    #[cfg(feature = "statements")]
+    fn waking(&self, _binding: &Definition, _rows: usize) -> Result<()> {
         Ok(())
     }
     /// Whether the hook judges whoever wrote rather than what was written

@@ -471,6 +471,55 @@ fn a_binding_s_refusal_is_told_the_writer_as_its_token_may_know_it() {
     assert_eq!(open(&db), (1..=10).collect::<Vec<_>>());
 }
 
+/// A binding whose condition reads a field the token is not shown is
+/// judged on every write of the token's reaching it, a row passing the
+/// condition or not: judged where one passed alone, the 403 against the
+/// 200 told the token the field's value. One reading shown fields alone is
+/// asked as a row passes it, as ever.
+#[test]
+fn a_condition_reading_an_unshown_field_is_judged_whatever_it_answers() {
+    const CARDS: &str = "cards  read(holder, note)  where holder = $jwt.sub  for customer
+cards  update(note)  where holder = $jwt.sub  for customer
+";
+    let granted = format!("{POLICY}{CARDS}overdrawn  wake  for customer\n");
+    for (grant, policy) in [(false, format!("{POLICY}{CARDS}")), (true, granted)] {
+        let (node, db) = start_with(&policy, |_| {});
+        node.ok(
+            ROOT,
+            "create collection cards (holder text, cap int, note text)",
+        );
+        node.ok(
+            ROOT,
+            "create statement overdrawn after set cards where old.cap > 100
+             as insert ledger {o: new.id, amount: 1}",
+        );
+        node.ok(
+            ROOT,
+            "put cards [{holder: 'u0', cap: 500, note: ''}, {holder: 'u0', cap: 50, note: ''}]",
+        );
+        let u0 = node.customer("u0");
+        // Card 2, under the cap, passes no condition; card 1 does. The
+        // customer reads neither's `cap`, and is told the same of both.
+        let low = node.query(&u0, "set cards {note: 'a'} where id = 2");
+        let high = node.query(&u0, "set cards {note: 'a'} where id = 1");
+        let (status, lines) = match grant {
+            false => (403, vec![]),
+            true => (200, vec![line_of(1, 1)]),
+        };
+        assert_eq!(low.0, status, "granted {grant}: {}", low.1);
+        assert_eq!(high.0, status, "granted {grant}: {}", high.1);
+        assert_eq!(ledger(&db), lines);
+    }
+    // `paid` reads `status` alone, which a customer is shown: asked as a
+    // row passes it, so an ungranted write passing none lands.
+    let (node, db) = start(|_| {});
+    let u0 = node.customer("u0");
+    node.ok(&u0, "set orders {status: 'held'} where id = 1");
+    let (status, body) = node.query(&u0, "set orders {status: 'paid'} where id = 2");
+    assert_eq!(status, 403, "{body}");
+    assert!(ledger(&db).is_empty());
+}
+
 /// A scoped writer's runs are charged to its `--call-rate`: past the
 /// bucket 429 with when to come back, its block put back; more runs than
 /// a full bucket holds 400, never told to come back; a write waking none
