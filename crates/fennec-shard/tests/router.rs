@@ -592,10 +592,9 @@ fn refusals() {
 fn an_unreachable_node_is_a_503_not_a_hang() {
     const TIMEOUT: Duration = Duration::from_secs(60);
     // A directory that points at a node nothing listens on: what a crashed
-    // node looks like from the router.
-    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = dead.local_addr().unwrap().to_string();
-    drop(dead);
+    // node looks like from the router. Not a port picked and let go of,
+    // which a test beside this one could take (`unsent::refusing`).
+    let addr = crate::unsent::refusing();
     let mut dir = Directory::in_memory();
     dir.set_node(
         "n1",

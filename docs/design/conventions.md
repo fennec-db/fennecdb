@@ -79,6 +79,19 @@ database's CORS names it -- takes a port the system picks, held by a
 stand-in listener until the moment it starts (`examples/shop`,
 `examples/dispatch`'s `ci.sh`).
 
+An address a test means nothing to listen on is `127.0.0.1:1`, which no
+system hands out, never a port picked and let go of: Linux hands a free
+port out at random, and a listener of a test running beside it took it. A
+router meant to find its node refused forwarded to another test's router
+(`fennec-shard`'s `cors.rs`, once in 50 runs), and a relay meant for a
+region whose routers refuse it was answered by one naming its own node
+(`unsent.rs`, once in 300 runs of `unsent::`; none in 600 on port 1), each
+in Docker's Linux, three cores beside six busy loops. In Docker's Linux a
+port let go of came back from a `bind` to port 0 17 times in 100 000, and
+none while a connection its listener accepted was open or closing, so a
+stand-in node closed after it answered keeps its port while the test holds
+that connection or has just closed it.
+
 ## Docs a change owes
 
 A change that adds or alters something a user meets says so where a user
