@@ -161,6 +161,10 @@ thread_local! {
     /// and the version of it that ran: its slow line names the call by its
     /// shape and that version ([`called`]).
     static CALLED: std::cell::RefCell<Option<Called>> = const { std::cell::RefCell::new(None) };
+    /// The slow line's `bound` for the request this thread serves, held by
+    /// [`bound`] where the request is slow and taken by [`record`] as it
+    /// writes that line.
+    static SLOW_BOUND: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     /// This thread's shard, handed out in turn.
     static MINE: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS.len();
 }
@@ -241,16 +245,8 @@ pub fn called(name: &str, version: Option<(u64, u64)>) {
 }
 
 /// Counts a statement that took `took`, and logs it when it is slow. `text`
-/// is asked for only then, and not for a call ([`called`]). `bound` is what
-/// the statements bound to its writes did (`Database::take_runs`): their
-/// runs and refusals counted, and the slow line naming them.
-pub fn record(
-    took: Duration,
-    failed: bool,
-    tenant: Option<&str>,
-    text: impl FnOnce() -> String,
-    bound: Option<&Runs>,
-) {
+/// is asked for only then, and not for a call ([`called`]).
+pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnOnce() -> String) {
     let wrote = WROTE.with(|w| w.replace(false));
     let called = CALLED.with(|c| c.borrow_mut().take());
     let shard = &SHARDS[shard()];
@@ -259,11 +255,6 @@ pub fn record(
     s.timings.add(took);
     if failed {
         s.errors.fetch_add(1, Ordering::Relaxed);
-    }
-    if let Some(r) = bound {
-        let runs: u64 = r.ran.iter().map(|r| r.rows).sum();
-        shard.bound_runs.fetch_add(runs, Ordering::Relaxed);
-        (shard.bound_refused).fetch_add(r.refused as u64, Ordering::Relaxed);
     }
     if micros >= SLOW_MICROS.load(Ordering::Relaxed) {
         shard.slow.fetch_add(1, Ordering::Relaxed);
@@ -281,16 +272,23 @@ pub fn record(
             text.truncate(end);
             text.push_str("...");
         }
-        let bound = bound.map(bound_json);
-        slow_line(
-            micros,
-            wrote,
-            failed,
-            tenant,
-            &text,
-            version,
-            bound.as_deref(),
-        );
+        slow_line(micros, wrote, failed, tenant, &text, version);
+    }
+}
+
+/// What the statements bound to the writes of the request this thread
+/// serves did (`Database::take_runs`), taken before the request is counted
+/// ([`record`]) and only where one ran: its runs and refusals counted, and
+/// where the request, which took `took`, is slow, its line's `bound` held
+/// for [`record`] to write.
+pub(crate) fn bound(r: &Runs, took: Duration) {
+    let shard = &SHARDS[shard()];
+    let runs: u64 = r.ran.iter().map(|r| r.rows).sum();
+    shard.bound_runs.fetch_add(runs, Ordering::Relaxed);
+    (shard.bound_refused).fetch_add(r.refused as u64, Ordering::Relaxed);
+    let micros = took.as_micros().min(u64::MAX as u128) as u64;
+    if micros >= SLOW_MICROS.load(Ordering::Relaxed) && !r.ran.is_empty() {
+        SLOW_BOUND.with(|b| *b.borrow_mut() = Some(bound_json(r)));
     }
 }
 
@@ -341,9 +339,11 @@ fn slow_line(
     tenant: Option<&str>,
     text: &str,
     version: Option<(u64, u64)>,
-    bound: Option<&str>,
 ) {
     use crate::audit::{Field, Level};
+    // What the statements bound to the request's writes did, held for this
+    // line where the request was slow ([`bound`]).
+    let bound = SLOW_BOUND.with(|b| b.borrow_mut().take());
     let mut fields = vec![
         ("duration_ms", Field::Num(micros as f64 / 1000.0)),
         ("kind", Field::Text(if wrote { "write" } else { "read" })),
@@ -356,7 +356,7 @@ fn slow_line(
     if let Some((history, change)) = version {
         fields.push(("version", Field::Pair(history, change)));
     }
-    if let Some(b) = bound {
+    if let Some(b) = &bound {
         fields.push(("bound", Field::Json(b)));
     }
     let line = crate::audit::line("slow", Level::Warn, &fields);

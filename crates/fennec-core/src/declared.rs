@@ -80,6 +80,7 @@ pub struct Declared {
     /// text, for the caller that has the parser to read into `statements`
     /// (`fennec_ql::bound_into`), each held to the collection it is listed
     /// beside.
+    #[cfg(not(target_arch = "wasm32"))]
     pub bound: Vec<(String, String, String)>,
 }
 
@@ -184,8 +185,6 @@ pub fn parse(src: &str) -> Result<Declared> {
         }
         None => Vec::new(),
     };
-    #[cfg(target_arch = "wasm32")]
-    let bound = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
     let (collections, bound) = collections(list(member(top, "collections"), "collections")?)?;
     let mut migrations = Vec::new();
@@ -214,6 +213,7 @@ pub fn parse(src: &str) -> Result<Declared> {
         collections,
         text,
         migrations,
+        #[cfg(not(target_arch = "wasm32"))]
         bound,
     })
 }

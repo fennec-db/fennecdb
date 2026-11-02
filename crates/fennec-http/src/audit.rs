@@ -118,12 +118,25 @@ thread_local! {
     // names it for the operator writing the grant, where the token is told
     // no name.
     static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
-    // A statement bound to the writes of the request this thread serves
-    // refused a scoped writer's write, which was told its status and
-    // `reason` alone ([`told_bound`]): its `bound` line names the binding
-    // and the engine's words.
-    static TOLD_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // What the statements bound to the writes of the request this thread
+    // serves left for its lines ([`TOLD`], [`HELD`]): a `Cell` a request
+    // looks at, the rest held in [`HELD_BOUND`] where something is.
+    static BOUND: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    // The binding that refused a scoped writer's write and the engine's
+    // words, for the request's `bound` line, and the bound statements it
+    // defined, replaced or dropped, for its `schema` lines ([`bound`]).
+    static HELD_BOUND: RefCell<Held> = const { RefCell::new((None, Vec::new())) };
 }
+
+/// [`HELD_BOUND`]: a refusal's binding and words, and the bound statements
+/// defined or dropped with what each binds.
+type Held = (Option<(String, String)>, Vec<(String, String, u8)>);
+
+/// [`BOUND`]: a binding refused a scoped writer's write, told without its
+/// name ([`told_bound`]).
+const TOLD: u8 = 1;
+/// [`BOUND`]: [`HELD_BOUND`] holds the request's ([`bound`]).
+const HELD: u8 = 2;
 
 /// The reason the request this thread serves is refused its token, for its
 /// `refused` line: one of the server's own texts, never the token's. Set
@@ -154,33 +167,55 @@ pub fn unwoken(binding: &str, why: &'static str) {
 /// the engine's words for the operator. Held only with `--audit`.
 pub fn told_bound() {
     if LOG.get().is_some() {
-        TOLD_BOUND.with(|t| t.set(true));
+        BOUND.with(|b| b.set(b.get() | TOLD));
     }
+}
+
+/// What the statements bound to the writes of the request this thread
+/// serves did (`Database::take_runs`), held for its lines: where a binding
+/// refused a scoped writer's write ([`told_bound`]), the binding and the
+/// engine's words for its `bound` line ([`http`]); and the bound
+/// statements it defined, replaced or dropped, with what each binds, for
+/// its `schema` lines ([`statement`]). Held only with `--audit`, and let go
+/// of by [`request`] as the next request begins.
+pub(crate) fn bound(r: &fennec_core::engine::Runs) {
+    if !on() {
+        return;
+    }
+    let told = BOUND.with(|b| b.get()) & TOLD != 0;
+    let refusal = r.refusal.clone().filter(|_| told);
+    HELD_BOUND.with(|h| *h.borrow_mut() = (refusal, r.changed.clone()));
+    BOUND.with(|b| b.set(b.get() | HELD));
+}
+
+/// What [`bound`] held for the request before, let go of: out of line, so
+/// that the request every connection reads pays a `Cell`'s look alone.
+#[cold]
+#[inline(never)]
+fn let_go_held() {
+    HELD_BOUND.with(|h| *h.borrow_mut() = (None, Vec::new()));
 }
 
 /// The request's `bound` line, where a binding refused a scoped writer's
 /// write ([`told_bound`]): the binding and the words the engine refused it
 /// with -- which the writer was not told, and which name values the token
-/// may not read -- from what the engine noted on this thread
-/// (`Runs::refusal`). Written once the answer is, outside the write lock,
-/// whatever the status: MCP answers its refusal inside a 200. A token that
-/// checked out was refused what its write caused, not its token: the line
-/// waits nothing and clears nothing.
-pub fn bound(req: &crate::http::Request, status: u16, runs: Option<&fennec_core::engine::Runs>) {
-    if !TOLD_BOUND.with(|t| t.replace(false)) {
-        return;
-    }
-    let Some((binding, words)) = runs.and_then(|r| r.refusal.as_ref()) else {
+/// may not read -- as the engine noted them (`Runs::refusal`). Written once
+/// the answer is, outside the write lock, whatever the status: MCP answers
+/// its refusal inside a 200. A token that checked out was refused what its
+/// write caused, not its token: the line waits nothing and clears nothing.
+#[cold]
+#[inline(never)]
+fn bound_line(req: &crate::http::Request, path: &str, status: u16) {
+    let Some((binding, words)) = HELD_BOUND.with(|h| h.borrow_mut().0.take()) else {
         return;
     };
-    let path = req.target.split('?').next().unwrap_or("");
     event(
         "bound",
         &[
             ("method", Field::Text(req.method.name())),
             ("path", Field::Text(path)),
-            ("binding", Field::Text(binding)),
-            ("error", Field::Text(words)),
+            ("binding", Field::Text(&binding)),
+            ("error", Field::Text(&words)),
             ("http_status", Field::Int(status as u64)),
         ],
     );
@@ -241,7 +276,9 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
     UNWOKEN.with(|u| u.borrow_mut().take());
-    TOLD_BOUND.with(|t| t.set(false));
+    if BOUND.with(|b| b.replace(0)) & HELD != 0 {
+        let_go_held();
+    }
     client
 }
 
@@ -507,20 +544,13 @@ static REFUSED: AtomicU64 = AtomicU64::new(0);
 /// was logged as far as its first. Shaped as far as a definition's longest
 /// text (`named::MAX_TEXT`), past the 1 000 bytes a count keeps, so one is
 /// logged whole. A text the parser refuses is split on `;`, as it came.
-pub fn statement(
-    tenant: Option<&str>,
-    text: &str,
-    shape: &str,
-    failed: bool,
-    bound: Option<&fennec_core::engine::Runs>,
-) {
+pub fn statement(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
     if !on() {
         return;
     }
     // Most requests change no schema, and ask nothing more.
     if shape.split(';').any(changes_schema) {
-        let changed = bound.map_or(&[][..], |r| &r.changed[..]);
-        schema_events(tenant, text, shape, failed, changed);
+        schema_events(tenant, text, shape, failed);
     }
 }
 
@@ -528,13 +558,12 @@ pub fn statement(
 /// path every statement takes stays as short as it was.
 #[cold]
 #[inline(never)]
-fn schema_events(
-    tenant: Option<&str>,
-    text: &str,
-    shape: &str,
-    failed: bool,
-    changed: &[(String, String, u8)],
-) {
+fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
+    // The bound statements the request defined or dropped ([`bound`]).
+    let changed = match BOUND.with(|b| b.get()) & HELD {
+        0 => Vec::new(),
+        _ => HELD_BOUND.with(|h| h.borrow().1.clone()),
+    };
     let mut each: Vec<String> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
@@ -653,6 +682,9 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
                 ("http_status", Field::Int(status as u64)),
             ],
         );
+    }
+    if BOUND.with(|b| b.get()) & HELD != 0 {
+        bound_line(req, path, status);
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
     // A tenant's read for a router's query across tenants changes nothing,

@@ -96,6 +96,9 @@ thread_local! {
     /// serving the request, under the write lock, so the server takes it
     /// once a request where it counts and logs the request, and no way in
     /// can forget to hand it over. Noted on the bound path alone.
+    /// Whether [`RUNS`] holds anything: the one look a request where
+    /// nothing is bound pays ([`Database::runs_noted`]).
+    static NOTED: Cell<bool> = const { Cell::new(false) };
     static RUNS: RefCell<Runs> = const {
         RefCell::new(Runs {
             ran: Vec::new(),
@@ -155,6 +158,7 @@ pub const RUNS_KEPT: usize = 256;
 /// collection and events it binds ([`Runs::changed`]).
 #[cold]
 pub(super) fn note_changed(name: &str, (collection, events): (&str, u8)) {
+    NOTED.with(|n| n.set(true));
     RUNS.with(|r| {
         let mut r = r.borrow_mut();
         if r.changed.len() < RUNS_KEPT {
@@ -166,6 +170,7 @@ pub(super) fn note_changed(name: &str, (collection, events): (&str, u8)) {
 
 /// A binding's runs, noted on this thread.
 fn note_ran(ran: Ran) {
+    NOTED.with(|n| n.set(true));
     RUNS.with(|r| {
         let mut r = r.borrow_mut();
         if r.ran.len() < RUNS_KEPT {
@@ -446,6 +451,7 @@ impl Database {
     fn refused(&mut self, name: &str, e: &Error) {
         let words = e.to_string();
         self.bound_due = true;
+        NOTED.with(|n| n.set(true));
         RUNS.with(|r| {
             let mut r = r.borrow_mut();
             r.refused = r.refused.saturating_add(1);
@@ -615,14 +621,25 @@ impl Database {
         Some((name, words))
     }
 
-    /// What the bindings did on this thread since it was last taken --
-    /// each binding's runs a statement, timed, and the writes one refused
-    /// -- or `None` where none ran or refused: what a server counts, logs
-    /// and traces once a request (`fennec_http`'s `/_metrics`,
-    /// `/_stats/statements`, the slow line, the spans and the audit). A
-    /// thread-local look a request where nothing is bound.
+    /// Whether the bindings did anything on this thread since it was last
+    /// taken ([`Self::take_runs`]): one thread-local `bool` a request where
+    /// nothing is bound, so that a server's connection loop -- the hottest
+    /// function there is -- holds nothing of a binding's and calls out of
+    /// line where one ran.
     #[inline]
+    pub fn runs_noted() -> bool {
+        NOTED.with(Cell::get)
+    }
+
+    /// What the bindings did on this thread since it was last taken --
+    /// each binding's runs a statement, timed, the writes one refused and
+    /// the bound statements defined or dropped -- or `None` where nothing
+    /// was: what a server counts, logs and traces once a request
+    /// (`fennec_http`'s `/_metrics`, `/_stats/statements`, the slow line,
+    /// the spans and the audit), asked where [`Self::runs_noted`] says so.
+    #[inline(never)]
     pub fn take_runs() -> Option<Runs> {
+        NOTED.with(|n| n.set(false));
         RUNS.with(|r| {
             let mut r = r.borrow_mut();
             let any = !r.ran.is_empty() || r.refused != 0 || !r.changed.is_empty();

@@ -33,19 +33,35 @@ pub enum Refused {
     /// 0, as a `/batch` answers `at`, and the statement bound to the
     /// writes that refused it with the words it is told after
     /// (`Database::refused_by`): an app holds its database's authority, and
-    /// is told the `binding` as a server's token is. Boxed: a refusal no
-    /// binding made carries a null word.
-    Error(Error, usize, Option<usize>, Option<Box<(String, String)>>),
+    /// is told the `binding` as a server's token is.
+    Error(Error, usize, Option<usize>, Bound),
     /// A json field is handed a list of numbers that came over as `f32`s:
     /// the places of those parameters, written as the answer lists them,
     /// for the caller to send them again as JSON.
     Exact(String),
 }
 
+/// The statement bound to the writes that refused a text, and the words its
+/// refusal is told after ([`Refused::Error`]): natively, boxed, so that a
+/// refusal no binding made carries a null word.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Bound = Option<Box<(String, String)>>;
+
+/// In the browser module, which runs no binding, nothing: a word of every
+/// refusal and its moves were 0.2 KB of the module (`make size-report`).
+#[cfg(target_arch = "wasm32")]
+pub type Bound = ();
+
+/// A refusal no binding made.
+#[cfg(not(target_arch = "wasm32"))]
+pub const UNBOUND: Bound = None;
+#[cfg(target_arch = "wasm32")]
+pub const UNBOUND: Bound = ();
+
 impl From<Error> for Refused {
     #[inline(always)]
     fn from(e: Error) -> Refused {
-        Refused::Error(e, 0, None, None)
+        Refused::Error(e, 0, None, UNBOUND)
     }
 }
 
@@ -207,14 +223,11 @@ fn run_text(
         match run(db, s, &p.params, ran) {
             Ok(r) => last = r,
             Err(e) if block => {
-                let bound = bound_of(db, &e);
+                let refused = refusal(db, e, 0, at);
                 db.rollback();
-                return Err(Refused::Error(e, 0, at, bound));
+                return Err(refused);
             }
-            Err(e) => {
-                let bound = bound_of(db, &e);
-                return Err(Refused::Error(e, ran, at, bound));
-            }
+            Err(e) => return Err(refusal(db, e, ran, at)),
         }
     }
     if block {
@@ -223,12 +236,21 @@ fn run_text(
     Ok(last)
 }
 
-/// The statement bound to the writes that refused the statement just run,
-/// read before its block is put back: `None` in the browser module, which
-/// runs no binding.
+/// A statement's refusal `e`, with the statement bound to the writes that
+/// refused it (`Database::refused_by`), read before its block is put back:
+/// none in the browser module, which runs no binding.
 #[inline(always)]
-fn bound_of(db: &Database, e: &Error) -> Option<Box<(String, String)>> {
-    (db.refused_by(e)).map(|(name, words)| Box::new((name.to_string(), words)))
+fn refusal(db: &Database, e: Error, ran: usize, at: Option<usize>) -> Refused {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = db;
+        Refused::Error(e, ran, at, UNBOUND)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bound = (db.refused_by(&e)).map(|(name, words)| Box::new((name.to_string(), words)));
+        Refused::Error(e, ran, at, bound)
+    }
 }
 
 /// Whether every statement only reads, for a caller that can then take a
@@ -255,7 +277,7 @@ pub fn query(db: &Database, p: &Prepared) -> std::result::Result<Response, Refus
     for (ran, s) in p.stmts.iter().enumerate() {
         match db.query(s, &p.params) {
             Ok(r) => last = r,
-            Err(e) => return Err(Refused::Error(e, ran, several.then_some(ran), None)),
+            Err(e) => return Err(Refused::Error(e, ran, several.then_some(ran), UNBOUND)),
         }
     }
     Ok(last)
@@ -271,8 +293,11 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
             "{{\"kind\":\"error\",\"message\":\"a json field is handed a list of numbers \
              sent over as f32s\",\"exact\":[{places}]}}"
         ),
+        // Native alone: the module runs no binding, and carried this arm's
+        // words for nothing (`make size-report`).
+        #[cfg(not(target_arch = "wasm32"))]
         Err(Refused::Error(e, _, at, Some(bound))) => refused_bound(e, *at, bound),
-        Err(Refused::Error(e, ran, at, None)) => refused(e, *ran, *at),
+        Err(Refused::Error(e, ran, at, _)) => refused(e, *ran, *at),
     }
 }
 
@@ -284,6 +309,7 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
 /// chunk, so none is named here.
 #[cold]
 #[inline(never)]
+#[cfg(not(target_arch = "wasm32"))]
 fn refused_bound(e: &Error, at: Option<usize>, (name, words): &(String, String)) -> String {
     let mut out = String::from("{\"kind\":\"error\",\"message\":");
     json::escape_into(&mut out, &format!("{words}{e}"));

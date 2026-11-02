@@ -104,6 +104,7 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 /// is listed by and bound to the collection it is listed beside, held to
 /// the collections declared. A build without named statements refuses a
 /// description listing one, as it refuses one written in FennecQL.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
     use fennec_core::declared::bad;
     #[cfg(not(feature = "statements"))]

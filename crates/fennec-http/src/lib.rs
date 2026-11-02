@@ -1184,10 +1184,6 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if let Some(t) = &tenant {
             quota::noted(&resp, t.name(), &req);
         }
-        // What the statements bound to its writes did, which the engine
-        // noted on this thread whichever way the write came in: counted,
-        // logged and traced with the request.
-        let bound = fennec_core::engine::Database::take_runs();
         // A preflight is the browser's, not a statement.
         if req.method != Method::Options {
             // A held request's time is its runs', not its wait: the slow
@@ -1197,11 +1193,14 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let failed = resp.status >= 400;
             let what = describe(&req);
             let name = tenant.as_ref().map(|t| t.name());
-            metrics::record(took, failed, name, || what.clone(), bound.as_ref());
-            statements::record(name, &what, took, failed, bound.as_ref());
-            if let Some(b) = &bound {
-                trace::bound_runs(b);
+            // What the statements bound to its writes did, which the engine
+            // noted on this thread whichever way the write came in: a
+            // `bool`'s look where none ran, the rest out of line.
+            if fennec_core::engine::Database::runs_noted() {
+                bound_noted(name, took);
             }
+            metrics::record(took, failed, name, || what.clone());
+            statements::record(name, &what, took, failed);
             if trace::recording() {
                 // An MCP call's statements are noted as `/query`'s are, and
                 // its shape is theirs.
@@ -1233,9 +1232,6 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.
         drop(tenant);
-        if bound.is_some() {
-            audit::bound(&req, resp.status, bound.as_ref());
-        }
         audit::http(&req, resp.status, peer);
         let resp = cors(resp, cfg);
         timing::lap(timing::Phase::Books);
@@ -1251,6 +1247,24 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         timing::lap(timing::Phase::Write);
         timing::end();
     }
+}
+
+/// What the statements bound to the writes of the request this thread
+/// served did (`Database::take_runs`, `docs/design/named-statements.md`,
+/// *Watching bindings*): their runs and refusals counted, each binding a
+/// shape of its own, a span each a statement, and what the slow line and
+/// the audit's lines name held for them, written where they always are.
+/// Out of line: a request where nothing is bound never comes here.
+#[cold]
+#[inline(never)]
+fn bound_noted(tenant: Option<&str>, took: std::time::Duration) {
+    let Some(r) = fennec_core::engine::Database::take_runs() else {
+        return;
+    };
+    metrics::bound(&r, took);
+    statements::bound(tenant, &r);
+    trace::bound_runs(&r);
+    audit::bound(&r);
 }
 
 /// A request's answer, run again while `Fennec-Wait` holds it ([`waits`]):
@@ -2539,8 +2553,8 @@ pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> R
         s.push_str(&String::from_utf8_lossy(&req.body));
         s
     };
-    metrics::record(took, failed, Some(t.name()), what, None);
-    statements::record(Some(t.name()), &what(), took, failed, None);
+    metrics::record(took, failed, Some(t.name()), what);
+    statements::record(Some(t.name()), &what(), took, failed);
     resp
 }
 

@@ -532,6 +532,7 @@ pub fn end(status: u16) {
 /// Its time is the binding's runs' together, from its first: within the
 /// request's, which holds it.
 #[cold]
+#[inline(never)]
 pub fn bound_runs(runs: &fennec_core::engine::Runs) {
     if !on() {
         return;

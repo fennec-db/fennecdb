@@ -134,7 +134,9 @@ pub fn clear() {
     ROWS.with(|r| r.set(0));
     // And what the statements bound to its writes did, noted by the
     // engine on this thread: a held run before put back what it woke.
-    drop(Database::take_runs());
+    if Database::runs_noted() {
+        drop(Database::take_runs());
+    }
 }
 
 /// Notes that the statement this thread is running returned or changed `n`
@@ -144,19 +146,8 @@ pub fn rows(n: u64) {
 }
 
 /// Counts a statement: `text` as it came -- unless its FennecQL was noted
-/// ([`text`]) -- and `tenant` on a tenant node; and each statement bound to
-/// its writes that ran, `bound` (`Database::take_runs`), as a shape of its
-/// own ([`record_bound`]).
-pub fn record(
-    tenant: Option<&str>,
-    text: &str,
-    took: Duration,
-    failed: bool,
-    bound: Option<&Runs>,
-) {
-    if let Some(r) = bound {
-        record_bound(tenant, r);
-    }
+/// ([`text`]) -- and `tenant` on a tenant node.
+pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
     let rows = ROWS.with(|r| r.replace(0));
     let micros = took.as_micros().min(u64::MAX as u128) as u64;
     SHAPE.with(|buf| {
@@ -170,7 +161,7 @@ pub fn record(
                 noted.as_str()
             };
             shape(source, &mut buf);
-            crate::audit::statement(tenant, source, &buf, failed, bound);
+            crate::audit::statement(tenant, source, &buf, failed);
             noted.clear();
         });
         let id = hash(tenant, &buf);
@@ -188,11 +179,20 @@ pub fn record(
         if map.len() >= PER_SHARD {
             forget(&mut map);
         }
+        let mut text = buf.clone();
+        if text.len() > TEXT_MAX {
+            let mut end = TEXT_MAX;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("...");
+        }
         map.insert(
             id,
             Entry {
                 tenant: tenant.map(str::to_string),
-                text: kept(&buf),
+                text,
                 id,
                 calls: 1,
                 errors: failed as u64,
@@ -226,7 +226,7 @@ fn kept(shape: &str) -> String {
 /// tuning a slow `set orders` sees what of it was the ledger -- and an
 /// error where it refused the write. Read as every shape is, by what reads
 /// every collection: a binding's name is the schema's.
-fn record_bound(tenant: Option<&str>, r: &Runs) {
+pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
     let mut names: Vec<&str> = Vec::new();
     for ran in &r.ran {
         if !names.contains(&ran.name.as_str()) {
@@ -709,30 +709,12 @@ mod tests {
         let t = Some("shape-test-tenant");
         let view = View::Tenant("shape-test-tenant");
         reset(view);
-        record(
-            t,
-            "get a where x = 1",
-            Duration::from_micros(10),
-            false,
-            None,
-        );
+        record(t, "get a where x = 1", Duration::from_micros(10), false);
         rows(3);
-        record(
-            t,
-            "get a where x = 22",
-            Duration::from_micros(30),
-            false,
-            None,
-        );
-        record(t, "get b", Duration::from_micros(5), true, None);
+        record(t, "get a where x = 22", Duration::from_micros(30), false);
+        record(t, "get b", Duration::from_micros(5), true);
         std::thread::spawn(move || {
-            record(
-                t,
-                "get a where x = $1",
-                Duration::from_micros(20),
-                false,
-                None,
-            )
+            record(t, "get a where x = $1", Duration::from_micros(20), false)
         })
         .join()
         .unwrap();
