@@ -29,7 +29,12 @@ write's fsync runs once the lock is let go (`Database::flush`'s
 runs under `catch_unwind` and returns a code -- an `Error`'s kind 1-10, 14
 (`FENNEC_UNMET`) or 15 (`FENNEC_QUOTA`), or `FENNEC_PANIC`, `FENNEC_MISUSE`,
 `FENNEC_LOCKED` -- with the error's JSON, so
-the library is built in the `ffi` profile, which unwinds. `<file>.lock` is
+the library is built in the `ffi` profile, which unwinds. A panic leaves
+the database as a failed write does, as a server's does
+([engine.md](engine.md#blocks)): the lock it poisoned is taken as it
+stands, and the write side is `fennec_abi::held::Writing`, which puts back
+a block left open between statements -- `run_text`'s, a sync's `remake`
+-- before the lock is let go and the next call takes it. `<file>.lock` is
 held while a file is open (a checkpoint renames a new file over the
 database, which a lock on it would not survive): a second open, here or in
 an app extension, is refused -- by a record lock (`fcntl`'s `F_SETLK`), the

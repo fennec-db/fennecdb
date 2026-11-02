@@ -51,6 +51,8 @@ pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
 mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared::{Prepared, PREPARE_AT};
+#[cfg(test)]
+mod unwinding;
 #[cfg(not(target_arch = "wasm32"))]
 mod wake;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3721,8 +3723,11 @@ impl Drop for Unwinding<'_> {
 }
 
 /// A block taken out of the database to land ([`Database::commit`]), put
-/// back as it drops: forgotten as [`Database::land`] returns, it drops
-/// only where a panic unwinds out of it.
+/// back as it drops where a panic unwinds out of a check before the sink
+/// call: forgotten as [`Database::land`] returns, it drops only on an
+/// unwind. From the sink call on it leaves the block's writes in memory --
+/// the file may hold them -- and the database is failed instead
+/// ([`Database::unwound`]).
 struct Unlanded<'a> {
     db: &'a mut Database,
     b: &'a mut Block,
@@ -3730,7 +3735,9 @@ struct Unlanded<'a> {
 
 impl Drop for Unlanded<'_> {
     fn drop(&mut self) {
-        self.db.undo(std::mem::take(self.b));
+        if !self.db.landing {
+            self.db.undo(std::mem::take(self.b));
+        }
     }
 }
 
@@ -3762,6 +3769,13 @@ pub struct Database {
     /// memory holds a write the file does not. Reads go on: they answer from
     /// memory, which is what every client was told so far.
     failed: Option<String>,
+    /// Whether the block [`Self::commit`] lands was handed to the sink and
+    /// has not ended: from the sink call through its notes on the feed to
+    /// the block's end, a panic leaves a record the file may hold and a
+    /// counter behind it, so it fails the database ([`Self::unwound`]) --
+    /// put back instead, the next block took the change numbers the file
+    /// held already.
+    landing: bool,
     /// Ring buffer of changed ids. Incremental feeding of replicas goes
     /// through here; see [`crate::changes`].
     changes: ChangeLog,
@@ -3968,6 +3982,7 @@ impl Database {
             sink: Mutex::new(Box::new(NullSink)),
             dirty: false,
             failed: None,
+            landing: false,
             changes: ChangeLog::default(),
             watcher: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -6188,8 +6203,8 @@ impl Database {
         }
         // Out of `self.block` from here, so held by `Unlanded` for a panic
         // unwinding out of a check the server plugged in -- the fence, a
-        // quota -- or the sink: dropped with nothing more, it left its writes
-        // in memory and in no record. Refused, it is put back here.
+        // quota: dropped with nothing more, it left its writes in memory and
+        // in no record. Refused, the sink's refusal too, it is put back here.
         let g = Unlanded {
             db: self,
             b: &mut b,
@@ -6199,15 +6214,22 @@ impl Database {
         let len = match landed {
             Ok(len) => len,
             Err(e) => {
+                self.landing = false;
                 self.undo(b);
                 return Err(e);
             }
         };
+        // The record is the sink's: a panic from here to the block's end --
+        // its notes on the feed, the watcher, the handover -- fails the
+        // database (`landing`, [`Self::unwound`]), as one inside the sink
+        // does.
         *self.appended.get_mut() += len as u64;
         self.dirty = true;
         #[cfg(not(target_arch = "wasm32"))]
         let before = self.changes.seq();
         for &(cid, id) in &b.notes {
+            #[cfg(test)]
+            unwinding::panic_at("notes");
             self.note(cid, id);
         }
         // Now, not at the next block's start: a collection the block dropped
@@ -6222,6 +6244,9 @@ impl Database {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.hand_over_when_due();
+        #[cfg(test)]
+        unwinding::panic_at("end");
+        self.landing = false;
         Ok(())
     }
 
@@ -6260,7 +6285,7 @@ impl Database {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let landed = land.map(|record| {
-            let r = self.sending(|db| db.land_spilled(b, seq, at, &record));
+            let r = self.land_spilled(b, seq, at, &record);
             (r, record.len())
         });
         #[cfg(target_arch = "wasm32")]
@@ -6271,7 +6296,7 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             let writes = b.notes.len() as u64;
             let record = b.record();
-            let r = self.sending(|db| db.sink_mut().record(seq, &record));
+            let r = self.handing().record(seq, &record);
             // Where its frames are in the file, for the handover: the
             // stores hold them as the record does.
             #[cfg(not(target_arch = "wasm32"))]
@@ -6285,17 +6310,21 @@ impl Database {
         Ok(len)
     }
 
-    /// `f`, the sink writing a block's record: a panic unwinding out of it
-    /// leaves the file holding the record, part of it or none, which no one
-    /// can tell, so it stops writes as a storage error does
-    /// ([`Self::fail`]) and the block is put back.
-    fn sending<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.unwinding(f, |db| {
-            db.fail(&Error::Io(
-                "a panic while a block's record was written: what reached the file is unknown"
-                    .into(),
-            ))
-        })
+    /// The sink, handed the record of the block [`Self::commit`] lands:
+    /// from here to the block's end a panic fails the database
+    /// ([`Self::unwound`]) rather than put the block back. The file may
+    /// hold the record, part of it or none, which no one can tell, and the
+    /// counter is behind it until the block's notes are on the feed: a
+    /// block put back here and the next one landing took the change
+    /// numbers the file held already.
+    #[inline(always)]
+    pub(super) fn handing(&mut self) -> &mut Box<dyn Sink> {
+        #[cfg(test)]
+        unwinding::panic_at("before");
+        self.landing = true;
+        #[cfg(test)]
+        unwinding::panic_at("sink");
+        self.sink_mut()
     }
 
     /// `f`, a write -- a statement, a block of them, a commit -- after which
@@ -6327,6 +6356,14 @@ impl Database {
     #[cold]
     #[inline(never)]
     fn unwound(&mut self) {
+        // Past the sink call, the record is in the file or not, and the
+        // counter behind it: stopped as a storage error stops writes, so
+        // that no block takes its numbers before the file is opened again.
+        if std::mem::take(&mut self.landing) {
+            self.fail(&Error::Io(
+                "a panic as a block landed: what reached the file is unknown".into(),
+            ));
+        }
         self.rollback();
         #[cfg(feature = "statements")]
         self.settle_woken();

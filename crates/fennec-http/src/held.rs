@@ -3,11 +3,13 @@
 //! panic of every request after it. A write leaves the database as a block
 //! landed or put back, never half of one, its hooks in place -- a panic's
 //! too, the engine's put back by the engine (`Database::execute_with`),
-//! one between statements by [`Writing`] -- so what it guarded is whole.
+//! one between statements by [`Writing`], the native library's guard too
+//! (`fennec_abi::held`) -- so what it guarded is whole.
 
+pub use fennec_abi::held::Writing;
 use fennec_core::engine::Prepared;
 use fennec_core::prelude::*;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{RwLock, RwLockReadGuard};
 
 /// The database to read: whatever a read lock finds has landed, since a
 /// block of writes is open only under the write lock of whoever opened it.
@@ -20,42 +22,13 @@ pub fn read(db: &RwLock<Database>) -> RwLockReadGuard<'_, Database> {
     db.read().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The database to write into.
+/// The database to write into: a block a keyed write, a REST write or an
+/// MCP call opens and a panic of the server's own leaves open between its
+/// statements is put back as the lock drops ([`Writing`]).
 pub fn write(db: &RwLock<Database>) -> Writing<'_> {
     let waiting = crate::trace::span("lock.wait");
     waiting.attr("fennec.lock", "write");
-    Writing(db.write().unwrap_or_else(|e| e.into_inner()))
-}
-
-/// The write lock, held: a panic unwinding while it is held puts back the
-/// block it leaves open before the lock is let go of. The engine puts back
-/// a block a panic unwinds out of one of its writes through
-/// (`Database::execute_with`); this is the block a keyed write, a REST
-/// write or an MCP call opened and left between statements, the panic the
-/// server's own -- rendering an answer, keeping a key. Left open, the next
-/// request read its writes as landed and ran its own in it, never landing.
-/// A panic's count read as the guard drops: nothing a write pays for.
-pub struct Writing<'a>(RwLockWriteGuard<'a, Database>);
-
-impl std::ops::Deref for Writing<'_> {
-    type Target = Database;
-    fn deref(&self) -> &Database {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Writing<'_> {
-    fn deref_mut(&mut self) -> &mut Database {
-        &mut self.0
-    }
-}
-
-impl Drop for Writing<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() && self.0.in_block() {
-            self.0.rollback();
-        }
-    }
+    Writing::take(db)
 }
 
 /// The documents the `put`s among `stmts` write, built and encoded under

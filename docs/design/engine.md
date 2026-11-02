@@ -463,16 +463,30 @@ return and by the loan's drop where a panic unwinds first; `execute_with`,
 open, whoever opened it -- the panic unwinds through its opener too, which
 never commits it -- and let go of the rows it woke; a block `commit` took
 out to land is held by `Unlanded` for a panic in a check the server
-plugged in (the fence, a quota) until the sink took its record, and a panic
-inside the sink's write stops writes as a storage error does
-(`Database::fail`), since what reached the file is unknown. A block the
-server opened and left between statements -- a keyed write's, a REST
-write's, an MCP call's -- is put back by `held::Writing` as the write lock
-drops, before anyone else takes it. `internally` gives its flag back on a
-panic as `unbound` does. `tests/unwinding.rs`,
-`access.rs`'s `a_panicking_write_leaves_the_rules_in_force` and `held.rs`'s
-test hold it: before, the scoped token's write after another connection's
-panic landed (201) where its policy refuses it (403).
+plugged in (the fence, a quota) up to the sink call. The fail point is the
+sink call, not the append: from it (`Database::handing`, which marks
+`landing`) through the record's notes for the handover, the block's notes
+on the feed, the watcher and the handover to the block's end, a panic
+stops writes as a storage error does (`Database::fail`, from `unwound`)
+and leaves the block's writes in memory. The file may hold the record,
+part of it or none, and until the notes loop ends the counter is behind
+it: put back there, as the first cut of this did for a panic past the
+sink's write, the next block was numbered from the counter and took the
+change numbers the record in the file held already -- a replica sent two
+records under one number, a reopen counting one of them. Failed, nothing
+lands before the file is opened again and counted. A block the server
+opened and left between statements -- a keyed write's, a REST write's, an
+MCP call's -- is put back by `held::Writing` as the write lock drops,
+before anyone else takes it; the native library takes its write lock
+through the same guard (`fennec_abi::held`), for `run_text`'s block and a
+sync's `remake`, whose panic between statements is caught at the C
+boundary. `internally` gives its flag back on a panic as `unbound` does.
+`tests/unwinding.rs`, `engine/unwinding.rs` (a panic at each point of a
+landing, before the sink call, at it, at the record's notes, in the notes
+loop and at the block's end, each file opened again), `access.rs`'s
+`a_panicking_write_leaves_the_rules_in_force` and both `held.rs`'s tests
+hold it: before, the scoped token's write after another connection's panic
+landed (201) where its policy refuses it (403).
 
 Each guard is forgotten on the way out, so its drop runs on an unwind
 alone: a lone `put` measured 349 ns against main's 357, a `set` 565
