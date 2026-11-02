@@ -148,6 +148,17 @@ over; and a node from before refuses to follow an `https://` primary and
 takes nothing. `make upgrade-check` drives both against the binaries of
 its base, beside this tree's router dialing the same node over TLS.
 
+An older router *reading* such a record -- a standby following the
+directory, a binary rolled back over its file -- is not driven: it holds
+the address as text and dials it as the one it refused at `PUT
+/_shard/nodes` does, through `dial::resolve`, so it skips the node as that
+check shows, never misreading it. The address is no socket address, and
+the system's lookup is handed `https://host` as a name, the port being
+what follows the last colon -- not a host name, refused by the resolver
+(`nodename nor servname provided` on macOS) before any byte goes to the
+node. A record of the directory carries the address alone, so no
+field of it is read another way.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |

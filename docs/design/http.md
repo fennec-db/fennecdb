@@ -1133,7 +1133,16 @@ exporter's timeout), each read and write waiting the time left, as
 `Server::accept_within` bounds an accept -- rustls's `complete_io` bounded
 each read, and a server trickling a byte short of it held a lease grant as
 long as it liked (`dial_within_bounds_the_whole_handshake`,
-`a_handshake_never_answered_is_a_timeout_at_the_dial_s_bound`). Nothing of
+`a_handshake_never_answered_is_a_timeout_at_the_dial_s_bound`). The
+router's dial holds its lookup, each connect and the handshake to one
+deadline (`dial_over`): each given the whole bound, a lease grant to a node
+slow at all three took three times its own. A forward's connect
+(`connect_watching`) gives the handshake what is left of its try's
+deadline, and looks for a failover of its tenant's bucket (`Pool::moved`)
+before the handshake writes the connection's first byte and again where
+it fails, as it does after a connect: a node stalling its handshake as its
+tenant is failed over holds the forward no longer than a connect to it
+would, and the forward goes back to the directory (`Ended::Moved`). Nothing of
 the caller's goes before the handshake ends, so a certificate refused --
 an unknown issuer, another name -- is refused before a byte of a request,
 its token among them: the server reads the client's alert (counted under
@@ -1172,6 +1181,22 @@ and taken for the answer, the head's read waited on and a client's end
 went unpassed (`a_held_request_watches_its_client_past_the_session_s_tickets`).
 The client's end is passed on as a `close_notify` and the socket shut for
 writing (`Stream::end_writing`), which the node reads through its session.
+
+*The router's pool is generic over the transport.* Its connection,
+exchange and an answer's reads are `Conn<S>`, `exchange<S>` and
+`body_over<S>` over `upstream::Wire`, implemented by `TcpStream` and by
+`dial::Stream` (its TLS variant, there): a node's pool entry
+(`upstream::Kept`) reads the scheme off the address once, as it is made,
+and keeps where the `host:port` its `Host` names begins, and a request
+takes both with its first pooled connection under the one lock it took
+before (`Pool::first`), a match on the transport a request where there was
+none, and none a read, write, flush or look. A plain request runs the
+code it ran before TLS; an answer's reader is matched once a body read
+(`upstream::Reader`), a stream's once a read. The first version held
+`dial::Stream` in the pool, a match at every read, write and flush, a
+look's match and a prefix test or two for `Host`: a relay's requests a
+second 2.1% under main's in the review's nine rounds (-2.4% to +0.6% a
+round), and 0.5 to 2.4% under in every round of an earlier five.
 
 *The router's addresses carry the scheme.* A node recorded at
 `https://host:port` is dialed over TLS; `http://host:port` is recorded bare,
@@ -1212,9 +1237,10 @@ rotated, a row by id relayed through the router to a `--dir` node, eight
 clients kept alive: main's router 70 493 requests a second at a p50 of
 42.5 us, this tree's over the same plain node 69 983 at 42.7 us, and over
 the node serving HTTPS 67 632 at 46.3 us -- a record sealed and opened each
-way on the router's link. The plain figures are a match per read and write
-and a prefix test a request apart; a second run of nine rounds is in the
-PR. A lease round over three nodes, its connections kept, p50 61.0 us plain
+way on the router's link. Those plain figures were the first version's,
+`dial::Stream` in the pool; the generic pool's ([above](#dialing-https)),
+nine rounds of 10 s each begun under a load of 1.5, are in the PR. A lease
+round over three nodes, its connections kept, p50 61.0 us plain
 and 61.1 over TLS (p99 88.0 and 103.5); a dial alone, the lookup, connect
 and handshake a grant to a node with no kept connection pays first, 31 us
 plain and 595 us over TLS -- against a lease's seconds and a grant's third

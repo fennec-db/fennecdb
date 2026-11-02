@@ -231,7 +231,7 @@ it.</p>
 <tr><td><code>--auth-delay &lt;ms&gt;</code></td><td>How long a request refused for its token waits, doubled for each one from the same address within a minute, 5 s at most; 0 turns it off. Default <code>100</code>.</td></tr>
 <tr><td><code>--max-connections &lt;n&gt;</code></td><td>Ceiling on concurrent connections. Default <code>1000</code>.</td></tr>
 <tr><td><code>--max-body &lt;MiB&gt;</code></td><td>Request body ceiling. Default <code>64</code>.</td></tr>
-<tr><td><code>--upstream-timeout &lt;s&gt;</code></td><td>Connect and read bound towards a node. Default <code>60</code>.</td></tr>
+<tr><td><code>--upstream-timeout &lt;s&gt;</code></td><td>Connect and read bound towards a node; to an <code>https://</code> node the TLS handshake is part of the connect, within the same bound. Default <code>60</code>.</td></tr>
 <tr><td><code>--fanout-timeout &lt;s&gt;</code></td><td>The longest a query across tenants runs, every call to a node within it; a request may ask for less (<code>timeout_ms</code>) (<a href="sharding-tenants.html#across-tenants">A query across tenants</a>). Default <code>30</code>.</td></tr>
 <tr><td><code>--fanout-max-rows &lt;n&gt;</code></td><td>Rows such a query gathers from its tenants at most: past it the query is refused (413), never answered with what fitted. Default <code>100000</code>.</td></tr>
 <tr><td><code>--fanout-max-bytes &lt;MiB&gt;</code></td><td>Bytes of the tenants' answers it gathers at most, refused past it likewise. Default <code>64</code>.</td></tr>

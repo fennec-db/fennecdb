@@ -354,12 +354,12 @@ tls-bench:
 ## What the router dialing its nodes over TLS costs: a row by id relayed to
 ## a node over HTTPS and over plain HTTP, the plain relay held to
 ## BASE=<another fennec-shard> in turns, and a lease round and a dial over
-## each, every round once the load is under 2.5
-## (crates/fennec-shard/examples/tls_dial.rs)
+## each, every round once the load is under QUIET (2.5), the clients run
+## RUN seconds a turn (3) (crates/fennec-shard/examples/tls_dial.rs)
 tls-dial-bench:
 	$(CARGO) build --release -p fennec-shard -p fennec-server
 	$(CARGO) run --release -p fennec-shard --example tls_dial -- target/release/fennec-shard \
-	  target/release/fennec-server $(or $(BASE),-) $(or $(ROUNDS),5)
+	  target/release/fennec-server $(or $(BASE),-) $(or $(ROUNDS),5) $(or $(RUN),3) $(or $(QUIET),2.5)
 
 ## What a scoped write's rules cost: a `set` under the server's token and
 ## under a policy of a plain rule, a field list, a transition, a field

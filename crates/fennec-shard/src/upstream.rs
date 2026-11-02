@@ -120,19 +120,64 @@ pub struct Pool {
     moved: [AtomicU64; MOVED_BUCKETS],
 }
 
-#[derive(Default)]
 struct Kept {
-    idle: Vec<Idle>,
+    /// Whether the node is dialed over TLS, and where in its address the
+    /// `host:port` a request's `Host` names begins: read off the address
+    /// once, as the entry is made ([`Kept::of`]), each request taking both
+    /// with its pooled connection ([`Pool::first`]).
+    tls: bool,
+    host_at: usize,
+    /// The idle connections, over the socket or over a TLS session: only
+    /// the one of the address's scheme is ever used ([`Wire::idle`]).
+    plain: Vec<Idle<TcpStream>>,
+    sessions: Vec<Idle<Stream>>,
     /// Every connection made to the node and not yet found closed:
     /// those closed are let go of as the next is made, and as a cut looks.
     flights: Vec<Arc<Flight>>,
 }
 
+impl Kept {
+    /// The entry of the node at `addr`, `https://host:port` dialed over
+    /// TLS ([`fennec_http::dial::tls_of`]).
+    fn of(addr: &str) -> Kept {
+        let (tls, host_at) = scheme_of(addr);
+        Kept {
+            tls,
+            host_at,
+            plain: Vec::new(),
+            sessions: Vec::new(),
+            flights: Vec::new(),
+        }
+    }
+}
+
+/// Whether `addr` is dialed over TLS, and where its `host:port` begins.
+fn scheme_of(addr: &str) -> (bool, usize) {
+    let (tls, authority) = fennec_http::dial::tls_of(addr);
+    (tls, addr.len() - authority.len())
+}
+
+/// A request's first connection, if the pool kept one, of its node's
+/// transport ([`Pool::first`]): what the request's tries are generic over.
+enum Taken {
+    Plain(Option<Idle<TcpStream>>),
+    Tls(Option<Idle<Stream>>),
+}
+
+/// The last connection of `list`, its word `mark`'s `WAITING` from here
+/// ([`Pool::take`]).
+#[inline(always)]
+fn handed<S>(list: &mut Vec<Idle<S>>, mark: u64) -> Option<Idle<S>> {
+    let i = list.pop()?;
+    i.conn.flight.word.store(mark | WAITING, Ordering::Relaxed);
+    Some(i)
+}
+
 /// A pooled connection and the read timeout it was left with, so that a
 /// request waiting as long sets none: the two `setsockopt`s every exchange
 /// made took 0.67 us, more than the look (`open`) made in their place.
-struct Idle {
-    conn: Conn,
+struct Idle<S> {
+    conn: Conn<S>,
     read_timeout: Duration,
     /// Set at the connect, and only by a read replica's read after
     /// ([`Pool::send_within`]): the pool's timeout otherwise, so a request
@@ -145,7 +190,7 @@ pub struct Answer {
     pub headers: Vec<(String, String)>,
     /// The connection the rest comes on, `None` once
     /// [`Answer::read_body_kept`] has read it and handed it back.
-    reader: Option<BufReader<Conn>>,
+    reader: Option<Reader>,
     addr: String,
     reusable: bool,
     read_timeout: Duration,
@@ -401,21 +446,185 @@ impl Flight {
 /// A connection to a node and its flight, marked closed as it is dropped,
 /// before its descriptor is -- a TLS session's too, which closes the
 /// descriptor as it is dropped after.
-pub struct Conn {
-    stream: Stream,
+struct Conn<S> {
+    stream: S,
     flight: Arc<Flight>,
 }
 
-impl Read for Conn {
+impl<S: Read> Read for Conn<S> {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.stream.read(buf)
     }
 }
 
-impl Drop for Conn {
+impl<S> Drop for Conn<S> {
     fn drop(&mut self) {
         self.flight.close();
+    }
+}
+
+/// What a connection to a node is carried over: the socket itself, or a
+/// TLS session over it ([`Stream`], always its `Tls` here). Chosen once a
+/// request, by its node's pool entry ([`Kept::tls`]), and the pooled
+/// connection, its exchange and its answer's reads are generic over it:
+/// a plain request runs the code it ran before TLS, no read, write, flush
+/// or look matching on the transport. Matched at each, a relay's requests a
+/// second were 2.1% under main's, the median of nine rounds (#467's
+/// review).
+trait Wire: Read + Write + Sized {
+    /// Whether a dial shakes hands after its connect.
+    const TLS: bool;
+
+    /// The socket beneath: for an option, a `poll` and a cut's shutdown.
+    fn socket(&self) -> &TcpStream;
+
+    /// `s`, just connected to `authority`, carried over this: itself, or a
+    /// TLS session whose handshake is done by `deadline`
+    /// ([`fennec_http::dial::secure`]), a certificate refused or a
+    /// handshake past it an error with nothing of a request sent.
+    fn over(s: TcpStream, authority: &str, deadline: Instant) -> io::Result<Self>;
+
+    /// The idle connections of this kind in `k`.
+    fn idle(k: &mut Kept) -> &mut Vec<Idle<Self>>;
+
+    /// An answer's reader of this kind.
+    fn answer(r: BufReader<Conn<Self>>) -> Reader;
+
+    /// Whether a pooled connection is still open ([`open`]).
+    fn is_open(&mut self) -> bool;
+
+    /// Whether bytes of an answer wait, read with no wait
+    /// ([`answer_waiting`]).
+    fn answer_waiting(&mut self) -> bool;
+
+    /// The node's socket moved as a held request waited
+    /// ([`answered_or_gone`]): whether that may be its answer. Over TLS
+    /// what arrived is read as TLS first -- a session ticket is none.
+    fn may_answer(&mut self) -> bool;
+
+    /// The client's end passed on: the socket shut for writing, over TLS
+    /// after a `close_notify`, which the node reads through its session.
+    fn end_writing(&mut self) -> io::Result<()>;
+}
+
+impl Wire for TcpStream {
+    const TLS: bool = false;
+
+    #[inline(always)]
+    fn socket(&self) -> &TcpStream {
+        self
+    }
+
+    #[inline(always)]
+    fn over(s: TcpStream, _: &str, _: Instant) -> io::Result<TcpStream> {
+        Ok(s)
+    }
+
+    #[inline(always)]
+    fn idle(k: &mut Kept) -> &mut Vec<Idle<TcpStream>> {
+        &mut k.plain
+    }
+
+    #[inline(always)]
+    fn answer(r: BufReader<Conn<TcpStream>>) -> Reader {
+        Reader::Plain(r)
+    }
+
+    #[inline(always)]
+    fn is_open(&mut self) -> bool {
+        open(self)
+    }
+
+    #[inline(always)]
+    fn answer_waiting(&mut self) -> bool {
+        answer_waiting(self)
+    }
+
+    #[inline(always)]
+    fn may_answer(&mut self) -> bool {
+        true
+    }
+
+    fn end_writing(&mut self) -> io::Result<()> {
+        self.shutdown(std::net::Shutdown::Write)
+    }
+}
+
+impl Wire for Stream {
+    const TLS: bool = true;
+
+    #[inline]
+    fn socket(&self) -> &TcpStream {
+        Stream::socket(self)
+    }
+
+    fn over(s: TcpStream, authority: &str, deadline: Instant) -> io::Result<Stream> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        fennec_http::dial::secure(s, authority, left)
+    }
+
+    #[inline]
+    fn idle(k: &mut Kept) -> &mut Vec<Idle<Stream>> {
+        &mut k.sessions
+    }
+
+    #[inline]
+    fn answer(r: BufReader<Conn<Stream>>) -> Reader {
+        Reader::Tls(r)
+    }
+
+    /// What arrived read as TLS ([`Stream::peer`]): a session ticket the
+    /// node sent after the handshake is no answer, and its `close_notify`
+    /// at its idle timeout the end it is, where a peek took either for
+    /// bytes of one and let a healthy connection go.
+    fn is_open(&mut self) -> bool {
+        matches!(self.peer(), Ok(Peer::Quiet))
+    }
+
+    /// Plaintext waiting.
+    fn answer_waiting(&mut self) -> bool {
+        matches!(self.peer(), Ok(Peer::Sent))
+    }
+
+    /// Records with no answer in them -- the session tickets a server
+    /// sends after its handshake, which come as a fresh connection's first
+    /// request is held -- are no answer, and the client is watched on past
+    /// them: taken for the answer, the head's read waited on and the
+    /// client went unwatched.
+    fn may_answer(&mut self) -> bool {
+        !matches!(self.peer(), Ok(Peer::Quiet))
+    }
+
+    fn end_writing(&mut self) -> io::Result<()> {
+        Stream::end_writing(self)
+    }
+}
+
+/// The connection an answer's rest comes on, of either transport: matched
+/// once a body read, never a read of it, but for a stream's
+/// ([`Answer::into_stream`]).
+enum Reader {
+    Plain(BufReader<Conn<TcpStream>>),
+    Tls(BufReader<Conn<Stream>>),
+}
+
+impl Reader {
+    /// Its connection's flight and socket.
+    fn parts(&self) -> (&Flight, &TcpStream) {
+        match self {
+            Reader::Plain(r) => (&r.get_ref().flight, &r.get_ref().stream),
+            Reader::Tls(r) => (&r.get_ref().flight, r.get_ref().stream.socket()),
+        }
+    }
+}
+
+impl Read for Reader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Reader::Plain(r) => r.read(buf),
+            Reader::Tls(r) => r.read(buf),
+        }
     }
 }
 
@@ -657,23 +866,53 @@ impl Pool {
     /// sequentially consistent instead, the two were an `stlr` and an
     /// `ldar` on aarch64 -- the load waiting for the store to drain -- and
     /// an `xchg` on x86, every request.
-    fn take(&self, addr: &str, mark: u64) -> Option<Idle> {
+    fn take<S: Wire>(&self, addr: &str, mark: u64) -> Option<Idle<S>> {
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let i = idle.get_mut(addr).and_then(|k| k.idle.pop())?;
-        i.conn.flight.word.store(mark | WAITING, Ordering::Relaxed);
-        Some(i)
+        idle.get_mut(addr).and_then(|k| handed(S::idle(k), mark))
     }
 
-    fn put(&self, addr: &str, s: Idle) {
+    /// [`Pool::take`] of a request's first connection, with what its node's
+    /// entry says of it ([`Kept::of`]): where its `host:port` begins in
+    /// `addr`, and the transport, in which the connection comes -- one
+    /// lock, as the first take's. With no entry yet, read off the address
+    /// as the entry the connect makes will be.
+    fn first(&self, addr: &str, mark: u64) -> (usize, Taken) {
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let list = &mut idle.entry(addr.to_string()).or_default().idle;
+        let Some(k) = idle.get_mut(addr) else {
+            drop(idle);
+            return match scheme_of(addr) {
+                (false, at) => (at, Taken::Plain(None)),
+                (true, at) => (at, Taken::Tls(None)),
+            };
+        };
+        let taken = match k.tls {
+            false => Taken::Plain(handed(&mut k.plain, mark)),
+            true => Taken::Tls(handed(&mut k.sessions, mark)),
+        };
+        (k.host_at, taken)
+    }
+
+    fn put<S: Wire>(&self, addr: &str, s: Idle<S>) {
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let kept = idle
+            .entry(addr.to_string())
+            .or_insert_with(|| Kept::of(addr));
+        let list = S::idle(kept);
         if list.len() < MAX_IDLE {
             list.push(s);
         }
     }
 
-    fn connect(&self, addr: &str, within: Duration, write: Duration) -> io::Result<Conn> {
-        dial(addr, within, write).map(|s| self.register(addr, s, 0))
+    /// A connection to the node at `addr`, whose `host:port` is
+    /// `authority`.
+    fn connect<S: Wire>(
+        &self,
+        addr: &str,
+        authority: &str,
+        within: Duration,
+        write: Duration,
+    ) -> io::Result<Conn<S>> {
+        dial_over(authority, within, write).map(|s| self.register(addr, s, 0))
     }
 
     /// [`Pool::connect`] of a forward, each address tried a
@@ -690,16 +929,23 @@ impl Pool {
     /// -- refused, a process gone and its machine there -- is asked the same
     /// before it is the client's 502: refused as the failover came, it is
     /// sent where the directory places it now.
-    fn connect_watching(
+    ///
+    /// Over TLS the handshake writes the connection's first byte, so a
+    /// failover is looked for before it begins, and its failure is asked
+    /// the same; it is bounded by what is left of the try's deadline, not
+    /// the whole bound again, so a node stalling its handshake as its
+    /// tenant is failed over holds the forward no longer than a connect
+    /// to it would.
+    fn connect_watching<S: Wire>(
         &self,
         addr: &str,
+        authority: &str,
         within: Duration,
         write: Duration,
         flying: Flying,
-    ) -> Result<Conn, Failure> {
+    ) -> Result<Conn<S>, Failure> {
         let unsent = |e| Failure(Stage::Unsent, e);
         let moved = || self.moved(flying.mark) != flying.seen;
-        let (tls, authority) = fennec_http::dial::tls_of(addr);
         let mut last = io::Error::new(
             io::ErrorKind::NotFound,
             format!("{authority} does not resolve"),
@@ -720,9 +966,15 @@ impl Pool {
                 }
                 match TcpStream::connect_timeout(&a, left.min(CONNECT_LOOK)) {
                     Ok(s) => {
-                        let s = secured(s, tls, authority, within)
-                            .and_then(|s| ready(s, write))
-                            .map_err(unsent)?;
+                        if S::TLS && moved() {
+                            return Err(moved_meanwhile());
+                        }
+                        let s = match S::over(s, authority, deadline) {
+                            Ok(s) => s,
+                            Err(_) if moved() => return Err(moved_meanwhile()),
+                            Err(e) => return Err(unsent(e)),
+                        };
+                        let s = ready(s, write).map_err(unsent)?;
                         return Ok(self.register(addr, s, flying.mark));
                     }
                     Err(_) if moved() => return Err(moved_meanwhile()),
@@ -741,10 +993,13 @@ impl Pool {
     /// to find, the closed ones let go of: a lock a connection made. Its
     /// word is `mark`'s `WAITING` before it is listed, under the lock, as
     /// [`Pool::take`] writes a pooled one's.
-    fn register(&self, addr: &str, s: Stream, mark: u64) -> Conn {
+    fn register<S: Wire>(&self, addr: &str, s: S, mark: u64) -> Conn<S> {
         let flight = Arc::new(Flight::of(s.socket(), mark | WAITING));
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let flights = &mut idle.entry(addr.to_string()).or_default().flights;
+        let flights = &mut idle
+            .entry(addr.to_string())
+            .or_insert_with(|| Kept::of(addr))
+            .flights;
         flights.retain(|f| !f.closed());
         flights.push(Arc::clone(&flight));
         Conn { stream: s, flight }
@@ -1052,9 +1307,14 @@ impl Pool {
         client: Option<&Client>,
         flying: Flying,
     ) -> Result<Answer, Failure> {
-        let (read_timeout, connect_within, write_timeout) = times;
+        // The first connection is taken before the head is written: with
+        // it comes where the address's `host:port` begins, kept in its
+        // node's entry. Out from the take (`WAITING`), as before, while the
+        // head is written: a cut meanwhile is one of a request that sent
+        // nothing.
+        let (host_at, taken) = self.first(addr, flying.mark);
+        let host = &addr[host_at..];
         let mut req = String::with_capacity(256);
-        let host = fennec_http::dial::authority(addr);
         for part in [method, " ", target, " HTTP/1.1\r\nHost: ", host, "\r\n"] {
             req.push_str(part);
         }
@@ -1093,13 +1353,45 @@ impl Pool {
             "Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
             body.len()
         ));
-        let head = req.as_bytes();
+        let request = (req.as_bytes(), body);
+        let asked = (method, headers);
+        match taken {
+            Taken::Plain(first) => self.tries(
+                addr, host, first, request, asked, times, replay, client, flying,
+            ),
+            Taken::Tls(first) => self.tries(
+                addr, host, first, request, asked, times, replay, client, flying,
+            ),
+        }
+    }
 
+    /// [`Self::send_staged`]'s tries of `request`, over the transport of
+    /// its node's address: on `first`, the connection taken with it
+    /// ([`Pool::first`]), and each pooled one after it, then on a fresh one
+    /// to `host`. `asked` is the method and headers, which say whether one
+    /// sent whole may go again.
+    #[allow(clippy::too_many_arguments)]
+    fn tries<S: Wire>(
+        &self,
+        addr: &str,
+        host: &str,
+        first: Option<Idle<S>>,
+        (head, body): (&[u8], &[u8]),
+        (method, headers): (&str, &[(&str, &str)]),
+        times: (Duration, Duration, Duration),
+        replay: Replay,
+        client: Option<&Client>,
+        flying: Flying,
+    ) -> Result<Answer, Failure> {
+        let (read_timeout, connect_within, write_timeout) = times;
         // The node closes its idle connections together, so a closed one
         // found here is let go of and the next one looked at.
         let mut whole = false;
-        while let Some(mut idle) = self.take(addr, flying.mark) {
-            if !open(&mut idle.conn.stream) {
+        let mut taken = first;
+        while let Some(mut idle) = taken {
+            if !idle.conn.stream.is_open() {
+                drop(idle);
+                taken = self.take(addr, flying.mark);
                 continue;
             }
             let set = (Some(idle.read_timeout), idle.write_timeout);
@@ -1116,9 +1408,9 @@ impl Pool {
         }
         let s = match flying.mark {
             0 => self
-                .connect(addr, connect_within, write_timeout)
+                .connect::<S>(addr, host, connect_within, write_timeout)
                 .map_err(|e| Failure(Stage::Unsent, e)),
-            _ => self.connect_watching(addr, connect_within, write_timeout, flying),
+            _ => self.connect_watching(addr, host, connect_within, write_timeout, flying),
         };
         let set = (None, write_timeout);
         let want = (read_timeout, write_timeout);
@@ -1137,10 +1429,10 @@ impl Pool {
     /// head, the request is what a failover's cut of `flying`'s tenant
     /// ends ([`Pool::cut`]).
     #[allow(clippy::too_many_arguments)]
-    fn exchange(
+    fn exchange<S: Wire>(
         &self,
         addr: &str,
-        mut s: Conn,
+        mut s: Conn<S>,
         set: (Option<Duration>, Duration),
         (head, body): (&[u8], &[u8]),
         want: (Duration, Duration),
@@ -1153,11 +1445,13 @@ impl Pool {
         // which is the cut's to say.
         if set.0 != Some(read_timeout) {
             s.stream
+                .socket()
                 .set_read_timeout(Some(read_timeout))
                 .map_err(|e| failed(&s.flight, Stage::Unsent, e))?;
         }
         if set.1 != write_timeout {
             s.stream
+                .socket()
                 .set_write_timeout(Some(write_timeout))
                 .map_err(|e| failed(&s.flight, Stage::Unsent, e))?;
         }
@@ -1194,7 +1488,7 @@ impl Pool {
             // takes met the reset after it. A pooled connection's byte may
             // be no answer of this request's (`open` looked before the
             // write), and its failure goes on to a fresh one.
-            Err(e) if set.0.is_none() && answer_waiting(&mut s.stream) => Some(e),
+            Err(e) if set.0.is_none() && s.stream.answer_waiting() => Some(e),
             Err(e) => return Err(failed(&s.flight, Stage::Unsent, e)),
         };
         // The client's end, passed on as the node reads one from a client
@@ -1239,10 +1533,10 @@ impl Pool {
     /// bounded by `want.0`; `kept_off`, the connection is not pooled after
     /// it.
     #[inline(always)]
-    fn head(
+    fn head<S: Wire>(
         &self,
         addr: &str,
-        s: Conn,
+        s: Conn<S>,
         (read_timeout, write_timeout): (Duration, Duration),
         kept_off: bool,
         flying: Flying,
@@ -1305,7 +1599,7 @@ impl Pool {
         Ok(Answer {
             status,
             headers,
-            reader: Some(reader),
+            reader: Some(S::answer(reader)),
             addr: addr.to_string(),
             reusable,
             read_timeout,
@@ -1320,7 +1614,13 @@ impl Pool {
     /// failover's every straddling forward closed a healthy connection.
     #[cold]
     #[inline(never)]
-    fn unsent_moved(&self, addr: &str, s: Conn, want: (Duration, Duration), mark: u64) -> Failure {
+    fn unsent_moved<S: Wire>(
+        &self,
+        addr: &str,
+        s: Conn<S>,
+        want: (Duration, Duration),
+        mark: u64,
+    ) -> Failure {
         if s.flight.rest(mark) {
             let (read_timeout, write_timeout) = want;
             let idle = Idle {
@@ -1412,34 +1712,40 @@ pub(crate) fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
 /// read and its upkeep, a health probe, a lease grant.
 ///
 /// A node recorded as `https://host:port` is dialed over TLS
-/// ([`fennec_http::dial::tls_of`]), its handshake the dial's last step,
-/// bounded by `within` as the connect is ([`secured`]): a certificate
-/// refused, or a handshake past its bound, is a dial that failed with no
-/// byte of the request sent.
+/// ([`fennec_http::dial::tls_of`]), its handshake the dial's last step
+/// ([`Wire::over`]): a certificate refused, or a handshake past its bound,
+/// is a dial that failed with no byte of the request sent.
 fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<Stream> {
-    let (tls, authority) = fennec_http::dial::tls_of(addr);
+    match fennec_http::dial::tls_of(addr) {
+        (false, authority) => dial_over(authority, within, write).map(Stream::Plain),
+        (true, authority) => dial_over(authority, within, write),
+    }
+}
+
+/// [`dial`] of `authority`, its `host:port`, over the transport `S`: the
+/// lookup, each connect and the handshake within one deadline, `within`
+/// from the dial's start. Each given `within` of its own, a lease grant to
+/// a node slow at all three took three times its bound.
+fn dial_over<S: Wire>(authority: &str, within: Duration, write: Duration) -> io::Result<S> {
+    let deadline = Instant::now() + within;
     let mut last = io::Error::new(
         io::ErrorKind::NotFound,
         format!("{authority} does not resolve"),
     );
     for a in fennec_http::dial::resolve(authority, within)? {
-        match TcpStream::connect_timeout(&a, within) {
-            Ok(s) => return ready(secured(s, tls, authority, within)?, write),
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{authority}: no connection within {within:?}"),
+            ));
+        }
+        match TcpStream::connect_timeout(&a, left) {
+            Ok(s) => return ready(S::over(s, authority, deadline)?, write),
             Err(e) => last = e,
         }
     }
     Err(last)
-}
-
-/// `s`, just connected to `authority`, as the dial asked: itself, or over
-/// TLS once its handshake is done within `within`
-/// ([`fennec_http::dial::secure`]).
-#[inline]
-fn secured(s: TcpStream, tls: bool, authority: &str, within: Duration) -> io::Result<Stream> {
-    match tls {
-        false => Ok(Stream::Plain(s)),
-        true => fennec_http::dial::secure(s, authority, within),
-    }
 }
 
 /// How long a forward's connect waits on a try before it looks whether its
@@ -1447,12 +1753,12 @@ fn secured(s: TcpStream, tls: bool, authority: &str, within: Duration) -> io::Re
 const CONNECT_LOOK: Duration = Duration::from_secs(1);
 
 /// `s`, just connected, as every request through the pool wants it.
-fn ready(s: Stream, write: Duration) -> io::Result<Stream> {
+fn ready<S: Wire>(s: S, write: Duration) -> io::Result<S> {
     let _ = s.socket().set_nodelay(true);
     // Once a connection: the same for every request but a read replica's,
     // which sets its own and is tracked with the connection
     // (`Idle::write_timeout`).
-    s.set_write_timeout(Some(write))?;
+    s.socket().set_write_timeout(Some(write))?;
     Ok(s)
 }
 
@@ -1474,27 +1780,18 @@ fn ended(e: &io::Error) -> bool {
 /// Whether a pooled connection is still open: a read that does not wait
 /// finds nothing to read. One the node closed reads its end, one it reset
 /// an error, and one holding bytes no request asked for is no use either.
-/// Over TLS what arrived is read as TLS ([`Stream::peer`]): a session
-/// ticket the node sent after the handshake is no answer, and its
-/// `close_notify` at its idle timeout the end it is, where a peek took
-/// either for bytes of one and let a healthy connection go.
-#[inline]
-fn open(s: &mut Stream) -> bool {
-    match s {
-        Stream::Plain(s) => matches!(peek_now(s), Err(e) if e.kind() == io::ErrorKind::WouldBlock),
-        s => matches!(s.peer(), Ok(Peer::Quiet)),
-    }
+/// Over TLS what arrived is read as TLS ([`Wire::is_open`]).
+fn open(s: &TcpStream) -> bool {
+    matches!(peek_now(s), Err(e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
 /// Whether bytes of an answer wait on `s`, read with no wait: after the
 /// reset that failed a write, too, since macOS and Linux both hand a
-/// socket's received bytes over before its error. Over TLS, plaintext.
+/// socket's received bytes over before its error. Over TLS, plaintext
+/// ([`Wire::answer_waiting`]).
 #[cold]
-fn answer_waiting(s: &mut Stream) -> bool {
-    match s {
-        Stream::Plain(s) => matches!(peek_now(s), Ok(1..)),
-        s => matches!(s.peer(), Ok(Peer::Sent)),
-    }
+fn answer_waiting(s: &TcpStream) -> bool {
+    matches!(peek_now(s), Ok(1..))
 }
 
 /// A `recv` of `MSG_PEEK | MSG_DONTWAIT`: one system call, where
@@ -1602,8 +1899,8 @@ mod sys {
 /// half-closed client was answered nothing while its claim took a job; a
 /// reset alone says the client can read nothing more.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn answered_or_gone(
-    node: &mut Stream,
+fn answered_or_gone<S: Wire>(
+    node: &mut S,
     client: &Client,
     within: Duration,
 ) -> Result<Watched, Failure> {
@@ -1653,11 +1950,9 @@ fn answered_or_gone(
             return Ok(Watched::Answering);
         }
         // Over TLS the node's socket moves for records with no answer in
-        // them too -- the session tickets a server sends after its
-        // handshake, which come as a fresh connection's first request is
-        // held -- and the client is watched on past them: taken for the
-        // answer, the head's read waited on and the client went unwatched.
-        if fds[0].revents != 0 && (!node.is_tls() || !matches!(node.peer(), Ok(Peer::Quiet))) {
+        // them too, and the client is watched on past them
+        // ([`Wire::may_answer`]).
+        if fds[0].revents != 0 && node.may_answer() {
             return Ok(Watched::Answering);
         }
         if watched == 2 && fds[1].revents != 0 {
@@ -1673,7 +1968,7 @@ fn answered_or_gone(
 
 /// No `poll` declared here: the head is waited for as an unheld request's.
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-fn answered_or_gone(_: &mut Stream, _: &Client, _: Duration) -> Result<Watched, Failure> {
+fn answered_or_gone<S: Wire>(_: &mut S, _: &Client, _: Duration) -> Result<Watched, Failure> {
     Ok(Watched::Answering)
 }
 
@@ -1818,20 +2113,41 @@ impl Answer {
         let Some(len) = self.content_length() else {
             return Err(bad("a stream is read as it comes"));
         };
-        let Some(mut reader) = self.reader.take() else {
+        let Some(reader) = self.reader.take() else {
             return Err(read_already());
         };
         let len = if head_only { 0 } else { len };
-        let body = body_of(&mut reader, len, |_| Ok(()))?;
+        let body = match reader {
+            Reader::Plain(r) => self.body_over(pool, r, len, |_, _| Ok(())),
+            Reader::Tls(r) => self.body_over(pool, r, len, |_, _| Ok(())),
+        }?;
+        self.reusable = false;
+        Ok(body)
+    }
+
+    /// The `len` bytes of the body off `reader`, `before` run ahead of each
+    /// read with the read timeout its connection has, and the connection
+    /// handed back to the pool where the node keeps it open and nothing
+    /// past the body came in: bytes left in the buffer would be the start
+    /// of an answer nobody asked for, and such a connection is not reused.
+    /// Generic over the transport, as the exchange is.
+    fn body_over<S: Wire>(
+        &self,
+        pool: &Pool,
+        mut reader: BufReader<Conn<S>>,
+        len: usize,
+        mut before: impl FnMut(&BufReader<Conn<S>>, &mut Duration) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        let mut read_timeout = self.read_timeout;
+        let body = body_of(&mut reader, len, |r| before(r, &mut read_timeout))?;
         if self.reusable && reader.buffer().is_empty() {
             let idle = Idle {
                 conn: reader.into_inner(),
-                read_timeout: self.read_timeout,
+                read_timeout,
                 write_timeout: self.write_timeout,
             };
             pool.put(&self.addr, idle);
         }
-        self.reusable = false;
         Ok(body)
     }
 
@@ -1852,28 +2168,20 @@ impl Answer {
     /// length). Refused rather than capped: a cap would be a bound picked
     /// for an answer that never comes, and reading up to it held the
     /// thread as long as the peer chose to trickle it in.
-    pub fn read_body(self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
+    pub fn read_body(mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
         let Some(len) = self.content_length() else {
             return Err(bad(
                 "an answer with no length, which only a stream sends and this call asks for none",
             ));
         };
-        let Some(mut reader) = self.reader else {
+        let Some(reader) = self.reader.take() else {
             return Err(read_already());
         };
         let len = if head_only { 0 } else { len };
-        let body = body_of(&mut reader, len, |_| Ok(()))?;
-        // Bytes left in the buffer would be the start of an answer nobody
-        // asked for; such a connection is not reused.
-        if self.reusable && reader.buffer().is_empty() {
-            let idle = Idle {
-                conn: reader.into_inner(),
-                read_timeout: self.read_timeout,
-                write_timeout: self.write_timeout,
-            };
-            pool.put(&self.addr, idle);
+        match reader {
+            Reader::Plain(r) => self.body_over(pool, r, len, |_, _| Ok(())),
+            Reader::Tls(r) => self.body_over(pool, r, len, |_, _| Ok(())),
         }
-        Ok(body)
     }
 
     /// [`Answer::read_body`] of an answer that must be in by `deadline`:
@@ -1885,27 +2193,13 @@ impl Answer {
         let Some(len) = self.content_length() else {
             return Err(bad("an answer with no length: a stream"));
         };
-        let Some(mut reader) = self.reader else {
+        let Some(reader) = self.reader.take() else {
             return Err(read_already());
         };
-        let timeout = &mut self.read_timeout;
-        let body = body_of(&mut reader, len, |reader| {
-            if reader.buffer().is_empty() {
-                let left = left_until(deadline)?.min(*timeout);
-                reader.get_ref().stream.set_read_timeout(Some(left))?;
-                *timeout = left;
-            }
-            Ok(())
-        })?;
-        if self.reusable && reader.buffer().is_empty() {
-            let idle = Idle {
-                conn: reader.into_inner(),
-                read_timeout: self.read_timeout,
-                write_timeout: self.write_timeout,
-            };
-            pool.put(&self.addr, idle);
+        match reader {
+            Reader::Plain(r) => self.body_over(pool, r, len, due(deadline)),
+            Reader::Tls(r) => self.body_over(pool, r, len, due(deadline)),
         }
-        Ok(body)
     }
 
     /// The rest of the answer as a byte stream, with no read timeout: an SSE
@@ -1924,14 +2218,35 @@ impl Answer {
         let Some(reader) = self.reader else {
             return Err(read_already());
         };
-        let conn = reader.get_ref();
-        conn.flight.streaming();
+        let (flight, socket) = reader.parts();
+        flight.streaming();
         let Flying { mark, seen } = self.flying;
         if mark != 0 && pool.moved(mark) != seen {
             return Err(io::Error::other(Ended::Cut { whole: true }));
         }
-        conn.stream.set_read_timeout(None)?;
+        socket.set_read_timeout(None)?;
         Ok(reader)
+    }
+}
+
+/// [`Answer::read_body_by`]'s look before each read of a body due by
+/// `deadline`: where the buffer is empty -- a small answer comes in with
+/// its head, in the one read that took that -- the read waits for what is
+/// left of it, and the connection keeps that timeout.
+fn due<S: Wire>(
+    deadline: Instant,
+) -> impl FnMut(&BufReader<Conn<S>>, &mut Duration) -> io::Result<()> {
+    move |reader: &BufReader<Conn<S>>, timeout: &mut Duration| {
+        if reader.buffer().is_empty() {
+            let left = left_until(deadline)?.min(*timeout);
+            reader
+                .get_ref()
+                .stream
+                .socket()
+                .set_read_timeout(Some(left))?;
+            *timeout = left;
+        }
+        Ok(())
     }
 }
 
@@ -1980,10 +2295,10 @@ pub fn answers_health(addr: &str, within: Duration) -> bool {
 
 /// The `len` bytes of a body off `reader`, `before` run ahead of each read,
 /// read into a buffer of the whole length ([`zeroed`]).
-fn body_of(
-    reader: &mut BufReader<Conn>,
+fn body_of<S: Wire>(
+    reader: &mut BufReader<Conn<S>>,
     len: usize,
-    mut before: impl FnMut(&BufReader<Conn>) -> io::Result<()>,
+    mut before: impl FnMut(&BufReader<Conn<S>>) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     let mut body = zeroed(len)?;
     let mut got = 0;
@@ -2069,18 +2384,15 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
-    /// `s` as a dialed stream, plain: the same socket.
-    fn plain(s: &TcpStream) -> Stream {
-        Stream::Plain(s.try_clone().unwrap())
+    /// `s` as the pool's connection holds it, plain: the same socket.
+    fn plain(s: &TcpStream) -> TcpStream {
+        s.try_clone().unwrap()
     }
 
     /// `s` as a connection the pool did not make: no cut finds it.
-    fn unpooled(s: TcpStream) -> Conn {
+    fn unpooled(s: TcpStream) -> Conn<TcpStream> {
         let flight = Arc::new(Flight::of(&s, WAITING));
-        Conn {
-            flight,
-            stream: Stream::Plain(s),
-        }
+        Conn { flight, stream: s }
     }
 
     /// A connection, and the node's end of it.
@@ -2125,18 +2437,18 @@ mod tests {
     #[test]
     fn the_look_tells_an_open_connection_from_a_closed_or_reset_one() {
         let (ours, theirs) = pair();
-        assert!(open(&mut plain(&ours)));
+        assert!(open(&ours));
         drop(theirs);
         assert_eq!(arrived(&ours).unwrap(), 0);
-        assert!(!open(&mut plain(&ours)));
+        assert!(!open(&ours));
 
-        assert!(!open(&mut plain(&reset())));
+        assert!(!open(&reset()));
 
         // Bytes no request asked for.
         let (ours, mut theirs) = pair();
         theirs.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
         assert_eq!(arrived(&ours).unwrap(), 1);
-        assert!(!open(&mut plain(&ours)));
+        assert!(!open(&ours));
     }
 
     /// How far a request of one write got over `s`. Of two, the node's
@@ -2471,7 +2783,7 @@ mod tests {
         std::thread::ScopedJoinHandle<'s, Result<Answer, Failure>>,
     ) {
         let (ours, theirs) = pair();
-        let conn = pool.register("n1", Stream::Plain(ours), flying.mark);
+        let conn = pool.register("n1", ours, flying.mark);
         let want = (pool.timeout, pool.timeout);
         let set = (None, pool.timeout);
         let exchange =
@@ -2776,11 +3088,11 @@ mod tests {
             drop(answer);
             let idle = pool.idle.lock().unwrap();
             let kept = &idle["n1"];
-            assert_eq!(kept.idle.len(), 1);
-            assert_eq!(kept.idle[0].conn.stream.socket().as_raw_fd(), fd);
-            assert!(open(&mut plain(kept.idle[0].conn.stream.socket())));
+            assert_eq!(kept.plain.len(), 1);
+            assert_eq!(kept.plain[0].conn.stream.as_raw_fd(), fd);
+            assert!(open(&kept.plain[0].conn.stream));
             assert_eq!(kept.flights.len(), 1);
-            assert!(Arc::ptr_eq(&kept.flights[0], &kept.idle[0].conn.flight));
+            assert!(Arc::ptr_eq(&kept.flights[0], &kept.plain[0].conn.flight));
         });
     }
 
@@ -2896,7 +3208,7 @@ mod tests {
                 "the node heard of a request that never went"
             );
             assert_eq!(state_of(&pool, "n1"), IDLE);
-            let kept = pool.idle.lock().unwrap()["n1"].idle.len();
+            let kept = pool.idle.lock().unwrap()["n1"].plain.len();
             assert_eq!(kept, 1, "its connection is the pool's again");
         });
 
@@ -3117,8 +3429,8 @@ mod tests {
             // is in -- with the answer it ended, or after.
             let started = Instant::now();
             loop {
-                let mut kept = pool.take(&addr, 0).unwrap();
-                let still = open(&mut kept.conn.stream);
+                let mut kept = pool.take::<Stream>(&addr, 0).unwrap();
+                let still = kept.conn.stream.is_open();
                 pool.put(&addr, kept);
                 if !still {
                     break;

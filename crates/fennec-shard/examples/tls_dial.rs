@@ -19,9 +19,10 @@
 //! connection to pays first -- to a node of each.
 //!
 //! A round of turns runs only once the machine's 1-minute load is under
-//! 2.5, the load each turn began at printed beside it: a figure made
-//! beside another's work is not one. The turns rotate round to round, and
-//! each figure printed last is its median over the rounds.
+//! 2.5 (`QUIET=`), the load each turn began at printed beside it: a figure
+//! made beside another's work is not one. Eight clients run a turn 3 s
+//! (`RUN=`). The turns rotate round to round, and each figure printed last
+//! is its median over the rounds.
 
 use fennec_http::tenants::{Replicated, Tenants};
 use fennec_shard::directory::Directory;
@@ -37,7 +38,10 @@ use std::time::{Duration, Instant};
 const ROWS: usize = 10_000;
 const ONE: usize = 20_000;
 const CLIENTS: usize = 8;
-const RUN: Duration = Duration::from_secs(3);
+/// How long the clients run a turn unless the fifth argument says.
+const RUN: f64 = 3.0;
+/// The 1-minute load a round waits to fall under unless the sixth
+/// argument says.
 const QUIET: f64 = 2.5;
 const LEASE_ROUNDS: usize = 200;
 const DIALS: usize = 200;
@@ -55,16 +59,16 @@ fn load() -> f64 {
     l[0]
 }
 
-/// Waits for the 1-minute load to fall under [`QUIET`], saying so.
-fn quiet() -> f64 {
+/// Waits for the 1-minute load to fall under `under`, saying so.
+fn quiet(under: f64) -> f64 {
     let mut said = false;
     loop {
         let l = load();
-        if l < QUIET {
+        if l < under {
             return l;
         }
         if !said {
-            eprintln!("waiting for the 1-minute load ({l:.2}) to fall under {QUIET}");
+            eprintln!("waiting for the 1-minute load ({l:.2}) to fall under {under}");
             said = true;
         }
         std::thread::sleep(Duration::from_secs(10));
@@ -236,8 +240,8 @@ fn one(port: u16) -> (f64, f64) {
     (took[ONE / 2], took[ONE * 99 / 100])
 }
 
-/// [`CLIENTS`] clients at once for [`RUN`]: requests a second.
-fn many(port: u16) -> f64 {
+/// [`CLIENTS`] clients at once for `run`: requests a second.
+fn many(port: u16, run: Duration) -> f64 {
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicU64::new(0));
     let threads: Vec<_> = (0..CLIENTS)
@@ -257,7 +261,7 @@ fn many(port: u16) -> f64 {
         })
         .collect();
     let started = Instant::now();
-    std::thread::sleep(RUN);
+    std::thread::sleep(run);
     stop.store(true, Ordering::Relaxed);
     for t in threads {
         t.join().unwrap();
@@ -287,7 +291,7 @@ struct Side {
 
 /// A turn: the side's router started over its directory, one client's
 /// round trips through it, then eight clients'.
-fn turn(side: &mut Side) {
+fn turn(side: &mut Side, run: Duration) {
     let mut args = vec![
         "--listen".to_string(),
         "127.0.0.1:0".into(),
@@ -299,7 +303,7 @@ fn turn(side: &mut Side) {
     let router = start(&side.bin, &args);
     let at = load();
     let (p50, p99) = one(router.port);
-    let rps = many(router.port);
+    let rps = many(router.port, run);
     println!(
         "  {:<14} p50 {p50:>6.1} us  p99 {p99:>6.1} us  {rps:>8.0} req/s  (load {at:.2})",
         side.name
@@ -405,12 +409,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(shard), Some(server)) = (args.first().cloned(), args.get(1).cloned()) else {
         eprintln!(
-            "usage: tls_dial <fennec-shard> <fennec-server> [<base fennec-shard>|- [rounds]]"
+            "usage: tls_dial <fennec-shard> <fennec-server> \
+             [<base fennec-shard>|- [rounds [seconds a turn [load under]]]]"
         );
         std::process::exit(2);
     };
     let base = args.get(2).filter(|b| b.as_str() != "-").cloned();
     let rounds: usize = args.get(3).map_or(5, |r| r.parse().unwrap());
+    let run = Duration::from_secs_f64(args.get(4).map_or(RUN, |s| s.parse().unwrap()));
+    let under: f64 = args.get(5).map_or(QUIET, |l| l.parse().unwrap());
     fennec_http::dial::trust_ca(&cert("ca.pem")).unwrap();
 
     let work = std::env::temp_dir().join(format!("fennec-tls-dial-{}", std::process::id()));
@@ -483,16 +490,17 @@ fn main() {
 
     println!(
         "a row by id over {ROWS} rows through the router: one client ({ONE} round trips), \
-         {CLIENTS} at once for {RUN:?}; the router's dial to its node plain or over TLS"
+         {CLIENTS} at once for {run:?}; the router's dial to its node plain or over TLS; \
+         each round begun under a 1-minute load of {under}"
     );
     let mut leases: [(Vec<f64>, Vec<f64>); 2] = Default::default();
     let mut dialed: [Vec<f64>; 2] = Default::default();
     for r in 0..rounds {
-        let at = quiet();
+        let at = quiet(under);
         println!("round {} (load {at:.2})", r + 1);
         let n = sides.len();
         for k in 0..n {
-            turn(&mut sides[(r + k) % n]);
+            turn(&mut sides[(r + k) % n], run);
         }
         for k in 0..2 {
             let tls = (r + k) % 2 == 1;
