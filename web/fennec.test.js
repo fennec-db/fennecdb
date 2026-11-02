@@ -581,6 +581,35 @@ test('an insert if absent says whether it wrote, in the module', { skip: wasm ? 
   assert.equal((await locks.first()).owner, 'a');
 });
 
+test('a text index beside a unique one, in the module: both answer, the unique one refusing every write', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  // Kept as the last one written, `@unique @text` was a text index alone.
+  db.run('create collection a (email text nocase @unique @text, tag text @text @hash)');
+  db.run('insert a {email: "x@y.z", tag: "red fox"}');
+  db.run('insert a {email: "p@q.r", tag: "blue"}');
+  for (const sql of ['insert a {email: "X@y.z"}', 'put a {email: "x@y.z"}', 'put a {id: 2, email: "x@Y.z"}', 'set a {email: "x@y.z"} where id = 2']) {
+    assert.throws(() => db.run(sql), /is unique/, sql);
+  }
+  assert.throws(() => db.run('put a $1', [[{ email: 'x@y.Z' }]]), /is unique/);
+  await assert.rejects(db.from('a').insert({ email: 'X@Y.Z' }), /is unique/);
+  const refused = await db.batch([['insert a {email: $1}', ['n@x.y']], ['insert a {email: $1}', ['N@x.y']]]).catch((e) => e);
+  assert.equal(refused.at, 1);
+  assert.equal(db.rows('get a count')[0].count, 2);
+  // The upsert finds the row by its unique value.
+  assert.equal(db.run('put a {email: "X@Y.Z", tag: "green"} if absent else set {tag: new.tag}').count, 1);
+  assert.deepEqual(db.rows('get a select tag where id = 1'), [{ tag: 'green' }]);
+  assert.deepEqual(db.rows('get a select id match email "p"').map((r) => r.id), [2]);
+  assert.deepEqual(db.rows('get a select id match tag "green"').map((r) => r.id), [1]);
+  // Both in every schema answer, and in the FennecQL that makes it.
+  const text = 'text(k1=0.9, b=0.4)';
+  assert.deepEqual(db.schemas()[0].fields.map((f) => [f.name, f.index, f.also]), [['email', 'unique', text], ['tag', 'hash', text]]);
+  assert.equal(db.describe('fennecql').fennecql, `create collection a (email text nocase @unique @${text}, tag text @hash @${text})\n`);
+  // Any other second index is refused where it is declared.
+  assert.throws(() => db.run('create collection b (k text @unique @sorted)'), /`k` has two indexes it cannot keep together/);
+  db.close();
+});
+
 test('points in the module: kept as written, a radius, a box and the nearest', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

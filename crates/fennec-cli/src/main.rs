@@ -993,6 +993,10 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         IndexKind::Inverted => "  @inverted".into(),
                         IndexKind::Geo => "  @geo".into(),
                     };
+                    let ix = match f.beside {
+                        Some(sp) => format!("{ix} @text({})", sp.args()),
+                        None => ix,
+                    };
                     let mut ty = match f.collate {
                         Some(c) => format!("{} collate {}", f.ty.name(), c.name()),
                         None => f.ty.name().to_string(),

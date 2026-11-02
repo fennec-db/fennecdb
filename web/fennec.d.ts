@@ -113,6 +113,8 @@ export interface FieldDescription {
   /** `nocase`: compared by its case fold, kept as written. */
   nocase?: true;
   index?: IndexDescription;
+  /** The `text` index a text field keeps beside a `hash`, `unique` or `sorted` index of its own. */
+  also?: IndexDescription;
   /** Indexes on paths into a json field. */
   paths?: { path: string; index: IndexDescription }[];
 }
@@ -1196,7 +1198,8 @@ export type TypedCall<T extends Statements> = <K extends keyof T & string>(
 /** Schema information from the `collections` output. */
 export interface SchemaInfo {
   name: string;
-  fields: { name: string; type: string; index?: string }[];
+  /** `also`: the `text(...)` index a field keeps beside its own `index`. */
+  fields: { name: string; type: string; index?: string; also?: string }[];
 }
 
 /** Remote endpoint options. Without `fetch`, `globalThis.fetch` is used. */

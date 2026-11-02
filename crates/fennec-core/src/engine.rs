@@ -721,8 +721,10 @@ enum Undo {
     /// A collection dropped, with where its name stood among the others: it
     /// comes back as it was.
     Dropped(Box<Collection>, usize),
-    /// An index built over a collection's field: it goes.
-    Indexed(u32, usize),
+    /// An index built over a collection's field: it goes, and the field
+    /// keeps what it had -- `true` where it was the `@text` beside the
+    /// field's own, its text index otherwise its own again.
+    Indexed(u32, usize, bool),
     /// An index built on a path into a json field, by the path: it goes.
     PathIndexed(u32, String),
     /// A collection's fields changed: the schema before, and the indexes
@@ -1534,6 +1536,35 @@ impl<T> std::ops::Index<&str> for Fields<T> {
 /// way, as the documents it could not read are still there.
 pub struct Derived<T>(Once<Result<T>>);
 
+/// Which derived index of a field [`Database::warm_index`] builds. A text
+/// field keeps a `@hash`, `@unique` or `@sorted` index and a `@text` one
+/// beside it, and each is built under a hold of the read lock of its own,
+/// so a writer waits out one build, never both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedKind {
+    Hash,
+    Text,
+    Sorted,
+    Sparse,
+    Geo,
+    /// An index over several fields, named by its fields joined by `+`.
+    Composite,
+}
+
+impl DerivedKind {
+    /// Its name in a log line.
+    pub fn name(self) -> &'static str {
+        match self {
+            DerivedKind::Hash => "hash",
+            DerivedKind::Text => "text",
+            DerivedKind::Sorted => "ordered",
+            DerivedKind::Sparse => "sparse",
+            DerivedKind::Geo => "geo",
+            DerivedKind::Composite => "composite",
+        }
+    }
+}
+
 /// What holds a derived index: a lock natively, where a second reader
 /// waits for the first one's build; a cell in the browser, which has one
 /// thread and so nothing to wait for. Through the lock each index type's
@@ -1670,6 +1701,11 @@ impl Collection {
                 }
                 _ => {}
             }
+            // The `@text` beside its own index (`@unique @text`).
+            #[cfg(feature = "text")]
+            if let Some(spec) = f.beside {
+                texts.insert(f.name.clone(), Derived::new(TextIndex::new(spec)));
+            }
         }
         let mut store = Store::new();
         store.set_dropped(&schema.dropped);
@@ -1746,6 +1782,10 @@ impl Collection {
                     self.geo.push((f.name.clone(), Derived::unbuilt()));
                 }
                 _ => {}
+            }
+            #[cfg(feature = "text")]
+            if f.beside.is_some() {
+                self.texts.insert(f.name.clone(), Derived::unbuilt());
             }
         }
         self.composites.clear();
@@ -2032,33 +2072,34 @@ impl Collection {
         }
     }
 
-    /// The fields whose hash, text, ordered or sparse index nothing has
-    /// built yet, in that order of kinds.
-    pub fn unbuilt(&self) -> Vec<String> {
+    /// The hash, text, ordered, sparse, point and composite indexes nothing
+    /// has built yet, in that order of kinds, each by its field and kind: a
+    /// field with two is listed twice.
+    pub fn unbuilt(&self) -> Vec<(String, DerivedKind)> {
         let mut out = Vec::new();
         for (name, d) in self.hashes.iter() {
             if d.0.get().is_none() {
-                out.push(name.clone());
+                out.push((name.clone(), DerivedKind::Hash));
             }
         }
         for (name, d) in self.texts.iter() {
             if d.0.get().is_none() {
-                out.push(name.clone());
+                out.push((name.clone(), DerivedKind::Text));
             }
         }
         for (name, d) in &self.sorted {
             if d.0.get().is_none() {
-                out.push(name.clone());
+                out.push((name.clone(), DerivedKind::Sorted));
             }
         }
         for (name, d) in &self.sparse {
             if d.0.get().is_none() {
-                out.push(name.clone());
+                out.push((name.clone(), DerivedKind::Sparse));
             }
         }
         for (name, d) in &self.geo {
             if d.0.get().is_none() {
-                out.push(name.clone());
+                out.push((name.clone(), DerivedKind::Geo));
             }
         }
         // An index over several fields by its fields joined by `+`
@@ -2069,24 +2110,29 @@ impl Collection {
             .filter(|_| cfg!(feature = "composite"))
         {
             if d.0.get().is_none() {
-                out.push(c.name());
+                out.push((c.name(), DerivedKind::Composite));
             }
         }
         out
     }
 
-    /// Builds whichever derived index `field` has, as its first read would:
-    /// a field's, or an index over several fields by its name.
-    pub fn warm(&self, field: &str) -> Result<()> {
-        self.hash(field)?;
-        self.text(field)?;
-        self.sorted_index(field)?;
-        self.sparse_index(field)?;
-        self.geo_index(field)?;
-        if let Some(i) = self.composites.iter().position(|(c, _)| c.name() == field) {
-            self.composite(i)?;
+    /// Builds the `kind` index of `field` alone, as its first read would: a
+    /// field's, or an index over several fields by its name. Nothing
+    /// happens where it has none of that kind.
+    pub fn warm(&self, field: &str, kind: DerivedKind) -> Result<()> {
+        match kind {
+            DerivedKind::Hash => self.hash(field).map(drop),
+            DerivedKind::Text => self.text(field).map(drop),
+            DerivedKind::Sorted => self.sorted_index(field).map(drop),
+            DerivedKind::Sparse => self.sparse_index(field).map(drop),
+            DerivedKind::Geo => self.geo_index(field).map(drop),
+            DerivedKind::Composite => {
+                match self.composites.iter().position(|(c, _)| c.name() == field) {
+                    Some(i) => self.composite(i).map(drop),
+                    None => Ok(()),
+                }
+            }
         }
-        Ok(())
     }
 
     /// The point index on `field`, built as [`Self::hash`] is.
@@ -2105,7 +2151,7 @@ impl Collection {
         let (Some(d), Some(pos)) = (self.texts.get(field), self.schema.field_pos(field)) else {
             return Ok(None);
         };
-        let IndexKind::Text(spec) = self.schema.fields[pos].index else {
+        let Some(spec) = self.schema.fields[pos].text_index() else {
             return Ok(None);
         };
         d.or_build(|| text_of(&self.store, pos, spec)).map(Some)
@@ -2884,11 +2930,20 @@ const EVERY_INDEX: bool = cfg!(all(
 /// together here from parts passed in, it cost the module with every index
 /// 197 bytes brotli. That module asks nothing, since the lookup of the field
 /// is a loop the compiler cannot prove ends, and it would stay in.
-fn not_built_on(c: &Collection, field: &str, what: &str) -> Option<Error> {
+///
+/// The feature named is the index's the statement reads -- for a `match`
+/// (`text`) the field's text index, its own or beside another, for a
+/// `near` its own -- never the field's other one: `match` over a `@sorted
+/// @text` field in a build with neither names `text`, not `sorted`.
+fn not_built_on(c: &Collection, field: &str, what: &str, text: bool) -> Option<Error> {
     if EVERY_INDEX {
         return None;
     }
-    let feature = missing_feature(&c.schema.field(field)?.index)?;
+    let f = c.schema.field(field)?;
+    let feature = match text {
+        true => missing_feature(&IndexKind::Text(f.text_index()?)),
+        false => missing_feature(&f.index),
+    }?;
     Some(not_built(&format!("field `{field}`'s {what}"), feature))
 }
 
@@ -4132,39 +4187,41 @@ impl Database {
         self.order.clone()
     }
 
-    /// The hash, text, ordered and sparse indexes nothing has built since
-    /// the open, as `(collection, field)` in collection order -- those
-    /// `only` names when it names any: a collection (`products`) or one of
-    /// its fields (`products.description`). What [`Self::warm_index`] builds
-    /// one at a time.
-    pub fn unbuilt_indexes(&self, only: &[String]) -> Vec<(String, String)> {
+    /// The hash, text, ordered, sparse, point and composite indexes nothing
+    /// has built since the open, as `(collection, field, kind)` in
+    /// collection order -- those `only` names when it names any: a
+    /// collection (`products`) or one of its fields
+    /// (`products.description`). A field keeping two is listed twice, once
+    /// a kind. What [`Self::warm_index`] builds one at a time.
+    pub fn unbuilt_indexes(&self, only: &[String]) -> Vec<(String, String, DerivedKind)> {
         let mut out = Vec::new();
         for name in &self.order {
             let Some(c) = self.collections.get(name) else {
                 continue;
             };
-            for field in c.unbuilt() {
+            for (field, kind) in c.unbuilt() {
                 let named = only.is_empty()
                     || only.iter().any(|o| match o.split_once('.') {
                         Some((col, f)) => col == name && f == field,
                         None => o == name,
                     });
                 if named {
-                    out.push((name.clone(), field));
+                    out.push((name.clone(), field, kind));
                 }
             }
         }
         out
     }
 
-    /// Builds the derived index on `collection.field`, as the first read of
+    /// Builds the `kind` index on `collection.field`, as the first read of
     /// it would: under the read lock a server holds, so reads go on beside
     /// it and a reader that needs it waits for this build rather than
-    /// starting its own. A collection or field gone since it was listed is
-    /// passed over.
-    pub fn warm_index(&self, collection: &str, field: &str) -> Result<()> {
+    /// starting its own. One index a call, so a field with two is two
+    /// holds of the lock (CLAUDE.md, `--warm`). A collection or field gone
+    /// since it was listed is passed over.
+    pub fn warm_index(&self, collection: &str, field: &str, kind: DerivedKind) -> Result<()> {
         match self.collections.get(collection) {
-            Some(c) => c.warm(field),
+            Some(c) => c.warm(field, kind),
             None => Ok(()),
         }
     }
@@ -4175,8 +4232,8 @@ impl Database {
     /// not pay for its index. Answers how many it built.
     pub fn warm(&self, only: &[String]) -> Result<usize> {
         let todo = self.unbuilt_indexes(only);
-        for (c, f) in &todo {
-            self.warm_index(c, f)?;
+        for (c, f, kind) in &todo {
+            self.warm_index(c, f, *kind)?;
         }
         Ok(todo.len())
     }
@@ -5780,18 +5837,26 @@ impl Database {
                 "a schema change moved the fields of `{name}`"
             )));
         }
-        // `create index` adds one -- on a field, or on a path -- and
-        // anything else rebuilds them all.
-        let changed: Vec<usize> = (0..schema.fields.len())
-            .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
-            .collect();
-        let added = changed
-            .iter()
-            .all(|&i| c.schema.fields[i].index == IndexKind::None);
+        // `create index` adds one -- on a field, beside a field's other,
+        // or on a path -- and anything else rebuilds them all. A field's
+        // text index and its own are two: one added beside the other
+        // leaves that one as it is.
+        let mut added = true;
+        let mut builds = Vec::new();
+        for (i, (was, now)) in c.schema.fields.iter().zip(&schema.fields).enumerate() {
+            if was.own_index() != now.own_index() {
+                added &= *was.own_index() == IndexKind::None;
+                builds.push((i, now.own_index().clone()));
+            }
+            if was.text_index() != now.text_index() {
+                added &= was.text_index().is_none();
+                builds.push((i, now.text_index().map_or(IndexKind::None, IndexKind::Text)));
+            }
+        }
         c.schema = SchemaCell::new(schema);
         if added {
-            for i in changed {
-                build_index(c, i)?;
+            for (i, kind) in builds {
+                build_kind(c, i, kind)?;
             }
             // A path's, and an index over several fields, built by the
             // first read.
@@ -6183,12 +6248,26 @@ impl Database {
                     self.collections.insert(name, *c);
                     of = None;
                 }
-                Undo::Indexed(cid, pos) => {
+                Undo::Indexed(cid, pos, beside) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
-                        let f = c.schema.fields[pos].name.clone();
-                        drop(c.take_indexes(&f));
-                        SchemaCell::make_mut(&mut c.schema).fields[pos].index = IndexKind::None;
+                        let field = &mut SchemaCell::make_mut(&mut c.schema).fields[pos];
+                        let f = field.name.clone();
+                        // What it kept before the one built: its own index
+                        // beside the text one that goes, or the text one,
+                        // its own again, beside the own one that goes.
+                        let text = field.beside.take();
+                        if !beside {
+                            field.index = text.map_or(IndexKind::None, IndexKind::Text);
+                        }
+                        let kept = text.filter(|_| !beside).and_then(|_| c.texts.remove(&f));
+                        match beside {
+                            true => drop(c.texts.remove(&f)),
+                            false => drop(c.take_indexes(&f)),
+                        }
+                        if let Some(ix) = kept {
+                            c.texts.insert(f, ix);
+                        }
                     }
                 }
                 Undo::PathIndexed(cid, path) => {
@@ -7398,7 +7477,10 @@ impl Database {
         let no_field = |f: &str| Error::NotFound(format!("field `{f}` in `{collection}`"));
         let (op, field, to) = match change {
             Alter::AddField(f) => {
-                if let Some(feature) = missing_feature(&f.index) {
+                let text = f.beside.map(IndexKind::Text);
+                if let Some(feature) =
+                    missing_feature(&f.index).or_else(|| missing_feature(text.as_ref()?))
+                {
                     return Err(not_built("the index", feature));
                 }
                 if f.required {
@@ -7554,14 +7636,18 @@ impl Database {
             build_path_index(c, field)?;
         } else {
             let pos = c.schema.field_pos(field).unwrap();
-            SchemaCell::make_mut(&mut c.schema).fields[pos].index = kind.resolved();
+            // Its own, or the `@text` beside it: `check_index` asked which.
+            let f = &mut SchemaCell::make_mut(&mut c.schema).fields[pos];
+            let had = f.beside;
+            f.add_index(kind.resolved())?;
+            let beside = had != f.beside && matches!(kind, IndexKind::Text(_));
             // Before the build, which a block that does not land -- or a
             // build that fails -- puts back with it.
             if let Some(b) = &mut self.block {
-                b.was.push(Undo::Indexed(cid, pos));
+                b.was.push(Undo::Indexed(cid, pos, beside));
             }
             let c = self.collections.get_mut(collection).unwrap();
-            build_index(c, pos)?;
+            build_kind(c, pos, kind.resolved())?;
         }
         let c = self.collections.get_mut(collection).unwrap();
         // Over documents that hold a value twice, a unique index is refused
@@ -9138,7 +9224,7 @@ impl Database {
             }
         }
         let ix = c.vectors.get(&near.field).ok_or_else(|| {
-            not_built_on(c, &near.field, "vector index").unwrap_or_else(|| {
+            not_built_on(c, &near.field, "vector index", false).unwrap_or_else(|| {
                 Error::Query(format!(
                     "field `{}` has no vector index (declare it with @hnsw)",
                     near.field
@@ -9672,7 +9758,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         let ix = c.text(&m.field)?.ok_or_else(|| {
-            not_built_on(c, &m.field, "full-text index").unwrap_or_else(|| {
+            not_built_on(c, &m.field, "full-text index", true).unwrap_or_else(|| {
                 Error::Query(format!(
                     "field `{}` has no full-text index (declare it with @text)",
                     m.field
@@ -10752,15 +10838,15 @@ impl Database {
         m: &Match,
         ctx: &EvalCtx,
     ) -> Result<(Option<crate::highlight::Terms>, Vec<MarkPlan>)> {
-        let index = c.schema.field(&m.field).map(|f| &f.index);
-        let (true, Some(IndexKind::Text(spec)), Value::Text(query)) = (
+        let index = c.schema.field(&m.field).and_then(|f| f.text_index());
+        let (true, Some(spec), Value::Text(query)) = (
             cfg!(feature = "text"),
             index,
             eval(&m.query, &mut NoRow, ctx)?,
         ) else {
             return Ok((None, Vec::new()));
         };
-        let mut terms = crate::highlight::Terms::new(&query, *spec);
+        let mut terms = crate::highlight::Terms::new(&query, spec);
         if m.fuzzy > 0 || m.prefix {
             if let Some(ix) = c.text(&m.field)? {
                 for w in ix.loose_words(&query, m.loose())? {
@@ -11832,15 +11918,27 @@ fn sparse_of(store: &Store, pos: usize) -> Result<SparseIndex> {
 /// inlined into each it was 2.2 KB more of it.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    build_kind(c, pos, c.schema.fields[pos].index.clone())?;
+    if let Some(spec) = c.schema.fields[pos].beside {
+        build_kind(c, pos, IndexKind::Text(spec))?;
+    }
+    Ok(())
+}
+
+/// Builds one of the indexes the field at `pos` keeps, `kind`, as
+/// [`build_index`] builds them all: what `create index` does, which adds
+/// one beside the field's other and builds that one alone.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn build_kind(c: &mut Collection, pos: usize, kind: IndexKind) -> Result<()> {
     // An index this build lacks is not built: a file's log replays the
     // `create index` that made it, and the file opens all the same. Asked
     // after `EVERY_INDEX`, or the bounds check of the lookup stays in the
     // module that has every index.
-    if !EVERY_INDEX && missing_feature(&c.schema.fields[pos].index).is_some() {
+    if !EVERY_INDEX && missing_feature(&kind).is_some() {
         return Ok(());
     }
     let field = c.schema.fields[pos].name.clone();
-    match c.schema.fields[pos].index.clone() {
+    match kind {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash { .. } => {
             let fold = c.schema.fields[pos].case_fold();

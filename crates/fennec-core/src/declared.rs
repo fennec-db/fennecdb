@@ -293,7 +293,7 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
     only(
         o,
         &[
-            "name", "type", "required", "collate", "nocase", "index", "paths",
+            "name", "type", "required", "collate", "nocase", "index", "also", "paths",
         ],
         "a field",
     )?;
@@ -319,6 +319,10 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
     }
     if let Some(ix) = member(o, "index").filter(|v| !matches!(v, Value::Null)) {
         f = f.indexed(index(ix, &at)?);
+    }
+    // The `@text` beside its own, held to the rule a statement is.
+    if let Some(ix) = member(o, "also").filter(|v| !matches!(v, Value::Null)) {
+        f.add_index(index(ix, &at)?)?;
     }
     let mut paths = Vec::new();
     for p in list(member(o, "paths"), "paths")? {
@@ -601,6 +605,10 @@ pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
                 out.push_str(",\"index\":");
                 index_json(&mut out, &f.index);
             }
+            if let Some(spec) = f.beside {
+                out.push_str(",\"also\":");
+                index_json(&mut out, &IndexKind::Text(spec));
+            }
             let mut paths = paths_of(s, &f.name).peekable();
             if paths.peek().is_some() {
                 out.push_str(",\"paths\":[");
@@ -763,6 +771,11 @@ pub fn field_text(f: &Field, required: bool) -> String {
     if let Some(ix) = index_text(&f.index) {
         s.push(' ');
         s.push_str(&ix);
+    }
+    if let Some(spec) = f.beside {
+        s.push_str(" @text(");
+        s.push_str(&spec.args());
+        s.push(')');
     }
     s
 }
@@ -1061,7 +1074,12 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 fix_rebuild::<FOLLOW>(c, &f.name),
             );
         }
-        index_plan::<FOLLOW>(p, c, &f.name, &g.index, &f.index);
+        // Its own index and its text one, each as an index of its own:
+        // one added beside the other is its `create index`. Two calls: a
+        // loop over the pairs was 224 bytes more of the browser module.
+        index_plan::<FOLLOW>(p, c, &f.name, g.own_index(), f.own_index());
+        let text = |x: &Field| x.text_index().map_or(IndexKind::None, IndexKind::Text);
+        index_plan::<FOLLOW>(p, c, &f.name, &text(g), &text(f));
         // The paths into a json field, each as a field of its own.
         for q in d.paths.iter().filter(|q| under(q, &f.name)) {
             let had = s.path(&q.name).map_or(&IndexKind::None, |h| &h.index);

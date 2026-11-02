@@ -306,7 +306,7 @@ fn fennec(out: &mut Out, dist: &str, data: &[(f64, f64)], qs: &[(f64, f64)]) {
         db.load(&image).unwrap();
         let before = db.memory_bytes();
         let at = Instant::now();
-        db.warm_index("p", "loc").unwrap();
+        db.warm_index("p", "loc", DerivedKind::Geo).unwrap();
         builds.push(at.elapsed().as_secs_f64() * 1e3);
         grown = db.memory_bytes() - before;
     }
@@ -385,7 +385,7 @@ fn fennec(out: &mut Out, dist: &str, data: &[(f64, f64)], qs: &[(f64, f64)]) {
             })
             .unwrap();
     }
-    sorted.warm_index("s", "f").unwrap();
+    sorted.warm_index("s", "f", DerivedKind::Sorted).unwrap();
     let put = fennec_ql::parse_one("put p {loc: $1}").unwrap();
     let put_f = fennec_ql::parse_one("put s {f: $1}").unwrap();
     let mut r = Rng(9);

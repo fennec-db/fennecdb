@@ -398,6 +398,12 @@ pub fn response_to_string(r: &Response) -> String {
                         }
                         .as_str(),
                     );
+                    // The `@text` beside it, only where there is one.
+                    if let Some(spec) = f.beside {
+                        out.push_str(",\"also\":\"text(");
+                        out.push_str(&spec.args());
+                        out.push_str(")\"");
+                    }
                     out.push('}');
                 }
                 out.push(']');

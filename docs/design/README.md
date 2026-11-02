@@ -22,7 +22,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
-- [indexes.md](indexes.md) -- `@unique`, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
+- [indexes.md](indexes.md) -- `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
 - [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms
@@ -189,3 +189,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 145. [A token is taken only from the issuers, for the audiences and clients, a server was told](access.md#whom-a-token-is-for) (added after the move, under *Access*)
 146. [A chunked body grows as it comes, held to the ceiling](http.md#chunked-bodies) (added after the move, under *The HTTP server*)
 147. [`--tls-cert` and `--tls-key` make a listener HTTPS alone](http.md#tls) (added after the move, under *The HTTP server*)
+148. [A field keeps one index, and a text field `@text` beside a `@hash`, `@unique` or `@sorted`](indexes.md#two-indexes-on-a-field) (added after the move, under *Indexes*)

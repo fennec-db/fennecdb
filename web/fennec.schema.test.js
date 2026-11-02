@@ -163,7 +163,7 @@ test('an index over several fields declares what FennecQL does', { skip }, async
 
 test('what fennecdb cannot hold is refused as it is declared', () => {
   const refused = (fn, why) => assert.throws(fn, (e) => e instanceof FennecError && why.test(e.message), String(why));
-  refused(() => fennecTable('t', { a: text().unique() }, (t) => [index().on(t.a)]), /two indexes: fennecdb takes one a field/);
+  refused(() => fennecTable('t', { a: text().unique() }, (t) => [index().on(t.a)]), /two indexes: fennecdb keeps one a field, and a text one beside/);
   refused(() => fennecTable('t', { a: text() }, (t) => [index('x').on(t.a), index('x').using('hash', t.a)]), /names two indexes x/);
   refused(() => fennecTable('t', { id: integer() }), /an `id` of its own/);
   refused(() => fennecTable('t', { 'a b': integer() }), /not a FennecQL name/);

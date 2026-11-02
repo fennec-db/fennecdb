@@ -263,7 +263,8 @@ export function mount(host, ctx) {
     );
     const rows = c.fields.map((f) => {
       const kinds = S.indexKinds(f.type);
-      const idx = f.index ? indexText(f.index) : null;
+      // Its own index and the text one beside it (`also`).
+      const idx = [f.index, f.also].filter(Boolean).map(indexText).join(' ') || null;
       const paths = (f.paths ?? []).map((p) => `${f.name}.${p.path} ${indexText(p.index)}`);
       return h(
         'tr',

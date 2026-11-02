@@ -69,7 +69,7 @@ const skip = missing ? `needs ${missing}` : false;
 
 test('statements: the same rows, counts, messages and refusals', { skip }, async () => {
   // A schema of every kind of field, index and option the views read.
-  await q('create collection docs (title text required @text, lang text @hash, code text @unique, n int @sorted, at timestamp @ttl(30d), tags [text], meta json, name text collate tr, emb vector<4> @hnsw(cosine, quant=int8))');
+  await q('create collection docs (title text required @text, lang text @hash, code text @unique, n int @sorted, at timestamp @ttl(30d), tags [text], meta json, name text collate tr, emb vector<4> @hnsw(cosine, quant=int8), email text nocase @unique @text)');
   await q('create index on docs (meta.src) @hash');
   await q('create collection notes (doc int @hash, body text)');
   const rows = Array.from({ length: 30 }, (_, i) => ({
@@ -168,6 +168,10 @@ test('the schema: described, as FennecQL, and the plan of a change', { skip }, a
   await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [changed] }));
   await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [{ ...docs, fields: docs.fields.slice(1) }] }));
   await same('POST', '/_schema/plan', 'not json');
+  // The text index a field keeps beside its own, taken off.
+  const plain = structuredClone(docs);
+  delete plain.fields.find((f) => f.name === 'email').also;
+  await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [plain] }));
   // An index over several fields, made by the plan, and taken off.
   const notes = described.collections.find((c) => c.name === 'notes');
   const keyed = structuredClone(notes);
