@@ -3837,9 +3837,18 @@ pub struct Database {
     woken: bound::Woken,
     /// The binding that refused the last write refused by one, for the
     /// server to tell ([`Self::woken`]); let go of as the next statement
-    /// ends, or a block starts (`Woken::due`).
+    /// ends, or a block starts ([`Self::bound_due`]).
     #[cfg(feature = "statements")]
     refused_by: Option<String>,
+    /// Whether the statement ending has a binding's work to settle: it
+    /// asked a binding's conditions (`bind` held some), or the statement
+    /// before it was refused by one ([`Self::refused_by`]). Set on the
+    /// bound path alone, and the one look [`Self::run_one`] pays for
+    /// bindings as a statement ends -- a flag of the database's own, where
+    /// it lies beside the other flags: in `Woken` it grew that by a word,
+    /// moving the fields after it, and a `del` by id measured +5 to +27%.
+    #[cfg(feature = "statements")]
+    bound_due: bool,
     /// The calls running over this database, a write's under its lock and
     /// reads' beside each other: while none runs, a statement asks nothing
     /// more of `--call-max-rows` ([`Self::set_call_max_rows`]), and while
@@ -3925,6 +3934,8 @@ impl Database {
             woken: bound::Woken::default(),
             #[cfg(feature = "statements")]
             refused_by: None,
+            #[cfg(feature = "statements")]
+            bound_due: false,
             #[cfg(feature = "statements")]
             calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
@@ -6452,7 +6463,7 @@ impl Database {
         // statement that woke no row, after one no binding refused, looks
         // at a byte, and nothing else of a binding's as it starts.
         #[cfg(feature = "statements")]
-        let out = match self.woken.due {
+        let out = match self.bound_due {
             false => out,
             true => self.ended(out),
         };

@@ -17,7 +17,7 @@
 //! whose block is put back as any block whose statement fails.
 //!
 //! A collection no statement is bound to pays the byte's look a writing
-//! statement, and `run_one` one more, [`Woken::due`], as it ends: no look
+//! statement, and `run_one` one more, `Database::bound_due`, as it ends: no look
 //! as a statement starts and none a row (`Database::erase` keeps a
 //! `del`'s row where it reads it, and a `put`'s row asks `wake` beside a
 //! `returning`'s look); nothing here is on its path.
@@ -56,13 +56,6 @@ pub(super) struct Woken {
     /// `now()`, read as the first row is asked a condition: the one time
     /// every condition and every run of the write reads.
     now: Option<i64>,
-    /// Whether the statement ending has a binding's work to settle: a row
-    /// kept, or the note of a binding that refused the statement before
-    /// ([`Database::woken`]). Set on the bound path alone, and the one look
-    /// [`Database::run_one`] pays as a statement ends, in place of the
-    /// rows' length there and the rows' and the note's as each statement
-    /// started.
-    pub(super) due: bool,
 }
 
 /// A row that woke a binding: as written (`new.`), as it stood (`old.`),
@@ -157,7 +150,6 @@ impl Woken {
             old: old.filter(|_| sides & OLD_SIDE != 0).cloned(),
             passed,
         });
-        self.due = true;
         Ok(())
     }
 }
@@ -273,11 +265,12 @@ impl Database {
         w.schema = Some(schema);
         w.rows.clear();
         w.now = None;
+        self.bound_due = true;
         Ok(true)
     }
 
     /// The statement `out` answered has ended with a binding's work due
-    /// ([`Woken::due`]): the note of the statement before let go of, and
+    /// (`Database::bound_due`): the note of the statement before let go of, and
     /// where it woke rows and succeeded, their bindings run, its answer
     /// standing only where every run did; where it failed, the rows are
     /// let go of with the block its caller puts back. Rows a panic left
@@ -289,6 +282,7 @@ impl Database {
     #[cold]
     #[inline(never)]
     pub(super) fn ended(&mut self, out: Result<Response>) -> Result<Response> {
+        self.bound_due = false;
         self.refused_by = None;
         let w = std::mem::take(&mut self.woken);
         if w.rows.is_empty() {
@@ -303,7 +297,7 @@ impl Database {
     /// server to tell, and let go of as the next statement ends.
     fn refused(&mut self, name: &str) {
         self.refused_by = Some(name.to_string());
-        self.woken.due = true;
+        self.bound_due = true;
     }
 
     /// The bindings `w`'s rows woke, run: each hook asked first whether
@@ -376,9 +370,9 @@ impl Database {
     /// bindings. A lone statement settles as it ends ([`Self::ended`]).
     #[inline]
     pub(super) fn settle_woken(&mut self) {
-        if self.woken.due {
+        if self.bound_due {
             self.woken.rows.clear();
-            self.woken.due = false;
+            self.bound_due = false;
             self.refused_by = None;
         }
     }
