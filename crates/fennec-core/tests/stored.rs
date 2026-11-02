@@ -694,10 +694,9 @@ fn a_binding_s_text_in_a_callable_record_is_marked_broken() {
 //
 // F2's slice 2 (named-statements.md, *F2 in slices*): a binding's record,
 // op 3, kept and applied as op 1 is, the collections it binds masked, and
-// the writes it binds refused by every build -- nothing runs a binding
-// before slice 3, and a write landing without its rows is the one thing a
-// binding must never let happen. Every way in refuses its definition; a
-// test lets one through (`Database::allow_bindings`).
+// the writes it binds refused by a build that runs none and by a binding
+// broken or unread -- a write landing without its rows is the one thing a
+// binding must never let happen. Slice 3 runs them (`tests/bound.rs`).
 
 /// A statement bound to the rows `entries` makes, over the fixture's
 /// schema.
@@ -705,11 +704,9 @@ const BINDING: &str = "create statement credit after insert entries where new.am
   comment 'Credits the account an entry names'
 as set accounts {balance: balance + new.amount} where id = new.dst";
 
-/// A database over the fixture's schema where a binding may be defined.
+/// A database over the fixture's schema.
 fn binding(tap: &Tap) -> Database {
-    let mut db = schema(tap);
-    db.allow_bindings();
-    db
+    schema(tap)
 }
 
 /// `file` with the binding after its records, once, as this build writes
@@ -722,7 +719,6 @@ fn with_binding(file: Vec<u8>) -> Vec<u8> {
     let mut db = tap.database();
     db.load(&file).unwrap();
     if db.statements().get("credit").is_none() {
-        db.allow_bindings();
         run(&mut db, BINDING).unwrap();
     }
     tap.bytes()
@@ -767,21 +763,7 @@ fn bound_record(name: &str, text: &str, collection: &str, events: u8, change: u6
 }
 
 #[test]
-fn every_way_in_refuses_a_binding_until_the_engine_runs_one() {
-    let tap = Tap::default();
-    let mut db = schema(&tap);
-    let writes = tap.writes.lock().unwrap().len();
-    let e = refused(run(&mut db, BINDING));
-    assert!(
-        e.contains("write-bound statements are not built yet"),
-        "{e}"
-    );
-    assert!(db.statements().is_empty());
-    assert_eq!(tap.writes.lock().unwrap().len(), writes, "nothing written");
-}
-
-#[test]
-fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_are_refused() {
+fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_run_it() {
     let tap = Tap::default();
     let mut db = binding(&tap);
     run(&mut db, "put accounts {owner: \"ann\", balance: 10}").unwrap();
@@ -813,71 +795,38 @@ fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_are_refused() {
     assert_eq!(names, ["credit"]);
     assert_eq!((mask(&db, "entries"), mask(&db, "accounts")), (1, 0));
 
-    // Nothing runs it yet: a write that may make a row of `entries` is
-    // refused before it changes anything -- an `insert` and a `put`
-    // alike, alone or in a block, which is put back whole.
+    // The write it binds runs it, in its block: the entry and the credit
+    // land as one record, or neither does.
     let writes = tap.writes.lock().unwrap().len();
-    for w in [
-        "insert entries {src: 1, dst: 1, amount: 5}",
-        "put entries {src: 1, dst: 1, amount: 5}",
-    ] {
-        let e = run(&mut db, w).unwrap_err();
-        let says = "the write would wake `credit`, bound after `insert` on `entries`";
-        assert!(
-            matches!(&e, Error::Query(m) if m.contains(says) && m.contains("not run yet")),
-            "{w}: {e}"
-        );
-    }
-    let e = refused(block(
-        &mut db,
-        "put accounts {owner: \"bob\", balance: 1}; insert entries {src: 1, dst: 1, amount: 5}",
-    ));
-    assert!(e.contains("credit"), "{e}");
-    assert_eq!(tap.writes.lock().unwrap().len(), writes, "nothing landed");
-    assert_eq!(db.change_seq(), seq);
-    // What it is not bound to is written as ever: `entries`' sets and
-    // deletes, and every other collection.
+    run(&mut db, "insert entries {src: 1, dst: 1, amount: 5}").unwrap();
+    assert_eq!(tap.writes.lock().unwrap().len(), writes + 1, "one record");
+    assert_eq!(db.change_seq(), seq + 2, "two writes in it");
+    let balance = |db: &mut Database| match run(db, "get accounts select balance where id = 1") {
+        Ok(Response::Rows(rs)) => rs.rows[0].values[0].clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(balance(&mut db), Value::Int(15));
+    // What it is not bound to wakes nothing: `entries`' sets and deletes,
+    // and every other collection.
     run(
         &mut db,
         "set entries {amount: 1} where src = 1; del entries where src = 1; put accounts {owner: \
          \"cy\", balance: 1}",
     )
     .unwrap();
+    assert_eq!(balance(&mut db), Value::Int(15));
     // Never called: its values are a row's.
     let e = refused(run(&mut db, "call credit"));
     let says =
         "statement `credit` is bound after `insert` on `entries`: the writes it binds run it";
     assert!(e.contains(says), "{e}");
 
-    // Dropped, the writes it bound land.
+    // Dropped, the writes it bound wake nothing.
     run(&mut db, "drop statement credit").unwrap();
     assert_eq!(mask(&db, "entries"), 0);
     assert!(db.statements().bound_to("entries").next().is_none());
     run(&mut db, "insert entries {src: 1, dst: 1, amount: 5}").unwrap();
-}
-
-#[test]
-fn each_event_refuses_the_writes_that_may_make_it() {
-    let tap = Tap::default();
-    let mut db = binding(&tap);
-    run(
-        &mut db,
-        "create statement unliked after set or del likes as set accounts {balance: balance - 1} \
-         where id = old.post",
-    )
-    .unwrap();
-    assert_eq!(mask(&db, "likes"), 6);
-    // A row made wakes nothing it is bound to.
-    run(&mut db, "insert likes {post: 1, user: \"ann\"}").unwrap();
-    for w in [
-        "put likes {post: 2, user: \"bob\"}",
-        "set likes {user: \"cy\"} where post = 1",
-        "del likes where post = 1",
-        "put likes {post: 1, user: \"ann\"} if absent else set {post: 3}",
-    ] {
-        let e = refused(run(&mut db, w));
-        assert!(e.contains("would wake `unliked`"), "{w}: {e}");
-    }
+    assert_eq!(balance(&mut db), Value::Int(15));
 }
 
 /// A collection's bindings are a run of the table's index, in name order,
@@ -946,8 +895,14 @@ fn an_open_an_image_a_replica_a_compact_and_a_restore_keep_a_binding() {
     }
     kept(&replica, "a replica's apply");
     kept(&opened(&replica_tap.bytes()), "a replica's file");
-    let e = refused(run(&mut replica, "insert entries {src: 1}"));
-    assert!(e.contains("credit"), "{e}");
+    // Promoted, it runs the binding from its first write.
+    run(&mut replica, "put accounts {owner: \"r\", balance: 0}").unwrap();
+    run(&mut replica, "insert entries {src: 1, dst: 1, amount: 3}").unwrap();
+    let rows = run(&mut replica, "get accounts select balance where id = 1").unwrap();
+    assert!(
+        matches!(&rows, Response::Rows(rs) if rs.rows[0].values[0] == Value::Int(3)),
+        "{rows:?}"
+    );
 
     // A reader of the changes passes over it, numbered as the write it is.
     let all: Vec<u8> = writes.iter().flat_map(|(_, r)| r.clone()).collect();
@@ -989,7 +944,6 @@ fn an_open_an_image_a_replica_a_compact_and_a_restore_keep_a_binding() {
             true => fennec_core::fs::open_mapped(&path).unwrap(),
             false => fennec_core::fs::open(&path).unwrap(),
         };
-        db.allow_bindings();
         run(&mut db, SCHEMA).unwrap();
         run(&mut db, BINDING).unwrap();
         run(
@@ -1087,8 +1041,8 @@ fn the_mask_follows_a_drop_a_rename_and_an_alter_of_the_bound_collection() {
     run(&mut db, "insert entries {src: 1}").unwrap();
 }
 
-/// A write waking several bindings is answered the same whichever comes
-/// first by name: 409 naming the first broken one where one is, else 400.
+/// A write waking several bindings, one of them broken, is answered the
+/// same whichever comes first by name: 409 naming the broken one.
 #[test]
 fn a_write_waking_several_is_answered_whatever_their_names_order() {
     let tap = Tap::default();
@@ -1097,11 +1051,7 @@ fn a_write_waking_several_is_answered_whatever_their_names_order() {
     run(&mut db, &format!("create statement audit {body}")).unwrap();
     run(&mut db, BINDING).unwrap();
     run(&mut db, &format!("create statement zeta {body}")).unwrap();
-    let e = run(&mut db, "insert entries {src: 1}").unwrap_err();
-    assert!(
-        matches!(&e, Error::Query(m) if m.contains("would wake `audit`")),
-        "{e}"
-    );
+    run(&mut db, "insert entries {src: 1}").unwrap();
     // `credit` broken, between two that are not: 409 naming it.
     let rename =
         fennec_ql::parse_one("alter collection entries rename field amount to sum").unwrap();
@@ -1276,7 +1226,6 @@ fn a_replacement_keeps_the_kind_the_binding_and_what_it_writes() {
         db.change_seq() + 1,
     ));
     let mut db = opened(&file);
-    db.allow_bindings();
     let later = db.statements().get("later").unwrap();
     assert!(later.tree.is_none() && later.broken.is_some());
     assert_eq!(mask(&db, "entries"), 5);
@@ -1412,10 +1361,11 @@ fn an_op_or_an_event_this_version_does_not_read_is_refused() {
 }
 
 /// `tests/statements.fennec` holds the binding after F1's records: every
-/// build reads it, keeps it through its images and refuses its writes --
-/// the browser module's own words held by `web/fennec.test.js`.
+/// build reads it and keeps it through its images; this one runs it, and
+/// the browser module refuses its writes in its own words
+/// (`web/fennec.test.js`).
 #[test]
-fn the_fixture_s_binding_is_read_and_refuses_its_writes() {
+fn the_fixture_s_binding_is_read_and_runs() {
     let mut db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
     let credit = db.statements().get("credit").expect("the binding");
     assert_eq!(credit.after, Some(("entries".to_string(), 1)));
@@ -1427,7 +1377,8 @@ fn the_fixture_s_binding_is_read_and_refuses_its_writes() {
     assert_eq!(mask(&db, "entries"), 1);
     let again = opened(&db.snapshot());
     assert_eq!(held(again.statements()), held(db.statements()));
-    let e = refused(run(&mut db, "insert entries {src: 1, dst: 1, amount: 5}"));
-    assert!(e.contains("would wake `credit`"), "{e}");
+    let (_, kept) = Database::bound_counts();
+    run(&mut db, "insert entries {src: 1, dst: 1, amount: 5}").unwrap();
+    assert_eq!(Database::bound_counts().1, kept + 1, "the row woke it");
     run(&mut db, "del entries where src = 1").unwrap();
 }

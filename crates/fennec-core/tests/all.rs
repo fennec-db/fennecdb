@@ -11,6 +11,7 @@ mod analytics_docs;
 mod approx;
 mod autocompact;
 mod blocks;
+mod bound;
 mod buckets;
 mod calls;
 mod changes;

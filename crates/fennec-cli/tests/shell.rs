@@ -191,30 +191,27 @@ fn a_definition_over_lines_reads_as_one_statement() {
 
 /// A statement bound to a collection's writes over lines is one statement
 /// too -- its events, its collection, its condition and its body each going
-/// on with the next line -- read whole and refused once, since nothing runs
-/// one yet; the reads after it run.
+/// on with the next line -- read whole and defined once; the write after
+/// it wakes it, in its block.
 #[test]
 fn a_binding_over_lines_reads_as_one_statement() {
     let d = Dir::new("binding");
     let f = d.notes();
     let out = piped(
         &f,
-        "create statement noted\n  after insert or set\n  notes\n  where new.topic = 4\n  and \
-         new.body != ''\nas begin\n  insert log {note: new.id};\n  set counts {n: n + 1} where \
-         id = 1\nend\nget notes count\ncreate statement kept after del notes as insert log \
-         {note: old.id}\n  \nget notes count\n",
+        "create collection log (note int)\ncreate collection counts (n int)\nput counts {n: \
+         0}\ncreate statement noted\n  after insert or set\n  notes\n  where new.topic = 4\n  \
+         and new.body != ''\nas begin\n  insert log {note: new.id};\n  set counts {n: n + 1} \
+         where id = 1\nend\nget notes count\ncreate statement kept after del notes as insert \
+         log {note: old.id}\n  \ninsert notes {body: 'f', topic: 4, posted: 6}\nget counts \
+         select n\n",
     );
     let err = text(&out.stderr);
-    assert_eq!(
-        err.matches("write-bound statements are not built yet")
-            .count(),
-        2,
-        "{err}"
-    );
-    assert_eq!(err.lines().filter(|l| l.starts_with("error:")).count(), 2);
+    let errors = err.lines().filter(|l| l.starts_with("error:")).count();
+    assert_eq!(errors, 0, "{err}");
     assert!(!err.contains("begins no statement"), "{err}");
-    assert_eq!(tables(&text(&out.stdout)), [["5"], ["5"]]);
-    assert_eq!(count(&f, ""), 5);
+    assert_eq!(tables(&text(&out.stdout)), [["5"], ["1"]]);
+    assert_eq!(count(&f, ""), 6);
 }
 
 /// A script of statements, each over several lines -- a schema, a

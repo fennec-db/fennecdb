@@ -805,6 +805,21 @@ tenant's schema declaring one (400, nothing placed). Upgrade the one that
 stopped and it goes on from where it stood: nothing was misread or lost
 (RELEASING.md; `make upgrade-check` drives each).
 
+**A statement bound to writes moves the format again.** `create statement
+... after` -- a ledger line, a counter kept with the write that made it --
+writes kind 13's op 3, which every binary from before the release that runs
+them refuses: the same order, every archiver, router and node upgraded
+before any primary defines a binding (by `create statement ... after`, a
+declared schema's apply or a tenant created with one). An older replica
+stops following at the record and connects again (`could not apply a
+write: corrupt: a statement record this version does not read; connecting
+again` in its log); an older archiver takes no image of its own (`no image
+taken: corrupt: a statement record this version does not read`) and its
+`fennec restore` fails; an older server refuses to open a file holding one,
+and a move onto an older node fails at its install, the tenant staying on
+its source. Upgrade the one that stopped and it goes on: nothing was
+misread or lost.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: a router from before regions reads
 the directory as it always did, forwarding every tenant where it is and,

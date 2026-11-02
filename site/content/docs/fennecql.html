@@ -428,6 +428,91 @@ href="sync.html#limits">sync replica</a> refuses <code>call</code>,
 <code>create statement</code> and <code>drop statement</code>: its app calls
 the server through its HTTP client.</p>
 
+<h3 id="write-bound-statements">Statements bound to writes</h3>
+
+<p>A named statement may be bound to the writes of one collection instead
+of being called: it runs in the block of the write that woke it, once for
+each row that write made, wrote over or took out, with that row as
+<code>new.</code> and <code>old.</code> — a ledger line, a counter, a
+denormalized field kept with the write that made them, in the record that
+holds it. A crash, a <a href="/docs/replication">replica</a> and a
+subscriber see the write and what it woke together, or neither.</p>
+
+<pre data-lang="fennecql">create [or replace] statement &lt;name&gt;
+       after insert | set | del [or ...] &lt;collection&gt; [where &lt;condition&gt;]
+       [comment '&lt;text&gt;'] [scans]
+       as &lt;statement&gt; | as begin &lt;statement&gt;; ... end   -- new.&lt;field&gt; and old.&lt;field&gt; in the body</pre>
+
+<pre data-lang="fennecql">create statement paid_ledger
+  after set orders where new.status = 'paid' and old.status = 'open'
+as begin
+  get accounts select id where id = new.account limit 1 require 1 else 'no such account';
+  insert ledger {order: new.id, account: new.account, amount: new.total, at: now()};
+  set accounts {balance: balance - new.total} where id = new.account
+end</pre>
+
+<p>An event is what happened to a row, whatever statement did it:
+<code>insert</code> a row made — by <code>insert</code>, by a
+<code>put</code> of an id not held, or of one whose row is past its
+<code>@ttl</code> time, which every read already saw gone; <code>set</code>
+a live row written over — by <code>set</code>, a <code>put</code> naming its
+id or an upsert's <code>else set</code>; <code>del</code> a row taken out by
+<code>del</code>. SQL's <code>update</code> and <code>delete</code> read as
+<code>set</code> and <code>del</code>. <code>new.</code> is the row as the
+write leaves it and <code>old.</code> the row as it stood: an
+<code>insert</code> binding reads <code>new.</code> alone, a
+<code>del</code> binding <code>old.</code> alone, a <code>set</code> binding
+both. The <code>where</code> reads <code>new.</code>, <code>old.</code> and
+<code>now()</code>, each field compared in its collation and case fold as a
+<code>get</code> compares it. The body is a callable statement's, its values
+the row's: no parameters, claims, <code>check</code> or
+<code>public</code>, a <code>get</code> only with <code>require</code> (a
+guard), no <code>returning</code>.</p>
+
+<p>The bindings run after the statement's own rows, hooks and
+<code>require</code>, before its block lands: row by row in the order the
+statement wrote them, and on each row the bindings it passed in name order.
+Each condition is asked as its row is written, and only a row passing one
+is kept; <code>now()</code> is read once for the whole write, condition and
+bodies alike. A write waking more than 10 000 rows is refused (400), and the
+bodies one statement runs examine at most <code>--call-max-rows</code> rows
+together — a call's own budget when the write is in a call's body: past
+either, nothing lands, never a part. A binding's error is its writer's — a
+guard's <code>require</code> is a 412 with its <code>reason</code>, a unique
+value taken a 409 — and the block is put back whole, a
+<code>/batch</code>'s statements before it included.</p>
+
+<p>Depth one: a binding's own writes wake nothing, so one writing the
+collection it is bound to, one writing a collection another statement is
+bound to and one bound to a collection another binding writes are each
+refused as they are defined. A collection is bound by at most 16
+statements; <code>after del</code> is refused on a collection whose rows
+expire (<code>@ttl</code>), and <code>@ttl</code> under one, since no
+binding sees a row expire. A binding is never called (400). A replacement
+keeps the collection and events it is bound to and each collection and kind
+of write it makes; anything else is a <code>drop</code> and a
+<code>create</code>. A broken binding — a dependency gone, a text that no
+longer reads — refuses every write it binds (409) until it is defined again
+or dropped: a write never lands without its rows.</p>
+
+<p>The server's token defines one and its writes wake it at every way in —
+<code>/query</code>, <code>/batch</code>, the REST routes, MCP's
+<code>write</code>, a held write, a call's body, the shell and the native
+library, and a schema declared in code may declare it. A scoped token's
+write, or call, that would wake one is refused (403) before anything runs:
+no policy grants one yet, and a binding never runs on a token's behalf
+without one. A write waking none — a row its condition does not pass, an
+event it is not bound to — is a token's as ever. What copies or loads rows
+wakes nothing, its derived rows made elsewhere or by its operator: a
+replica's apply and a restore, which take the bound rows from the record,
+<code>fennec import</code>, <code>--follow</code>'s mirror, a declared
+schema's migrations, a sync replica's apply of its streams, and the
+<code>@ttl</code> sweep. The browser module runs none: it refuses the writes
+a binding binds, <i>write it through a server</i>. Before a primary defines
+the first one, every reader of its file runs a release that knows them: a
+binary from before refuses the record and stops there, in words (<a
+href="/docs/replication">Replication</a>).</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

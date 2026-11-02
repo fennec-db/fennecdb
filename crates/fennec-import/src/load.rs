@@ -22,7 +22,20 @@ pub fn run(src: &mut dyn Source, db: &mut Database, opts: &Options) -> Result<Su
 
 /// [`run`], but reports the rows written so far after every batch. Progress
 /// output is the caller's job; this module prints nothing.
+///
+/// A load wakes no statement bound to the collection's writes
+/// (`Database::unbound`): its derived rows are a backfill its operator runs
+/// as a statement, and a follower's copy's are its source's.
 pub fn run_with_progress(
+    src: &mut dyn Source,
+    db: &mut Database,
+    opts: &Options,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Summary> {
+    db.unbound(|db| load(src, db, opts, progress))
+}
+
+fn load(
     src: &mut dyn Source,
     db: &mut Database,
     opts: &Options,
@@ -360,6 +373,36 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    /// A load wakes no statement bound to its collection, which a database
+    /// may hold for a collection it makes -- a binding another database
+    /// defined, its record (kind 13, op 3) written by hand here: a load's
+    /// derived rows are a backfill its operator runs.
+    #[test]
+    fn a_load_wakes_no_statement_bound_to_its_collection() {
+        use fennec_core::codec::{encode_str, put_uvarint};
+        let mut body = vec![3u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, 1);
+        put_uvarint(&mut body, fennec_core::named::GRAMMAR_EPOCH as u64);
+        body.extend_from_slice(&1u64.to_le_bytes());
+        encode_str(&mut body, "tally");
+        put_uvarint(&mut body, 0);
+        encode_str(&mut body, "docs");
+        body.push(1);
+        encode_str(&mut body, "create statement tally after insert docs ...");
+        let mut file = Database::new().snapshot();
+        file.push(13);
+        put_uvarint(&mut file, 0);
+        put_uvarint(&mut file, body.len() as u64);
+        file.extend_from_slice(&body);
+        let mut db = Database::new();
+        db.load(&file).unwrap();
+        let mut src = source(rows(3));
+        run(&mut src, &mut db, &Options::new("docs")).unwrap();
+        assert_eq!(db.collection("docs").unwrap().bound, 1, "bound as made");
+        assert_eq!(count(&db, "docs"), 3);
     }
 
     #[test]

@@ -34,6 +34,8 @@ mod limit;
 #[cfg(not(target_arch = "wasm32"))]
 pub use limit::{Landing, Limit};
 #[cfg(feature = "statements")]
+mod bound;
+#[cfg(feature = "statements")]
 mod call;
 #[cfg(feature = "statements")]
 pub use call::{claims_carried, CallRead, Callee};
@@ -3822,10 +3824,22 @@ pub struct Database {
     /// ([`Self::internally`]).
     #[cfg_attr(not(feature = "statements"), allow(dead_code))]
     internal: bool,
-    /// Whether a binding may be defined here: a test's
-    /// ([`Self::allow_bindings`]), until the engine runs them.
+    /// Whether a write wakes no statement bound to it: a writer whose
+    /// derived rows are made elsewhere, or not at all -- a mirror, a load,
+    /// a migration, the sync's apply ([`Self::unbound`]) -- and a
+    /// binding's own runs, whose writes wake nothing (depth one). Asked
+    /// only where a collection is bound: the byte comes first.
+    unbound: bool,
+    /// The rows the statement running woke, each with its pair and the
+    /// bindings it passed, run by [`Self::run_one`] as the statement ends
+    /// (`engine/bound.rs`).
     #[cfg(feature = "statements")]
-    bindings: bool,
+    woken: bound::Woken,
+    /// The binding that refused the last write refused by one, for the
+    /// server to tell ([`Self::woken`]); let go of as the next statement
+    /// a client sends starts.
+    #[cfg(feature = "statements")]
+    refused_by: Option<String>,
     /// The calls running over this database, a write's under its lock and
     /// reads' beside each other: while none runs, a statement asks nothing
     /// more of `--call-max-rows` ([`Self::set_call_max_rows`]), and while
@@ -3906,8 +3920,11 @@ impl Database {
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
             internal: false,
+            unbound: false,
             #[cfg(feature = "statements")]
-            bindings: false,
+            woken: bound::Woken::default(),
+            #[cfg(feature = "statements")]
+            refused_by: None,
             #[cfg(feature = "statements")]
             calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
@@ -6381,6 +6398,8 @@ impl Database {
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
+        #[cfg(feature = "statements")]
+        self.settle_woken();
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
             return Err((
                 i,
@@ -6427,6 +6446,15 @@ impl Database {
     /// data the module has not been handed.
     fn run_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         let out = self.execute_inner(stmt, params);
+        // The statements bound to its rows' writes, run as it ends -- its
+        // rows, hooks and `require` behind it -- and before its block is
+        // due to spill: what it woke lands with it or nothing does. A
+        // statement that woke no row looks at a length.
+        #[cfg(feature = "statements")]
+        let out = match self.woken.rows.is_empty() {
+            true => out,
+            false => self.woke(out),
+        };
         // A block that outgrew its bound spills what it holds into the file,
         // a statement's writes at a time: a /batch's statements, a `put` of
         // many rows.
@@ -6659,6 +6687,8 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
+        #[cfg(feature = "statements")]
+        self.settle_woken();
         // A call whose statement reads is a read: no block, no replica's or
         // lease's refusal, no counter moved -- the read executor's.
         #[cfg(feature = "statements")]
@@ -7891,9 +7921,13 @@ impl Database {
             true => stored::INSERT,
             false => stored::INSERT | stored::SET,
         };
-        if bound & events != 0 {
-            return Err(self.bound_refused(collection, bound & events));
-        }
+        #[cfg(feature = "statements")]
+        let wake = bound & events != 0 && self.bind(collection, bound & events)?;
+        #[cfg(not(feature = "statements"))]
+        let wake = match bound & events != 0 && !self.unbound {
+            true => return Err(self.bound_refused(collection, bound & events)),
+            false => false,
+        };
         let hooks = registry.hooks();
         let ctx = EvalCtx {
             params,
@@ -7950,8 +7984,10 @@ impl Database {
         // by, up to a minute later.
         let unique = schema.has_unique();
         // Without a clock -- the browser module handed none -- no row is
-        // past its time for a write, as before.
-        let expiry = match (insert || unique)
+        // past its time for a write, as before. A write waking a binding
+        // asks too: a `put` over an expired row makes one, as every read
+        // saw it gone, and a binding is told what every read saw.
+        let expiry = match (insert || unique || wake)
             .then(|| self.ttl_of(collection))
             .flatten()
         {
@@ -7984,11 +8020,14 @@ impl Database {
             // The row an upsert sets rather than the document written.
             let mut held = None;
             let named = doc.id != 0;
+            // Whether the row its id names is past its time: an update to
+            // the hooks, and a row made to a binding.
+            let mut gone = false;
             let op = if doc.id == 0 {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
             } else if c.store.contains(doc.id) {
-                let gone = match expiry {
+                gone = match expiry {
                     Some(cut) => expired(c, doc.id, cut)?,
                     None => false,
                 };
@@ -8106,6 +8145,19 @@ impl Database {
                     for h in hooks {
                         h.after_write(collection, op, &doc)?;
                     }
+                    // Asked its bindings' conditions as it is written: a
+                    // row made, or a live one written over.
+                    #[cfg(feature = "statements")]
+                    if wake {
+                        let (event, old) = match op == WriteOp::Insert || gone {
+                            true => (stored::INSERT, None),
+                            false => (stored::SET, old.as_ref()),
+                        };
+                        let clock = self.clock;
+                        self.woken.keep(registry, clock, event, old, Some(&doc))?;
+                    }
+                    #[cfg(not(feature = "statements"))]
+                    let _ = gone;
                     if let Some((ids, ops)) = answered.as_deref_mut() {
                         ids.push(doc.id);
                         ops.push(op);
@@ -8134,7 +8186,7 @@ impl Database {
                 collection,
                 &schema,
                 cid,
-                id,
+                (id, wake),
                 assigns,
                 &ctx,
                 hooks,
@@ -11465,9 +11517,13 @@ impl Database {
             let c = self.collection(collection)?;
             (c.schema.clone(), c.id, c.bound)
         };
-        if bound & stored::SET != 0 {
-            return Err(self.bound_refused(collection, stored::SET));
-        }
+        #[cfg(feature = "statements")]
+        let wake = bound & stored::SET != 0 && self.bind(collection, stored::SET)?;
+        #[cfg(not(feature = "statements"))]
+        let wake = match bound & stored::SET != 0 && !self.unbound {
+            true => return Err(self.bound_refused(collection, stored::SET)),
+            false => false,
+        };
         let hooks: Vec<_> = registry.hooks().to_vec();
         let ctx = EvalCtx {
             params,
@@ -11501,7 +11557,8 @@ impl Database {
 
         let mut n = 0;
         for &id in ids {
-            if self.set_row(collection, &schema, cid, id, &assigns, &ctx, &hooks, None)? {
+            let row = (id, wake);
+            if self.set_row(collection, &schema, cid, row, &assigns, &ctx, &hooks, None)? {
                 n += 1;
             }
         }
@@ -11509,14 +11566,16 @@ impl Database {
     }
 
     /// Row `id` set by `assigns`, each over the row as it was -- and over
-    /// `new`, an upsert's document; whether there was such a row.
+    /// `new`, an upsert's document; whether there was such a row. `wake`:
+    /// asked its bindings' conditions as it is written
+    /// ([`Self::bind`]).
     #[allow(clippy::too_many_arguments)]
     fn set_row(
         &mut self,
         collection: &str,
         schema: &Schema,
         cid: u32,
-        id: DocId,
+        (id, wake): (DocId, bool),
         assigns: &[Assign],
         ctx: &EvalCtx,
         hooks: &[Arc<dyn crate::plugin::Hook>],
@@ -11550,6 +11609,14 @@ impl Database {
         for h in hooks {
             h.after_write(collection, WriteOp::Update, &doc)?;
         }
+        #[cfg(feature = "statements")]
+        if wake {
+            let set = stored::SET;
+            self.woken
+                .keep(ctx.registry, ctx.clock, set, Some(&old), Some(&doc))?;
+        }
+        #[cfg(not(feature = "statements"))]
+        let _ = wake;
         Ok(true)
     }
 
@@ -11577,13 +11644,27 @@ impl Database {
             let c = self.collection(collection)?;
             (c.schema.clone(), c.bound)
         };
-        if waking && bound & stored::DEL != 0 {
-            return Err(self.bound_refused(collection, stored::DEL));
-        }
+        let asks = waking && bound & stored::DEL != 0;
+        #[cfg(feature = "statements")]
+        let wake = asks && self.bind(collection, stored::DEL)?;
+        #[cfg(not(feature = "statements"))]
+        let wake = match asks && !self.unbound {
+            true => return Err(self.bound_refused(collection, stored::DEL)),
+            false => false,
+        };
         let hooks: Vec<_> = self.registry.hooks().to_vec();
         let n = ids.len();
         for id in ids {
-            self.erase(collection, &schema, id, &hooks)?;
+            let gone = self.erase(collection, &schema, id, &hooks)?;
+            // Asked its bindings' conditions as it goes, as it stood.
+            #[cfg(feature = "statements")]
+            if let (true, Some(old)) = (wake, &gone) {
+                let (del, clock) = (stored::DEL, self.clock);
+                self.woken
+                    .keep(&self.registry, clock, del, Some(old), None)?;
+            }
+            #[cfg(not(feature = "statements"))]
+            let _ = (wake, gone);
         }
         Ok(match rows {
             Some(rs) => Response::Rows(rs),
@@ -11593,28 +11674,30 @@ impl Database {
 
     /// Deletes the document `id` of `collection`: what a `del` does to each
     /// row it matches, and a write to a row past its `@ttl` that holds the
-    /// id or the `@unique` value the write is about to take.
+    /// id or the `@unique` value the write is about to take. The row as it
+    /// stood, which a `del`'s bindings read as `old.`.
     fn erase(
         &mut self,
         collection: &str,
         schema: &Schema,
         id: DocId,
         hooks: &[Arc<dyn crate::plugin::Hook>],
-    ) -> Result<()> {
+    ) -> Result<Option<Document>> {
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
-        if let Some(doc) = c.store.read(schema, id)? {
+        let gone = c.store.read(schema, id)?;
+        if let Some(doc) = &gone {
             for h in hooks {
-                h.after_write(collection, WriteOp::Delete, &doc)?;
+                h.after_write(collection, WriteOp::Delete, doc)?;
             }
-            c.unindex_doc(&doc, None);
+            c.unindex_doc(doc, None);
         }
         let (mark, was) = (c.store.mark(), c.store.loc(id));
         let frame = c.store.append(OP_DEL, id, &[]);
         self.remember(cid, id, was, mark);
         self.wal(REC_DATA, cid, &frame)?;
         self.note(cid, id);
-        Ok(())
+        Ok(gone)
     }
 
     /// Drops the dead records of `which` (every collection when `None`) and

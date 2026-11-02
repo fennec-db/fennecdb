@@ -487,11 +487,33 @@ impl super::Database {
     /// its source, the sync's remake of a collection. Every other writer's
     /// is refused at its commit, naming the statement. A build without
     /// named statements holds none to refuse for.
+    ///
+    /// Such a writer copies, or remakes, what another made: it runs
+    /// [`Self::unbound`] too.
     pub fn internally<R>(&mut self, f: impl FnOnce(&mut super::Database) -> R) -> R {
         let was = std::mem::replace(&mut self.internal, true);
-        let r = f(self);
+        let r = self.unbound(f);
         self.internal = was;
         r
+    }
+
+    /// Runs `f` as a writer whose writes wake no statement bound to them,
+    /// and are refused by none -- a broken one's or an unread one's
+    /// either: derived rows made elsewhere, or not at all. `--follow`'s
+    /// mirror, whose collections copy another database's rows, derived
+    /// ones among them; `fennec import`, a load, whose derived rows are a
+    /// backfill its operator runs as a statement; a declared schema's
+    /// migrations, which write what their text says; the sync's apply of
+    /// a stream's rows and its remake; and [`Self::internally`]'s writers.
+    /// A binding's own runs write so too (depth one). Every other writer
+    /// wakes them (`docs/design/named-statements.md`, *When a binding
+    /// runs*). Given back as `f` ends, on a panic too: one left set would
+    /// let every later write land without its rows.
+    pub fn unbound<R>(&mut self, f: impl FnOnce(&mut super::Database) -> R) -> R {
+        let was = std::mem::replace(&mut self.unbound, true);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.unbound = was;
+        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
     }
 
     /// A kind-13 record into the table, as a load or a replica's apply
@@ -622,16 +644,7 @@ impl super::Database {
         &mut self,
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
-        use crate::named::{BOUND_NOT_BUILT, GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
-        // First, before a name held or the schema is asked: nothing runs a
-        // binding yet, and one stored would bind writes no build runs it
-        // for -- refused by every build until the engine runs it (F2's
-        // slice 3), so here every way in (`/query`, `/batch`, the shell,
-        // the native library, a declared schema's apply) meets it. A test
-        // lets one through ([`Self::allow_bindings`]) to hold its record.
-        if def.after.is_some() && !self.bindings {
-            return Err(Error::Query(BOUND_NOT_BUILT.into()));
-        }
+        use crate::named::{GRAMMAR_EPOCH, MAX_STATEMENTS, MAX_TEXT};
         let name = &def.name;
         let held = self.statements.get(name);
         if let Some(old) = held {
@@ -670,7 +683,7 @@ impl super::Database {
             )));
         }
         if let Some(b) = &def.after {
-            self.binding_checked(name, b)?;
+            self.binding_checked(def, b)?;
         }
         let collections = &self.collections;
         let depends = def.depends(&|c| collections.get(c).map(|c| &*c.schema))?;
@@ -749,31 +762,26 @@ impl super::Database {
         Ok(())
     }
 
-    /// Lets `create statement ... after` run on this database. Every way
-    /// in refuses a binding's definition (`named::BOUND_NOT_BUILT`) until
-    /// the engine runs one (F2's slice 3): defined here, its record is
-    /// written and kept and the writes it binds are refused, which a test
-    /// holds -- as F1's slice 2 let a definition run only where a test
-    /// let it. Never a server's.
-    #[doc(hidden)]
-    #[cfg(feature = "statements")]
-    pub fn allow_bindings(&mut self) {
-        self.bindings = true;
-    }
-
     /// What a binding's definition is held to beside a callable one's: its
     /// collection held, bound by at most `named::MAX_BOUND` statements,
-    /// `after del` refused where its rows expire, and each field `new.`
-    /// and `old.` read held by it.
+    /// `after del` refused where its rows expire, each field `new.` and
+    /// `old.` read held by it, and depth one kept whole: no collection it
+    /// is bound to written by it, none another statement is bound to, and
+    /// none another binding writes bound by it ([`chained`]).
     #[cfg(feature = "statements")]
-    fn binding_checked(&self, name: &str, b: &crate::named::Binding) -> Result<()> {
+    fn binding_checked(
+        &self,
+        def: &crate::named::Definition,
+        b: &crate::named::Binding,
+    ) -> Result<()> {
         use crate::named::MAX_BOUND;
+        let name = &def.name;
         let c = &b.collection;
         let schema = &self.collection(c)?.schema;
         if self
             .statements
             .bound_to(c)
-            .filter(|s| s.name != name)
+            .filter(|s| s.name != *name)
             .count()
             >= MAX_BOUND
         {
@@ -793,7 +801,10 @@ impl super::Database {
                 "statement `{name}`: `{c}` holds no field `{f}`"
             )));
         }
-        Ok(())
+        match chained(&self.statements, def, c) {
+            Some(why) => Err(Error::Query(why)),
+            None => Ok(()),
+        }
     }
 
     /// A `@ttl` about to be given `collection`, held to the statements
@@ -838,45 +849,32 @@ impl super::Database {
     /// A writing statement over `collection` that may wake the statements
     /// bound to it on `events` -- its [`super::Collection::bound`] and what
     /// the statement may do to a row -- refused before it changes
-    /// anything, the condition unread. No build runs a binding yet (F2's
-    /// slice 3 does), and a write landing without the rows its binding
-    /// would write is the one thing a binding must never let happen: the
-    /// writes stop, loudly, until it is dropped. A broken binding's refusal
-    /// is the 409 it keeps once bindings run; the browser module, which
-    /// will never run one, says so in its own words. Where the write would
-    /// wake several, the answer is the same whichever comes first by name:
-    /// the first broken or unread among them (409), else the first (400) --
-    /// a 409 is what stays once bindings run, and the status a client sees
-    /// is never a name's accident.
+    /// anything, the condition unread: where one of them is broken, or
+    /// held unread by a process with no FennecQL reader (409), and in a
+    /// build that runs none -- the browser module -- in words of its own.
+    /// A write landing without the rows its binding would write is the
+    /// one thing a binding must never let happen: the writes stop, loudly,
+    /// until it is defined again or dropped. Where several would refuse,
+    /// the first by name answers.
     #[cold]
     #[inline(never)]
     pub(super) fn bound_refused(&self, collection: &str, events: u8) -> Error {
         #[cfg(feature = "statements")]
-        if let Some((s, e)) = {
-            let woken = || {
-                self.statements.bound_to(collection).filter_map(|s| {
-                    Some((s, s.after.as_ref()?.1 & events)).filter(|(_, e)| *e != 0)
-                })
-            };
-            let stays = |(s, _): &(&Stored, u8)| s.broken.is_some() || s.tree.is_none();
-            woken().find(stays).or_else(|| woken().next())
-        } {
+        if let Some(s) = self.statements.bound_to(collection).find(|s| {
+            s.after.as_ref().is_some_and(|a| a.1 & events != 0)
+                && (s.broken.is_some() || s.tree.is_none())
+        }) {
             let name = &s.name;
-            return match (&s.broken, &s.tree) {
-                (Some(why), _) => Error::Exists(format!(
+            return Error::Exists(match &s.broken {
+                Some(why) => format!(
                     "the write would wake `{name}`, which is broken: {why}: define it again or \
                      drop it"
-                )),
-                (None, None) => Error::Exists(format!(
+                ),
+                None => format!(
                     "the write would wake `{name}`, whose text this process holds unread (no \
                      FennecQL reader installed): define it again or drop it"
-                )),
-                (None, Some(_)) => Error::Query(format!(
-                    "the write would wake `{name}`, bound after `{}` on `{collection}`, and \
-                     write-bound statements are not run yet: drop it to write `{collection}`",
-                    crate::named::Binding::events_named(e)
-                )),
-            };
+                ),
+            });
         }
         let _ = events;
         Error::Query(format!(
@@ -884,6 +882,51 @@ impl super::Database {
              run: write it through a server"
         ))
     }
+}
+
+/// Where `def`, a binding of `collection`, would make a chain -- what a
+/// binding's writes wake, which is nothing (depth one) -- the refusal in
+/// words: a binding writing the collection it is bound to, which would
+/// move the rows its writer is still walking and answering; one writing a
+/// collection another statement is bound to, which would sleep through
+/// every row the first wrote; and one bound to a collection another
+/// binding writes, the same in the other order. Each by collection,
+/// whatever the events: a refusal can be lifted later, a cascade never
+/// taken back. A binding read from no tree here -- broken by a misread,
+/// or unread -- writes nothing a definition can know of, and refuses its
+/// own writes.
+#[cfg(feature = "statements")]
+fn chained(t: &Statements, def: &crate::named::Definition, collection: &str) -> Option<String> {
+    let name = &def.name;
+    let written = def.written();
+    if written.iter().any(|(w, _)| *w == collection) {
+        return Some(format!(
+            "statement `{name}` is bound to `{collection}` and writes it: a binding writes no \
+             collection it is bound to, whose rows its writer is still writing"
+        ));
+    }
+    for (w, _) in &written {
+        if let Some(other) = t.bound_to(w).find(|s| s.name != *name) {
+            return Some(format!(
+                "statement `{name}` writes `{w}`, which `{}` is bound to: a binding's writes \
+                 wake nothing, so `{}` would miss every row `{name}` wrote -- drop one of them",
+                other.name, other.name
+            ));
+        }
+    }
+    let writes_it = |s: &&Stored| {
+        s.name != *name
+            && (s.tree.as_ref()).is_some_and(|d| d.written().iter().any(|(w, _)| *w == collection))
+    };
+    if let Some(other) = t.iter().filter(|s| s.after.is_some()).find(writes_it) {
+        return Some(format!(
+            "statement `{name}` is bound to `{collection}`, which `{}` writes: a binding's \
+             writes wake nothing, so `{name}` would miss every row `{}` wrote -- drop one of \
+             them",
+            other.name, other.name
+        ));
+    }
+    None
 }
 
 /// A statement's text no longer reading as its tree, in words.

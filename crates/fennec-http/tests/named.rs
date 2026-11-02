@@ -1034,28 +1034,17 @@ fn a_call_that_writes_is_held_to_the_data_ceiling() {
     assert_eq!(node.number("get entries count"), 1);
 }
 
-/// A statement bound to a collection's writes is refused wherever a
-/// statement runs until the engine runs bindings (F2's slice 1): the
-/// server's token is told so (400), alone and in a `/batch` behind a write,
-/// which lands nothing; a scoped token meets the schema change it is.
+/// A statement bound to a collection's writes is defined by the server's
+/// token and is a schema change a scoped token meets as one (403); what it
+/// runs is `tests/bound.rs`'s.
 #[test]
-fn a_binding_is_refused_until_bindings_run() {
+fn a_binding_is_the_server_token_s_to_define() {
     let node = start(|_| {});
     let bound = "create statement noted after set accounts where new.balance < old.balance as \
                  insert journal {what: 'debit'}";
-    let (status, body) = node.query(ROOT, bound);
-    assert_eq!(status, 400, "{body}");
-    assert!(
-        body.contains("write-bound statements are not built yet"),
-        "{body}"
-    );
-    let before = node.number("get journal count");
-    let batch = [line("insert journal {what: 'x'}"), line(bound)].join("\n");
-    let (status, body) = node.post(ROOT, "/batch", &batch);
-    assert_eq!(status, 400, "{body}");
-    assert!(body.contains("not built yet"), "{body}");
-    assert_eq!(node.number("get journal count"), before);
     let (status, body) = node.query(&node.customer("u0"), bound);
     assert_eq!(status, 403, "{body}");
     assert!(!node.ok(ROOT, "statements").contains("noted"));
+    node.ok(ROOT, bound);
+    assert!(node.ok(ROOT, "statements").contains("noted"));
 }

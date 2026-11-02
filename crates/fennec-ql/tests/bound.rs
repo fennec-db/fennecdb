@@ -6,7 +6,7 @@
 //! and every way of running one refusing it until the engine runs them, so
 //! no write lands without the rows its binding would write.
 
-use fennec_core::named::{Binding, Definition, Place, BOUND_NOT_BUILT};
+use fennec_core::named::{Binding, Definition, Place};
 use fennec_core::prelude::*;
 use fennec_core::query::ArithOp;
 use fennec_ql::{parse, parse_one};
@@ -550,12 +550,12 @@ END";
     assert_eq!(base, 0x129d_557c_ceeb_0ded, "{base:#018x}");
 }
 
-/// Nothing runs one yet: every way of running a statement meets the
-/// engine's definition, which refuses a binding in words of its own before
-/// it asks anything else -- alone, in a block behind a write, which lands
-/// nothing, and as a replacement of a statement held.
+/// Every way of running a statement defines one through the engine: alone,
+/// and in a block behind a write, which lands with it; a callable statement
+/// is replaced by a bound one nowhere, the kind being part of what a grant
+/// names.
 #[test]
-fn a_binding_is_refused_where_statements_run() {
+fn a_binding_is_defined_where_statements_run() {
     fennec_ql::install();
     let mut db = Database::new();
     for s in parse(
@@ -571,26 +571,23 @@ fn a_binding_is_refused_where_statements_run() {
          new.id}",
     )
     .unwrap();
-    let not_built = Error::Query(BOUND_NOT_BUILT.into());
-    assert_eq!(db.execute(&bound), Err(not_built.clone()));
-    assert_eq!(db.execute_with(&bound, &[]), Err(not_built.clone()));
+    db.execute(&bound).unwrap();
+    db.execute(&parse_one("drop statement paid").unwrap())
+        .unwrap();
+    db.execute_with(&bound, &[]).unwrap();
+    db.execute(&parse_one("drop statement paid").unwrap())
+        .unwrap();
     let put = parse_one("put orders {status: 'open', total: 3}").unwrap();
-    assert_eq!(
-        db.execute_block(&[(&put, &[]), (&bound, &[])]),
-        Err((1, not_built.clone()))
-    );
+    db.execute_block(&[(&put, &[]), (&bound, &[])]).unwrap();
     let replace =
         parse_one("create or replace statement s after insert orders as insert ledger {o: 1}")
             .unwrap();
-    assert_eq!(db.execute(&replace), Err(not_built));
+    let e = db.execute(&replace).unwrap_err();
+    assert!(e.to_string().contains("`s`"), "{e}");
     let orders = db
         .execute(&parse_one("get orders select id").unwrap())
         .unwrap();
-    assert_eq!(
-        orders.rows().unwrap().rows.len(),
-        0,
-        "the block put back whole"
-    );
+    assert_eq!(orders.rows().unwrap().rows.len(), 1, "the block landed");
     let listed = db.execute(&parse_one("statements").unwrap()).unwrap();
-    assert_eq!(listed.rows().unwrap().rows.len(), 1, "`s` alone, as it was");
+    assert_eq!(listed.rows().unwrap().rows.len(), 2, "`paid` and `s`");
 }

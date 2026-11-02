@@ -1040,8 +1040,11 @@ packaging-test:
 ## identity, answers a reclaim 404 and keeps the file, which this tree's
 ## router reports; and an old router creates, replicates, moves and deletes
 ## a tenant on this tree's nodes (tools/upgrade-order.sh). Then a binding,
-## kind 13's op 3: the server, a replica and `fennec types` built before
-## the op stop at it in words (fennec-core's tests/statements.fennec).
+## kind 13's op 3, defined by this tree's primary over /query: a replica,
+## an archiver, `fennec restore`, the server and a move's node built before
+## the op stop at it in words, the tenant left on its source; and the
+## server, a replica and `fennec types` refuse fennec-core's
+## tests/statements.fennec.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## and OP3_BASE -- b73ce4ca, the last before the op -- in scratch
 ## worktrees: minutes. Not in CI.

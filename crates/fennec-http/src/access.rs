@@ -3188,8 +3188,10 @@ pub fn run_as<T>(who: &Who, stmt: &Statement, f: impl FnOnce() -> Result<T>) -> 
 /// from the token (403), the arguments (400), `check` (400), whether it is
 /// broken (409) -- [`Database::callee`] -- and then the policy's
 /// `append-only` collections, which no scoped token updates or deletes in,
-/// a call's body included (403). Nothing for any other statement or token:
-/// the server's token's calls are judged as they run.
+/// a call's body included (403), and the statements bound to the writes it
+/// makes, which no scoped token wakes yet (403, [`unwoken`]). Nothing for
+/// any other statement or token: the server's token's calls are judged as
+/// they run.
 pub fn judge_call(who: &Who, db: &Database, stmt: &Statement, params: &[Value]) -> Result<()> {
     match (who, stmt) {
         (Who::Scoped(_), Statement::Call(c)) => judged(who, db, c, params).map(drop),
@@ -3234,7 +3236,33 @@ pub fn judged(
             )));
         }
     }
+    unwoken(db, &callee.def)?;
     Ok(callee)
+}
+
+/// A scoped token's call whose body may wake a statement bound to the
+/// writes it makes, refused (403) before the body runs: its body runs
+/// outside [`within`], where the `Check` hook finds no scope to refuse a
+/// binding by, so the call is judged by what its text writes -- each
+/// collection and kind of write, against the events bound to it. No
+/// scoped token wakes a binding until a policy's lines grant it by name
+/// (`docs/design/named-statements.md`, *A binding's authority*): fail
+/// closed, never a binding run on a token's behalf with no grant. The
+/// binding is named to no token, as an ungranted statement is no name.
+fn unwoken(db: &Database, def: &fennec_core::named::Definition) -> Result<()> {
+    let t = db.statements();
+    match def
+        .written()
+        .into_iter()
+        .find(|(c, kind)| t.events_of(c) & kind != 0)
+    {
+        Some((c, _)) => Err(denied(format!(
+            "statement `{}` writes `{c}`, whose writes wake a statement bound to them, which no \
+             scoped token's write wakes: nothing was written",
+            def.name
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// A call's refusal as a scoped token is told it: its kind, and a guard's
@@ -3326,6 +3354,24 @@ impl Hook for Check {
             )));
         }
         scope.overwrites(schema, old, doc, &self.registry)
+    }
+    /// A scoped token's write waking a statement bound to it, refused
+    /// (403) before the binding runs, its block put back: no scoped token
+    /// wakes one until a policy's lines grant it by name, so none runs on
+    /// a token's behalf with no grant -- fail closed, never a binding run
+    /// as its writer. Asked as a binding wakes, a row passing its
+    /// condition: a write waking none needs nothing. The token is told no
+    /// name; the audit's refusal line and the engine's note
+    /// (`Database::woken`) hold it for the operator.
+    fn waking(&self, _binding: &str, _rows: usize) -> Result<()> {
+        if CURRENT.with(|c| c.borrow().is_none()) {
+            return Ok(());
+        }
+        Err(denied(
+            "the write would wake a statement bound to it, which no scoped token's write \
+             wakes: nothing was written"
+                .to_string(),
+        ))
     }
     fn answering(&self, schema: &Schema, op: WriteOp, doc: &Document) -> Result<()> {
         // A delete's rows were picked through the read rules as they stood

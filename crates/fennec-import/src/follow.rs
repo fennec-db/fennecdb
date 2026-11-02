@@ -1263,7 +1263,10 @@ impl<'a> Mirror<'a> {
                     }
                 }
             };
-            g.execute(&stmt)?;
+            // A mirror's rows are its source's, derived ones among them:
+            // a statement bound to the collection's writes would make them
+            // again (`Database::unbound`).
+            g.unbound(|g| g.execute(&stmt))?;
         }
         Ok(())
     }
@@ -1492,6 +1495,78 @@ mod tests {
 
     fn count(db: &RwLock<Database>) -> usize {
         db.read().unwrap().collection("docs").unwrap().store.len()
+    }
+
+    /// The mirror's collection bound by a statement another database
+    /// defined -- its record (kind 13, op 3), written by hand: this crate
+    /// reads no FennecQL -- for every event.
+    fn bound(db: &RwLock<Database>) {
+        use fennec_core::codec::{encode_str, put_uvarint};
+        let mut g = db.write().unwrap();
+        let mut body = vec![3u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, g.change_seq() + 1);
+        put_uvarint(&mut body, fennec_core::named::GRAMMAR_EPOCH as u64);
+        body.extend_from_slice(&1u64.to_le_bytes());
+        encode_str(&mut body, "tally");
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "docs");
+        encode_str(&mut body, "docs");
+        body.push(7);
+        encode_str(
+            &mut body,
+            "create statement tally after insert or set or del docs ...",
+        );
+        let mut file = g.snapshot();
+        file.push(13);
+        put_uvarint(&mut file, 0);
+        put_uvarint(&mut file, body.len() as u64);
+        file.extend_from_slice(&body);
+        let mut again = Database::new();
+        again.load(&file).unwrap();
+        assert_eq!(again.collection("docs").unwrap().bound, 7);
+        *g = again;
+    }
+
+    /// A mirror writes unbound: its rows are its source's, derived ones
+    /// among them, so a statement bound to its collection is never woken
+    /// -- nor, held unread or broken here, does it refuse the mirror's
+    /// writes, as it refuses every other writer's.
+    #[test]
+    fn a_mirror_wakes_no_statement_bound_to_its_collection() {
+        let (source, opts, db) = fixture(None);
+        bound(&db);
+        let put = Statement::Put {
+            collection: "docs".into(),
+            docs: vec![vec![("title".into(), Expr::Lit(Value::Text("x".into())))]],
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        assert!(
+            db.write().unwrap().execute(&put).is_err(),
+            "a writer refused"
+        );
+        let mut m = Mirror::new(&source, &opts);
+        apply(
+            &mut m,
+            &db,
+            &[
+                relation(b'd', &COLS),
+                insert(&[Some("1"), Some("one"), Some("[1,0]"), Some("{a,b}")]),
+                update(None, &[Some("1"), Some("uno"), U, Some("{a}")]),
+                insert(&[Some("2"), Some("two"), None, None]),
+                delete(&[Some("2"), None, None, None]),
+            ],
+        );
+        assert_eq!(count(&db), 1);
+        assert_eq!(
+            doc(&db, 1).unwrap().get("title"),
+            Some(&Value::Text("uno".into()))
+        );
     }
 
     #[test]

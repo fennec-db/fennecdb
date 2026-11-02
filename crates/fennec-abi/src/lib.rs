@@ -475,8 +475,11 @@ pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -
             exec(db, declared::MIGRATIONS_DDL, &[])?;
         }
         for i in pending.clone() {
+            // A migration writes what its text says, waking no statement
+            // bound to what it writes (`Database::unbound`).
             if !fresh {
-                exec(db, &texts[i], &[]).map_err(|e| in_migration(i + 1, e))?;
+                db.unbound(|db| exec(db, &texts[i], &[]))
+                    .map_err(|e| in_migration(i + 1, e))?;
             }
             let at = now.map_or(Value::Null, Value::Timestamp);
             let row = [Value::Int(i as i64 + 1), Value::Text(texts[i].clone()), at];
@@ -660,6 +663,41 @@ mod tests {
     }
 
     const TODOS: &str = r#"[{"name":"todos","fields":[{"name":"title","type":"text","required":true},{"name":"done","type":"bool","index":{"kind":"hash"}}]}]"#;
+
+    /// The native library's way in wakes a statement bound to a write, in
+    /// its block; a declared schema's migration writes what its text says
+    /// and wakes none (`Database::unbound`).
+    #[test]
+    fn a_binding_wakes_at_the_native_way_in_and_a_migration_writes_unbound() {
+        fennec_ql::install();
+        const ITEMS: &str = r#"[{"name":"items","fields":[{"name":"n","type":"int"}]},{"name":"log","fields":[{"name":"n","type":"int"}]}]"#;
+        let mut db = Database::new();
+        schema(&mut db, &described(ITEMS, "[]"), true, None).unwrap();
+        let ok = |r: String| assert!(!r.contains("error"), "{r}");
+        ok(run(
+            &mut db,
+            "create statement mk after insert items as insert log {n: new.n}",
+            "",
+            &[],
+        ));
+        ok(run(&mut db, "insert items {n: 1}", "", &[]));
+        let logged = |db: &mut Database| run(db, "get log count", "", &[]);
+        assert!(
+            logged(&mut db).contains(r#"{"count":1}"#),
+            "{}",
+            logged(&mut db)
+        );
+        let req = described(ITEMS, r#"["insert items {n: 2}"]"#);
+        let o = schema(&mut db, &req, true, Some(9)).unwrap();
+        assert!(o.applied && o.ran, "{o:?}");
+        let items = run(&mut db, "get items count", "", &[]);
+        assert!(items.contains(r#"{"count":2}"#), "{items}");
+        assert!(
+            logged(&mut db).contains(r#"{"count":1}"#),
+            "{}",
+            logged(&mut db)
+        );
+    }
 
     /// A database made from the description; opened again, nothing to do.
     #[test]
