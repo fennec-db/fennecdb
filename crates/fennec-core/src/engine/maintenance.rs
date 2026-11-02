@@ -319,7 +319,10 @@ impl Database {
                 .field(field)
                 .ok_or_else(|| Error::NotFound(format!("field `{field}` in `{collection}`")))?,
         };
-        if f.index != IndexKind::None {
+        // One of its own, or `@text` beside a `@hash`, `@unique` or
+        // `@sorted` of its own (`Field::add_index`); a path keeps one.
+        let mut with = f.clone();
+        if (path.is_some() && f.index != IndexKind::None) || with.add_index(kind.clone()).is_err() {
             if if_not_exists {
                 return Ok(Some(Response::Ok(format!("`{field}` is already indexed"))));
             }
@@ -443,6 +446,13 @@ impl Database {
                 .ok()
                 .and_then(|k| copy.values[k].1.as_ref())
         };
+        // Beside its other where it has one, as `check_index` found it
+        // could be: the schema is the one it was then (`tail.schema`).
+        // Asked of a copy before any index goes into its map, and put in
+        // place only once one has: a refusal here or a failed read below
+        // leaves the maps and the schema both as they were.
+        let mut field = c.schema.fields[pos].clone();
+        field.add_index(copy.kind.clone())?;
         // The writes made during the build, applied as the write path would
         // have: out with the value the build saw, in with the one there now.
         match index {
@@ -524,7 +534,7 @@ impl Database {
                 c.geo.push((copy.field.clone(), Derived::new(ix)));
             }
         }
-        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos].index = copy.kind;
+        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos] = field;
         let (cid, encoded) = (c.id, c.schema.encode());
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);

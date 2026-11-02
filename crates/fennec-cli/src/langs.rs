@@ -173,6 +173,9 @@ pub(crate) fn note(f: &fennec_core::schema::Field) -> String {
         s.push(' ');
         s.push_str(&ix);
     }
+    if let Some(spec) = f.beside {
+        s.push_str(&format!(" @text({})", spec.args()));
+    }
     if f.required {
         s.push_str(" required");
     }

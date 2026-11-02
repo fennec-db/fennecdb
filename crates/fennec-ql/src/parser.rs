@@ -1862,31 +1862,28 @@ impl Parser {
                 field = field.nocase();
                 continue;
             }
+            // Each index it keeps: one of its own, and `@text` beside a
+            // `@hash`, `@unique` or `@sorted` -- any other second one
+            // refused here, never dropped (`Field::add_index`).
             if matches!(self.peek(), Tok::At) {
                 self.skip();
                 let kind = self.ident()?.to_ascii_lowercase();
-                match kind.as_str() {
-                    "hash" => field = field.indexed(IndexKind::HASH),
-                    "unique" => field = field.indexed(IndexKind::UNIQUE),
-                    "sorted" => field = field.indexed(IndexKind::SORTED),
+                let kind = match kind.as_str() {
+                    "hash" => IndexKind::HASH,
+                    "unique" => IndexKind::UNIQUE,
+                    "sorted" => IndexKind::SORTED,
                     // An ordered index whose rows expire: the sweep walks
                     // it rather than scan for them.
-                    "ttl" => {
-                        let ttl = Some(self.ttl_args()?);
-                        field = field.indexed(IndexKind::Sorted { ttl });
-                    }
-                    "hnsw" | "vector" => {
-                        let spec = self.hnsw_args()?;
-                        field = field.indexed(IndexKind::Vector(spec));
-                    }
-                    "text" | "bm25" => {
-                        let spec = self.text_args()?;
-                        field = field.indexed(IndexKind::Text(spec));
-                    }
-                    "inverted" => field = field.indexed(IndexKind::Inverted),
-                    "geo" => field = field.indexed(IndexKind::Geo),
+                    "ttl" => IndexKind::Sorted {
+                        ttl: Some(self.ttl_args()?),
+                    },
+                    "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
+                    "text" | "bm25" => IndexKind::Text(self.text_args()?),
+                    "inverted" => IndexKind::Inverted,
+                    "geo" => IndexKind::Geo,
                     other => return self.err(format!("unknown index `{other}`")),
-                }
+                };
+                field.add_index(kind)?;
                 continue;
             }
             break;

@@ -828,7 +828,7 @@ fn text_field(schema: &Schema, asked: Option<&str>) -> Checked<String> {
     let texts: Vec<&str> = schema
         .fields
         .iter()
-        .filter(|f| matches!(f.index, IndexKind::Text(_)))
+        .filter(|f| f.text_index().is_some())
         .map(|f| f.name.as_str())
         .collect();
     match (asked, texts.as_slice()) {

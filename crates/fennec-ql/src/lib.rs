@@ -49,8 +49,13 @@ pub fn install() {
 
 use fennec_core::error::Result;
 use fennec_core::query::Statement;
-use fennec_core::schema::{Field, IndexKind, Schema};
+use fennec_core::schema::{Field, Schema};
 use fennec_core::value::DataType;
+
+/// A second index on a field or a path that cannot stand beside its first
+/// (`Field::add_index`), as a description refuses it.
+const TWO_INDEXES: &str =
+    "has two indexes: a field keeps one, and a text field @text beside a @hash, @unique or @sorted";
 
 /// A schema written as FennecQL -- a `schema.fennecql` file: `create
 /// collection` statements, and `create index` over their fields and the
@@ -138,9 +143,7 @@ fn schema_read(
                 };
                 match f {
                     None if !path => return Err(bad(&at, "is indexed and not declared")),
-                    Some(f) if path || f.index != IndexKind::None => {
-                        return Err(bad(&at, "has two indexes: a field takes one"))
-                    }
+                    Some(_) if path => return Err(bad(&at, TWO_INDEXES)),
                     _ => {}
                 }
                 match path {
@@ -148,10 +151,14 @@ fn schema_read(
                         kind.check(&field, &DataType::Json)?;
                         s.add_path(Field::new(field, DataType::Json).indexed(kind));
                     }
+                    // A field's own, or `@text` beside it, as `create
+                    // collection` takes the two.
                     false => {
                         let pos = s.field_pos(&field).unwrap_or_default();
                         kind.check(&field, &s.fields[pos].ty)?;
-                        s.fields[pos].index = kind;
+                        if s.fields[pos].add_index(kind).is_err() {
+                            return Err(bad(&at, TWO_INDEXES));
+                        }
                     }
                 }
             }

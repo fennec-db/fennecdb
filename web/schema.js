@@ -70,6 +70,7 @@ class Column {
     this.collation = null;
     this.folded = false;
     this.index = null;
+    this.also = null;
     this.name = null;
     this.table = null;
   }
@@ -77,7 +78,7 @@ class Column {
   notNull() {
     return copy(this, { required: true });
   }
-  /** `@unique`: a field's one index, as `uniqueIndex().on(col)` gives it. */
+  /** `@unique`: a field's own index, as `uniqueIndex().on(col)` gives it; a `bm25` one may stand beside it. */
   unique() {
     return copy(this, { index: { kind: 'unique' } });
   }
@@ -146,6 +147,7 @@ class Column {
     if (this.collation) out.collate = this.collation;
     if (this.folded) out.nocase = true;
     if (this.index) out.index = this.index;
+    if (this.also) out.also = this.also;
     if (this.paths?.length) out.paths = this.paths;
     return out;
   }
@@ -383,10 +385,16 @@ export function fennecTable(tableName, columns, extra) {
     const { col, path, index: kind } = ix.resolve();
     if (table[col.name] !== col) throw new FennecError(`${tname}: index ${ix.indexName ?? ''} is on another table's column`);
     if (path === null) {
-      if (col.index) {
-        throw new FennecError(`${tname}.${col.name} has two indexes: fennecdb takes one a field (${col.index.kind} and ${kind.kind})`);
+      // One index a field, and a text one beside a hash, unique or
+      // ordered one -- in either order -- as the engine keeps them
+      // (`Field::add_index`): `text().unique()` with a `bm25` index.
+      const beside = (k) => ['hash', 'unique', 'sorted', 'ttl'].includes(k.kind);
+      if (!col.index) col.index = kind;
+      else if (!col.also && kind.kind === 'text' && beside(col.index)) col.also = kind;
+      else if (!col.also && col.index.kind === 'text' && beside(kind)) [col.index, col.also] = [kind, col.index];
+      else {
+        throw new FennecError(`${tname}.${col.name} has two indexes: fennecdb keeps one a field, and a text one beside a hash, unique or ordered one (${col.index.kind} and ${kind.kind})`);
       }
-      col.index = kind;
     } else {
       if (col.paths.some((p) => p.path === path)) throw new FennecError(`${tname}.${col.name}.${path} has two indexes`);
       col.paths.push({ path, index: kind });
@@ -423,6 +431,7 @@ class Table {
       if (c.collation) f += ` collate ${c.collation}`;
       if (c.folded) f += ' nocase';
       if (c.index) f += ` ${indexText(c.index)}`;
+      if (c.also) f += ` ${indexText(c.also)}`;
       return f;
     });
     for (const ix of this.$indexes) {

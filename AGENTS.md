@@ -759,6 +759,13 @@ write.](docs/design/indexes.md#unique)** `Collection::unique_clash` runs
 after the hooks, before any write; a scoped token is told the field alone
 (`access::told`).
 
+**[A field keeps one index, and a text field `@text` beside a `@hash`,
+`@unique` or `@sorted`.](docs/design/indexes.md#two-indexes-on-a-field)**
+`Field::add_index` is the one rule wherever a field is indexed; any other
+second index is refused where it is declared, never dropped. The text one
+is `Field::beside`, looked for through `Field::text_index`, written behind
+`TAG_BESIDE`.
+
 **[A `@hash` bucket holds its ids ascending, in
 runs](docs/design/indexes.md#hash-buckets)** (`engine/bucket.rs`), read in
 order through `Bucket::iter`.

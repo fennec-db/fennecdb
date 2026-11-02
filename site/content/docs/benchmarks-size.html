@@ -41,7 +41,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>328 KB brotli</b>; for an app whose queries run on a
+the browser pays is <b>331 KB brotli</b>; for an app whose queries run on a
 server, the client alone in its bundle.</p>
 
 <div class="tbl">
@@ -67,7 +67,7 @@ server, the client alone in its bundle.</p>
 <details class="deep"><summary>Method, and where the module's bytes go</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>328 KB brotli</b> for both together. A binary you execute and an image
+<b>331 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
