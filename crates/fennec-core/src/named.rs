@@ -309,8 +309,10 @@ pub struct Place {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schedule {
     pub when: When,
-    /// `in '<zone>'`, as written: one of IANA's zones the binary's table
-    /// holds, or a fixed offset (`crate::tz::zone_of`). `None` is UTC.
+    /// `in '<zone>'` as [`crate::tz::spelled`] writes the zone
+    /// `crate::tz::zone_of` reads: one of IANA's zones the binary's table
+    /// holds, by the table's spelling of its name, or a fixed offset as
+    /// `+hh:mm`. `None` is UTC, however written.
     pub zone: Option<String>,
 }
 
@@ -407,8 +409,8 @@ impl Cron {
     /// PocketBase take. Refused, naming the form to write: other than five
     /// fields, a value outside its field, a step of 0, a range running
     /// backwards, Quartz's `?`, `L`, `W` and `#`, pg_cron's `$`, a macro, a
-    /// day of month and a day of week both restricted, and an expression
-    /// that never fires.
+    /// day of month and a day of week both written as other than `*`, and
+    /// an expression that never fires.
     pub fn read(text: &str) -> std::result::Result<Cron, String> {
         let t = text.trim();
         if let Some(m) = t.strip_prefix('@') {
@@ -453,14 +455,21 @@ impl Cron {
             months: masks[3] as u16,
             weekdays,
         };
-        let every_day = cron.days == (1 << 31) - 1;
-        if !every_day && weekdays != 0x7f {
+        // By the text, never the masks: POSIX's crontab, Vixie cron and
+        // pg_cron count a field not starting with `*` as restricted and run
+        // on either day where both are, so `0 0 1-31 * mon` runs every day
+        // there and `0 0 13 * 0-6` too, where the masks ANDed would run on
+        // Mondays and on the 13th alone. Only `*` is open to every reader:
+        // a step is no POSIX form, Vixie cron counts any field starting
+        // with `*` open, `*/2` too, robfig's Go cron `*/1` and not `*/2`,
+        // so `*/1` is held to the rule as well.
+        if f[2] != "*" && f[4] != "*" {
             return Err(format!(
-                "`{t}` restricts both the day of the month and the day of the week, which cron \
-                 runs on either and a reader takes for both: two statements, `at '{} {} {} {} *'` \
-                 and `at '{} {} * {} {}'`, say either, and one of them with a guard in its body \
-                 says both",
-                f[0], f[1], f[2], f[3], f[0], f[1], f[3], f[4]
+                "`{t}` restricts both the day of the month (`{}`) and the day of the week \
+                 (`{}`) -- a field is open as `*` alone -- which cron runs on either and a \
+                 reader takes for both: two statements, `at '{} {} {} {} *'` and `at '{} {} * {} \
+                 {}'`, say either, and one of them with a guard in its body says both",
+                f[2], f[4], f[0], f[1], f[2], f[3], f[0], f[1], f[3], f[4]
             ));
         }
         // The lowest day named, held to the longest month named.
@@ -1878,10 +1887,11 @@ struct Canon(Vec<u8>);
 impl Canon {
     /// A schedule, a node of kind 6: `every`'s interval as `bucket` holds
     /// it -- a step of milliseconds (1) from an origin (2, a week's Monday),
-    /// or months (3) -- or cron's five masks (4 to 8), then the zone (9).
-    /// Its meaning, not its spelling: `every 60m` is `every 1h`, and
-    /// `'*/15 * * * *'` is `'0,15,30,45 * * * *'`. Out of line: no other
-    /// definition reaches it.
+    /// or months (3) -- or cron's five masks (4 to 8), then the zone (9),
+    /// none for UTC. Its meaning, not its spelling: `every 60m` is `every
+    /// 1h`, `'*/15 * * * *'` is `'0,15,30,45 * * * *'`, and `in 'utc'` no
+    /// zone, as the parser reads it (`crate::tz::spelled`). Out of line: no
+    /// other definition reaches it.
     #[cold]
     #[inline(never)]
     fn schedule(&mut self, s: &Schedule) {

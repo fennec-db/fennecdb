@@ -4256,15 +4256,19 @@ impl Parser {
                  'Europe/Berlin'`, or an offset, `in '+03:00'`",
             )?;
             // The binary's table, as `bucket` reads it: a zone it lacks is
-            // a clock no run of this build could read.
-            if fennec_core::tz::zone_of(&Value::Text(z.as_str().into())).is_err() {
-                self.i = from;
-                return self.err(format!(
-                    "`'{z}'` is no time zone this build holds: one of IANA's by its name, \
-                     `'Europe/Berlin'`, or an offset, `'+03:00'`"
-                ));
+            // a clock no run of this build could read. The tree holds the
+            // zone read, never its spelling: `'utc'` is no zone, as `'Z'`
+            // and `'+00:00'` are, and `'europe/berlin'` `Europe/Berlin`.
+            match fennec_core::tz::spelled(&z) {
+                Ok(read) => zone = read,
+                Err(_) => {
+                    self.i = from;
+                    return self.err(format!(
+                        "`'{z}'` is no time zone this build holds: one of IANA's by its name, \
+                         `'Europe/Berlin'`, or an offset, `'+03:00'`"
+                    ));
+                }
             }
-            zone = Some(z);
         }
         let (mut comment, mut scans) = (None, false);
         loop {

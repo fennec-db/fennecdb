@@ -136,20 +136,27 @@ fn a_schedule_reads_into_its_tree() {
     // Whole minutes in another unit are minutes.
     assert_eq!(every("120s"), every("2m"));
 
-    // A zone by its name in any case, or an offset; `create or replace`;
-    // a body of several.
-    for zone in [
-        "Europe/Berlin",
-        "europe/berlin",
-        "+03:00",
-        "-0530",
-        "UTC",
-        "Z",
+    // A zone by its name in any case, held as the table spells it, or an
+    // offset, held as `+hh:mm`, UTC's none at all; `create or replace`; a
+    // body of several.
+    for (zone, read) in [
+        ("Europe/Berlin", Some("Europe/Berlin")),
+        ("europe/berlin", Some("Europe/Berlin")),
+        ("EUROPE/BERLIN", Some("Europe/Berlin")),
+        ("+03:00", Some("+03:00")),
+        ("+0300", Some("+03:00")),
+        ("+03", Some("+03:00")),
+        ("-0530", Some("-05:30")),
+        ("UTC", None),
+        ("utc", None),
+        ("Z", None),
+        ("+00:00", None),
+        ("-00", None),
     ] {
         let s = schedule(&format!(
             "create statement s every 1d in '{zone}' as del t where a = 1"
         ));
-        assert_eq!(s.zone.as_deref(), Some(zone));
+        assert_eq!(s.zone.as_deref(), read, "{zone}");
     }
     let d = definition(
         "create or replace statement purge at '30 3 * * mon-fri' in 'Europe/Istanbul' comment \
@@ -202,7 +209,9 @@ fn cron_reads_every_form() {
     // other way.
     assert_eq!(cron("0 12 */2 * *").weekdays, 0x7f);
     assert_eq!(cron("0 12 * * */2").weekdays, 1 | 1 << 2 | 1 << 4 | 1 << 6);
-    assert_eq!(cron("0 12 1-31 * mon").days, (1 << 31) - 1);
+    // Mondays, as every cron reads `* * mon`: the day of the month open.
+    let mondays = cron("0 0 * * mon");
+    assert_eq!((mondays.days, mondays.weekdays), ((1 << 31) - 1, 1 << 1));
     // White space between fields is any.
     assert_eq!(cron("  0\t3  * *   * "), cron("0 3 * * *"));
 }
@@ -283,6 +292,21 @@ fn a_schedule_s_refusals() {
         "two statements, `at '0 0 13 * *'` and `at '0 0 * * 5'`, say either",
     );
     cron_refused("0 0 */2 * mon", "restricts both");
+    // By the text: a field written other than `*` is restricted to cron
+    // though it names every value, so these run every day there -- on
+    // either day -- and would run on fewer here, ANDed.
+    cron_refused(
+        "0 0 1-31 * mon",
+        "restricts both the day of the month (`1-31`) and the day of the week (`mon`) -- a \
+         field is open as `*` alone",
+    );
+    cron_refused(
+        "0 0 13 * 0-6",
+        "two statements, `at '0 0 13 * *'` and `at '0 0 * * 0-6'`, say either",
+    );
+    cron_refused("0 0 */1 * mon", "restricts both");
+    cron_refused("0 0 13 * */1", "restricts both");
+    cron_refused("0 0 1-31 * 0-7", "restricts both");
     // Never: no month named holds a day named.
     cron_refused("0 0 30 2 *", "never runs");
     cron_refused("0 0 31 apr,jun,sep,nov *", "never runs");
@@ -497,6 +521,27 @@ AS BEGIN UPDATE holds SET state = 'lapsed', lapsed_at = now()
     };
     assert_ne!(zoned("Europe/Berlin"), every("1d"));
     assert_ne!(zoned("Europe/Berlin"), zoned("+01:00"));
+    // The zone read, never its spelling: UTC however written is no zone,
+    // a name in any case the table's, an offset `+hh:mm`.
+    for utc in ["UTC", "utc", "Z", "+00:00", "-00:00", "+00", "+0000"] {
+        assert_eq!(zoned(utc), every("1d"), "{utc}");
+    }
+    for (a, b) in [
+        ("europe/berlin", "Europe/Berlin"),
+        ("EUROPE/BERLIN", "Europe/Berlin"),
+        ("asia/kolkata", "Asia/Kolkata"),
+        ("+0300", "+03:00"),
+        ("+03", "+03:00"),
+        ("-0530", "-05:30"),
+    ] {
+        assert_eq!(zoned(a), zoned(b), "{a} {b}");
+    }
+    // A link is a name of its own, as the table holds it: which name one
+    // leads to moves with tzdata, and a digest must not. A zone of the
+    // table is not a fixed offset, before 2000 refused where the offset
+    // reads.
+    assert_ne!(zoned("Asia/Calcutta"), zoned("Asia/Kolkata"));
+    assert_ne!(zoned("Etc/UTC"), every("1d"));
 
     // Written as tag 10 after the body, and nowhere for any other:
     // `Debug`, which `make fennecql-corpus` compares, says it alike.
@@ -507,14 +552,30 @@ AS BEGIN UPDATE holds SET state = 'lapsed', lapsed_at = now()
     // no origin, no zone; the node's end and the definition's.
     let tail = [10, 6, 1, 0x80, 0xdd, 0xdb, 0x01, 0, 0];
     assert!(bytes.ends_with(&tail), "{bytes:?}");
-    let bytes = definition("create statement s at '0 0 * * 1' in 'UTC' as del u where a = 1")
+    let cron_in = |zone: &str| {
+        definition(&format!(
+            "create statement s at '0 0 * * 1'{zone} as del u where a = 1"
+        ))
         .canonical()
-        .unwrap();
-    // Cron's masks under tags 4 to 8, then the zone under 9.
-    let mut tail = vec![
-        10, 6, 4, 1, 5, 1, 6, 0xff, 0xff, 0xff, 0xff, 0x07, 7, 0xff, 0x1f,
+        .unwrap()
+    };
+    // Cron's masks under tags 4 to 8; `in 'UTC'` writes no zone, as none
+    // does.
+    let masks = [
+        10, 6, 4, 1, 5, 1, 6, 0xff, 0xff, 0xff, 0xff, 0x07, 7, 0xff, 0x1f, 8, 2,
     ];
-    tail.extend([8, 2, 9, 3, b'U', b'T', b'C', 0, 0]);
+    let bytes = cron_in(" in 'UTC'");
+    assert!(
+        bytes.ends_with(&[&masks[..], &[0, 0]].concat()),
+        "{bytes:?}"
+    );
+    assert_eq!(bytes, cron_in(""));
+    // A zone under 9, as the table spells it.
+    let bytes = cron_in(" in 'europe/berlin'");
+    let tail = [&masks[..], &[9, 13], b"Europe/Berlin", &[0, 0]].concat();
+    assert!(bytes.ends_with(&tail), "{bytes:?}");
+    let bytes = cron_in(" in '+0300'");
+    let tail = [&masks[..], &[9, 6], b"+03:00", &[0, 0]].concat();
     assert!(bytes.ends_with(&tail), "{bytes:?}");
     let callable = definition("create statement s($a int) public as del u where id = $a");
     assert!(!format!("{callable:?}").contains("schedule"));
