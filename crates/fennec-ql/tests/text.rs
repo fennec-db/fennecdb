@@ -99,6 +99,8 @@ fn match_is_case_insensitive_and_unicode() {
     // The folding path, not the ASCII one: the stored term is upper case.
     assert_eq!(ids(&run(&mut db, r#"get d match t "çalışma""#)), [1]);
     assert_eq!(ids(&run(&mut db, r#"get d match t "RAPORU""#)), [1]);
+    // And typed without its accents, as a keyboard without them types it.
+    assert_eq!(ids(&run(&mut db, r#"get d match t "calisma""#)), [1]);
 }
 
 /// The end-to-end half of `text::tests::the_turkish_i_folds_every_way_it_is_written`:
@@ -445,6 +447,104 @@ fn the_chars_option_is_carried_through_the_schema() {
         .map(|(a, b)| (*a, *b))
         .collect();
     assert_eq!((with.len(), differ), (without.len(), vec![(7, 3)]));
+}
+
+/// `accents` is written with the schema as index kind 11, its options a
+/// byte after it: a binary from before knows text indexes of kinds 3 and 7
+/// alone and refuses the file, rather than read a word typed with accents
+/// as every spelling; this one refuses a bit of that byte it does not know,
+/// as the binary after it would write one. An index without `accents` is
+/// written as it always was.
+#[test]
+fn the_accents_option_is_carried_through_the_schema() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection d (t text @text(accents), u text @text(prefix=6, chars, accents), \
+         v text @hash @text(accents), w text @text)",
+    );
+    let Response::Schemas(s) = run(&mut db, "describe d") else {
+        panic!("expected a schema");
+    };
+    let text = |i: usize| s[0].fields[i].text_index().expect("a text index");
+    assert!(text(0).accents && !text(0).chars);
+    assert_eq!(text(0).args(), "k1=0.9, b=0.4, accents");
+    assert_eq!(text(1).args(), "k1=0.9, b=0.4, prefix=6, chars, accents");
+    assert!(text(2).accents, "beside a hash index too");
+    assert!(!text(3).accents);
+    let fresh = reload(&db);
+    assert_eq!(*fresh.collection("d").expect("collection").schema, s[0]);
+    let encoded = |spec: TextIndexSpec| {
+        Schema::new(
+            "x",
+            vec![Field::new("t", DataType::Text).indexed(IndexKind::Text(spec))],
+        )
+        .unwrap()
+        .encode()
+    };
+    // Kind 3 or 7 becomes 11 and its flags: 2 for `accents`, 1 for `chars`.
+    for (spec, was, flags) in [(text(0), 3, 2), (text(1), 7, 3)] {
+        let with = encoded(spec);
+        let without = encoded(TextIndexSpec {
+            accents: false,
+            ..spec
+        });
+        let at = with.iter().zip(&without).position(|(a, b)| a != b).unwrap();
+        assert_eq!((without[at], with[at], with[at + 1]), (was, 11, flags));
+        assert_eq!(with[at + 2..], without[at + 1..]);
+        assert_eq!(
+            Schema::decode(&with, &mut 0).unwrap().fields[0].index,
+            IndexKind::Text(spec)
+        );
+        // An option this binary does not know is refused, never dropped.
+        let mut unknown = with.clone();
+        unknown[at + 1] |= 4;
+        let e = Schema::decode(&unknown, &mut 0).unwrap_err().to_string();
+        assert!(
+            e.contains(&format!("unknown text index options {}", flags | 4)),
+            "{e}"
+        );
+        // As a binary from before refuses kind 11, this one refuses the
+        // next kind.
+        let mut next = with.clone();
+        next[at] = 12;
+        let e = Schema::decode(&next, &mut 0).unwrap_err().to_string();
+        assert!(e.contains("unknown index kind 12"), "{e}");
+    }
+    // A flag takes no value, and says how it is written.
+    for (src, want) in [
+        (
+            "create collection e (t text @text(accents=1))",
+            "`accents` takes no value: write `@text(accents)`",
+        ),
+        (
+            "create collection e (t text @text(Chars = true))",
+            "`Chars` takes no value: write `@text(chars)`",
+        ),
+        // A name it does not know, flag or not, is refused naming the
+        // ones it does.
+        (
+            "create collection e (t text @text(accent))",
+            "unknown text parameter `accent`: `@text` takes `k1`, `b`, `prefix`, \
+             `prefix_min`, `prefix_max`, `chars` and `accents`",
+        ),
+        (
+            "create collection e (t text @text(accent=1))",
+            "unknown text parameter `accent`: `@text` takes",
+        ),
+        ("create collection e (t text @text(k1))", "expected `=`"),
+    ] {
+        let e = parse(src).unwrap_err().to_string();
+        assert!(e.contains(want), "{src}: {e}");
+    }
+    // Any case, any order, beside every other option.
+    for src in [
+        "create collection e (t text @text(ACCENTS))",
+        "create collection e (t text @text(k1=1.2, accents, b=0.5, prefix=5))",
+        "create index on d (w) @text(chars, accents)",
+    ] {
+        parse(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+    }
 }
 
 #[test]

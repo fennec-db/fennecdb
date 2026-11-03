@@ -182,7 +182,7 @@ const UNIT = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
  * (`json`): `{kind: 'hnsw', metric: 'cosine', quant: 'int8'}` is
  * `@hnsw(cosine, quant=int8)`; `{kind: 'ttl', ttl: '7d'}` is `@ttl(7d)`,
  * `{kind: 'ttl', ms: 604800000}`; `{kind: 'text', prefix: 6, chars: true}`
- * is `@text(prefix=6, chars)`.
+ * is `@text(prefix=6, chars)`, and `accents: true` adds `accents`.
  */
 export function indexSpec(spec) {
   const kind = spec?.kind;
@@ -209,6 +209,10 @@ export function indexSpec(spec) {
       if (spec.chars) {
         args.push('chars');
         json.chars = true;
+      }
+      if (spec.accents) {
+        args.push('accents');
+        json.accents = true;
       }
       return { text: args.length ? `@text(${args.join(', ')})` : '@text', json };
     }

@@ -27,6 +27,21 @@ jobs:
 
       - run: cargo fmt --all --check
 
+      # docs/design/text.md#tokenizer: the accent fold's table is written by
+      # its script alone, through rustfmt, from Unicode's UnicodeData.txt --
+      # kept by its version, so a run asks unicode.org only on a miss, and
+      # held to the checksum gen.py pins either way.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/unicode/17.0.0
+          key: unicode-17.0.0-UnicodeData
+
+      - name: The accent fold's table is what tools/fold/gen.py writes
+        run: |
+          f=~/.cache/unicode/17.0.0/UnicodeData.txt
+          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
+          python3 crates/fennec-core/tools/fold/gen.py --check "$f"
+
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 

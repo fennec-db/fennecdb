@@ -21,7 +21,7 @@ export const articles = fennecTable('articles', {
   counts: integer().array().notNull(),
   slug: text().nocase().unique(),
 }, (t) => [
-  index('articles_title_idx').using('bm25', t.title).with({ prefix: 6, chars: true }),
+  index('articles_title_idx').using('bm25', t.title).with({ prefix: 6, chars: true, accents: true }),
   index('articles_year_idx').using('hash', t.year),
   index('articles_score_idx').on(t.score),
   index('articles_published_idx').on(t.published).ttl('30d'),

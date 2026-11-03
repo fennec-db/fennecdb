@@ -17,7 +17,7 @@ export type Bytes = number[] & { readonly __fennec: 'bytes' };
 
 export type FennecSchema = {
   articles: {
-    /** text @text(k1=0.9, b=0.4, prefix=6, chars) required */
+    /** text @text(k1=0.9, b=0.4, prefix=6, chars, accents) required */
     title: string;
     /** int @hash */
     year: number | null;
@@ -120,7 +120,7 @@ export type FennecStatements = {
     };
     row: {
       id: number;
-      /** text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required */
+      /** text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required */
       title: string;
       /** int @hash */
       year: number | null;

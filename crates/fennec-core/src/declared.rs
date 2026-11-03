@@ -385,7 +385,15 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
         Some(Value::Text(k)) => match k.as_str() {
             "hash" | "unique" | "sorted" | "inverted" | "geo" => &["kind"],
             "ttl" => &["kind", "ms"],
-            "text" => &["kind", "k1", "b", "prefix", "prefix_min", "chars"],
+            "text" => &[
+                "kind",
+                "k1",
+                "b",
+                "prefix",
+                "prefix_min",
+                "chars",
+                "accents",
+            ],
             "hnsw" => &[
                 "kind",
                 "metric",
@@ -449,6 +457,7 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
                 spec.prefix_min = TextIndexSpec::default().prefix_min;
             }
             spec.chars = flag(o, "chars", at)?;
+            spec.accents = flag(o, "accents", at)?;
             IndexKind::Text(spec)
         }
         _ => {
@@ -747,6 +756,9 @@ fn index_json(out: &mut String, k: &IndexKind) {
             }
             if s.chars {
                 out.push_str(",\"chars\":true");
+            }
+            if s.accents {
+                out.push_str(",\"accents\":true");
             }
             out.push('}');
         }
@@ -1528,10 +1540,11 @@ mod tests {
                 {"name":"i","type":"sparse<100>","index":{"kind":"inverted"}},
                 {"name":"j","type":"[text]","index":{"kind":"hash"}},
                 {"name":"u","type":"text","nocase":true,"index":{"kind":"unique"}},
-                {"name":"v","type":"vector<3>","index":{"kind":"hnsw"}}]}]}"#,
+                {"name":"v","type":"vector<3>","index":{"kind":"hnsw"}},
+                {"name":"w","type":"text","index":{"kind":"text","accents":true}}]}]}"#,
         );
         let s = &d.collections[0];
-        assert_eq!(s.fields.len(), 12);
+        assert_eq!(s.fields.len(), 13);
         assert_eq!(s.paths.len(), 2);
         let made = create(s);
         assert_eq!(
@@ -1540,7 +1553,8 @@ mod tests {
              b int @hash, c float @sorted, d bool, e timestamp @ttl(90m), f bytes, g json, \
              h vector<4, f16> @hnsw(l2, m=8, ef_construction=50, ef_search=33, quant=int8), \
              i sparse<100> @inverted, j [text] @hash, u text nocase @unique, \
-             v vector<3> @hnsw(cosine, m=16, ef_construction=200, ef_search=100))"
+             v vector<3> @hnsw(cosine, m=16, ef_construction=200, ef_search=100), \
+             w text @text(k1=0.9, b=0.4, accents))"
         );
         assert_eq!(made[1], "create index on t (g.lang) @hash");
         assert_eq!(made[2], "create index on t (g.src.rank) @sorted");

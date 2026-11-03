@@ -9,7 +9,7 @@ import "encoding/json"
 // Articles is a row of `articles`.
 type Articles struct {
 	ID        int64           `json:"id"`
-	Title     string          `json:"title"`     // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+	Title     string          `json:"title"`     // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
 	Year      *int64          `json:"year"`      // int @hash
 	Score     *float64        `json:"score"`     // float @sorted
 	Draft     bool            `json:"draft"`     // bool required
@@ -76,7 +76,7 @@ type EveryTypeArgs struct {
 // EveryTypeRow is a row of what `every_type` answers.
 type EveryTypeRow struct {
 	ID        int64           `json:"id"`
-	Title     string          `json:"title"`     // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+	Title     string          `json:"title"`     // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
 	Year      *int64          `json:"year"`      // int @hash
 	Draft     bool            `json:"draft"`     // bool required
 	Published *string         `json:"published"` // timestamp @ttl(30d)

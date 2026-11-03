@@ -100,3 +100,64 @@ fn a_filtered_match_within_scores_as_its_rows_alone_would() {
     let all = "get memos select n match body \"initech memo\" limit 20";
     assert_eq!(scores(&db, all, true), scores(&db, all, false));
 }
+
+/// Under `@text(accents)` whether a word typed with accents reads its
+/// spelling is decided by the rows the filter selects, as BM25's counts
+/// are: alice's `match`, held to her rows, answers the same rows, scores,
+/// marks and facets whether or not bob wrote rows of the spelling she
+/// cannot read -- her `sutlac tarifi` found by `sütlaç` before and after.
+/// Over the collection his rows are the spelling it reads, and hers is
+/// found no more.
+#[test]
+fn a_row_the_filter_leaves_out_decides_no_spelling() {
+    let answer = |bob: bool, within: bool, q: &str| {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection notes (n int, owner text @hash, kind text, body text @text(accents))",
+        );
+        run(
+            &mut db,
+            "put notes {n: 1, owner: \"alice\", kind: \"tatli\", body: \"sutlac tarifi\"}, \
+             {n: 2, owner: \"alice\", kind: \"yemek\", body: \"sutlac ve kofte\"}",
+        );
+        let bobs = if bob { "sütlaç" } else { "kek" };
+        run(
+            &mut db,
+            &format!("put notes {{n: 3, owner: \"bob\", kind: \"gizli\", body: \"{bobs}\"}}"),
+        );
+        let Statement::Select(mut sel) = fennec_ql::parse_one(&format!(
+            "get notes select n, highlight(body) where owner = \"alice\" match body \"{q}\" \
+             limit 10 facet kind"
+        ))
+        .unwrap() else {
+            panic!("{q}");
+        };
+        sel.matcher.as_mut().unwrap().within = within;
+        let Response::Rows(rs) = db.query(&Statement::Select(sel), &[]).unwrap() else {
+            panic!("{q}");
+        };
+        rs
+    };
+    for q in ["sütlaç", "SÜTLAÇ tarifi", "sütlac"] {
+        let alone = answer(false, true, q);
+        assert_eq!(alone, answer(true, true, q), "{q}");
+        assert_eq!(alone.rows.len(), 2, "{q}");
+        assert_eq!(alone.facets[0].values.len(), 2, "{q}");
+        // Her `sutlac` is marked: the word as it read it.
+        let first = alone
+            .rows
+            .iter()
+            .find(|r| r.values[0] == Value::Int(1))
+            .unwrap();
+        let span = Value::List(vec![Value::Int(0), Value::Int(6)]);
+        let Value::List(spans) = &first.values[1] else {
+            panic!("{q}: {:?}", first.values[1]);
+        };
+        assert_eq!(spans.first(), Some(&span), "{q}");
+    }
+    // Over the collection bob's rows decide it: `sütlaç` reads his
+    // spelling, which none of alice's rows writes.
+    let over_all = answer(true, false, "sütlaç");
+    assert!(over_all.rows.is_empty(), "{:?}", over_all.rows);
+}

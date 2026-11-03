@@ -45,7 +45,7 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">10 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">278 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">279 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -650,7 +650,7 @@ off.</p>
 <tr><td><code>index().using('hash', t.n)</code> / <code>uniqueIndex().on(t.n)</code></td><td><code>@hash</code> / <code>@unique</code></td></tr>
 <tr><td><code>index().on(t.owner, t.at.desc())</code> / <code>uniqueIndex().on(t.org, t.slug)</code></td><td><code>@sorted(owner, at desc)</code> / <code>@unique(org, slug)</code></td></tr>
 <tr><td><code>index().using('hnsw', t.e.op('vector_l2_ops')).with({ m, ef_construction, ef_search, quant })</code></td><td><code>@hnsw(l2, m=.., ...)</code></td></tr>
-<tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars })</code></td><td><code>@text(...)</code></td></tr>
+<tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars, accents })</code></td><td><code>@text(...)</code></td></tr>
 <tr><td><code>index().using('inverted', t.splade)</code></td><td><code>@inverted</code></td></tr>
 <tr><td><code>index().using('hash', t.meta.path('lang'))</code></td><td><code>create index on t (meta.lang) @hash</code></td></tr>
 </tbody>
@@ -835,7 +835,7 @@ version's tables is refused: its ranks would mean something else.</p>
 the rest. The release ships <code>fennec.wasm</code> alone, with every
 feature; another set is a build option.</p>
 
-<pre data-lang="bash">make wasm                              # every feature: 278 KB brotli
+<pre data-lang="bash">make wasm                              # every feature: 279 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
 make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 205 KB

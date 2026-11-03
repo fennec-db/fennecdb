@@ -34,7 +34,7 @@ public indirect enum JSON: Codable, Sendable, Equatable {
 /// A row of `articles`.
 public struct Articles: Codable, Sendable, Equatable {
     public var id: Int64
-    public var title: String  // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    public var title: String  // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     public var year: Int64?  // int @hash
     public var score: Double?  // float @sorted
     public var draft: Bool  // bool required
@@ -128,7 +128,7 @@ public struct EveryTypeArgs: Codable, Sendable, Equatable {
 /// A row of what `every_type` answers.
 public struct EveryTypeRow: Codable, Sendable, Equatable {
     public var id: Int64
-    public var title: String  // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    public var title: String  // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     public var year: Int64?  // int @hash
     public var draft: Bool  // bool required
     public var published: String?  // timestamp @ttl(30d)

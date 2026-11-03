@@ -9,7 +9,7 @@ class Articles(TypedDict):
     """A row of `articles`."""
 
     id: int
-    title: str  # text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    title: str  # text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     year: Optional[int]  # int @hash
     score: Optional[float]  # float @sorted
     draft: bool  # bool required
@@ -86,7 +86,7 @@ class EveryTypeRow(TypedDict):
     """A row of what `every_type` answers."""
 
     id: int
-    title: str  # text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    title: str  # text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     year: Optional[int]  # int @hash
     draft: bool  # bool required
     published: Optional[str]  # timestamp @ttl(30d)
