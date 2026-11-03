@@ -153,24 +153,42 @@ impl Database {
         if !callee.def.writes() {
             return self.read_call(&callee);
         }
-        let run = |db: &mut Self| {
-            db.bounded(|db| {
-                let mut last = Ok(Response::Affected(0));
-                for s in &callee.def.body {
-                    last = db.run_one(s, &callee.values);
-                    if last.is_err() {
-                        break;
-                    }
-                }
-                last
-            })
-        };
-        // Out of line where it reads a slot: a scheduled statement run by
-        // hand.
+        self.run_callee(&callee)
+    }
+
+    /// A writing body judged ([`Self::callee`]), run in the block open --
+    /// a call's, or a scheduled run's ([`Self::run_slot`]): the one write
+    /// loop both run, a scheduled body's out of line where it reads a slot.
+    pub(super) fn run_callee(&mut self, callee: &Callee) -> Result<Response> {
         match callee.slot {
-            None => run(self),
-            slot => super::due::with_slot(slot, || run(self)),
+            None => self.run_body(&callee.def.body, &callee.values, None),
+            Some(slot) => self.run_slotted(&callee.def.body, &callee.values, slot),
         }
+    }
+
+    /// Each statement of `body` run with `values`, its rows counted against
+    /// `--call-max-rows`; the answer is the last statement's. `slot`, a
+    /// scheduled body's, is handed to each statement's filter
+    /// (`due::slot_handed`).
+    pub(super) fn run_body(
+        &mut self,
+        body: &[Statement],
+        values: &[Value],
+        slot: Option<&Value>,
+    ) -> Result<Response> {
+        self.bounded(|db| {
+            let mut last = Ok(Response::Affected(0));
+            for s in body {
+                last = match slot {
+                    None => db.run_one(s, values),
+                    Some(at) => db.run_one(&super::due::slot_handed(s, at), values),
+                };
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        })
     }
 
     /// Whether the statement `call` names only reads, as the table stands
@@ -346,6 +364,18 @@ impl Database {
             };
             let Some((c, filter, pick)) = shape(st) else {
                 continue;
+            };
+            // `slot()` is a constant of a run, handed to the plan as a value
+            // (`run_slotted`): a hole here, as a parameter is.
+            let folded;
+            let filter = match (&def.schedule, filter) {
+                (Some(_), Some(f)) => {
+                    let mut f = f.clone();
+                    super::due::slot_folded(&mut f, &Value::Null);
+                    folded = f;
+                    Some(&folded)
+                }
+                (_, f) => f,
             };
             let Some(schema) = schema_of(c) else {
                 continue;

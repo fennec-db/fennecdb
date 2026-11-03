@@ -1345,25 +1345,16 @@ fn main() {
         // a definition. A server taking no writes runs none, and says how
         // many it holds unrun; its file keeps their slots due, to the
         // server that next writes it.
+        let what = file.as_deref().unwrap_or("the database");
         if read_only {
-            let unrun = shared
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .statements()
-                .iter()
-                .filter(|s| s.schedule.is_some())
-                .count();
-            if unrun > 0 {
-                fennec_http::log!(
-                    "{unrun} scheduled statement(s) held unrun: --http-read-only runs none, \
-                     its slots left due"
-                );
-            }
+            let mut g = shared.write().unwrap_or_else(|e| e.into_inner());
+            fennec_http::schedule::unrun(what, "--http-read-only runs none", &mut g);
         } else {
             fennec_http::schedule::watch(
-                file.as_deref().unwrap_or("the database"),
+                what,
                 &shared,
                 sync == SyncPolicy::Always,
+                durability::stop_with,
             )?;
         }
 

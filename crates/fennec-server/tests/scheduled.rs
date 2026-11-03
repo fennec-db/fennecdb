@@ -112,3 +112,83 @@ fn a_read_only_server_runs_none_and_says_so() {
     assert_eq!(code, 0, "{log}");
     assert_eq!(ran(&path), (0, None));
 }
+
+/// A `--http-read-only` replica says so as its primary's first schedule
+/// reaches it, as it would have at its start: never one held unrun without
+/// a word.
+#[test]
+fn a_read_only_replica_says_so_as_a_schedule_reaches_it() {
+    const TOKEN: &str = "repl-token";
+    let (pf, rf) = (tmp("scheduled", "rp.fennec"), tmp("scheduled", "rr.fennec"));
+    let (pf, rf) = (pf.to_str().unwrap(), rf.to_str().unwrap());
+    let primary = start(&["--file", pf, "--replication-token", TOKEN]);
+    let mut p = primary.http();
+    p.run("create collection ticks (slot timestamp, at timestamp)");
+    let upstream = format!("http://127.0.0.1:{}", primary.port);
+    let replica = start(&[
+        "--file",
+        rf,
+        "--replication-token",
+        TOKEN,
+        "--replica-of",
+        &upstream,
+        "--http-read-only",
+    ]);
+    let mut r = replica.http();
+    let t = Instant::now();
+    while r.query("get ticks count").is_err() {
+        assert!(t.elapsed() < Duration::from_secs(20), "never followed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    p.run("create statement tick every 1d as insert ticks {slot: slot(), at: now()}");
+    assert!(
+        replica.logged(
+            "1 scheduled statement(s) held unrun: --http-read-only runs none",
+            Duration::from_secs(20)
+        ),
+        "{}",
+        replica.log.lock().unwrap()
+    );
+    let (code, log) = replica.terminate();
+    assert_eq!(code, 0, "{log}");
+    let _ = primary.terminate();
+}
+
+/// A tenant node runs no schedule yet: a file holding one, put into its
+/// directory as `fennec restore` puts one, is said held unrun as the
+/// tenant opens -- an install of one is refused (fennec-http's
+/// `a_tenant_node_takes_no_scheduled_statement_yet`).
+#[test]
+fn a_tenant_node_says_what_it_holds_unrun() {
+    fennec_ql::install();
+    let dir = tmp("scheduled", "node");
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let mut db = fennec_core::fs::open(dir.join("acme.fennec")).unwrap();
+        db.allow_schedules();
+        for q in [
+            "create collection ticks (slot timestamp, at timestamp)",
+            "create statement tick every 1h as insert ticks {slot: slot(), at: now()}",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        if let Some(sync) = db.flush().unwrap() {
+            sync().unwrap();
+        }
+    }
+    let server = start(&["--admin-token", "adm", "--dir", dir.to_str().unwrap()]);
+    let answer = server.http().query_at("/t/acme", "get ticks count");
+    assert!(answer.is_ok_and(|a| a.contains("\"count\":0")));
+    assert!(
+        server.logged(
+            "tenant `acme`: 1 scheduled statement(s) held unrun: a tenant node runs no \
+             scheduled statement yet",
+            Duration::from_secs(10)
+        ),
+        "{}",
+        server.log.lock().unwrap()
+    );
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

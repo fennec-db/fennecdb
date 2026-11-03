@@ -1352,10 +1352,10 @@ impl super::Database {
     /// adopted, a collection made. A look at each collection, at a schema
     /// change alone, and out of line: each place calls it.
     ///
-    /// Where the table then holds a schedule, the scheduler watching the
-    /// database is woken ([`Self::on_schedules`]): its next slot may have
-    /// moved, and a table that came to hold its first schedule wakes a
-    /// scheduler that slept with none -- never a timer.
+    /// The scheduler watching the database is told how many schedules the
+    /// table holds ([`Self::on_schedules`]): its next slot may have moved,
+    /// and a table that came to hold its first schedule wakes a scheduler
+    /// that slept with none -- never a timer.
     #[inline(never)]
     pub(super) fn rebind(&mut self) {
         let t = &self.statements;
@@ -1363,10 +1363,21 @@ impl super::Database {
             c.bound = t.events_of(name);
         }
         #[cfg(feature = "statements")]
-        if let Some(wake) = &self.on_schedules {
-            if t.iter().any(|s| s.schedule.is_some()) {
-                wake();
-            }
+        self.tell_schedules();
+    }
+
+    /// [`Self::on_schedules`]' hook told how many schedules the table
+    /// holds, where one is set: at a schema change, and as a copy is
+    /// promoted ([`Self::fork`]).
+    #[cfg(feature = "statements")]
+    pub(super) fn tell_schedules(&self) {
+        if let Some(tell) = &self.on_schedules {
+            tell(
+                self.statements
+                    .iter()
+                    .filter(|s| s.schedule.is_some())
+                    .count(),
+            );
         }
     }
 

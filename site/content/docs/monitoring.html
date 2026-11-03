@@ -279,7 +279,19 @@ events:</p>
     <code>create statement ... after</code>, its replacement or its
     <code>drop statement</code> carries <code>bound_collection</code> and
     <code>bound_events</code> (<code>"orders"</code>, <code>"set or
-    del"</code>): a drop's text does not say what it bound.</li>
+    del"</code>): a drop's text does not say what it bound. The line of a
+    <a href="/docs/fennecql#scheduled-statements">scheduled statement</a>'s
+    definition or replacement carries <code>schedule</code>, its clause as
+    written (<code>"at '0 3 * * mon-fri' in 'Europe/Berlin'"</code>), whose
+    texts the shape made parameters.</li>
+  <li><b>A scheduled statement's last run found ahead of the clock</b>: a
+    <code>clock</code> line (<code>warn</code>), once a statement and mark,
+    naming the <code>database</code>, the <code>statement</code>, the
+    <code>mark</code>, the <code>clock</code>, <code>ahead_ms</code> and
+    <code>waits</code> -- whether its slots wait for the clock to pass the
+    mark, ahead by an hour at most, or the schedule goes on from the clock,
+    the mark taken for a wrong clock's. A clock stepped back behind a run
+    is one of its two readings wrong, which an operator wants to know.</li>
   <li><b>A <a href="/docs/fennecql#write-bound-statements">bound statement</a>'s
     refusal of a scoped writer's write.</b> The writer is told the status and
     the guard's <code>reason</code> alone; a <code>bound</code> line holds the

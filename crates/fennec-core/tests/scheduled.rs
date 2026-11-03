@@ -679,11 +679,27 @@ fn a_mark_ahead_of_the_clock_pauses_an_hour_at_most_then_goes_on_from_it() {
     assert_eq!(d.ahead, Some(at(5, 0)));
     assert_eq!(d.run, Some((at(3, 0), 2)));
     assert_eq!(d.next, Some(at(4, 0)));
-    // A `since` far ahead: from the clock too.
-    let (_, db) = scheduled(HOURLY, at(23, 30));
+    // A `since` far ahead anchors nothing: the latest slot runs once, and
+    // its mark anchors the slots after it, each of which runs.
+    let (_, mut db) = scheduled(HOURLY, at(23, 30));
     let d = due(&db, at(10, 15));
     assert_eq!(d.ahead, Some(at(23, 30)));
-    assert_eq!((d.run, d.next), (None, Some(at(11, 0))));
+    assert_eq!((d.run, d.next), (Some((at(10, 0), 0)), Some(at(11, 0))));
+    db.mark_slot("h", ran(&db, "h", at(10, 0), 0)).unwrap();
+    assert_eq!(due(&db, at(10, 50)).run, None, "once");
+    assert_eq!(due(&db, at(11, 5)).run, Some((at(11, 0), 0)));
+    db.mark_slot("h", ran(&db, "h", at(11, 0), 0)).unwrap();
+    let d = due(&db, at(14, 5));
+    assert_eq!((d.run, d.next), (Some((at(14, 0), 2)), Some(at(15, 0))));
+    // A mark that far ahead too: the same, from the clock.
+    let (_, mut db) = scheduled(HOURLY, at(23, 30));
+    db.begin().unwrap();
+    run(&mut db, "put holds {state: 'x'}").unwrap();
+    db.mark_slot("h", ran(&db, "h", at(23, 0) + DAY, 0))
+        .unwrap();
+    db.commit().unwrap();
+    let d = due(&db, at(10, 15));
+    assert_eq!(d.run, Some((at(10, 0), 0)));
 }
 
 /// Berlin's clocks go forward at 02:00 on 29 March 2026 and back at 03:00
@@ -861,6 +877,50 @@ fn a_call_by_hand_runs_the_slot_that_has_come_and_marks_none() {
     assert_eq!(due(&db, at).run, Some((t0() + HOUR, 0)), "still due");
     assert_eq!(db.slot_at("stamp", at), Some(t0() + HOUR));
     assert_eq!(db.slot_at("lapse", at), None, "no such schedule");
+}
+
+/// `slot()` is a constant of a run: a filter on it reaches an index as a
+/// parameter does -- at the definition, which takes it with no `scans`,
+/// and in the run and the call by hand, each reading one row of ten where
+/// `--call-max-rows` lets two be read.
+#[test]
+fn slot_reaches_an_index_as_a_parameter_does() {
+    let tap = Tap::default();
+    let mut db = holds(&tap);
+    run(
+        &mut db,
+        "create collection logs (period timestamp @hash, n int)",
+    )
+    .unwrap();
+    let text = "create statement b every 15m as set logs {n: 2} where period = slot()";
+    run(&mut db, text).unwrap();
+    let e = refused(run(
+        &mut db,
+        "create statement c every 15m as set logs {n: 3} where n = 1",
+    ));
+    assert!(e.contains("say `scans`"), "{e}");
+    let slot = t0() + 15 * MINUTE;
+    for i in 0..10 {
+        run(
+            &mut db,
+            &format!("put logs {{period: {}, n: 1}}", slot - i * HOUR),
+        )
+        .unwrap();
+    }
+    db.set_call_max_rows(2);
+    db.begin().unwrap();
+    db.run_slot("b", slot, slot + MINUTE).unwrap();
+    db.commit().unwrap();
+    let stmt = fennec_ql::parse_one("get logs where n = 2 select period").unwrap();
+    let rows = db.query(&stmt, &[]).unwrap().rows().unwrap().rows.clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values[0], Value::Timestamp(slot));
+    // By hand, the slot that has come.
+    db.set_clock(Some(slot - HOUR + MINUTE));
+    run(&mut db, "call b").unwrap();
+    let stmt = fennec_ql::parse_one("get logs where n = 2 count").unwrap();
+    let n = db.query(&stmt, &[]).unwrap().rows().unwrap().rows[0].values[0].clone();
+    assert_eq!(n, Value::Int(2));
 }
 
 /// A slot's mark is a write that changes nothing read: a block carrying

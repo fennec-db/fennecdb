@@ -142,8 +142,6 @@ fn a_run_and_its_mark_land_as_one_block_once() {
         ran(schedule::pass(&db, late)),
         (t0() + HOUR, 2, Outcome::Ran)
     );
-    assert_eq!(schedule::counts(Some(&db)).skipped, 2);
-    assert_eq!(schedule::counts(Some(&db)).ran, 2);
 }
 
 /// A run that finds nothing lands nothing: no record, no counter moved;
@@ -244,8 +242,6 @@ fn a_refusal_the_statement_makes_marks_its_slot() {
         (t0() + 30 * MINUTE, 0, Outcome::Ran)
     );
     assert_eq!(number(&db, "get holds where state = 'closed' count"), 1);
-    let c = schedule::counts(Some(&db));
-    assert_eq!((c.refused, c.ran), (1, 1));
 }
 
 /// A broken statement's slots are marked as they pass, nothing of it run;
@@ -455,7 +451,6 @@ fn the_quota_holds_a_slot_and_the_next_supersedes_it() {
         (t0() + 45 * MINUTE, 1, Outcome::Ran)
     );
     assert_eq!(number(&db, "get holds where state = 'held' count"), 0);
-    assert!(schedule::counts(Some(&db)).held >= 5);
 }
 
 /// The clock moves the slots. Stepped back staying past the mark, nothing
@@ -483,7 +478,6 @@ fn a_mark_ahead_of_the_clock_waits_an_hour_at_most() {
         schedule::Look::default(),
         "told once"
     );
-    assert_eq!(schedule::counts(Some(&db)).mark_ahead, 1);
     assert!(schedule::pass(&db, at(5, 10)).runs.is_empty(), "none twice");
 
     // By more: on from the clock, the slot run early run again.
@@ -505,6 +499,88 @@ fn a_mark_ahead_of_the_clock_waits_an_hour_at_most() {
     let look = schedule::pass(&db, at(7, 5));
     assert!(look.ahead.is_empty(), "cleared");
     assert_eq!(ran(look), (at(7, 0), 0, Outcome::Ran));
+}
+
+/// A `since` a wrong clock left a year ahead stops nothing: the latest
+/// slot runs at the first look, and each slot after it as it comes.
+#[test]
+fn a_definition_a_year_ahead_runs_from_the_clock() {
+    let insert = "create statement h every 1h as insert holds {state: 'tick'}";
+    let db = defined_at(t0() + 365 * 24 * HOUR, &[HOLDS, insert]);
+    for h in 0..4 {
+        let look = schedule::pass(&db, t0() + h * HOUR + 5 * MINUTE);
+        assert_eq!(ran(look), (t0() + h * HOUR, 0, Outcome::Ran), "{h}");
+        assert!(schedule::pass(&db, t0() + h * HOUR + 30 * MINUTE)
+            .runs
+            .is_empty());
+    }
+    assert_eq!(number(&db, "get holds count"), 4);
+}
+
+/// A mark a wrong clock left ahead, landed, then runs that find nothing:
+/// each one's mark is the latest by order, never outranked by the one
+/// ahead, so no slot after it runs twice -- pending, or carried by a
+/// client's write.
+#[test]
+fn a_mark_left_ahead_outranks_no_run_after_it() {
+    let at = |h, m| utc(2026, 5, 4, h, m);
+    let hourly = "create statement h every 1h as del holds where state = 'x'";
+    let db = defined_at(at(0, 30), &[HOLDS, hourly]);
+    put(&db, "put holds {state: 'x'}");
+    // 05:00's run deletes a row: its mark lands.
+    assert_eq!(
+        ran(schedule::pass(&db, at(5, 10))),
+        (at(5, 0), 4, Outcome::Ran)
+    );
+    assert_eq!(
+        db.read().unwrap().last_mark("h").map(|m| m.at),
+        Some(at(5, 0))
+    );
+    // The clock back to 02:10: 02:00 runs, finding nothing.
+    assert_eq!(ran(schedule::pass(&db, at(2, 10))).0, at(2, 0));
+    assert_eq!(db.read().unwrap().pending().len(), 1);
+    assert!(schedule::pass(&db, at(2, 20)).runs.is_empty(), "pending");
+    put(&db, "put holds {state: 'open'}");
+    assert!(db.read().unwrap().pending().is_empty(), "carried");
+    assert_eq!(
+        db.read().unwrap().last_mark("h").map(|m| m.at),
+        Some(at(2, 0))
+    );
+    assert!(schedule::pass(&db, at(2, 30)).runs.is_empty(), "landed");
+    assert_eq!(
+        ran(schedule::pass(&db, at(3, 5))),
+        (at(3, 0), 0, Outcome::Ran)
+    );
+}
+
+/// A copy promoted runs its due slot at once: the promotion wakes the
+/// scheduler, which looked at it while it followed and would otherwise
+/// look again within a minute.
+#[test]
+fn a_promoted_copy_runs_its_due_slot_at_once() {
+    let now = fennec_core::time::now_ms().unwrap();
+    let db = defined_at(
+        now - 2 * HOUR,
+        &[
+            HOLDS,
+            "create statement h every 1h as insert holds {state: 'tick'}",
+        ],
+    );
+    db.write().unwrap().follow(Vec::new()).unwrap();
+    schedule::watch("a promoted copy", &db, false, |_| {}).unwrap();
+    let t = Instant::now();
+    while schedule::looks(&db) == 0 {
+        assert!(t.elapsed() < Duration::from_secs(20), "never looked");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(number(&db, "get holds count"), 0, "a follower runs none");
+    db.write().unwrap().fork(9).unwrap();
+    // Well inside the minute the look while following set.
+    let t = Instant::now();
+    while number(&db, "get holds count") == 0 {
+        assert!(t.elapsed() < Duration::from_secs(30), "not run at once");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Berlin's clocks go forward at 02:00 on 29 March 2026 and back at 03:00
@@ -780,7 +856,7 @@ fn a_schedule_is_defined_where_a_scheduler_runs_it_by_the_server_s_token() {
     let (status, body) = node.send(ROOT, "/batch", &batch, "");
     assert_eq!(status, 400, "{body}");
     assert_eq!(number(&db, "get holds count"), 0);
-    schedule::watch("a test's database", &db, false).unwrap();
+    schedule::watch("a test's database", &db, false, |_| {}).unwrap();
     let (status, body) = node.query(&node.scoped(), yearly);
     assert_eq!(status, 403, "{body}");
     let (status, body) = node.query(ROOT, yearly);
@@ -908,7 +984,7 @@ fn a_held_claim_is_answered_by_a_run_s_write_never_by_its_mark() {
 fn a_server_holding_no_schedule_makes_no_look() {
     fennec_ql::install();
     let db = Arc::new(RwLock::new(Database::new()));
-    schedule::watch("idle", &db, false).unwrap();
+    schedule::watch("idle", &db, false, |_| {}).unwrap();
     let node = serve(&db);
     for q in [
         HOLDS,

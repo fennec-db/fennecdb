@@ -597,8 +597,9 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
     };
     // Each by its shape, and a scheduled statement defined or replaced by
     // its schedule as well, whose texts -- the cron expression, the zone --
-    // the shape made parameters (`Schedule::written`).
-    let mut each: Vec<(String, Option<String>)> = Vec::new();
+    // the shape made parameters: the clause as written ([`schedule_of`]),
+    // which holds no row's value.
+    let mut each: Vec<(String, Option<&str>)> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
             for (from, to) in spans {
@@ -607,10 +608,7 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
                 if changes_schema(s) {
                     let mut one = String::new();
                     crate::statements::shape_to(s, &mut one, fennec_core::named::MAX_TEXT);
-                    let schedule = (statement_named(&one).is_some())
-                        .then(|| fennec_ql::definition(s).ok())
-                        .flatten()
-                        .and_then(|d| d.schedule.map(|t| t.written()));
+                    let schedule = statement_named(&one).and_then(|_| schedule_of(s));
                     each.push((one, schedule));
                 }
             }
@@ -643,6 +641,26 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         }
         event("schema", &fields);
     }
+}
+
+/// The schedule clause of `create [or replace] statement <name>`'s text,
+/// as written: `every <interval>` or `at '<cron>'`, and `in '<zone>'`
+/// after it, up to the clause after it -- `None` for any other text. Read
+/// off the lexer's tokens, which the parse links in already: the
+/// definition read again and its schedule written out by its meaning cost
+/// the server 3 KB for a log line.
+fn schedule_of(s: &str) -> Option<&str> {
+    use fennec_ql::lexer::Tok;
+    let toks = fennec_ql::lexer::tokenize(s).ok()?;
+    let is = |t: &Tok, w: &str| matches!(t, Tok::Ident(i) if i.eq_ignore_ascii_case(w));
+    let at = toks.iter().position(|t| is(&t.tok, "statement"))? + 2;
+    let first = toks
+        .get(at)
+        .filter(|t| is(&t.tok, "every") || is(&t.tok, "at"))?;
+    let end = (toks[at..].iter())
+        .find(|t| t.tok == Tok::Eof || ["comment", "scans", "as"].iter().any(|w| is(&t.tok, w)))
+        .map_or(s.len(), |t| t.pos);
+    s.get(first.pos..end).map(str::trim_end)
 }
 
 /// The statement a `create [or replace] statement` or a `drop statement
@@ -856,6 +874,37 @@ pub fn succeeded(peer: Option<IpAddr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schedule clause as written, its zone with it, and nothing of
+    /// the body or the clauses after it.
+    #[test]
+    fn a_schedule_is_named_as_written() {
+        for (text, clause) in [
+            (
+                "create statement a every 15m as del t where n = 1",
+                Some("every 15m"),
+            ),
+            (
+                "CREATE OR REPLACE STATEMENT a EVERY 1 h IN 'Europe/Berlin' comment 'x' as del t",
+                Some("EVERY 1 h IN 'Europe/Berlin'"),
+            ),
+            (
+                "create statement a every 1d scans as del t",
+                Some("every 1d"),
+            ),
+            (
+                "create statement a at '0 3 * * 1-5'\n  in '+03:00'\nas del t where s = 'in'",
+                Some("at '0 3 * * 1-5'\n  in '+03:00'"),
+            ),
+            ("create statement a at 'it''s' as del t", Some("at 'it''s'")),
+            ("create statement a every 1h", Some("every 1h")),
+            ("create statement a() as get t count", None),
+            ("create statement a after del t as del u where id = 1", None),
+            ("drop statement a", None),
+        ] {
+            assert_eq!(schedule_of(text), clause, "{text}");
+        }
+    }
 
     #[test]
     fn the_wait_doubles_to_its_ceiling_and_a_success_forgives() {

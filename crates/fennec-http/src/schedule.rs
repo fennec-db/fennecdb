@@ -11,7 +11,11 @@
 //! the engine wakes it where the table comes to hold one
 //! (`Database::on_schedules`, asked where `rebind` is), never a timer. With
 //! a schedule it sleeps until the earliest next slot, a minute at most, so
-//! a clock stepped forward is noticed within one.
+//! a clock stepped forward is noticed within one. A panic outside a run's
+//! own catch -- a look, a log line, a sync -- stops the server through the
+//! one shutdown, as anything beside the database does (`stop_with`): a
+//! server answering while its schedules never run is the gap F3 must never
+//! leave.
 //!
 //! **A look** ([`pass`], which a test drives with the time it names) asks
 //! [`Database::due`] of each database it is due for, and runs each due
@@ -144,7 +148,7 @@ pub struct Look {
 }
 
 /// The process's counts of runs: what `/_metrics` will read (F3's slice
-/// 5) and a test asks of its own database ([`counts`]).
+/// 5, [`counts`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub ran: u64,
@@ -158,7 +162,6 @@ pub struct Counts {
     pub mark_ahead: u64,
 }
 
-#[derive(Default)]
 struct Counters {
     ran: AtomicU64,
     refused: AtomicU64,
@@ -167,21 +170,6 @@ struct Counters {
     unknown: AtomicU64,
     skipped: AtomicU64,
     mark_ahead: AtomicU64,
-}
-
-impl Counters {
-    fn read(&self) -> Counts {
-        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        Counts {
-            ran: r(&self.ran),
-            refused: r(&self.refused),
-            broken: r(&self.broken),
-            held: r(&self.held),
-            unknown: r(&self.unknown),
-            skipped: r(&self.skipped),
-            mark_ahead: r(&self.mark_ahead),
-        }
-    }
 }
 
 static TOTAL: Counters = Counters {
@@ -194,9 +182,23 @@ static TOTAL: Counters = Counters {
     mark_ahead: AtomicU64::new(0),
 };
 
-fn count(w: &Watched, f: impl Fn(&Counters) -> &AtomicU64, n: u64) {
+fn count(f: impl Fn(&Counters) -> &AtomicU64, n: u64) {
     f(&TOTAL).fetch_add(n, Ordering::Relaxed);
-    f(&w.counts).fetch_add(n, Ordering::Relaxed);
+}
+
+/// The runs the process counted.
+pub fn counts() -> Counts {
+    let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+    let t = &TOTAL;
+    Counts {
+        ran: r(&t.ran),
+        refused: r(&t.refused),
+        broken: r(&t.broken),
+        held: r(&t.held),
+        unknown: r(&t.unknown),
+        skipped: r(&t.skipped),
+        mark_ahead: r(&t.mark_ahead),
+    }
 }
 
 /// A database the scheduler knows: one [`watch`] gave it, which its
@@ -215,7 +217,6 @@ struct Watched {
     /// wait for.
     next: AtomicI64,
     looks: AtomicU64,
-    counts: Counters,
     state: Mutex<State>,
 }
 
@@ -258,7 +259,6 @@ fn entry(db: &Arc<RwLock<Database>>, what: &str, durable: bool) -> Arc<Watched> 
         woken: AtomicBool::new(false),
         next: AtomicI64::new(NONE),
         looks: AtomicU64::new(0),
-        counts: Counters::default(),
         state: Mutex::default(),
     });
     list.push(Arc::clone(&w));
@@ -269,22 +269,25 @@ fn entry(db: &Arc<RwLock<Database>>, what: &str, durable: bool) -> Arc<Watched> 
 /// log: lets it take a scheduled statement's definition, and starts the
 /// process's scheduler where none runs yet -- an `Err` where its thread
 /// cannot be made, for the server to stop on (`stop_with`), never to serve
-/// with its schedules unrun. `durable` is `--sync always`. Called after
-/// both listeners are bound, since a first look may run a missed slot.
+/// with its schedules unrun. `durable` is `--sync always`; `stop` is the
+/// server's one shutdown, which the scheduler's thread asks for should it
+/// end (`stop_with`). Called after both listeners are bound, since a first
+/// look may run a missed slot.
 pub fn watch(
     what: &str,
     db: &Arc<RwLock<Database>>,
     durable: bool,
+    stop: fn(i32),
 ) -> std::result::Result<(), String> {
-    start()?;
+    start(stop)?;
     let w = entry(db, what, durable);
     w.run.store(true, Ordering::Release);
     let holds = {
         let mut g = held::write(db);
         g.allow_schedules();
         let hook = Arc::downgrade(&w);
-        g.on_schedules(Arc::new(move || {
-            if let Some(w) = hook.upgrade() {
+        g.on_schedules(Arc::new(move |n| {
+            if let (true, Some(w)) = (n > 0, hook.upgrade()) {
                 wake(&w);
             }
         }));
@@ -305,28 +308,76 @@ fn wake(w: &Watched) {
     WOKEN.notify_all();
 }
 
-fn start() -> std::result::Result<(), String> {
+/// Says how many scheduled statements `db` holds that nothing here runs
+/// -- `--http-read-only`, a tenant node -- `why` naming why: at once, and
+/// again wherever the table comes to hold another (a replica's apply, an
+/// image adopted), so a schedule is never held unrun without a word. Its
+/// file keeps their slots due, to whoever runs them next.
+pub fn unrun(what: &str, why: &'static str, db: &mut Database) {
+    let held = db
+        .statements()
+        .iter()
+        .filter(|s| s.schedule.is_some())
+        .count();
+    tell_unrun(what, why, held);
+    let told = std::sync::atomic::AtomicUsize::new(held);
+    let what = what.to_string();
+    db.on_schedules(Arc::new(move |n| {
+        if told.swap(n, Ordering::Relaxed) != n {
+            tell_unrun(&what, why, n);
+        }
+    }));
+}
+
+fn tell_unrun(what: &str, why: &str, n: usize) {
+    if n > 0 {
+        crate::log!("{what}: {n} scheduled statement(s) held unrun: {why}, their slots left due");
+    }
+}
+
+fn start(stop: fn(i32)) -> std::result::Result<(), String> {
     let mut started = lock(&STARTED);
     if *started {
         return Ok(());
     }
     std::thread::Builder::new()
         .name("fennec-schedule".into())
-        .spawn(scheduler)
+        .spawn(move || scheduler(stop))
         .map_err(|e| format!("could not start the scheduler: {e}"))?;
     *started = true;
     Ok(())
 }
 
-fn scheduler() {
+/// The scheduler's thread. A run's panic is caught where it runs, its slot
+/// marked; one anywhere else -- `Database::due`, a look, a log line, a
+/// sync -- or the loop's end stops the server through its one shutdown
+/// (`stop`), never a thread gone and the server serving with no schedule
+/// run.
+fn scheduler(stop: fn(i32)) {
+    let ended = std::panic::catch_unwind(looking);
+    let words = match &ended {
+        Ok(()) => "its loop ended".to_string(),
+        Err(p) => panic_words(p.as_ref()),
+    };
+    crate::log!("the scheduler stopped ({words}): the server stops with it");
+    stop(1);
+}
+
+fn looking() {
     loop {
         for w in due() {
             if let Some(db) = w.db.upgrade() {
                 w.woken.store(false, Ordering::Release);
-                look(&w, &db, now_ms());
+                look(&w, &db, now_ms(), true, None);
             }
         }
     }
+}
+
+fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
+    (p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into())
 }
 
 /// The databases a look is due for, once there are any: woken, or past
@@ -371,7 +422,9 @@ fn due() -> Vec<Arc<Watched>> {
 /// it was not given ([`watch`]), so one a test looks at is the test's.
 pub fn pass(db: &Arc<RwLock<Database>>, now: i64) -> Look {
     let w = entry(db, "the database", true);
-    look(&w, db, now)
+    let mut out = Look::default();
+    look(&w, db, now, false, Some(&mut out));
+    out
 }
 
 /// The looks made at `db` so far: none, for a database holding no
@@ -383,27 +436,22 @@ pub fn looks(db: &Arc<RwLock<Database>>) -> u64 {
     w.map_or(0, |w| w.looks.load(Ordering::Relaxed))
 }
 
-/// The runs counted for `db`, or with `None` the process's.
-pub fn counts(db: Option<&Arc<RwLock<Database>>>) -> Counts {
-    let Some(db) = db else {
-        return TOTAL.read();
-    };
-    let weak = Arc::downgrade(db);
-    let list = lock(&WATCHED);
-    let w = list.iter().find(|w| Weak::ptr_eq(&w.db, &weak));
-    w.map_or_else(Counts::default, |w| w.counts.read())
-}
-
 /// The id of the run this thread is making, at the end of each line it
 /// writes as a request's id is (`request_id`); empty between runs.
 pub fn run_id() -> String {
     crate::request_id::current()
 }
 
-fn look(w: &Watched, db: &RwLock<Database>, now: i64) -> Look {
+/// One look, at `now`: `live` where the scheduler's thread makes it, the
+/// clock read again as each run takes the write lock; what it did told to
+/// `out` where a test asks ([`pass`]), and built for no one otherwise.
+fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, mut out: Option<&mut Look>) {
     w.looks.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    if tests::PANIC.swap(false, Ordering::SeqCst) {
+        panic!("a look's panic");
+    }
     let mut st = lock(&w.state);
-    let mut out = Look::default();
     let (dues, writes, seq, limit) = {
         let g = held::read(db);
         // A following database's writes are its primary's, the runs among
@@ -427,11 +475,13 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64) -> Look {
         let waits = mark <= now.saturating_add(fennec_core::named::AHEAD_MAX);
         tell_ahead(w, &d.name, mark, now, waits);
         st.told.push((d.name.clone(), mark));
-        out.ahead.push(Ahead {
-            name: d.name.clone(),
-            mark,
-            waits,
-        });
+        if let Some(out) = out.as_deref_mut() {
+            out.ahead.push(Ahead {
+                name: d.name.clone(),
+                mark,
+                waits,
+            });
+        }
     }
     // A slot held for a statement dropped, replaced past it or run since
     // is held no more.
@@ -448,9 +498,7 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64) -> Look {
             if st.held.iter().any(waits) {
                 continue;
             }
-            if let Some(r) = run(w, db, &d.name, now, &mut st) {
-                out.runs.push(r);
-            }
+            run(w, db, &d.name, now, live, &mut st, out.as_deref_mut());
         }
     }
     let mut next = dues.iter().filter_map(|d| d.next).min().unwrap_or(NONE);
@@ -461,15 +509,31 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64) -> Look {
         next = next.min(now.saturating_add(MINUTE));
     }
     w.next.store(next, Ordering::Release);
-    out
 }
 
-/// `name`'s due slot run, with an id of its own for the lines it writes.
-fn run(w: &Watched, db: &RwLock<Database>, name: &str, now: i64, st: &mut State) -> Option<Run> {
+/// `name`'s due slot run, with an id of its own for the lines it writes,
+/// and told to `out` where a test asks.
+fn run(
+    w: &Watched,
+    db: &RwLock<Database>,
+    name: &str,
+    now: i64,
+    live: bool,
+    st: &mut State,
+    out: Option<&mut Look>,
+) {
     crate::request_id::begin(None);
-    let r = run_slot(w, db, name, now, st);
+    let r = run_slot(w, db, name, now, live, st);
+    if let (Some((slot, skipped, outcome)), Some(out)) = (r, out) {
+        out.runs.push(Run {
+            name: name.to_string(),
+            slot,
+            skipped,
+            outcome,
+            id: run_id(),
+        });
+    }
     crate::request_id::end();
-    r
 }
 
 fn limit_of(db: &Database) -> usize {
@@ -477,16 +541,26 @@ fn limit_of(db: &Database) -> usize {
         .map_or(0, |l| Arc::as_ptr(l) as *const () as usize)
 }
 
+/// The slot run, what it passed over and what came of it; `None` where
+/// none ran.
 fn run_slot(
     w: &Watched,
     db: &RwLock<Database>,
     name: &str,
     now: i64,
+    live: bool,
     st: &mut State,
-) -> Option<Run> {
+) -> Option<(i64, u64, Outcome)> {
     let iso = fennec_core::time::format_iso;
     let what = &w.what;
     let mut g = held::write(db);
+    // The run's start, read once the lock is held: a run behind fifteen
+    // others, their fsyncs and their streams, reads the time it runs at --
+    // its `now()` and `@ttl`'s `alive` -- never the look's.
+    let now = match live {
+        true => now.max(now_ms()),
+        false => now,
+    };
     // Asked again under the lock the run holds to its landing: a slot is
     // run once in a history, the mark landing with the run.
     if g.history().following || g.failure().is_some() || g.fenced().is_err() {
@@ -535,24 +609,20 @@ fn run_slot(
             }
         }
     }));
-    let id = run_id();
     let refusal = match ran {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some((crate::api::status_of(&e), e.to_string(), e)),
         Err(p) => {
             // Put back whole by the engine, its block too.
             g.rollback();
-            let words = (p.downcast_ref::<&str>().map(|s| s.to_string()))
-                .or_else(|| p.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic".into());
-            let e = Error::Plugin(format!("a panic in the run: {words}"));
+            let e = Error::Plugin(format!("a panic in the run: {}", panic_words(p.as_ref())));
             Some((500, e.to_string(), e))
         }
     };
     let outcome = match refusal {
         None => {
             st.held.retain(|(n, _)| n != name);
-            count(w, |c| &c.ran, 1);
+            count(|c| &c.ran, 1);
             Outcome::Ran
         }
         // The state's: the slot is left due, and tried again.
@@ -588,7 +658,7 @@ fn run_slot(
                     ));
                 }
             }
-            count(w, |c| &c.held, 1);
+            count(|c| &c.held, 1);
             Outcome::Held(status)
         }
         // The statement's: the slot is marked refused, a run that lands
@@ -615,18 +685,18 @@ fn run_slot(
             );
             match broken {
                 true => {
-                    count(w, |c| &c.broken, 1);
+                    count(|c| &c.broken, 1);
                     Outcome::Broken
                 }
                 false => {
-                    count(w, |c| &c.refused, 1);
+                    count(|c| &c.refused, 1);
                     Outcome::Refused(status)
                 }
             }
         }
     };
     if !matches!(outcome, Outcome::Held(_)) {
-        count(w, |c| &c.skipped, skipped);
+        count(|c| &c.skipped, skipped);
     }
     // Made durable as any write is, once the lock is let go: only where a
     // block landed -- a run that wrote nothing costs no fsync.
@@ -650,15 +720,9 @@ fn run_slot(
              the next primary holds it is unknown",
             iso(slot)
         );
-        count(w, |c| &c.unknown, 1);
+        count(|c| &c.unknown, 1);
     }
-    Some(Run {
-        name: name.to_string(),
-        slot,
-        skipped,
-        outcome,
-        id,
-    })
+    Some((slot, skipped, outcome))
 }
 
 /// Whether `e`, a run's refusal, is the state's -- the quota, a lapsed
@@ -676,7 +740,7 @@ fn state_refused(db: &Database, e: &Error) -> bool {
 
 fn tell_ahead(w: &Watched, name: &str, mark: i64, now: i64, waits: bool) {
     let iso = fennec_core::time::format_iso;
-    count(w, |c| &c.mark_ahead, 1);
+    count(|c| &c.mark_ahead, 1);
     let then = match waits {
         true => "its slots wait for the clock to pass it",
         false => "taken for a wrong clock's: the schedule goes on from the clock",
@@ -688,4 +752,45 @@ fn tell_ahead(w: &Watched, name: &str, mark: i64, now: i64, waits: bool) {
         iso(now)
     );
     crate::audit::clock(&w.what, name, mark, now, waits);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicI32;
+
+    /// Makes the next look panic, outside any run.
+    pub(super) static PANIC: AtomicBool = AtomicBool::new(false);
+    static STOPPED: AtomicI32 = AtomicI32::new(0);
+
+    fn stop(code: i32) {
+        STOPPED.store(code, Ordering::SeqCst);
+    }
+
+    /// A panic outside a run -- here a look's -- ends the scheduler's
+    /// thread through the server's one shutdown (`stop`, `stop_with` in
+    /// `fennec-server`), never silently: the server would go on answering
+    /// with no schedule run.
+    #[test]
+    fn a_panic_outside_a_run_stops_the_server() {
+        let mut db = Database::new();
+        db.allow_schedules();
+        for q in [
+            "create collection holds (state text @hash)",
+            "create statement tidy every 1m as del holds where state = 'x'",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        let db = Arc::new(RwLock::new(db));
+        PANIC.store(true, Ordering::SeqCst);
+        // Holding a schedule, the database is looked at once given.
+        watch("a test's database", &db, false, stop).unwrap();
+        let t = std::time::Instant::now();
+        while STOPPED.load(Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(20), "never stopped");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(STOPPED.load(Ordering::SeqCst), 1);
+        assert!(!PANIC.load(Ordering::SeqCst), "the look panicked");
+    }
 }

@@ -3969,11 +3969,12 @@ pub struct Database {
     /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
-    /// What wakes that scheduler where the table comes to hold a schedule
-    /// -- a definition, an image adopted, a replica's apply -- asked at a
-    /// schema change alone ([`Self::on_schedules`]).
+    /// What is told how many schedules the table holds -- a definition, an
+    /// image adopted, a replica's apply, a promotion -- the scheduler it
+    /// wakes or the server's word on those it runs none of, asked at a
+    /// schema change and a promotion alone ([`Self::on_schedules`]).
     #[cfg(feature = "statements")]
-    on_schedules: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_schedules: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -5776,7 +5777,12 @@ impl Database {
     /// names none. `id` must be one no other database holds; the caller
     /// draws it at random.
     pub fn fork(&mut self, id: u64) -> Result<()> {
-        self.set_history(self.history.forked(id, self.changes.seq()))
+        self.set_history(self.history.forked(id, self.changes.seq()))?;
+        // A copy promoted runs its schedules from here: its scheduler, which
+        // ran none while it followed, looks at once.
+        #[cfg(feature = "statements")]
+        self.tell_schedules();
+        Ok(())
     }
 
     /// Takes a primary's history, and from then on no write of its own:

@@ -268,7 +268,7 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     ));
     for q in [
         r#"{"query":"create collection jobs (n int)"}"#,
-        r#"{"query":"create statement nightly at '0 3 * * 1-5' in 'Europe/Berlin' scans as del jobs where n = 0"}"#,
+        r#"{"query":"create statement nightly at '0 3 * * mon-fri' in 'Europe/Berlin' scans as del jobs where n = 0"}"#,
     ] {
         assert_eq!(call(sched, Some(ROOT), "POST", "/query", q), 200);
     }
@@ -326,7 +326,7 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     assert!(bound.contains(r#""path":"/query""#), "{bound}");
     let defined = lines[16];
     assert!(
-        defined.contains(r#""schedule":"at '0 3 * * 1-5' in 'Europe/Berlin'""#),
+        defined.contains(r#""schedule":"at '0 3 * * mon-fri' in 'Europe/Berlin'""#),
         "{defined}"
     );
     assert!(defined.contains(r#""statement":"create statement nightly at $1 in $2"#));

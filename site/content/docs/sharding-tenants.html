@@ -38,7 +38,12 @@ to the router instead, and the app needs the router's token alone:</p>
     ... as ...</code>, follows the collections it binds and writes, and the
     node runs it. A <a href="/docs/fennecql#scheduled-statements">scheduled
     statement</a> is refused on a tenant for now (400): a node runs none
-    yet, and a schedule no one runs is never kept. A router from before
+    yet, and a schedule no one runs is never kept. So is the image of a file
+    holding one (<code>PUT /_admin/tenants/&lt;t&gt;/file</code>, and with it
+    a move onto the node, the tenant left on its source), naming the
+    statement to drop; a tenant whose file came holding one another way, a
+    <code>fennec restore</code> into the directory, is said to hold it unrun
+    in the node's log as it opens. A router from before
     named statements refuses such a schema as one that does not read (400):
     upgrade the routers, and every node and archiver, before a tenant
     defines one.</li>
