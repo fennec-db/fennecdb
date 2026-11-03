@@ -348,9 +348,22 @@ pub struct Cron {
 /// `every 90s` are refused at definition.
 pub const MIN_PERIOD: i64 = 60_000;
 
+/// The scheduled statements a database holds at most: sixteen runs a
+/// minute at the floor. Refused past it, never cut.
+pub const MAX_SCHEDULED: usize = 16;
+
+/// How far ahead of the clock a schedule's last mark, or its `since`, may
+/// stand and be waited for (`Database::due`): a clock stepped back by at
+/// most this long is taken for the wrong reading, and the slots up to the
+/// mark, which ran, wait for it -- a pause of an hour at most. A mark
+/// further ahead is taken for the wrong one, left by a clock that was
+/// ahead, and the schedule goes on from the clock.
+pub const AHEAD_MAX: i64 = 3_600_000;
+
 /// What the engine refuses a scheduled statement's definition with until a
 /// server runs one (F3's slices 1 and 2): a schedule defined where nothing
-/// runs it would be a slot no one runs without a word.
+/// runs it would be a slot no one runs without a word. A test lets one be
+/// defined (`Database::allow_schedules`).
 pub const SCHEDULED_NOT_BUILT: &str =
     "scheduled statements are not built yet: no server runs one, so none is defined";
 
@@ -1158,8 +1171,13 @@ impl Definition {
     /// written as `drop` and `create`, so no grant starts meaning more with
     /// no line of a policy changed.
     pub fn breaks_contract(&self, old: &Definition) -> Option<String> {
-        if let Some(why) = kind_kept(&self.name, self.bound_as(), old.bound_as()) {
+        if let Some(why) = kind_kept(&self.name, self.kind(), old.kind()) {
             return Some(why);
+        }
+        // A scheduled statement is called by no one and woken by no write:
+        // no grant hangs on its schedule, zone or body.
+        if self.schedule.is_some() {
+            return None;
         }
         // A bound statement's contract is what a `wake` line grants: to
         // cause what it writes, each collection by the kind of write. A
@@ -1205,6 +1223,15 @@ impl Definition {
              which leaves every grant naming it naming nothing",
             self.name, self.name
         ))
+    }
+
+    /// Its kind, as its record keeps it.
+    pub fn kind(&self) -> Kind<'_> {
+        match (self.bound_as(), &self.schedule) {
+            (Some((c, e)), _) => Kind::Bound(c, e),
+            (None, Some(_)) => Kind::Scheduled,
+            (None, None) => Kind::Called,
+        }
     }
 
     /// What it binds, as its record keeps it: the collection and the
@@ -1284,22 +1311,43 @@ impl Definition {
     }
 }
 
+/// What kind of statement a definition is, as its record says it: called,
+/// bound to a collection's writes (and which), or run by the clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind<'a> {
+    Called,
+    Bound(&'a str, u8),
+    Scheduled,
+}
+
 /// Why a replacement is refused for its kind, if it is: a callable
-/// statement replaced by a bound one or the other way, or a bound one by
-/// one bound to another collection or other events (`now` and `was`, each
-/// the collection and events a statement binds). A `call` or `wake` line
-/// naming it would name something else, so it is a new statement, written
-/// as `drop` and `create`. Asked from the record where the old text reads
-/// no tree: its op and its fields say both.
-pub fn kind_kept(name: &str, now: Option<(&str, u8)>, was: Option<(&str, u8)>) -> Option<String> {
+/// statement replaced by a bound or a scheduled one, or the other way, or
+/// a bound one by one bound to another collection or other events. A
+/// `call` or `wake` line naming it would name something else, so it is a
+/// new statement, written as `drop` and `create`. Asked from the record
+/// where the old text reads no tree: its op and its fields say both. A
+/// scheduled one changes its schedule, zone and body freely: no grant
+/// hangs on them.
+pub fn kind_kept(name: &str, now: Kind, was: Kind) -> Option<String> {
     let what = match (now, was) {
         (a, b) if a == b => return None,
-        (Some(_), None) => "is bound to writes, where it was called".to_string(),
-        (None, _) => "is called, where it was bound to writes".to_string(),
-        (Some((c, e)), Some(_)) => format!(
+        (Kind::Bound(c, e), Kind::Bound(..)) => format!(
             "is bound after `{}` on `{c}`, where it was bound to other writes",
             Binding::events_named(e)
         ),
+        (now, was) => {
+            let is = match now {
+                Kind::Called => "is called",
+                Kind::Bound(..) => "is bound to writes",
+                Kind::Scheduled => "runs by the clock",
+            };
+            let was = match was {
+                Kind::Called => "it was called",
+                Kind::Bound(..) => "it was bound to writes",
+                Kind::Scheduled => "it ran by the clock",
+            };
+            format!("{is}, where {was}")
+        }
     };
     Some(format!(
         "statement `{name}` {what}: a replacement keeps its kind, and a bound one the collection \

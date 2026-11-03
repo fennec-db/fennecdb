@@ -781,8 +781,9 @@ test('a file holding named statements opens in the module, which keeps them thro
   const { readFileSync } = await import('node:fs');
   const { Fennec } = await import('./fennec.js');
   // Written by a server's build (fennec-core's `stored::` tests): two
-  // definitions in its image, a third after it, and a statement bound to
-  // the rows `entries` makes (op 3).
+  // definitions in its image, a third after it, a statement bound to the
+  // rows `entries` makes (op 3), and one run by the clock (op 4) with the
+  // mark of a slot it ran for (op 5), landed in the block of its write.
   const file = readFileSync(new URL('../crates/fennec-core/tests/statements.fennec', import.meta.url));
   const db = await Fennec.open(wasm);
   db.load(new Uint8Array(file));
@@ -791,9 +792,42 @@ test('a file holding named statements opens in the module, which keeps them thro
     'create statement like(',
     'create statement stale(',
     'create statement credit after insert entries',
+    'create statement lapse every 15m',
   ];
-  const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t));
-  assert.ok(keeps(db.snapshot()), 'each text as it came');
+  // The mark's record: kind 13 of no collection, op 5, its statement's
+  // name, then its slot -- 2026-03-28T13:00Z, as a zigzag varint.
+  const zigzag = (ms) => {
+    const out = [];
+    for (let v = BigInt(ms) * 2n; ; v >>= 7n) {
+      if (v < 128n) { out.push(Number(v)); break; }
+      out.push(Number(v & 127n) | 128);
+    }
+    return out;
+  };
+  const mark = Buffer.from([5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13))]);
+  const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t)) && Buffer.from(image).includes(mark);
+  assert.ok(Buffer.from(file).includes(mark), 'the fixture holds the mark');
+  assert.ok(keeps(db.snapshot()), 'each text and the mark as they came');
+  // The module reads a mark's name and version alone, and keeps its bytes:
+  // a later slot's mark of the same definition, its outcome (9) one no
+  // version writes, is taken as the last and written back as it came, for
+  // the server that next opens the file to read, or refuse.
+  const version = Buffer.from(file).indexOf(mark) + mark.length;
+  let end = version;
+  for (let n = 0; n < 2; end++) if (file[end] < 128) n++;
+  const later = Buffer.from([
+    5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13, 15)),
+    ...file.subarray(version, end), 9, 0, 0, 0,
+  ]);
+  const marked = await Fennec.open(wasm);
+  marked.load(new Uint8Array(Buffer.concat([file, Buffer.from([13, 0, later.length]), later])));
+  const laterImage = Buffer.from(marked.snapshot());
+  assert.ok(laterImage.includes(later) && !laterImage.includes(mark), 'the later mark alone, as it came');
+  // A schedule binds no write, and the module runs none: what it writes
+  // writes as ever, and its call is refused, as every call is here.
+  assert.equal(db.run('get holds count').rows[0].count, 1);
+  db.run("set holds {state: 'held'} where state = 'lapsed'");
+  assert.throws(() => db.run('call lapse'), /named statements are a server's/);
   // The module runs no binding: a write that may make a row of `entries`
   // is refused before it changes anything, in its own words; what the
   // binding does not bind writes as ever.

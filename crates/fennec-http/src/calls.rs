@@ -286,11 +286,13 @@ pub fn wait_of(message: &str) -> u64 {
 }
 
 /// Logs each `call` line naming a statement `db` does not hold, or holds
-/// bound to writes, which no call runs, and each `wake` line naming one it
-/// does not hold, or holds callable, which no write wakes: as the server
-/// starts, as a tenant (`tenant`) opens, and after a `drop` took one away.
-/// A typo in the policy grants nothing, and says so.
+/// bound to writes or run by the clock, which no call of a token's runs,
+/// and each `wake` line naming one it does not hold, or holds callable or
+/// scheduled, which no write wakes: as the server starts, as a tenant
+/// (`tenant`) opens, and after a `drop` took one away. A typo in the
+/// policy grants nothing, and says so.
 pub fn log_unheld(access: Option<&Access>, db: &Database, tenant: Option<&str>) {
+    use fennec_core::named::Kind;
     let Some(access) = access else {
         return;
     };
@@ -301,35 +303,46 @@ pub fn log_unheld(access: Option<&Access>, db: &Database, tenant: Option<&str>) 
     };
     let t = db.statements();
     for (line, name) in access.call_grants() {
-        match t.get(name).map(|s| s.after.is_some()) {
+        match t.get(name).map(|s| s.kind()) {
             None => crate::log!(
                 "{}policy line {line} grants calling statement `{name}`, which the database \
                  does not hold: the line grants nothing until it does",
                 at()
             ),
-            Some(true) => crate::log!(
+            Some(Kind::Bound(..)) => crate::log!(
                 "{}policy line {line} grants calling statement `{name}`, which is bound to \
                  writes: the writes it binds run it, and no call does, so the line grants \
                  nothing; grant waking it with `{name} wake`",
                 at()
             ),
-            Some(false) => {}
+            Some(Kind::Scheduled) => crate::log!(
+                "{}policy line {line} grants calling statement `{name}`, which runs by the \
+                 clock: a token held to a policy never calls it, so the line grants nothing",
+                at()
+            ),
+            Some(Kind::Called) => {}
         }
     }
     for (line, name) in access.wake_grants() {
-        match t.get(name).map(|s| s.after.is_some()) {
+        match t.get(name).map(|s| s.kind()) {
             None => crate::log!(
                 "{}policy line {line} grants waking statement `{name}`, which the database \
                  does not hold: the line grants nothing until it does",
                 at()
             ),
-            Some(false) => crate::log!(
+            Some(Kind::Called) => crate::log!(
                 "{}policy line {line} grants waking statement `{name}`, which is bound to no \
                  writes: `wake` grants a bound statement alone, so the line grants nothing; \
                  grant calling it with `{name} call`",
                 at()
             ),
-            Some(true) => {}
+            Some(Kind::Scheduled) => crate::log!(
+                "{}policy line {line} grants waking statement `{name}`, which runs by the \
+                 clock: `wake` grants a statement bound to writes alone, and no write wakes \
+                 it, so the line grants nothing",
+                at()
+            ),
+            Some(Kind::Bound(..)) => {}
         }
     }
 }

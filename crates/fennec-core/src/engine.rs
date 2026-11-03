@@ -41,10 +41,16 @@ pub use bound::{Ran, Runs, RUNS_KEPT};
 mod call;
 #[cfg(feature = "statements")]
 pub use call::{claims_carried, CallRead, Callee};
+#[cfg(feature = "statements")]
+mod due;
+#[cfg(feature = "statements")]
+pub use due::Due;
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
-pub use stored::{Statements, Stored};
+#[cfg(feature = "statements")]
+pub use stored::{SlotMark, Times};
+pub use stored::{Statements, Stored, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
@@ -745,6 +751,11 @@ enum Undo {
     /// or marked broken as the block landed: the table before.
     #[cfg(feature = "statements")]
     Statements(Arc<Statements>),
+    /// A scheduled statement's last mark changed -- a run's landed in the
+    /// block, or one taken by a replacement or a drop: the mark before,
+    /// `None` where it had none.
+    #[cfg(feature = "statements")]
+    Mark(Box<(String, Option<SlotMark>)>),
 }
 
 /// What [`Undo::Altered`] puts back.
@@ -3893,9 +3904,17 @@ pub struct Database {
     #[cfg(not(target_arch = "wasm32"))]
     behind: bool,
     /// The named statements the database holds, in a cell of their own:
-    /// a definition, a drop or a mark makes a new table, never changes one
-    /// a reader holds ([`Self::statements`]).
+    /// a definition or a drop makes a new table, never changes one a reader
+    /// holds ([`Self::statements`]).
     statements: Arc<Statements>,
+    /// Each scheduled statement's last mark that landed, by name, beside
+    /// the table rather than in it ([`Self::last_mark`]): a slot's mark is
+    /// read under the lock alone, and in the table it made a new one, each
+    /// statement copied, a slot a tenant. One naming a definition replaced
+    /// or dropped since marks nothing. A build running no schedule keeps
+    /// each mark's bytes on its statement's entry instead (`Stored::last`).
+    #[cfg(feature = "statements")]
+    marks: Vec<(String, SlotMark)>,
     /// Whether a schema change that breaks a named statement marks it
     /// broken rather than being refused: a writer that cannot refuse
     /// ([`Self::internally`]).
@@ -3934,6 +3953,19 @@ pub struct Database {
     /// `--call-max-rows`.
     #[cfg(feature = "statements")]
     call_max_rows: usize,
+    /// The marks of slots whose runs wrote nothing, by statement, each
+    /// landing as the last record of the next block that lands
+    /// ([`Self::mark_slot`], `engine/due.rs`): the schedules' table in
+    /// memory beside the statements'. A word of the database's, `None`
+    /// while none waits, so a commit asks a word it holds in its line and
+    /// follows no pointer (*What a schedule costs*, named-statements.md).
+    #[cfg(feature = "statements")]
+    #[allow(clippy::box_collection)]
+    pending: Option<Box<Vec<(String, SlotMark)>>>,
+    /// Whether a scheduled statement may be defined: a test's, until a
+    /// server runs one ([`Self::allow_schedules`]).
+    #[cfg(feature = "statements")]
+    scheduling: bool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -4003,6 +4035,8 @@ impl Database {
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
+            #[cfg(feature = "statements")]
+            marks: Vec::new(),
             internal: false,
             unbound: false,
             #[cfg(feature = "statements")]
@@ -4013,6 +4047,10 @@ impl Database {
             calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "statements")]
             call_max_rows: crate::named::CALL_MAX_ROWS,
+            #[cfg(feature = "statements")]
+            pending: None,
+            #[cfg(feature = "statements")]
+            scheduling: false,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -4520,11 +4558,25 @@ impl Database {
             }
         }
         // After the collections they read, each with its version, epoch
-        // and digest: a compact keeps them as they were.
+        // and digest: a compact keeps them as they were. A schedule's last
+        // mark right after its definition, in one walk: a walk of the
+        // marks after the definitions, and the closure writing each, were
+        // 0.15 KB of the browser module, which writes a mark's bytes back
+        // as they came.
         for st in self.statements.iter() {
             let body = st.encode();
             out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
             out.write(&body)?;
+            #[cfg(feature = "statements")]
+            let mark = self.mark_record(st);
+            #[cfg(feature = "statements")]
+            let mark = mark.as_deref();
+            #[cfg(not(feature = "statements"))]
+            let mark = st.last.as_deref();
+            if let Some(m) = mark {
+                out.write(&record_head(REC_STATEMENT, 0, m.len()))?;
+                out.write(m)?;
+            }
         }
         let body_len = out.at() - body_at;
         out.patch(head_at + 9, &body_len.to_le_bytes())
@@ -6083,6 +6135,13 @@ impl Database {
         self.next_coll_id = fresh.next_coll_id;
         self.history = fresh.history;
         self.statements = fresh.statements;
+        // Runs of a history the image need not continue: a following
+        // database runs none, and marks none.
+        #[cfg(feature = "statements")]
+        {
+            self.marks = fresh.marks;
+            self.pending = None;
+        }
         self.rebind();
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
@@ -6203,6 +6262,12 @@ impl Database {
             self.spare(b);
             return Ok(());
         }
+        // The marks of runs that wrote nothing ride the first block that
+        // lands, as its last records: a block put back keeps them pending.
+        #[cfg(feature = "statements")]
+        if self.pending.is_some() {
+            self.carry_pending(&mut b);
+        }
         // Out of `self.block` from here, so held by `Unlanded` for a panic
         // unwinding out of a check the server plugged in -- the fence, a
         // quota: dropped with nothing more, it left its writes in memory and
@@ -6227,6 +6292,10 @@ impl Database {
         // does.
         *self.appended.get_mut() += len as u64;
         self.dirty = true;
+        #[cfg(feature = "statements")]
+        if self.pending.is_some() {
+            self.landed_pending();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let before = self.changes.seq();
         for &(cid, id) in &b.notes {
@@ -6529,6 +6598,14 @@ impl Database {
                 Undo::Statements(t) => {
                     self.statements = t;
                     rebound = true;
+                }
+                #[cfg(feature = "statements")]
+                Undo::Mark(m) => {
+                    let (name, was) = *m;
+                    match was {
+                        Some(was) => drop(self.set_mark(name, was)),
+                        None => self.marks.retain(|m| m.0 != name),
+                    }
                 }
                 Undo::Uncomposed(cid, at, b) => {
                     if let Some(name) = self.named(cid) {
