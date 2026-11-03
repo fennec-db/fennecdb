@@ -264,6 +264,25 @@ fn a_hook_over_lines_reads_as_one_statement() {
     assert_eq!(tables(&text(&out.stdout)), [["5"]]);
 }
 
+/// A quoted key left open at a line's end is refused there, as the lexer
+/// refuses a control character in a key: the shell's gate closes it at
+/// the line's end, where a string would read on, so the line after it is
+/// no part of the key and runs (`lexer::Unclosed`).
+#[test]
+fn a_key_open_at_a_line_s_end_swallows_no_line() {
+    let d = Dir::new("open-key");
+    let f = d.notes();
+    let out = piped(
+        &f,
+        "create statement s on hook h where event.\"order\nget notes count\n",
+    );
+    let err = text(&out.stderr);
+    let errors: Vec<&str> = err.lines().filter(|l| l.starts_with("error:")).collect();
+    assert_eq!(errors.len(), 1, "{err}");
+    assert!(errors[0].contains("no control character"), "{err}");
+    assert_eq!(tables(&text(&out.stdout)), [["5"]]);
+}
+
 /// A script of statements, each over several lines -- a schema, a
 /// document, a `set`, a `del` that picks its row, reads -- runs as
 /// written, and a blank line between two lines of a statement is white

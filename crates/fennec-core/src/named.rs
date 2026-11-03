@@ -655,9 +655,12 @@ pub struct Webhook {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     /// `event.<key>...`, a path into the event's body, its keys as the
-    /// JSON names them -- or `event` alone, no key: the whole body, a
-    /// `json` parameter's only.
-    Event(Vec<String>),
+    /// JSON names them, joined by dots, which no key holds -- as
+    /// [`Value::at_path`] reads them -- or `event` alone, no key: the whole
+    /// body, a `json` parameter's only. One `String`, not a list: a
+    /// definition's reading and refusals took 1.2 KB of the server's code
+    /// more with one.
+    Event(String),
     /// `hook.id`: the event's key, a text.
     HookId,
     /// `hook.at`: the time its signature covers, a timestamp, `null` where
@@ -696,16 +699,34 @@ pub const HOOKED_PARAMS: &str = "each parameter of a webhook consumer reads the 
                                  int from event.data.object.amount`, `$e json from event` for the \
                                  whole body, or `hook.id`, `hook.at`, `hook.event`";
 
+/// Why `keys`, a path's keys past `event` joined by dots, names no part
+/// of an event, if it names none: past `MAX_PATH_KEYS` keys, as a `json`
+/// field's path, a key of no character, or `*` -- SQL's `o.*`, which the
+/// lexer reads as a name's end: the whole body is `from event`.
+#[cold]
+fn keys_refused(keys: &str) -> Option<String> {
+    use crate::value::MAX_PATH_KEYS;
+    if keys.split('.').count() > MAX_PATH_KEYS {
+        return Some(format!(
+            "a path names at most {MAX_PATH_KEYS} keys past `event`"
+        ));
+    }
+    keys.split('.').any(|k| k.is_empty() || k == "*").then(|| {
+        format!(
+            "`event.{keys}` names no part of the event: a key holds a character at least, and \
+             `*` none -- the whole body is a `json` parameter's, `$e json from event`"
+        )
+    })
+}
+
 /// Why a webhook consumer's parameter `p` cannot read `s`, if it cannot,
 /// from their text alone: the whole body is a `json` parameter's, a path
-/// names at most `MAX_PATH_KEYS` keys past `event`, each a name with no
-/// dot, `hook.id` and `hook.event` are texts and `hook.at` a timestamp --
-/// a `json` parameter taking any of them. Out of line: a definition's
-/// alone.
+/// names what [`keys_refused`] lets it, `hook.id` and `hook.event` are
+/// texts and `hook.at` a timestamp -- a `json` parameter taking any of
+/// them. Out of line: a definition's alone.
 #[cold]
 #[inline(never)]
 pub fn source_refused(p: &Param, s: &Source) -> Option<String> {
-    use crate::value::MAX_PATH_KEYS;
     let held = |ty: DataType| p.ty == ty || p.ty == DataType::Json;
     let (read, is) = match s {
         Source::Event(keys) if keys.is_empty() && p.ty != DataType::Json => {
@@ -715,19 +736,8 @@ pub fn source_refused(p: &Param, s: &Source) -> Option<String> {
                 p.name, p.name
             ))
         }
-        Source::Event(keys) if keys.len() > MAX_PATH_KEYS => {
-            return Some(format!(
-                "`${}`: a path names at most {MAX_PATH_KEYS} keys past `event`",
-                p.name
-            ))
-        }
-        Source::Event(keys) => {
-            let key = keys.iter().find(|k| k.is_empty() || k.contains('.'))?;
-            return Some(format!(
-                "`${}`: `{key}` is no key of a path -- a key holds a character at least, and no \
-                 dot, which cuts a path's keys",
-                p.name
-            ));
+        Source::Event(keys) if !keys.is_empty() => {
+            return keys_refused(keys).map(|why| format!("`${}`: {why}", p.name));
         }
         Source::HookId if !held(DataType::Text) => ("hook.id", "text"),
         Source::HookEvent if !held(DataType::Text) => ("hook.event", "text"),
@@ -743,8 +753,9 @@ pub fn source_refused(p: &Param, s: &Source) -> Option<String> {
 /// Why a webhook consumer's condition is refused, if it is: it picks the
 /// events its statement takes from the event alone -- its paths, `hook.event`
 /// and literals -- so no parameter, no row and no other collection, no
-/// `now()`, no `expired()` and no fold. Its names are the parser's to hold
-/// to `event.` and `hook.event`; a tree made otherwise is held here too.
+/// `now()`, no `slot()`, no `expired()` and no fold, and a path names what
+/// [`keys_refused`] lets it. Its names are the parser's to hold to
+/// `event.` and `hook.event`; a tree made otherwise is held here too.
 #[cold]
 #[inline(never)]
 pub fn hook_condition_refused(e: &Expr) -> Option<String> {
@@ -754,7 +765,8 @@ pub fn hook_condition_refused(e: &Expr) -> Option<String> {
             return;
         }
         why = match e {
-            Expr::Field(f) if f == "hook.event" || f.starts_with("event.") => None,
+            Expr::Field(f) if f == "hook.event" => None,
+            Expr::Field(f) if f.starts_with("event.") => keys_refused(&f["event.".len()..]),
             Expr::Field(f) => Some(format!(
                 "`{f}`: a hook's condition reads the event, `event.<path>`, and `hook.event`"
             )),
@@ -768,11 +780,17 @@ pub fn hook_condition_refused(e: &Expr) -> Option<String> {
                 Some("a hook's condition reads one event, and folds none".into())
             }
             e if e.asks_expired() => Some("a hook's condition reads no row: no `expired()`".into()),
-            Expr::Call(n, a) if a.is_empty() && n.eq_ignore_ascii_case("now") => Some(
-                "a hook's condition reads the event and literals, and no clock: `now()` is its \
-                 body's, the time of the event's taking"
-                    .into(),
-            ),
+            Expr::Call(n, a)
+                if a.is_empty()
+                    && (n.eq_ignore_ascii_case("now") || n.eq_ignore_ascii_case("slot")) =>
+            {
+                Some(
+                    "a hook's condition reads the event and literals, and no clock: `now()` is \
+                     its body's, the time of the event's taking, and `slot()` a scheduled \
+                     statement's"
+                        .into(),
+                )
+            }
             _ => None,
         };
     };
@@ -2317,7 +2335,15 @@ impl Canon {
         self.list(3, &h.sources, |c, s| {
             c.node(8);
             match s {
-                Source::Event(keys) => c.names(2, keys),
+                // Each key under 2, as a list of them was written.
+                Source::Event(keys) if !keys.is_empty() => {
+                    c.tag(2);
+                    c.uint(keys.split('.').count() as u64);
+                    for k in keys.split('.') {
+                        c.str(k);
+                    }
+                }
+                Source::Event(_) => {}
                 Source::HookId => c.num(1, 1),
                 Source::HookAt => c.num(1, 2),
                 Source::HookEvent => c.num(1, 3),

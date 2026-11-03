@@ -57,7 +57,7 @@ fn condition(text: &str) -> Expr {
 }
 
 fn path(keys: &[&str]) -> Source {
-    Source::Event(keys.iter().map(|k| k.to_string()).collect())
+    Source::Event(keys.join("."))
 }
 
 fn field(f: &str) -> Box<Expr> {
@@ -156,8 +156,8 @@ fn a_hook_reads_into_its_tree() {
 
     // The whole body, a `json` parameter's; the hook's own three values;
     // `event` and `hook` in any case, the keys as written.
-    assert_eq!(source("json", "event"), Source::Event(Vec::new()));
-    assert_eq!(source("json", "EVENT"), Source::Event(Vec::new()));
+    assert_eq!(source("json", "event"), Source::Event(String::new()));
+    assert_eq!(source("json", "EVENT"), Source::Event(String::new()));
     assert_eq!(source("text", "hook.id"), Source::HookId);
     assert_eq!(source("text", "Hook.ID"), Source::HookId);
     assert_eq!(source("timestamp", "hook.at"), Source::HookAt);
@@ -178,6 +178,11 @@ fn a_hook_reads_into_its_tree() {
     assert_eq!(
         source("int", "event.\"0\".\"a b\".c"),
         path(&["0", "a b", "c"])
+    );
+    // A key no name begins: quoted, which the lexer's refusal names.
+    assert_eq!(
+        source("int", "event.items.\"0\".price"),
+        path(&["items", "0", "price"])
     );
     // A default after the path, and `check` over the parameters.
     let d = definition(
@@ -463,16 +468,167 @@ fn a_hook_s_refusals() {
         "body of guards alone takes an event and changes nothing",
         "guard",
     );
-    // A quoted key is a hook's alone; SQL's quoted column is a name here.
-    for (text, at) in [
-        ("get t where meta.\"a-b\" = 1", "meta."),
-        ("select o.\"total\" from orders o", "o.\""),
+    // A quoted key is a hook's alone; SQL's quoted column is a name here,
+    // refused as `Parser::quoted` refuses `"total"` -- the path as read,
+    // never the fix as the offence.
+    for (text, words, at) in [
+        (
+            "get t where meta.\"a-b\" = 1",
+            "`meta.a-b`, its keys bare",
+            "meta.",
+        ),
+        (
+            "select o.\"total\" from orders o",
+            "`o.total`, its keys bare, not in double quotes: double quotes make text here",
+            "o.\"",
+        ),
         (
             "create statement s() public as set t {a: 1} where meta.\"a-b\" = 1",
+            "its keys bare, not in double quotes",
             "meta.",
         ),
     ] {
-        refused_at(text, "a quoted key reads a webhook's event", at);
+        refused_at(text, words, at);
+    }
+    // Where a name alone stands, the token is told for what it is.
+    let e = parse("del t.\"x\" where a = 1").unwrap_err().to_string();
+    assert!(
+        e.contains("expected a name, found a path with a quoted key"),
+        "{e}"
+    );
+}
+
+/// SQL's `o.*`, which the lexer reads as a name's end, names no part of an
+/// event: the whole body is `from event`, a parameter or a condition alike.
+#[test]
+fn a_star_is_no_key_of_the_event() {
+    let writes = "as insert t {a: 1}";
+    refused_at(
+        &format!("create statement s($e json from event.*) on hook h {writes}"),
+        "`event.*` names no part of the event: a key holds a character at least, and `*` none \
+         -- the whole body is a `json` parameter's, `$e json from event`",
+        "event.*",
+    );
+    refused_at(
+        &format!("create statement s($e json from event.data.*) on hook h {writes}"),
+        "`*` none",
+        "event.data.*",
+    );
+    refused_at(
+        &format!("create statement s on hook h where event.* = 1 {writes}"),
+        "`event.*` names no part of the event",
+        "event.*",
+    );
+    refused_at(
+        &format!("create statement s on hook h where event.a = 1 and event.b.* = 1 {writes}"),
+        "`event.b.*` names no part of the event",
+        "event.a",
+    );
+}
+
+/// A quoted key holds no control character: refused at the path, whose
+/// words hold none of it, and a key no name begins named quoted.
+#[test]
+fn a_key_holds_no_control_character() {
+    for key in ["a\nb", "a\tb", "\r", "a\u{1}"] {
+        let text = format!(
+            "create statement s($a text from event.\"{key}\") on hook h as insert t {{a: $a}}"
+        );
+        let e = parse(&text).unwrap_err().to_string();
+        assert!(e.contains("no control character"), "{key:?}: {e}");
+        assert!(!e.contains(key), "{key:?}: {e}");
+    }
+    refused_at(
+        "create statement s($p int from event.items.0.price) on hook h as insert t {a: $p}",
+        "a key that starts with a digit is quoted, `.\"0\"`",
+        ".0",
+    );
+}
+
+/// What the parser refuses at its word, [`Definition::refused`] refuses of
+/// a tree made by hand, which the parser cannot make: a hook beside a
+/// binding or a schedule, a name that is no word, claims or `public`, a
+/// source more or fewer than the parameters, a path no event holds, and a
+/// condition reading `slot()`.
+#[test]
+fn a_hook_s_tree_made_by_hand_is_held_as_its_text() {
+    let base = definition(
+        "create statement s($a text from event.a) on hook h where event.t = 'x' as insert t {a: $a}",
+    );
+    assert_eq!(base.refused(), None);
+    let refused = |change: &dyn Fn(&mut Definition)| {
+        let mut d = base.clone();
+        change(&mut d);
+        d.refused().expect("refused").1
+    };
+    let other = |text: &str| definition(text);
+    let bound = other("create statement b after insert t as insert u {a: 1}").after;
+    assert_eq!(refused(&|d| d.after = bound.clone()), HOOKED_AND_OTHER);
+    let every = other("create statement c every 1h as insert u {a: 1}").schedule;
+    assert_eq!(refused(&|d| d.schedule = every.clone()), HOOKED_AND_OTHER);
+    let named = refused(&|d| d.hook.as_mut().unwrap().name = "stripe-live".into());
+    assert!(named.contains("is no hook's name"), "{named}");
+    let claims = other("create statement c() claims (sub text) as insert u {a: $jwt.sub}").claims;
+    assert_eq!(refused(&|d| d.claims = claims.clone()), HOOKED_VALUES);
+    assert_eq!(refused(&|d| d.public = true), HOOKED_VALUES);
+    assert_eq!(
+        refused(&|d| d.hook.as_mut().unwrap().sources.clear()),
+        HOOKED_PARAMS
+    );
+    assert_eq!(
+        refused(&|d| d.hook.as_mut().unwrap().sources.push(Source::HookId)),
+        HOOKED_PARAMS
+    );
+    let deep: String = (0..65).map(|k| format!("k{k}.")).collect();
+    for (keys, words) in [
+        ("a..b", "names no part of the event"),
+        ("a.", "names no part of the event"),
+        ("*", "names no part of the event"),
+        (deep.trim_end_matches('.'), "at most 64 keys past `event`"),
+    ] {
+        let why = refused(&|d| d.hook.as_mut().unwrap().sources[0] = Source::Event(keys.into()));
+        assert!(why.contains(words), "{keys}: {why}");
+        let why = refused(&|d| {
+            d.hook.as_mut().unwrap().condition = Some(eq(&format!("event.{keys}"), Value::Int(1)))
+        });
+        assert!(why.contains(words), "{keys}: {why}");
+    }
+    let slot = Expr::Cmp(
+        CmpOp::Gt,
+        Box::new(Expr::Call("slot".into(), Vec::new())),
+        Box::new(Expr::Lit(Value::Int(0))),
+    );
+    let why = refused(&|d| d.hook.as_mut().unwrap().condition = Some(slot.clone()));
+    assert!(
+        why.contains("and no clock") && why.contains("`slot()`"),
+        "{why}"
+    );
+}
+
+/// `on` at the text's end after a schedule or a binding is left open, as
+/// the plain form's is -- `hook` may be the next line's -- and refused in
+/// the hook's words, which `hook` on the next line keeps.
+#[test]
+fn on_at_the_end_after_a_schedule_or_a_binding_is_left_open() {
+    for text in [
+        "create statement s every 1h on",
+        "create statement s at '0 3 * * *' in 'Europe/Berlin' on",
+        "create statement s after insert t on",
+        "create statement s after set t where new.a = 1 comment 'x' on",
+    ] {
+        let fennec_ql::Rest::Refused(r) = fennec_ql::reading(text).rest else {
+            panic!("{text}: not refused")
+        };
+        assert!(
+            r.error.to_string().contains(HOOKED_AND_OTHER),
+            "{text}: {r:?}"
+        );
+        assert!(r.end && !r.stands_alone(text), "{text}: {r:?}");
+        refused_at(
+            &format!("{text}\nhook h as insert t {{a: 1}}"),
+            HOOKED_AND_OTHER,
+            "on",
+        );
     }
 }
 

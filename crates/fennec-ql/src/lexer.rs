@@ -24,18 +24,6 @@ pub enum Tok {
     /// refused as before.
     #[cfg(feature = "statements")]
     Named(String),
-    /// `event.metadata."order-id"`: a path with a key FennecQL does not
-    /// write as a name, quoted as a policy quotes a claim
-    /// (`$jwt."cognito:groups"`) -- its names and keys as written, cut by
-    /// dots, which no key holds (`event.metadata.order-id`). A webhook
-    /// consumer reads one where it reads its event (a parameter's `from`,
-    /// its condition) and every other place refuses it: a dot before a
-    /// `"` was no token at all, so no text that lexed reads otherwise.
-    /// Without named statements it is that error still. A `String`, as
-    /// [`Tok::Ident`]'s: a list of keys made every token's copy and drop
-    /// an arm longer, the lexer's loop 0.9 KB.
-    #[cfg(feature = "statements")]
-    Keys(String),
     /// Numbers alone between brackets, read as the parser reads such a
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
@@ -71,6 +59,19 @@ pub enum Tok {
     /// that ran each statement at its `;`.
     Semi,
     Eof,
+    /// `event.metadata."order-id"`: a path with a key FennecQL does not
+    /// write as a name, quoted as a policy quotes a claim
+    /// (`$jwt."cognito:groups"`) -- its names and keys as written, cut by
+    /// dots, which no key holds (`event.metadata.order-id`). A webhook
+    /// consumer reads one where it reads its event (a parameter's `from`,
+    /// its condition) and every other place refuses it: a dot before a
+    /// `"` was no token at all, so no text that lexed reads otherwise.
+    /// Without named statements it is that error still. A `String`, as
+    /// [`Tok::Ident`]'s: a list of keys made every token's copy and drop
+    /// an arm longer, the lexer's loop 0.9 KB. The last variant, so no
+    /// other token's discriminant moves.
+    #[cfg(feature = "statements")]
+    Keys(String),
 }
 
 impl Tok {
@@ -89,7 +90,7 @@ impl Tok {
             #[cfg(feature = "statements")]
             Tok::Named(n) => format!("`${n}`"),
             #[cfg(feature = "statements")]
-            Tok::Keys(k) => format!("`{}`", keys_written(k)),
+            Tok::Keys(_) => "a path with a quoted key".into(),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
@@ -154,39 +155,24 @@ fn named_at(src: &str, s: usize) -> (Tok, usize) {
     (Tok::Named(src.get(s..i).unwrap_or_default().to_string()), i)
 }
 
-/// A path's names and keys, cut by dots, as FennecQL writes them: each
-/// bare where it reads as a name, else in double quotes --
-/// `event.metadata."order-id"`.
+/// What a quoted key is refused with, whatever it holds that no key may:
+/// one message, which says what a key holds.
 #[cfg(feature = "statements")]
-#[cold]
-pub(crate) fn keys_written(path: &str) -> String {
-    let mut out = String::new();
-    for (i, k) in path.split('.').enumerate() {
-        if i > 0 {
-            out.push('.');
-        }
-        let bare = k.starts_with(|c: char| c.is_alphabetic() || c == '_')
-            && k.chars().all(|c| c.is_alphanumeric() || c == '_');
-        match bare {
-            true => out.push_str(k),
-            false => {
-                out.push('"');
-                out.push_str(k);
-                out.push('"');
-            }
-        }
-    }
-    out
-}
+pub(crate) const KEY_HOLDS: &str = "a quoted key is the JSON's as written: a character at least, \
+                                    and no `\\`, no control character and no `.`, which cuts a \
+                                    path's keys";
 
 /// At a `.` at byte `i`: where it stands right after a name, the last of
 /// `out`, and before a `"` (`event.metadata."order-id"`), the path read on
 /// into [`Tok::Keys`] in that name's place -- each key in quotes, each name
 /// after a dot -- and where it ends; `None` for every other dot, the error
-/// it was. A quoted key is taken as written, the JSON's own: a character
-/// at least, no `\`, and no `.`, which cuts a path's keys. Out of the
-/// lexer's loop, every check with it, reached where a dot alone was
-/// refused: no text that lexed pays for it.
+/// it was, but a dot after a name and before a digit (`items.0`), refused
+/// naming the key quoted. A quoted key is taken as written, the JSON's
+/// own: a character at least, with no `\`, no control character -- a line
+/// ends none, so the shell's gate closes one at a line's end
+/// ([`Unclosed`]) -- and no `.`, which cuts a path's keys ([`KEY_HOLDS`]).
+/// Out of the lexer's loop, every check with it, reached where a dot alone
+/// was refused: no text that lexed pays for it.
 #[cfg(feature = "statements")]
 #[cold]
 #[inline(never)]
@@ -200,57 +186,98 @@ fn quoted_keys(src: &str, out: &mut [Token], mut i: usize, start: usize) -> Resu
     let Tok::Ident(first) = last else {
         return Ok(None);
     };
-    if b.get(i + 1) != Some(&b'"') || !after_name {
+    if !after_name || !matches!(b.get(i + 1), Some(b'"' | b'0'..=b'9')) {
         return Ok(None);
     }
-    let refused = |why: String| Err(Error::Query(format!("position {start}: {why}")));
     let mut path = std::mem::take(first);
     loop {
-        // At a `.`, a `"` or a name's first character after it.
+        // At a `.` before a `"`, a digit or a name's first character.
         path.push('.');
-        if b.get(i + 1) == Some(&b'"') {
-            let s = i + 2;
-            let mut j = s;
-            loop {
+        let s = i + 1;
+        let mut j = s;
+        let why = match b.get(s) {
+            Some(b'"') => loop {
+                j += 1;
                 match b.get(j) {
-                    None => return refused(UNTERMINATED.into()),
-                    Some(b'"') => break,
-                    Some(b'\\') => {
-                        return refused(
-                            "a quoted key is taken as written, the JSON's own, with no `\\`".into(),
-                        )
+                    None => break Some(UNTERMINATED),
+                    Some(b'"') if j > s + 1 => break None,
+                    Some(&(b'"' | b'\\' | b'.' | ..=0x1f | 0x7f)) => break Some(KEY_HOLDS),
+                    Some(_) => {}
+                }
+            },
+            // `items.0`: a key no name reads as, refused naming it quoted.
+            Some(b'0'..=b'9') => {
+                j += (b[s..].iter())
+                    .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+                    .count();
+                return Err(Error::Query(format!(
+                    "position {start}: unexpected character `.`: a key that starts with a digit \
+                     is quoted, `.\"{}\"`",
+                    src.get(s..j).unwrap_or_default()
+                )));
+            }
+            _ => {
+                while let Some(c) = src.get(j..).and_then(|t| t.chars().next()) {
+                    if !(c.is_alphanumeric() || c == '_') {
+                        break;
                     }
-                    Some(_) => j += 1,
+                    j += c.len_utf8();
                 }
+                None
             }
-            let key = src.get(s..j).unwrap_or_default();
-            if key.is_empty() || key.contains('.') {
-                return refused(format!(
-                    "`\"{key}\"` is no key of a path: a key holds a character at least, and no \
-                     dot, which cuts a path's keys"
-                ));
-            }
-            path.push_str(key);
-            i = j + 1;
-        } else {
-            let s = i + 1;
-            let mut j = s;
-            while let Some(c) = src.get(j..).and_then(|t| t.chars().next()) {
-                if !(c.is_alphanumeric() || c == '_') {
-                    break;
-                }
-                j += c.len_utf8();
-            }
-            path.push_str(src.get(s..j).unwrap_or_default());
-            i = j;
+        };
+        if let Some(why) = why {
+            return Err(Error::Query(format!("position {start}: {why}")));
         }
+        i = match b[s] {
+            b'"' => {
+                path.push_str(src.get(s + 1..j).unwrap_or_default());
+                j + 1
+            }
+            _ => {
+                path.push_str(src.get(s..j).unwrap_or_default());
+                j
+            }
+        };
         match (b.get(i), src.get(i + 1..).and_then(|t| t.chars().next())) {
-            (Some(b'.'), Some(c)) if c == '"' || c.is_alphabetic() || c == '_' => {}
+            (Some(b'.'), Some(c))
+                if c == '"' || c.is_ascii_digit() || c.is_alphabetic() || c == '_' => {}
             _ => break,
         }
     }
     *last = Tok::Keys(path);
     Ok(Some(i))
+}
+
+/// At a character at byte `i` that begins no token: where it ends after
+/// a path with a quoted key ([`quoted_keys`]), else its refusal -- the
+/// character as the text holds it, a `char` formatted being 274 bytes of
+/// the browser module. The lexer's loop holds a call alone for it: with
+/// the quoted key's call and the refusal inline, the loop the texts that
+/// are no definition run was laid out anew, its registers spilled,
+/// though no text that lexed reached the arm.
+#[cfg(feature = "statements")]
+#[cold]
+#[inline(never)]
+fn unlexed(
+    src: &str,
+    out: &mut [Token],
+    i: usize,
+    start: usize,
+    counted: usize,
+    other: char,
+) -> Result<usize> {
+    if other == '.' {
+        if let Some(end) = quoted_keys(src, out, i, start)? {
+            return Ok(end);
+        }
+    }
+    let other = src
+        .get(counted..counted + other.len_utf8())
+        .unwrap_or_default();
+    Err(Error::Query(format!(
+        "position {start}: unexpected character `{other}`"
+    )))
 }
 
 fn subtracts(last: Option<&Token>) -> bool {
@@ -295,13 +322,14 @@ pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
 /// `parser::reading` knows its end is what refused it.
 pub(crate) const UNTERMINATED: &str = "unterminated string";
 
-/// What a text leaves open, read as the lexer reads its strings, comments
-/// and brackets but a piece at a time and with no token made: a string not
-/// closed, or more brackets opened than closed. No statement is whole
-/// while either holds, so a reader taking a text a line at a time -- the
-/// shell -- asks this before it reads the text again: a document written
-/// over 10 000 lines is read once, at its last line, where reading it at
-/// each was the text lexed and parsed 10 000 times.
+/// What a text leaves open, read as the lexer reads its strings, quoted
+/// keys, comments and brackets but a piece at a time and with no token
+/// made: a string or a key not closed, or more brackets opened than
+/// closed. No statement is whole while either holds, so a reader taking a
+/// text a line at a time -- the shell -- asks this before it reads the
+/// text again: a document written over 10 000 lines is read once, at its
+/// last line, where reading it at each was the text lexed and parsed
+/// 10 000 times.
 ///
 /// It is the lexer's reading but for one text the lexer refuses anyway: a
 /// number whose exponent's sign is followed by a `-` (`1e--2`), where it
@@ -325,7 +353,19 @@ pub struct Unclosed {
     /// The bytes before were `<#`: a `>` makes them `<#>`, an operator,
     /// anything else a `<` and a comment.
     lt_hash: bool,
+    /// The byte before ends a name -- a letter, a digit, `_`, a byte of a
+    /// character outside ASCII -- or a quoted key: a `.` after it may lead
+    /// a path's quoted key.
+    name: bool,
+    /// The byte before was a `.` after a name: a `"` after it opens a
+    /// quoted key (`event.metadata."order-id"`), which no `\` escapes and
+    /// a control character -- a line's end -- closes, as the lexer refuses
+    /// it there: a key open at a line's end swallows no line after it.
+    dot: bool,
 }
+
+/// [`Unclosed::quote`] inside a quoted key.
+const KEY: u8 = b'.';
 
 impl Unclosed {
     /// The next piece of the text.
@@ -333,6 +373,13 @@ impl Unclosed {
         for &b in piece.as_bytes() {
             if self.comment {
                 self.comment = b != b'\n';
+                continue;
+            }
+            if self.quote == KEY {
+                if b == b'"' || b < 0x20 || b == 0x7f {
+                    self.quote = 0;
+                    self.name = b == b'"';
+                }
                 continue;
             }
             if self.quote != 0 {
@@ -352,7 +399,13 @@ impl Unclosed {
             }
             let dash = std::mem::take(&mut self.dash);
             let lt = std::mem::replace(&mut self.lt, b == b'<');
+            let name = std::mem::replace(
+                &mut self.name,
+                b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80,
+            );
+            let dot = std::mem::replace(&mut self.dot, b == b'.' && name);
             match b {
+                b'"' if dot => self.quote = KEY,
                 b'"' | b'\'' => self.quote = b,
                 b'#' if lt => self.lt_hash = true,
                 b'#' => self.comment = true,
@@ -813,17 +866,16 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 }
                 Tok::Ident(src.get(s..i).unwrap_or_default().to_string())
             }
+            // A character no token begins, refused out of line -- but a
+            // dot right after a name before a `"`, a path with a quoted key
+            // (`event.metadata."order-id"`), read on into `Tok::Keys`.
+            #[cfg(feature = "statements")]
             other => {
-                // `event.metadata."order-id"`: a dot right after a name,
-                // before a `"`, reads the name on as a path with a quoted
-                // key (`Tok::Keys`), out of line -- it was this error.
-                #[cfg(feature = "statements")]
-                if other == '.' {
-                    if let Some(end) = quoted_keys(src, &mut out, i, start)? {
-                        i = end;
-                        continue;
-                    }
-                }
+                i = unlexed(src, &mut out, i, start, counted, other)?;
+                continue;
+            }
+            #[cfg(not(feature = "statements"))]
+            other => {
                 // The character as the text holds it: a `char` formatted
                 // was 274 bytes of the browser module for this alone.
                 let other = src
@@ -951,23 +1003,77 @@ mod tests {
         // Placed where the name began, as every token is.
         let t = tokenize("get e where EVENT.\"x-y\" = 1").unwrap();
         assert_eq!((t[3].pos, &t[3].tok), (12, &keys(&["EVENT", "x-y"])));
-        assert_eq!(keys_written("event.x-y._a1.0"), "event.\"x-y\"._a1.\"0\"");
         // Unclosed is a string unclosed, which the shell reads on past.
         let e = tokenize("event.\"order").unwrap_err().to_string();
         assert!(e.ends_with(UNTERMINATED), "{e}");
         for (text, words) in [
-            ("event.\"\"", "no key of a path"),
-            ("event.\"a.b\"", "no key of a path"),
-            ("event.\"a\\\"b\"", "with no `\\`"),
+            // What no key holds, one message, at the path's first dot.
+            (
+                "event.\"\"",
+                "position 5: a quoted key is the JSON's as written",
+            ),
+            ("event.\"a.b\"", KEY_HOLDS),
+            ("event.\"a\\\"b\"", KEY_HOLDS),
+            ("x.y.\"a\nb\" = 1", "position 3: a quoted key"),
+            ("event.\"a\tb\"", KEY_HOLDS),
+            ("event.\"a\u{7f}\"", KEY_HOLDS),
+            ("event.\"ok\".\"\r\"", KEY_HOLDS),
             // A dot after a space, a `*` or a text is no path's.
             ("event .\"a\"", "unexpected character `.`"),
             ("o.*.\"a\"", "unexpected character `.`"),
             ("\"a\".\"b\"", "unexpected character `.`"),
-            ("event.\"a\".5", "unexpected character `.`"),
+            // A key no name reads as, after a name or a key, quoted.
+            (
+                "event.items.0.price",
+                "position 11: unexpected character `.`: a key that starts with a digit is \
+                 quoted, `.\"0\"`",
+            ),
+            (
+                "event.\"a\".5x = 1",
+                "starts with a digit is quoted, `.\"5x\"`",
+            ),
+            ("x.ş.2", "`.\"2\"`"),
         ] {
             let e = tokenize(text).unwrap_err().to_string();
             assert!(e.contains(words), "{text}: {e}");
         }
+        // A control character never reaches the words.
+        let e = tokenize("event.\"a\nb\"").unwrap_err().to_string();
+        assert!(!e.contains('\n'), "{e}");
+        // `1.5`, `$a.5`, `a .5` and `x.*.5` stay what they were.
+        assert_eq!(toks("1.5")[..1], [Tok::Float(1.5)]);
+        for text in ["$a.5", "a .5", "x.*.5"] {
+            let e = tokenize(text).unwrap_err().to_string();
+            assert!(!e.contains("digit"), "{text}: {e}");
+        }
+    }
+
+    /// The shell's gate closes a quoted key where the lexer does: at its
+    /// `"`, and at a line's end, where the lexer refuses it -- an open key
+    /// leaves the text open only at the text's end -- while a `"` after
+    /// no name's dot is a string still, which a line's end leaves open.
+    #[test]
+    fn the_gate_closes_a_key_at_a_line_s_end() {
+        let open = |t: &str| {
+            let mut g = Unclosed::default();
+            g.feed(t);
+            g.is_open()
+        };
+        assert!(open("get t where event.\"order"));
+        assert!(!open("get t where event.\"order\n"));
+        assert!(!open("get t where event.\"order-id\" = 1"));
+        assert!(!open("get t where event.\"a\".\"b\".c.\"d\" = 'x'"));
+        assert!(open("get t where event.\"a\".\"b"));
+        assert!(
+            !open("get t where event.\"a\\\" = 1"),
+            "no `\\` escapes a key"
+        );
+        assert!(open("get t where x = .\"a\nb"), "a string after a lone dot");
+        assert!(
+            open("get t where x = \"a\".\"b\nc"),
+            "a string after a text's dot"
+        );
+        assert!(open("get t where ş.\"a"));
     }
 
     #[test]
@@ -1247,62 +1353,72 @@ mod tests {
                         }
                     }
                     // A quoted key, since a webhook consumer's paths were
-                    // read: the path read on, names and quoted keys.
+                    // read: the path read on, names and quoted keys; and a
+                    // key no name reads as, `items.0`, refused naming it
+                    // quoted.
                     #[cfg(feature = "statements")]
-                    if b.get(i) == Some(&'.') && b.get(i + 1) == Some(&'"') && b[i - 1] != '*' {
+                    if b.get(i) == Some(&'.') && b[i - 1] != '*' {
                         let dot = i;
-                        let mut path: String = b[s..i].iter().collect();
-                        loop {
-                            path.push('.');
-                            if b.get(i + 1) == Some(&'"') {
-                                let mut j = i + 2;
-                                while j < b.len() && b[j] != '"' && b[j] != '\\' {
-                                    j += 1;
-                                }
-                                let why = match b.get(j) {
-                                    None => Some(UNTERMINATED.to_string()),
-                                    Some('\\') => Some(
-                                        "a quoted key is taken as written, the JSON's own, \
-                                         with no `\\`"
-                                            .to_string(),
-                                    ),
-                                    _ => None,
-                                };
-                                let key: String = b[(i + 2).min(j)..j].iter().collect();
-                                let why = why.or_else(|| {
-                                    (key.is_empty() || key.contains('.')).then(|| {
-                                        format!(
-                                            "`\"{key}\"` is no key of a path: a key holds a \
-                                             character at least, and no dot, which cuts a \
-                                             path's keys"
-                                        )
-                                    })
-                                });
-                                if let Some(why) = why {
-                                    return Err(Error::Query(format!("position {dot}: {why}")));
-                                }
-                                path.push_str(&key);
-                                i = j + 1;
-                            } else {
-                                let k = i + 1;
-                                let mut j = k;
-                                while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
-                                    j += 1;
-                                }
-                                path.extend(&b[k..j]);
-                                i = j;
-                            }
-                            match (b.get(i), b.get(i + 1)) {
-                                (Some('.'), Some(&n))
-                                    if n == '"' || n.is_alphabetic() || n == '_' => {}
-                                _ => break,
-                            }
+                        let refused =
+                            |why: String| Err(Error::Query(format!("position {dot}: {why}")));
+                        let digit = |i: usize| {
+                            let key: String = b[i + 1..]
+                                .iter()
+                                .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+                                .collect();
+                            format!(
+                                "unexpected character `.`: a key that starts with a digit is \
+                                 quoted, `.\"{key}\"`"
+                            )
+                        };
+                        if b.get(i + 1).is_some_and(|c| c.is_ascii_digit()) {
+                            return refused(digit(i));
                         }
-                        out.push(Token {
-                            tok: Tok::Keys(path),
-                            pos: start,
-                        });
-                        continue;
+                        if b.get(i + 1) == Some(&'"') {
+                            let mut path: String = b[s..i].iter().collect();
+                            loop {
+                                path.push('.');
+                                if b.get(i + 1) == Some(&'"') {
+                                    let mut j = i + 2;
+                                    loop {
+                                        match b.get(j) {
+                                            None => return refused(UNTERMINATED.into()),
+                                            Some('"') if j > i + 2 => break,
+                                            Some(&c)
+                                                if matches!(c, '"' | '\\' | '.' | '\u{7f}')
+                                                    || (c as u32) < 0x20 =>
+                                            {
+                                                return refused(KEY_HOLDS.into())
+                                            }
+                                            Some(_) => j += 1,
+                                        }
+                                    }
+                                    path.extend(&b[i + 2..j]);
+                                    i = j + 1;
+                                } else {
+                                    let k = i + 1;
+                                    let mut j = k;
+                                    while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
+                                        j += 1;
+                                    }
+                                    path.extend(&b[k..j]);
+                                    i = j;
+                                }
+                                match (b.get(i), b.get(i + 1)) {
+                                    (Some('.'), Some(&n))
+                                        if n == '"' || n.is_alphabetic() || n == '_' => {}
+                                    (Some('.'), Some(n)) if n.is_ascii_digit() => {
+                                        return refused(digit(i))
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            out.push(Token {
+                                tok: Tok::Keys(path),
+                                pos: start,
+                            });
+                            continue;
+                        }
                     }
                     Tok::Ident(b[s..i].iter().collect())
                 }
@@ -1493,6 +1609,9 @@ mod tests {
             "<#>",
             "<#",
             "<->",
+            // A quoted key, after a name's dot, and a dot after anything.
+            ".",
+            "\u{1}",
         ];
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let mut rnd = |n: usize| {

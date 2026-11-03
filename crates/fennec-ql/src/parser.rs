@@ -759,6 +759,34 @@ fn row_field(name: &str) -> Option<(bool, &str)> {
     }
 }
 
+/// What `path` -- a name, or a path with a quoted key -- names of a
+/// webhook's event: a path into its body past `event`, in any case, its
+/// keys as written (none for the body whole), or the hook's own `hook.id`,
+/// `hook.at` and `hook.event`; `Err(true)` for any other `hook.` value,
+/// `Err(false)` for a name naming neither. The one reading of a
+/// parameter's `from` and a condition's names, which ask the rest of
+/// `MAX_PATH_KEYS`, `*` and an empty key of the tree
+/// (`named::source_refused`, `named::hook_condition_refused`).
+#[cfg(feature = "statements")]
+#[cold]
+#[inline(never)]
+fn event_part(path: &str) -> std::result::Result<fennec_core::named::Source, bool> {
+    use fennec_core::named::Source;
+    let (head, rest) = path.split_once('.').unwrap_or((path, ""));
+    if head.eq_ignore_ascii_case("event") {
+        return Ok(Source::Event(rest.into()));
+    }
+    if !head.eq_ignore_ascii_case("hook") {
+        return Err(false);
+    }
+    match () {
+        _ if rest.eq_ignore_ascii_case("id") => Ok(Source::HookId),
+        _ if rest.eq_ignore_ascii_case("at") => Ok(Source::HookAt),
+        _ if rest.eq_ignore_ascii_case("event") => Ok(Source::HookEvent),
+        _ => Err(true),
+    }
+}
+
 /// What `new.<field>` or `old.<field>` in a webhook consumer is refused
 /// with: an event runs it, and no write.
 #[cfg(feature = "statements")]
@@ -3968,7 +3996,7 @@ impl Parser {
                 return why;
             }
             if self.next_kw("hook") {
-                return self.hooked_statement(replace, name, at, Vec::new(), Vec::new());
+                return self.hooked_statement(replace, name, at, Vec::new(), Vec::new(), None);
             }
         }
         if !matches!(self.peek(), Tok::LParen) {
@@ -3980,9 +4008,12 @@ impl Parser {
         let paren = self.i;
         self.skip();
         let mut params: Vec<Param> = Vec::new();
-        // What each parameter reads of a webhook's event, where it says
-        // (`from event.<path>`), and where its `$` and its `from` are.
-        let mut froms: Vec<(Option<Source>, usize, usize)> = Vec::new();
+        // What the parameters read of a webhook's event, each saying
+        // (`from event.<path>`), handed on where `on hook` follows the
+        // parentheses and dropped before the clauses otherwise; where the
+        // first parameter saying none stands, and the first `from`.
+        let mut sources: Vec<Source> = Vec::new();
+        let (mut bare, mut from_at) = (None, None);
         while !matches!(self.peek(), Tok::RParen) {
             if params.len() == MAX_PARAMS {
                 return self.err(format!(
@@ -3990,16 +4021,22 @@ impl Parser {
                 ));
             }
             let at = self.i;
-            let (p, from) = self.param()?;
+            let mut source = None;
+            let p = self.param(&mut source)?;
             if params.iter().any(|q| q.name == p.name) {
                 self.i = at;
                 return self.err(format!("`${}` is declared twice", p.name));
             }
             params.push(p);
-            froms.push(match from {
-                Some((s, word)) => (Some(s), at, word),
-                None => (None, at, at),
-            });
+            match source {
+                Some((s, word)) => {
+                    from_at.get_or_insert(word);
+                    sources.push(s);
+                }
+                None => {
+                    bare.get_or_insert(at);
+                }
+            }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
@@ -4007,8 +4044,9 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         if self.peek_kw("on") && self.next_kw("hook") {
-            return self.hooked_statement(replace, name, at, params, froms);
+            return self.hooked_statement(replace, name, at, params, sources, bare);
         }
+        drop(sources);
         let (mut claims, mut public, mut scans) = (None, false, false);
         let (mut comment, mut check) = (None, None);
         let twice = |p: &Parser, what: &str| p.err(format!("`{what}` is written once"));
@@ -4097,7 +4135,7 @@ impl Parser {
         // from: refused at its `from` where a word follows, and where the
         // text ends -- or ends at `on` -- left to the next line, which may
         // hold `hook`.
-        if let Some(&(_, _, word)) = froms.iter().find(|f| f.0.is_some()) {
+        if let Some(word) = from_at {
             if !self.at_eof() && !self.peek_kw("on") {
                 self.i = word;
                 return self.err(FROM_UNHOOKED);
@@ -4270,7 +4308,7 @@ impl Parser {
                 return self.err(BOUND_VALUES);
             } else if self.peek_among(&["every", "at"]) {
                 return self.err(fennec_core::named::SCHEDULED_AND_BOUND);
-            } else if self.peek_kw("on") && self.next_kw("hook") {
+            } else if self.peek_kw("on") && self.hook_after() {
                 return self.err(fennec_core::named::HOOKED_AND_OTHER);
             } else {
                 break;
@@ -4424,7 +4462,7 @@ impl Parser {
                 return self.err(SCHEDULED_VALUES);
             } else if self.peek_kw("after") {
                 return self.err(SCHEDULED_AND_BOUND);
-            } else if self.peek_kw("on") && self.next_kw("hook") {
+            } else if self.peek_kw("on") && self.hook_after() {
                 return self.err(fennec_core::named::HOOKED_AND_OTHER);
             } else if self.peek_among(&["every", "at"]) {
                 return self.err(
@@ -4481,6 +4519,20 @@ impl Parser {
         matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Ident(w)) if w.eq_ignore_ascii_case(kw))
     }
 
+    /// At `on` past a binding's or a schedule's clauses: whether `hook`
+    /// follows, or the text's end, marked cut short -- `hook` may be the
+    /// next line's -- where a statement run two ways is refused in the
+    /// hook's words, as the plain form leaves `on` open at a line's end.
+    #[cfg(feature = "statements")]
+    fn hook_after(&mut self) -> bool {
+        let end = matches!(
+            self.toks.get(self.i + 1).map(|t| &t.tok),
+            Some(Tok::Eof) | None
+        );
+        self.cut |= end;
+        end || self.next_kw("hook")
+    }
+
     /// At `on` in a definition: `None` before `hook`, and before the
     /// text's end, which is marked cut short -- `hook` may be the next
     /// line's. Before any other word, the refusal naming the form, at
@@ -4509,10 +4561,10 @@ impl Parser {
     /// ...)] on hook <hook> [where <condition>] [comment '<text>'] [check
     /// <expr>] [scans] as <body>`, at `on`: a statement taking the events
     /// another service sends, called by no token -- no claims, `$jwt` or
-    /// `public` -- each parameter reading a part of the event (`froms`:
-    /// what, and where its `$` and its `from` stand), its condition the
-    /// event's paths and literals alone. Out of line, as every path only a
-    /// definition takes.
+    /// `public` -- each parameter reading a part of the event (`sources`,
+    /// in the signature's order; `bare`, where the first parameter that
+    /// reads none stands), its condition the event's paths and literals
+    /// alone. Out of line, as every path only a definition takes.
     #[cfg(feature = "statements")]
     #[cold]
     #[inline(never)]
@@ -4522,19 +4574,16 @@ impl Parser {
         name: String,
         at: usize,
         params: Vec<fennec_core::named::Param>,
-        froms: Vec<(Option<fennec_core::named::Source>, usize, usize)>,
+        sources: Vec<fennec_core::named::Source>,
+        bare: Option<usize>,
     ) -> Result<Statement> {
         use fennec_core::named::{
             hook_condition_refused, hook_name_refused, valid_name, Definition, Webhook,
             HOOKED_AND_OTHER, HOOKED_PARAMS, HOOKED_VALUES,
         };
-        let mut sources = Vec::with_capacity(froms.len());
-        for (source, dollar, _) in froms {
-            let Some(s) = source else {
-                self.i = dollar;
-                return self.err(HOOKED_PARAMS);
-            };
-            sources.push(s);
+        if let Some(dollar) = bare {
+            self.i = dollar;
+            return self.err(HOOKED_PARAMS);
         }
         self.i += 2;
         let named = self.i;
@@ -4663,67 +4712,47 @@ impl Parser {
     }
 
     /// After `from` in a parameter, `$name <type>` read: what of a
-    /// webhook's event it reads, and where its `from` stands -- a path
-    /// into the body, the body whole, or the hook's `hook.id`, `hook.at`
-    /// and `hook.event`, `event` and `hook` in any case as every word,
-    /// the keys as written. Held to the type at the path's word
+    /// webhook's event it reads ([`event_part`]), where its `from` stands
+    /// and where its path does. Held to the type at the path's word
     /// ([`fennec_core::named::source_refused`]) once the parameter is
     /// read, with its default. Out of line: a definition's alone.
     #[cfg(feature = "statements")]
     #[cold]
     #[inline(never)]
     fn hook_source(&mut self) -> Result<(fennec_core::named::Source, usize, usize)> {
-        use fennec_core::named::Source;
         let from = self.i;
         self.skip();
         let at = self.i;
         let source = match self.peek() {
-            // A quoted key that reads as a name is that name's path:
-            // `event."id"` is `event.id`.
-            Tok::Ident(path) | Tok::Keys(path) => {
-                let (head, rest) = path.split_once('.').unwrap_or((path, ""));
-                if head.eq_ignore_ascii_case("event") {
-                    let keys = match rest.is_empty() {
-                        true => Vec::new(),
-                        false => rest.split('.').map(str::to_string).collect(),
-                    };
-                    Some(Source::Event(keys))
-                } else if head.eq_ignore_ascii_case("hook") {
-                    match rest.to_ascii_lowercase().as_str() {
-                        "id" => Some(Source::HookId),
-                        "at" => Some(Source::HookAt),
-                        "event" => Some(Source::HookEvent),
-                        _ => {
-                            return self.err(format!(
-                                "`{path}`: of the hook's own values a parameter reads `hook.id`, \
-                                 the event's key, `hook.at`, the time its signature covers, and \
-                                 `hook.event`, GitHub's event's name"
-                            ))
-                        }
-                    }
-                } else {
-                    None
-                }
+            Tok::Ident(path) | Tok::Keys(path) => event_part(path),
+            _ => Err(false),
+        };
+        match source {
+            Ok(s) => {
+                self.skip();
+                Ok((s, from, at))
             }
-            _ => None,
-        };
-        let Some(source) = source else {
-            return Err(self.taught(FROM_FORMS));
-        };
-        self.skip();
-        Ok((source, from, at))
+            Err(true) => self.err(
+                "of the hook's own values a parameter reads `hook.id`, the event's key, `hook.at`, \
+                 the time its signature covers, and `hook.event`, GitHub's event's name",
+            ),
+            Err(false) => Err(self.taught(FROM_FORMS)),
+        }
     }
 
     /// A name in a webhook consumer's condition or body, `name` stepped
     /// past: no row is new or old, and in the condition the event's path,
-    /// `event.<key>...`, or `hook.event`, kept with `event.` and `hook.` in
-    /// lower case so `EVENT.type` is `event.type`'s tree. In the body, the
+    /// `event.<key>...`, or `hook.event` ([`event_part`]), kept with
+    /// `event.` and `hook.` in lower case so `EVENT.type` is `event.type`'s
+    /// tree -- its keys held to what a path names by
+    /// [`fennec_core::named::hook_condition_refused`]. In the body, the
     /// field it names, as anywhere: `event.type` is the path `type` into a
     /// collection's field `event`.
     #[cfg(feature = "statements")]
     #[cold]
     #[inline(never)]
     fn hooked_field(&mut self, name: String, condition: bool) -> Result<Expr> {
+        use fennec_core::named::Source;
         if row_field(&name).is_some() {
             self.i -= 1;
             return self.err(hooked_row(&name));
@@ -4731,66 +4760,49 @@ impl Parser {
         if !condition {
             return Ok(Expr::Field(name));
         }
-        let (head, rest) = name.split_once('.').unwrap_or((&name, ""));
-        if head.eq_ignore_ascii_case("event") && !rest.is_empty() {
-            return self.event_path(rest.split('.').count(), format!("event.{rest}"));
-        }
-        if head.eq_ignore_ascii_case("hook") && rest.eq_ignore_ascii_case("event") {
-            return Ok(Expr::Field("hook.event".into()));
-        }
-        let why = match (head.to_ascii_lowercase().as_str(), rest.is_empty()) {
-            ("event", _) => "the whole event is a parameter's, `$e json from event`: a hook's \
-                             condition reads a path into it, `event.type`"
-                .to_string(),
-            ("hook", false) => format!(
-                "`{name}`: of the hook's own values a condition reads `hook.event` -- `hook.id` \
-                 and `hook.at` are a parameter's, `$key text from hook.id`"
-            ),
-            _ => format!(
-                "`{name}`: a hook's condition reads the event, `event.<path>`, and `hook.event` \
-                 -- a bare name has no row to be read from"
-            ),
+        let why = match event_part(&name) {
+            Ok(Source::Event(keys)) if !keys.is_empty() => {
+                return Ok(Expr::Field(format!("event.{keys}")))
+            }
+            Ok(Source::HookEvent) => return Ok(Expr::Field("hook.event".into())),
+            Ok(Source::Event(_)) => {
+                "the whole event is a parameter's, `$e json from event`: a hook's condition reads \
+                 a path into it, `event.type`"
+            }
+            Ok(_) | Err(true) => {
+                "of the hook's own values a condition reads `hook.event` -- `hook.id` and \
+                 `hook.at` are a parameter's, `$key text from hook.id`"
+            }
+            Err(false) => {
+                "a hook's condition reads the event, `event.<path>`, and `hook.event` -- a bare \
+                 name has no row to be read from"
+            }
         };
         self.i -= 1;
-        self.err(why)
+        self.err(format!("`{name}`: {why}"))
     }
 
     /// `event.metadata."order-id"` where a value stands: in a webhook
-    /// consumer's condition the event's path, as a name is, and refused
-    /// anywhere else -- a quoted key is a hook's to read, and SQL's quoted
-    /// column a name.
+    /// consumer's condition the event's path, as a name is; in its body
+    /// refused naming where a hook reads one; anywhere else refused as
+    /// SQL's quoted name is ([`Parser::quoted`]) -- `o."total"` is
+    /// written `o.total`.
     #[cfg(feature = "statements")]
     #[cold]
     #[inline(never)]
     fn keys_field(&mut self, path: String) -> Result<Expr> {
-        if self
-            .def
-            .as_deref()
-            .is_some_and(|d| d.hooked == Hooked::Condition)
-        {
+        let hooked = self.def.as_deref().map(|d| d.hooked);
+        if hooked == Some(Hooked::Condition) {
             self.skip();
             return self.hooked_field(path, true);
         }
-        self.err(format!(
-            "`{}`: a quoted key reads a webhook's event, in its parameters' `from` and its \
-             condition (`from event.metadata.\"order-id\"`); a field's name, and SQL's quoted \
-             column, is written bare here, `o.total`",
-            crate::lexer::keys_written(&path)
-        ))
-    }
-
-    /// The event's path `field`, its `n` keys past `event` held to
-    /// `MAX_PATH_KEYS`, as a json field's path is, the parser past it.
-    #[cfg(feature = "statements")]
-    fn event_path(&mut self, n: usize, field: String) -> Result<Expr> {
-        use fennec_core::value::MAX_PATH_KEYS;
-        if n > MAX_PATH_KEYS {
-            self.i -= 1;
-            return self.err(format!(
-                "a path names at most {MAX_PATH_KEYS} keys past `event`"
-            ));
-        }
-        Ok(Expr::Field(field))
+        self.err(match hooked {
+            Some(Hooked::Body) => "a quoted key reads a webhook's event, in its condition and its \
+                                   parameters' `from`: the body reads the event through its \
+                                   parameters, `$id text from event.metadata.\"order-id\"`"
+                .to_string(),
+            _ => format!("`{path}`, its keys bare, not in double quotes: {QUOTED}"),
+        })
     }
 
     /// `slot()` in a definition, its `(` read: the instant of the slot a
@@ -4955,16 +4967,14 @@ impl Parser {
         self.err(UNBUILT)
     }
 
-    /// `$name type [from <source>] [= <literal>]`, with what of a
-    /// webhook's event it reads, where it says, and where its `from` is.
+    /// `$name type [from <source>] [= <literal>]`; what of a webhook's
+    /// event it reads, where it says, and where its `from` stands, into
+    /// `source`.
     #[cfg(feature = "statements")]
-    #[allow(clippy::type_complexity)]
     fn param(
         &mut self,
-    ) -> Result<(
-        fennec_core::named::Param,
-        Option<(fennec_core::named::Source, usize)>,
-    )> {
+        source: &mut Option<(fennec_core::named::Source, usize)>,
+    ) -> Result<fennec_core::named::Param> {
         let name = match self.peek() {
             Tok::Named(n) if n == "jwt" || n.starts_with("jwt.") => {
                 return self.err(
@@ -4995,7 +5005,7 @@ impl Parser {
         let ty = self.data_type()?;
         // `from event.<path>`: a webhook consumer's, what of its event the
         // parameter reads.
-        let source = match self.peek_kw("from") {
+        let from = match self.peek_kw("from") {
             true => Some(self.hook_source()?),
             false => None,
         };
@@ -5020,14 +5030,14 @@ impl Parser {
             }
         }
         let p = fennec_core::named::Param { name, ty, default };
-        let Some((source, from, at)) = source else {
-            return Ok((p, None));
-        };
-        if let Some(why) = fennec_core::named::source_refused(&p, &source) {
-            self.i = at;
-            return self.err(why);
+        if let Some((s, word, at)) = from {
+            if let Some(why) = fennec_core::named::source_refused(&p, &s) {
+                self.i = at;
+                return self.err(why);
+            }
+            *source = Some((s, word));
         }
-        Ok((p, Some((source, from))))
+        Ok(p)
     }
 
     /// `(<name> <type> [from "<claim>"], ...)` after `claims`: the token's
