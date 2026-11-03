@@ -1102,9 +1102,17 @@ impl super::Database {
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
         use crate::named::{
-            GRAMMAR_EPOCH, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT, SCHEDULED_UNRUN,
+            GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT,
+            SCHEDULED_UNRUN,
         };
-        // First, before a name held or the schema is asked: where no
+        // First of all: nothing takes a hook's events yet, and one stored
+        // would be a hook no sender reaches, without a word -- here every
+        // way in (`/query`, `/batch`, the shell, the native library, a
+        // declared schema's apply) meets it (F4's slices 1 and 2).
+        if def.hook.is_some() {
+            return Err(Error::Query(HOOKED_NOT_BUILT.into()));
+        }
+        // Then, before a name held or the schema is asked: where no
         // scheduler runs this database's schedules, one stored would be a
         // slot no one runs without a word -- here every way in (`/query`,
         // `/batch`, the shell, the native library, a declared schema's
@@ -1471,10 +1479,17 @@ fn chained(t: &Statements, def: &crate::named::Definition, collection: &str) -> 
 }
 
 /// Where `d`, the tree `s`'s text reads to, is of another kind than its
-/// record -- called, bound or scheduled -- bound to other writes or run at
-/// other times, how, in words.
+/// record -- called, bound or scheduled, or a webhook consumer, which no
+/// record holds yet -- bound to other writes or run at other times, how, in
+/// words.
 #[cfg(feature = "statements")]
 fn misread_kind(d: &crate::named::Definition, s: &Stored) -> Option<&'static str> {
+    // No record this build writes holds a hook (op 6 is F4's slice 2): a
+    // text reading as one, digest and all, is never loaded as a statement
+    // a call, a write or the clock runs.
+    if d.hook.is_some() {
+        return Some("reads as a webhook consumer");
+    }
     match (&d.schedule, &s.schedule) {
         (Some(_), None) => return Some("reads as a scheduled statement"),
         (Some(a), Some(t)) => {

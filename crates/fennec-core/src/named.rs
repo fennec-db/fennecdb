@@ -125,7 +125,10 @@ pub const MAX_NAME: usize = 59;
 /// [comment '<text>'] [scans] as <body>` ([`Binding`]), or one run by the
 /// clock, `create [or replace] statement <name> (every <interval> | at
 /// '<cron>') [in '<zone>'] [comment '<text>'] [scans] as <body>`
-/// ([`Schedule`]). Two are equal where
+/// ([`Schedule`]), or one taking another service's events, `create [or
+/// replace] statement <name> [($p <type> from <source>, ...)] on hook
+/// <hook> [where <condition>] [comment '<text>'] [check <expr>] [scans] as
+/// <body>` ([`Webhook`]). Two are equal where
 /// everything but their [`Definition::text`] is: the same statement
 /// written over one line or several. Its `Debug` form is its tree's, the
 /// text left out, which `make fennecql-corpus` compares.
@@ -175,6 +178,11 @@ pub struct Definition {
     /// `public` -- no one hands it a value -- whose body reads `slot()`, the
     /// instant of the slot it runs for. Boxed, as a binding is.
     pub schedule: Option<Box<Schedule>>,
+    /// `on hook <hook> [where <condition>]`: a statement taking the events
+    /// another service sends, called by no token, with no claims or
+    /// `public` -- each parameter reads a part of the event. Boxed, as a
+    /// binding is.
+    pub hook: Option<Box<Webhook>>,
 }
 
 /// What a bound statement is bound to (`docs/design/named-statements.md`,
@@ -622,6 +630,174 @@ fn cron_value(text: &str, k: usize) -> std::result::Result<u32, String> {
     ))
 }
 
+/// What a webhook consumer takes (`docs/design/named-statements.md`,
+/// *Webhook consumers (F4)*): the events another service sends to the hook
+/// `name`, each taken where its `condition` passes it, its parameters read
+/// from the event as its `sources` say, one a parameter in the signature's
+/// order. Nothing takes one yet: every way of defining one refuses it
+/// ([`HOOKED_NOT_BUILT`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Webhook {
+    /// The hook's name, a word as a statement's is ([`valid_name`]): the
+    /// path segment its sender is told, `/_hooks/<name>`. As written: a
+    /// path's segment is read in its case.
+    pub name: String,
+    /// `where <condition>`: `event.<path>`, `hook.event` and literals
+    /// alone, each path an `Expr::Field` named as read, `event.` and
+    /// `hook.` in lower case and every key as written -- read against the
+    /// event's JSON as a `json` field's path is.
+    pub condition: Option<Expr>,
+    /// What each parameter reads, in the signature's order.
+    pub sources: Vec<Source>,
+}
+
+/// What a webhook consumer's parameter reads: `$p <type> from <source>`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    /// `event.<key>...`, a path into the event's body, its keys as the
+    /// JSON names them, joined by dots, which no key holds -- as
+    /// [`Value::at_path`] reads them -- or `event` alone, no key: the whole
+    /// body, a `json` parameter's only. One `String`, not a list: a
+    /// definition's reading and refusals took 1.2 KB of the server's code
+    /// more with one.
+    Event(String),
+    /// `hook.id`: the event's key, a text.
+    HookId,
+    /// `hook.at`: the time its signature covers, a timestamp, `null` where
+    /// its scheme signs none.
+    HookAt,
+    /// `hook.event`: GitHub's `X-GitHub-Event`, a text, `null` elsewhere.
+    HookEvent,
+}
+
+/// What every way of defining a webhook consumer refuses it with until a
+/// server takes events (F4's slices 1 and 2): one stored would be a hook
+/// no sender reaches, without a word.
+pub const HOOKED_NOT_BUILT: &str = "webhook consumers are not built yet";
+
+/// What a claim, `$jwt` or `public` in a webhook consumer is refused with.
+pub const HOOKED_VALUES: &str = "a webhook consumer is called by no token: it reads no claim and \
+                                 is not `public` -- its values are the event's, each read by a \
+                                 parameter, `$amount int from event.data.object.amount`";
+
+/// What `on hook` beside `after` or a schedule is refused with: one
+/// statement, one way to run.
+pub const HOOKED_AND_OTHER: &str = "a statement takes a hook's events, runs by the clock or runs \
+                                    after a write -- one of them: two statements, `create \
+                                    statement <n>(...) on hook <hook> as ...` and `create \
+                                    statement <m> every 1h as ...`";
+
+/// What a parameter in a webhook consumer's condition is refused with.
+pub const HOOKED_CONDITION_VALUES: &str = "a hook's condition reads the event and literals, and \
+                                           no parameter: a statement whose parameters would \
+                                           refuse an event never refuses one its condition \
+                                           passes over -- a parameter's test is its `check`";
+
+/// What a parameter of a webhook consumer reading no part of the event is
+/// refused with.
+pub const HOOKED_PARAMS: &str = "each parameter of a webhook consumer reads the event: `$amount \
+                                 int from event.data.object.amount`, `$e json from event` for the \
+                                 whole body, or `hook.id`, `hook.at`, `hook.event`";
+
+/// Why `keys`, a path's keys past `event` joined by dots, names no part
+/// of an event, if it names none: past `MAX_PATH_KEYS` keys, as a `json`
+/// field's path, a key of no character, or `*` -- SQL's `o.*`, which the
+/// lexer reads as a name's end: the whole body is `from event`.
+#[cold]
+fn keys_refused(keys: &str) -> Option<String> {
+    use crate::value::MAX_PATH_KEYS;
+    let mut n = 0;
+    for k in keys.split('.') {
+        if k.is_empty() || k == "*" {
+            return Some(format!(
+                "`event.{keys}` names no part of the event: a key holds a character at least, \
+                 and `*` none -- the whole body is a `json` parameter's, `$e json from event`"
+            ));
+        }
+        n += 1;
+    }
+    (n > MAX_PATH_KEYS).then(|| format!("a path names at most {MAX_PATH_KEYS} keys past `event`"))
+}
+
+/// Why a webhook consumer's parameter `p` cannot read `s`, if it cannot,
+/// from their text alone: the whole body is a `json` parameter's, a path
+/// names what [`keys_refused`] lets it, `hook.id` and `hook.event` are
+/// texts and `hook.at` a timestamp -- a `json` parameter taking any of
+/// them. Out of line: a definition's alone.
+#[cold]
+#[inline(never)]
+pub fn source_refused(p: &Param, s: &Source) -> Option<String> {
+    let held = |ty: DataType| p.ty == ty || p.ty == DataType::Json;
+    let (read, is) = match s {
+        Source::Event(keys) if keys.is_empty() && p.ty != DataType::Json => {
+            return Some(format!(
+                "`${}`: the whole event is a `json` parameter's, `${} json from event` -- a \
+                 typed one reads a path into it, `from event.data.object.id`",
+                p.name, p.name
+            ))
+        }
+        Source::Event(keys) if !keys.is_empty() => {
+            return keys_refused(keys).map(|why| format!("`${}`: {why}", p.name));
+        }
+        Source::HookId if !held(DataType::Text) => ("hook.id", "text"),
+        Source::HookEvent if !held(DataType::Text) => ("hook.event", "text"),
+        Source::HookAt if !held(DataType::Timestamp) => ("hook.at", "timestamp"),
+        _ => return None,
+    };
+    Some(format!(
+        "`${}`: `{read}` is a {is}, read by a `{is}` or a `json` parameter",
+        p.name
+    ))
+}
+
+/// Why a webhook consumer's condition is refused, if it is: it picks the
+/// events its statement takes from the event alone -- its paths, `hook.event`
+/// and literals -- so no parameter, no row and no other collection, no
+/// `now()`, no `slot()`, no `expired()` and no fold, and a path names what
+/// [`keys_refused`] lets it. Its names are the parser's to hold to
+/// `event.` and `hook.event`; a tree made otherwise is held here too.
+#[cold]
+#[inline(never)]
+pub fn hook_condition_refused(e: &Expr) -> Option<String> {
+    let mut why = None;
+    let mut walk = |e: &Expr| {
+        if why.is_some() {
+            return;
+        }
+        why = match e {
+            Expr::Field(f) if f == "hook.event" => None,
+            Expr::Field(f) if f.starts_with("event.") => keys_refused(&f["event.".len()..]),
+            Expr::Field(f) => Some(format!(
+                "`{f}`: a hook's condition reads the event, `event.<path>`, and `hook.event`"
+            )),
+            Expr::Param(_) | Expr::InParam(..) => Some(HOOKED_CONDITION_VALUES.into()),
+            Expr::InSelect(..) => Some(
+                "a hook's condition reads the event alone: a read of a collection is its body's \
+                 guard, `get ... require 1 else '<why>'`"
+                    .into(),
+            ),
+            e if e.aggregate_name().is_some() => {
+                Some("a hook's condition reads one event, and folds none".into())
+            }
+            e if e.asks_expired() => Some("a hook's condition reads no row: no `expired()`".into()),
+            Expr::Call(n, a)
+                if a.is_empty()
+                    && (n.eq_ignore_ascii_case("now") || n.eq_ignore_ascii_case("slot")) =>
+            {
+                Some(
+                    "a hook's condition reads the event and literals, and no clock: `now()` is \
+                     its body's, the time of the event's taking, and `slot()` a scheduled \
+                     statement's"
+                        .into(),
+                )
+            }
+            _ => None,
+        };
+    };
+    each_expr(e, &mut walk);
+    why
+}
+
 /// The rows one statement may wake the statements bound to its writes for
 /// (`docs/design/named-statements.md`, *When a binding runs*), a row
 /// counted once whatever number of bindings it passes: the 10 001st
@@ -723,6 +899,16 @@ pub fn name_refused(name: &str) -> String {
     )
 }
 
+/// What a hook's name is refused with: a statement's rule, since it is the
+/// path segment its sender is told.
+#[cold]
+pub fn hook_name_refused(name: &str) -> String {
+    format!(
+        "`{name}` is no hook's name: ASCII letters, digits and `_`, starting with a letter, at \
+         most {MAX_NAME} bytes -- the path its sender is told, `/_hooks/<name>`"
+    )
+}
+
 impl Definition {
     /// Whether the body writes: an `insert`, a `set` or a `del` among it.
     pub fn writes(&self) -> bool {
@@ -775,6 +961,11 @@ impl Definition {
                     ),
                 );
             }
+        }
+        // A webhook consumer's answer goes to its sender, which reads no
+        // rows, and its values are the event's.
+        if let Some(h) = &self.hook {
+            return self.hooked_refused(h);
         }
         // A scheduled statement's answer goes nowhere either, and no one
         // hands it a value.
@@ -877,6 +1068,63 @@ impl Definition {
         None
     }
 
+    /// What a webhook consumer refuses beyond a callable one's: no token
+    /// calls it, so it reads no claim and is not `public`; each parameter
+    /// reads a part of the event its type can hold ([`source_refused`]);
+    /// its condition reads the event alone ([`hook_condition_refused`]);
+    /// and a sender reads no rows, so a `get` is a guard, with `require`,
+    /// nothing answers `returning`, and a body of guards alone, which
+    /// takes an event and changes nothing, is refused. The parser refuses
+    /// each at its word; a tree made otherwise is held here too.
+    #[cold]
+    #[inline(never)]
+    fn hooked_refused(&self, h: &Webhook) -> Option<(Option<usize>, String)> {
+        if self.after.is_some() || self.schedule.is_some() {
+            return Some((None, HOOKED_AND_OTHER.into()));
+        }
+        if !valid_name(&h.name) {
+            return Some((None, hook_name_refused(&h.name)));
+        }
+        if !self.claims.is_empty() || self.public || self.reads_claims() {
+            return Some((None, HOOKED_VALUES.into()));
+        }
+        if h.sources.len() != self.params.len() {
+            return Some((None, HOOKED_PARAMS.into()));
+        }
+        if let Some(why) =
+            (self.params.iter().zip(&h.sources)).find_map(|(p, s)| source_refused(p, s))
+        {
+            return Some((None, why));
+        }
+        if let Some(why) = h.condition.as_ref().and_then(hook_condition_refused) {
+            return Some((None, why));
+        }
+        for (i, s) in self.body.iter().enumerate() {
+            let why = match s {
+                Statement::Select(sel) if sel.require.is_none() => {
+                    "a webhook consumer answers its sender, which reads no rows, so its `get` is a \
+                     guard, which counts them: `get orders select id where ref = $order limit 1 \
+                     require 1 else 'no such order'`"
+                }
+                _ if s.pick().is_some_and(|p| p.returning.is_some()) => {
+                    "a webhook consumer answers its sender, which reads no rows: its writes say \
+                     nothing with `returning`"
+                }
+                _ => continue,
+            };
+            return Some((Some(i), why.into()));
+        }
+        if !self.writes() {
+            return Some((
+                None,
+                "a webhook consumer's body of guards alone takes an event and changes nothing: it \
+                 writes, `insert`, `set` or `del`"
+                    .into(),
+            ));
+        }
+        None
+    }
+
     /// The canonical tree's digest: [`crate::hll::hash`] of
     /// [`Self::canonical`]. Equal for every text that parses to the same
     /// statement -- white space, comments, a keyword's case, SQL's spelling
@@ -914,6 +1162,7 @@ impl Definition {
             text: _,
             after,
             schedule,
+            hook,
         } = self;
         let mut c = Canon(Vec::new());
         c.node(1);
@@ -974,6 +1223,12 @@ impl Definition {
             c.tag(10);
             c.schedule(s);
         }
+        // Tag 11 only where the statement takes a hook's events, as tags 9
+        // and 10.
+        if let Some(h) = hook {
+            c.tag(11);
+            c.webhook(h);
+        }
         c.end();
         Ok(c.0)
     }
@@ -1000,6 +1255,9 @@ impl std::fmt::Debug for Definition {
         if let Some(s) = &self.schedule {
             d.field("schedule", s);
         }
+        if let Some(h) = &self.hook {
+            d.field("hook", h);
+        }
         d.finish()
     }
 }
@@ -1020,6 +1278,7 @@ impl PartialEq for Definition {
             text: _,
             after,
             schedule,
+            hook,
         } = self;
         (name, replace, params, claims, public, scans)
             == (
@@ -1028,6 +1287,7 @@ impl PartialEq for Definition {
             && (comment, check, body, block) == (&o.comment, &o.check, &o.body, &o.block)
             && *after == o.after
             && *schedule == o.schedule
+            && *hook == o.hook
     }
 }
 
@@ -2057,6 +2317,42 @@ impl Canon {
             }
         }
         self.opt_text(9, s.zone.as_deref());
+        self.end();
+    }
+
+    /// A hook, a node of kind 7: its name (1), its condition (2), and what
+    /// each parameter reads (3), in the signature's order, each a node of
+    /// kind 8 -- the body's path, its keys under 2 (none for the whole
+    /// body), or `hook.id`, `hook.at` and `hook.event`, 1 to 3 under 1. The
+    /// condition's paths are written as read, `event.` in lower case and
+    /// each key as written. Out of line: no other definition reaches it.
+    #[cold]
+    #[inline(never)]
+    fn webhook(&mut self, h: &Webhook) {
+        self.node(7);
+        self.text(1, &h.name);
+        self.opt_expr(2, &h.condition);
+        self.list(3, &h.sources, |c, s| {
+            c.node(8);
+            match s {
+                // Each key under 2, as a list of them was written: a text
+                // each, its length and its bytes, as `Canon::str` writes it.
+                Source::Event(keys) if !keys.is_empty() => {
+                    let keys = keys.as_bytes().split(|&b| b == b'.');
+                    c.tag(2);
+                    c.uint(keys.clone().count() as u64);
+                    for k in keys {
+                        c.uint(k.len() as u64);
+                        c.0.extend_from_slice(k);
+                    }
+                }
+                Source::Event(_) => {}
+                Source::HookId => c.num(1, 1),
+                Source::HookAt => c.num(1, 2),
+                Source::HookEvent => c.num(1, 3),
+            }
+            c.end();
+        });
         self.end();
     }
 

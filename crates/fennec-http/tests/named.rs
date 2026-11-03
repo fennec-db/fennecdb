@@ -1075,3 +1075,30 @@ fn a_schedule_is_refused_where_no_scheduler_runs_it() {
     assert_eq!(status, 403, "{body}");
     assert!(!node.ok(ROOT, "statements").contains("tidy"));
 }
+
+/// A webhook consumer is refused wherever a statement runs until a server
+/// takes events (F4's slices 1 and 2): the server's token is told so (400),
+/// alone and in a `/batch` behind a write, which lands nothing; a scoped
+/// token meets the schema change it is. Never a hook stored that no sender
+/// reaches.
+#[test]
+fn a_hook_is_refused_until_hooks_are_taken() {
+    let node = start(|_| {});
+    let hooked = "create statement paid($what text from event.data.object.id) on hook stripe \
+                  where event.type = 'payment_intent.succeeded' as insert journal {what: $what}";
+    let (status, body) = node.query(ROOT, hooked);
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("webhook consumers are not built yet"),
+        "{body}"
+    );
+    let before = node.number("get journal count");
+    let batch = [line("insert journal {what: 'x'}"), line(hooked)].join("\n");
+    let (status, body) = node.post(ROOT, "/batch", &batch);
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("not built yet"), "{body}");
+    assert_eq!(node.number("get journal count"), before);
+    let (status, body) = node.query(&node.customer("u0"), hooked);
+    assert_eq!(status, 403, "{body}");
+    assert!(!node.ok(ROOT, "statements").contains("paid"));
+}

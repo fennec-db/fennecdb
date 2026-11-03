@@ -750,6 +750,10 @@ test('named statements are a server\'s: the module refuses a definition and a ca
     "create statement purge every 1h as del t where a = 1",
     "create statement reset at '0 0 1 * *' in 'Europe/Berlin' as set t {a: 0} where a > 0",
     "create statement never at '0 0 30 2 *' as del t where a = 1",
+    // A webhook consumer too (F4's slice 1): the module takes no event,
+    // and refuses it before reading its hook.
+    "create statement paid on hook stripe where event.type = 'x' as set t {a: 1} where a = 0",
+    'create statement paid($a int from event.data.a) on hook stripe as del t where a = $a',
     'call s',
     'call s {a: 1} as {sub: "x"}',
     'CALL s(1, b => 2)',

@@ -8,6 +8,9 @@
 #[cfg(feature = "statements")]
 mod bound;
 mod e2e;
+// Webhook consumers' syntax, and their refusal where statements run.
+#[cfg(feature = "statements")]
+mod hooked;
 mod join;
 // Named statements' syntax, read where the parser reads it.
 #[cfg(feature = "statements")]
