@@ -218,11 +218,15 @@ fn sync_failure_is_reported_and_stops_writes() {
 /// A disk whose fsync fails when `fail` is set -- the half of a sync that
 /// runs outside the lock -- and waits at a [`Gate`] the test holds. It
 /// keeps `FileSink`'s protocol: an fsync covers every byte appended before
-/// it starts, and one that finds its bytes covered does not run. It counts
-/// the fsyncs it ran.
+/// it starts, one that finds its bytes covered does not run, and after one
+/// failed every durability fails without an fsync (`Disk::failed`): the
+/// kernel may have dropped the pages it could not write. It counts the
+/// fsyncs it ran.
 #[derive(Clone)]
 struct SlowDisk {
     fail: bool,
+    /// An fsync failed: never tried again.
+    failed: Arc<AtomicBool>,
     fsyncs: Arc<AtomicUsize>,
     appended: Arc<AtomicU64>,
     /// Bytes on disk; held through an fsync, as the file is.
@@ -294,6 +298,9 @@ impl fennec_core::engine::Sink for SlowDisk {
                 cv.notify_all();
             }
             let mut synced = disk.synced.lock().unwrap();
+            if disk.failed.load(Ordering::SeqCst) {
+                return Err(fennec_core::error::Error::Io("input/output error".into()));
+            }
             if *synced >= upto {
                 return Ok(());
             }
@@ -301,6 +308,7 @@ impl fennec_core::engine::Sink for SlowDisk {
             disk.wait_at_gate();
             disk.fsyncs.fetch_add(1, Ordering::SeqCst);
             if disk.fail {
+                disk.failed.store(true, Ordering::SeqCst);
                 return Err(fennec_core::error::Error::Io("input/output error".into()));
             }
             *synced = covers;
@@ -410,6 +418,7 @@ fn slow_disk_server(fail: bool) -> SlowDiskServer {
     let gate = Arc::new((Mutex::new(Gate::default()), Condvar::new()));
     let mut db = Database::with_sink(Box::new(SlowDisk {
         fail,
+        failed: Arc::new(AtomicBool::new(false)),
         fsyncs: Arc::clone(&fsyncs),
         appended: Arc::new(AtomicU64::new(0)),
         synced: Arc::new(Mutex::new(0)),
@@ -552,12 +561,15 @@ fn a_replay_is_answered_once_its_first_tries_fsync_is_done() {
 /// sent after it the 500 every write is refused with until the file is
 /// opened again. Answered at once, as it was, it was the success the first
 /// try was never given. Every way a keyed write comes, each on a server of
-/// its own, since a failure stops the writes.
+/// its own, since a failure stops the writes. The replay's durability
+/// fails as the disk's failure sticks, running no fsync of its own: one
+/// tried again might report pages the kernel dropped as written.
 #[test]
 fn a_replay_of_a_write_whose_fsync_failed_is_no_success() {
     for (i, &(target, body)) in KEYED.iter().enumerate() {
         let s = slow_disk_server(true);
         let key = format!("failed-{i}");
+        let before = s.fsyncs.load(Ordering::SeqCst);
         let (early, first, replay) = race(&s, target, body, &key);
         s.open();
         assert!(
@@ -568,10 +580,263 @@ fn a_replay_of_a_write_whose_fsync_failed_is_no_success() {
         assert_eq!(status, 500, "{target}: {made}");
         let (status, replayed, again) = replay.join().unwrap();
         assert_eq!((status, replayed), (500, false), "{target}: {again}");
+        assert_eq!(
+            s.fsyncs.load(Ordering::SeqCst),
+            before + 1,
+            "{target}: the failed fsync was tried again"
+        );
         let (status, replayed, after) = Conn::open(s.h.port).keyed(target, &key, body);
         assert_eq!((status, replayed), (500, false), "{target}: {after}");
         assert!(after.contains("refused"), "{target}: {after}");
     }
+}
+
+/// After a storage error a replay is the 500 every write is refused with,
+/// under either `--sync`: the kept success may be of a write the disk lost
+/// with the error -- a failed fsync, or under `--sync <ms>` a failed write
+/// of the buffer it went out in -- whose outcome no one here knows.
+/// Answered the success, as `--sync <ms>` did, its client held as made a
+/// write the next open may not have. Every way a keyed write comes.
+#[test]
+fn a_replay_after_a_storage_error_is_no_success_under_either_sync() {
+    for sync_on_write in [true, false] {
+        let mut db = Database::new();
+        for q in [
+            "create collection t (n int)",
+            "create statement w() public as insert t {n: 5}",
+            "create statement r() public as insert t {n: 6}",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        let h = start(
+            Config {
+                sync_on_write,
+                ..Config::default()
+            },
+            db,
+        );
+        let mut c = Conn::open(h.port);
+        for (i, &(target, body)) in KEYED.iter().enumerate() {
+            let (status, replayed, made) = c.keyed(target, &format!("lost-{i}"), body);
+            assert!(status < 300 && !replayed, "{target}: {status} {made}");
+            let (status, replayed, again) = c.keyed(target, &format!("lost-{i}"), body);
+            assert_eq!(
+                (status, replayed, &again),
+                (status, true, &made),
+                "{target}"
+            );
+        }
+        now_reading(&h.db);
+        h.db.write()
+            .unwrap()
+            .fail(&fennec_core::error::Error::Io("input/output error".into()));
+        for (i, &(target, body)) in KEYED.iter().enumerate() {
+            let (status, replayed, after) = c.keyed(target, &format!("lost-{i}"), body);
+            assert_eq!(
+                (status, replayed),
+                (500, false),
+                "{target}, sync_on_write {sync_on_write}: {after}"
+            );
+            assert!(after.contains("refused"), "{target}: {after}");
+        }
+    }
+}
+
+/// The child of [`a_key_a_killed_process_landed_is_replayed_once_on_disk`]:
+/// the file it opens.
+const KILLED: &str = "FENNEC_TEST_KILLED_BEFORE_FSYNC";
+/// Its exit, inside its keyed write's durability.
+const KILLED_CODE: i32 = 42;
+
+/// A file's sink whose durability ends the process before its fsync, the
+/// block written into the file first as a durability writes it: a process
+/// killed between the two, its write in the page cache alone.
+struct DiesAtFsync(Box<dyn fennec_core::engine::Sink>);
+
+impl fennec_core::engine::Sink for DiesAtFsync {
+    fn append(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.0.append(bytes)
+    }
+    fn record(&mut self, seq: u64, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.0.record(seq, bytes)
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.0.rewrite(bytes)
+    }
+    fn remapped(&mut self) -> Option<fennec_core::store::Base> {
+        self.0.remapped()
+    }
+    fn written_through(&mut self) -> fennec_core::error::Result<Option<fennec_core::store::Base>> {
+        self.0.written_through()
+    }
+    fn sync(&mut self) -> fennec_core::error::Result<()> {
+        self.0.sync()
+    }
+    fn flush(&mut self) -> fennec_core::error::Result<Option<fennec_core::engine::Durability>> {
+        self.0.write_out()?;
+        Ok(Some(Box::new(|| std::process::exit(KILLED_CODE))))
+    }
+}
+
+/// What a replay's durability went through on a file opened after the
+/// kill, in order, a test's client's answer last.
+#[derive(Default)]
+struct Reopened {
+    /// The durability held here until set.
+    open: bool,
+    events: Vec<&'static str>,
+}
+
+type ReopenedGate = Arc<(Mutex<Reopened>, Condvar)>;
+
+/// A file's sink whose durabilities wait at a gate and say what they did:
+/// asked, then the file's own durability run.
+struct Held {
+    inner: Box<dyn fennec_core::engine::Sink>,
+    gate: ReopenedGate,
+}
+
+impl fennec_core::engine::Sink for Held {
+    fn append(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.inner.append(bytes)
+    }
+    fn record(&mut self, seq: u64, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.inner.record(seq, bytes)
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.inner.rewrite(bytes)
+    }
+    fn remapped(&mut self) -> Option<fennec_core::store::Base> {
+        self.inner.remapped()
+    }
+    fn written_through(&mut self) -> fennec_core::error::Result<Option<fennec_core::store::Base>> {
+        self.inner.written_through()
+    }
+    fn sync(&mut self) -> fennec_core::error::Result<()> {
+        self.inner.sync()
+    }
+    fn flush(&mut self) -> fennec_core::error::Result<Option<fennec_core::engine::Durability>> {
+        let inner = self.inner.flush()?;
+        let gate = Arc::clone(&self.gate);
+        Ok(Some(Box::new(move || {
+            {
+                let (m, cv) = &*gate;
+                let mut g = m.lock().unwrap();
+                g.events.push("asked");
+                cv.notify_all();
+                let _ = cv.wait_timeout_while(g, GATE_LIMIT, |g| !g.open).unwrap();
+            }
+            let r = inner.map_or(Ok(()), |d| d());
+            gate.0.lock().unwrap().events.push("durable");
+            gate.1.notify_all();
+            r
+        })))
+    }
+}
+
+/// A key landed by a process killed before its fsync is in the file, and
+/// for all anyone knows in the page cache alone: a server opening the file
+/// answers a replay of it once the file's durability ran -- which fsyncs
+/// what the process left though it covers nothing this one appended
+/// (`fennec_core::fs`'s `a_servers_first_durability_fsyncs_what_a_killed_process_left`)
+/// -- never before. Answered at once, a power loss after took back a write
+/// its client held as made. The test binary run again as the process
+/// killed: its keyed write's durability writes the block and exits.
+#[test]
+fn a_key_a_killed_process_landed_is_replayed_once_on_disk() {
+    let body = r#"{"query": "put t {n: 9}"}"#;
+    if let Ok(p) = std::env::var(KILLED) {
+        let db = fennec_core::fs::open_with(
+            &p,
+            true,
+            Box::new(
+                |inner| Ok(Box::new(DiesAtFsync(inner)) as Box<dyn fennec_core::engine::Sink>),
+            ),
+        )
+        .unwrap();
+        let h = start(
+            Config {
+                sync_on_write: true,
+                ..Config::default()
+            },
+            db,
+        );
+        let answer = Conn::open(h.port).keyed("/query", "killed", body);
+        panic!("answered before its fsync: {answer:?}");
+    }
+    let path = tmp("killed.fennec");
+    {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        db.execute(&fennec_ql::parse_one("create collection t (n int)").unwrap())
+            .unwrap();
+        db.sync().unwrap();
+    }
+    let before = std::fs::metadata(&path).unwrap().len();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "server::a_key_a_killed_process_landed_is_replayed_once_on_disk",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(KILLED, &path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(KILLED_CODE),
+        "the child was not killed at its fsync"
+    );
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > before,
+        "the killed process's block is not in the file"
+    );
+
+    let gate: ReopenedGate = Arc::default();
+    let held = Arc::clone(&gate);
+    let db = fennec_core::fs::open_serving(
+        &path,
+        true,
+        Box::new(move |inner| {
+            Ok(Box::new(Held { inner, gate: held }) as Box<dyn fennec_core::engine::Sink>)
+        }),
+    )
+    .unwrap();
+    let h = start(
+        Config {
+            sync_on_write: true,
+            ..Config::default()
+        },
+        db,
+    );
+    let (port, told) = (h.port, Arc::clone(&gate));
+    let replay = std::thread::spawn(move || {
+        let answer = Conn::open(port).keyed("/query", "killed", body);
+        told.0.lock().unwrap().events.push("answered");
+        told.1.notify_all();
+        answer
+    });
+    {
+        let (m, cv) = &*gate;
+        let (mut g, waited) = cv
+            .wait_timeout_while(m.lock().unwrap(), GATE_LIMIT, |g| g.events.is_empty())
+            .unwrap();
+        assert!(!waited.timed_out(), "the replay asked for no durability");
+        assert_eq!(
+            g.events,
+            ["asked"],
+            "the replay was answered before its durability"
+        );
+        g.open = true;
+        cv.notify_all();
+    }
+    let (status, replayed, answer) = replay.join().unwrap();
+    assert_eq!((status, replayed), (200, true), "{answer}");
+    assert_eq!(
+        gate.0.lock().unwrap().events,
+        ["asked", "durable", "answered"]
+    );
 }
 
 /// The deepest expression the parser takes runs on a connection's stack:

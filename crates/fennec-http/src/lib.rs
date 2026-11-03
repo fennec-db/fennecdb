@@ -4062,9 +4062,17 @@ fn await_durable(
     let waiting = trace::span("durability");
     durable().inspect_err(|e| {
         waiting.error(e.to_string());
-        crate::log!("sync error: {e}");
-        db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
+        storage_failed(db, e);
     })
+}
+
+/// A storage error found with no lock held -- a durability's, or a sink's
+/// as one was asked for under the read lock ([`idempotent::Replay`]) --
+/// logged and handed to the engine, which refuses every write after it
+/// and never tries the fsync again ([`Database::fail`]).
+fn storage_failed(db: &RwLock<Database>, e: &Error) {
+    crate::log!("sync error: {e}");
+    db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
 }
 
 /// `POST /<name>/near` is a read: taking the write lock would block the other
@@ -4613,6 +4621,81 @@ mod tests {
         assert_eq!((status, replayed), (200, true));
         assert_eq!(feed.waited_out(), 1, "a lagging stream was waited for");
         drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// On a tenant node a replay waits for the node's stream of every
+    /// tenant as its first try's answer did: not for it while it is held up
+    /// on another tenant (`Sender::held`), which no durable write waits
+    /// for, and for it, its `SENT_WAIT`, once it keeps up short of the
+    /// key's block -- a node failed over to the standby that stream feeds
+    /// took back a write the client held as made. Counted by `waited_out`,
+    /// never the clock.
+    #[test]
+    fn a_tenants_replay_waits_for_the_nodes_stream_as_its_first_try() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-replay-node-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let tenants = Tenants::new(&dir)
+            .unwrap()
+            .with_replication(tenants::Replicated {
+                token: "repl".into(),
+                buffer: 1 << 20,
+                upstream: None,
+                sync_on_write: true,
+            });
+        let t = tenants.create("acme").unwrap();
+        let feed = Arc::clone(t.repl.as_ref().and_then(|r| r.feed()).expect("a feed"));
+        let cfg = Config {
+            sync_on_write: true,
+            ..Config::default()
+        };
+        let send = |sql: &str, key: Option<&str>| {
+            let req = Request {
+                method: Method::Post,
+                target: "/query".into(),
+                path: "/query".into(),
+                query: Vec::new(),
+                headers: key
+                    .map(|k| ("Idempotency-Key".to_string(), k.to_string()))
+                    .into_iter()
+                    .collect(),
+                body: format!(r#"{{"query":"{sql}"}}"#).into_bytes(),
+                keep_alive: false,
+            };
+            metrics::begin_request();
+            let resp = handle_tenant(&t, &cfg, &req);
+            let replayed = resp.extra.iter().any(|(k, _)| k == "Idempotent-Replayed");
+            let body = String::from_utf8_lossy(&resp.body).into_owned();
+            (resp.status, replayed, body)
+        };
+        let (status, _, body) = send("create collection notes (n int)", None);
+        assert_eq!(status, 200, "{body}");
+        let before = t.db.read().unwrap().change_seq();
+        let (status, replayed, first) = send("put notes {n: 1}", Some("k-1"));
+        assert_eq!((status, replayed), (200, false), "{first}");
+        // The node's stream, from before the key's block, held up on
+        // another tenant's image.
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        feed.sending_as(9, before, Some(&held), false);
+        let (status, replayed, again) = send("put notes {n: 1}", Some("k-1"));
+        assert_eq!((status, replayed, &again), (200, true, &first));
+        assert_eq!(
+            feed.waited_out(),
+            0,
+            "the replay waited for a stream held up elsewhere"
+        );
+        held.store(false, Ordering::Relaxed);
+        let (status, replayed, again) = send("put notes {n: 1}", Some("k-1"));
+        assert_eq!((status, replayed, &again), (200, true, &first));
+        assert_eq!(
+            feed.waited_out(),
+            1,
+            "the replay was answered before the node's stream was sent the key's block"
+        );
+        drop(t);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

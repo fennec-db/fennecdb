@@ -75,9 +75,10 @@ struct Disk {
     /// left in the page cache alone. A durability ([`Sink::flush`]) fsyncs
     /// them once even where it covers nothing appended -- a replayed
     /// `Idempotency-Key` after a restart answers a write that process
-    /// landed (`Database::durability`). A plain sync, a close's, leaves
-    /// them: the shell syncs as it exits, after a one-shot read too, which
-    /// would fsync, and on Linux begin a sync log, for nothing.
+    /// landed (`Database::durability`) -- the file itself, never through
+    /// the sync log ([`Disk::sync_inherited`]). A plain sync, a close's,
+    /// leaves them: the shell syncs as it exits, after a one-shot read
+    /// too, which would fsync for nothing.
     inherited: bool,
     /// fsyncs run, for the test that they are shared.
     #[cfg(test)]
@@ -329,11 +330,17 @@ impl Disk {
 
     /// Makes the first `upto` appended bytes durable, unless they are --
     /// and, `inherited` asked, the bytes the file held before them, once.
+    /// What `inherited` costs a durability: where its bytes are covered,
+    /// the test of it below (and of the flag where it is asked); where it
+    /// fsyncs, the store clearing the flag. A plain sync passes `false`.
     fn sync(&mut self, pending: &Mutex<Vec<u8>>, upto: u64, inherited: bool) -> Result<()> {
         if let Some(e) = &self.failed {
             return Err(e.clone());
         }
-        if self.synced >= upto && !(inherited && self.inherited) {
+        if self.synced >= upto {
+            if inherited && self.inherited {
+                return self.sync_inherited();
+            }
             return Ok(());
         }
         self.write_pending(pending)?;
@@ -348,11 +355,44 @@ impl Disk {
         #[cfg(test)]
         {
             self.fsyncs += 1;
+            FSYNCS_HERE.with(|n| n.set(n.get() + 1));
         }
         self.synced = self.written;
         self.inherited = false;
         Ok(())
     }
+
+    /// The bytes an earlier process left, fsynced by a durability that
+    /// covers nothing appended: the file itself, as the first sync of an
+    /// open does, but with no sync log begun -- the log is for the bytes
+    /// this sink writes, and an app that opened its file and wrote
+    /// nothing, whose `fennec_sync` lands here, made 260 KB of it on
+    /// Android for this. What was written meanwhile is covered too, the
+    /// fsync being the whole file's; the log's generation begins at the
+    /// next sync, which still fsyncs the file (`Tail::direct`, set until
+    /// a sync runs, as `inherited` is).
+    #[cold]
+    fn sync_inherited(&mut self) -> Result<()> {
+        if let Err(e) = self.file.sync_data() {
+            self.failed = Some(e.into());
+            return Err(self.failed.clone().unwrap());
+        }
+        #[cfg(test)]
+        {
+            self.fsyncs += 1;
+            FSYNCS_HERE.with(|n| n.set(n.get() + 1));
+        }
+        self.synced = self.written;
+        self.inherited = false;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The fsyncs a file's sink ran on this thread, for a test that opens
+    /// a database and holds no sink of its own to count them on.
+    static FSYNCS_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl FileSink {
@@ -465,6 +505,9 @@ impl FileSink {
         disk.file.set_len(len as u64)?;
         disk.file.sync_data()?;
         disk.file.seek(SeekFrom::End(0))?;
+        // That fsync was the whole file's, what the earlier process left
+        // among it.
+        disk.inherited = false;
         #[cfg(unix)]
         disk.tail.reset(len as u64);
         Ok(())
@@ -1290,6 +1333,51 @@ mod tests {
             "inherited bytes are fsynced once"
         );
         drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// As a server opens its file (`open_serving`) after a process that
+    /// landed a write and was killed before its fsync: the write is in the
+    /// file, in the page cache alone for all anyone knows. The first
+    /// durability fsyncs it though it covers nothing appended -- a replayed
+    /// `Idempotency-Key` waits for that fsync before it answers the write
+    /// as made -- the file itself, with no sync log begun (kept here as
+    /// Linux keeps one); a plain sync before it fsyncs nothing, and a
+    /// durability after it none.
+    #[cfg(unix)]
+    #[test]
+    fn a_servers_first_durability_fsyncs_what_a_killed_process_left() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennecdb-fs-killed-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("killed.fennec");
+        let mut earlier = open(&path).unwrap();
+        earlier.fork(7).unwrap();
+        earlier.write_out().unwrap();
+        // Killed: nothing of its own runs after the write, no drop.
+        std::mem::forget(earlier);
+
+        keep_sync_log(true);
+        let mut db = open_serving(&path, true, Box::new(Ok)).unwrap();
+        keep_sync_log(false);
+        assert!(
+            db.history().lineage.iter().any(|&(id, _)| id == 7),
+            "the killed process's write is not in the file"
+        );
+        let fsyncs = || FSYNCS_HERE.with(|n| n.get());
+        let before = fsyncs();
+        db.sync().unwrap();
+        assert_eq!(fsyncs(), before, "a plain sync fsynced");
+        db.durability().unwrap().expect("a durability")().unwrap();
+        assert_eq!(fsyncs(), before + 1, "what the process left went unsynced");
+        let log = crate::synclog::path_for(&resolved(&path));
+        assert!(!log.exists(), "an fsync of what it left began a sync log");
+        db.durability().unwrap().expect("a durability")().unwrap();
+        assert_eq!(fsyncs(), before + 1, "what it left was fsynced twice");
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

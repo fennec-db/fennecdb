@@ -161,13 +161,30 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
 pub struct Replay {
     sent: Response,
     durable: Option<fennec_core::engine::Durability>,
+    /// The sink's error as the durability was asked for, `sent` its 500:
+    /// reported to the engine once the lock is let go
+    /// ([`Database::fail`]), as a durability's failure is.
+    failed: Option<fennec_core::error::Error>,
 }
 
 impl Replay {
+    /// `sent`, waiting for nothing.
+    fn now(sent: Response) -> Replay {
+        Replay {
+            sent,
+            durable: None,
+            failed: None,
+        }
+    }
+
     /// The answer, once what it waits for ran -- with no lock held, as a
     /// write's durability runs ([`crate::await_durable`]). A failed fsync
     /// is the answer, as it is the first try's: a 500, never the success.
     pub fn answer(self, db: &RwLock<Database>) -> Response {
+        if let Some(e) = &self.failed {
+            crate::storage_failed(db, e);
+            return self.sent;
+        }
         match crate::await_durable(db, self.durable) {
             Ok(()) => self.sent,
             Err(e) => crate::error_response(&e),
@@ -189,23 +206,37 @@ impl Replay {
 /// ([`Database::durability`]), everything appended -- the key's block
 /// among it -- on disk and sent to every stream keeping up, `SENT_WAIT` at
 /// most. An fsync that covered it already makes that one run none, and
-/// one under way is waited out at the disk; refused after a storage
-/// error. Under `--sync <ms>` a first try's answer waits for no fsync, and
-/// a replay for none. The 422 of a key sent with another request says
-/// nothing of the write and waits for nothing.
+/// one under way is waited out at the disk. Under `--sync <ms>` a first
+/// try's answer waits for no fsync, and a replay for none.
+///
+/// After a storage error ([`Database::failure`]) a replay is the refusal
+/// every write meets, a 500, under either `--sync`: the write it answers
+/// may be among what the disk lost -- a failed fsync, or under `--sync
+/// <ms>` a failed write of the buffer it was in -- and whether it is, no
+/// one here knows. Answered the kept success, its client held as made a
+/// write the next open may not have. The 422 of a key sent with another
+/// request says nothing of the write and waits for nothing.
 pub fn replay(db: &Database, key: &Key, ttl_ms: i64, durable: bool) -> Option<Replay> {
     let sent = answered(db, key, ttl_ms)?;
-    if !durable || sent.status == 422 {
-        return Some(Replay {
-            sent,
-            durable: None,
-        });
+    if sent.status == 422 {
+        return Some(Replay::now(sent));
+    }
+    if let Err(e) = db.refuse_if_failed() {
+        return Some(Replay::now(crate::error_response(&e)));
+    }
+    if !durable {
+        return Some(Replay::now(sent));
     }
     Some(match db.durability() {
-        Ok(durable) => Replay { sent, durable },
+        Ok(durable) => Replay {
+            sent,
+            durable,
+            failed: None,
+        },
         Err(e) => Replay {
             sent: crate::error_response(&e),
             durable: None,
+            failed: Some(e),
         },
     })
 }

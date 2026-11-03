@@ -5731,6 +5731,13 @@ impl Database {
     /// where one runs it waits for it at the disk; a file's sink fsyncs
     /// once what an earlier process left in the file (`fs::Disk`'s
     /// `inherited`). Refused after a storage error, as every write is.
+    ///
+    /// An error the sink gives it, and one its durability gives, is the
+    /// caller's to report with [`Self::fail`] once it has let the lock go,
+    /// as for [`Self::flush`]'s: on `&self` it notes nothing, and a failed
+    /// fsync must stop the writes and never be tried again. A sink of no
+    /// durability of its own -- the trait's default `flush`, a sync -- runs
+    /// its sync here, under the caller's lock, and can fail here.
     pub fn durability(&self) -> Result<Option<Durability>> {
         self.refuse_if_failed()?;
         self.sink.lock().unwrap_or_else(|e| e.into_inner()).flush()
@@ -5791,7 +5798,11 @@ impl Database {
         r
     }
 
-    fn refuse_if_failed(&self) -> Result<()> {
+    /// The refusal every write meets after a storage error
+    /// ([`Self::failure`]): what a request answering a write another one
+    /// landed is told as well -- a replayed `Idempotency-Key`, whose write
+    /// the disk may have lost with the failure.
+    pub fn refuse_if_failed(&self) -> Result<()> {
         match &self.failed {
             None => Ok(()),
             Some(m) => Err(Error::Io(format!(
