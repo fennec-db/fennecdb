@@ -40,6 +40,7 @@ a loop over the ranges, summing their lengths, cost Cyrillic and Greek a
 walk of them for every letter.
 """
 
+import hashlib
 import os
 import re
 import subprocess
@@ -50,6 +51,9 @@ import urllib.request
 
 UNICODE = "17.0.0"
 URL = "https://www.unicode.org/Public/%s/ucd/UnicodeData.txt" % UNICODE
+# The file the table was written from: a download that differs is refused
+# rather than written or checked against.
+SHA256 = "2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c"
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.normpath(os.path.join(HERE, "..", "..", "src", "text", "fold.rs"))
 
@@ -85,8 +89,8 @@ def load(path):
 
 
 def fetch():
-    """UnicodeData.txt into a directory of its own, tried three times: CI
-    runs `--check` on a fresh machine."""
+    """UnicodeData.txt into a directory of its own, tried three times, when
+    no path is given (CI gives the copy it keeps by version)."""
     path = os.path.join(tempfile.mkdtemp(), "UnicodeData.txt")
     for attempt in range(3):
         try:
@@ -103,6 +107,10 @@ def main():
     check = "--check" in args
     args = [a for a in args if a != "--check"]
     path = args[0] if args else fetch()
+    with open(path, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    if digest != SHA256:
+        sys.exit("%s is not Unicode %s's UnicodeData.txt (sha256 %s)" % (path, UNICODE, digest))
     chars = load(path)
 
     def lower(cp):
