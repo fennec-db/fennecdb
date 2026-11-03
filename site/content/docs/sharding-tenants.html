@@ -138,7 +138,7 @@ most of the time, so it keeps those holding a schedule by name with their
 next slot, and opens one only as its slot comes.</p>
 
 <pre data-lang="bash">curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
-     -d '{"schema": "create collection holds (state text @hash, until timestamp @sorted); create statement lapse_holds every 1m as set holds {state: \"lapsed\"} where state = \"held\" and until &lt; now() order until limit 1000"}'</pre>
+     -d '{"schema": "create collection sessions (user text, expires timestamp @sorted); create statement tidy_sessions every 1h as del sessions where expires &lt; now() order expires limit 1000"}'</pre>
 
 <ul>
   <li><b>An idle tenant is opened as its slot comes, and closed after its
