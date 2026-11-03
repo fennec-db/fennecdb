@@ -165,18 +165,47 @@ every match as an ordered `get` reads every row its filter passes, so
 neither keeps the ranking's `MAX_MATCH_ROWS`: a `count` over 12 500
 matched rows answers 12 500. The set is a `Vec<DocId>`, eight bytes a
 row, as `matching_ids` holds a `where`'s, and bounded by the index's
-documents, never by its lists' sum: the cursors' lists are laid end to end
-and put together (`sort_unstable`, `dedup`) whenever they pass the count
-of documents, so it holds twice that at most while it is made -- where
-each list copied and then sorted once held a query of 200 words, each in
-half of a million documents, as 100 million ids, 800 MB. In the common
-case, lists that together hold fewer ids than there are documents, it is
-the one sort it was. What bounded it before bounds it and errors as it
-did: a word `fuzzy` or `prefix` reads as more than `MAX_EXPANSIONS`
-words, `--call-max-rows`, and the ranking's 10 000 rows wherever `match`
-still ranks. `explain` says how many rows the words scored and how many
-the filter kept; to a scoped token it says the kept alone, since the words
-reach rows it cannot read.
+documents, never by its lists' sum (`text::ids_of`). Lists holding more
+ids than their span has 64-id words, and no more words than there are
+documents, are marked in a bitmap of the span and read out in id order: a
+pass over the postings and one over the words, no sort. Others -- few ids
+over a wide span, or ids far apart -- are laid end to end and put
+together (`sort_unstable`, `dedup`) whenever they pass the count of
+documents, the one sort they always had where they hold fewer; one list
+alone is copied. Either way it holds twice the documents' ids at most
+while it is made, the bitmap's words and the set or the lists laid end to
+end -- where each list copied and then sorted once held a query of 200
+words, each in half of a million documents, as 100 million ids, 800 MB.
+The sort alone was the first cut: a facet beside a ranking of the 100
+commonest words of 200 000 titles, whose lists hold 262 786 ids over
+149 669 rows, sorted once its ids passed 200 000 and again at the end,
+where main had sorted all 262 786 once, and took 5% longer than main
+(22.6 -> 23.9 ms). Marked, the set costs a tenth of the sort's
+instructions: that facet retires 303 million instructions against main's
+337 (18.8 ms against 22.8 on a loaded machine), `get ... match ... count`
+over those words 4.9 million against the sort's 58 (0.54 ms against 5.5),
+the ordered page 93 million against 147 and the groups 128 against 182; a
+query of one or two words, under the bitmap's bar, retires what it did.
+What bounded it before bounds it and errors as it did: a word `fuzzy` or
+`prefix` reads as more than `MAX_EXPANSIONS` words, `--call-max-rows`,
+and the ranking's 10 000 rows wherever `match` still ranks. `explain`
+says how many rows the words scored and how many the filter kept; to a
+scoped token it says the kept alone, since the words reach rows it cannot
+read.
+
+A plain ordered `get`, which runs none of this code, ran 4% slower in the
+first timing run (4.88 -> 5.08 us, in every pair), and the branch's binary
+did retire 1.4 thousand more instructions in it -- but not of its code:
+the functions it spends its time in are main's instruction for
+instruction, and the branch's path retires some 200 fewer. On macOS the
+default allocator's work follows the executable's identity: the same
+binary with its UUID alone rewritten, and signed again, ran the statement
+in 78.6 to 82.1 thousand instructions and 16.1 to 16.8 thousand cycles,
+main's and the branch's alike; over seven identities each, main and this
+branch ran it in 16.55 and 16.56 thousand cycles, and with
+`MallocNanoZone=0` the two retire the same and run in the same cycles. Two
+builds a few percent apart in a statement of microseconds are compared
+over several UUIDs, or with that variable set.
 
 What answers beside it. `highlight()` and `snippet()` mark a row's words
 whatever orders it, the marks its ranking gives it, so they stay beside
@@ -192,17 +221,19 @@ filtering `match` counts the rows it selects, what a `count` beside it
 counts. `near` and `fuse` are as they were; `fuse` was refused beside all
 three already.
 
-The browser module grew 1.3 KB raw, 0.8 KB gzip and 0.7 KB brotli
-(`matched_rows` 1.4 KB, `scored` 0.6, less the facets' own path, 1.8 KB:
-`matched_set`, `matching` and `matching_loose`): kept in it, as a page's
-search box asks "how many" and "newest first" as a server's does. The
-first cut grew it 3.1 KB raw, 1.0 brotli, before the facets shared the set.
+The browser module grew 1.9 KB raw, 1.1 KB gzip and 0.8 KB brotli
+(`matched_rows` 1.4 KB, `scored` 1.1 -- 0.65 KB of it the bitmap's, 0.3
+gzip -- less the facets' own path, 1.8 KB: `matched_set`, `matching` and
+`matching_loose`): kept in it, as a page's search box asks "how many" and
+"newest first" as a server's does, and the bitmap with it, since a page
+counts a facet over common words as a server does. The first cut grew it
+3.1 KB raw, 1.0 brotli, before the facets shared the set.
 A build without the text index refuses `match` in `text_query`, in line
 with each caller (`no_text_index`), so neither the ranking's path nor the
 filter's after it is code of that module, nor `rerank`'s, and the checks
 only a built index would make (`order _score`, `rerank` or an aggregate's
 `limit` beside a filter) are asked where one is: the module without the
-indexes and the one with no feature lost 4.3 and 4.0 KB raw, 1.0 and 1.1
+indexes and the one with no feature lost 4.3 and 4.1 KB raw, 1.4 and 1.2
 brotli, against main.
 
 Rejected: putting the set into the filter as an `id in [...]` -- each id an
@@ -211,9 +242,11 @@ written list is -- for eight bytes a row and its bound kept; the rows
 holding a term (`matching`), which leaves the ranking's set at the `f32`
 edge above; a ranking with no `k`, read off for its positive scores,
 which walks every list a document at a time where the set is the lists
-put together; and merging each list into the set as it comes, a walk of
-the set a list, which gains only where the lists pass the documents, for a
-merge of its own in the module where the sort is the engine's one.
+put together; merging each list into the set as it comes, a walk of the
+set a list, which costs the set's length a list where the bitmap costs
+its words once; and the bitmap for every query of two lists or more,
+which reads and clears a word for each 64 ids of the span however few
+the lists hold -- the bar keeps it to lists that hold more ids than that.
 
 ## Tokenizer
 

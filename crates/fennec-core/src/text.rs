@@ -503,11 +503,9 @@ impl TextIndex {
     /// none, as it adds none to a ranking.
     ///
     /// Its memory is bounded by the documents the index holds, never by
-    /// the lists' sum: the lists are put together through the engine's one
-    /// sort of ids whenever what they hold passes that count, so the set
-    /// never holds more than twice it -- where copying every list first
-    /// held a query of 200 words, each in half of a million documents, as
-    /// 100 million ids: 800 MB.
+    /// the lists' sum (`ids_of`): never more than twice their count in
+    /// ids -- where copying every list first held a query of 200 words,
+    /// each in half of a million documents, as 100 million ids: 800 MB.
     pub fn scored(
         &self,
         query: &str,
@@ -528,25 +526,8 @@ impl TextIndex {
             false => self.reach(query, loose, &qtf)?,
         };
         let unions = unions(&reach);
-        let mut out: Vec<DocId> = Vec::new();
-        // How many ascending lists `out` holds laid end to end.
-        let mut lists = 0;
-        for c in &self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within) {
-            if c.weight > 0.0 {
-                out.extend_from_slice(c.list.docs);
-                lists += 1;
-                if lists > 1 && out.len() > most {
-                    out.sort_unstable();
-                    out.dedup();
-                    lists = 1;
-                }
-            }
-        }
-        if lists > 1 {
-            out.sort_unstable();
-            out.dedup();
-        }
-        Ok(out)
+        let cursors = self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within);
+        Ok(ids_of(&cursors, most))
     }
 
     /// Top `k` documents for `query`, best first.
@@ -959,6 +940,73 @@ impl<'a> Reach<'a> {
             .map(|f| f.2)
             .collect()
     }
+}
+
+/// The documents the cursors weighing more than nothing hold, ascending,
+/// each once: [`TextIndex::scored`]'s set, `most` the documents the index
+/// holds.
+///
+/// Lists that hold more ids than their span has 64-id words, and no more
+/// words than there are documents, are marked in a bitmap of that span and
+/// read out in id order: a pass over the postings and one over the words,
+/// no sort. Other lists -- few ids over a wide span, or ids far apart --
+/// are laid end to end and put together through the engine's one sort
+/// whenever they pass `most`, the one sort they always had where they hold
+/// fewer; one list alone is copied. Either holds twice `most` ids at most:
+/// the bitmap's words and the set, or the lists laid end to end. The sort
+/// alone put a facet beside the 100 commonest words of 200 000 titles, two
+/// sorts of 200 000 ids and more, 5% behind the one sort main made of
+/// every list; marked, `count` over them retires a twelfth of what it did.
+#[cfg(feature = "text")]
+fn ids_of(cursors: &[Cursor], most: usize) -> Vec<DocId> {
+    let (mut count, mut held, mut lo, mut hi) = (0, 0, DocId::MAX, 0);
+    let mut one: &[DocId] = &[];
+    for c in cursors {
+        let l = c.list.docs;
+        if let (true, Some(&first), Some(&last)) = (c.weight > 0.0, l.first(), l.last()) {
+            (count, held, one) = (count + 1, held + l.len(), l);
+            (lo, hi) = (lo.min(first), hi.max(last));
+        }
+    }
+    if count < 2 {
+        return one.to_vec();
+    }
+    let words = (hi - lo) / 64 + 1;
+    let mut out: Vec<DocId> = Vec::new();
+    if words <= held.min(most) as u64 {
+        let mut bits = vec![0u64; words as usize];
+        for c in cursors.iter().filter(|c| c.weight > 0.0) {
+            for &d in c.list.docs {
+                let at = d - lo;
+                bits[(at / 64) as usize] |= 1 << (at % 64);
+            }
+        }
+        out.reserve_exact(bits.iter().map(|w| w.count_ones() as usize).sum());
+        for (i, &w) in bits.iter().enumerate() {
+            let mut w = w;
+            while w != 0 {
+                out.push(lo + i as u64 * 64 + w.trailing_zeros() as u64);
+                w &= w - 1;
+            }
+        }
+        return out;
+    }
+    // How many ascending lists `out` holds laid end to end.
+    let mut laid = 0;
+    for c in cursors.iter().filter(|c| c.weight > 0.0) {
+        out.extend_from_slice(c.list.docs);
+        laid += 1;
+        if laid > 1 && out.len() > most {
+            out.sort_unstable();
+            out.dedup();
+            laid = 1;
+        }
+    }
+    if laid > 1 {
+        out.sort_unstable();
+        out.dedup();
+    }
+    out
 }
 
 /// Each word's variants of one distance as one list where there are
@@ -1575,6 +1623,46 @@ mod tests {
         let thirds: Vec<String> = (0..40).step_by(3).map(|i| format!("w{i}")).collect();
         let want: Vec<DocId> = (0..300).filter(|d| d % 3 != 0).collect();
         assert_eq!(matching(&ix, &thirds.join(" ")), want);
+    }
+
+    /// The set is one whichever way `ids_of` puts it together: lists dense
+    /// over their span marked in a bitmap, lists sparse over it -- ids far
+    /// apart, or few against the span -- laid end to end and sorted, one
+    /// list copied. Each is the documents a word of the query holds,
+    /// ascending, once.
+    #[test]
+    fn the_bitmap_and_the_sort_put_together_one_set() {
+        // Document `i` holds `w<k>` where `k + 2` divides `i + k`: `w0`
+        // half of them, `w9` one in eleven, some none.
+        let holds = |i: u64, k: u64| (i + k).is_multiple_of(k + 2);
+        let queries: [&[u64]; 5] = [
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            &[9],
+            &[8, 9],
+            &[0, 9],
+            &[3, 5, 7],
+        ];
+        // A gap of 1 or 3 puts every query of several words in the bitmap,
+        // of 64 the ten words alone (400 words of bits, 800 ids), of 1 000
+        // or 2^40 none.
+        for gap in [1u64, 3, 64, 1_000, 1 << 40] {
+            let mut ix = TextIndex::new(spec());
+            for i in 0..400u64 {
+                let words: Vec<String> = (0..10)
+                    .filter(|&k| holds(i, k))
+                    .map(|k| format!("w{k}"))
+                    .collect();
+                ix.insert(1 + i * gap, &format!("t {}", words.join(" ")));
+            }
+            for q in queries {
+                let text: Vec<String> = q.iter().map(|k| format!("w{k}")).collect();
+                let want: Vec<DocId> = (0..400u64)
+                    .filter(|&i| q.iter().any(|&k| holds(i, k)))
+                    .map(|i| 1 + i * gap)
+                    .collect();
+                assert_eq!(matching(&ix, &text.join(" ")), want, "gap {gap}, {q:?}");
+            }
+        }
     }
 
     /// The count `memory_bytes` reads is what the terms hold -- each
