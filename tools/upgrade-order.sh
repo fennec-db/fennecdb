@@ -723,7 +723,7 @@ echo "ok: the binaries from before stop in words at a schedule (op 4) and its ma
 #   - an old replica of that server refuses the image holding op 6, and an
 #     old archiver takes no image of its own;
 #   - the old `fennec types` refuses it.
-OP6_BASE=${OP6_BASE:-effc12ce}
+OP6_BASE=${OP6_BASE:-6fb28002}
 if [ -n "${OLD6_BIN_DIR:-}" ]; then
     OLD6=$OLD6_BIN_DIR
 else
