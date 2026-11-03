@@ -169,7 +169,9 @@ impl Database {
     /// Each statement of `body` run with `values`, its rows counted against
     /// `--call-max-rows`; the answer is the last statement's. `slot`, a
     /// scheduled body's, is handed to each statement's filter
-    /// (`due::slot_handed`).
+    /// (`due::slot_handed`). Asked once, outside the loops: a call's loop
+    /// is the one it was before schedules, no branch a statement, and the
+    /// two share one `bounded` (a second was 0.8 KB of the server).
     pub(super) fn run_body(
         &mut self,
         body: &[Statement],
@@ -178,13 +180,22 @@ impl Database {
     ) -> Result<Response> {
         self.bounded(|db| {
             let mut last = Ok(Response::Affected(0));
-            for s in body {
-                last = match slot {
-                    None => db.run_one(s, values),
-                    Some(at) => db.run_one(&super::due::slot_handed(s, at), values),
-                };
-                if last.is_err() {
-                    break;
+            match slot {
+                None => {
+                    for s in body {
+                        last = db.run_one(s, values);
+                        if last.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(at) => {
+                    for s in body {
+                        last = db.run_one(&super::due::slot_handed(s, at), values);
+                        if last.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             last

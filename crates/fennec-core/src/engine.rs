@@ -5975,12 +5975,13 @@ impl Database {
     ) -> Result<()> {
         // Taken as the primary wrote it, its digest checked here. A slot's
         // mark is noted as the primary noted it, a write that changes
-        // nothing read ([`crate::changes::SLOT_MARK`]): no statement to
-        // read again after it.
+        // nothing read ([`crate::changes::SLOT_MARK`]), on collection 0
+        // whatever the record's head said -- the ring tells a mark by its
+        // collection first: no statement to read again after it.
         if kind == REC_STATEMENT {
             #[cfg(feature = "statements")]
             if body.first() == Some(&stored::OP_MARK) {
-                notes.push((cid, crate::changes::SLOT_MARK));
+                notes.push((0, crate::changes::SLOT_MARK));
                 return self.take_statement(body);
             }
             notes.push((cid, SCHEMA_MARK));
