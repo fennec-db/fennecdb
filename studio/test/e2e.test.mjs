@@ -734,6 +734,50 @@ test('the schema: a collection\'s bindings, each opened as its replacement, none
   }
 });
 
+// A statement the server's clock runs: listed by its schedule with its next
+// slot and no run yet, run now from its dialog into the editor -- marking no
+// slot -- and opened as its replacement. Its slot is New Year's, so no run
+// of the clock lands while the test looks.
+test('the schema: a scheduled statement with its clock, run now, opened as its replacement', async () => {
+  await query(server.url, 'create collection ticks (n int, at timestamp)');
+  await query(server.url, "create statement tick at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' as insert ticks {n: 1, at: slot()}");
+  try {
+    // Berlin's 03:00 on 1 January is 02:00 UTC: this year's, or next.
+    const year = new Date().getUTCFullYear();
+    const next = Date.now() < Date.UTC(year, 0, 1, 2) ? year : year + 1;
+    const p = await page();
+    await signIn(p, TOKEN);
+    await view(p, 'schema', 'tr[data-statement="tick"]');
+    const cells = await p.$eval('tr[data-statement="tick"]', (e) => [...e.cells].map((c) => c.textContent));
+    assert.deepEqual(cells.slice(0, 3), ['tickscheduled', `at '0 3 1 1 *' in 'Europe/Berlin'next ${next}-01-01T02:00:00Z; not run yet`, 'A tick a year']);
+    assert.equal(await p.$('button[aria-label="Call tick"]'), null);
+    // Run now: the statement it sends, its name alone, then run in the editor.
+    await p.click('button[aria-label="Run tick now"]');
+    await p.waitForFunction(() => /^Run tick now/.test(document.querySelector('dialog[open]')?.textContent ?? ''));
+    assert.equal(await p.$eval('dialog[open] pre.q-block', (e) => e.textContent), 'call tick');
+    await p.click('dialog[open] button[type=submit]');
+    await p.waitForFunction(() => /Wrote 1 row/.test(document.querySelector('.ed-out')?.textContent ?? ''), { timeout: 10_000 });
+    assert.equal(await p.$eval('#query', (e) => e.value), 'call tick');
+    // Its slot() the latest at or before the call: last 1 January's.
+    const [row] = await query(server.url, 'get ticks select at');
+    assert.equal(row.at, `${next - 1}-01-01T02:00:00Z`);
+    // No slot marked: the server lists no run yet, the same slot next.
+    const listed = (await query(server.url, 'statements')).find((s) => s.name === 'tick');
+    assert.deepEqual([listed.last, listed.held, listed.next], [null, null, `${next}-01-01T02:00:00Z`]);
+    await view(p, 'schema', 'tr[data-statement="tick"]');
+    // Its definition says when it runs, and opens as its replacement.
+    await p.click('button[aria-label="The definition of tick"]');
+    await p.waitForFunction(() => /Runs at '0 3 1 1 \*' in 'Europe\/Berlin' by the server's clock, a slot once; reads ticks/.test(document.querySelector('dialog[open]')?.textContent ?? ''), { timeout: 10_000 });
+    await p.click('dialog[open] .dialog-actions .btn.primary');
+    await p.waitForFunction(() => /^create or replace statement tick at '0 3 1 1 \*'/.test(document.querySelector('#query')?.value ?? ''), { timeout: 10_000 });
+    assert.deepEqual(p.problems, []);
+    await p.close();
+  } finally {
+    await query(server.url, 'drop statement if exists tick');
+    await query(server.url, 'drop collection if exists ticks');
+  }
+});
+
 test('the live view: rows arrive as they are written, and pause', async () => {
   const p = await page();
   await signIn(p, TOKEN);

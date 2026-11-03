@@ -363,6 +363,35 @@ void main() {
     remote.close();
   });
 
+  // The statements a server holds, typed: a scheduled one with its clause
+  // and next slot -- New Year's, so no run of the clock lands while the test
+  // looks -- and no run yet, and a called one with no clock; the server's
+  // token runs the scheduled one now, marking no slot.
+  test('the statements a server holds are listed, a scheduled one with its clock', () async {
+    final s = await server('statements');
+    final db = Fennec.connect(s.url);
+    await db.execute('create collection ticks (n int, at timestamp)');
+    await db.execute("create statement tick at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' "
+        'as insert ticks {n: 1, at: slot()}');
+    await db.execute('create statement ticked() as get ticks count');
+    // Berlin's 03:00 on 1 January is 02:00 UTC: this year's, or next.
+    final now = DateTime.now().toUtc();
+    final first = DateTime.utc(now.year, 1, 1, 2);
+    final newYears = now.isBefore(first) ? first : DateTime.utc(now.year + 1, 1, 1, 2);
+    final listed = {for (final x in await db.statements()) x.name: x};
+    final tick = listed['tick']!;
+    final ticked = listed['ticked']!;
+    expect(
+        (tick.schedule, tick.next, tick.last, tick.held), ("at '0 3 1 1 *' in 'Europe/Berlin'", newYears, null, null));
+    expect((tick.comment, tick.writes, tick.signature, tick.after, tick.broken),
+        ('A tick a year', true, '()', null, null));
+    expect((ticked.signature, ticked.writes, ticked.schedule, ticked.next), ('()', false, null, null));
+    expect((await db.callStatement('tick')).affected, 1);
+    final again = (await db.statements()).singleWhere((x) => x.name == 'tick');
+    expect((again.next, again.last), (newYears, null));
+    db.close();
+  });
+
   test('connect runs every query on the server', () async {
     final s = await server('connect');
     final db = Fennec.connect(s.url);

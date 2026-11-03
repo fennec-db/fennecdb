@@ -500,6 +500,69 @@ func (c *Client) Call(ctx context.Context, name string, args any, options ...Cal
 	return r, nil
 }
 
+// NamedStatement is a named statement as `statements` lists it to the
+// server's token, each column nil or "" where it says nothing of the
+// statement: a called one has no After and no clock.
+type NamedStatement struct {
+	Name string `json:"name"`
+	// Version is the history and change its definition landed at.
+	Version [2]uint64 `json:"version"`
+	// Signature is `($from int, $to int = ...) claims (sub text)`, as a
+	// call is written; "()" for none.
+	Signature string `json:"signature"`
+	Writes    bool   `json:"writes"`
+	Comment   string `json:"comment"`
+	// Broken says why the schema broke it: it runs no more until it reads
+	// again.
+	Broken string `json:"broken"`
+	// After is a write-bound statement's collection and the writes that
+	// run it: ["orders", "set or del"].
+	After []string `json:"after"`
+	// Schedule is a scheduled statement's clause as its text writes it:
+	// "every 1h", "at '0 3 * * *' in 'Europe/Berlin'".
+	Schedule string `json:"schedule"`
+	// Next is the slot due next: past while one is overdue or held back.
+	Next *time.Time `json:"next"`
+	// Last is its last run, landed or pending; nil before the first.
+	Last *LastRun `json:"last"`
+	// Held is a due slot the server's state holds back -- a tenant's
+	// quota, a storage error -- tried again as that changes.
+	Held *HeldSlot `json:"held"`
+}
+
+// LastRun is a scheduled statement's last run, as `statements` lists it.
+type LastRun struct {
+	// Slot is the slot it ran for: what slot() read.
+	Slot time.Time `json:"slot"`
+	// Outcome is "ran", or "refused": the statement's own refusal -- a
+	// require not met, a broken statement -- which marks the slot as run.
+	Outcome string `json:"outcome"`
+	// Status is a refusal's status: 412 a require not met, 409 broken or a
+	// value taken; 0 for a run.
+	Status int `json:"status"`
+	// Reason is the words a refusing require gave.
+	Reason string `json:"reason"`
+	// Skipped is how many slots it passed over: missed slots run once, the
+	// latest.
+	Skipped int `json:"skipped"`
+}
+
+// HeldSlot is a due slot the server's state holds back, as `statements`
+// lists it: its status (507 a tenant's quota) and since when.
+type HeldSlot struct {
+	Slot   time.Time `json:"slot"`
+	Status int       `json:"status"`
+	Since  time.Time `json:"since"`
+}
+
+// Statements lists the named statements the database holds, as the server
+// lists them to its own token -- a scoped one is refused (403): each one's
+// signature, whether it writes, its comment, why the schema broke it, what
+// a binding is bound to, and a scheduled one's clock.
+func (c *Client) Statements(ctx context.Context) ([]NamedStatement, error) {
+	return QueryAs[NamedStatement](ctx, c, "statements")
+}
+
 // Statement is one line of a Batch.
 type Statement struct {
 	Query  string

@@ -171,6 +171,42 @@ class CallLocalTest {
         db.close()
     }
 
+    /** The statements the library holds, listed: a called one with its signature and no clock. */
+    @Test
+    fun theStatementsAreListed() = runBlocking {
+        val db = bank()
+        val transfer = db.statements().single { it.name == "transfer" }
+        assertEquals(listOf<Any?>("(\$from int, \$to int, \$amount int)", true, 2), listOf(transfer.signature, transfer.writes, transfer.version.size))
+        assertEquals(listOf<Any?>(null, null, null, null, null, null), listOf(transfer.schedule, transfer.next, transfer.last, transfer.held, transfer.after, transfer.broken))
+        assertEquals(db.statements(), db.statementsBlocking())
+        db.close()
+    }
+
+    /** A run and a held slot as a server lists them, read into their types: the times as milliseconds since the epoch. */
+    @Test
+    fun aListedRunAndAHeldSlotAreReadAsTimes() {
+        val rows = (
+            Json.parse(
+                """[{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+                    "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
+                    "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
+                    "held":{"since":"2026-05-04T12:16:00.25Z","slot":"2026-05-04T12:15:00Z","status":507}},
+                   {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
+                    "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]""",
+            ) as List<*>
+            ).map { NamedStatement.of(it as Row) }
+        val (lapse, billed) = rows
+        // 2026-05-04T12:00:00Z, as Json.iso writes it back.
+        val noon = 1_777_896_000_000L
+        assertEquals("2026-05-04T12:00:00.000Z", Json.iso(noon))
+        assertEquals(listOf(0L, 4L), lapse.version)
+        assertEquals(noon + 15 * 60_000, lapse.next)
+        assertEquals(LastRun(noon, "refused", 412, "no hold", 2), lapse.last)
+        assertEquals(HeldSlot(noon + 15 * 60_000, 507, noon + 16 * 60_000 + 250), lapse.held)
+        assertEquals(listOf<Any?>(listOf("bills", "insert or set"), null, null), listOf(billed.after, billed.next, billed.last))
+        assertFailsWith<FennecException> { epochMillis("2026-05-04 12:00:00") }
+    }
+
     /** A binding's refusal through the library names it beside its reason; one no binding made names none. */
     @Test
     fun aBindingThatRefusesAWriteIsNamed() = runBlocking {
@@ -303,6 +339,35 @@ class CallRemoteTest {
         assertEquals(listOf(0.5f, -0.25f, 1f), kinds.floats("v")!!.toList())
         // And on the calling thread.
         assertEquals(1000L - 300 - 1, db.callBlocking("transfer", mapOf("from" to 1, "to" to 2, "amount" to 1)).rows.single().long("balance"))
+    }
+
+    /** Berlin's 03:00 on 1 January, 02:00 UTC -- this year's, or next -- in milliseconds since the epoch. */
+    private fun newYears(): Long {
+        val now = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC)
+        val first = java.time.ZonedDateTime.of(now.year, 1, 1, 2, 0, 0, 0, java.time.ZoneOffset.UTC)
+        return (if (now.isBefore(first)) first else first.plusYears(1)).toInstant().toEpochMilli()
+    }
+
+    /**
+     * The statements the server holds, typed: a scheduled one with its clause and next slot -- New Year's, so no
+     * run of the clock lands while the test looks -- and no run yet, and a called one with no clock; the server's
+     * token runs the scheduled one now, marking no slot.
+     */
+    @Test
+    fun theStatementsAreListedAScheduledOneWithItsClock() = runBlocking {
+        val db = Fennec.connect(server("statements").url)
+        db.execute("create collection ticks (n int, at timestamp)")
+        db.execute("create statement tick at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' as insert ticks {n: 1, at: slot()}")
+        db.execute("create statement ticked() as get ticks count")
+        val listed = db.statements().associateBy { it.name }
+        val tick = listed.getValue("tick")
+        val ticked = listed.getValue("ticked")
+        assertEquals(listOf<Any?>("at '0 3 1 1 *' in 'Europe/Berlin'", newYears(), null, null), listOf(tick.schedule, tick.next, tick.last, tick.held))
+        assertEquals(listOf<Any?>("A tick a year", true, "()", null, null), listOf(tick.comment, tick.writes, tick.signature, tick.after, tick.broken))
+        assertEquals(listOf<Any?>("()", false, null, null, null), listOf(ticked.signature, ticked.writes, ticked.schedule, ticked.next, ticked.last))
+        assertEquals(1L, db.call("tick").affected)
+        val again = db.statementsBlocking().single { it.name == "tick" }
+        assertEquals(listOf<Any?>(newYears(), null), listOf(again.next, again.last))
     }
 
     /** A binding's refusal over HTTP names it to the server's token; one no binding made names none. */

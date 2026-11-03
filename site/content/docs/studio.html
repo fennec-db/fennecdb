@@ -232,6 +232,17 @@ or drop a field, and drop the collection.</p>
     <code>create or replace statement ...</code>. Among the named
     statements a binding is listed by what it is bound to, with no call
     form: the writes it binds run it, never a call.</li>
+  <li><b>A <a href="fennecql.html#scheduled-statements">scheduled
+    statement</a></b> is listed among the named statements by its schedule as
+    its text writes it (<code>at '0 3 * * *' in 'Europe/Berlin'</code>), with
+    the slot due next, its last run — <code>ran</code>, or
+    <code>refused (412)</code> with the reason its <code>require</code> gave,
+    and the slots a restart passed over — and a slot the server holds back
+    (a tenant at its quota), or why the schema broke it. <b>Run now</b> shows
+    the statement it sends, <code>call lapse_holds</code>, and runs it once in
+    the query editor as the server's token's call: no slot is marked, so the
+    server's clock still runs the one due. Its definition opens in the query
+    editor as <code>create or replace statement ...</code>.</li>
   <li><b>A call form</b> gives each argument an input typed as the
     signature types it (a scoped token, which is not shown signatures, types
     the arguments as a JSON object), and shows the statement it sends,

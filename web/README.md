@@ -37,6 +37,10 @@ statement that only reads, which a client reading near has answered by a read
 replica, `{ claims }` is `as {...}` for the server's token, and the builder's
 `call(name, args).toCall()` is the text and parameters. A database in the page
 refuses a call (a statement is a server's): call through `connect(url)`.
+`await db.statements()` lists them as the server lists them to its own token,
+each a `NamedStatement`: its signature, comment, what a binding is bound to,
+and a scheduled statement's clock -- `schedule`, the `next` slot, the `last`
+run and a slot the server holds back (`held`).
 
 A refusal throws a `FennecError` with the server's `status`; a stopped
 `batch` adds `at` and `completed`, and on a tenant node a quota names itself

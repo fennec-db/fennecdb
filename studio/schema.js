@@ -100,8 +100,8 @@ export function mount(host, ctx) {
     if (!named) return null;
     if (named.note) return hint(named.note);
     if (named.error) return [head, h('p', { class: 'ed-error' }, named.error)];
-    const callBtn = (n, signature, broken = false) =>
-      h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `Call ${n}`, disabled: broken, onclick: () => callForm(n, signature) }, 'Call');
+    const callBtn = (n, signature, broken = false, run = false) =>
+      h('button', { type: 'button', class: 'btn ghost small', 'aria-label': run ? `Run ${n} now` : `Call ${n}`, disabled: broken, onclick: () => callForm(n, signature, run) }, run ? 'Run now' : 'Call');
     let rows;
     if (named.names) {
       if (!named.names.length) return hint('Your token may call no named statement: a call line of the server’s policy grants one.');
@@ -110,17 +110,19 @@ export function mount(host, ctx) {
       if (!named.rows.length) return hint('The database holds none: create statement in the query editor defines one.');
       // A statement bound to the writes of a collection (`after`) is run by
       // them, never called: listed by what it is bound to, with no call form.
+      // One the server's clock runs (`every`, `at`) is listed by its
+      // schedule, with its next slot, last run and held slot, and run now.
       rows = named.rows.map((s) =>
         h(
           'tr',
           { dataset: { statement: s.name } },
-          h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.after ? 'bound' : s.writes ? 'writes' : 'reads')),
-          h('td', { class: 'mono muted' }, s.after ? `after ${s.after[1]} ${s.after[0]}` : (s.signature ?? '')),
+          h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.after ? 'bound' : s.schedule ? 'scheduled' : s.writes ? 'writes' : 'reads')),
+          h('td', { class: 'mono muted' }, s.after ? `after ${s.after[1]} ${s.after[0]}` : (s.schedule ?? s.signature ?? ''), s.schedule ? h('span', { class: 'sc-paths' }, S.clockText(s)) : null),
           h('td', {}, s.broken ? h('span', { class: 'ed-error' }, `Broken: ${s.broken}`) : (s.comment ?? '')),
           h(
             'td',
             { class: 'sc-row-actions' },
-            s.after ? null : callBtn(s.name, s.signature ?? '()', Boolean(s.broken)),
+            s.after ? null : callBtn(s.name, s.signature ?? '()', Boolean(s.broken), Boolean(s.schedule)),
             h('button', { type: 'button', class: 'btn ghost small', 'aria-label': `The definition of ${s.name}`, onclick: () => definition(s.name) }, 'Definition'),
           ),
         ),
@@ -151,7 +153,7 @@ export function mount(host, ctx) {
         { class: 'hint' },
         s.after
           ? `Runs after ${s.after[1]} on ${s.after[0]}${s.condition ? ` where ${s.condition}` : ''}, in the write's block; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`
-          : `Answers ${(s.answers ?? []).join(', ') || 'no field'}; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`,
+          : `${s.schedule ? `Runs ${s.schedule} by the server's clock, a slot once` : `Answers ${(s.answers ?? []).join(', ') || 'no field'}`}; reads ${(s.depends ?? []).join(', ') || 'nothing'}.`,
       ),
       h(
         'div',
@@ -168,9 +170,10 @@ export function mount(host, ctx) {
    * as it is, or -- to a token not shown the signature -- the arguments as
    * a JSON object; the statement it sends written out below them. It runs
    * in the query editor, its answer in the grid, under an `Idempotency-Key`
-   * as the studio's writes are.
+   * as the studio's writes are. `run`: a scheduled statement run now, its
+   * name alone (`call <name>`), the server marking no slot for it.
    */
-  function callForm(n, signature) {
+  function callForm(n, signature, run = false) {
     const params = signature === null ? null : S.signatureParams(signature).params;
     const inputs = new Map();
     const statement = h('div');
@@ -200,8 +203,8 @@ export function mount(host, ctx) {
             throw new S.StatementError('the arguments are a JSON object: {"from": 1}');
           }
         }
-        current = S.callStatement(n, args);
-        fill(statement, statementsBlock([current.text]), h('pre', { class: 'statement' }, `$1 = ${JSON.stringify(current.params[0])}`));
+        current = run ? S.runNow(n) : S.callStatement(n, args);
+        fill(statement, statementsBlock([current.text]), run ? null : h('pre', { class: 'statement' }, `$1 = ${JSON.stringify(current.params[0])}`));
         fill(problem);
       } catch (e) {
         current = null;
@@ -210,7 +213,7 @@ export function mount(host, ctx) {
       }
       go.disabled = !current;
     };
-    const go = h('button', { type: 'submit', class: 'btn primary' }, 'Call');
+    const go = h('button', { type: 'submit', class: 'btn primary' }, run ? 'Run now' : 'Call');
     const form = h(
       'form',
       {
@@ -226,10 +229,11 @@ export function mount(host, ctx) {
       fields,
       h('h3', {}, 'The statement'),
       statement,
+      run ? h('p', { class: 'hint' }, 'It runs once, now. No slot is marked: the server’s clock still runs the slot due.') : null,
       problem,
       h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', onclick: () => d.close() }, 'Cancel'), go),
     );
-    const d = dialog(`Call ${n}`, form);
+    const d = dialog(run ? `Run ${n} now` : `Call ${n}`, form);
     update();
     form.querySelector('input, textarea')?.focus();
   }

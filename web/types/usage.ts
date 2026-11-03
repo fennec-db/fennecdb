@@ -478,6 +478,17 @@ export async function remote() {
   await local.call('stamp', null, { claims: { sub: 'a' } }).catch(() => {});
   // @ts-expect-error -- a server's wait
   void local.call('stamp', null, { wait: 1 });
+  // The statements a server holds, a scheduled one's clock among the
+  // columns: each `null` where it says nothing.
+  const listed = await bare.statements();
+  expect<string | null>(listed[0].schedule);
+  expect<'ran' | 'refused' | undefined>(listed[0].last?.outcome);
+  expect<number | undefined>(listed[0].held?.status);
+  expect<[string, string] | null>(listed[0].after);
+  // @ts-expect-error -- a slot is the server's ISO text, not a Date
+  expect<Date | null>(listed[0].next);
+  // @ts-expect-error -- the page's database holds no statement it runs
+  void local.statements;
   // What `fennec types` writes for the statements of a schema, and the call
   // typed by it.
   type Mine = {

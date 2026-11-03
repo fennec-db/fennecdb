@@ -170,6 +170,16 @@ statement or none granted, 403 a claim missing, 400 an argument missing,
 extra or of another type, 409 a unique value taken, 412 a `require` not met
 with its `e.reason`.
 
+`db.statements()` -- awaited on `AsyncClient` -- lists the statements the
+server holds, as it lists them to its own token (a scoped one is refused,
+403): each a `NamedStatement` with its `signature`, `writes`, `comment`,
+`broken`, a binding's `after`, and a scheduled statement's clock -- its
+`schedule` (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `next`
+slot as an aware UTC `datetime`, the `last` run (a `LastRun`: `slot`,
+`outcome` `"ran"` or `"refused"`, `status`, `reason`, `skipped`) and a slot
+the server holds back (`held`, a `HeldSlot`). `db.call` of a scheduled one
+runs it now, as the server's token, marking no slot.
+
 To see the text and parameters a chain builds, for logging or a test,
 `to_fennecql()` returns them and runs nothing:
 `docs.select("title").limit(5).to_fennecql()` is

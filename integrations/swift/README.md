@@ -180,6 +180,16 @@ statements, and refuses a local `call` (`.query`: "a synced database runs
 no named statement"); call the server through `Fennec.connect`, and what it
 writes comes back through the shapes.
 
+`statements()` lists them, on `Fennec` and on `FennecRemote` alike -- the
+server's to its own token (a scoped one is refused, 403): each a
+`NamedStatement` with its `signature`, `writes`, `comment`, `broken`, a
+binding's `after`, and a scheduled statement's clock -- its `schedule`
+(`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `next` slot as a
+`Date`, the `last` run (a `LastRun`: `slot`, `outcome` `ran` or `refused`,
+`status`, `reason`, `skipped`) and a slot the server holds back (`held`, a
+`HeldSlot`). The library runs no schedule: a server's file opened in the app
+keeps its schedules for the server that next opens it.
+
 The call builder is `Call`, stood beside `Query.from`: `try Call.call("mine",
 ["limit": 10], claims: ["sub": "alice"]).toCall()` is `("call mine $1 as
 $2", [{"limit": 10}, {"sub": "alice"}])`, the text and parameters for

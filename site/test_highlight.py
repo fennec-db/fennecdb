@@ -30,6 +30,10 @@ SAMPLES = [
     'get notes where tag = "<b>&amp;</b>" and q = \'"\'',
     'get notes select highlight(body), snippet(body, 12) match body "kuş ağacı"',
     'çok güzel İstanbul 東京 ü2 aéb',
+    "create statement nightly at '0 3 * * *' in 'Europe/Berlin' as set plans {used: 0, period: slot()}",
+    'create statement tidy every 1h as del sessions where at < now() order at limit 1000',
+    "get sales select bucket(at, 1h) as hour where at > '2026-01-01' and format = 'at'",
+    "create statement late at\n  '0 3 * * *' as del t where at < now()",
     '',
 ]
 

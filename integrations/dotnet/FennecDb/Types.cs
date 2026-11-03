@@ -59,6 +59,41 @@ public sealed record Answer(IReadOnlyList<JsonElement> Rows, IReadOnlyDictionary
 /// <summary>One statement of a batch.</summary>
 public sealed record Statement(string Query, IReadOnlyList<object?>? Parameters = null);
 
+/// <summary>A named statement as <c>statements</c> lists it to the server's token
+/// (<see cref="FennecClient.StatementsAsync"/>), each column null where it says nothing of the statement: a called
+/// one has no <see cref="After"/> and no clock.</summary>
+/// <param name="Name">The statement's name.</param>
+/// <param name="Version">The history and change its definition landed at.</param>
+/// <param name="Signature"><c>($from int, $to int = ...) claims (sub text)</c>, as a call is written; <c>()</c> for none.</param>
+/// <param name="Writes">Whether its body writes.</param>
+/// <param name="Comment">Its <c>comment '...'</c>.</param>
+/// <param name="Broken">Why the schema broke it: it runs no more until it reads again.</param>
+/// <param name="After">A write-bound statement's collection and the writes that run it: <c>["orders", "set or del"]</c>.</param>
+/// <param name="Schedule">A scheduled statement's clause as its text writes it: <c>every 1h</c>,
+/// <c>at '0 3 * * *' in 'Europe/Berlin'</c>.</param>
+/// <param name="Next">The slot due next: past while one is overdue or held back.</param>
+/// <param name="Last">Its last run, landed or pending; null before the first.</param>
+/// <param name="Held">A due slot the server's state holds back -- a tenant's quota, a storage error -- tried again
+/// as that changes.</param>
+public sealed record NamedStatement(
+    string Name, IReadOnlyList<long> Version, string? Signature, bool? Writes, string? Comment, string? Broken,
+    IReadOnlyList<string>? After, string? Schedule, DateTimeOffset? Next, LastRun? Last, HeldSlot? Held);
+
+/// <summary>A scheduled statement's last run, as <c>statements</c> lists it.</summary>
+/// <param name="Slot">The slot it ran for: what <c>slot()</c> read.</param>
+/// <param name="Outcome"><c>ran</c>, or <c>refused</c>: the statement's own refusal -- a <c>require</c> not met, a
+/// broken statement -- which marks the slot as run.</param>
+/// <param name="Status">A refusal's status: 412 a <c>require</c> not met, 409 broken or a value taken.</param>
+/// <param name="Reason">The words a refusing <c>require</c> gave.</param>
+/// <param name="Skipped">The slots passed over before it: missed slots run once, the latest.</param>
+public sealed record LastRun(DateTimeOffset Slot, string Outcome, int? Status, string? Reason, int Skipped);
+
+/// <summary>A due slot the server's state holds back, as <c>statements</c> lists it.</summary>
+/// <param name="Slot">The slot.</param>
+/// <param name="Status">The refusal holding it: 507 a tenant's quota, 500 a storage error.</param>
+/// <param name="Since">When it was first held.</param>
+public sealed record HeldSlot(DateTimeOffset Slot, int Status, DateTimeOffset Since);
+
 /// <summary>What a batch answers: how many statements ran, each one's answer -- <c>{"affected": n}</c> or
 /// <c>{"rows": [...]}</c>, with <c>"facets"</c> beside the rows when it asked them (<see cref="Answer.Of"/> reads
 /// either) -- and the change the batch left the database at.</summary>

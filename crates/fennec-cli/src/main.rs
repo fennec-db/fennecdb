@@ -80,6 +80,9 @@ Named statements
   create [or replace] statement <name> after insert|set|del [or ...] <collection>
            [where new.status = 'paid' and old.status = 'open'] [comment '...'] [scans]
            as ...    -- bound: run by each write it binds, a row at a time, in its block
+  create [or replace] statement <name> every 1h | at '0 3 * * *' [in 'Europe/Berlin']
+           [comment '...'] [scans] as ...   -- scheduled: fennec-server's clock runs it,
+           a slot once, slot() the slot's time; defined on a server, never here
   call <name> {a: 1, b: 'y'} [as {sub: 'alice'}]   -- or CALL name(1, b => 'y')
   statements | describe statement <name> | drop statement [if exists] <name>
 

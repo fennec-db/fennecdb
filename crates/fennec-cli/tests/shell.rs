@@ -858,6 +858,20 @@ mod pty {
     }
 }
 
+/// `.help` gives the scheduled form beside the called and the bound ones,
+/// and where it is defined: a server's clock runs it, never the shell.
+#[test]
+fn the_help_gives_the_scheduled_form() {
+    let d = Dir::new("help");
+    let out = piped(&d.0.join("help.fennec"), ".help\n");
+    let help = text(&out.stdout);
+    assert!(
+        help.contains("statement <name> every 1h | at '0 3 * * *' [in 'Europe/Berlin']"),
+        "{help}"
+    );
+    assert!(help.contains("defined on a server, never here"), "{help}");
+}
+
 /// The shell holds a file for a session and runs no schedule: a file
 /// whose slot is due -- `tick`, every hour, defined a day ago -- takes the
 /// shell's reads and writes and keeps its slot due, unmarked, for the

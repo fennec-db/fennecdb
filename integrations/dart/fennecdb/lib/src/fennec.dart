@@ -200,6 +200,115 @@ class Answer {
       };
 }
 
+/// A named statement as `statements` lists it to the server's token
+/// ([FennecRemote.statements], [Fennec.statements]), each column null where it
+/// says nothing of the statement: a called one has no [after] and no clock.
+class NamedStatement {
+  final String name;
+
+  /// The history and change its definition landed at.
+  final List<int> version;
+
+  /// `($from int, $to int = ...) claims (sub text)`, as a call is written;
+  /// `()` for none.
+  final String? signature;
+  final bool? writes;
+  final String? comment;
+
+  /// Why the schema broke it: it runs no more until it reads again.
+  final String? broken;
+
+  /// A write-bound statement's collection and the writes that run it:
+  /// `['orders', 'set or del']`.
+  final List<String>? after;
+
+  /// A scheduled statement's clause as its text writes it: `every 1h`,
+  /// `at '0 3 * * *' in 'Europe/Berlin'`.
+  final String? schedule;
+
+  /// The slot due next, in UTC: past while one is overdue or held back.
+  final DateTime? next;
+
+  /// Its last run, landed or pending; null before the first.
+  final LastRun? last;
+
+  /// A due slot the server's state holds back -- a tenant's quota, a storage
+  /// error -- tried again as that changes.
+  final HeldSlot? held;
+
+  const NamedStatement(this.name, this.version, this.signature, this.writes, this.comment, this.broken, this.after,
+      this.schedule, this.next, this.last, this.held);
+
+  @override
+  String toString() => 'NamedStatement($name${schedule == null ? '' : ', $schedule, next $next'})';
+}
+
+/// A scheduled statement's last run, as `statements` lists it: the slot it
+/// ran for (what `slot()` read); `ran`, or `refused` -- the statement's own
+/// refusal, a `require` not met or a broken statement, which marks the slot
+/// as run -- its status and the `reason` its `require` gave; and the slots
+/// passed over before it.
+class LastRun {
+  final DateTime slot;
+  final String outcome;
+  final int? status;
+  final String? reason;
+  final int skipped;
+  const LastRun(this.slot, this.outcome, this.status, this.reason, this.skipped);
+
+  @override
+  bool operator ==(Object other) =>
+      other is LastRun &&
+      other.slot == slot &&
+      other.outcome == outcome &&
+      other.status == status &&
+      other.reason == reason &&
+      other.skipped == skipped;
+
+  @override
+  int get hashCode => Object.hash(slot, outcome, status, reason, skipped);
+}
+
+/// A due slot the server's state holds back, as `statements` lists it: its
+/// status (507 a tenant's quota) and since when.
+class HeldSlot {
+  final DateTime slot;
+  final int status;
+  final DateTime since;
+  const HeldSlot(this.slot, this.status, this.since);
+
+  @override
+  bool operator ==(Object other) =>
+      other is HeldSlot && other.slot == slot && other.status == status && other.since == since;
+
+  @override
+  int get hashCode => Object.hash(slot, status, since);
+}
+
+/// A row of `statements` as a [NamedStatement]; the times the server's ISO
+/// text, read as UTC.
+NamedStatement namedStatement(Map<String, Object?> row) {
+  DateTime? at(Object? v) => v is String ? DateTime.parse(v) : null;
+  final last = row['last'] as Map?;
+  final held = row['held'] as Map?;
+  return NamedStatement(
+    row['name'] as String? ?? '',
+    ((row['version'] as List?) ?? const []).cast<num>().map((n) => n.toInt()).toList(),
+    row['signature'] as String?,
+    row['writes'] as bool?,
+    row['comment'] as String?,
+    row['broken'] as String?,
+    (row['after'] as List?)?.cast<String>(),
+    row['schedule'] as String?,
+    at(row['next']),
+    last == null
+        ? null
+        : LastRun(at(last['slot'])!, last['outcome'] as String? ?? '', (last['status'] as num?)?.toInt(),
+            last['reason'] as String?, (last['skipped'] as num?)?.toInt() ?? 0),
+    held == null ? null : HeldSlot(at(held['slot'])!, (held['status'] as num).toInt(), at(held['since'])!),
+  );
+}
+
 /// What [Fennec.changes] answers: the counter now, and the collections
 /// written since -- null when it cannot be told which, everything stale.
 class Changes {
@@ -378,6 +487,13 @@ class Fennec {
     final s = Call(name, args: args, claims: claims).toCall();
     return run(s.text, s.params);
   }
+
+  /// The named statements this file holds (`statements`): each one's
+  /// signature, whether it writes, its comment, why the schema broke it and
+  /// what a binding is bound to. A scheduled one is listed with its clock,
+  /// though the library runs none: a server's file opened here keeps its
+  /// schedules for the server that next opens it.
+  Future<List<NamedStatement>> statements() async => (await query('statements')).map(namedStatement).toList();
 
   /// [run], the live queries' own runs not asking for a look.
   Future<Answer> runQuiet(String text, List<Object?> params, {required bool quiet}) async {

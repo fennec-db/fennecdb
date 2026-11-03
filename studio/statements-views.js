@@ -428,6 +428,16 @@ export function callStatement(n, args = {}) {
   return { text: `call ${n} $1`, params: [args] };
 }
 
+/** `call <name>`: a scheduled statement run now, which takes no arguments and marks no slot. */
+export const runNow = (n) => ({ text: `call ${statementName(n)}`, params: [] });
+
+/** A scheduled statement's next slot, last run and held slot, as `statements` lists them, in words. */
+export function clockText({ next, last, held }) {
+  const ran = last ? `${last.outcome === 'ran' ? 'ran' : `refused (${last.status})`} for ${last.slot}${last.reason ? `: ${last.reason}` : ''}` : 'not run yet';
+  const passed = last?.skipped ? `, ${last.skipped} before it passed over` : '';
+  return `next ${next}; ${ran}${passed}${held ? `; ${held.slot} held (${held.status}) since ${held.since}` : ''}`;
+}
+
 /**
  * The parameters of a signature as `statements` writes it -- `($from int,
  * $to int = ..., $tags [text]) claims (sub text)` -- each `{name, type,

@@ -147,4 +147,108 @@ extension FennecRemote {
         if read { db = db.asRead() }
         return try await db.run(text, params: params, idempotencyKey: idempotencyKey)
     }
+
+    /// The named statements the server holds, as it lists them to its own
+    /// token (`statements`) -- a scoped one is refused (403): each one's
+    /// signature, whether it writes, its comment, why the schema broke it,
+    /// what a binding is bound to, and a scheduled one's clock.
+    public func statements() async throws -> [NamedStatement] {
+        try await query("statements").map(NamedStatement.init)
+    }
+}
+
+extension Fennec {
+    /// The named statements this database holds (`statements`): each one's
+    /// signature, whether it writes, its comment, why the schema broke it
+    /// and what a binding is bound to. A scheduled one is listed with its
+    /// clock, though the library runs none: a server's file opened here
+    /// keeps its schedules for the server that next opens it.
+    public func statements() async throws -> [NamedStatement] {
+        try await query("statements").map(NamedStatement.init)
+    }
+}
+
+/// A named statement as `statements` lists it to the server's token, each
+/// column nil where it says nothing of the statement: a called one has no
+/// `after` and no clock.
+public struct NamedStatement: Sendable, Equatable {
+    public let name: String
+    /// The history and change its definition landed at.
+    public let version: [Int]
+    /// `($from int, $to int = ...) claims (sub text)`, as a call is
+    /// written; `()` for none.
+    public let signature: String?
+    public let writes: Bool?
+    public let comment: String?
+    /// Why the schema broke it: it runs no more until it reads again.
+    public let broken: String?
+    /// A write-bound statement's collection and the writes that run it:
+    /// `["orders", "set or del"]`.
+    public let after: [String]?
+    /// A scheduled statement's clause as its text writes it: `every 1h`,
+    /// `at '0 3 * * *' in 'Europe/Berlin'`.
+    public let schedule: String?
+    /// The slot due next: past while one is overdue or held back.
+    public let next: Date?
+    /// Its last run, landed or pending; nil before the first.
+    public let last: LastRun?
+    /// A due slot the server's state holds back -- a tenant's quota, a
+    /// storage error -- tried again as that changes.
+    public let held: HeldSlot?
+
+    init(_ row: Row) {
+        name = row["name"]?.string ?? ""
+        version = row["version"]?.array?.compactMap(\.int) ?? []
+        signature = row["signature"]?.string
+        writes = row["writes"]?.bool
+        comment = row["comment"]?.string
+        broken = row["broken"]?.string
+        after = row["after"]?.array?.compactMap(\.string)
+        schedule = row["schedule"]?.string
+        next = instant(row["next"])
+        last = row["last"]?.object.flatMap { r in
+            instant(r["slot"]).map {
+                LastRun(
+                    slot: $0, outcome: r["outcome"]?.string ?? "", status: r["status"]?.int,
+                    reason: r["reason"]?.string, skipped: r["skipped"]?.int ?? 0)
+            }
+        }
+        held = row["held"]?.object.flatMap { r in
+            guard let slot = instant(r["slot"]), let since = instant(r["since"]) else { return nil }
+            return HeldSlot(slot: slot, status: r["status"]?.int ?? 0, since: since)
+        }
+    }
+}
+
+/// A scheduled statement's last run, as `statements` lists it.
+public struct LastRun: Sendable, Equatable {
+    /// The slot it ran for: what `slot()` read.
+    public let slot: Date
+    /// `ran`, or `refused`: the statement's own refusal -- a `require` not
+    /// met, a broken statement -- which marks the slot as run.
+    public let outcome: String
+    /// A refusal's status: 412 a `require` not met, 409 broken or a value
+    /// taken.
+    public let status: Int?
+    /// The words a refusing `require` gave.
+    public let reason: String?
+    /// The slots passed over before it: missed slots run once, the latest.
+    public let skipped: Int
+}
+
+/// A due slot the server's state holds back, as `statements` lists it: its
+/// status (507 a tenant's quota) and since when.
+public struct HeldSlot: Sendable, Equatable {
+    public let slot: Date
+    public let status: Int
+    public let since: Date
+}
+
+/// The server's ISO text of a time -- `2026-11-03T03:00:00Z`, to the
+/// millisecond where it has one -- as a `Date`.
+func instant(_ v: Value?) -> Date? {
+    guard let text = v?.string else { return nil }
+    let f = ISO8601DateFormatter()
+    f.formatOptions = text.contains(".") ? [.withInternetDateTime, .withFractionalSeconds] : [.withInternetDateTime]
+    return f.date(from: text)
 }

@@ -292,4 +292,82 @@ public sealed class CallTests(Servers servers)
         // Cancelled before it starts, nothing is sent.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slow.CallAsync("stamp", cancellationToken: cts.Token));
     }
+
+    /// <summary>Berlin's 03:00 on 1 January, 02:00 UTC: this year's, or next.</summary>
+    static DateTimeOffset NewYears()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = new DateTimeOffset(now.Year, 1, 1, 2, 0, 0, TimeSpan.Zero);
+        return now < first ? first : first.AddYears(1);
+    }
+
+    // The statements the server holds, typed: a scheduled one with its clause and next slot -- New Year's, so no
+    // run of the clock lands while the test looks -- and no run yet, and a called one with no clock. The server's
+    // token runs the scheduled one now, marking no slot; a scoped token is refused the listing.
+    [Fact]
+    public async Task TheStatementsAServerHoldsAreListedAScheduledOneWithItsClock()
+    {
+        using var db = Root();
+        string ticks = Fresh("ticks"), tick = Fresh("tick"), ticked = Fresh("ticked");
+        await db.ExecAsync($"create collection {ticks} (n int, at timestamp)");
+        await db.ExecAsync($"create statement {tick} at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' " +
+            $"as insert {ticks} {{n: 1, at: slot()}}");
+        await db.ExecAsync($"create statement {ticked}() as get {ticks} count");
+        try
+        {
+            var listed = (await db.StatementsAsync()).ToDictionary(s => s.Name);
+            var (s, c) = (listed[tick], listed[ticked]);
+            Assert.Equal(("at '0 3 1 1 *' in 'Europe/Berlin'", (DateTimeOffset?)NewYears(), (LastRun?)null, (HeldSlot?)null),
+                (s.Schedule, s.Next, s.Last, s.Held));
+            Assert.Equal(("A tick a year", (bool?)true, "()", (string?)null), (s.Comment, s.Writes, s.Signature, s.Broken));
+            Assert.Null(s.After);
+            Assert.Equal(2, s.Version.Count);
+            Assert.Equal(("()", (bool?)false, (string?)null, (DateTimeOffset?)null, (LastRun?)null),
+                (c.Signature, c.Writes, c.Schedule, c.Next, c.Last));
+            Assert.Equal(1, (await db.CallAsync(tick)).Affected);
+            var again = (await db.StatementsAsync()).Single(x => x.Name == tick);
+            Assert.Equal(((DateTimeOffset?)NewYears(), (LastRun?)null), (again.Next, again.Last));
+            using var alice = new FennecClient(servers.Primary, new FennecClientOptions { Token = servers.Mint("{\"sub\":\"alice\"}") });
+            Assert.Equal(403, (await Assert.ThrowsAsync<FennecException>(() => alice.StatementsAsync())).Status);
+        }
+        finally
+        {
+            await db.ExecAsync($"drop statement if exists {tick}");
+            await db.ExecAsync($"drop statement if exists {ticked}");
+        }
+    }
+
+    /// <summary>Answers each request with the same body.</summary>
+    sealed class Answering(string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+    }
+
+    // A run and a held slot as the server lists them, read into their types: the times as DateTimeOffsets, a
+    // binding's After its collection and events.
+    [Fact]
+    public async Task AListedRunAndAHeldSlotAreReadAsTimes()
+    {
+        using var db = new FennecClient("http://scripted.invalid", new()
+        {
+            HttpClient = new HttpClient(new Answering("""
+                [{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+                  "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
+                  "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
+                  "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
+                 {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
+                  "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
+                """)),
+        });
+        var listed = await db.StatementsAsync();
+        var (lapse, billed) = (listed[0], listed[1]);
+        DateTimeOffset At(int m, int s = 0, int ms = 0) => new(2026, 5, 4, 12, m, s, ms, TimeSpan.Zero);
+        Assert.Equal([0L, 4L], lapse.Version);
+        Assert.Equal(At(15), lapse.Next);
+        Assert.Equal(new LastRun(At(0), "refused", 412, "no hold", 2), lapse.Last);
+        Assert.Equal(new HeldSlot(At(15), 507, At(16, 0, 250)), lapse.Held);
+        Assert.Equal(["bills", "insert or set"], billed.After!);
+        Assert.Equal(((DateTimeOffset?)null, (LastRun?)null), (billed.Next, billed.Last));
+    }
 }
