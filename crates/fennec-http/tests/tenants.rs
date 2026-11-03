@@ -1008,12 +1008,12 @@ fn admin_and_tenant_bodies_come_chunked() {
     assert_eq!(r.status, 507, "{}", r.text());
 }
 
-/// A tenant node runs no tenant's schedules until F3's slice 4 brings its
-/// scheduler there, so it takes none: a scheduled statement's definition is
-/// refused (400) in the engine's words, never a schedule no one runs; a
-/// callable statement is defined as ever.
+/// A node whose registry no scheduler runs -- `--http-read-only` -- takes
+/// no scheduled statement: its definition is refused (400) in the engine's
+/// words, never a schedule no one runs; a callable statement is defined as
+/// ever. A node running its scheduler takes both (`node_scheduled.rs`).
 #[test]
-fn a_tenant_node_takes_no_scheduled_statement_yet() {
+fn a_node_running_no_scheduler_takes_no_scheduled_statement() {
     let n = start("scheduled", admin_cfg());
     create(n.port, "acme");
     let r = query(n.port, "acme", "create collection holds (state text @hash)");
@@ -1061,7 +1061,7 @@ fn a_tenant_node_takes_no_scheduled_statement_yet() {
     assert_eq!(r.status, 400, "{}", r.text());
     assert!(
         r.text()
-            .contains("holds the scheduled statement `nightly`, and a tenant node runs no"),
+            .contains("holds the scheduled statement `nightly`, and this node runs no scheduler"),
         "{}",
         r.text()
     );

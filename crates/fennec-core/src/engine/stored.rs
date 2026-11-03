@@ -1113,6 +1113,12 @@ impl super::Database {
         if def.schedule.is_some() && !self.scheduling {
             return Err(Error::Query(SCHEDULED_UNRUN.into()));
         }
+        // And before anything is written, a tenant node's hint names the
+        // tenant: a block landing its first schedule where the node's next
+        // start would not look was a slot no one runs.
+        if def.schedule.is_some() {
+            self.entered()?;
+        }
         let name = &def.name;
         let held = self.statements.get(name);
         if let Some(old) = held {

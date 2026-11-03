@@ -35,6 +35,26 @@ repairs a failed attach under the claim;
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
 slot; no id, never.
 
+**[A tenant node runs its tenants' schedules from one thread, by name, a
+run no use of a tenant.](../../docs/design/named-statements.md#where-a-run-happens-and-once)**
+`schedule::Node`, set on the registry before any tenant opens, keeps each
+scheduled tenant's next slot by its name, never an `Arc`, and opens it
+through the registry as its slot comes (`Tenants::for_run`): its
+`last_used` left as it was (`UNUSED` where the run opened it), a run's open
+evicting no tenant a client used (`make_room`), the tenant closed after
+its run unless a request used it (`close_after_run`). A look holds the
+tenant's gate, passes over a frozen one, meets the fence and runs one slot,
+a tenant with another due going behind the others due. `schedules.hint`
+names the tenants holding one and those alone: entered, synced, before a
+first schedule lands (`Database::before_schedules`) and as a tenant opens
+or comes on holding one, left as it closes holding none, a closed tenant's
+pending marks kept with where its file stood (`Stood`) and handed back
+only while it stands there (`Database::keep_pending`), a move's source
+leaving it as it is deleted, its delete refused or not (`left`); a node
+with no hint opens each tenant once to learn one. A new way a tenant
+opens, closes, comes onto or leaves a node owes the scheduler's hooks
+(`opened`, `closed`, `enter`, `forget`).
+
 ### Regions and the global entry
 
 **[A node is in a region and a zone, and a tenant in its node's region.](../../docs/design/regions.md#regions-and-zones)**

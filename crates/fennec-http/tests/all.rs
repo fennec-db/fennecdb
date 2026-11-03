@@ -22,6 +22,7 @@ mod lease_answers;
 mod mcp;
 mod named;
 mod node_archive;
+mod node_scheduled;
 mod ordered_claims;
 mod prepared;
 mod providers;

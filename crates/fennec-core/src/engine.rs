@@ -3975,6 +3975,12 @@ pub struct Database {
     /// schema change and a promotion alone ([`Self::on_schedules`]).
     #[cfg(feature = "statements")]
     on_schedules: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    /// What a scheduled definition asks before anything of it is written:
+    /// a tenant node names the tenant in its hint, synced, so the block
+    /// bringing its first schedule never lands where a start would not
+    /// look ([`Self::before_schedules`]).
+    #[cfg(feature = "statements")]
+    entering: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -4062,6 +4068,8 @@ impl Database {
             scheduling: false,
             #[cfg(feature = "statements")]
             on_schedules: None,
+            #[cfg(feature = "statements")]
+            entering: None,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]

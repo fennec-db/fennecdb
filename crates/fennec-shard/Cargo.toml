@@ -84,6 +84,12 @@ path = "tests/lease_stalls.rs"
 name = "late_grants"
 path = "tests/late_grants.rs"
 
+# Apart, as `late_grants`: three nodes, their replication and a router a
+# test, the proxies' threads besides.
+[[test]]
+name = "scheduled"
+path = "tests/scheduled.rs"
+
 # Apart: each test holds a thread a request beside three nodes, their
 # replication and a router.
 [[test]]

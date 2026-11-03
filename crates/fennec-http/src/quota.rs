@@ -554,10 +554,13 @@ pub fn limit(held: &Arc<Held>) -> Option<Limit> {
                 ));
             }
         }
-        held.charge(l.adds);
-        // A request's own rows, not the sweep's, a compact's or a
-        // replica's: those land on threads no request is held to a rate on.
+        // A request's own bytes and rows, not the sweep's, a compact's, a
+        // replica's or a scheduled run's: those land on threads no request
+        // is held to a rate on. Charged a run's bytes, a tenant's clients
+        // were slowed by its schedule (`docs/design/named-statements.md`,
+        // *Where a run happens, and once*).
         if writing_here() {
+            held.charge(l.adds);
             held.charge_rows(l.writes);
         }
         Ok(())

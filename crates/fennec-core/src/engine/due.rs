@@ -119,12 +119,49 @@ pub struct Due {
 impl Database {
     /// Lets a scheduled statement be defined, which every way in refuses
     /// where no scheduler runs the database's (`named::SCHEDULED_UNRUN`):
-    /// what a file's server sets as its scheduler starts watching it
-    /// (`fennec_http::schedule::watch`), never a tenant node's (F3's slice
-    /// 4), the shell or the native library, which run none. A test sets it
-    /// to hold a schedule's record and drive its runs.
+    /// what a server sets as its scheduler starts watching it -- a file's
+    /// (`fennec_http::schedule::watch`) or a tenant's as it opens on a node
+    /// (`fennec_http::schedule::Node`) -- never the shell or the native
+    /// library, which run none. A test sets it to hold a schedule's record
+    /// and drive its runs.
     pub fn allow_schedules(&mut self) {
         self.scheduling = true;
+    }
+
+    /// Has a scheduled definition ask `enter` before anything of it is
+    /// written, refused with what it answers: a tenant node names the
+    /// tenant in its hint, synced, so the block bringing its first schedule
+    /// never lands where the node's next start would not look for it --
+    /// asked under the write lock, as the definition is.
+    pub fn before_schedules(&mut self, enter: Arc<dyn Fn() -> Result<()> + Send + Sync>) {
+        self.entering = Some(enter);
+    }
+
+    /// The hook [`Self::before_schedules`] set, asked by a scheduled
+    /// definition before its record is written.
+    pub(super) fn entered(&self) -> Result<()> {
+        match &self.entering {
+            Some(enter) => enter(),
+            None => Ok(()),
+        }
+    }
+
+    /// Hands back the marks of runs that wrote nothing which a tenant node
+    /// kept as the file closed ([`Self::pending`]), read off it while it
+    /// stood where it stands now -- its change and its history the same:
+    /// each counts as it did, landing with the next block, and one of a
+    /// definition replaced since counts for nothing. A following database
+    /// runs and marks none, and takes none back.
+    pub fn keep_pending(&mut self, marks: Vec<(String, SlotMark)>) {
+        if marks.is_empty() || self.history.following {
+            return;
+        }
+        let pending = self.pending.get_or_insert_with(Default::default);
+        for (name, m) in marks {
+            if !pending.iter().any(|(n, _)| *n == name) {
+                pending.push((name, m));
+            }
+        }
     }
 
     /// Calls `tell` with the number of scheduled statements the table
@@ -314,7 +351,8 @@ impl Database {
     }
 
     /// The marks of runs that wrote nothing, by statement, not landed yet:
-    /// a tenant node keeps a closing tenant's (F3's slice 4).
+    /// a tenant node keeps a closing tenant's, and hands them back as it
+    /// opens again ([`Self::keep_pending`]).
     pub fn pending(&self) -> &[(String, SlotMark)] {
         self.pending.as_deref().map_or(&[], |p| &p[..])
     }

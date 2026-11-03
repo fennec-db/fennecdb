@@ -37,16 +37,12 @@ to the router instead, and the app needs the router's token alone:</p>
     to a collection's writes</a>, <code>create statement paid after set orders
     ... as ...</code>, follows the collections it binds and writes, and the
     node runs it. A <a href="/docs/fennecql#scheduled-statements">scheduled
-    statement</a> is refused on a tenant for now (400): a node runs none
-    yet, and a schedule no one runs is never kept. So is the image of a file
-    holding one (<code>PUT /_admin/tenants/&lt;t&gt;/file</code>, and with it
-    a move onto the node, the tenant left on its source), naming the
-    statement to drop; a tenant whose file came holding one another way, a
-    <code>fennec restore</code> into the directory, is said to hold it unrun
-    in the node's log as it opens. A router from before
-    named statements refuses such a schema as one that does not read (400):
-    upgrade the routers, and every node and archiver, before a tenant
-    defines one.</li>
+    statement</a>, <code>create statement tidy every 1h as ...</code>, follows
+    the collections it writes, and the node runs it by the clock
+    (<a href="#scheduled-statements">Scheduled statements</a>). A router
+    from before named statements refuses such a schema as one that does not
+    read (400): upgrade the routers, and every node and archiver, before a
+    tenant defines one.</li>
 </ul>
 
 <p>A tenant's statement is called through the router as any tenant path,
@@ -130,6 +126,69 @@ source and marked <code>moving</code>; moving it again replaces whatever copy th
 interrupted attempt left on the target, which is stale by definition, since the
 directory never pointed at it.</p>
 </details>
+
+<h2 id="scheduled-statements">Scheduled statements</h2>
+
+<p>A node runs its tenants' <a
+href="/docs/fennecql#scheduled-statements">scheduled statements</a> as a
+file's server runs a file's: each slot once, its writes and its mark one
+block, a slot missed while the node was down run once, the latest. One
+thread runs every tenant's, a tenant at a time. Most tenants are closed
+most of the time, so it keeps those holding a schedule by name with their
+next slot, and opens one only as its slot comes.</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema": "create collection holds (state text @hash, until timestamp @sorted); create statement lapse_holds every 1m as set holds {state: \"lapsed\"} where state = \"held\" and until &lt; now() order until limit 1000"}'</pre>
+
+<ul>
+  <li><b>An idle tenant is opened as its slot comes, and closed after its
+    run.</b> The run is no use of it: it keeps the tenant open no longer than
+    the run, and under <code>--max-memory</code> it closes no tenant a client
+    used to make room for itself. A tenant a client has open runs its slot
+    where it is, and stays open as the client left it.</li>
+  <li><b>A run from each tenant due before a second from any.</b> Ten
+    thousand tenants due at 03:00 run in turn, one slot each, then a second
+    each, so no tenant's sixteen statements hold the others back. A run is
+    late by the runs before it. On an M1 Mac, ten thousand closed tenants
+    each with a purge due at once that found nothing all ran within 1.6 s
+    of their slot. Ten thousand inserts took 54 s, because each tenant's
+    file is synced once, as it closes or as its run lands under
+    <code>--sync always</code>, and each sync is a 5 ms flush of the
+    drive.</li>
+  <li><b>Its quota, never its rates.</b> A run's block is held to the
+    tenant's bytes and rows as it lands: one that would grow a tenant past
+    its quota waits, its slot due, and runs once a delete, a compaction or
+    a raised quota makes room; one that only deletes goes through. No rate
+    is charged for a run: a tenant's clients are not slowed by its schedule,
+    nor its schedule by them.</li>
+  <li><b>Under the lease, and never on a frozen tenant.</b> A node runs
+    nothing for a tenant its lease does not name, and logs a run that
+    landed as its lease lapsed, as a write is answered
+    <code>outcome: unknown</code>. A move's source, frozen, runs nothing
+    after its export, and leaves the node's schedules as it is deleted,
+    even where a request still holding it keeps its file there; its target
+    runs the slot then due, and a move undone leaves it to the source.</li>
+  <li><b>A failover runs a slot once in the history that survives.</b> The
+    promoted copy holds the run and its mark, or neither: it runs the slot
+    its old primary ran only where that run never reached it, its
+    <code>slot()</code> the same. The old node, fenced past its lease, runs
+    nothing, and once back follows the promoted copy, its own run gone with
+    the history it was on. A copy that follows runs nothing until it is
+    promoted.</li>
+</ul>
+
+<p>The node keeps a hint beside the tenants' files,
+<code>schedules.hint</code>: the tenants holding a schedule, and those
+alone, each with its next slot. A tenant is named in it before its first
+schedule lands — defined, installed, moved in or promoted — so a start
+opens no tenant before its slot, and none that holds no schedule. The hint
+is derived from the files: deleted, the node opens each tenant once as it
+next starts, four at a time, to write it again, and says so in its log. A
+file put into the directory behind the node's back, a <code>fennec
+restore</code> into a directory it serves, is learned as something first
+opens it. A node under <code>--http-read-only</code> runs none, takes no
+definition and no image holding one, and says in its log how many a
+tenant holds unrun as it opens.</p>
 
 <h2 id="archive">Archiving a node</h2>
 

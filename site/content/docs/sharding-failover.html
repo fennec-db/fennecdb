@@ -290,6 +290,12 @@ fennec-shard --listen 127.0.0.1:8090 --directory shard.fennec --replicas --auto-
     at <code>--upstream-timeout</code>: a read or a keyed write goes to the
     new primary, any other write is a <code>502</code> that it may have
     run (<a href="sharding-design.html#in-flight">Requests out to a node failed over</a>).</li>
+  <li><b>A scheduled statement's slot runs once</b> in the history that
+    survives: the promoted copy runs a slot its old primary ran only where
+    the run never reached it, its <code>slot()</code> the same, and the old
+    node, fenced past its lease, runs none
+    (<a href="sharding-tenants.html#scheduled-statements">Scheduled
+    statements</a>).</li>
 </ul>
 
 <p>How a lease holds, and what leases do not cover, are under <a href="sharding-design.html#leases">Leases</a> in the design.</p>

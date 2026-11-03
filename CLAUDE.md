@@ -356,6 +356,7 @@ Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, lea
 *Tenants and leases*
 - Scaling out is by tenant, one file each.
 - A failed attach is tried again, a file left taken back by identity.
+- A tenant node runs its tenants' schedules from one thread, by name, a run no use of a tenant.
 
 *Regions and the global entry*
 - A node is in a region and a zone, and a tenant in its node's region.

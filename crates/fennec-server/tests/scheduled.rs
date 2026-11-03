@@ -2,8 +2,9 @@
 //! (`docs/design/named-statements.md`, F3's slice 3), against the binary:
 //! its scheduler starts after both listeners and runs a missed slot at its
 //! first look, once; the one shutdown lands a run whole and synced or not
-//! at all; a server failing at its port writes no run; and a server taking
-//! no writes runs none, saying how many it holds unrun.
+//! at all; a server failing at its port writes no run; a server taking no
+//! writes runs none, saying how many it holds unrun; and a tenant node
+//! learns which of its tenants hold one and runs them.
 
 use crate::support::{command, ended, start, tmp};
 use std::path::Path;
@@ -154,35 +155,43 @@ fn a_read_only_replica_says_so_as_a_schedule_reaches_it() {
     let _ = primary.terminate();
 }
 
-/// A tenant node runs no schedule yet: a file holding one, put into its
-/// directory as `fennec restore` puts one, is said held unrun as the
-/// tenant opens -- an install of one is refused (fennec-http's
-/// `a_tenant_node_takes_no_scheduled_statement_yet`).
-#[test]
-fn a_tenant_node_says_what_it_holds_unrun() {
-    fennec_ql::install();
-    let dir = tmp("scheduled", "node");
+/// A directory holding `acme.fennec`, `tick` every hour defined a day ago,
+/// and `beta.fennec`, holding none, as `fennec restore` leaves a node's.
+fn node_dir(tag: &str) -> std::path::PathBuf {
+    let dir = tmp("scheduled", tag);
     std::fs::create_dir_all(&dir).unwrap();
-    {
-        let mut db = fennec_core::fs::open(dir.join("acme.fennec")).unwrap();
-        db.allow_schedules();
-        for q in [
-            "create collection ticks (slot timestamp, at timestamp)",
-            "create statement tick every 1h as insert ticks {slot: slot(), at: now()}",
-        ] {
-            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
-        }
-        if let Some(sync) = db.flush().unwrap() {
-            sync().unwrap();
-        }
-    }
+    let acme = ticking(&format!("{tag}-acme"));
+    std::fs::rename(&acme, dir.join("acme.fennec")).unwrap();
+    let _ = std::fs::remove_file(acme.with_extension("fennec.lock"));
+    drop(fennec_core::fs::open(dir.join("beta.fennec")).unwrap());
+    dir
+}
+
+/// A tenant node runs its tenants' schedules (F3's slice 4): started with
+/// no hint, it opens each tenant once in the background to learn which
+/// hold one, writes the hint naming those alone, and runs the latest
+/// missed slot of each once; the shutdown lands it whole.
+#[test]
+fn a_node_learns_its_hint_and_runs_a_tenant_s_missed_slot() {
+    let dir = node_dir("learn");
     let server = start(&["--admin-token", "adm", "--dir", dir.to_str().unwrap()]);
-    let answer = server.http().query_at("/t/acme", "get ticks count");
-    assert!(answer.is_ok_and(|a| a.contains("\"count\":0")));
     assert!(
         server.logged(
-            "tenant `acme`: 1 scheduled statement(s) held unrun: a tenant node runs no \
-             scheduled statement yet",
+            "no schedule hint: opening each of its 2 tenant(s)",
+            Duration::from_secs(10)
+        ),
+        "{}",
+        server.log.lock().unwrap()
+    );
+    let mut http = server.http();
+    let t = Instant::now();
+    while !(http.query_at("/t/acme", "get ticks count")).is_ok_and(|a| a.contains("\"count\":1")) {
+        assert!(t.elapsed() < Duration::from_secs(20), "never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        server.logged(
+            "1 of 2 tenant(s) hold a scheduled statement",
             Duration::from_secs(10)
         ),
         "{}",
@@ -190,5 +199,41 @@ fn a_tenant_node_says_what_it_holds_unrun() {
     );
     let (code, log) = server.terminate();
     assert_eq!(code, 0, "{log}");
+    let hint = std::fs::read_to_string(dir.join("schedules.hint")).unwrap();
+    assert!(hint.lines().any(|l| l.starts_with("acme ")), "{hint}");
+    assert!(!hint.contains("beta"), "{hint}");
+    let hour = now_ms() - now_ms().rem_euclid(HOUR);
+    let (ticks, mark) = ran(&dir.join("acme.fennec"));
+    assert_eq!(ticks, 1, "{log}");
+    assert!(mark == Some(hour) || mark == Some(hour - HOUR), "{mark:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A node taking no writes runs none: a tenant holding a schedule says
+/// so as it opens, and its slots stay due.
+#[test]
+fn a_read_only_node_says_what_it_holds_unrun() {
+    let dir = node_dir("read-only");
+    let server = start(&[
+        "--admin-token",
+        "adm",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--http-read-only",
+    ]);
+    let answer = server.http().query_at("/t/acme", "get ticks count");
+    assert!(answer.is_ok_and(|a| a.contains("\"count\":0")));
+    assert!(
+        server.logged(
+            "tenant `acme`: 1 scheduled statement(s) held unrun: this node runs no scheduler",
+            Duration::from_secs(10)
+        ),
+        "{}",
+        server.log.lock().unwrap()
+    );
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "{log}");
+    assert!(!dir.join("schedules.hint").exists());
+    assert_eq!(ran(&dir.join("acme.fennec")), (0, None));
     let _ = std::fs::remove_dir_all(&dir);
 }

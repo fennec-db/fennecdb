@@ -142,11 +142,13 @@ slot's mark op 5 (`SlotMark`), each one write, refused by a binary from
 before. A run's writes and its mark are one block (`Database::run_slot`,
 `mark_slot`), its slot asked again under the write lock (`Database::due`);
 a run that wrote nothing leaves its mark pending (`Database::pending`),
-the latest by order. Only `fennec_http::schedule::watch`'s thread runs one,
-ending through `stop_with`; never hold a schedule nothing runs: a database
-it does not watch refuses a definition (`SCHEDULED_UNRUN`), a tenant
-node's install an image holding one, and a server running none says how
-many it holds (`schedule::unrun`). A refusal the statement makes marks its
-slot, the state's leaves it due (`schedule::Held`), and only the server's
-token calls one, marking nothing. A new path running a body owes its mark
-in the block, and a new way a file reaches a node the refusal or the word.
+the latest by order. Only a scheduler's thread runs one -- a file's
+(`fennec_http::schedule::watch`) or a node's (`schedule::Node`) -- ending
+through `stop_with`; never hold a schedule nothing runs: a database no
+scheduler watches refuses a definition (`SCHEDULED_UNRUN`), a node running
+none an install of an image holding one, and a server running none says
+how many it holds (`schedule::unrun`). A refusal the statement makes marks
+its slot, the state's leaves it due (`schedule::Held`), and only the
+server's token calls one, marking nothing. A new path running a body owes
+its mark in the block, and a new way a file reaches a node the scheduler's
+word (`Node::enter`, `Node::opened`).
