@@ -30,6 +30,53 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
 
+A durable write's block is read from the moment it lands, before its
+fsync after the lock has run -- by design: on a primary a read, an SSE
+stream, a live query and `Fennec-After` see it from then on, and only a
+replica, sent what an fsync covered, and `/_changes`, which reads what an
+fsync covered, wait for the disk. So is an answer kept with it: a
+replayed `Idempotency-Key` was handed back the kept success at once,
+before the first try's fsync or its wait for the streams -- a write a
+power loss or a failover could take back from a client that held it as
+made, and never sent it again (`http.md`, *Idempotency keys*). A request
+answering a write another landed now waits for it as that write's answer
+does: it asks `Database::durability` -- `flush` on `&self`, under the read
+lock alone if that is what it holds, clearing nothing -- and runs it after
+its lock. The sink's group commit makes it free where an fsync covered the
+bytes and holds it at the disk where one runs; a failed fsync is its
+answer. On `&self` the engine notes no error: one the sink gives as the
+durability is asked, as one the durability gives, is the caller's to hand
+to `Database::fail` once its lock is let go (fennec-http's
+`storage_failed`), so the writes stop and the fsync is never tried again.
+A sink with the trait's default `flush` runs its sync there, under the
+caller's lock, and can fail there; a file's sink cannot, its `flush`
+touching nothing. After `Database::fail` a durability is refused as every
+write is, and a replay with it, under either `--sync`: the write it
+answers may be among what the disk lost.
+
+A file's sink fsyncs, too, what it inherited once (`Disk::inherited`): the
+bytes an earlier process left in the file, maybe in the page cache alone
+after its crash, are on disk once no fsync of this sink has run, and a
+durability that covers nothing appended -- a replay after a restart, of a
+key that process landed -- fsynced nothing. Only a durability
+(`Sink::flush`) asks for them: a plain `sync`, which the shell runs as it
+exits, a read's one-shot run too, would have fsynced for nothing. One that
+covers appended bytes fsyncs anyway and clears the flag with it; one that
+covers none fsyncs the file itself, beginning no sync log
+(`Disk::sync_inherited`) -- through the log's path it made the log's
+260 KB on Linux and Android for an app that wrote nothing. So the one
+fsync more is paid once an open, by a durability with nothing appended
+since: a replay after a restart, `fennec_sync` of an app that has written
+nothing since it opened, a `--sync always` statement that appended nothing
+(a `set` or `del` matching no row) as the first after the open. The syncer
+and a node's tenants flush only what is dirty, and pay nothing; a write
+under `--sync <ms>` runs no `Disk::sync` on its path. Every platform
+needs it: on Linux an open's `synclog::recover` fsyncs the file only where
+a log whose header names this file decodes -- a log missing, torn before
+its header or another file's leaves the bytes as they were -- and a macOS
+file keeps no log. A primary's open (`Sink::sync_existing`) and a cut of a
+torn tail fsync the whole file, and clear the flag.
+
 ## Writes behind the lock
 
 **Buffered writes are written behind the lock** (`Database::write_behind`,

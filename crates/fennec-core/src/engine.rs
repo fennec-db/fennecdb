@@ -3773,8 +3773,9 @@ pub struct Database {
     /// `Mutex` not for locking but for `Sync`: `Sink` is only required to be
     /// `Send` (a sink carrying a JS handle on the browser side cannot be
     /// `Sync`), but the server expects `Sync` so it can share `Database`
-    /// under an `RwLock`. Access always happens through `get_mut` on
-    /// `&mut self`: there is no locking cost.
+    /// under an `RwLock`. Access happens through `get_mut` on `&mut self`,
+    /// with no locking cost, but for the two callers holding the read lock
+    /// alone, [`Self::save_graphs`] and [`Self::durability`].
     sink: Mutex<Box<dyn Sink>>,
     /// Whether writes are still not on disk before `sync` is called. The
     /// periodic syncer on the server side skips idle passes with this flag.
@@ -5719,6 +5720,29 @@ impl Database {
         Ok(durable)
     }
 
+    /// [`Self::flush`] for a caller holding the read lock alone, clearing
+    /// nothing: what makes every write the database holds durable -- and
+    /// on a primary sent to the streams keeping up -- to run once the lock
+    /// is let go. A request answering a write another one landed asks it,
+    /// a replayed `Idempotency-Key`: the write's block is read from the
+    /// moment it lands, before its own durability has run, and answered
+    /// then, its client held a success a power loss or a failover could
+    /// take back. Where an fsync covered the bytes already it runs none;
+    /// where one runs it waits for it at the disk; a file's sink fsyncs
+    /// once what an earlier process left in the file (`fs::Disk`'s
+    /// `inherited`). Refused after a storage error, as every write is.
+    ///
+    /// An error the sink gives it, and one its durability gives, is the
+    /// caller's to report with [`Self::fail`] once it has let the lock go,
+    /// as for [`Self::flush`]'s: on `&self` it notes nothing, and a failed
+    /// fsync must stop the writes and never be tried again. A sink of no
+    /// durability of its own -- the trait's default `flush`, a sync -- runs
+    /// its sync here, under the caller's lock, and can fail here.
+    pub fn durability(&self) -> Result<Option<Durability>> {
+        self.refuse_if_failed()?;
+        self.sink.lock().unwrap_or_else(|e| e.into_inner()).flush()
+    }
+
     /// Hands the buffered writes to the operating system with no fsync
     /// ([`Sink::write_out`]): they survive the process being killed, not
     /// the machine losing power.
@@ -5774,7 +5798,11 @@ impl Database {
         r
     }
 
-    fn refuse_if_failed(&self) -> Result<()> {
+    /// The refusal every write meets after a storage error
+    /// ([`Self::failure`]): what a request answering a write another one
+    /// landed is told as well -- a replayed `Idempotency-Key`, whose write
+    /// the disk may have lost with the failure.
+    pub fn refuse_if_failed(&self) -> Result<()> {
         match &self.failed {
             None => Ok(()),
             Some(m) => Err(Error::Io(format!(
