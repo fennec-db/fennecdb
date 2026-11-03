@@ -2417,6 +2417,14 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
                     .collect(),
                 false => Vec::new(),
             };
+            // The scheduled statements, to the server's token alone too, as
+            // `statements` lists them: by name, schedule and text, and what
+            // the clock does with each -- its next slot, its last mark and
+            // the slot its scheduler holds back.
+            let scheduled = match full && guard.holds_schedules() {
+                true => scheduled_described(&guard),
+                false => Vec::new(),
+            };
             drop(guard);
             // `?as=fennecql`: the same description with its collections as
             // the statements that make them -- what the studio shows a
@@ -2425,7 +2433,8 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             // the bindings after them, each after the collections it names.
             if req.query.iter().any(|(k, v)| k == "as" && v == "fennecql") {
                 let mut text = with_id_note(&schemas);
-                for (.., def) in &bound {
+                let defs = (bound.iter().map(|b| &b.3)).chain(scheduled.iter().map(|s| &s.1));
+                for def in defs {
                     text.push_str(def.trim_end_matches(|c: char| c == ';' || c.is_whitespace()));
                     text.push_str(";\n");
                 }
@@ -2454,6 +2463,10 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
                     out.push(']');
                 }
             });
+            let described = match scheduled.is_empty() {
+                true => described,
+                false => with_schedules(described, &scheduled),
+            };
             return Response::json(200, described);
         }
         (Method::Post, ["_schema", "plan"]) if follow => {
@@ -2494,6 +2507,55 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
         Ok(o) => Response::json(200, o.json()),
         Err(e) => error_response(&e),
     }
+}
+
+/// A scheduled statement as `GET /_schema` describes it: its name, its
+/// text, and what `statements` shows of it -- its schedule, next slot, last
+/// mark and the slot held back.
+type Described = (String, String, [Value; 4]);
+
+/// The scheduled statements `db` holds, described: out of line, as a
+/// schema holding none never comes here.
+#[cold]
+#[inline(never)]
+fn scheduled_described(db: &Database) -> Vec<Described> {
+    let now = db.clock_for_schedules();
+    (db.statements().iter())
+        .filter(|s| s.schedule.is_some())
+        .map(|s| (s.name.clone(), s.text.clone(), db.schedule_shown(s, now)))
+        .collect()
+}
+
+/// `described`, a description's JSON, with its scheduled statements after
+/// its collections, `"schedules":[{"name","schedule","text","next","last",
+/// "held"}]` in that order: what `/_schema/plan` reads back as their definitions
+/// (`fennec_ql::bound_into`), the clock's three the server's to tell.
+#[cold]
+#[inline(never)]
+fn with_schedules(mut described: String, scheduled: &[Described]) -> String {
+    use fennec_core::json::{escape_into, value_into};
+    described.pop();
+    described.push_str(",\"schedules\":[");
+    for (i, (name, text, [schedule, next, last, held])) in scheduled.iter().enumerate() {
+        if i > 0 {
+            described.push(',');
+        }
+        described.push_str("{\"name\":");
+        escape_into(&mut described, name);
+        described.push_str(",\"schedule\":");
+        value_into(&mut described, schedule);
+        described.push_str(",\"text\":");
+        escape_into(&mut described, text);
+        for (k, v) in [("next", next), ("last", last), ("held", held)] {
+            described.push_str(",\"");
+            described.push_str(k);
+            described.push_str("\":");
+            value_into(&mut described, v);
+        }
+        described.push('}');
+    }
+    described.push_str("]}");
+    described
 }
 
 /// `POST /_admin/tenants/<t>/query`: one read of a tenant, answered as

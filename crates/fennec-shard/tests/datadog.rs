@@ -268,6 +268,22 @@ fn scrape() -> (BTreeMap<String, String>, String) {
         let _ = leasing.serve_on(listener);
     });
 
+    // A database whose scheduler ran a slot: a process's scheduler families
+    // are in its every scrape once it made a look, and in none before.
+    fennec_ql::install();
+    let mut s = Database::new();
+    s.allow_schedules();
+    for q in [
+        "create collection holds (state text @hash)",
+        "create statement tidy every 1m as del holds where state = 'lapsed'",
+    ] {
+        s.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
+    let s = Arc::new(RwLock::new(s));
+    let soon = fennec_core::time::now_ms().unwrap() + 2 * 60_000;
+    let look = fennec_http::schedule::pass(&s, soon);
+    assert_eq!(look.runs.len(), 1, "{look:?}");
+
     // The replica's gauges are there once it has heard from its primary.
     let deadline = Instant::now() + Duration::from_secs(20);
     let replica_scrape = loop {
@@ -296,15 +312,11 @@ fn scrape() -> (BTreeMap<String, String>, String) {
     (exposed, text)
 }
 
-#[test]
-fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
-    let (exposed, _) = scrape();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../monitoring/datadog");
-    let conf = std::fs::read_to_string(root.join("conf.yaml")).unwrap();
-    let entries = kept(&conf);
-    assert!(entries.len() > 10, "{entries:?}");
+/// Every Datadog name that arrives through `conf.yaml`'s `metrics` from a
+/// scrape's families, with the family it comes from.
+fn arriving(exposed: &BTreeMap<String, String>, entries: &[String]) -> BTreeMap<String, String> {
     let mut arrives = BTreeMap::new();
-    for (family, kind) in &exposed {
+    for (family, kind) in exposed {
         let (raw, names) = datadog_names(family, kind);
         if entries.iter().any(|e| keeps(e, &raw)) {
             for n in names {
@@ -312,6 +324,17 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
             }
         }
     }
+    arrives
+}
+
+#[test]
+fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
+    let (exposed, _) = scrape();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../monitoring/datadog");
+    let conf = std::fs::read_to_string(root.join("conf.yaml")).unwrap();
+    let entries = kept(&conf);
+    assert!(entries.len() > 10, "{entries:?}");
+    let arrives = arriving(&exposed, &entries);
     for e in &entries {
         assert!(
             exposed
@@ -349,6 +372,101 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
             names.iter().any(|n| n == want),
             "no {want} in the dashboard"
         );
+    }
+}
+
+/// Each metric a Datadog query reads, with the tags its scope matches:
+/// `fennecdb.x.count{outcome:held,service:fennecdb}` as `outcome` `held`
+/// and `service` `fennecdb`; `*` matches every series.
+fn scopes(query: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = Vec::new();
+    for (i, _) in query.match_indices("fennecdb.") {
+        let rest = &query[i..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        let mut tags = Vec::new();
+        if let Some(scope) = rest[end..].strip_prefix('{') {
+            let scope = &scope[..scope.find('}').expect("a scope left open")];
+            for t in scope.split(',').map(str::trim).filter(|t| *t != "*") {
+                let (k, v) = t
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("a tag this reads no value of: {t}"));
+                tags.push((k.to_string(), v.to_string()));
+            }
+        }
+        out.push((rest[..end].to_string(), tags));
+    }
+    out
+}
+
+/// `monitors.json`'s monitors read only what arrives through `conf.yaml`,
+/// each tag they match a label a scrape carries -- a monitor over a name
+/// no server sends, or a value none has, never fires -- and they watch
+/// scheduled statements' refused and held runs, a mark ahead of the clock
+/// and how late runs begin.
+#[test]
+fn the_datadog_monitors_watch_what_the_servers_send() {
+    let (exposed, text) = scrape();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../monitoring/datadog");
+    let conf = std::fs::read_to_string(root.join("conf.yaml")).unwrap();
+    let arrives = arriving(&exposed, &kept(&conf));
+    let file = std::fs::read_to_string(root.join("monitors.json")).unwrap();
+    let Value::List(monitors) = fennec_core::json::parse_json(&file).expect("monitors.json") else {
+        panic!("monitors.json is not a list");
+    };
+    assert!(monitors.len() >= 4, "{monitors:?}");
+    let mut watched: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for m in &monitors {
+        let Value::Object(m) = m else {
+            panic!("a monitor is not an object: {m:?}");
+        };
+        let field = |k: &str| match m.iter().find(|(n, _)| n == k) {
+            Some((_, Value::Text(t))) => t.clone(),
+            other => panic!("a monitor's `{k}` is not a text: {other:?}"),
+        };
+        let (name, query) = (field("name"), field("query"));
+        assert_eq!(field("type"), "query alert", "{name}");
+        assert!(!field("message").is_empty(), "{name}");
+        let read = scopes(&query);
+        assert!(
+            !read.is_empty(),
+            "{name} reads no fennecdb metric: `{query}`"
+        );
+        for (metric, tags) in &read {
+            let family = arrives.get(metric).unwrap_or_else(|| {
+                panic!(
+                    "{name} reads {metric}, which no server sends through conf.yaml: {:?}",
+                    arrives.keys().collect::<Vec<_>>()
+                )
+            });
+            for (k, v) in tags.iter().filter(|(k, _)| k != "service") {
+                let head = format!("{family}{{");
+                let pair = format!("{k}=\"{v}\"");
+                assert!(
+                    text.lines()
+                        .any(|l| l.starts_with(&head) && l.contains(&pair)),
+                    "{name} matches {metric}{{{k}:{v}}}, a sample no server sends"
+                );
+            }
+        }
+        watched.extend(read);
+    }
+    let watches = |metric: &str, tag: Option<(&str, &str)>| {
+        watched.iter().any(|(m, tags)| {
+            m == metric && tag.is_none_or(|(k, v)| tags.iter().any(|t| t.0 == k && t.1 == v))
+        })
+    };
+    for (metric, tag) in [
+        (
+            "fennecdb.scheduled_runs.count",
+            Some(("outcome", "refused")),
+        ),
+        ("fennecdb.scheduled_runs.count", Some(("outcome", "held"))),
+        ("fennecdb.scheduled_mark_ahead.count", None),
+        ("fennecdb.scheduled_lateness_seconds.bucket", None),
+    ] {
+        assert!(watches(metric, tag), "no monitor watches {metric} {tag:?}");
     }
 }
 

@@ -331,7 +331,10 @@ impl Database {
 
     /// `statements`: each named statement the database holds, by name.
     pub(super) fn list_statements(&self) -> Response {
-        let rows = self.statements.iter().map(|s| row(s, false)).collect();
+        let now = self.clock_for_schedules();
+        let rows = (self.statements.iter())
+            .map(|s| row(s, false, self.schedule_shown(s, now)))
+            .collect();
         Response::Rows(ResultSet {
             columns: columns(false),
             rows,
@@ -344,11 +347,22 @@ impl Database {
     /// token is told the statements it may call by `/_whoami`.
     pub(super) fn describe_statement(&self, name: &str) -> Result<Response> {
         let s = self.statements.get(name).ok_or_else(|| missing(name))?;
+        let shown = self.schedule_shown(s, self.clock_for_schedules());
         Ok(Response::Rows(ResultSet {
             columns: columns(true),
-            rows: vec![row(s, true)],
+            rows: vec![row(s, true, shown)],
             ..ResultSet::default()
         }))
+    }
+
+    /// The time a listing computes its schedules' next slots at: read only
+    /// where the table holds a schedule, so a listing of statements no
+    /// clock runs reads no clock.
+    pub fn clock_for_schedules(&self) -> Option<i64> {
+        match self.holds_schedules() {
+            true => self.now().ok(),
+            false => None,
+        }
     }
 
     /// What a definition's body is held to against the schema, beside its
@@ -724,6 +738,10 @@ fn columns(described: bool) -> Vec<String> {
         "comment",
         "broken",
         "after",
+        "schedule",
+        "next",
+        "last",
+        "held",
     ];
     if described {
         c.extend(["answers", "text", "depends", "condition"]);
@@ -731,8 +749,9 @@ fn columns(described: bool) -> Vec<String> {
     c.into_iter().map(String::from).collect()
 }
 
-/// A statement as `statements` and `describe statement` answer it.
-fn row(s: &super::Stored, described: bool) -> Row {
+/// A statement as `statements` and `describe statement` answer it, `shown`
+/// what the clock does with it (`Database::schedule_shown`).
+fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
     let text = |t: &str| Value::Text(t.to_string());
     let def = s.tree.as_deref();
     let mut values = vec![
@@ -756,6 +775,8 @@ fn row(s: &super::Stored, described: bool) -> Row {
             ])
         }),
     ];
+    // A scheduled statement's `schedule`, `next`, `last` and `held`.
+    values.extend(shown);
     if described {
         values.push(def.map_or(Value::Null, |d| {
             Value::List(d.answers().into_iter().map(Value::Text).collect())

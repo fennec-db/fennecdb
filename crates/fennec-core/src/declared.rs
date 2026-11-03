@@ -84,6 +84,16 @@ pub struct Declared {
     /// a description claiming others is refused.
     #[cfg(not(target_arch = "wasm32"))]
     pub bound: Vec<(String, String, Option<String>, String)>,
+    /// The scheduled statements a description's JSON lists after its
+    /// collections (`"schedules"`, as `GET /_schema` writes them to the
+    /// server's token): each statement's name, the schedule it is listed
+    /// with, where it is, and its text, for the caller that has the parser
+    /// to read into `statements` (`fennec_ql::bound_into`), held to the
+    /// schedule listed as the text writes it. What `GET /_schema` says of
+    /// its runs beside them -- `next`, `last`, `held` -- is the server's
+    /// to tell, and no plan reads it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub scheduled: Vec<(String, Option<String>, String)>,
 }
 
 /// One migration: run once, in order, and recorded.
@@ -154,11 +164,19 @@ pub struct Refusal {
 pub fn parse(src: &str) -> Result<Declared> {
     let top = json::parse_json(src)?;
     let top = object(&top, "the description")?;
-    only(
-        top,
-        &["format", "collections", "fennecql", "migrations"],
-        "the description",
-    )?;
+    // A server's `schedules` natively; the browser module, which runs none
+    // and reads a description as `fennecql`, takes no such member.
+    #[cfg(target_arch = "wasm32")]
+    let members: &[&str] = &["format", "collections", "fennecql", "migrations"];
+    #[cfg(not(target_arch = "wasm32"))]
+    let members: &[&str] = &[
+        "format",
+        "collections",
+        "fennecql",
+        "migrations",
+        "schedules",
+    ];
+    only(top, members, "the description")?;
     if !matches!(member(top, "format"), Some(Value::Int(FORMAT))) {
         return Err(bad(
             "the description",
@@ -189,6 +207,8 @@ pub fn parse(src: &str) -> Result<Declared> {
     };
     #[cfg(not(target_arch = "wasm32"))]
     let (collections, bound) = collections(list(member(top, "collections"), "collections")?)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let scheduled = schedules(list(member(top, "schedules"), "schedules")?)?;
     let mut migrations = Vec::new();
     for m in list(member(top, "migrations"), "migrations")? {
         migrations.push(match m {
@@ -217,7 +237,39 @@ pub fn parse(src: &str) -> Result<Declared> {
         migrations,
         #[cfg(not(target_arch = "wasm32"))]
         bound,
+        #[cfg(not(target_arch = "wasm32"))]
+        scheduled,
     })
+}
+
+/// A description's scheduled statements ([`Declared::scheduled`]): each a
+/// name, its text and the schedule it is listed with, beside what the
+/// server tells of its runs (`next`, `last`, `held`), which no plan reads.
+#[cfg(not(target_arch = "wasm32"))]
+fn schedules(all: &[Value]) -> Result<Vec<(String, Option<String>, String)>> {
+    let mut out = Vec::new();
+    for s in all {
+        let s = object(s, "a scheduled statement")?;
+        only(
+            s,
+            &["name", "schedule", "text", "next", "last", "held"],
+            "a scheduled statement",
+        )?;
+        let n = name(s, "name", "a scheduled statement")?;
+        let schedule = match member(s, "schedule") {
+            None => None,
+            Some(Value::Text(t)) => Some(t.clone()),
+            Some(_) => return Err(bad(&n, "is listed with a `schedule` that is not a text")),
+        };
+        let Some(Value::Text(text)) = member(s, "text") else {
+            return Err(bad(
+                &n,
+                "is listed with its `text`, the definition as written",
+            ));
+        };
+        out.push((n, schedule, text.clone()));
+    }
+    Ok(out)
 }
 
 /// A description's bound statements, read from its collections

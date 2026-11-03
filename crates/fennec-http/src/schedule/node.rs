@@ -598,6 +598,7 @@ impl Node {
         let what = format!("tenant `{name}`");
         let ctx = Ctx {
             what: &what,
+            tenant: Some(name),
             durable: self.durable,
             live,
         };
@@ -658,14 +659,19 @@ impl Node {
         }
         let now = now_ms();
         let next = next_of(&db.due(now), now);
-        let noted = {
+        let (noted, held) = {
             let mut q = lock(&self.queue);
-            let noted = q.entry(name).noted;
+            let e = q.entry(name);
+            // What its scheduler holds back, for its listings: kept by the
+            // entry across a close, unless a look holds it now -- which
+            // tells the database as it ends.
+            let (noted, held) = (e.noted, super::shown_held(&e.state));
             if next < NONE {
                 q.set_next(name, next);
             }
-            noted
+            (noted, held)
         };
+        db.set_held_slots(held);
         if !noted {
             if let Err(e) = self.note(name, false) {
                 crate::log!(

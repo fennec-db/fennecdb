@@ -13,7 +13,8 @@ OTLP receiver takes the traces (<a href="#tracing">Tracing</a>).</p>
 <h2 id="datadog">Datadog in three steps</h2>
 
 <p>The repository's <code>monitoring/datadog/</code> holds the Agent's
-configuration, a logs pipeline and a dashboard.</p>
+configuration, a logs pipeline, a dashboard and monitors (<a
+href="#monitors">The monitors</a>).</p>
 
 <pre data-lang="bash"># 1. the check and the logs: the Agent reads /_metrics and both logs
 sudo cp monitoring/datadog/conf.yaml /etc/datadog-agent/conf.d/openmetrics.d/conf.yaml
@@ -34,8 +35,8 @@ curl -X POST https://api.datadoghq.com/api/v1/dashboard \
   <li><b>Every server</b>, replica, tenant node and router is an instance of
     the same check, each with its own address and token.</li>
   <li><b>The names are tested:</b> a test scrapes a real server, a replica,
-    a tenant node and a router, and fails if the check or the dashboard
-    names a metric none of them sends.</li>
+    a tenant node and a router, and fails if the check, the dashboard or a
+    monitor names a metric or a tag none of them sends.</li>
 </ul>
 
 <h2 id="metrics">The metrics</h2>
@@ -74,9 +75,19 @@ the metrics arrive as <code>fennecdb.*</code>.</p>
 <tr><td><code>fennec_documents{collection}</code></td><td><code>fennecdb.documents</code>, tag <code>collection</code></td><td>gauge</td></tr>
 <tr><td><code>fennec_statement_duration_seconds</code></td><td><code>fennecdb.statement_duration_seconds.bucket</code>, <code>.sum</code>, <code>.count</code></td><td>distribution: <code>p99:</code> once percentiles are on</td></tr>
 <tr><td><code>fennec_router_requests_total{route, code}</code></td><td><code>fennecdb.router_requests.count</code>, tags <code>route</code>, <code>code</code></td><td>count</td></tr>
+<tr><td><code>fennec_scheduled_runs_total{outcome}</code></td><td><code>fennecdb.scheduled_runs.count</code>, tag <code>outcome</code></td><td>count</td></tr>
+<tr><td><code>fennec_scheduled_lateness_seconds</code></td><td><code>fennecdb.scheduled_lateness_seconds.bucket</code>, <code>.sum</code>, <code>.count</code></td><td>distribution</td></tr>
 </tbody>
 </table>
 </div>
+
+<p>The four metrics of <a href="/docs/fennecql#scheduled-statements">scheduled
+statements</a> arrive through <code>conf.yaml</code> as well:
+<code>fennecdb.scheduled_runs.count</code>,
+<code>fennecdb.scheduled_skipped.count</code>,
+<code>fennecdb.scheduled_mark_ahead.count</code> and
+<code>fennecdb.scheduled_lateness_seconds.bucket</code>. A server sends them
+once its scheduler made a look (<a href="/docs/monitoring#what-is-counted">Monitoring</a>).</p>
 
 <details class="deep"><summary>How metric names and labels arrive in Datadog</summary>
 <p>A counter loses its <code>_total</code> and arrives as a count,
@@ -182,8 +193,8 @@ described in Monitoring.</p>
 
 <p><code>monitoring/datadog/dashboard.json</code> opens on whether the disk
 has refused a write, statements and errors a second, refusals and the memory
-footprint, then requests and their latency, writes and storage,
-replication, tenants, the router, and the logs.</p>
+footprint, then requests and their latency, writes and storage, scheduled
+statements, replication, tenants, the router, and the logs.</p>
 
 <details class="deep"><summary>The dashboard's groups and what each shows</summary>
 <p>Its groups, each on the metrics <code>/_metrics</code> sends:</p>
@@ -195,6 +206,9 @@ replication, tenants, the router, and the logs.</p>
     <code>fennecdb.change_sequence</code> — documents and each collection's
     dead share, the file and what a compact would give back, compactions
     <code>--auto-compact</code> ran, and vectors waiting to be linked.</li>
+  <li><b>Scheduled statements:</b> runs by outcome, how late they began past
+    their slot (p50 and p99), and the slots passed over and the marks found
+    ahead of the clock.</li>
   <li><b>Replication:</b> a replica's lag in writes, whether it is
     connected, since it last heard from its primary, a primary's replicas,
     reconnects and whole images.</li>
@@ -210,6 +224,39 @@ replication, tenants, the router, and the logs.</p>
 The percentiles need the distribution's percentiles turned on, once, in the
 metric's summary.</p>
 </details>
+
+<h2 id="monitors">The monitors</h2>
+
+<p><code>monitoring/datadog/monitors.json</code> holds four monitors on
+<a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, an
+array Datadog's API takes one monitor a call (<code>POST
+/api/v1/monitor</code>).</p>
+
+<pre data-lang="bash">jq -c '.[]' monitoring/datadog/monitors.json | while read -r monitor; do
+  curl -X POST https://api.datadoghq.com/api/v1/monitor \
+    -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+    -H 'Content-Type: application/json' -d "$monitor"
+done
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Monitor</th><th>Fires when</th></tr></thead>
+<tbody>
+<tr><td>a scheduled statement refused its run</td><td><code>outcome:refused</code> and <code>outcome:broken</code> runs together are over 0 in an hour</td></tr>
+<tr><td>a slot is held back</td><td><code>outcome:held</code> runs are over 3 in an hour; a warning from 0</td></tr>
+<tr><td>a mark is ahead of the clock</td><td><code>fennecdb.scheduled_mark_ahead.count</code> is over 0 in an hour</td></tr>
+<tr><td>runs are late</td><td>the p99 of <code>fennecdb.scheduled_lateness_seconds.bucket</code> is over 120 s in 30 minutes; a warning from 60 s</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Each is grouped by host and tagged <code>service:fennecdb</code> and
+<code>fennec:scheduled</code>, and its message says what to look at: the
+listing's <code>last</code> and <code>held</code>, the log line of the run, the
+audit log's <code>clock</code> line. The lateness monitor needs the
+distribution's percentiles turned on, as the dashboard's do. A test holds
+every monitor's metric and tag, as the dashboard's, to a real scrape.</p>
 
 <h2 id="request-id">One id a request</h2>
 

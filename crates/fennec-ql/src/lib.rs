@@ -104,13 +104,18 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 /// is listed by and bound to the collection it is listed beside, and to
 /// the events listed beside it where they are -- the text's are the
 /// binding's, so a description claiming others is refused, never taken --
-/// held to the collections declared. A build without named statements refuses a
-/// description listing one, as it refuses one written in FennecQL.
+/// held to the collections declared. And its scheduled statements listed
+/// after the collections (`Declared::scheduled`) alike: each text one
+/// scheduled definition of the name it is listed by, run at the schedule
+/// it is listed with where it is -- as the text writes it, the clause
+/// `GET /_schema` lists, so a description claiming another is refused. A
+/// build without named statements refuses a description listing one, as
+/// it refuses one written in FennecQL.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
     use fennec_core::declared::bad;
     #[cfg(not(feature = "statements"))]
-    if let Some((_, name, ..)) = d.bound.first() {
+    if let Some(name) = (d.bound.first().map(|b| &b.1)).or(d.scheduled.first().map(|s| &s.0)) {
         return Err(bad(
             name,
             "is a named statement, which this build does not read",
@@ -119,16 +124,7 @@ pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
     #[cfg(feature = "statements")]
     for (collection, name, events, text) in std::mem::take(&mut d.bound) {
         {
-            let mut read = parse(&text)?;
-            let def = match (read.len(), read.pop()) {
-                (1, Some(Statement::CreateStatement(def))) => *def,
-                _ => {
-                    return Err(bad(
-                        &name,
-                        "is listed with a text that is not its definition",
-                    ))
-                }
-            };
+            let def = declared_def(&name, &text)?;
             let binds = def.after.as_ref().map(|b| b.collection.as_str());
             if def.name != name || binds != Some(collection.as_str()) {
                 return Err(bad(
@@ -156,18 +152,67 @@ pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
                     ));
                 }
             }
-            if d.statements.iter().any(|s| s.name == def.name) {
-                return Err(bad(&def.name, "is declared twice"));
-            }
-            let collections = &d.collections;
-            if let Err(e) = def.depends(&|c| collections.iter().find(|s| s.name == c)) {
-                let why =
-                    fennec_core::declared::cat(&["names what is not declared: ", &e.to_string()]);
-                return Err(bad(&def.name, &why));
-            }
-            d.statements.push(def);
+            held_to(d, def)?;
         }
     }
+    #[cfg(feature = "statements")]
+    for (name, schedule, text) in std::mem::take(&mut d.scheduled) {
+        let def = declared_def(&name, &text)?;
+        if def.name != name || def.schedule.is_none() {
+            return Err(bad(
+                &name,
+                "is listed among the schedules with the text of another statement than a \
+                 scheduled one of its name",
+            ));
+        }
+        let written = fennec_core::named::schedule_text(&text);
+        if let Some(listed) = schedule.filter(|l| Some(l.trim()) != written) {
+            return Err(bad(
+                &name,
+                &fennec_core::declared::cat(&[
+                    "is listed with the schedule `",
+                    &listed,
+                    "`, and its text runs `",
+                    written.unwrap_or_default(),
+                    "`",
+                ]),
+            ));
+        }
+        held_to(d, def)?;
+    }
+    Ok(())
+}
+
+/// A listed text read as the one definition it must be.
+#[cfg(all(not(target_arch = "wasm32"), feature = "statements"))]
+fn declared_def(name: &str, text: &str) -> Result<fennec_core::named::Definition> {
+    let mut read = parse(text)?;
+    match (read.len(), read.pop()) {
+        (1, Some(Statement::CreateStatement(def))) => Ok(*def),
+        _ => Err(fennec_core::declared::bad(
+            name,
+            "is listed with a text that is not its definition",
+        )),
+    }
+}
+
+/// `def` among `d`'s statements: declared once, naming only what `d`
+/// declares.
+#[cfg(all(not(target_arch = "wasm32"), feature = "statements"))]
+fn held_to(
+    d: &mut fennec_core::declared::Declared,
+    def: fennec_core::named::Definition,
+) -> Result<()> {
+    use fennec_core::declared::bad;
+    if d.statements.iter().any(|s| s.name == def.name) {
+        return Err(bad(&def.name, "is declared twice"));
+    }
+    let collections = &d.collections;
+    if let Err(e) = def.depends(&|c| collections.iter().find(|s| s.name == c)) {
+        let why = fennec_core::declared::cat(&["names what is not declared: ", &e.to_string()]);
+        return Err(bad(&def.name, &why));
+    }
+    d.statements.push(def);
     Ok(())
 }
 

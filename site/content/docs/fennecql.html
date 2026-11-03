@@ -701,6 +701,37 @@ reader of its file runs a release that knows them: a binary from before
 refuses the record and stops there, in words (<a
 href="/docs/replication">Replication</a>).</p>
 
+<p>Where a schedule stands is in the listings, to the server's token alone
+(a scoped token's <code>statements</code> is 403 and <code>describe
+statement</code> 404): four columns follow <code>after</code>.
+<code>schedule</code> is the clause as the text writes it
+(<code>every 15m in 'Europe/Berlin'</code>). <code>next</code> is the slot
+due now — shown past, overdue, where the scheduler holds it back or nothing
+runs it yet — else the first slot after now. <code>last</code> is the last
+slot's mark, pending or landed: <code>{outcome, reason, skipped, slot,
+status}</code>, <code>outcome</code> <code>"ran"</code> or
+<code>"refused"</code>, and <code>null</code> before the first run.
+<code>held</code> is a due slot the state holds back — the tenant's quota, a
+lapsed lease, a storage error — as <code>{since, slot, status}</code>, else
+<code>null</code>. It is the scheduler's memory, not the file's: after a
+restart the slot is found due and held again. All four are
+<code>null</code> for a statement that is called or bound.</p>
+
+<pre data-lang="json">{"name":"reset","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,"schedule":"every 15m","next":"2026-05-04T12:15:00Z","last":null,"held":{"since":"2026-05-04T12:16:00Z","slot":"2026-05-04T12:15:00Z","status":507}}</pre>
+
+<p>A refused run's <code>last</code> holds the status and the guard's
+<code>reason</code>:
+<code>{"outcome":"refused","reason":"no hold to look at","skipped":0,"slot":"2026-05-04T12:15:00Z","status":412}</code>.
+<code>GET /_schema</code> lists the same beside the collections, as
+<code>schedules</code>, and <code>?as=fennecql</code> writes each definition
+after them (<a href="/docs/http-reference">HTTP reference</a>). How often a
+schedule ran, how late, and what it refused are counted in <a
+href="/docs/monitoring#what-is-counted"><code>/_metrics</code></a> and <a
+href="/docs/monitoring#statements"><code>/_stats/statements</code></a> (the
+shape <code>schedule lapse_holds</code>), named in the <a
+href="/docs/monitoring#slow">slow-statement line</a> and given a <a
+href="/docs/monitoring#tracing">trace</a> a run.</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

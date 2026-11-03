@@ -15,7 +15,10 @@
 # come from the logs' `tenant` attribute and /t/<tenant>/_stats/statements.
 #
 # crates/fennec-shard/tests/datadog.rs holds every name in `metrics` to a real
-# scrape of a server, a replica, a tenant node and a router.
+# scrape of a server, a replica, a tenant node and a router, and every query of
+# dashboard.json and monitors.json -- the monitors on scheduled statements'
+# refused and held runs, marks ahead of the clock and lateness, each importable
+# by Datadog's API (POST /api/v1/monitor) -- to what arrives through it.
 
 init_config:
 
@@ -54,6 +57,12 @@ instances:
       - reclaimable_bytes
       - change_sequence
       - storage_failed
+      # Scheduled statements, once a server or a node ran one: runs by
+      # outcome, slots passed over, marks ahead of the clock, lateness
+      - scheduled_runs
+      - scheduled_skipped
+      - scheduled_mark_ahead
+      - scheduled_lateness_seconds
       # Replication: a primary's replicas, a replica's lag
       - replicas
       - ^replica_.*$

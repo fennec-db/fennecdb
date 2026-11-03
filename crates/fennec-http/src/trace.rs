@@ -449,6 +449,113 @@ pub fn begin(req: &Request) {
     });
 }
 
+/// Starts a scheduled statement's run on this thread -- the scheduler's --
+/// as a trace of its own (`docs/design/named-statements.md`, *Watching
+/// schedules*), sampled at the ratio as a request with no `traceparent`
+/// is: its root span `schedule <name>`, the shape `/_stats/statements`
+/// counts it as, its `db.operation.name` `schedule` and
+/// `db.stored_procedure.name` the statement. What the run learns under the
+/// lock -- its slot, how late it is -- is set on it as an attribute
+/// ([`attr`]); the lock's wait, the run and its sync are its children as a
+/// request's are, and its bindings' after it ([`bound_runs`]). It ends with
+/// [`end_run`], or goes as [`discard`] where no slot was run.
+#[cold]
+#[inline(never)]
+pub fn begin_run(name: &str, tenant: Option<&str>) {
+    if !on() {
+        return;
+    }
+    CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        c.generation = c.generation.wrapping_add(1);
+        c.spans.clear();
+        c.open.clear();
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&fresh().to_be_bytes());
+        id[8..].copy_from_slice(&fresh().to_be_bytes());
+        let keep = sampled(&id);
+        c.active = true;
+        c.sampled = keep;
+        c.id = id;
+        c.parent = None;
+        c.root = fresh().to_be_bytes();
+        c.state = None;
+        if !keep {
+            return;
+        }
+        let shape = format!("schedule {name}");
+        let mut attrs: Vec<(&'static str, Val)> = Vec::with_capacity(12);
+        attrs.push(("db.system", Val::from("fennecdb")));
+        attrs.push(("db.operation.name", Val::from("schedule")));
+        attrs.push(("db.stored_procedure.name", Val::from(name.to_string())));
+        attrs.push(("db.query.text", Val::from(shape.clone())));
+        crate::request_id::with(|r| {
+            if !r.is_empty() {
+                attrs.push(("fennec.request_id", Val::from(r.to_string())));
+            }
+        });
+        if let Some(t) = tenant {
+            attrs.push(("fennec.tenant", Val::from(t.to_string())));
+        }
+        let root = c.root;
+        c.spans.push(Rec {
+            name: Cow::Owned(shape),
+            id: root,
+            parent: None,
+            kind: Kind::Internal,
+            start: now_unix(),
+            end: 0,
+            attrs,
+            error: None,
+        });
+    });
+}
+
+/// Ends this thread's run ([`begin_run`]) and hands its spans to the
+/// exporter, never waiting on it: `refused` the status a refusal answers
+/// and the reason its `else` wrote -- the statement's own text -- never
+/// the engine's words, which may hold a row's value, a unique value its
+/// body met among them: a span names a shape.
+#[cold]
+#[inline(never)]
+pub fn end_run(outcome: &'static str, refused: Option<(u16, Option<&str>)>) {
+    if !on() {
+        return;
+    }
+    let trace = CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        let was = std::mem::take(&mut c.active);
+        if !(was && c.sampled) || c.spans.is_empty() {
+            c.spans.clear();
+            return None;
+        }
+        let now = now_unix();
+        for i in std::mem::take(&mut c.open) {
+            if c.spans[i].end == 0 {
+                c.spans[i].end = now;
+            }
+        }
+        let root = &mut c.spans[0];
+        root.end = now;
+        set(&mut root.attrs, "fennec.outcome", Val::from(outcome));
+        if let Some((status, reason)) = refused {
+            root.error = Some(match reason {
+                Some(r) => format!("{status} {r}"),
+                None => status.to_string(),
+            });
+            set(&mut root.attrs, "error.type", Val::from(status.to_string()));
+        }
+        Some(Trace {
+            id: c.id,
+            state: None,
+            spans: std::mem::take(&mut c.spans),
+        })
+    });
+    if let (Some(t), Some(e)) = (trace, EXPORTER.get()) {
+        e.push(t);
+    }
+}
+
 /// Whether this thread's request is being recorded: worth working out an
 /// attribute for.
 #[inline]

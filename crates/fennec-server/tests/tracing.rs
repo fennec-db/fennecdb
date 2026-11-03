@@ -413,3 +413,122 @@ fn a_collector_that_hangs_or_is_down_costs_the_requests_nothing() {
     );
     assert!(server.logged("tracing: could not post", Duration::from_secs(10)));
 }
+
+const HOUR: i64 = 3_600_000;
+
+/// A file holding three scheduled statements, every hour, defined a day
+/// and a half hour ago -- the first slot after that, what it answers --:
+/// at a server's first look each runs its latest slot, the ones before it
+/// passed over -- `tick` lands, `gatekeep`'s guard refuses with its reason,
+/// and `clash` meets a unique value held, whose engine words name it.
+fn three_scheduled(path: &std::path::Path) -> i64 {
+    fennec_ql::install();
+    let since = fennec_core::time::now_ms().unwrap() - 24 * HOUR - HOUR / 2;
+    let mut db = fennec_core::fs::open(path).unwrap();
+    db.allow_schedules();
+    db.set_clock(Some(since));
+    for q in [
+        "create collection ticks (slot timestamp, at timestamp)",
+        "create collection users (email text @unique)",
+        "put users {email: 'kept@example.com'}",
+        "create statement tick every 1h as insert ticks {slot: slot(), at: now()}",
+        "create statement gatekeep every 1h scans as begin get ticks where slot = \
+         timestamp(0) require 1 else 'no tick at the epoch'; insert ticks {slot: slot(), \
+         at: now()} end",
+        "create statement clash every 1h as insert users {email: 'kept@example.com'}",
+    ] {
+        db.execute(&fennec_ql::parse_one(q).unwrap())
+            .unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+    if let Some(sync) = db.flush().unwrap() {
+        sync().unwrap();
+    }
+    since - since.rem_euclid(HOUR) + HOUR
+}
+
+/// A scheduled statement's run is a trace of its own, begun and ended on
+/// the scheduler's thread (`docs/design/named-statements.md`, *Watching
+/// schedules*): its root span `schedule <name>`, the shape it is counted
+/// as, its slot, how late it ran and what it passed over, the lock's wait,
+/// the run and its sync beneath it as a request's are; a refused run's
+/// span failed with its status and the reason its `else` wrote, never the
+/// engine's words -- a unique value its body met is named in them, and
+/// reaches no span.
+#[test]
+fn a_scheduled_run_is_a_trace_of_its_own() {
+    let recv = Receiver::start();
+    let path = tmp("trace", "scheduled.fennec");
+    let first = three_scheduled(&path);
+    let url = recv.url();
+    let _server = start_env(
+        &["--file", path.to_str().unwrap(), "--otlp-endpoint", &url],
+        &[],
+    );
+    let names = ["schedule tick", "schedule gatekeep", "schedule clash"];
+    let spans = recv.until("the three runs' spans", |s| {
+        names.iter().all(|n| s.iter().any(|g| g.name == *n))
+    });
+    let root = |n: &str| spans.iter().find(|g| g.name == n).unwrap();
+    let tick = root("schedule tick");
+    assert_eq!((tick.kind, tick.parent.as_deref()), (1, None), "{tick:#?}");
+    for (k, v) in [
+        ("db.system", "fennecdb"),
+        ("db.operation.name", "schedule"),
+        ("db.stored_procedure.name", "tick"),
+        ("db.query.text", "schedule tick"),
+        ("fennec.outcome", "ran"),
+    ] {
+        assert_eq!(tick.attr(k), Some(v), "{k} in {tick:#?}");
+    }
+    assert!(!tick.error, "{tick:#?}");
+    let slot = tick.attr("fennec.slot").unwrap();
+    assert!(slot.ends_with(":00:00Z"), "an hour's edge: {slot}");
+    // A day's slots passed over, the latest run: from the first after the
+    // definition, 23 or 24 by where in its hour the clock stood.
+    let ran = fennec_core::time::parse(slot).unwrap();
+    let skipped = ((ran - first) / HOUR).to_string();
+    assert_eq!(tick.attr("fennec.slots_skipped"), Some(&*skipped));
+    assert!(skipped == "23" || skipped == "24", "{skipped}");
+    let late: i64 = tick.attr("fennec.lateness_ms").unwrap().parse().unwrap();
+    assert!((0..HOUR).contains(&late), "{late}");
+    assert!(!tick.attr("fennec.request_id").unwrap_or("").is_empty());
+    let trace: Vec<Got> = (spans.iter())
+        .filter(|g| g.trace == tick.trace)
+        .cloned()
+        .collect();
+    // The write lock the run holds to its landing, and the read the lease
+    // is asked under once it is durable.
+    let lock = children(&trace, tick, "lock.wait");
+    let held: Vec<_> = lock.iter().map(|l| l.attr("fennec.lock")).collect();
+    assert_eq!(held, [Some("write"), Some("read")], "{trace:#?}");
+    for child in ["execute", "durability"] {
+        let [c] = children(&trace, tick, child)[..] else {
+            panic!("{child}: {trace:#?}")
+        };
+        within(c, tick);
+    }
+    // Refused: the status, and the reason the statement's text wrote.
+    let gatekeep = root("schedule gatekeep");
+    assert!(gatekeep.error, "{gatekeep:#?}");
+    assert_eq!(
+        gatekeep.message.as_deref(),
+        Some("412 no tick at the epoch")
+    );
+    assert_eq!(gatekeep.attr("error.type"), Some("412"));
+    assert_eq!(gatekeep.attr("fennec.outcome"), Some("refused"));
+    assert!(
+        children(&spans, gatekeep, "durability").is_empty(),
+        "it landed nothing"
+    );
+    let clash = root("schedule clash");
+    assert_eq!(clash.message.as_deref(), Some("409"), "{clash:#?}");
+    assert!(
+        spans
+            .iter()
+            .all(|g| !format!("{g:?}").contains("kept@example.com")),
+        "a value reached a span: {spans:#?}"
+    );
+    // Each run a trace of its own.
+    assert_ne!(tick.trace, gatekeep.trace);
+    assert_ne!(gatekeep.trace, clash.trace);
+}

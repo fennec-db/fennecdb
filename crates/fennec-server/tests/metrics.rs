@@ -18,7 +18,11 @@ struct Node {
 }
 
 fn node(name: &str, extra: &[&str]) -> Node {
-    let path = tmp("metrics", name);
+    node_at(&tmp("metrics", name), extra)
+}
+
+/// [`node`] over a file made already.
+fn node_at(path: &std::path::Path, extra: &[&str]) -> Node {
     let mut args = vec![
         "--metrics",
         "127.0.0.1:0",
@@ -313,4 +317,108 @@ fn a_binding_s_runs_and_refusals_are_counted_and_its_slow_line_names_it() {
         !plain.contains(r#""bound""#),
         "a write waking nothing: {plain}"
     );
+}
+
+/// A scheduled statement's run past `--slow-ms` writes the slow line, its
+/// `statement` the shape `/_stats/statements` counts it as, `schedule
+/// <name>`, its `scheduled` the statement, the version that ran, the slot
+/// and its rows, the bindings its writes woke beside it, and its
+/// request id the run's own; `/_metrics` counts the runs by outcome, the
+/// slots they passed over and how late they began
+/// (`docs/design/named-statements.md`, *Watching schedules*).
+#[test]
+fn a_scheduled_run_is_counted_and_its_slow_line_names_it() {
+    const HOUR: i64 = 3_600_000;
+    // Every hour, defined a day and a half hour ago: the first look runs
+    // each statement's latest slot, the 23 before it passed over.
+    let path = tmp("metrics", "scheduled.fennec");
+    fennec_ql::install();
+    let since = fennec_core::time::now_ms().unwrap() - 24 * HOUR - HOUR / 2;
+    {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        db.allow_schedules();
+        db.set_clock(Some(since));
+        for q in [
+            "create collection ticks (slot timestamp, at timestamp)",
+            "create collection logs (n int)",
+            "create statement noted after insert ticks as insert logs {n: 1}",
+            "create statement tick every 1h as insert ticks {slot: slot(), at: now()}",
+            "create statement gatekeep every 1h scans as begin get ticks where slot = \
+             timestamp(0) require 1 else 'no tick at the epoch'; insert ticks {slot: slot(), \
+             at: now()} end",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap())
+                .unwrap_or_else(|e| panic!("{q}: {e}"));
+        }
+        if let Some(sync) = db.flush().unwrap() {
+            sync().unwrap();
+        }
+    }
+    let s = node_at(&path, &["--slow-ms", "0"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let log = loop {
+        let log = s.server.log.lock().unwrap().clone();
+        let lines = |n: &str| log.contains(&format!(r#""scheduled":["{n}",["#));
+        if lines("tick") && lines("gatekeep") {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "no run's slow line in:\n{log}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let line = |n: &str| {
+        (log.lines())
+            .find(|l| l.contains(&format!(r#""scheduled":["{n}",["#)))
+            .unwrap()
+            .to_string()
+    };
+    let tick = line("tick");
+    for part in [
+        r#""event":"slow""#,
+        r#""kind":"write""#,
+        r#""failed":false"#,
+        r#""statement":"schedule tick""#,
+        r#""request_id":""#,
+        r#":00:00Z",1],"bound":[["noted",["#,
+    ] {
+        assert!(tick.contains(part), "{part} in {tick}");
+    }
+    assert!(tick.ends_with(",1]]}"), "a binding's run: {tick}");
+    let gatekeep = line("gatekeep");
+    for part in [
+        r#""failed":true"#,
+        r#""statement":"schedule gatekeep""#,
+        r#":00:00Z",0]}"#,
+    ] {
+        assert!(gatekeep.contains(part), "{part} in {gatekeep}");
+    }
+
+    let m = s.scrape();
+    for (outcome, n) in [
+        ("ran", 1.0),
+        ("refused", 1.0),
+        ("broken", 0.0),
+        ("held", 0.0),
+        ("unknown", 0.0),
+    ] {
+        let key = format!("fennec_scheduled_runs_total{{outcome=\"{outcome}\"}}");
+        assert_eq!(value(&m, &key), n, "{outcome}");
+    }
+    // Each passed over the slots from the first after its definition to
+    // the one it ran, its slot in its slow line.
+    let run = &tick[tick.find(r#""scheduled":["tick",["#).unwrap()..];
+    let run = &run[run.find(r#"],""#).unwrap() + 3..];
+    let slot = fennec_core::time::parse(&run[..run.find('"').unwrap()]).unwrap();
+    let first = since - since.rem_euclid(HOUR) + HOUR;
+    let skipped = 2 * (slot - first) / HOUR;
+    assert!(skipped == 46 || skipped == 48, "{tick}");
+    assert_eq!(value(&m, "fennec_scheduled_skipped_total"), skipped as f64);
+    assert_eq!(value(&m, "fennec_scheduled_mark_ahead_total"), 0.0);
+    assert_eq!(value(&m, "fennec_scheduled_lateness_seconds_count"), 2.0);
+    // The two runs, slow at 0 ms, and the binding one woke.
+    assert_eq!(value(&m, "fennec_slow_statements_total"), 2.0);
+    assert_eq!(value(&m, "fennec_bound_runs_total"), 1.0);
+    assert!(m
+        .keys()
+        .filter(|k| k.starts_with("fennec_scheduled_"))
+        .all(|k| !k.contains("tick") && !k.contains("gatekeep")));
 }

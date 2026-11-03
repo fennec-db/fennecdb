@@ -115,7 +115,90 @@ pub struct Due {
     pub ahead: Option<i64>,
 }
 
+/// A due slot a server's scheduler holds back -- the quota, a lapsed
+/// lease, a storage error -- as it tells the database it runs
+/// ([`Database::set_held_slots`]): what the listings' `held` shows. The
+/// scheduler's memory (`fennec_http::schedule::Held`), never the file's: a
+/// restart, a failover or a move finds the slot due and holds it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldSlot {
+    /// The slot held back.
+    pub slot: i64,
+    /// The status of the refusal that held it, as its answer would be.
+    pub status: u16,
+    /// When it was first refused.
+    pub since: i64,
+}
+
 impl Database {
+    /// The slots the scheduler running this database's statements holds
+    /// back, by statement, as it last told them.
+    pub fn held_slots(&self) -> &[(String, HeldSlot)] {
+        self.held_slots.as_deref().map_or(&[], |h| &h[..])
+    }
+
+    /// What the scheduler running this database's statements holds back,
+    /// told after each look that changed it and as a tenant opens: the
+    /// listings' `held`. Nothing else reads it; a slot run, marked or
+    /// passed over since is shown none of, whatever was told.
+    pub fn set_held_slots(&mut self, held: Vec<(String, HeldSlot)>) {
+        self.held_slots = (!held.is_empty()).then(|| Box::new(held));
+    }
+
+    /// What the listings show of a scheduled statement beside its record:
+    /// its schedule as its text writes it, the slot it runs next -- one due
+    /// now, overdue where it is past, or the first after `now` -- its last
+    /// mark, pending or landed, and the slot its scheduler holds back; four
+    /// `null`s for a statement no clock runs (`statements`, `describe
+    /// statement`, `GET /_schema`). `now` is `None` where no clock reads.
+    pub fn schedule_shown(&self, s: &Stored, now: Option<i64>) -> [Value; 4] {
+        if s.schedule.is_none() {
+            return [Value::Null, Value::Null, Value::Null, Value::Null];
+        }
+        let due = now.map(|now| self.due_of(s, now));
+        let next = due
+            .as_ref()
+            .and_then(|d| d.run.map(|r| r.0).or(d.next))
+            .map_or(Value::Null, Value::Timestamp);
+        let mark = self.pending_of(s).or(self.last_mark(&s.name));
+        let last = mark.map_or(Value::Null, |m| {
+            let (outcome, status, reason) = match &m.refused {
+                None => ("ran", Value::Null, Value::Null),
+                Some((status, reason)) => (
+                    "refused",
+                    Value::Int(*status as i64),
+                    match reason.is_empty() {
+                        true => Value::Null,
+                        false => Value::Text(reason.clone()),
+                    },
+                ),
+            };
+            // Its members ascending by key, as an object holds them.
+            Value::Object(vec![
+                ("outcome".into(), Value::Text(outcome.into())),
+                ("reason".into(), reason),
+                ("skipped".into(), Value::Int(m.skipped as i64)),
+                ("slot".into(), Value::Timestamp(m.at)),
+                ("status".into(), status),
+            ])
+        });
+        // Held as long as the slot it holds is the one due: one run,
+        // marked or passed over since is held no more.
+        let due_slot = due.as_ref().and_then(|d| d.run.map(|r| r.0));
+        let held = (self.held_slots().iter())
+            .find(|(n, h)| *n == s.name && Some(h.slot) == due_slot)
+            .map_or(Value::Null, |(_, h)| {
+                Value::Object(vec![
+                    ("since".into(), Value::Timestamp(h.since)),
+                    ("slot".into(), Value::Timestamp(h.slot)),
+                    ("status".into(), Value::Int(h.status as i64)),
+                ])
+            });
+        let schedule = crate::named::schedule_text(&s.text)
+            .map_or(Value::Null, |t| Value::Text(t.to_string()));
+        [schedule, next, last, held]
+    }
+
     /// Lets a scheduled statement be defined, which every way in refuses
     /// where no scheduler runs the database's (`named::SCHEDULED_UNRUN`):
     /// what a server sets as its scheduler starts watching it -- a file's
@@ -258,10 +341,11 @@ impl Database {
     /// `--call-max-rows`. `now()` reads `now` throughout, the run's start,
     /// as `@ttl`'s `alive` does, and `slot()` reads `slot`. The version
     /// that ran, for the mark the caller lands with the run's writes
-    /// ([`Self::mark_slot`]); a statement not scheduled is missing (404),
+    /// ([`Self::mark_slot`]), and the rows its last statement answered, as
+    /// a call's are counted; a statement not scheduled is missing (404),
     /// and a broken one or one whose text this process holds unread is
     /// refused (409) with nothing of it run, as its call would be.
-    pub fn run_slot(&mut self, name: &str, slot: i64, now: i64) -> Result<(u64, u64)> {
+    pub fn run_slot(&mut self, name: &str, slot: i64, now: i64) -> Result<((u64, u64), u64)> {
         let s = (self.statements.get(name))
             .filter(|s| s.schedule.is_some())
             .ok_or_else(|| Error::NotFound(format!("scheduled statement `{name}`")))?;
@@ -288,7 +372,12 @@ impl Database {
         };
         let before = self.clock.replace(now);
         let c = Clocked { db: self, before };
-        c.db.run_callee(&callee).map(|_| version)
+        let rows = |r: Response| match r {
+            Response::Affected(n) => n as u64,
+            Response::Rows(rs) => rs.rows.len() as u64,
+            _ => 0,
+        };
+        c.db.run_callee(&callee).map(|r| (version, rows(r)))
     }
 
     /// A scheduled body run for `slot` -- by the clock, or by the server's

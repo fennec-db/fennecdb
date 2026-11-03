@@ -553,7 +553,10 @@ expect.</p>
     statements. Call it on the server (<code>db.remote.call(…)</code>, or the
     native SDKs' HTTP client, <a href="/docs/languages#named-statements">Named
     statements</a>), and what it writes comes back through the shapes'
-    streams.</li>
+    streams. A <a href="/docs/fennecql#scheduled-statements">scheduled
+    statement</a> is one: a replica defines and runs none, and what a run
+    writes reaches a synced app through the shapes following its
+    collections, as any server write does.</li>
 </ul>
 
 <details class="deep"><summary>What a shape does not guarantee</summary>

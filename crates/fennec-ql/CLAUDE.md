@@ -151,4 +151,10 @@ how many it holds (`schedule::unrun`). A refusal the statement makes marks
 its slot, the state's leaves it due (`schedule::Held`), and only the
 server's token calls one, marking nothing. A new path running a body owes
 its mark in the block, and a new way a file reaches a node the scheduler's
-word (`Node::note`, `Node::installed`, `Node::opened`).
+word (`Node::note`, `Node::installed`, `Node::opened`). A run is counted,
+logged and traced as the shape `schedule <name>` on the scheduler's thread
+(`schedule::watched`), its span failed with its status and its `else`
+reason alone, never the engine's words; its schedule, next slot, last run
+and held slot are described (`statements`, `GET /_schema`) to the server's
+token alone, `held` as the scheduler last told it
+(`Database::set_held_slots`).

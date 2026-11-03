@@ -54,7 +54,8 @@ pub(crate) use node::closing;
 pub use node::Node;
 
 use crate::held;
-use fennec_core::engine::SlotMark;
+use crate::{metrics, statements, trace};
+use fennec_core::engine::{HeldSlot, SlotMark};
 use fennec_core::error::Error;
 use fennec_core::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -158,8 +159,8 @@ pub struct Look {
     pub ahead: Vec<Ahead>,
 }
 
-/// The process's counts of runs: what `/_metrics` will read (F3's slice
-/// 5, [`counts`]).
+/// The process's counts of runs, each run counted once by what came of it:
+/// what `/_metrics` reads ([`counts`], [`metrics`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub ran: u64,
@@ -167,7 +168,7 @@ pub struct Counts {
     pub broken: u64,
     pub held: u64,
     /// Runs that landed as their lease lapsed: whether the tenant's next
-    /// primary holds them is unknown.
+    /// primary holds them is unknown. Not among `ran`.
     pub unknown: u64,
     pub skipped: u64,
     pub mark_ahead: u64,
@@ -210,6 +211,84 @@ pub fn counts() -> Counts {
         skipped: r(&t.skipped),
         mark_ahead: r(&t.mark_ahead),
     }
+}
+
+/// The upper bounds of a run's lateness buckets, in microseconds: a tenth
+/// of a second, where a run behind none lands, to a day, where one after a
+/// day down does -- a node's ten thousand tenants due at once run within
+/// a minute (`make schedule-bench`).
+const LATENESS: [u64; 16] = [
+    100_000,
+    500_000,
+    1_000_000,
+    5_000_000,
+    10_000_000,
+    30_000_000,
+    60_000_000,
+    120_000_000,
+    300_000_000,
+    600_000_000,
+    900_000_000,
+    1_800_000_000,
+    3_600_000_000,
+    7_200_000_000,
+    21_600_000_000,
+    86_400_000_000,
+];
+
+/// How late each run began, past its slot. One process, one scheduler
+/// thread counting -- a file's or a node's -- so no shard a thread.
+static LATE: crate::metrics::Timings = crate::metrics::Timings::new(&LATENESS);
+
+/// A look was made: the process holds a schedule, and `/_metrics` says
+/// what its runs came to ([`metrics`]). A server that never held one
+/// scrapes as it did, and wakes for nothing.
+static LOOKED: AtomicBool = AtomicBool::new(false);
+
+/// The scheduler's families, once a look was made: its runs by outcome,
+/// the slots passed over, the marks found ahead of the clock and how late
+/// runs began. No label names a tenant, a statement or a collection:
+/// `/_stats/statements` counts each statement's runs by name, for those
+/// who may read every shape (`docs/design/named-statements.md`, *Watching
+/// schedules*).
+pub(crate) fn metrics(out: &mut crate::metrics::Text) {
+    if !LOOKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let c = counts();
+    let name = "fennec_scheduled_runs_total";
+    out.family(
+        name,
+        "counter",
+        "Runs of scheduled statements, by outcome: ran (its writes and its slot's mark landed, or the mark waits for the next write), refused (the statement refused it, its slot marked), broken (the statement could not run, its slot marked), held (the state refused it -- the quota, a lapsed lease, a storage error -- its slot left due and tried again), unknown (it landed as its lease lapsed: whether the next primary holds it is unknown).",
+    );
+    for (outcome, n) in [
+        ("ran", c.ran),
+        ("refused", c.refused),
+        ("broken", c.broken),
+        ("held", c.held),
+        ("unknown", c.unknown),
+    ] {
+        out.sample(name, &[("outcome", outcome)], n);
+    }
+    out.family(
+        "fennec_scheduled_skipped_total",
+        "counter",
+        "Slots of scheduled statements passed over: missed slots run once, the latest.",
+    );
+    out.sample("fennec_scheduled_skipped_total", &[], c.skipped);
+    out.family(
+        "fennec_scheduled_mark_ahead_total",
+        "counter",
+        "A scheduled statement's last mark, or its definition's time, found ahead of the clock -- a clock stepped back, or one that was ahead -- each also the audit's clock line.",
+    );
+    out.sample("fennec_scheduled_mark_ahead_total", &[], c.mark_ahead);
+    out.family(
+        "fennec_scheduled_lateness_seconds",
+        "histogram",
+        "How late a scheduled statement's run began, past its slot: behind the runs before it, after a restart, a held slot tried again.",
+    );
+    crate::metrics::histogram(out, "fennec_scheduled_lateness_seconds", &[], &[&LATE]);
 }
 
 /// A database the scheduler knows: one [`watch`] gave it, which its
@@ -461,6 +540,9 @@ pub fn run_id() -> String {
 pub(crate) struct Ctx<'a> {
     /// What names it in the log.
     pub what: &'a str,
+    /// The tenant, on a node: its runs are its shapes, its slow lines and
+    /// its spans', never a metric's label.
+    pub tenant: Option<&'a str>,
     /// `--sync always`: a run is fsynced, and waits for the streams keeping
     /// up, before the next.
     pub durable: bool,
@@ -481,6 +563,7 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, out: Option<&m
     let mut st = lock(&w.state);
     let ctx = Ctx {
         what: &w.what,
+        tenant: None,
         durable: w.durable,
         live,
     };
@@ -503,7 +586,10 @@ pub(crate) fn look_at(
     most: usize,
     mut out: Option<&mut Look>,
 ) -> (i64, i64, bool) {
-    let (dues, writes, following, seq, limit) = {
+    if !LOOKED.load(Ordering::Relaxed) {
+        LOOKED.store(true, Ordering::Relaxed);
+    }
+    let (dues, writes, following, seq, limit, told) = {
         let g = held::read(db);
         // A following database's writes are its primary's, the runs among
         // them; a failed one takes none until it is opened again; past a
@@ -511,7 +597,15 @@ pub(crate) fn look_at(
         // stays due, to whoever writes the file next.
         let following = g.history().following;
         let writes = !following && g.failure().is_none() && g.fenced().is_ok();
-        (g.due(now), writes, following, g.change_seq(), limit_of(&g))
+        let told = g.held_slots().to_vec();
+        (
+            g.due(now),
+            writes,
+            following,
+            g.change_seq(),
+            limit_of(&g),
+            told,
+        )
     };
     // A mark ahead of the clock: counted and told once a statement and
     // mark.
@@ -578,11 +672,33 @@ pub(crate) fn look_at(
     if following {
         (next, closed) = (NONE, NONE);
     }
+    // What the listings' `held` shows, told where it changed: the write
+    // lock taken for it only then.
+    let shown = shown_held(st);
+    if shown != told {
+        held::write(db).set_held_slots(shown);
+    }
     (next, closed, more)
 }
 
-/// `name`'s due slot run, with an id of its own for the lines it writes,
-/// and told to `out` where a test asks.
+/// The slots `st` holds back, as the database is told them for its
+/// listings (`Database::set_held_slots`).
+pub(crate) fn shown_held(st: &State) -> Vec<(String, HeldSlot)> {
+    (st.held.iter())
+        .map(|(n, h)| {
+            let shown = HeldSlot {
+                slot: h.slot,
+                status: h.status,
+                since: h.since,
+            };
+            (n.clone(), shown)
+        })
+        .collect()
+}
+
+/// `name`'s due slot run, with an id of its own for the lines it writes
+/// and a trace of its own, what came of it counted ([`watched`]), and told
+/// to `out` where a test asks.
 fn run(
     w: &Ctx<'_>,
     db: &RwLock<Database>,
@@ -592,19 +708,80 @@ fn run(
     out: Option<&mut Look>,
 ) {
     crate::request_id::begin(None);
+    trace::begin_run(name, w.tenant);
     let started = out.is_some().then(std::time::Instant::now);
     let r = run_slot(w, db, name, now, st);
-    if let (Some((slot, skipped, outcome)), Some(out), Some(started)) = (r, out, started) {
+    match &r {
+        Some(made) => watched(w, name, made),
+        None => trace::discard(),
+    }
+    if let (Some(made), Some(out), Some(started)) = (r, out, started) {
         out.runs.push(Run {
             name: name.to_string(),
-            slot,
-            skipped,
-            outcome,
+            slot: made.slot,
+            skipped: made.skipped,
+            outcome: made.outcome,
             id: run_id(),
             started,
         });
     }
     crate::request_id::end();
+}
+
+/// What a run of one slot came to, for what watches it ([`watched`]).
+struct Made {
+    slot: i64,
+    skipped: u64,
+    outcome: Outcome,
+    /// The definition that ran.
+    version: (u64, u64),
+    /// What its last statement answered, as a call's are counted.
+    rows: u64,
+    /// Its time under the write lock: never how late it ran.
+    took: std::time::Duration,
+    /// How late it began, past its slot, in milliseconds.
+    late: i64,
+    /// A refusal's status and the reason its `else` wrote -- never the
+    /// engine's words, which may hold a row's value.
+    refused: Option<(u16, Option<String>)>,
+    /// It landed as its lease lapsed.
+    unknown: bool,
+}
+
+/// What a run came to, told where every statement's is: counted by its
+/// outcome and its lateness (`/_metrics`, no label naming a tenant or a
+/// statement), as the shape `schedule <name>` (`/_stats/statements`, a
+/// tenant's apart), in the slow line past `--slow-ms` and as its trace,
+/// the bindings its writes woke beside it as a request's are.
+fn watched(w: &Ctx<'_>, name: &str, m: &Made) {
+    let (counter, outcome): (fn(&Counters) -> &AtomicU64, _) = match (m.outcome, m.unknown) {
+        (Outcome::Ran, true) => (|c| &c.unknown, "unknown"),
+        (Outcome::Ran, false) => (|c| &c.ran, "ran"),
+        (Outcome::Refused(_), _) => (|c| &c.refused, "refused"),
+        (Outcome::Broken, _) => (|c| &c.broken, "broken"),
+        (Outcome::Held(_), _) => (|c| &c.held, "held"),
+    };
+    count(counter, 1);
+    // A held slot's tries are counted held, each; what it passed over and
+    // how late it ran are counted once, by the run that did not hold.
+    if !matches!(m.outcome, Outcome::Held(_)) {
+        count(|c| &c.skipped, m.skipped);
+        LATE.add(std::time::Duration::from_millis(m.late.max(0) as u64));
+    }
+    let failed = !matches!(m.outcome, Outcome::Ran);
+    // The statements its writes woke, noted by the engine on this thread
+    // as a request's are: counted, shaped and traced as theirs.
+    if Database::runs_noted() {
+        if let Some(r) = Database::take_runs() {
+            metrics::bound(&r, m.took);
+            statements::bound(w.tenant, &r);
+            trace::bound_runs(&r);
+        }
+    }
+    statements::scheduled(w.tenant, name, m.rows, m.took, failed);
+    metrics::scheduled(m.took, failed, w.tenant, name, m.version, m.slot, m.rows);
+    let refused = (m.refused.as_ref()).map(|(status, reason)| (*status, reason.as_deref()));
+    trace::end_run(outcome, refused);
 }
 
 fn limit_of(db: &Database) -> usize {
@@ -620,10 +797,11 @@ fn run_slot(
     name: &str,
     now: i64,
     st: &mut State,
-) -> Option<(i64, u64, Outcome)> {
+) -> Option<Made> {
     let iso = fennec_core::time::format_iso;
     let what = w.what;
     let mut g = held::write(db);
+    let locked = std::time::Instant::now();
     // The run's start, read once the lock is held: a run behind fifteen
     // others, their fsyncs and their streams, reads the time it runs at --
     // its `now()` and `@ttl`'s `alive` -- never the look's.
@@ -660,9 +838,18 @@ fn run_slot(
     let s = g.statements().get(name)?;
     let version = s.version;
     let broken = s.broken.is_some() || s.tree.is_none();
+    let late = now.saturating_sub(slot);
+    if trace::recording() {
+        trace::attr("fennec.slot", iso(slot));
+        trace::attr("fennec.lateness_ms", late);
+        trace::attr("fennec.slots_skipped", skipped as i64);
+    }
+    let mut rows = 0;
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         g.begin()?;
-        let r = (g.run_slot(name, slot, now)).and_then(|_| {
+        let running = trace::span("execute");
+        let r = (g.run_slot(name, slot, now)).and_then(|(_, answered)| {
+            rows = answered;
             let mark = SlotMark {
                 at: slot,
                 version,
@@ -671,6 +858,7 @@ fn run_slot(
             };
             g.mark_slot(name, mark)
         });
+        drop(running);
         match r {
             Ok(()) => g.commit(),
             Err(e) => {
@@ -689,10 +877,12 @@ fn run_slot(
             Some((500, e.to_string(), e))
         }
     };
+    // What a trace may tell of a refusal: its status and the reason its
+    // `else` wrote, never the engine's words.
+    let told = (refusal.as_ref()).map(|(status, _, e)| (*status, e.reason().map(String::from)));
     let outcome = match refusal {
         None => {
             st.held.retain(|(n, _)| n != name);
-            count(|c| &c.ran, 1);
             Outcome::Ran
         }
         // The state's: the slot is left due, and tried again.
@@ -728,7 +918,6 @@ fn run_slot(
                     ));
                 }
             }
-            count(|c| &c.held, 1);
             Outcome::Held(status)
         }
         // The statement's: the slot is marked refused, a run that lands
@@ -754,20 +943,11 @@ fn run_slot(
                 iso(slot)
             );
             match broken {
-                true => {
-                    count(|c| &c.broken, 1);
-                    Outcome::Broken
-                }
-                false => {
-                    count(|c| &c.refused, 1);
-                    Outcome::Refused(status)
-                }
+                true => Outcome::Broken,
+                false => Outcome::Refused(status),
             }
         }
     };
-    if !matches!(outcome, Outcome::Held(_)) {
-        count(|c| &c.skipped, skipped);
-    }
     // Made durable as any write is, once the lock is let go: only where a
     // block landed -- a run that wrote nothing costs no fsync.
     let landed = g.change_seq() != seq;
@@ -776,8 +956,12 @@ fn run_slot(
         (true, true) => g.flush(),
         (true, false) => Ok(g.write_behind()),
     };
+    let took = locked.elapsed();
     drop(g);
+    let syncing = landed.then(|| trace::span("durability"));
     let synced = durable.and_then(|d| d.map_or(Ok(()), |d| d()));
+    drop(syncing);
+    let mut unknown = false;
     if let Err(e) = synced {
         crate::log!("{what}: sync error after scheduled statement `{name}`'s run: {e}");
         held::write(db).fail(&e);
@@ -790,9 +974,19 @@ fn run_slot(
              the next primary holds it is unknown",
             iso(slot)
         );
-        count(|c| &c.unknown, 1);
+        unknown = true;
     }
-    Some((slot, skipped, outcome))
+    Some(Made {
+        slot,
+        skipped,
+        outcome,
+        version,
+        rows,
+        took,
+        late,
+        refused: told,
+        unknown,
+    })
 }
 
 /// Whether `e`, a run's refusal, is the state's -- the quota, a lapsed

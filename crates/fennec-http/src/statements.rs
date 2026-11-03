@@ -233,6 +233,30 @@ pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
     }
 }
 
+/// A run of the scheduled statement `name`, counted as the shape `schedule
+/// <name>` (`docs/design/named-statements.md`, *Watching schedules*): its
+/// calls the runs, its rows theirs -- what the body's last statement
+/// answered, as a call's -- its time theirs under the write lock, never
+/// how late they were, and an error where the run was refused, by the
+/// statement or the state. On a tenant node it is the tenant's, read as
+/// every shape of the tenant's is.
+pub(crate) fn scheduled(tenant: Option<&str>, name: &str, rows: u64, took: Duration, failed: bool) {
+    let shape = format!("schedule {name}");
+    let micros = took.as_micros().min(u64::MAX as u128) as u64;
+    let e = Entry {
+        tenant: None,
+        text: String::new(),
+        id: hash(tenant, &shape),
+        calls: 1,
+        errors: failed as u64,
+        rows,
+        micros,
+        min_micros: micros,
+        max_micros: micros,
+    };
+    count(tenant, &shape, e);
+}
+
 /// `counted` -- one request's counts of `shape`, its `id` the shape's hash
 /// -- added to this thread's shard.
 fn count(tenant: Option<&str>, shape: &str, counted: Entry) {

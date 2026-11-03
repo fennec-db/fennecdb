@@ -916,6 +916,263 @@ fn a_scheduled_statement_is_the_server_token_s_to_call() {
     assert!(mark(&db, "lapse").is_none(), "a run by hand marks no slot");
 }
 
+/// `statements`' row of each statement by name, as the engine answers it:
+/// its `schedule`, `next`, `last` and `held`, as the database's clock
+/// reads `at`.
+fn shown(db: &RwLock<Database>, at: i64, q: &str) -> Vec<(String, Vec<Value>)> {
+    let mut g = db.write().unwrap();
+    g.set_clock(Some(at));
+    let r = g.query(&fennec_ql::parse_one(q).unwrap(), &[]).unwrap();
+    let rs = r.rows().unwrap();
+    let at = |c: &str| rs.columns.iter().position(|x| x == c).unwrap();
+    let cols = ["schedule", "next", "last", "held"].map(at);
+    (rs.rows.iter())
+        .map(|r| {
+            let name = match &r.values[at("name")] {
+                Value::Text(t) => t.clone(),
+                other => panic!("{other:?}"),
+            };
+            (name, cols.iter().map(|&i| r.values[i].clone()).collect())
+        })
+        .collect()
+}
+
+fn object(pairs: &[(&str, Value)]) -> Value {
+    Value::object(
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// What the listings show of a scheduled statement, to the server's token:
+/// `statements` and `describe statement` its schedule as its text writes
+/// it, its next slot -- one held back shown due, overdue --, its last mark,
+/// pending or landed, its outcome, status, reason and what it passed over,
+/// and the slot its scheduler holds back, its status and since when; four
+/// `null`s for a statement no clock runs. `GET /_schema` describes each
+/// after the collections, in both its forms, each read back by the plan as
+/// a plan of nothing. A token held to a policy is shown none of it.
+#[test]
+fn the_listings_show_a_schedule_its_next_slot_its_last_run_and_a_held_slot() {
+    let guard = "create statement guard every 15m in 'Europe/Berlin' comment 'Looks first' \
+                 scans as begin get holds where state = 'nothing' require 1 else 'no hold to \
+                 look at'; del holds where state = 'x' end";
+    let reset = "create statement reset every 15m as set holds {state: 'reset'} where state = \
+                 'held'";
+    let db = defined_at(
+        t0(),
+        &[
+            HOLDS,
+            LAPSE,
+            guard,
+            reset,
+            "create statement count_holds() as get holds count",
+        ],
+    );
+    put(&db, "put holds {state: 'held'}");
+    let ts = Value::Timestamp;
+    let text = |t: &str| Value::Text(t.into());
+    let nulls = vec![Value::Null; 4];
+    let before = shown(&db, t0() + 5 * MINUTE, "statements");
+    assert_eq!(
+        before,
+        vec![
+            ("count_holds".into(), nulls.clone()),
+            (
+                "guard".into(),
+                vec![
+                    text("every 15m in 'Europe/Berlin'"),
+                    ts(t0() + 15 * MINUTE),
+                    Value::Null,
+                    Value::Null
+                ]
+            ),
+            (
+                "lapse".into(),
+                vec![
+                    text("every 15m"),
+                    ts(t0() + 15 * MINUTE),
+                    Value::Null,
+                    Value::Null
+                ]
+            ),
+            (
+                "reset".into(),
+                vec![
+                    text("every 15m"),
+                    ts(t0() + 15 * MINUTE),
+                    Value::Null,
+                    Value::Null
+                ]
+            ),
+        ]
+    );
+    // A run that found nothing, a guard's refusal, and the quota holding
+    // a run that grows.
+    db.write()
+        .unwrap()
+        .set_limit(Some(Arc::new(|_: &Database, l: &Landing| match l.grows {
+            true => Err("rows: at most 1".into()),
+            false => Ok(()),
+        })));
+    let look = schedule::pass(&db, t0() + 16 * MINUTE);
+    assert_eq!(look.runs.len(), 3, "{look:?}");
+    let ran = |slot: i64| {
+        object(&[
+            ("outcome", text("ran")),
+            ("reason", Value::Null),
+            ("skipped", Value::Int(0)),
+            ("slot", ts(slot)),
+            ("status", Value::Null),
+        ])
+    };
+    let refused = object(&[
+        ("outcome", text("refused")),
+        ("reason", text("no hold to look at")),
+        ("skipped", Value::Int(0)),
+        ("slot", ts(t0() + 15 * MINUTE)),
+        ("status", Value::Int(412)),
+    ]);
+    let held = object(&[
+        ("since", ts(t0() + 16 * MINUTE)),
+        ("slot", ts(t0() + 15 * MINUTE)),
+        ("status", Value::Int(507)),
+    ]);
+    let after = shown(&db, t0() + 17 * MINUTE, "statements");
+    let next = ts(t0() + 30 * MINUTE);
+    assert_eq!(
+        after[1..],
+        [
+            (
+                "guard".into(),
+                vec![
+                    text("every 15m in 'Europe/Berlin'"),
+                    next.clone(),
+                    refused.clone(),
+                    Value::Null
+                ]
+            ),
+            (
+                "lapse".into(),
+                vec![
+                    text("every 15m"),
+                    next.clone(),
+                    ran(t0() + 15 * MINUTE),
+                    Value::Null
+                ]
+            ),
+            (
+                "reset".into(),
+                vec![
+                    text("every 15m"),
+                    ts(t0() + 15 * MINUTE),
+                    Value::Null,
+                    held.clone()
+                ]
+            ),
+        ]
+    );
+    assert_eq!(after[0], ("count_holds".into(), nulls));
+    let described = shown(&db, t0() + 17 * MINUTE, "describe statement reset");
+    assert_eq!(described, after[3..]);
+
+    // Over HTTP, to the server's token: the listing, and the schema in
+    // both its forms, each read back as a plan of nothing.
+    let node = serve(&db);
+    let (status, body) = node.query(ROOT, "statements");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""schedule":"every 15m","next":"2026-05-04T12:15:00Z","last":null,"held":{"since":"2026-05-04T12:16:00Z","slot":"2026-05-04T12:15:00Z","status":507}"#),
+        "{body}"
+    );
+    let (status, described) = node.send(ROOT, "/_schema", "", "");
+    assert_eq!(status, 200, "{described}");
+    let doc = fennec_core::json::parse_json(&described).unwrap();
+    let member = |o: &Value, k: &str| match o {
+        Value::Object(m) => {
+            (m.iter().find(|(n, _)| n == k)).map_or(Value::Null, |(_, v)| v.clone())
+        }
+        other => panic!("{other:?}"),
+    };
+    let schedules = member(&doc, "schedules");
+    let Value::List(schedules) = &schedules else {
+        panic!("{described}")
+    };
+    let names: Vec<_> = schedules.iter().map(|s| member(s, "name")).collect();
+    assert_eq!(names, [text("guard"), text("lapse"), text("reset")]);
+    let (g, r) = (&schedules[0], &schedules[2]);
+    assert_eq!(member(g, "schedule"), text("every 15m in 'Europe/Berlin'"));
+    assert_eq!(member(g, "text"), text(guard));
+    assert_eq!(member(g, "next"), text("2026-05-04T12:30:00Z"));
+    assert_eq!(
+        member(&member(g, "last"), "reason"),
+        text("no hold to look at")
+    );
+    assert_eq!(member(r, "last"), Value::Null);
+    assert_eq!(
+        member(r, "held"),
+        object(&[
+            ("since", text("2026-05-04T12:16:00Z")),
+            ("slot", text("2026-05-04T12:15:00Z")),
+            ("status", Value::Int(507)),
+        ])
+    );
+    let (status, fennecql) = node.send(ROOT, "/_schema?as=fennecql", "", "");
+    assert_eq!(status, 200, "{fennecql}");
+    assert!(
+        fennecql.contains("every 15m in 'Europe/Berlin'"),
+        "{fennecql}"
+    );
+    for plan_of in [described.clone(), fennecql] {
+        let (status, body) = node.send(ROOT, "/_schema/plan", &plan_of, "");
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains(r#""statements":[]"#) && body.contains(r#""refusals":[]"#),
+            "{body}"
+        );
+    }
+    // A description claiming another schedule than its text runs.
+    let claimed = described.replacen(r#""schedule":"every 15m","#, r#""schedule":"every 1h","#, 1);
+    let (status, body) = node.send(ROOT, "/_schema/plan", &claimed, "");
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("listed with the schedule `every 1h`"),
+        "{body}"
+    );
+
+    // A token held to a policy: no listing, and a schema naming none.
+    let scoped = node.scoped();
+    let (status, body) = node.query(&scoped, "statements");
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = node.query(&scoped, "describe statement reset");
+    assert_eq!(status, 404, "{body}");
+    for target in ["/_schema", "/_schema?as=fennecql"] {
+        let (status, body) = node.send(&scoped, target, "", "");
+        assert_eq!(status, 200, "{body}");
+        for word in ["schedules", "reset", "every 15m", "held", "next"] {
+            assert!(!body.contains(word), "{target}: {word} in {body}");
+        }
+    }
+
+    // The quota lifted: the slot held runs, and is held no more.
+    db.write().unwrap().set_limit(None);
+    let look = schedule::pass(&db, t0() + 18 * MINUTE);
+    assert_eq!(look.runs.len(), 1, "{look:?}");
+    let last = shown(&db, t0() + 18 * MINUTE, "describe statement reset");
+    assert_eq!(
+        last[0].1,
+        vec![
+            text("every 15m"),
+            next,
+            ran(t0() + 15 * MINUTE),
+            Value::Null
+        ]
+    );
+}
+
 /// A held claim is answered by a run's write, its block naming `jobs`; a
 /// run that wrote nothing lands nothing and wakes nothing, and a client's
 /// write carrying its mark names its own collection alone -- never every

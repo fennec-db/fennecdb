@@ -272,8 +272,41 @@ pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnO
             text.truncate(end);
             text.push_str("...");
         }
-        slow_line(micros, wrote, failed, tenant, &text, version);
+        slow_line(micros, wrote, failed, tenant, &text, version, None);
     }
+}
+
+/// A scheduled statement's run, which held the write lock for `took`,
+/// logged with the slow statements where that is past `--slow-ms` and
+/// counted among them (`docs/design/named-statements.md`, *Watching
+/// schedules*): its `statement` the shape `/_stats/statements` counts it
+/// as, `schedule <name>`, and its `scheduled` the statement, the version
+/// that ran, the slot and its rows, `["purge",[3,41],"2026-11-03T03:00:00Z",12]`.
+/// Its time is the run's under the lock, never how late it ran, which the
+/// lateness histogram holds. A run is no request: it counts in no
+/// statement's family but the slow one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scheduled(
+    took: Duration,
+    failed: bool,
+    tenant: Option<&str>,
+    name: &str,
+    version: (u64, u64),
+    slot: i64,
+    rows: u64,
+) {
+    let micros = took.as_micros().min(u64::MAX as u128) as u64;
+    if micros < SLOW_MICROS.load(Ordering::Relaxed) {
+        return;
+    }
+    SHARDS[shard()].slow.fetch_add(1, Ordering::Relaxed);
+    let mut run = String::from("[");
+    fennec_core::json::escape_into(&mut run, name);
+    let _ = write!(run, ",[{},{}],", version.0, version.1);
+    fennec_core::json::escape_into(&mut run, &fennec_core::time::format_iso(slot));
+    let _ = write!(run, ",{rows}]");
+    let shape = format!("schedule {name}");
+    slow_line(micros, true, failed, tenant, &shape, None, Some(&run));
 }
 
 /// What the statements bound to the writes of the request this thread
@@ -339,6 +372,7 @@ fn slow_line(
     tenant: Option<&str>,
     text: &str,
     version: Option<(u64, u64)>,
+    scheduled: Option<&str>,
 ) {
     use crate::audit::{Field, Level};
     // What the statements bound to the request's writes did, held for this
@@ -355,6 +389,9 @@ fn slow_line(
     fields.push(("statement", Field::Text(text)));
     if let Some((history, change)) = version {
         fields.push(("version", Field::Pair(history, change)));
+    }
+    if let Some(s) = scheduled {
+        fields.push(("scheduled", Field::Json(s)));
     }
     if let Some(b) = &bound {
         fields.push(("bound", Field::Json(b)));
@@ -564,6 +601,7 @@ fn render(source: Source) -> String {
         "Held writes run again after a look found a row for them.",
     );
     out.sample("fennec_held_runs_total", &[], held.runs);
+    crate::schedule::metrics(&mut out);
     crate::trace::metrics(&mut out);
     crate::mcp::metrics(&mut out);
 
