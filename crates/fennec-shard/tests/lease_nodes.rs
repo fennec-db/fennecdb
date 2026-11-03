@@ -35,6 +35,11 @@ pub struct Node {
     pub proxy: Proxy,
     /// Whether it serves HTTPS alone, with `fennec-http/tests/certs`.
     pub tls: bool,
+    /// Its registry, and the scheduler of its tenants' scheduled statements
+    /// -- attached as `fennec-server --dir` attaches one, no thread running
+    /// it: a test drives its slots by the time it names.
+    pub tenants: Arc<Tenants>,
+    pub schedule: Arc<fennec_http::schedule::Node>,
 }
 
 impl Drop for Node {
@@ -77,7 +82,11 @@ pub fn node_with(tag: &str, lease: bool, tls: bool) -> Node {
         }),
         ..fennec_http::Config::default()
     };
-    let server = fennec_http::Server::with_tenants(Arc::new(tenants), cfg);
+    let tenants = Arc::new(tenants);
+    fennec_ql::install();
+    let schedule = fennec_http::schedule::Node::attach(&tenants, true);
+    schedule.learn();
+    let server = fennec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
     let listener = server.bind().unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -89,6 +98,8 @@ pub fn node_with(tag: &str, lease: bool, tls: bool) -> Node {
         dir,
         proxy: Proxy::to(&addr.to_string()),
         tls,
+        tenants,
+        schedule,
     }
 }
 

@@ -1466,6 +1466,14 @@ fn serve_dir(
     // every restart its unit made.
     let listener = std::net::TcpListener::bind(&http_cfg.addr)
         .unwrap_or_else(|e| fail(&format!("could not open the HTTP endpoint: {e}")));
+    // The tenants' scheduled statements run from one thread, a tenant at a
+    // time (`fennec_http::schedule::Node`), set on the registry before any
+    // tenant opens -- each that opens is told this node runs its schedules
+    // -- and its thread started below, past the listener, since a first
+    // look may run a missed slot. A node taking no writes runs none: each
+    // tenant says how many it holds unrun as it opens.
+    let scheduler = (!http_cfg.read_only)
+        .then(|| fennec_http::schedule::Node::attach(&tenants, sync == SyncPolicy::Always));
     // A replica's tenants have to be open to follow: nothing else touches
     // them there, and a follower that is not running is a replica falling
     // behind. Opening one starts its follower -- every tenant on a standby,
@@ -1493,6 +1501,11 @@ fn serve_dir(
         if stdin_close {
             durability::exit_on_stdin_close()
                 .map_err(|e| format!("could not start the stdin thread: {e}"))?;
+        }
+        // After `with_tenants` gave each tenant its `--call-max-rows`, and
+        // before the endpoint takes a request.
+        if let Some(s) = &scheduler {
+            s.start(durability::stop_with)?;
         }
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();

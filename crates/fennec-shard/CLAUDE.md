@@ -35,6 +35,20 @@ repairs a failed attach under the claim;
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
 slot; no id, never.
 
+**[A tenant node runs its tenants' schedules from one thread, by name, a
+run no use of a tenant.](../../docs/design/named-statements.md#where-a-run-happens-and-once)**
+`schedule::Node` keeps each scheduled tenant by its name, never an `Arc`,
+and opens it through the registry as its slot comes (`Tenants::for_run`),
+closing it after unless a request used it: a run never counts as a use nor
+evicts a tenant a client used. `schedules.hint` never misses a tenant
+holding a schedule: it is named, synced, before any scheduled definition
+or installed file is written (`Node::note`), its look queued only once the
+file is in place (`Node::installed`), and it leaves only once its last drop
+is durable or as a frozen move's source leaves the node (`Node::left`). One
+tenant's look panicking holds that tenant back, never the node. A new way a
+tenant opens, closes, comes onto or leaves a node owes the scheduler's hooks
+(`opened`, `closed`, `installed`, `forget`).
+
 ### Regions and the global entry
 
 **[A node is in a region and a zone, and a tenant in its node's region.](../../docs/design/regions.md#regions-and-zones)**

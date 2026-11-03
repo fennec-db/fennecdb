@@ -165,9 +165,12 @@ a statement record it does not read and refuses it, never taking a schedule
 for a callable statement nobody runs. Its notes name `every` and `at` as
 the clauses that move the format, under the same upgrade heading and in the
 same order: every archiver, router and node upgraded before any primary
-defines a schedule. A tenant node takes none in that release (a scheduler
-runs a file's alone until F3's slice 4), so a tenant's schema declaring one
-is refused, nothing placed. Where the order is not kept, each older binary
+defines a schedule. A tenant node runs its tenants' from F3's slice 4 on,
+keeping `schedules.hint` beside their files; a node of the release before
+it takes none, so a tenant's schema declaring one placed on it is
+refused, nothing placed, and a move onto it is refused at the install, the
+tenant left on its source: every node upgraded before a tenant defines one
+there. Where the order is not kept, each older binary
 stops in words ("a statement record this version does not read"): a
 replica stops following at the record and connects again, taking no write
 past it; an archiver keeps the stream and takes no image of its own, and

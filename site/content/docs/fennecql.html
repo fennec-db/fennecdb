@@ -664,9 +664,12 @@ replicas sent it, before the next run. A run examines at most
 <code>--call-max-rows</code> rows, each run a fresh budget, and is no one's
 request: no rate is charged for it.</p>
 
-<p>A file's server runs them, from one thread that sleeps while no
-schedule is held: a <code>fennec-server &lt;file&gt;</code> primary, or a
-replica from its promotion, which runs a slot then due at once. Should that
+<p>A server that may write runs them, from one thread that sleeps while
+no schedule is held: a <code>fennec-server &lt;file&gt;</code> primary, a
+replica from its promotion, which runs a slot then due at once, and a
+tenant node, which opens a closed tenant as its slot comes and closes it
+after its run (<a href="/docs/sharding-tenants#scheduled-statements">Scheduled
+statements on a node</a>). Should that
 thread fail outside a run, the server stops through its usual shutdown
 rather than answer with its schedules unrun. A replica runs none — its
 primary's runs come to it with their marks — nor does a server under
@@ -674,12 +677,7 @@ primary's runs come to it with their marks — nor does a server under
 start and again as its primary's reach it, nor one whose storage failed. The shell, the native library and the
 browser module run none and take no definition, since nothing of theirs
 would run it; a file they hold keeps its schedules, and the server that next
-writes it runs each slot due, once, the latest. A tenant node takes no
-definition yet (<a href="/docs/sharding-tenants">Tenants</a>), nor the
-image of a file holding one — an install or a move is refused, naming it —
-and says how many a tenant holds unrun as it opens one that came another
-way, a <code>fennec restore</code> into its directory: its runs come with
-the scheduler of a later release.</p>
+writes it runs each slot due, once, the latest.</p>
 
 <p>The server's token defines one, as it makes any schema change; the
 <a href="/docs/monitoring#audit">audit log</a>'s <code>schema</code> line

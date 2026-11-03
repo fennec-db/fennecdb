@@ -39,7 +39,6 @@ use crate::tz::Zone;
 use crate::value::Value;
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::sync::Arc;
 
 thread_local! {
     /// The slot `slot()` reads on this thread: the run's, or the latest at
@@ -119,12 +118,37 @@ pub struct Due {
 impl Database {
     /// Lets a scheduled statement be defined, which every way in refuses
     /// where no scheduler runs the database's (`named::SCHEDULED_UNRUN`):
-    /// what a file's server sets as its scheduler starts watching it
-    /// (`fennec_http::schedule::watch`), never a tenant node's (F3's slice
-    /// 4), the shell or the native library, which run none. A test sets it
-    /// to hold a schedule's record and drive its runs.
+    /// what a server sets as its scheduler starts watching it -- a file's
+    /// (`fennec_http::schedule::watch`) or a tenant's as it opens on a node
+    /// (`fennec_http::schedule::Node`) -- never the shell or the native
+    /// library, which run none. A test sets it to hold a schedule's record
+    /// and drive its runs.
     pub fn allow_schedules(&mut self) {
         self.scheduling = true;
+    }
+
+    /// Hands back the marks of runs that wrote nothing which a tenant node
+    /// kept as the file closed ([`Self::pending`]), read off it while it
+    /// stood where it stands now -- its change and its history the same:
+    /// each counts as it did, landing with the next block, and one of a
+    /// definition replaced since counts for nothing. A following database
+    /// runs and marks none, and takes none back; nor does one whose slot is
+    /// not past its name's landed mark. A pending mark outranks the landed
+    /// one by order ([`Self::due`]), so one handed back older than a mark
+    /// landed since would run again the slots between them.
+    pub fn keep_pending(&mut self, marks: Vec<(String, SlotMark)>) {
+        if marks.is_empty() || self.history.following {
+            return;
+        }
+        for (name, m) in marks {
+            if self.last_mark(&name).is_some_and(|l| l.at >= m.at) {
+                continue;
+            }
+            let pending = self.pending.get_or_insert_with(Default::default);
+            if !pending.iter().any(|(n, _)| *n == name) {
+                pending.push((name, m));
+            }
+        }
     }
 
     /// Calls `tell` with the number of scheduled statements the table
@@ -132,9 +156,24 @@ impl Database {
     /// adopted, a replica's apply, a copy promoted -- under the write lock:
     /// what wakes a scheduler that sleeps with no slot to wait for, never a
     /// timer, and what lets a server running none say it holds one unrun.
-    /// Asked at a schema change and a promotion alone (`rebind`, `fork`).
-    pub fn on_schedules(&mut self, tell: Arc<dyn Fn(usize) + Send + Sync>) {
+    /// Asked at a schema change and a promotion alone (`rebind`, `fork`),
+    /// its answer unread. And with `None` before a scheduled definition
+    /// writes anything, refused with what it answers: a tenant node names
+    /// the tenant in its hint, synced, so the block bringing a schedule
+    /// never lands where the node's next start would not look for it --
+    /// asked under the write lock, as the definition is. One hook for both:
+    /// a node's open makes one, not two.
+    pub fn on_schedules(&mut self, tell: super::SchedulesHook) {
         self.on_schedules = Some(tell);
+    }
+
+    /// [`Self::on_schedules`]' hook asked with `None`, by a scheduled
+    /// definition before its record is written.
+    pub(super) fn entering(&self) -> Result<()> {
+        match &self.on_schedules {
+            Some(tell) => tell(None),
+            None => Ok(()),
+        }
     }
 
     /// Whether the table holds a scheduled statement.
@@ -314,7 +353,8 @@ impl Database {
     }
 
     /// The marks of runs that wrote nothing, by statement, not landed yet:
-    /// a tenant node keeps a closing tenant's (F3's slice 4).
+    /// a tenant node keeps a closing tenant's, and hands them back as it
+    /// opens again ([`Self::keep_pending`]).
     pub fn pending(&self) -> &[(String, SlotMark)] {
         self.pending.as_deref().map_or(&[], |p| &p[..])
     }

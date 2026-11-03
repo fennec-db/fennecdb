@@ -28,6 +28,11 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
   <li><b>Archived as a whole</b> by <code>fennec archive --tenants</code>,
     one connection for every tenant (<a href="sharding-tenants.html#archive">Archiving a
     node</a>).</li>
+  <li><b>Runs its tenants' scheduled statements</b>, opening a closed tenant
+    as its slot comes and closing it after its run, the tenants holding one
+    named in <code>schedules.hint</code> beside their files
+    (<a href="sharding-tenants.html#scheduled-statements">Scheduled
+    statements</a>).</li>
 </ul>
 
 <details class="deep"><summary>How a --dir node opens, closes and shuts down tenants, and its /_admin/ routes</summary>
@@ -54,8 +59,16 @@ while its reads go on.</p>
     read because other tenants are busy would turn a memory warning into an
     outage. A write that grows a tenant is refused once that tenant alone is
     past the ceiling, over either listener.</li>
+  <li><b>Opened for a scheduled run, no use of it.</b> A tenant holding a
+    scheduled statement is opened as its slot comes, counted as no client's
+    use: a client's open closes it first under <code>--max-memory</code>,
+    its own open closes no tenant a client used, and it is closed once its
+    run is done unless a request opened it meanwhile. A closed tenant the
+    node's lease does not name is not opened for one, and a tenant installed
+    or moved in is first looked at a minute after its install.</li>
   <li><b>Shutdown</b> syncs every open tenant and checkpoints the ones with a
-    graph, holding their write locks until exit.</li>
+    graph, holding their write locks until exit; the marks of scheduled
+    runs that wrote nothing are kept in <code>schedules.hint</code>.</li>
 </ul>
 
 <p>The router drives the node through <code>/_admin/</code>, which answers only

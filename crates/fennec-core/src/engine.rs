@@ -3975,10 +3975,17 @@ pub struct Database {
     /// What is told how many schedules the table holds -- a definition, an
     /// image adopted, a replica's apply, a promotion -- the scheduler it
     /// wakes or the server's word on those it runs none of, asked at a
-    /// schema change and a promotion alone ([`Self::on_schedules`]).
+    /// schema change and a promotion alone; and asked before a scheduled
+    /// definition writes anything ([`Self::on_schedules`]).
     #[cfg(feature = "statements")]
-    on_schedules: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    on_schedules: Option<SchedulesHook>,
 }
+
+/// What a scheduler watching a database is told of its schedules
+/// ([`Database::on_schedules`]): `Some(n)` the schedules its table holds,
+/// `None` before a scheduled definition writes anything.
+#[cfg(feature = "statements")]
+pub type SchedulesHook = Arc<dyn Fn(Option<usize>) -> Result<()> + Send + Sync>;
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
 /// once this many of its nodes changed since it last reached the file --

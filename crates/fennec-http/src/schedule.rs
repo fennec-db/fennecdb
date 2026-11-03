@@ -1,4 +1,5 @@
-//! Runs the scheduled statements of a file's server
+//! Runs the scheduled statements of a file's server, and of a tenant
+//! node's tenants ([`Node`])
 //! (`docs/design/named-statements.md`, *Scheduled statements (F3)*).
 //!
 //! **One thread a process, asleep with no schedule.** [`watch`] gives a
@@ -15,7 +16,8 @@
 //! own catch -- a look, a log line, a sync -- stops the server through the
 //! one shutdown, as anything beside the database does (`stop_with`): a
 //! server answering while its schedules never run is the gap F3 must never
-//! leave.
+//! leave. A node's scheduler holds a panic in one tenant's look to that
+//! tenant ([`Node`]): the one shutdown stopped every other with it.
 //!
 //! **A look** ([`pass`], which a test drives with the time it names) asks
 //! [`Database::due`] of each database it is due for, and runs each due
@@ -44,6 +46,12 @@
 //! define one is the server's token alone, and only that token calls one
 //! by hand, which marks nothing (`Database::callee`). Each run's lines
 //! carry an id of its own ([`run_id`]), as a request's carry its.
+
+pub mod hint;
+mod node;
+
+pub(crate) use node::closing;
+pub use node::Node;
 
 use crate::held;
 use fennec_core::engine::SlotMark;
@@ -125,6 +133,9 @@ pub struct Run {
     pub outcome: Outcome,
     /// The run's own id, at the end of every line it wrote ([`run_id`]).
     pub id: String,
+    /// When it began, by the boot clock: how late it ran behind the runs
+    /// before it, read by a test or a bench.
+    pub started: std::time::Instant,
 }
 
 /// A mark, or a `since`, a look found ahead of the clock.
@@ -221,7 +232,7 @@ struct Watched {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     /// The slots the state holds back, by statement.
     held: Vec<(String, Held)>,
     /// The marks ahead of the clock told, by statement: once each.
@@ -287,9 +298,10 @@ pub fn watch(
         g.allow_schedules();
         let hook = Arc::downgrade(&w);
         g.on_schedules(Arc::new(move |n| {
-            if let (true, Some(w)) = (n > 0, hook.upgrade()) {
+            if let (Some(1..), Some(w)) = (n, hook.upgrade()) {
                 wake(&w);
             }
+            Ok(())
         }));
         g.holds_schedules()
     };
@@ -309,7 +321,8 @@ fn wake(w: &Watched) {
 }
 
 /// Says how many scheduled statements `db` holds that nothing here runs
-/// -- `--http-read-only`, a tenant node -- `why` naming why: at once, and
+/// -- `--http-read-only`, a file's server's or a node's -- `why` naming
+/// why: at once, and
 /// again wherever the table comes to hold another (a replica's apply, an
 /// image adopted), so a schedule is never held unrun without a word. Its
 /// file keeps their slots due, to whoever runs them next.
@@ -323,9 +336,10 @@ pub fn unrun(what: &str, why: &'static str, db: &mut Database) {
     let told = std::sync::atomic::AtomicUsize::new(held);
     let what = what.to_string();
     db.on_schedules(Arc::new(move |n| {
-        if told.swap(n, Ordering::Relaxed) != n {
+        if let Some(n) = n.filter(|&n| told.swap(n, Ordering::Relaxed) != n) {
             tell_unrun(&what, why, n);
         }
+        Ok(())
     }));
 }
 
@@ -442,24 +456,62 @@ pub fn run_id() -> String {
     crate::request_id::current()
 }
 
+/// What a look runs against: a file's database, or a tenant's on a node
+/// ([`Node`]).
+pub(crate) struct Ctx<'a> {
+    /// What names it in the log.
+    pub what: &'a str,
+    /// `--sync always`: a run is fsynced, and waits for the streams keeping
+    /// up, before the next.
+    pub durable: bool,
+    /// Made by the scheduler's thread, the clock read again as each run
+    /// takes the write lock; a test's look runs at the time it names.
+    pub live: bool,
+}
+
 /// One look, at `now`: `live` where the scheduler's thread makes it, the
 /// clock read again as each run takes the write lock; what it did told to
 /// `out` where a test asks ([`pass`]), and built for no one otherwise.
-fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, mut out: Option<&mut Look>) {
+fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, out: Option<&mut Look>) {
     w.looks.fetch_add(1, Ordering::Relaxed);
     #[cfg(test)]
     if tests::PANIC.swap(false, Ordering::SeqCst) {
         panic!("a look's panic");
     }
     let mut st = lock(&w.state);
-    let (dues, writes, seq, limit) = {
+    let ctx = Ctx {
+        what: &w.what,
+        durable: w.durable,
+        live,
+    };
+    let (next, _, _) = look_at(&ctx, db, now, &mut st, usize::MAX, out);
+    w.next.store(next, Ordering::Release);
+}
+
+/// A look at `db` at `now`, running at most `most` slots: when to look
+/// again -- open, and closed after the look -- and whether a due slot was
+/// left for the next look: a tenant's look runs one, so ten thousand
+/// tenants due at once each run once before any runs twice ([`Node`]). A
+/// closed tenant's held slot waits its backoff out: nothing moves its
+/// counter or its limit, and opened each minute to find so, a tenant at its
+/// quota was ten thousand opens a minute on a node of them.
+pub(crate) fn look_at(
+    w: &Ctx<'_>,
+    db: &RwLock<Database>,
+    now: i64,
+    st: &mut State,
+    most: usize,
+    mut out: Option<&mut Look>,
+) -> (i64, i64, bool) {
+    let (dues, writes, following, seq, limit) = {
         let g = held::read(db);
         // A following database's writes are its primary's, the runs among
         // them; a failed one takes none until it is opened again; past a
         // lapsed lease the slot is the tenant's next primary's. Each slot
         // stays due, to whoever writes the file next.
-        let writes = !g.history().following && g.failure().is_none() && g.fenced().is_ok();
-        (g.due(now), writes, g.change_seq(), limit_of(&g))
+        let following = g.history().following;
+        let writes = !following && g.failure().is_none() && g.fenced().is_ok();
+        (g.due(now), writes, following, g.change_seq(), limit_of(&g))
     };
     // A mark ahead of the clock: counted and told once a statement and
     // mark.
@@ -489,6 +541,7 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, mut out: Optio
         dues.iter()
             .any(|d| d.name == *n && d.run.is_some_and(|r| r.0 >= h.slot))
     });
+    let (mut ran, mut more) = (0, false);
     if writes {
         for d in dues.iter().filter(|d| d.run.is_some()) {
             // A slot held back and not due a try takes no write lock.
@@ -498,39 +551,57 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, mut out: Optio
             if st.held.iter().any(waits) {
                 continue;
             }
-            run(w, db, &d.name, now, live, &mut st, out.as_deref_mut());
+            if ran == most {
+                more = true;
+                break;
+            }
+            run(w, db, &d.name, now, st, out.as_deref_mut());
+            ran += 1;
         }
     }
     let mut next = dues.iter().filter_map(|d| d.next).min().unwrap_or(NONE);
     // A slot held back, or one due where this copy may not run it -- a
-    // replica promoted, a lease granted again -- is looked at again within
-    // a minute.
-    if !st.held.is_empty() || (!writes && dues.iter().any(|d| d.run.is_some())) {
+    // lease granted again, a storage failure's file opened again -- is
+    // looked at again within a minute. A following copy waits for nothing:
+    // its promotion tells the scheduler (`Database::fork`), and a standby
+    // node's ten thousand copies looked at each minute were ten thousand
+    // looks for nothing.
+    let blocked = !writes && !following && dues.iter().any(|d| d.run.is_some());
+    if blocked {
         next = next.min(now.saturating_add(MINUTE));
     }
-    w.next.store(next, Ordering::Release);
+    let mut closed = next;
+    for (_, h) in &st.held {
+        next = next.min(now.saturating_add(MINUTE));
+        closed = closed.min(h.tried.saturating_add(h.backoff));
+    }
+    if following {
+        (next, closed) = (NONE, NONE);
+    }
+    (next, closed, more)
 }
 
 /// `name`'s due slot run, with an id of its own for the lines it writes,
 /// and told to `out` where a test asks.
 fn run(
-    w: &Watched,
+    w: &Ctx<'_>,
     db: &RwLock<Database>,
     name: &str,
     now: i64,
-    live: bool,
     st: &mut State,
     out: Option<&mut Look>,
 ) {
     crate::request_id::begin(None);
-    let r = run_slot(w, db, name, now, live, st);
-    if let (Some((slot, skipped, outcome)), Some(out)) = (r, out) {
+    let started = out.is_some().then(std::time::Instant::now);
+    let r = run_slot(w, db, name, now, st);
+    if let (Some((slot, skipped, outcome)), Some(out), Some(started)) = (r, out, started) {
         out.runs.push(Run {
             name: name.to_string(),
             slot,
             skipped,
             outcome,
             id: run_id(),
+            started,
         });
     }
     crate::request_id::end();
@@ -544,20 +615,19 @@ fn limit_of(db: &Database) -> usize {
 /// The slot run, what it passed over and what came of it; `None` where
 /// none ran.
 fn run_slot(
-    w: &Watched,
+    w: &Ctx<'_>,
     db: &RwLock<Database>,
     name: &str,
     now: i64,
-    live: bool,
     st: &mut State,
 ) -> Option<(i64, u64, Outcome)> {
     let iso = fennec_core::time::format_iso;
-    let what = &w.what;
+    let what = w.what;
     let mut g = held::write(db);
     // The run's start, read once the lock is held: a run behind fifteen
     // others, their fsyncs and their streams, reads the time it runs at --
     // its `now()` and `@ttl`'s `alive` -- never the look's.
-    let now = match live {
+    let now = match w.live {
         true => now.max(now_ms()),
         false => now,
     };
@@ -738,7 +808,7 @@ fn state_refused(db: &Database, e: &Error) -> bool {
     }
 }
 
-fn tell_ahead(w: &Watched, name: &str, mark: i64, now: i64, waits: bool) {
+fn tell_ahead(w: &Ctx<'_>, name: &str, mark: i64, now: i64, waits: bool) {
     let iso = fennec_core::time::format_iso;
     count(|c| &c.mark_ahead, 1);
     let then = match waits {
@@ -751,7 +821,7 @@ fn tell_ahead(w: &Watched, name: &str, mark: i64, now: i64, waits: bool) {
         iso(mark),
         iso(now)
     );
-    crate::audit::clock(&w.what, name, mark, now, waits);
+    crate::audit::clock(w.what, name, mark, now, waits);
 }
 
 #[cfg(test)]
