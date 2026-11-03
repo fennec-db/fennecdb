@@ -140,7 +140,11 @@ tool, its answer held to the bounds before a write's block lands
 once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
 `_idempotency` row are one block, the key the subject's for a scoped token
 and the key with another request 422; a failed write or a `compact` keeps
-none.
+none. A replay answers only once the first try's record is as durable and
+sent as its answer was to be: under `--sync always` every path that finds
+a key runs `Database::durability` after its lock (`idempotent::replay`),
+and a failed fsync is its answer, never the kept success; after a storage
+error a replay is the refusal under either `--sync`, its outcome unknown.
 
 **[Refusals and schema changes are logged; a refusal
 waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token

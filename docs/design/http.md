@@ -246,6 +246,115 @@ A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
 
+**A replay answers only once the first try's record is as durable, and as
+sent, as its answer was to be** (`idempotent::replay`,
+`Database::durability`). The block lands under the write lock and its
+fsync (`--sync always`), and on a primary its wait for the streams
+(`Feed::wait_sent`), run after the lock -- but the key's row is read from
+the moment the block lands. So a second request with the key -- a
+client's retry, or the router's replay of a cut connection, which
+`replayable` sends again because it is keyed -- arriving between the two
+was answered the kept success at once: a power loss before the fsync, or
+a failover to a standby the block had not been sent, took the write back
+from a client that held it as made and would never send it again. Found
+reviewing the F4 design; every path that finds a key had it -- a REST
+write, `/query` and `/_call/<name>` of a writing statement (`keyed_query`),
+`/batch`, and a call kept by a writing statement since made to read,
+answered under the read lock (`read_call`); a tenant's routes are these
+same paths, and MCP's tools send no key. Now each, finding a kept answer
+under `--sync always`, asks the database for its durability under the
+lock it holds -- the read lock does, as `save_graphs` does: `flush`'s
+first half on `&self`, clearing nothing -- and runs it once the lock is
+let go, as a write's answer does (`await_durable`). It covers everything
+appended, the key's block among it: an fsync that covered it already
+makes it run none (the group commit), and one under way it waits out at
+the disk, held by that fsync; on a primary the `Tee` then waits for every
+stream keeping up to send it, `SENT_WAIT` at most, a lagging one not
+waited for. A failed fsync is its answer -- the first try's 500 -- and an
+error the sink gives as the durability is asked, which the engine on
+`&self` cannot note, goes to `Database::fail` once the lock is let go
+(`storage_failed`), as a durability's does: the writes stop, and the
+fsync is never tried again. Under `--sync <ms>` a first try's answer
+waits for no fsync, and a replay for none; the 422 of a key sent with
+another request says nothing of the write and waits for nothing.
+
+After a storage error a replay is the refusal every write meets, a 500,
+under either `--sync`, asked before anything else
+(`Database::refuse_if_failed`): the row is still in memory, and was handed
+out as a success before, but the write it answers may be among what the
+disk lost -- a failed fsync, or under `--sync <ms>` a failed write of the
+buffer it went out in -- and whether it is, no one here knows; under
+`--sync <ms>` a replay was answered the kept success until the review of
+this change. That 500 says the
+outcome is unknown, as a first try's failed fsync says it and as a
+tenant's write answered after its lease lapsed says it in words
+(`answered_under_lease`, `"outcome": "unknown"`): neither made nor
+refused, the write is there once the file opens again or it is not, and
+the client reads it back then rather than take it as made.
+
+A key an earlier process landed is in the file and may not be on the
+disk, that process having crashed before its fsync: a file sink's
+durability fsyncs what it inherited once, though it covers nothing
+appended, with the file's own fsync and no sync log (`durability.md`,
+*Storage errors*).
+
+The other design was a position: the engine keeping the change through
+which the file is durable (`durable_through`, moved after each fsync, a
+condvar beside it) and the `_idempotency` row the change of its block, a
+replay waiting for the one to pass the other. It needs a field in every
+kept row and a wait on another request's progress -- a first try whose
+thread died between its land and its durability leaves no one to move the
+position, and the replay waits out its bound. Running a durability of its
+own needs neither: the sink's `synced` and the feed's sent marks are the
+positions already, and the replay waits on nothing but the disk and the
+streams. It may fsync writes landed after the key's; a replay is rare and
+the fsync is shared.
+
+`tests/server.rs` holds every path to it on a disk whose fsync the test
+holds (`SlowDisk`): the replay's durability begins and waits, never its
+answer, until the first try's fsync is let go
+(`a_replay_is_answered_once_its_first_tries_fsync_is_done`), and where the
+fsync fails the replay and every send after it are 500, the replay's
+durability failing as the disk's failure sticks, with no fsync of its own
+(`a_replay_of_a_write_whose_fsync_failed_is_no_success`); after
+`Database::fail` a replay is 500 under either `--sync`
+(`a_replay_after_a_storage_error_is_no_success_under_either_sync`); and a
+key a process killed in its durability, before the fsync, left in the file
+-- the test binary run again as that process -- is replayed by a server
+opening the file only once the file's durability ran
+(`a_key_a_killed_process_landed_is_replayed_once_on_disk`), which fsyncs
+what it left (fs.rs's
+`a_servers_first_durability_fsyncs_what_a_killed_process_left`, from
+`open_serving`, no sync log begun). lib.rs's
+`a_replay_waits_for_the_streams_as_its_first_try` holds a replay to a
+stream connected after the first answer, short of the block: it waits its
+`SENT_WAIT` (`waited_out`), and once the stream lags no longer; and
+`a_tenants_replay_waits_for_the_nodes_stream_as_its_first_try` a tenant
+node's to the node's stream of every tenant: not waited for while it is
+held up on another tenant (`Sender::held`), waited for once it keeps up
+short of the block. Each fails with its path's wait taken out.
+
+A write without a key and a keyed first try run no new code in
+fennec-http. Each durability of theirs runs `Disk::sync` with one more
+argument: where its bytes are covered, a test of it (and of `inherited`
+where it is asked); where it fsyncs, a store clearing the flag. A write
+under `--sync <ms>` runs no `Disk::sync` on its path at all.
+Counted in process around the loop alone (`make replay-bench`'s example
+reads `proc_pid_rusage` before and after it; nine runs a side in turns,
+20 000 requests each, loads below 1.5, `MallocNanoZone=0`), a write
+without a key (`put`, `--sync <ms>`) is 22 238 instructions and 4 409
+cycles a request on main, 22 157 and 4 416 here -- each side's runs
+spread over 177 to 249 instructions a request, the pairs' differences
+from -172 to +88, their median -78. A keyed first try is 85 036 against
+84 980 (the median pair -12). A replay of a key already on disk under
+`--sync always` is 44 264 against 45 196, +852 instructions and +199
+cycles a request (+1.9%), 2 696 -> 2 756 ns: asking the sink for its
+durability -- a boxed closure, two `Arc`s, the sink's and the disk's
+mutexes, the trace's span -- to find it covered. The whole process's
+count, which the first run of the timing read +227 instructions a write
+without a key, moves by up to 6 million over 20 000 requests from one run
+of a build to the next: the process's start, its setup and its end.
+
 ## Audit
 
 **Refusals and schema changes are logged; a refusal waits**

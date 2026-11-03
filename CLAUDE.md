@@ -157,7 +157,12 @@ mapped file is replaced only by rename. The fsync runs after the lock
 (`Database::flush`'s `Durability`), a durable write answered only once it
 has; a failed one is never retried (500 under `--sync always`) and goes to
 `Database::fail`. A write the lock still makes is put off while a
-durability holds the disk (`Sink::syncing`).
+durability holds the disk (`Sink::syncing`). A durability asked under the
+read lock clears nothing (`Database::durability`), its caller handing a
+sink's error to `Database::fail` once the lock is let go. A durability
+covers what an earlier process left in the file, a plain `sync` does not
+(`Disk::inherited`): the file's own fsync, no sync log begun, where
+nothing was appended.
 
 ## Area invariants
 
