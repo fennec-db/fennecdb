@@ -279,6 +279,11 @@ waits for it as after the first answer.</p>
   the first try's fsync runs waits for it; one whose fsync failed is
   answered that failure (500), never the first answer. Under
   <code>--sync &lt;ms&gt;</code> neither waits for the disk.</li>
+  <li>After a storage error the server refuses writes until the file is
+  opened again, and a repeat is refused with them (500) under either
+  <code>--sync</code>: the first write may be among what the disk lost, so
+  its outcome is unknown. Read it back once the server has opened the file
+  again rather than take it as made.</li>
   <li>A write that failed keeps no key: sent again, it runs again.</li>
   <li>A key is for one request: the same key with another method, path or
   body is refused (422). A key is 1 to 255 bytes and holds no control
