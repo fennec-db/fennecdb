@@ -1178,8 +1178,10 @@ impl Database {
         // row folds, as they pick a `get`'s page.
         let picks = sel.group.is_empty()
             && (!sel.order.is_empty() || sel.limit.is_some() || !sel.offset.is_zero());
+        // Beside `match` the rows are the ones it scores, which no other
+        // index counts.
         #[cfg(not(target_arch = "wasm32"))]
-        let walked = match picks {
+        let walked = match picks || sel.matcher.is_some() {
             true => None,
             false => self.counted_by_index(c, sel, &mut f, &mut g)?,
         };
@@ -1206,7 +1208,7 @@ impl Database {
                 ids.drain(..sel.offset.at(params).min(ids.len()));
                 ids
             }
-            None => self.matching_ids(&sel.collection, &sel.filter, params)?,
+            None => self.selected_ids(c, sel, &ctx)?,
         };
         f.fold(&mut g, &ids, reg, clock)?;
         // In the browser module `walked` is always `None`.

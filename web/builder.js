@@ -1133,8 +1133,9 @@ export class Query {
     }
     if (aggregate) {
       // Ungrouped, `order`, `limit` and `offset` pick the rows folded; a
-      // lookup hangs off the groups, keyed by a column.
-      const clash = near ? 'near' : match ? 'match' : count && !group ? 'count' : null;
+      // lookup hangs off the groups, keyed by a column. Beside them `match`
+      // is a filter: the rows it finds are folded.
+      const clash = near ? 'near' : count && !group ? 'count' : null;
       if (clash) throw new FennecError(`aggregates cannot be combined with ${clash}`);
       if (!group && this.#s.require) {
         throw new FennecError('require counts the rows a query answers, and an aggregate answers one');
@@ -1507,16 +1508,17 @@ export class Query {
 
   // `count` does not combine with projection, ordering or pagination: they
   // are meaningless over a count, and `near` truncates to its own ceiling.
+  // Beside it `match` is a filter: it counts the rows `match` finds.
   // The engine checks the same thing; failing here never sends the query.
   #assertCountable() {
-    const extra = this.#extraClause() ?? (this.#s.require ? 'require' : null);
+    const extra = this.#extraClause(false, true) ?? (this.#s.require ? 'require' : null);
     if (extra) throw new FennecError(`count cannot be used with \`${extra}\``);
   }
 
-  #extraClause(picks = false) {
+  #extraClause(picks = false, counts = false) {
     const { near, match, rerank, order, limit, offset, project } = this.#s;
     return near ? 'near'
-      : match ? 'match'
+      : match && !counts ? 'match'
       : rerank ? 'rerank'
       : order.length && !picks ? 'order'
       : limit !== undefined && !picks ? 'limit'

@@ -118,6 +118,16 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   // @ts-expect-error -- `match` takes a text field
   db.from('articles').match('year', 'x');
   await db.from('articles').match('body', 'datab', { fuzzy: true, prefix: true }).limit(10).rows();
+  // A ranking's rows carry `_score`; beside `order` `match` is a filter and
+  // they carry none, so it is optional whichever the chain is.
+  const ranked = await db.from('articles').select('title').match('body', 'rust').limit(10).rows();
+  expect<{ title: string; _score?: number }[]>(ranked);
+  const newest = await db.from('articles').select('title').match('body', 'rust').order('year', 'desc').rows();
+  // @ts-expect-error -- no `_score` under `order`
+  expect<number>(newest[0]._score);
+  expect<number>(await db.from('articles').match('body', 'rust').count());
+  const reranked = await db.from('articles').select('title').match('body', 'rust').rerank('embed', [0.1, 0.2]).rows();
+  expect<{ title: string; _score: number }[]>(reranked);
   await db.from('articles').match('body', 'databse', { fuzzy: 1 }).rows();
   // @ts-expect-error -- two edits at most
   db.from('articles').match('body', 'x', { fuzzy: 3 });

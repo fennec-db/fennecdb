@@ -689,6 +689,32 @@ import Testing
         try await db.sends("get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    @Test("docs: matches, newest first") func matchesNewestFirst() async throws {
+        let db = Recording()
+        _ = try await db.from("articles")
+            .match("body", "ownership")
+            .order("year", "desc")
+            .limit(20)
+            .rows()
+        try await db.sends("get articles match body $1 order year desc limit $2", "[\"ownership\", 20]")
+    }
+
+    @Test("docs: matches counted") func matchesCounted() async throws {
+        let db = Recording()
+        _ = try await db.from("articles").match("body", "ownership").count()
+        try await db.sends("get articles match body $1 count", "[\"ownership\"]")
+    }
+
+    @Test("docs: matches counted by topic") func matchesCountedByTopic() async throws {
+        let db = Recording()
+        _ = try await db.from("articles")
+            .select("topic", "count(*)")
+            .match("body", "ownership")
+            .group("topic")
+            .rows()
+        try await db.sends("get articles select topic, count(*) group topic match body $1", "[\"ownership\"]")
+    }
+
     @Test("docs: products matching a misspelt word") func productsMatchingAMisspeltWord() async throws {
         let db = Recording()
         _ = try await db.from("products")

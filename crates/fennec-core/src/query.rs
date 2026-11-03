@@ -2459,6 +2459,17 @@ impl Select {
         Some(out)
     }
 
+    /// Whether `match` ranks the rows: relevance its order, best first, its
+    /// page at most `MAX_MATCH_ROWS`. Beside `order`, `count` or an
+    /// aggregate it ranks none and is a filter -- the rows it scores above
+    /// zero, the statement's own clause deciding the rest as it does for a
+    /// `where` -- since a search page asks "the matches, newest first" and
+    /// "how many matched", and two orders, or a count of a ranking's page,
+    /// answer neither. `fuse` is refused beside all three.
+    pub fn match_ranks(&self) -> bool {
+        self.matcher.is_some() && self.order.is_empty() && !self.count && self.aggregate.is_empty()
+    }
+
     /// `count` does not combine with the other clauses: projection, ordering
     /// and pagination are meaningless over a count, and `near` already cuts
     /// at its own ceiling -- it would answer "how many are there" wrongly.
@@ -2497,11 +2508,6 @@ impl Select {
                     .into(),
             ));
         }
-        if self.matcher.is_some() && !self.order.is_empty() {
-            return Err(Error::Query(
-                "`match` cannot be combined with `order`: match orders results by relevance".into(),
-            ));
-        }
         if self.matcher.as_ref().is_some_and(|m| m.fuzzy > MAX_FUZZY) {
             return Err(Error::Query(FUZZY_RANGE.into()));
         }
@@ -2510,6 +2516,25 @@ impl Select {
         if self.rerank.is_some() && self.matcher.is_none() {
             return Err(Error::Query(
                 "`rerank` needs `match`: it reorders the candidates match found".into(),
+            ));
+        }
+        // Beside `order`, `count` or an aggregate, `match` ranks nothing
+        // ([`Self::match_ranks`]): there are no candidates to reorder, and
+        // the statement's own clause decides the rows. A build without the
+        // text index refuses every `match`, naming it, so these are asked
+        // where one is built.
+        let text = cfg!(feature = "text");
+        if text && self.rerank.is_some() && !self.match_ranks() {
+            return Err(Error::Query(
+                "beside `order`, `count` or an aggregate `match` ranks nothing: leave out `rerank`"
+                    .into(),
+            ));
+        }
+        // Nor is there a score to order by: `_score` is an answer's, a
+        // ranking's, and no field -- named, it was "not found".
+        if text && self.matcher.is_some() && self.order.iter().any(|s| s.field == "_score") {
+            return Err(Error::Query(
+                "`_score` is a ranking's: leave out `order`, and `match` ranks best first".into(),
             ));
         }
         // `lookup` does not combine with the clauses that rank or collapse
@@ -2634,12 +2659,11 @@ impl Select {
         if !self.count {
             return Ok(());
         }
+        // `match` beside it counts the rows it scores above zero.
         let clash = if self.project.is_some() {
             "select"
         } else if self.near.is_some() {
             "near"
-        } else if self.matcher.is_some() {
-            "match"
         } else if !self.order.is_empty() {
             "order"
         } else if self.limit.is_some() {
@@ -2677,6 +2701,8 @@ impl Select {
                 "the terms `match` found: the query needs `match`"
             } else if !self.aggregate.is_empty() {
                 "a row's text; aggregates answer groups"
+            } else if self.count {
+                "a row's text, and `count` answers no row: count without it"
             } else if self.marks.iter().any(|m| m.snippet == Some(0)) {
                 "at least one word: `snippet(<field>, <words>)`"
             } else if self.marks.iter().any(|m| {
@@ -3021,7 +3047,8 @@ impl Select {
     }
 
     /// Aggregates follow `count`'s rules: they collapse rows, so nothing that
-    /// ranks the rows combines with them. Ungrouped, `order`, `limit` and
+    /// ranks the rows combines with them, and `match` is a filter beside
+    /// them ([`Self::match_ranks`]). Ungrouped, `order`, `limit` and
     /// `offset` pick the rows the one row folds -- what the `get` would
     /// answer without the aggregates, `limit 50` its 50 latest; grouped,
     /// the rows are the groups, and those they order and page. A `lookup`
@@ -3030,11 +3057,23 @@ impl Select {
         check_folds(&self.aggregate, &self.group, self.having.as_ref())?;
         if self.group.is_empty() {
             picks_by_rows(&self.aggregate, &self.order)?;
+            // Beside an aggregate `match` is a filter, ranking nothing: a
+            // `limit` with no `order` would fold the first rows by id,
+            // which reads as "the best 50" and is not.
+            if cfg!(feature = "text")
+                && self.matcher.is_some()
+                && self.order.is_empty()
+                && (self.limit.is_some() || !self.offset.is_zero())
+            {
+                return Err(Error::Query(
+                    "beside an aggregate `match` ranks nothing: `limit` and `offset` need `order`"
+                        .into(),
+                ));
+            }
         }
+        // `match` beside it is a filter: the rows it scores above zero.
         let clash = if self.near.is_some() {
             "near"
-        } else if self.matcher.is_some() {
-            "match"
         } else if self.count && self.group.is_empty() {
             "count"
         } else if self.project.is_some() {

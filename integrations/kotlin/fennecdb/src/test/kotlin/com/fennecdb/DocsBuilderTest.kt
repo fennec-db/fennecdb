@@ -818,6 +818,38 @@ class DocsBuilderTest {
         db.sends("get articles match body \$1 rerank embed \$2 candidates 500 limit \$3", "[\"ownership\", [0.9, 0.1, 0], 10]")
     }
 
+    /** docs: matches, newest first */
+    @Test
+    fun matchesNewestFirst() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .match("body", "ownership")
+            .order("year", "desc")
+            .limit(20)
+            .rows()
+        db.sends("get articles match body \$1 order year desc limit \$2", "[\"ownership\", 20]")
+    }
+
+    /** docs: matches counted */
+    @Test
+    fun matchesCounted() = runBlocking {
+        val db = Recording()
+        db.from("articles").match("body", "ownership").count()
+        db.sends("get articles match body \$1 count", "[\"ownership\"]")
+    }
+
+    /** docs: matches counted by topic */
+    @Test
+    fun matchesCountedByTopic() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .select("topic", "count(*)")
+            .match("body", "ownership")
+            .group("topic")
+            .rows()
+        db.sends("get articles select topic, count(*) group topic match body \$1", "[\"ownership\"]")
+    }
+
     /** docs: products matching a misspelt word */
     @Test
     fun productsMatchingAMisspeltWord() = runBlocking {

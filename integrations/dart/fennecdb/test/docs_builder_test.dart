@@ -596,6 +596,24 @@ void main() {
         'get articles match body \$1 rerank embed \$2 candidates 500 limit \$3', '["ownership", [0.9, 0.1, 0], 10]');
   });
 
+  test('docs: matches, newest first', () async {
+    final db = _Recording();
+    await db.from('articles').match('body', 'ownership').order('year', 'desc').limit(20).rows();
+    db.sends('get articles match body \$1 order year desc limit \$2', '["ownership", 20]');
+  });
+
+  test('docs: matches counted', () async {
+    final db = _Recording();
+    await db.from('articles').match('body', 'ownership').count();
+    db.sends('get articles match body \$1 count', '["ownership"]');
+  });
+
+  test('docs: matches counted by topic', () async {
+    final db = _Recording();
+    await db.from('articles').select(['topic', 'count(*)']).match('body', 'ownership').group('topic').rows();
+    db.sends('get articles select topic, count(*) group topic match body \$1', '["ownership"]');
+  });
+
   test('docs: products matching a misspelt word', () async {
     final db = _Recording();
     await db.from('products').match('title', 'databse', fuzzy: true).limit(10).rows();

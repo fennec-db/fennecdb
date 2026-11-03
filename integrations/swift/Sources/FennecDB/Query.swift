@@ -1301,8 +1301,9 @@ public struct Query: Sendable {
         }
         if aggregate {
             // Ungrouped, `order`, `limit` and `offset` pick the rows folded; a
-            // lookup hangs off the groups, keyed by a column.
-            let clash = near != nil ? "near" : match != nil ? "match" : count && group == nil ? "count" : nil
+            // lookup hangs off the groups, keyed by a column. Beside them
+            // `match` is a filter: the rows it finds are folded.
+            let clash = near != nil ? "near" : count && group == nil ? "count" : nil
             if let clash { throw FennecError.builder("aggregates cannot be combined with \(clash)") }
             if group == nil, !requirement.isEmpty {
                 throw FennecError.builder("require counts the rows a query answers, and an aggregate answers one")
@@ -1347,7 +1348,8 @@ public struct Query: Sendable {
                 seen.append(l.collection)
             }
         }
-        if count, let extra = extraClause() ?? (requirement.isEmpty ? nil : "require") {
+        // Beside `count`, `match` is a filter: it counts the rows it finds.
+        if count, let extra = extraClause(counts: true) ?? (requirement.isEmpty ? nil : "require") {
             throw FennecError.builder("count cannot be used with `\(extra)`")
         }
 
@@ -1462,9 +1464,9 @@ public struct Query: Sendable {
         return try Builder.render(root, bind)
     }
 
-    private func extraClause(picks: Bool = false) -> String? {
+    private func extraClause(picks: Bool = false, counts: Bool = false) -> String? {
         near != nil ? "near"
-            : match != nil ? "match"
+            : match != nil && !counts ? "match"
             : rerank != nil ? "rerank"
             : !order.isEmpty && !picks ? "order"
             : limit != nil && !picks ? "limit"

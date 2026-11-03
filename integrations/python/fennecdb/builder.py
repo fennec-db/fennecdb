@@ -1093,10 +1093,9 @@ class _Builder:
             raise _err(f"group {keys} needs an aggregate in select: 'count(*)'")
         if s["aggregate"]:
             # Ungrouped, `order`, `limit` and `offset` pick the rows folded;
-            # a lookup hangs off the groups, keyed by a column.
-            clash = (
-                "near" if near else "match" if match else "count" if count and not s["group"] else None
-            )
+            # a lookup hangs off the groups, keyed by a column. Beside them
+            # `match` is a filter: the rows it finds are folded.
+            clash = "near" if near else "count" if count and not s["group"] else None
             if clash:
                 raise _err(f"aggregates cannot be combined with {clash}")
             if not s["group"] and s["require"]:
@@ -1143,7 +1142,8 @@ class _Builder:
                     )
                 seen.append(level["collection"])
         if count:
-            extra = self._extra_clause() or ("require" if s["require"] else None)
+            # Beside `count` `match` is a filter: it counts the rows it finds.
+            extra = self._extra_clause(counts=True) or ("require" if s["require"] else None)
             if extra:
                 raise _err(f"count cannot be used with `{extra}`")
         sql = f"get {s['collection']}"
@@ -1377,11 +1377,11 @@ class _Builder:
         if verb in ("insert", "upsert") and self._s["cond"]:
             raise _err(f"{verb} cannot be used with `where`")
 
-    def _extra_clause(self, picks: bool = False) -> str | None:
+    def _extra_clause(self, picks: bool = False, counts: bool = False) -> str | None:
         s = self._s
         return (
             "near" if s["near"]
-            else "match" if s["match"]
+            else "match" if s["match"] and not counts
             else "rerank" if s["rerank"]
             else "order" if s["order"] and not picks
             else "limit" if s["limit"] is not None and not picks
