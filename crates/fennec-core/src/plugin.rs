@@ -224,7 +224,17 @@ impl Registry {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value> {
-        let (_, f, (lo, hi)) = self.entry(name).ok_or_else(|| {
+        let entry = self.entry(name);
+        // `slot()`, where a scheduled body runs: no function of the table,
+        // so asked only where a call found none -- every other call pays
+        // nothing for it, and a build without named statements carries none.
+        #[cfg(feature = "statements")]
+        if entry.is_none() && args.is_empty() && name.eq_ignore_ascii_case("slot") {
+            if let Some(t) = crate::engine::slot_now() {
+                return Ok(Value::Timestamp(t));
+            }
+        }
+        let (_, f, (lo, hi)) = entry.ok_or_else(|| {
             if !crate::FULL {
                 if let Some(feature) = missing_function(name) {
                     return crate::error::not_built(&format!("`{name}`"), feature);

@@ -567,15 +567,27 @@ echo "ok: the binaries from before stop in words at a binding (op 3)"
 # clock is kind 13's op 4, its schedule and `since` outside its text, and
 # the mark of a slot it ran for op 5. A binary from before them --
 # OP4_BASE, the last main before the ops -- refuses an op it does not read,
-# never taking a schedule for a callable statement nobody runs. No server
-# defines one yet (F3's slice 3 runs them): fennec-core's fixture holds one
-# and a mark, written by its tests (`tests/statements.fennec`), and
+# never taking a schedule for a callable statement nobody runs.
+# fennec-core's fixture holds one and a mark, written by its tests
+# (`tests/statements.fennec`), and
 #
 #   - the old server refuses to open it, in words;
-#   - this tree's server opens it, answers its reads and takes its writes;
+#   - this tree's server opens it, answers its reads, takes its writes and
+#     runs the schedule by the server's token's call;
 #   - an old replica of that server refuses the image holding op 4, and an
 #     old archiver takes no image of its own;
 #   - the old `fennec types` refuses it.
+#
+# And this tree's primary defines one by `/query`, as a client does since a
+# file's server runs them (F3's slice 3), and runs its slots:
+#
+#   - an old replica following it refuses the record in words, takes no
+#     write past it, and connects again;
+#   - an old archiver keeps the stream's bytes but takes no image of its
+#     own; the old `fennec restore` refuses what it kept, this tree's
+#     restores it, and the old server refuses to open the file it wrote.
+#
+# A tenant node takes no schedule until F3's slice 4, which drives a move.
 OP4_BASE=${OP4_BASE:-cd907d6c}
 if [ -n "${OLD4_BIN_DIR:-}" ]; then
     OLD4=$OLD4_BIN_DIR
@@ -607,8 +619,8 @@ PIDS+=($!)
 SCHEDULED=$(address "$WORK/scheduled-primary.log")
 query "$SCHEDULED" "get holds select state" | grep -q 'lapsed' ||
     fail "this tree's server answered no read of the file holding op 4"
-query "$SCHEDULED" "call lapse" | grep -q 'runs by the clock' ||
-    fail "this tree's server ran a schedule by a call"
+query "$SCHEDULED" "call lapse" | grep -q '"error"' &&
+    fail "this tree's server refused its token's call of a schedule"
 
 # The old archiver keeps the primary's image as it came; the image of its
 # own it takes once a write follows reads op 4.
@@ -639,4 +651,59 @@ if "$OLD4/fennec" types "$WORK/scheduled-old.fennec" >"$WORK/scheduled-types.log
 fi
 grep -q "$UNREAD" "$WORK/scheduled-types.log" || fail "the old \`fennec types\` said nothing of op 4"
 echo "old types:    $(grep -m1 "$UNREAD" "$WORK/scheduled-types.log")"
+
+# The first schedule, defined as a client defines one, beside an old
+# replica and an old archiver following the primary that defines it.
+SCHEDULE="create statement tidy every 1d as del orders where status = 'void'"
+"$NEW/fennec-server" --file "$WORK/p4.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/p4.log" &
+PIDS+=($!)
+P4=$(address "$WORK/p4.log")
+"$OLD4/fennec-server" --file "$WORK/r4.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$P4" 2>"$WORK/r4.log" &
+PIDS+=($!)
+R4=$(address "$WORK/r4.log")
+"$OLD4/fennec" archive "$P4" "$WORK/archive4b" --token r --image-every 1s \
+    2>"$WORK/archiver4b.log" &
+ARCHIVER4B=$!
+PIDS+=($ARCHIVER4B)
+query "$P4" "create collection orders (status text @hash)" >/dev/null
+query "$P4" "put orders {status: 'open'}" >/dev/null
+for _ in $(seq 1 600); do
+    query "$R4" "get orders count" | grep -q '"count":1' && break
+    sleep 0.05
+done
+query "$R4" "get orders count" | grep -q '"count":1' ||
+    fail "the old replica never followed this tree's primary"
+said "$WORK/archiver4b.log" "image at change" || fail "the old archiver took no image"
+query "$P4" "$SCHEDULE" | grep -q '"error"' && fail "the primary refused the schedule"
+query "$P4" "put orders {status: 'paid'}" | grep -q '"error"' &&
+    fail "the primary refused a write beside its schedule"
+said "$WORK/r4.log" "$UNREAD" || fail "the old replica said nothing of op 4"
+query "$R4" "get orders count" | grep -q '"count":2' &&
+    fail "the old replica took a write past the schedule it refused"
+said "$WORK/archiver4b.log" "$UNREAD" || fail "the old archiver said nothing of op 4"
+echo "old replica:  $(grep -m1 "$UNREAD" "$WORK/r4.log")"
+echo "old archiver: $(grep -m1 "$UNREAD" "$WORK/archiver4b.log")"
+kill "$ARCHIVER4B" 2>/dev/null || true
+wait "$ARCHIVER4B" 2>/dev/null || true
+if TMPDIR="$WORK" "$OLD4/fennec" restore "$WORK/archive4b" "$WORK/restored4-old.fennec" \
+    >"$WORK/restore4-old.log" 2>&1; then
+    fail "the old restore read an archive holding op 4"
+fi
+grep -q "$UNREAD" "$WORK/restore4-old.log" || fail "the old restore said nothing of op 4"
+TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive4b" "$WORK/restored4.fennec" \
+    >"$WORK/restore4-new.log" 2>&1 || fail "this tree's restore refused the archive"
+"$OLD4/fennec-server" --file "$WORK/restored4.fennec" --http 127.0.0.1:0 \
+    >"$WORK/restored4-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a restore holding op 4"
+grep -q "$UNREAD" "$WORK/restored4-open.log" || fail "the old server said nothing of op 4"
+echo "old restore:  $(grep -m1 "$UNREAD" "$WORK/restore4-old.log")"
+echo "old open:     $(grep -m1 "$UNREAD" "$WORK/restored4-open.log")"
 echo "ok: the binaries from before stop in words at a schedule (op 4) and its mark (op 5)"

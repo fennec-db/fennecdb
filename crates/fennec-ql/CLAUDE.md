@@ -135,26 +135,37 @@ spans and audit, and described (`statements`, `GET /_schema`) to the
 server's token alone. `@ttl` and `after del` refuse each other; a replacement
 keeps collection, events and kinds of write (a `put` makes and sets).
 
-**[A scheduled statement's record is kept by every build, and run by none
-yet.](../../docs/design/named-statements.md#what-f3-has-built)**
+**[A scheduled statement runs once a slot, by the primary that may write
+its file.](../../docs/design/named-statements.md#scheduled-statements-f3)**
 `create statement <n> every <interval> | at '<cron>' [in '<zone>'] as ...`
 is kind 13's op 4, its schedule and `since` after its text, and a slot's
 mark op 5 (`SlotMark`): each one write `writes_in` counts, refused by a
-binary from before, never misread. A server reads the schedule into
-`Stored::schedule` and a mark into the marks beside the table
-(`Database::last_mark`), which a mark changes alone -- never the table,
-put back by `Undo::Mark`; a build running none (the module) keeps the
-schedule as the record's tail and a mark as its body (`Stored::last`),
-reading only its name and version. Every image keeps each schedule's last
-mark after its definition, and a compact beside the database writes the
-marks at its swap (`last_marks`); a replica applies them, `/_changes`
-passes over them. A run's mark lands in its block; one of a run that
-wrote nothing waits in `Database::pending` for the next block `commit`
-lands, kept by one put back and written by an image. A mark of a
-definition replaced counts for nothing; a replacement clears the mark,
-moves `since` and keeps the kind (`named::Kind`). `grows` and a rate pass
-over op 5;
-`MAX_SCHEDULED` bounds them; `Database::due` is each one's slot, a pure
-function of the table, the marks and a time (`AHEAD_MAX`). Until a server
-runs one, every way in refuses a definition (`SCHEDULED_NOT_BUILT`) but a
-test's (`Database::allow_schedules`), and no call runs one.
+binary from before, never misread; a build running none (the module) keeps
+the schedule as the record's tail and a mark as its body (`Stored::last`).
+A server keeps marks beside the table (`Database::last_mark`), never in it,
+put back by `Undo::Mark`, kept by every image and by a compact beside the
+database at its swap (`last_marks`). A run's writes and its mark are one
+block (`Database::run_slot`, `mark_slot`), its slot the next after the last
+mark asked again under the write lock (`Database::due`), so a crash, a
+failover or a move leaves a slot run once or not at all in the history
+that survives; missed slots run once, the latest (`skipped`); a run landing
+nothing marks in memory (`Database::pending`), its mark landing as the
+last record of the next block, noted as `SLOT_MARK`, which names no
+collection to the watcher. A mark ahead of the clock is counted and told
+once (`audit::clock`), waited for up to `AHEAD_MAX`; a replacement clears
+it, moves `since` and keeps the kind (`named::Kind`). Only a server's
+scheduler (`fennec_http::schedule::watch`, after both listeners) runs one,
+and a database it does not watch refuses a definition
+(`SCHEDULED_UNRUN`): never a following database, `--http-read-only`, a
+tenant node until F3's slice 4, the shell, the native library or the
+module. A run is the server's token's: `now()` its start, `slot()` its
+slot, its writes waking bindings, a fresh `--call-max-rows`, the quota but
+no rate (`grows` passes over op 5); a refusal the statement makes marks
+its slot, one the state makes -- the quota, the fence (`Database::fenced`,
+asked again after), `Error::Io` -- leaves it due (`schedule::Held`), tried
+again as the counter or the limit moves, the next slot superseding it. No
+token but the server's calls one (a scoped one's is a missing one's 404,
+and MCP lists none), its `slot()` the call's time truncated to a slot
+(`Database::slot_at`), marking nothing. A database holding no schedule
+costs its scheduler no look: it is woken where `rebind` is
+(`Database::on_schedules`), never by a timer.

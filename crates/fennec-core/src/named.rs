@@ -304,8 +304,8 @@ pub struct Place {
 /// What a statement run by the clock is defined to run at
 /// (`docs/design/named-statements.md`, *Scheduled statements (F3)*): the
 /// edges `bucket` cuts, or the times a cron expression names, on a zone's
-/// clock. Nothing runs one yet: the engine refuses its definition
-/// ([`SCHEDULED_NOT_BUILT`]).
+/// clock. A file's server runs one (`fennec_http::schedule`); a database
+/// no scheduler runs refuses its definition ([`SCHEDULED_UNRUN`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schedule {
     pub when: When,
@@ -360,12 +360,15 @@ pub const MAX_SCHEDULED: usize = 16;
 /// ahead, and the schedule goes on from the clock.
 pub const AHEAD_MAX: i64 = 3_600_000;
 
-/// What the engine refuses a scheduled statement's definition with until a
-/// server runs one (F3's slices 1 and 2): a schedule defined where nothing
-/// runs it would be a slot no one runs without a word. A test lets one be
-/// defined (`Database::allow_schedules`).
-pub const SCHEDULED_NOT_BUILT: &str =
-    "scheduled statements are not built yet: no server runs one, so none is defined";
+/// What the engine refuses a scheduled statement's definition with where
+/// no scheduler runs the database's -- a tenant node's until F3's slice 4,
+/// the shell, the native library, a server's database a scheduler does not
+/// watch: a schedule defined where nothing runs it would be a slot no one
+/// runs without a word. A file's server lets one be defined
+/// (`Database::allow_schedules`, `fennec_http::schedule::watch`).
+pub const SCHEDULED_UNRUN: &str = "no scheduler runs this database's statements, so none \
+                                   runs by the clock here: a scheduled statement is defined \
+                                   on a file's server (`fennec-server <file>`), which runs it";
 
 /// What a parameter, a claim, `check`, `public` or parentheses in a
 /// scheduled statement are refused with.
@@ -413,6 +416,80 @@ const MONTH_NAMES: [&str; 12] = [
 const DAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 /// The most days each month holds, 29 February admitted.
 const MONTH_DAYS: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+#[cfg(feature = "statements")]
+impl Schedule {
+    /// The schedule as a definition would write it, by its meaning --
+    /// `every 1h`, `at '0,30 3 * * 1-5' in 'Europe/Berlin'` -- as the
+    /// canonical tree holds it: `every 60m` is `every 1h`, `*/15` the
+    /// minutes it names. What a log line names a schedule by, its shape
+    /// having made its texts parameters.
+    pub fn written(&self) -> String {
+        use crate::query::Interval;
+        const WEEK: i64 = 7 * 86_400_000;
+        let mut out = match self.when {
+            When::Every(Interval::Ms(step, origin)) => {
+                let (n, unit) = match step {
+                    _ if origin != 0 => (step / WEEK, "w"),
+                    _ if step % 86_400_000 == 0 => (step / 86_400_000, "d"),
+                    _ if step % 3_600_000 == 0 => (step / 3_600_000, "h"),
+                    _ => (step / MIN_PERIOD, "m"),
+                };
+                format!("every {n}{unit}")
+            }
+            When::Every(Interval::Months(n)) => match n % 12 {
+                0 => format!("every {}y", n / 12),
+                _ => format!("every {n}mo"),
+            },
+            When::At(c) => {
+                let fields = [
+                    (c.minutes, 0, 59),
+                    (c.hours as u64, 0, 23),
+                    ((c.days as u64) << 1, 1, 31),
+                    ((c.months as u64) << 1, 1, 12),
+                    (c.weekdays as u64, 0, 6),
+                ];
+                let written: Vec<String> = (fields.iter())
+                    .map(|&(mask, lo, hi)| cron_written(mask, lo, hi))
+                    .collect();
+                format!("at '{}'", written.join(" "))
+            }
+        };
+        if let Some(z) = &self.zone {
+            out.push_str(&format!(" in '{z}'"));
+        }
+        out
+    }
+}
+
+/// A cron field's values from `lo` to `hi`, bit `v` of `mask` each: `*`
+/// for every one, else runs of three or more as `a-b` and the rest alone.
+#[cfg(feature = "statements")]
+fn cron_written(mask: u64, lo: u32, hi: u32) -> String {
+    let has = |v: u32| mask >> v & 1 != 0;
+    if (lo..=hi).all(has) {
+        return "*".into();
+    }
+    let mut parts = Vec::new();
+    let mut v = lo;
+    while v <= hi {
+        if !has(v) {
+            v += 1;
+            continue;
+        }
+        let start = v;
+        while v < hi && has(v + 1) {
+            v += 1;
+        }
+        match v - start {
+            0 => parts.push(start.to_string()),
+            1 => parts.extend([start.to_string(), v.to_string()]),
+            _ => parts.push(format!("{start}-{v}")),
+        }
+        v += 1;
+    }
+    parts.join(",")
+}
 
 impl Cron {
     /// `at '<cron>'`: minute, hour, day of month, month and day of week,

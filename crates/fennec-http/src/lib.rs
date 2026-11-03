@@ -70,6 +70,7 @@ pub mod node_stream;
 pub mod quota;
 pub mod replication;
 pub mod request_id;
+pub mod schedule;
 pub mod seal;
 pub mod sse;
 pub mod statements;
@@ -377,6 +378,7 @@ impl Server {
                 looks: 0,
                 runs: 0,
                 picks: 0,
+                epoch: 0,
             },
         }
     }

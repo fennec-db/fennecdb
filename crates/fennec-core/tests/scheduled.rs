@@ -5,13 +5,14 @@
 //! its block, kept by every open, image and compact, applied by a replica
 //! and passed over by a reader of the changes; the mark of a run that wrote
 //! nothing pending until the next block lands; and `Database::due`, what
-//! the clock says. Nothing runs one: a definition is refused but where a
-//! test lets it (`Database::allow_schedules`), and no call runs one.
+//! the clock says. A definition is refused where no scheduler runs the
+//! database's (`Database::allow_schedules`); a run's body is
+//! `Database::run_slot`'s, and a call by hand marks nothing.
 
 use crate::stored::{body_at, opened, refused, run, Tap};
 use fennec_core::codec::{encode_str, put_uvarint};
 use fennec_core::engine::{writes_in, ChangeKind, Due, Landing, SlotMark, Times};
-use fennec_core::named::{AHEAD_MAX, GRAMMAR_EPOCH, MAX_SCHEDULED, SCHEDULED_NOT_BUILT};
+use fennec_core::named::{AHEAD_MAX, GRAMMAR_EPOCH, MAX_SCHEDULED, SCHEDULED_UNRUN};
 use fennec_core::prelude::*;
 use std::sync::Arc;
 
@@ -119,7 +120,7 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
     run(&mut db, HOLDS).unwrap();
     assert_eq!(
         refused(run(&mut db, LAPSE)),
-        Error::Query(SCHEDULED_NOT_BUILT.into()).to_string()
+        Error::Query(SCHEDULED_UNRUN.into()).to_string()
     );
     assert!(db.statements().is_empty());
 
@@ -142,9 +143,12 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
     assert!(s.tree.is_some() && s.broken.is_none() && db.last_mark("lapse").is_none());
     assert!(!s.called());
     assert!(s.depends.iter().any(|d| d == "holds.state"));
-    // No call runs one: the clock's, once a server runs it.
-    let e = refused(run(&mut db, "call lapse"));
-    assert!(e.contains("runs by the clock"), "{e}");
+    // Called by hand -- the server's token's, the only caller one has --
+    // it runs and marks no slot: the mark is the clock's.
+    let seq = db.change_seq();
+    run(&mut db, "call lapse").unwrap();
+    assert!(db.last_mark("lapse").is_none() && db.pending().is_empty());
+    assert_eq!(db.change_seq(), seq, "nothing to lapse, and no mark");
     // `statements` lists it.
     let listed = db
         .execute(&fennec_ql::parse_one("statements").unwrap())
@@ -775,4 +779,123 @@ fn the_fixture_s_schedule_and_its_mark_are_read_and_kept() {
     assert_eq!(again.statements().get("lapse"), Some(&s));
     let d = due(&db, utc(2026, 3, 28, 13, 20));
     assert_eq!(d.run, Some((utc(2026, 3, 28, 13, 15), 0)));
+}
+
+// ------------------------------------------------------------ the runs
+
+const STAMPS: &str = "create collection stamps (slot timestamp, at timestamp)";
+
+/// Stamps the slot it ran for and the time it read, twice, in one run.
+const STAMP: &str = "create statement stamp every 1h in 'Europe/Berlin' as begin
+  insert stamps {slot: slot(), at: now()};
+  insert stamps {slot: slot(), at: now()}
+end";
+
+fn stamped(db: &Database) -> Vec<(Value, Value)> {
+    let stmt = fennec_ql::parse_one("get stamps select slot, at order id").unwrap();
+    let rows = db.query(&stmt, &[]).unwrap();
+    let rows = rows.rows().unwrap().rows.clone();
+    rows.into_iter()
+        .map(|r| (r.values[0].clone(), r.values[1].clone()))
+        .collect()
+}
+
+/// A run's body reads `now()` as the run's start, once a run, and
+/// `slot()` as its slot -- `Database::run_slot`, in the block its runner
+/// opened, with its mark -- the database's own clock as it was after.
+#[test]
+fn a_run_reads_its_start_once_and_its_slot() {
+    let tap = Tap::default();
+    let mut db = holds(&tap);
+    run(&mut db, STAMPS).unwrap();
+    run(&mut db, STAMP).unwrap();
+    let late = t0() + HOUR + 40 * MINUTE;
+    let slot = due(&db, late).run.unwrap().0;
+    assert_eq!(slot, t0() + HOUR);
+    db.set_clock(Some(t0()));
+    db.begin().unwrap();
+    let version = db.run_slot("stamp", slot, late).unwrap();
+    let mark = SlotMark {
+        at: slot,
+        version,
+        refused: None,
+        skipped: 0,
+    };
+    db.mark_slot("stamp", mark).unwrap();
+    db.commit().unwrap();
+    let ts = Value::Timestamp;
+    assert_eq!(
+        stamped(&db),
+        vec![(ts(slot), ts(late)), (ts(slot), ts(late))]
+    );
+    assert_eq!(ops_in(&tap.last().1), vec![5], "one block, its mark last");
+    // The database's clock is its own again.
+    let stmt = fennec_ql::parse_one("get stamps select now() as t limit 1").unwrap();
+    let now = db.query(&stmt, &[]).unwrap();
+    assert_eq!(now.rows().unwrap().rows[0].values[0], ts(t0()));
+    // Out of a run `slot()` is no function.
+    let stmt = fennec_ql::parse_one("get stamps select slot() as s limit 1").unwrap();
+    let e = refused(db.query(&stmt, &[]));
+    assert!(e.contains("unknown function `slot`"), "{e}");
+}
+
+/// The server's token runs one by hand with `call`: its body runs, its
+/// `slot()` the latest slot at or before the call's `now()` -- the slot
+/// that has come, under its label -- and no slot is marked, landed or
+/// pending; the slot still due runs at the scheduler's look.
+#[test]
+fn a_call_by_hand_runs_the_slot_that_has_come_and_marks_none() {
+    let tap = Tap::default();
+    let mut db = holds(&tap);
+    run(&mut db, STAMPS).unwrap();
+    run(&mut db, STAMP).unwrap();
+    let at = t0() + HOUR + 30 * MINUTE;
+    db.set_clock(Some(at));
+    run(&mut db, "call stamp").unwrap();
+    let ts = Value::Timestamp;
+    assert_eq!(
+        stamped(&db),
+        vec![(ts(t0() + HOUR), ts(at)), (ts(t0() + HOUR), ts(at))]
+    );
+    assert!(db.last_mark("stamp").is_none() && db.pending().is_empty());
+    assert_eq!(due(&db, at).run, Some((t0() + HOUR, 0)), "still due");
+    assert_eq!(db.slot_at("stamp", at), Some(t0() + HOUR));
+    assert_eq!(db.slot_at("lapse", at), None, "no such schedule");
+}
+
+/// A slot's mark is a write that changes nothing read: a block carrying
+/// one names the collections of its other writes alone -- none for a
+/// mark alone -- where a definition names one no name stands for, so a
+/// held write is woken by a run's writes, never by its mark.
+#[test]
+fn a_mark_names_no_collection_among_the_changes() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(&mut db, "create collection other (n int)").unwrap();
+    let now = t0() + HOUR;
+    let slot = due(&db, now).run.unwrap().0;
+    // A run that wrote nothing: its mark pending, then carried by a write.
+    run_slot(&mut db, BODY, "lapse", slot, 0).unwrap();
+    let before = db.change_seq();
+    run(&mut db, "put other {n: 1}").unwrap();
+    assert_eq!(ops_in(&tap.last().1), vec![5]);
+    let other = Some(vec!["other".to_string()]);
+    assert_eq!(db.changed_collections_since(before), other);
+    // A run's writes and its mark: the run's collection.
+    let before = db.change_seq();
+    let writes = format!("put holds {{state: 'held', until: {}}}; {BODY}", t0());
+    run_slot(&mut db, &writes, "lapse", slot + 15 * MINUTE, 0).unwrap();
+    let holds = Some(vec!["holds".to_string()]);
+    assert_eq!(db.changed_collections_since(before), holds);
+    // A mark alone, landed with an image's worth of nothing: no name.
+    let before = db.change_seq();
+    run_slot(&mut db, BODY, "lapse", slot + 30 * MINUTE, 0).unwrap();
+    db.begin().unwrap();
+    db.commit().unwrap();
+    assert_eq!(db.change_seq(), before, "an empty block lands nothing");
+    // A definition: every collection.
+    let before = db.change_seq();
+    let hourly = "create statement h every 1h as del holds where state = 'x'";
+    run(&mut db, hourly).unwrap();
+    assert_eq!(db.changed_collections_since(before), None);
 }

@@ -59,6 +59,13 @@ impl Database {
         self.limit = limit;
     }
 
+    /// The limit blocks are held to, where one is set: a server's
+    /// scheduler tries a run the quota refused again once it changed
+    /// (`fennec_http::schedule`), told apart by the `Arc` it is.
+    pub fn limit(&self) -> Option<&Limit> {
+        self.limit.as_ref()
+    }
+
     /// The documents in the app's own collections -- those not `_`-named
     /// (`declared::own`), which are the database's: idempotency keys,
     /// consumers' places, migrations. A sum over the collections, no

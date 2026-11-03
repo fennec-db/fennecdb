@@ -190,6 +190,35 @@ pub(crate) fn bound(r: &fennec_core::engine::Runs) {
     BOUND.with(|b| b.set(b.get() | HELD));
 }
 
+/// A scheduled statement's last mark, or its `since`, found ahead of the
+/// clock (`fennec_http::schedule`): one of the two readings was wrong, a
+/// clock stepped back behind a run or a mark left by a clock that was
+/// ahead. Its `clock` line names the database (`what`), the statement, the
+/// mark and the clock, and whether the schedule waits for the clock to
+/// pass the mark -- ahead by `named::AHEAD_MAX` at most -- or goes on from
+/// the clock, the slots the wrong one ran early running again as they
+/// come. Once a statement and mark, by its scheduler.
+pub fn clock(what: &str, name: &str, mark: i64, now: i64, waits: bool) {
+    if !on() {
+        return;
+    }
+    let iso = fennec_core::time::format_iso;
+    event(
+        "clock",
+        &[
+            ("database", Field::Text(what)),
+            ("statement", Field::Text(name)),
+            ("mark", Field::Text(&iso(mark))),
+            ("clock", Field::Text(&iso(now))),
+            (
+                "ahead_ms",
+                Field::Int(mark.saturating_sub(now).max(0) as u64),
+            ),
+            ("waits", Field::Bool(waits)),
+        ],
+    );
+}
+
 /// What [`bound`] held for the request before, let go of: out of line, so
 /// that the request every connection reads pays a `Cell`'s look alone.
 #[cold]
@@ -452,7 +481,7 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         return;
     };
     let level = match name {
-        "refused" | "quota" | "unwoken" => Level::Warn,
+        "refused" | "quota" | "unwoken" | "clock" => Level::Warn,
         _ => Level::Info,
     };
     let line = line(name, level, fields);
@@ -566,7 +595,10 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         0 => Vec::new(),
         _ => HELD_BOUND.with(|h| h.borrow().1.clone()),
     };
-    let mut each: Vec<String> = Vec::new();
+    // Each by its shape, and a scheduled statement defined or replaced by
+    // its schedule as well, whose texts -- the cron expression, the zone --
+    // the shape made parameters (`Schedule::written`).
+    let mut each: Vec<(String, Option<String>)> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
             for (from, to) in spans {
@@ -575,7 +607,11 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
                 if changes_schema(s) {
                     let mut one = String::new();
                     crate::statements::shape_to(s, &mut one, fennec_core::named::MAX_TEXT);
-                    each.push(one);
+                    let schedule = (statement_named(&one).is_some())
+                        .then(|| fennec_ql::definition(s).ok())
+                        .flatten()
+                        .and_then(|d| d.schedule.map(|t| t.written()));
+                    each.push((one, schedule));
                 }
             }
         }
@@ -583,10 +619,10 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
             shape
                 .split(';')
                 .filter(|o| changes_schema(o))
-                .map(|o| o.to_string()),
+                .map(|o| (o.to_string(), None)),
         ),
     }
-    for one in &each {
+    for (one, schedule) in &each {
         let mut fields = vec![("statement", Field::Text(one.trim_ascii()))];
         if let Some(t) = tenant {
             fields.push(("tenant", Field::Text(t)));
@@ -601,6 +637,9 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         if let (Some((_, c, _)), Some(e)) = (bound, &events) {
             fields.push(("bound_collection", Field::Text(c)));
             fields.push(("bound_events", Field::Text(e)));
+        }
+        if let Some(sched) = schedule {
+            fields.push(("schedule", Field::Text(sched)));
         }
         event("schema", &fields);
     }

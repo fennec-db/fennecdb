@@ -23,8 +23,11 @@
 //! expression's a day at a time -- so a server down for a year finds its
 //! missed slots counted without a walk over each.
 //!
-//! Nothing here runs a statement: that is a server's scheduler's, F3's
-//! slice 3. The browser module, which runs none, carries none of it.
+//! What runs one is a server's scheduler (`fennec_http::schedule`), which
+//! asks [`Database::due`] under the write lock and runs a slot's body with
+//! [`Database::run_slot`]; the server's token's `call` runs it by hand
+//! ([`Database::slot_at`]). The browser module, which runs none, carries
+//! none of it.
 
 use super::stored::{marked, SlotMark, Stored, Times};
 use super::Database;
@@ -32,6 +35,31 @@ use crate::error::{Error, Result};
 use crate::named::AHEAD_MAX;
 use crate::time::{civil_from_days, days_from_civil};
 use crate::tz::Zone;
+use std::cell::Cell;
+use std::sync::Arc;
+
+thread_local! {
+    /// The slot `slot()` reads on this thread: the run's, or the latest at
+    /// or before a call's time where the server's token calls a scheduled
+    /// statement by hand -- `None` elsewhere, where `slot()` is no function
+    /// (`plugin::Registry::call`). A thread's, as `call::LEFT` is: a body
+    /// runs on the thread that runs it, under the lock it holds.
+    static SLOT: Cell<Option<i64>> = const { Cell::new(None) };
+}
+
+/// The slot `slot()` reads on this thread, where a scheduled body runs.
+pub(crate) fn slot_now() -> Option<i64> {
+    SLOT.with(Cell::get)
+}
+
+/// `f` with `slot()` reading `slot` on this thread, put back as it returns
+/// and as a panic unwinds out of it.
+pub(super) fn with_slot<T>(slot: Option<i64>, f: impl FnOnce() -> T) -> T {
+    let before = SLOT.with(|s| s.replace(slot));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    SLOT.with(|s| s.set(before));
+    r.unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
 
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
@@ -66,12 +94,27 @@ pub struct Due {
 
 impl Database {
     /// Lets a scheduled statement be defined, which every way in refuses
-    /// until a server runs one (`named::SCHEDULED_NOT_BUILT`): for a test
-    /// to hold its record, its mark and their keeping, as F2's slice 2
-    /// held a binding's.
-    #[doc(hidden)]
+    /// where no scheduler runs the database's (`named::SCHEDULED_UNRUN`):
+    /// what a file's server sets as its scheduler starts watching it
+    /// (`fennec_http::schedule::watch`), never a tenant node's (F3's slice
+    /// 4), the shell or the native library, which run none. A test sets it
+    /// to hold a schedule's record and drive its runs.
     pub fn allow_schedules(&mut self) {
         self.scheduling = true;
+    }
+
+    /// Calls `wake` wherever the table comes to hold a schedule or one
+    /// changes -- a definition, a drop, an image adopted, a replica's apply
+    /// -- under the write lock: what wakes a scheduler that sleeps with no
+    /// slot to wait for, never a timer. Asked at a schema change alone
+    /// (`rebind`).
+    pub fn on_schedules(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.on_schedules = Some(wake);
+    }
+
+    /// Whether the table holds a scheduled statement.
+    pub fn holds_schedules(&self) -> bool {
+        self.statements.iter().any(|s| s.schedule.is_some())
     }
 
     /// Each scheduled statement's slot due at `now`, in epoch milliseconds:
@@ -103,14 +146,7 @@ impl Database {
         let Ok(zone) = zone_named(&t.zone) else {
             return due;
         };
-        let clock = Clock {
-            times: t.times,
-            zone: &zone,
-            every: match t.times {
-                Times::Step(step, _) => step % DAY != 0,
-                _ => false,
-            },
-        };
+        let clock = Clock::of(t.times, &zone);
         let mark = self.pending_of(s).or(self.last_mark(&s.name)).map(|m| m.at);
         let anchor = mark.map_or(t.since, |m| m.max(t.since));
         if anchor > now {
@@ -129,6 +165,62 @@ impl Database {
         }
         due.next = clock.next(from.max(now));
         due
+    }
+
+    /// The latest slot of `name`'s schedule at or before `now`, its
+    /// `since` and its marks aside: the `slot()` the server's token's call
+    /// of it reads, the slot that has come -- the one the scheduler ran
+    /// last or runs next -- under its label. `None` for a statement not
+    /// scheduled, or a zone this build's table lacks.
+    pub fn slot_at(&self, name: &str, now: i64) -> Option<i64> {
+        let t = self.statements.get(name)?.schedule.as_ref()?;
+        let zone = zone_named(&t.zone).ok()?;
+        Clock::of(t.times, &zone).latest(now)
+    }
+
+    /// Runs `name`'s body for `slot`, in the block its caller opened -- a
+    /// server's scheduler, which asked [`Self::due`] for the slot under the
+    /// write lock it holds -- each statement as a call's: through
+    /// `run_one`, waking the bindings its writes reach, its rows bounded by
+    /// a fresh `--call-max-rows`. `now()` reads `now` throughout, the run's
+    /// start, as `@ttl`'s `alive` does, and `slot()` reads `slot`. The
+    /// version that ran, for the mark the caller lands with the run's
+    /// writes ([`Self::mark_slot`]); a statement not scheduled is missing
+    /// (404), and a broken one or one whose text this process holds unread
+    /// is refused (409) with nothing of it run, as its call would be.
+    pub fn run_slot(&mut self, name: &str, slot: i64, now: i64) -> Result<(u64, u64)> {
+        let s = (self.statements.get(name))
+            .filter(|s| s.schedule.is_some())
+            .ok_or_else(|| Error::NotFound(format!("scheduled statement `{name}`")))?;
+        let version = s.version;
+        if let Some(why) = &s.broken {
+            return Err(Error::Exists(format!(
+                "statement `{name}` is broken: {why}"
+            )));
+        }
+        let Some(def) = s.tree.clone() else {
+            return Err(Error::Exists(format!(
+                "statement `{name}` is held unread: no FennecQL reader is installed"
+            )));
+        };
+        // As a block of statements starts: what an earlier write's
+        // bindings or preparation left is not this run's.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disarm();
+        self.settle_woken();
+        let clock = self.clock.replace(now);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_slot(Some(slot), || {
+                self.bounded(|db| {
+                    for st in &def.body {
+                        db.run_one(st, &[])?;
+                    }
+                    Ok(version)
+                })
+            })
+        }));
+        self.clock = clock;
+        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
     }
 
     /// Marks `name`'s slot run, or refused: where the open block holds
@@ -154,7 +246,7 @@ impl Database {
         // entry alone, and the block keeps the one before to put back.
         if self.block.as_ref().is_some_and(|b| !b.heads.is_empty()) {
             self.wal(super::REC_STATEMENT, 0, &marked(name, &slot))?;
-            self.note(0, crate::changes::SCHEMA_MARK);
+            self.note(0, crate::changes::SLOT_MARK);
             let was = self.set_mark(name.to_string(), slot);
             if let Some(b) = &mut self.block {
                 b.was
@@ -184,14 +276,14 @@ impl Database {
     }
 
     /// Appends to `b`, a block about to land, the pending marks that
-    /// count, as its last records: one write each, noted as a schema
-    /// change of no collection is.
+    /// count, as its last records: one write each, noted on no collection
+    /// as a write that changes nothing read ([`crate::changes::SLOT_MARK`]).
     pub(super) fn carry_pending(&self, b: &mut super::Block) {
         for s in self.statements.iter() {
             if let Some(p) = self.pending_of(s) {
                 b.frames.extend_from_slice(&marked(&s.name, p));
                 b.heads.push((super::REC_STATEMENT, 0, b.frames.len()));
-                b.notes.push((0, crate::changes::SCHEMA_MARK));
+                b.notes.push((0, crate::changes::SLOT_MARK));
             }
         }
     }
@@ -230,7 +322,12 @@ struct Clock<'z> {
     every: bool,
 }
 
-impl Clock<'_> {
+impl<'z> Clock<'z> {
+    fn of(times: Times, zone: &'z Zone) -> Clock<'z> {
+        let every = matches!(times, Times::Step(step, _) if step % DAY != 0);
+        Clock { times, zone, every }
+    }
+
     /// The latest slot at or before `t`.
     fn latest(&self, t: i64) -> Option<i64> {
         if !self.every {

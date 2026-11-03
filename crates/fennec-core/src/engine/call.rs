@@ -38,6 +38,11 @@ use crate::value::Value;
 pub struct Callee {
     pub def: Arc<Definition>,
     pub values: Vec<Value>,
+    /// What `slot()` reads where a scheduled statement is called by hand
+    /// -- the server's token's, the only caller one has -- the latest slot
+    /// of its schedule at or before the call's `now()`; `None` for every
+    /// other statement. Such a call marks no slot.
+    pub slot: Option<i64>,
 }
 
 /// A call that reads, answered ([`Database::read_call_json`]): its last
@@ -77,15 +82,22 @@ impl Database {
                 crate::named::Binding::events_named(*events)
             )));
         }
-        // A scheduled statement is the clock's: no call runs it until a
-        // server's scheduler does, with the rules of who may (F3's slice
-        // 3) -- one run by hand before them would be a run no one said.
-        if s.schedule.is_some() {
-            return Err(Error::Query(format!(
-                "statement `{}` runs by the clock: no call runs it",
-                call.name
-            )));
-        }
+        // A scheduled statement is the clock's, and the server's token's
+        // to run by hand -- a token held to a policy meets the 404 a
+        // missing one is (`fennec_http::access`) -- its `slot()` the slot
+        // that has come, the call's time truncated to the schedule: the
+        // run by hand repeats it under its label and marks nothing, the
+        // mark being the clock's.
+        let slot = match s.schedule.is_some() {
+            true => Some(self.slot_at(&call.name, self.now()?).ok_or_else(|| {
+                Error::Query(format!(
+                    "statement `{}`'s schedule reads a zone this build's table lacks: no slot \
+                     to run it for",
+                    call.name
+                ))
+            })?),
+            false => None,
+        };
         // Judged by the tree it runs, or, where its text reads as another
         // statement here, by that one's signature: the mark below comes
         // after the claims, the arguments and `check`, as the design orders
@@ -125,6 +137,7 @@ impl Database {
         Ok(Callee {
             def: Arc::clone(def),
             values,
+            slot,
         })
     }
 
@@ -140,16 +153,24 @@ impl Database {
         if !callee.def.writes() {
             return self.read_call(&callee);
         }
-        self.bounded(|db| {
-            let mut last = Ok(Response::Affected(0));
-            for s in &callee.def.body {
-                last = db.run_one(s, &callee.values);
-                if last.is_err() {
-                    break;
+        let run = |db: &mut Self| {
+            db.bounded(|db| {
+                let mut last = Ok(Response::Affected(0));
+                for s in &callee.def.body {
+                    last = db.run_one(s, &callee.values);
+                    if last.is_err() {
+                        break;
+                    }
                 }
-            }
-            last
-        })
+                last
+            })
+        };
+        // Out of line where it reads a slot: a scheduled statement run by
+        // hand.
+        match callee.slot {
+            None => run(self),
+            slot => super::due::with_slot(slot, || run(self)),
+        }
     }
 
     /// Whether the statement `call` names only reads, as the table stands

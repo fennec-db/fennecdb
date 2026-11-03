@@ -1007,3 +1007,35 @@ fn admin_and_tenant_bodies_come_chunked() {
     let r = query(n.port, "copy", "put docs {title: 'eleventh'}");
     assert_eq!(r.status, 507, "{}", r.text());
 }
+
+/// A tenant node runs no tenant's schedules until F3's slice 4 brings its
+/// scheduler there, so it takes none: a scheduled statement's definition is
+/// refused (400) in the engine's words, never a schedule no one runs; a
+/// callable statement is defined as ever.
+#[test]
+fn a_tenant_node_takes_no_scheduled_statement_yet() {
+    let n = start("scheduled", admin_cfg());
+    create(n.port, "acme");
+    let r = query(n.port, "acme", "create collection holds (state text @hash)");
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = query(
+        n.port,
+        "acme",
+        "create statement tidy every 1d as del holds where state = 'x'",
+    );
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(
+        r.text()
+            .contains("no scheduler runs this database's statements"),
+        "{}",
+        r.text()
+    );
+    let r = query(n.port, "acme", "statements");
+    assert!(!r.text().contains("tidy"), "{}", r.text());
+    let r = query(
+        n.port,
+        "acme",
+        "create statement tidy() public as del holds where state = 'x'",
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+}

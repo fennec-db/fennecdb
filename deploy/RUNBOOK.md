@@ -831,6 +831,21 @@ and a move onto an older node fails at its install, the tenant staying on
 its source. Upgrade the one that stopped and it goes on: nothing was
 misread or lost.
 
+**A statement run by the clock moves the format again.** `create statement
+... every` or `... at` -- a purge at 03:00, a hold lapsed once its time is
+up -- writes kind 13's op 4, and each run's mark op 5, which every binary
+from before the release that runs them refuses: the same order, every
+archiver, router and node upgraded before any primary defines one (by
+`create statement ... every`, `... at` or a declared schema's apply; a
+tenant node takes none in that release). An older replica stops following
+at the record and connects again (`could not apply a write: corrupt: a
+statement record this version does not read; connecting again` in its
+log); an older archiver takes no image of its own and its `fennec restore`
+fails; an older server refuses to open a file holding one. Upgrade the one
+that stopped and it goes on: nothing was misread or lost, and the slots
+that came meanwhile run once, the latest, on the primary that writes the
+file.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is

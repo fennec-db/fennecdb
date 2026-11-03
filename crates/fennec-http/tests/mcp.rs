@@ -43,6 +43,39 @@ fn define(n: &Node, sql: &[&str]) {
     }
 }
 
+/// A statement run by the clock is no tool, to the server's token or to a
+/// scoped one whose `call` line names it: the clock runs it, and the
+/// server's token alone runs it by hand, over `/query` -- never a model.
+#[test]
+fn a_scheduled_statement_is_no_tool() {
+    let access = Arc::new(Access::new(SECRET, "docs read\nnightly call\n").unwrap());
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            access: Some(access),
+            mcp: Some(Arc::new(opts())),
+            ..Config::default()
+        },
+        DOCS,
+    );
+    define(
+        &n,
+        &["create statement nightly at '0 3 * * *' scans as del secrets where x = 0"],
+    );
+    let scoped = n.token(r#"{"sub":"alice"}"#);
+    for token in [ROOT, scoped.as_str()] {
+        let tools = listed(&n, token);
+        assert!(named(&tools, "call_nightly").is_none(), "{tools:?}");
+    }
+    let a = n.modern(
+        Some(ROOT),
+        7,
+        "tools/call",
+        r#"{"name":"call_nightly","arguments":{}}"#,
+    );
+    assert!(a.body.contains("\"error\""), "{}", a.body);
+}
+
 /// A 2026-07-28 `tools/list` as `token`: each tool by name.
 fn listed(n: &Node, token: &str) -> Vec<(String, Value)> {
     let v = n.modern(Some(token), 2, "tools/list", "{}").json();
@@ -433,6 +466,9 @@ struct Node {
 fn serve(cfg: Config, sql: &[&str]) -> Node {
     fennec_http::audit::set_delay(0);
     let mut db = Database::new();
+    // As a file's server whose scheduler watches it: a test defines a
+    // scheduled statement to find it no tool.
+    db.allow_schedules();
     setup(&mut db, sql);
     let access = cfg.access.clone();
     let server = Server::new(

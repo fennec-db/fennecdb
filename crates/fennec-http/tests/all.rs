@@ -28,6 +28,7 @@ mod providers;
 mod reach;
 mod replication;
 mod require;
+mod scheduled;
 mod schema;
 mod server;
 mod tls;

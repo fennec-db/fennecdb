@@ -28,7 +28,7 @@ holds this page's outputs to what the demo prints).</p>
 <tr><td>Work to do after a write, that may take a while and be retried, by many workers: mail, thumbnails, billing</td><td><a href="#queue">A job queue</a>: the job is a row, written in the batch of what it is about</td><td>At least once, a lease a job, a back-off, a dead letter</td></tr>
 <tr><td>To let another system know a row changed: a search index, Kafka, a cache, a webhook</td><td><a href="#webhook">A consumer</a> of <code>/_changes</code></td><td>At least once, in order, from a place the server keeps. It sees every write, whoever made it</td></tr>
 <tr><td>State and logic per user or team, at the edge</td><td>A Durable Object with the engine inside (<a href="/docs/serverless">Serverless and Cloudflare</a>)</td><td>One writer an object, no network between code and data</td></tr>
-<tr><td>Something to expire, or to sweep on a schedule</td><td><code>@ttl</code>, or a statement on a timer (cron, an object's alarm)</td><td>The server's own sweep, or yours</td></tr>
+<tr><td>Something to expire, or to sweep on a schedule</td><td><code>@ttl</code>, or a <a href="/docs/fennecql#scheduled-statements">scheduled statement</a> a file's server runs (<code>every 1m</code>, <code>at '0 3 * * *'</code>); a tenant's or a page's on a timer of yours (cron, an object's alarm)</td><td>The server's own sweep, or its scheduler: a slot once, its run and its mark one block</td></tr>
 </tbody>
 </table>
 </div>
@@ -703,6 +703,9 @@ ALERT: seq 22: http://127.0.0.1:53620/moved redirects (302), and a signed body i
     <a href="/docs/files#deleting">Files</a> (a reconcile, not a read of the
     collections, for deletions) and
     <a href="/docs/microservices#delivery-and-replay">Delivery and replay</a>.</li>
-  <li><b>No schedule of its own.</b> A cron job, an object's alarm or a
-    <code>@ttl</code> is the clock.</li>
+  <li><b>A schedule writes, and calls nothing out.</b> A <a
+    href="/docs/fennecql#scheduled-statements">scheduled statement</a> runs
+    FennecQL on a file's server, once a slot; a call to a third party at a
+    time is a worker's, from a job the schedule writes. A tenant, a page
+    and an app take a cron job's or an object's alarm.</li>
 </ul>

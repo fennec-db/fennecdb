@@ -11,6 +11,7 @@ mod logs;
 mod mcp;
 mod otlp;
 mod providers;
+mod scheduled;
 mod shutdown;
 mod start;
 mod stdin;

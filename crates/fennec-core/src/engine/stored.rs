@@ -158,9 +158,10 @@ impl Stored {
         out
     }
 
-    /// Whether a call may name it: neither bound to writes, which run it,
-    /// nor scheduled, which the clock runs -- and which no call runs until
-    /// a server runs schedules (F3's slice 3).
+    /// Whether a token held to a policy may call it: neither bound to
+    /// writes, which run it, nor scheduled, which the clock runs and only
+    /// the server's token calls by hand -- what a `call` line grants and
+    /// an MCP tool is made of.
     pub fn called(&self) -> bool {
         self.after.is_none() && self.schedule.is_none()
     }
@@ -1101,15 +1102,16 @@ impl super::Database {
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
         use crate::named::{
-            GRAMMAR_EPOCH, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT, SCHEDULED_NOT_BUILT,
+            GRAMMAR_EPOCH, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT, SCHEDULED_UNRUN,
         };
-        // First, before a name held or the schema is asked: nothing runs a
-        // schedule yet, and one stored would be a slot no one runs without
-        // a word -- here every way in (`/query`, `/batch`, the shell, the
-        // native library, a declared schema's apply) meets it. A test lets
-        // one be defined, to hold its record ([`Self::allow_schedules`]).
+        // First, before a name held or the schema is asked: where no
+        // scheduler runs this database's schedules, one stored would be a
+        // slot no one runs without a word -- here every way in (`/query`,
+        // `/batch`, the shell, the native library, a declared schema's
+        // apply) meets it. A file's server lets one be defined, its
+        // scheduler watching the database ([`Self::allow_schedules`]).
         if def.schedule.is_some() && !self.scheduling {
-            return Err(Error::Query(SCHEDULED_NOT_BUILT.into()));
+            return Err(Error::Query(SCHEDULED_UNRUN.into()));
         }
         let name = &def.name;
         let held = self.statements.get(name);
@@ -1349,11 +1351,22 @@ impl super::Database {
     /// drop, a block put back, an open, a replica's apply, an image
     /// adopted, a collection made. A look at each collection, at a schema
     /// change alone, and out of line: each place calls it.
+    ///
+    /// Where the table then holds a schedule, the scheduler watching the
+    /// database is woken ([`Self::on_schedules`]): its next slot may have
+    /// moved, and a table that came to hold its first schedule wakes a
+    /// scheduler that slept with none -- never a timer.
     #[inline(never)]
     pub(super) fn rebind(&mut self) {
         let t = &self.statements;
         for (name, c) in self.collections.iter_mut() {
             c.bound = t.events_of(name);
+        }
+        #[cfg(feature = "statements")]
+        if let Some(wake) = &self.on_schedules {
+            if t.iter().any(|s| s.schedule.is_some()) {
+                wake();
+            }
         }
     }
 

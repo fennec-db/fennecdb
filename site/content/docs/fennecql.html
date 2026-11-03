@@ -573,6 +573,126 @@ named in the <a href="/docs/monitoring#slow">slow-statement line</a>, given a
 href="/docs/monitoring#audit">audit log</a> when it is defined, dropped or
 refuses a scoped writer.</p>
 
+<h3 id="scheduled-statements">Scheduled statements</h3>
+
+<p>A named statement may run by the clock instead of being called: every
+quarter of an hour, at 03:00 in Berlin, on the first of the month — a purge,
+a hold lapsed once its time is up, a monthly reset. The server that writes
+its file runs it, each run and the mark of the slot it ran for landing as
+one block: a crash, a <a href="/docs/replication">replica</a> and a
+subscriber see the run and its mark together or neither, and no slot runs
+twice.</p>
+
+<pre data-lang="fennecql">create [or replace] statement &lt;name&gt;
+       every &lt;interval&gt; | at '&lt;cron&gt;' [in '&lt;zone&gt;']
+       [comment '&lt;text&gt;'] [scans]
+       as &lt;statement&gt; | as begin &lt;statement&gt;; ... end   -- now() and slot() in the body</pre>
+
+<pre data-lang="fennecql">create statement lapse_holds
+  every 1m
+  comment 'Lapses each hold whose time is up, a thousand a minute'
+as set holds {state: 'lapsed', lapsed_at: now()}
+   where state = 'held' and until &lt; now() order until limit 1000
+
+create statement monthly_reset
+  at '0 0 1 * *' in 'Europe/Berlin'
+  scans
+as set plans {used: 0, period: slot()} where used &gt; 0</pre>
+
+<p><code>every &lt;interval&gt;</code> runs at the edges
+<code>bucket</code> cuts — a whole number of minutes, hours, days or weeks
+counted from the epoch, a week from a Monday, or calendar months
+(<code>mo</code>, <code>y</code>) — so <code>every 15m</code> runs at :00,
+:15, :30 and :45, never a quarter of an hour after its definition. <code>at
+'&lt;cron&gt;'</code> takes cron's five fields, minute, hour, day of the
+month, month and day of the week, each <code>*</code>, a number, a range, a
+list or a step, Sunday 0 or 7, and the three-letter English names.
+<code>in '&lt;zone&gt;'</code> names the clock it reads, one of IANA's zones
+or a fixed offset, UTC without it: a time the clock skips the night summer
+time starts runs at the instant it jumps past it, once, and a time it shows
+twice runs once, at the first; <code>every 1h</code> runs twice in the hour
+shown twice, as <code>bucket(at, 1h, 'Europe/Berlin')</code> has two of it.
+A minute is the finest period. Refused as the definition is read, each
+naming the form to write: a period under a minute or not of whole minutes,
+cron's sixth field (Quartz's seconds), <code>?</code>, <code>L</code>,
+<code>W</code>, <code>#</code> and the <code>@hourly</code> macros, a day of
+the month and a day of the week both written (<code>0 0 13 * 5</code>, which
+cron runs on every Friday and every 13th), an expression that never runs
+(<code>0 0 30 2 *</code>), and a zone the binary's table does not hold. The
+body is a called statement's with nothing to call it with: no parameters,
+claims, <code>check</code> or <code>public</code>, no <code>new.</code> or
+<code>old.</code>, no <code>returning</code>, a <code>get</code> only with
+<code>require</code> (a guard), and a body of guards alone is refused. A
+database holds at most 16, and a statement runs by the clock or after a
+write, never both.</p>
+
+<p><code>now()</code> is the run's start, read once a run — the time
+<code>@ttl</code> reads too, so a late run leaves out the rows every read
+already left out — and <code>slot()</code> the instant of the slot it ran
+for: <code>monthly_reset</code>'s <code>period</code> is the month's first
+midnight in Berlin even when a restart ran it at 00:40. <code>slot()</code>
+outside a scheduled statement is refused. A definition starts its schedule
+at its own landing: one made at 02:59 <code>every 1h</code> runs at 03:00,
+one made at 03:01 at 04:00. A server down for a day, or a clock stepped
+forward, finds the slots it missed and runs the latest once, the others
+counted as passed over — never a day of runs at once. A clock stepped back
+behind the last run waits for it, an hour at most; a run's mark further
+ahead than that is taken for a wrong clock's, and the schedule goes on from
+the clock. A replacement starts its schedule again from its own landing.</p>
+
+<p>Who refused decides whether a slot is spent. A refusal the statement
+makes — a guard's <code>require</code> unmet, a broken statement, a unique
+value taken, <code>--call-max-rows</code>, a statement bound to its writes
+refusing them — spends the slot, its status and the guard's
+<code>reason</code> noted, and the next slot runs as due. A refusal the
+server's state makes — a tenant's quota, a storage error — leaves the slot
+due, tried again as the data or the limit changes, at most once a minute,
+and otherwise after a wait that doubles from a minute to fifteen; the next
+slot takes its place. A run that finds nothing to do writes nothing: no
+record, no fsync, no send to a replica, its mark kept in memory until the
+next write lands. A run is a write as any other: its writes wake the <a
+href="#write-bound-statements">statements bound to them</a>, in its block,
+and a <a href="/docs/http-reference#wait">held write</a> reading what it
+wrote, and they reach a replica, an archive and <code>/_changes</code> as
+any write does; under <code>--sync always</code> it is fsynced, and its
+replicas sent it, before the next run. A run examines at most
+<code>--call-max-rows</code> rows, each run a fresh budget, and is no one's
+request: no rate is charged for it.</p>
+
+<p>A file's server runs them, from one thread that sleeps while no
+schedule is held: a <code>fennec-server &lt;file&gt;</code> primary, or a
+replica once it is promoted. A replica runs none — its primary's runs come
+to it with their marks — nor does a server under
+<code>--http-read-only</code>, which says at its start how many it holds
+unrun, nor one whose storage failed. The shell, the native library and the
+browser module run none and take no definition, since nothing of theirs
+would run it; a file they hold keeps its schedules, and the server that next
+writes it runs each slot due, once, the latest. A tenant node takes no
+definition yet (<a href="/docs/sharding-tenants">Tenants</a>): its runs
+come with the scheduler of a later release.</p>
+
+<p>The server's token defines one, as it makes any schema change; the
+<a href="/docs/monitoring#audit">audit log</a>'s <code>schema</code> line
+names its schedule beside the statement's shape. The server's token may
+<code>call</code> one to run it now — an operator's test — which runs the
+body, answers its last statement and spends no slot, its
+<code>slot()</code> the latest slot at or before the call: the slot that has
+come, under its label. To a scoped token a scheduled statement is the 404 a
+missing statement is, at <code>/query</code>, <code>/batch</code> and
+<code>POST /_call/&lt;name&gt;</code>, whatever its policy's
+<code>call</code> lines say — the server logs such a line as granting
+nothing — and an agent gets no MCP tool for it. <code>statements</code>
+lists it to the server's token, its <code>after</code>
+<code>null</code>. A refused or held run, and a run's mark found ahead of
+the clock, are written to the server's log with an id of the run's own, the
+last also to the audit log as a <code>clock</code> line. A <a
+href="sync.html#limits">sync replica</a> refuses the definition, as it
+refuses every <code>create statement</code>: what a run writes reaches it
+through its shapes' streams. Before a primary defines the first one, every
+reader of its file runs a release that knows them: a binary from before
+refuses the record and stops there, in words (<a
+href="/docs/replication">Replication</a>).</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

@@ -60,6 +60,16 @@ pub const HELD_MOST: usize = 1 << 20;
 /// collides.
 pub const SCHEMA_MARK: DocId = 0;
 
+/// Document id of a scheduled statement's slot mark (record kind 13's op
+/// 5), noted on collection 0 as a definition is: one write the counter
+/// counts, which changes nothing a read, a stream or a held write reads,
+/// so [`ChangeLog::changed_collections`] passes it over -- a block holding
+/// a run's writes names their collections alone, and one carrying a mark
+/// alone names none, where the definition's [`SCHEMA_MARK`] names a
+/// collection no name stands for and wakes everything.
+#[cfg(feature = "statements")]
+pub const SLOT_MARK: DocId = DocId::MAX;
+
 /// The mark of a single write. It does *not* carry the document (module header).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mark {
@@ -300,9 +310,13 @@ impl ChangeLog {
             return None;
         }
         let start = self.ring.partition_point(|m| m.seq <= since);
+        let marks = self.ring.iter().skip(start);
+        // A slot's mark changes nothing a reader reads ([`SLOT_MARK`]).
+        #[cfg(feature = "statements")]
+        let marks = marks.filter(|m| m.id != SLOT_MARK);
         // Sorted as `u64`s, the sort the ids take: one of `u32`s as well was
         // 2.9 KB of the browser module.
-        let mut out: Vec<u64> = self.ring.iter().skip(start).map(|m| m.cid as u64).collect();
+        let mut out: Vec<u64> = marks.map(|m| m.cid as u64).collect();
         out.sort_unstable();
         out.dedup();
         Some(out.into_iter().map(|cid| cid as u32).collect())

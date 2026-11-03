@@ -7,7 +7,7 @@
 //! server runs them, so no schedule is defined that no one runs.
 
 use fennec_core::named::{
-    Cron, Definition, Schedule, When, SCHEDULED_AND_BOUND, SCHEDULED_NOT_BUILT, SCHEDULED_VALUES,
+    Cron, Definition, Schedule, When, SCHEDULED_AND_BOUND, SCHEDULED_UNRUN, SCHEDULED_VALUES,
 };
 use fennec_core::prelude::*;
 use fennec_core::query::Interval;
@@ -585,10 +585,12 @@ AS BEGIN UPDATE holds SET state = 'lapsed', lapsed_at = now()
     assert_eq!(base, 0xb974_f801_58c8_1744, "{base:#018x}");
 }
 
-/// Nothing runs one yet: every way of running a statement meets the
-/// engine's definition, which refuses a schedule in words of its own before
-/// it asks anything else -- alone, in a block behind a write, which lands
-/// nothing, and as a replacement of a statement held.
+/// Where no scheduler runs the database's -- the shell, the native
+/// library, a tenant node until F3's slice 4 -- every way of running a
+/// statement meets the engine's definition, which refuses a schedule in
+/// words of its own before it asks anything else -- alone, in a block
+/// behind a write, which lands nothing, and as a replacement of a
+/// statement held. Never a schedule no one runs.
 #[test]
 fn a_schedule_is_refused_where_statements_run() {
     fennec_ql::install();
@@ -602,7 +604,7 @@ fn a_schedule_is_refused_where_statements_run() {
         db.execute(&s).unwrap();
     }
     let lapse = parse_one(LAPSE).unwrap();
-    let not_built = Error::Query(SCHEDULED_NOT_BUILT.into());
+    let not_built = Error::Query(SCHEDULED_UNRUN.into());
     assert_eq!(db.execute(&lapse), Err(not_built.clone()));
     assert_eq!(db.execute_with(&lapse, &[]), Err(not_built.clone()));
     let put = parse_one("put plans {used: 3}").unwrap();
