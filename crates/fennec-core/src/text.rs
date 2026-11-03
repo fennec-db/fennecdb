@@ -41,6 +41,9 @@ use terms::{List, Postings, Terms};
 #[cfg(feature = "text")]
 mod terms;
 
+// Written by `tools/fold/gen.py`: what a Latin or Greek letter folds to.
+mod fold;
+
 /// How loosely a `match` reads its query's words: `match body $1 fuzzy`,
 /// `fuzzy 1`, `prefix`. Plain -- no edits, no prefix -- is a `match` as it
 /// always was, down the same code.
@@ -147,21 +150,30 @@ pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
 /// The index passes them over.
 pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usize)) {
     let mut buf = String::new();
-    // U+0307 is not alphanumeric, so a plain `is_alphanumeric` split would cut
-    // `I\u{307}stanbul` -- the decomposed spelling of `İstanbul`, and what the
-    // default mapping leaves behind -- into two terms. Keep it inside the
+    // A combining mark is not alphanumeric, so a plain `is_alphanumeric`
+    // split would cut `I\u{307}stanbul` -- the decomposed spelling of
+    // `İstanbul`, and what the default mapping leaves behind -- or a
+    // decomposed `re\u{301}sume\u{301}` into two terms. Keep it inside the
     // word; it is dropped below. So are a Thai or a Khmer word's marks, some
     // of which are not letters: split at them, `ไม่` lost its tone mark.
     for raw in text.split(splits_words) {
-        if raw.is_empty() || raw.chars().all(|c| c == '\u{0307}') {
+        if raw.is_empty() || raw.chars().all(combining) {
             continue;
         }
         // `split` hands out slices of `text`, so where one starts is how far
         // its pointer is past the text's.
         let base = raw.as_ptr() as usize - text.as_ptr() as usize;
-        // Already-lowercase ASCII is its own answer -- `i` folds to `i`.
-        if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_uppercase()) {
-            f(raw, base, base + raw.len());
+        // ASCII is its own answer lowercased -- `I` folds to `i` -- and never
+        // reaches the fold's table, so English pays nothing for it.
+        if raw.is_ascii() {
+            if raw.bytes().any(|b| b.is_ascii_uppercase()) {
+                buf.clear();
+                buf.push_str(raw);
+                buf.make_ascii_lowercase();
+                f(&buf, base, base + raw.len());
+            } else {
+                f(raw, base, base + raw.len());
+            }
             continue;
         }
         // A run of a script written without spaces is its runs of characters
@@ -182,16 +194,19 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                 grams(run, at, n, chars && n == 2, f);
                 continue;
             }
-            if run.chars().all(|c| c == '\u{0307}') {
-                continue;
-            }
             buf.clear();
             for c in run.chars() {
+                if c.is_ascii() {
+                    buf.push(c.to_ascii_lowercase());
+                    continue;
+                }
                 match c {
-                    'I' | 'İ' | 'ı' => buf.push('i'),
-                    // Carries nothing once the I forms are folded, and it is
-                    // what the default mapping leaves behind for `İ`.
-                    '\u{0307}' => {}
+                    'İ' | 'ı' => buf.push('i'),
+                    // A combining mark carries nothing once a letter is
+                    // folded: written after its letter (`e\u{301}`), it is
+                    // the accent the letter's fold drops, and U+0307 is what
+                    // the default mapping leaves behind for `İ`.
+                    '\u{0300}'..='\u{036F}' => {}
                     // A full-width Latin letter or digit, as Japanese and
                     // Chinese text writes them (`ＩＴ`, `２０２３`), is the
                     // ASCII one.
@@ -199,8 +214,23 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                         let a = char::from_u32(c as u32 - 0xFEE0).unwrap_or(c);
                         buf.push(a.to_ascii_lowercase());
                     }
-                    _ => buf.extend(c.to_lowercase()),
+                    // A letter the table folds is lowercase folded; any other
+                    // is lowercased, and what that gives folded in turn (the
+                    // Angström sign is `å`, so `a`).
+                    _ => {
+                        if !fold_into(&mut buf, c) {
+                            for l in c.to_lowercase() {
+                                if !fold_into(&mut buf, l) {
+                                    buf.push(l);
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            // A run of marks alone is no word.
+            if buf.is_empty() {
+                continue;
             }
             f(&buf, at, at + run.len());
         }
@@ -235,9 +265,45 @@ fn grams(run: &str, at: usize, n: usize, chars: bool, f: &mut dyn FnMut(&str, us
 }
 
 /// Where text is cut into words: at what is neither a letter nor a digit,
-/// a stray dot above or a mark a word of a script holds.
+/// a combining mark or a mark a word of a script holds.
 pub(crate) fn splits_words(c: char) -> bool {
-    !c.is_alphanumeric() && c != '\u{0307}' && !marked(c)
+    !c.is_alphanumeric() && !combining(c) && !marked(c)
+}
+
+/// A combining diacritical mark (U+0300 to U+036F): the accents a letter
+/// written decomposed carries after it, kept inside its word and dropped
+/// from its term.
+pub(crate) fn combining(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036F}')
+}
+
+/// Pushes what the table folds `c` to (`fold.rs`, written by
+/// `tools/fold/gen.py`), its base letter or letters lowercase -- `Ş` and `ş`
+/// are `s`, `ǽ` is `ae`, `ά` is `α` -- and says whether it held one.
+fn fold_into(buf: &mut String, c: char) -> bool {
+    let u = c as u32;
+    let mut at = 0;
+    let mut byte = 0;
+    for (lo, hi) in fold::RANGES {
+        if u < lo {
+            break;
+        }
+        if u < hi {
+            byte = fold::TABLE
+                .get(at + (u - lo) as usize)
+                .copied()
+                .unwrap_or(0);
+            break;
+        }
+        at += (hi - lo) as usize;
+    }
+    match byte {
+        0 => return false,
+        1..=0x1F => buf.push_str(fold::PAIRS.get(byte as usize - 1).copied().unwrap_or("")),
+        0x20..=0x7F => buf.push(byte as char),
+        _ => buf.push(char::from_u32(0x300 + byte as u32).unwrap_or(c)),
+    }
+    true
 }
 
 /// How a run of `c`'s script is indexed: in overlapping runs of 2
@@ -1238,8 +1304,9 @@ mod tests {
         assert_eq!(tokenize("Rust and WASM"), ["rust", "and", "wasm"]);
         assert_eq!(tokenize("a-b_c.d"), ["a", "b", "c", "d"]);
         assert_eq!(tokenize("  "), Vec::<String>::new());
-        // Non-ASCII goes through the Unicode mapping, not the ASCII path.
-        assert_eq!(tokenize("Grüße"), ["grüße"]);
+        // Non-ASCII goes through the Unicode mapping and the fold, not the
+        // ASCII path.
+        assert_eq!(tokenize("Grüße"), ["grusse"]);
         // Case must not decide the term, whatever the alphabet. The Turkish
         // pair is spelled out in `the_turkish_i_folds_every_way_it_is_written`.
         for (a, b) in [("ÖDEV", "ödev"), ("ÇALIŞMA", "çalışma"), ("GRÜßE", "grüße")] {
@@ -1266,6 +1333,88 @@ mod tests {
         }
         // The decomposed spelling of `İ` (I + combining dot) folds too.
         assert_eq!(tokenize("I\u{307}stanbul"), tokenize("İstanbul"));
+    }
+
+    /// A Latin or Greek letter is its base letter, its accents dropped, so
+    /// a word typed on a keyboard without them finds the word written with
+    /// them, and the other way round.
+    #[test]
+    fn accents_fold_to_their_letters() {
+        assert_eq!(tokenize("Sütlaç tarifi"), ["sutlac", "tarifi"]);
+        assert_eq!(tokenize("sütlaç fırında"), ["sutlac", "firinda"]);
+        for group in [
+            ["sutlac", "Sütlaç", "SÜTLAÇ", "sütlaç"],
+            ["kofte", "köfte", "KÖFTE", "Köfte"],
+            ["cay", "çay", "ÇAY", "Çay"],
+            ["dogru", "doğru", "DOĞRU", "Doğru"],
+            ["sise", "şişe", "ŞİŞE", "Şişe"],
+            // French, Spanish, Portuguese, Polish, Czech, Romanian.
+            ["ecole", "école", "ÉCOLE", "École"],
+            ["nino", "niño", "NIÑO", "Niño"],
+            ["acao", "ação", "AÇÃO", "Ação"],
+            ["lodz", "łódź", "ŁÓDŹ", "Łódź"],
+            ["prilis", "příliš", "PŘÍLIŠ", "Příliš"],
+            ["stiinta", "știință", "ȘTIINȚĂ", "Știință"],
+            // Vietnamese stacks a tone on a vowel's own mark.
+            ["pho", "phở", "PHỞ", "Phở"],
+            ["nguyen", "nguyễn", "NGUYỄN", "Nguyễn"],
+            ["duong", "đường", "ĐƯỜNG", "Đường"],
+            // The letters Unicode gives no decomposition, by what they are.
+            ["oresund", "øresund", "ØRESUND", "Øresund"],
+            ["strasse", "straße", "STRASSE", "Straße"],
+            ["aegir", "ægir", "ÆGIR", "Ægir"],
+            ["oeuvre", "œuvre", "ŒUVRE", "Œuvre"],
+            ["ijs", "ĳs", "ĲS", "Ĳs"],
+            ["hobz", "ħobż", "ĦOBŻ", "Ħobż"],
+            // Greek's tonos and dialytika, polytonic breathings, and the
+            // final sigma, which `Σ` lowercases to `σ` wherever it stands.
+            ["ελληνικα", "ελληνικά", "ΕΛΛΗΝΙΚΑ", "Ελληνικά"],
+            ["οδος", "οδός", "ΟΔΟΣ", "Οδός"],
+            ["προυποθεση", "προϋπόθεση", "ΠΡΟΫΠΟΘΕΣΗ", "Προϋπόθεση"],
+            ["ανθρωπος", "ἄνθρωπος", "ἌΝΘΡΩΠΟΣ", "Ἄνθρωπος"],
+        ] {
+            let first = tokenize(group[0]);
+            for other in &group[1..] {
+                assert_eq!(first, tokenize(other), "{:?} vs {other:?}", group[0]);
+            }
+        }
+        // Written decomposed, a letter and its marks fold as the letter
+        // written whole does: macOS's file names, Vietnamese typed with
+        // its tones apart.
+        assert_eq!(tokenize("Su\u{308}tlac\u{327}"), ["sutlac"]);
+        assert_eq!(tokenize("pho\u{31B}\u{309} bo\u{300}"), ["pho", "bo"]);
+        assert_eq!(tokenize("re\u{301}sume\u{301}"), ["resume"]);
+        // A mark alone is no word, and a mark keeps no word apart.
+        assert_eq!(tokenize("a \u{301} b"), ["a", "b"]);
+        // Cyrillic and every other script stay as written: `ё` is not `е`,
+        // `й` not `и`.
+        assert_eq!(tokenize("Ёлка и йогурт"), ["ёлка", "и", "йогурт"]);
+        assert_ne!(tokenize("ёлка"), tokenize("елка"));
+        assert_eq!(tokenize("مرحبا שלום"), ["مرحبا", "שלום"]);
+        // English never reaches the table.
+        assert_eq!(
+            tokenize("The Quick brown FOX, naive cafe"),
+            ["the", "quick", "brown", "fox", "naive", "cafe"]
+        );
+        assert_eq!(tokenize("naïve café"), ["naive", "cafe"]);
+    }
+
+    /// Case never decides a word: every character folds as its lowercase
+    /// does, and a fold is folded already -- over every code point, so a
+    /// table written from another Unicode than the standard library's
+    /// lowercase mapping is caught here.
+    #[test]
+    fn every_character_folds_as_its_lowercase_and_once() {
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            if splits_words(c) || gram(c) > 0 || combining(c) || marked(c) {
+                continue;
+            }
+            let one = tokenize(&format!("a{c}"));
+            let lower = tokenize(&format!("a{}", c.to_lowercase()));
+            assert_eq!(one, lower, "U+{:04X}", c as u32);
+            let again: Vec<String> = one.iter().flat_map(|t| tokenize(t)).collect();
+            assert_eq!(one, again, "U+{:04X} folds twice", c as u32);
+        }
     }
 
     #[test]

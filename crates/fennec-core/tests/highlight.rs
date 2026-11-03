@@ -174,15 +174,57 @@ fn emoji_and_astral_characters_count_as_javascript_counts_them() {
 }
 
 #[test]
+fn an_accent_folds_and_the_word_is_marked_as_written() {
+    let t = "Sütlaç tarifi: sütlaç fırında, SÜTLAÇ ve sutlac";
+    let db = one("", &[t]);
+    // Typed without its accents or with them, the word finds every way it
+    // is written, and each is marked whole.
+    let every = [
+        at(t, "Sütlaç", 0),
+        at(t, "sütlaç", 0),
+        at(t, "SÜTLAÇ", 0),
+        at(t, "sutlac", 0),
+    ];
+    assert_eq!(marks(&db, "sutlac", 0), every);
+    assert_eq!(marks(&db, "Sütlaç", 0), every);
+    assert_eq!(marks(&db, "firinda", 0), [at(t, "fırında", 0)]);
+    let rs = answer(
+        &db,
+        "get d select highlight(body, $1, $2) match body \"sutlac\"",
+        &[Value::Text("[".into()), Value::Text("]".into())],
+    );
+    assert_eq!(
+        rs.rows[0].values[0],
+        Value::Text("[Sütlaç] tarifi: [sütlaç] fırında, [SÜTLAÇ] ve [sutlac]".into())
+    );
+    // A prefix of the folded word marks the word as written.
+    let db = one("(prefix=4)", &["köfte, kofteci, KÖFTECİ"]);
+    let t = "köfte, kofteci, KÖFTECİ";
+    assert_eq!(
+        marks(&db, "kofte", 0),
+        [at(t, "köfte", 0), at(t, "kofteci", 0), at(t, "KÖFTECİ", 0)]
+    );
+}
+
+#[test]
 fn a_combining_mark_stays_with_its_letter() {
     // Decomposed, `é` is an `e` and a combining acute, which the tokenizer
-    // cuts at: the `e` is its own term, and its mark keeps its accent.
-    let t = "e\u{301}cole and ecole";
+    // keeps inside the word and drops from its term, as the fold drops a
+    // composed letter's: the word is one term however it is written, and
+    // its mark holds the accents.
+    let t = "e\u{301}cole and école";
     let db = one("", &[t]);
     assert_eq!(
-        marks(&db, "e", 0),
-        [at(t, "e\u{301}", 0)],
+        marks(&db, "ecole", 0),
+        [at(t, "e\u{301}cole", 0), at(t, "école", 0)],
         "the accent belongs to the mark"
+    );
+    // An accent past a word's end belongs to its last letter.
+    let t = "cafe\u{301}, cafe";
+    let db = one("", &[t]);
+    assert_eq!(
+        marks(&db, "café", 0),
+        [at(t, "cafe\u{301}", 0), at(t, "cafe", 1)]
     );
     // A Thai run's triples: the mark covers the matched characters and the
     // tone mark after them.
@@ -421,7 +463,7 @@ impl Rng {
 /// taken out, is the text.
 #[test]
 fn marks_over_generated_texts_hold_the_terms_and_whole_characters() {
-    const PIECES: [&str; 16] = [
+    const PIECES: [&str; 18] = [
         "rust",
         "Rust",
         "İstanbul",
@@ -438,13 +480,25 @@ fn marks_over_generated_texts_hold_the_terms_and_whole_characters() {
         ", ",
         "-",
         "1\u{FE0F}\u{20E3}",
+        "Sütlaç",
+        "sutlac",
     ];
-    const QUERIES: [&str; 6] = ["rust", "istanbul ışık", "京都", "e", "서울 ไม่", "café 1"];
+    const QUERIES: [&str; 7] = [
+        "rust",
+        "istanbul ışık",
+        "京都",
+        "e",
+        "서울 ไม่",
+        "café 1",
+        "sutlac",
+    ];
     let mut rng = Rng(0x9e3779b97f4a7c15);
     let mut texts = Vec::new();
     for _ in 0..300 {
         let n = 1 + rng.below(14);
-        let t: String = (0..n).map(|_| PIECES[rng.below(16) as usize]).collect();
+        let t: String = (0..n)
+            .map(|_| PIECES[rng.below(PIECES.len() as u64) as usize])
+            .collect();
         texts.push(t);
     }
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();

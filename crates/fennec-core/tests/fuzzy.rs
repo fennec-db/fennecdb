@@ -356,3 +356,61 @@ fn an_index_of_prefixes_reads_loosely_as_any() {
         [2, 0]
     );
 }
+
+/// The words are folded before they are read loosely: a typo or a word
+/// begun meets the word whatever accents either is written with.
+#[test]
+fn accents_fold_before_a_word_is_read_loosely() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection d (n int, body text @text, short text @text(prefix=3))",
+        &[],
+    );
+    for (i, b) in [
+        "Sütlaç tarifi",
+        "sütlaç fırında",
+        "köfte ve pilav",
+        "çay bahçesi",
+        "fırın sutlac",
+    ]
+    .iter()
+    .enumerate()
+    {
+        exec(
+            &mut db,
+            "put d {n: $1, body: $2, short: $2}",
+            &[Value::Int(i as i64), Value::Text(b.to_string())],
+        );
+    }
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v
+    };
+    let whole = "get d select n match body $1 limit 10";
+    assert_eq!(sorted(ns(&db, whole, "sutlac")), [0, 1, 4]);
+    assert_eq!(
+        sorted(ns(&db, whole, "SÜTLAÇ")),
+        [0, 1, 4],
+        "the accented query finds the plain text too"
+    );
+    assert_eq!(ns(&db, whole, "kofte"), [2]);
+    assert_eq!(ns(&db, whole, "cay"), [3]);
+    assert_eq!(ns(&db, whole, "bahcesi"), [3]);
+    // A typo of six letters takes one edit, counted over the folds.
+    let fuzzy = "get d select n match body $1 fuzzy limit 10";
+    assert_eq!(sorted(ns(&db, fuzzy, "sutlca")), [0, 1, 4]);
+    assert_eq!(sorted(ns(&db, fuzzy, "sütlaçı")), [0, 1, 4]);
+    // A word begun, by `prefix` and by an index of prefixes.
+    let prefix = "get d select n match body $1 prefix limit 10";
+    assert_eq!(ns(&db, prefix, "köf"), [2]);
+    assert_eq!(ns(&db, prefix, "bahc"), [3]);
+    let short = "get d select n match short $1 limit 10";
+    assert_eq!(sorted(ns(&db, short, "firi")), [1, 4]);
+    let r = rows(
+        &db,
+        r#"get d select highlight(body, "[", "]") match body $1 fuzzy prefix limit 1"#,
+        &[Value::Text("cay bahc".into())],
+    );
+    assert_eq!(r.rows[0].values[0], Value::Text("[çay] [bahçesi]".into()));
+}

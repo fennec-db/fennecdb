@@ -99,6 +99,8 @@ fn match_is_case_insensitive_and_unicode() {
     // The folding path, not the ASCII one: the stored term is upper case.
     assert_eq!(ids(&run(&mut db, r#"get d match t "çalışma""#)), [1]);
     assert_eq!(ids(&run(&mut db, r#"get d match t "RAPORU""#)), [1]);
+    // And typed without its accents, as a keyboard without them types it.
+    assert_eq!(ids(&run(&mut db, r#"get d match t "calisma""#)), [1]);
 }
 
 /// The end-to-end half of `text::tests::the_turkish_i_folds_every_way_it_is_written`:

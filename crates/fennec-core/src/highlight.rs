@@ -5,11 +5,12 @@
 //! where a term stood is kept in the index -- its postings hold counts, and
 //! positions would have been a file format and a third of the postings
 //! again -- so a row's text is split at query time with the same splitting,
-//! the same folding (`İstanbul`, `ISTANBUL` and `istanbul` are one term)
-//! and the same prefixes and runs of characters the index was built with
-//! (`text::indexed_terms`), and a span is marked where a term it yields is
-//! one of the query's. A mark is therefore exactly a term the index
-//! matched: a word, the whole word a prefix (`prefix=N`) was cut from, and
+//! the same folding (`İstanbul`, `ISTANBUL` and `istanbul` are one term,
+//! `Sütlaç` and `sutlac` another) and the same prefixes and runs of
+//! characters the index was built with (`text::indexed_terms`), and a span
+//! is marked where a term it yields is one of the query's. A mark is
+//! therefore exactly a term the index matched: a word as it is written,
+//! accents and all, the whole word a prefix (`prefix=N`) was cut from, and
 //! the characters of a pair (or a triple) of Han, kana, Hangul or Thai.
 //! The same query over the same text marks the same spans in every build.
 //!
@@ -23,7 +24,7 @@
 
 use crate::maps::Map;
 use crate::schema::TextIndexSpec;
-use crate::text::{indexed_terms, splits_words};
+use crate::text::{combining, indexed_terms, splits_words};
 
 /// A query's terms, as the index of the field `match` ran over reads them,
 /// each once. In the map type the index's own search counts them in: a
@@ -142,7 +143,7 @@ fn extends(c: char) -> bool {
 fn units(text: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for raw in text.split(splits_words) {
-        if raw.is_empty() || raw.chars().all(|c| c == '\u{0307}') {
+        if raw.is_empty() || raw.chars().all(combining) {
             continue;
         }
         let base = raw.as_ptr() as usize - text.as_ptr() as usize;
