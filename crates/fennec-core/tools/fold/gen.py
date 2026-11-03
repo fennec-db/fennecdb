@@ -31,11 +31,20 @@ lowercase is outside the table, which the tokenizer then never folds.
 
 The table is a byte a code point over three ranges -- Latin-1's letters
 with Latin Extended-A and -B, Greek and Coptic, and Latin Extended
-Additional (Vietnamese) with Greek Extended (polytonic Greek): 0 for a
-code point that stays, an ASCII letter for itself, `n` up to 31 for the
-`n`th of `PAIRS`, and from 0x80 up U+0300 past it -- a Greek letter. 1 056
-bytes; ASCII text never reaches it. Where a code point is in it is a
-function of the ranges, `at`, each range's offset a constant of its arm:
+Additional (Vietnamese) with Greek Extended (polytonic Greek): an ASCII
+letter for itself, `n` up to 30 for the `n`th of `PAIRS`, and from 0x80 up
+U+0300 past it -- a Greek letter; 0 for a code point that is its own
+lowercase and folds to nothing the table can say, which the tokenizer
+keeps as it is, and 31 (`LOWER`) for one it lowercases and folds that in
+turn. A capital of a letter that stays is that letter where a byte holds
+it, `Α` the byte of `α`, so a Greek word is read a lookup a letter: with 0
+for every letter that stays, read as one to lowercase, each of Greek's
+unaccented letters, most of its text, was looked up, lowercased through
+the standard library's tables and looked up again. 1 056 bytes, 400
+brotli where 0 for every letter that stays was 327, and 414 with a byte
+of its own for a letter that is its own lowercase, 0 the rest: kept as
+it is, 0, a letter is what it was. ASCII text never reaches it.
+Where a code point is in it is a function of the ranges, `at`, each range's offset a constant of its arm:
 a loop over the ranges, summing their lengths, cost Cyrillic and Greek a
 walk of them for every letter.
 """
@@ -54,6 +63,8 @@ URL = "https://www.unicode.org/Public/%s/ucd/UnicodeData.txt" % UNICODE
 # The file the table was written from: a download that differs is refused
 # rather than written or checked against.
 SHA256 = "2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c"
+# The byte of a code point the tokenizer lowercases and folds in turn.
+LOWER = 0x1F
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.normpath(os.path.join(HERE, "..", "..", "src", "text", "fold.rs"))
 
@@ -178,21 +189,36 @@ def main():
 
     pairs = sorted({f for f in folds.values() if len(f) > 1})
     table = []
+    lowered = 0
     for lo, hi in RANGES:
         for cp in range(lo, hi):
             f = folds.get(cp)
-            if f is None:
-                table.append(0)
-            elif len(f) == 1 and "a" <= f <= "z":
-                table.append(ord(f))
-            elif len(f) == 1 and 0x0380 <= ord(f) < 0x0400:
-                table.append(ord(f) - 0x0300)
-            elif len(f) == 2 and f.isascii() and f.isalpha():
-                table.append(pairs.index(f) + 1)
-            else:
+            if f is not None:
+                if len(f) == 1 and "a" <= f <= "z":
+                    table.append(ord(f))
+                    continue
+                if len(f) == 1 and 0x0380 <= ord(f) < 0x0400:
+                    table.append(ord(f) - 0x0300)
+                    continue
+                if len(f) == 2 and f.isascii() and f.isalpha():
+                    table.append(pairs.index(f) + 1)
+                    continue
                 left.append((cp, f, "no byte holds it"))
+            # What folds to nothing the table can say. `char::to_lowercase`
+            # maps a code point by this file's mapping, but for U+0130,
+            # which it maps to two: one with no lowercase is itself; a
+            # capital of a letter that stays is that letter where a byte
+            # holds it (`Α` is `α`); any other is lowercased, and that
+            # folded in turn.
+            low = lower(cp)
+            if low == cp:
                 table.append(0)
-    assert len(pairs) < 0x20, pairs
+            elif cp != 0x0130 and 0x0380 <= low < 0x0400 and fold(low) is None:
+                table.append(low - 0x0300)
+                lowered += 1
+            else:
+                table.append(LOWER)
+    assert len(pairs) < LOWER, pairs
 
     out = [
         "// Written by crates/fennec-core/tools/fold/gen.py from Unicode %s's" % UNICODE,
@@ -220,8 +246,12 @@ def main():
         "pub(super) const PAIRS: [&str; %d] = [%s];" % (
             len(pairs), ", ".join('"%s"' % p for p in pairs)),
         "",
-        "/// A byte a code point: 0 where it stays, an ASCII letter for itself, a",
-        "/// pair of `PAIRS` from 1, and from 0x80 up U+0300 past it (a Greek letter).",
+        "/// The byte of a code point that is lowercased, and that folded in turn.",
+        "pub(super) const LOWER: u8 = 0x%02X;" % LOWER,
+        "",
+        "/// A byte a code point: 0 where it is itself, an ASCII letter for itself, a",
+        "/// pair of `PAIRS` from 1, from 0x80 up U+0300 past it (a Greek letter), and",
+        "/// `LOWER` where it is lowercased and that folded in turn.",
         "pub(super) static TABLE: [u8; %d] = [" % len(table),
     ]
     at = 0
@@ -247,7 +277,8 @@ def main():
         print("%s is what tools/fold/gen.py writes" % OUT)
         return
 
-    print("%d code points fold, %d bytes, pairs %s" % (len(folds), len(table), pairs))
+    print("%d code points fold, %d stay as their lowercase, %d are lowercased first, %d bytes, "
+          "pairs %s" % (len(folds), lowered, table.count(LOWER), len(table), pairs))
     for cp, f, why in left:
         print("left as it is: U+%04X %s -> %s (%s)" % (cp, chars[cp].name, f, why))
 

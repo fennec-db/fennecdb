@@ -279,7 +279,15 @@ it writes is the file as committed, which CI's fmt job holds it to
 decomposition into letters of the script, the letters with a stroke or a
 middle dot by what they are (`ø`, `ł`, `đ`, `ħ`), `æ`, `œ` and `ß` as two
 letters and the final sigma as `σ`; a letter folds as its lowercase does.
-Where a code point is in the table is a match of its three ranges, each
+A letter that folds to nothing is read in one lookup too: 0, one that is
+its own lowercase, is kept as it is, and a capital of one that stays is
+its lowercase where a byte holds it (`Α` is `α`), so every letter Greek
+text writes is one lookup; `LOWER`, lowercased and looked up again, is
+left to a capital whose lowercase no byte holds (`Þ`, `Ŋ`) and to one
+whose lowercase is outside the table. With 0 read as `LOWER`, as the
+table first had it, each of Greek's unaccented letters was looked up,
+lowercased and looked up again; the table is 400 bytes brotli, where it
+was 327 (414 with a byte for a letter kept and 0 for one lowered). Where a code point is in the table is a match of its three ranges, each
 range's offset a constant of its arm (`fold::at`): a loop summing the
 ranges' lengths walked them for every Cyrillic and Greek letter. A
 combining mark stays in its word; after a Latin or Greek letter, or ASCII,
@@ -334,8 +342,8 @@ hers writes it so, and the word read its fold -- until bob wrote a row of
 `sütlaç` she cannot read; then the spelling was read, which only his row
 held, and her empty answer told her a row she could not read held the
 word. The ranking (`search_within`, `search_loose`), the set a facet counts
-(`matching_loose`, the filter's test asked of the spelling's rows, as
-`matched_set` asks it of the set after) and the marks of `highlight()`
+and a `match` beside `order` or `count` selects (`scored`, handed the rows
+the ranking reads as its `within`) and the marks of `highlight()`
 (`read_terms`, `loose_words`) all read the query through `read_words`, so
 a statement reads a word one way wherever it reads it: `tests/within.rs`
 holds a scoped statement's rows, scores, facets and marks to be the same
@@ -344,10 +352,11 @@ with bob's rows as without them, and
 is "no row this statement reads writes it so", which for a scoped token is
 the access rule's to decide; for any other `match` the rows are the
 collection's, as its BM25's are, whatever its `where` keeps -- a `where`
-narrows the rows ranked and nothing counted. A row whose filter fails to
-evaluate counts as one the statement does not read, as `matching_ids` left
-it out of the ranking; the facet's set tests it again and refuses there.
-The browser holds no scoped token, and asks the index.
+narrows the rows ranked and nothing counted. A filter that fails to
+evaluate fails the ranking and the set, which read its rows
+(`matching_ids`); the marks, asked of each row by the filter's test, count
+such a row as one the statement does not read. The browser holds no scoped
+token, and asks the index.
 
 **Case decides a word as written no more than its fold.** A term as
 written is the word lowercased, and a letter whose uppercase lowercases to
@@ -417,10 +426,60 @@ lowercase reaches -- Cyrillic and every block up to the Latin and Greek
 extensions, and every one past them but the Angström sign, whose lowercase
 is `å` -- is lowercased as before anything folded, its two lookups of the
 table spared; `every_character_folds_as_its_lowercase_and_once` holds those
-ranges to the table. What Greek pays over main is its fold's lookups. Under
-the option the closure is a call a word the first build did not make:
-`insert` with `accents`, that build / this one, English 14.60 / 16.03 us,
-Russian 18.87 / 19.58, Greek 25.08 / 25.94, Turkish 4.85 / 4.96.
+ranges to the table. Under the option the closure is a call a word the
+first build did not make: `insert` with `accents`, that build / this one,
+English 14.60 / 16.03 us, Russian 18.87 / 19.58, Greek 25.08 / 25.94,
+Turkish 4.85 / 4.96.
+
+**A script the fold never reaches retires no more instructions than main
+did.** The formal timing of that build against main (7 pairs in turns,
+each started below a load of 1.5) still had Russian slower in every pair:
+the tokenizer 21.11 -> 21.73 ns a byte (+3.0%), the index's build
+15.17 -> 15.54 us a document, a `put` 18.03 -> 18.47 us. Counted in
+instructions retired (`/usr/bin/time -l`, the reading of the documents
+taken off), it was the code, not where it landed: Russian's tokenizing
+retired 2.5% more than main's as an index reaches it and 3.7% more as
+`foldtime.rs` calls it, and with main's loop put back in the branch's
+tokenizer 0.6% fewer. Two calls of `char::to_lowercase` in the
+loop -- Cyrillic's arm and the fold's, for a letter the table did not
+hold -- left the standard library's lowercase lookup out of line, a call a
+letter, where main's one call had it inlined; and a `matches!` of the four
+ranges a Cyrillic letter is tested against was compiled into vector
+instructions, a dozen a letter. So the loop calls the lowercase once, for
+the scripts that stay (`stays`, a `match` of its ranges), and the fold's
+arm reads the table alone, a letter's lowercase among its bytes, the rare
+one no byte holds lowercased out of the loop (`lower_folded`, cold);
+`fold_into` is inlined into the loop, natively -- the browser module,
+built for size, keeps it a function. Latin-1's signs, IPA and the
+modifier letters, outside the table and each its own lowercase, are kept
+as written by an arm of their own (`KEPT`): sent down the cold path,
+Azerbaijani's `ə` and Uzbek's `ʻ` were a call a letter, where main
+lowercased them inline. Its terms are the same: the tokenizer,
+`@text(accents)` and a prefix index hand out what that build did for
+every code point in nine contexts and over 12 000 Russian and Greek,
+5 183 English, 30 000 Turkish and 4 869 Azerbaijani documents.
+Instructions retired, millions, main / that build / this one, five passes
+of the tokenizer as an index reaches it (`for_each_indexed_term`), three
+of `TextIndex::insert` and two of `create index` through the database (a
+`put` of the documents taken off):
+
+| | tokenizer | `insert` | `create index` |
+|---|---:|---:|---:|
+| Russian | 8 256 / 8 464 / 8 025 | 5 811 / 5 941 / 5 679 | 4 050 / 4 135 / 3 964 |
+| Greek | 9 542 / 9 843 / 7 672 | 6 721 / 6 902 / 5 600 | 4 679 / 4 801 / 3 931 |
+| English | 1 970 / 1 607 / 1 657 | 2 645 / 2 441 / 2 474 | 1 807 / 1 673 / 1 691 |
+| Turkish | 4 265 / 3 209 / 3 235 | 4 111 / 3 483 / 3 498 | 2 944 / 2 513 / 2 517 |
+| Azerbaijani | 886 / 729 / 650 | 808 / 714 / 668 | 577 / 516 / 483 |
+
+Russian is 2 to 3% under main, and its cycles with it: the tokenizer as
+`foldtime.rs` calls it, 2.177 / 2.248 / 2.145 billion, in turns. Greek is
+a fifth under main, where it was 3% over: its unaccented letters, most of
+its text, were looked up, lowercased and looked up again. English and
+Turkish keep what the fold's ASCII path won, within 3% of that build. Tried and dropped: the test for
+ASCII after the one for the scripts that stay (Turkish, mostly ASCII
+letters, 7% over that build), and the words that are not ASCII handed to
+a function of their own, which spared English's loop its registers but
+cost Russian a call a word (8 348, over main).
 
 **A word written decomposed is another spelling under `accents`.** A
 term as written keeps a word's letters as written: `sütlaç` written whole

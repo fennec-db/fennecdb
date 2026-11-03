@@ -182,6 +182,13 @@ pub(crate) const WRITTEN: char = '~';
 /// flag for it. With the flag tested here a word at a time, an index
 /// without the option paid for it: Russian 21.84 -> 22.68 ns a byte against
 /// main, and 22.18 without it (docs/design/text.md#tokenizer).
+///
+/// A letter of a script the fold never reaches takes the path it took
+/// before anything folded: one test of its range ([`stays`]) and the
+/// standard library's lowercase, called from this loop once, so that the
+/// compiler inlines its tables here as it did then. With a second call in
+/// the fold's arm both went out of line, and Russian retired 2.5 to 3.7%
+/// more instructions tokenizing than main.
 pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usize)) {
     let mut buf = String::new();
     // A combining mark is not alphanumeric, so a plain `is_alphanumeric`
@@ -242,6 +249,13 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                     drops = true;
                     continue;
                 }
+                // Cyrillic and every other script the fold leaves as
+                // written: lowercased as before anything folded.
+                if stays(c) {
+                    buf.extend(c.to_lowercase());
+                    drops = false;
+                    continue;
+                }
                 match c {
                     '\u{0300}'..='\u{036F}' => {
                         if !drops {
@@ -252,6 +266,14 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                         buf.push('i');
                         drops = true;
                     }
+                    // Latin-1's signs, IPA and the modifier letters (`ə`,
+                    // `ʻ`), outside the table and each its own lowercase:
+                    // as written, a mark after them dropped as after any
+                    // Latin letter (`KEPT`).
+                    KEPT_LO..=KEPT_HI | KEPT_IPA_LO..=KEPT_IPA_HI => {
+                        buf.push(c);
+                        drops = true;
+                    }
                     // A full-width Latin letter or digit, as Japanese and
                     // Chinese text writes them (`ＩＴ`, `２０２３`), is the
                     // ASCII one.
@@ -259,28 +281,14 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                         buf.push(full_width(c));
                         drops = true;
                     }
-                    // A letter neither the table nor its lowercase reaches --
-                    // Cyrillic and every script past Greek but the Latin and
-                    // Greek extensions, the Angström sign aside (its
-                    // lowercase is `å`) -- is lowercased as it was before
-                    // anything folded, its two lookups of the table spared.
-                    // `every_character_folds_as_its_lowercase_and_once` holds
-                    // the ranges to the table.
-                    '\u{0400}'..='\u{1DFF}' | '\u{2000}'..='\u{212A}' | '\u{212C}'.. => {
-                        buf.extend(c.to_lowercase());
-                        drops = false;
-                    }
-                    // A letter the table folds is lowercase folded; any other
-                    // is lowercased, and what that gives folded in turn (the
-                    // Angström sign is `å`, so `a`). Latin and Greek drop the
-                    // marks after them, folded or not.
+                    // A Latin or Greek letter: the table's byte, whether it
+                    // folds, stays or is a capital of a letter that stays
+                    // (`Α` is `α`), one lookup; the rare one it says to
+                    // lowercase first, lowercased and looked up again. Latin
+                    // and Greek drop the marks after them, folded or not.
                     _ => {
                         if !fold_into(&mut buf, c) {
-                            for l in c.to_lowercase() {
-                                if !fold_into(&mut buf, l) {
-                                    buf.push(l);
-                                }
-                            }
+                            lower_folded(&mut buf, c);
                         }
                         drops = true;
                     }
@@ -319,6 +327,50 @@ fn grams(run: &str, at: usize, n: usize, chars: bool, f: &mut dyn FnMut(&str, us
     }
     if seen < n && !(chars && seen == 1) {
         f(run, at, at + run.len());
+    }
+}
+
+/// The letters below the table and between its first range and Greek
+/// that the tokenizer keeps as written, each its own lowercase
+/// (`what_the_table_leaves_is_its_own_lowercase`): handed to the cold path
+/// with the rest the table holds no byte for, Azerbaijani's `ə` and
+/// Uzbek's `ʻ` were a call each.
+const KEPT_LO: char = '\u{0080}';
+const KEPT_HI: char = '\u{00BF}';
+const KEPT_IPA_LO: char = '\u{0250}';
+const KEPT_IPA_HI: char = '\u{02FF}';
+
+/// Whether `c`, not ASCII, is of a script the fold leaves as written: a
+/// letter neither the table nor its lowercase reaches -- Cyrillic and every
+/// block up to the Latin and Greek extensions, and every one past them but
+/// the Angström sign (its lowercase is `å`) and the full-width forms.
+/// `every_character_folds_as_its_lowercase_and_once` holds the ranges to
+/// the table. A `match`, a range tested a branch: written as a `matches!`
+/// of the four ranges, the compiler tested them together in vector
+/// registers, a dozen instructions a Cyrillic letter.
+#[inline(always)]
+fn stays(c: char) -> bool {
+    let u = c as u32;
+    match u {
+        0x0400..=0x1DFF => true,
+        0x2000.. => u != 0x212B && !(0xFF01..=0xFF5E).contains(&u),
+        _ => false,
+    }
+}
+
+/// `c`, which the table says to lowercase first or does not hold,
+/// lowercased and each letter of that folded: a capital whose lowercase no
+/// byte holds (`Þ`, `Ŋ`), one whose lowercase is outside the table, the
+/// Angström sign. Out of the
+/// loop, which keeps its one call of the lowercase for the scripts that
+/// stay ([`terms`]).
+#[cold]
+#[inline(never)]
+fn lower_folded(buf: &mut String, c: char) {
+    for l in c.to_lowercase() {
+        if !fold_into(buf, l) {
+            buf.push(l);
+        }
     }
 }
 
@@ -394,18 +446,28 @@ pub(crate) fn combining(c: char) -> bool {
 
 /// Pushes what the table folds `c` to (`fold.rs`, written by
 /// `tools/fold/gen.py`), its base letter or letters lowercase -- `Ş` and `ş`
-/// are `s`, `ǽ` is `ae`, `ά` is `α` -- and says whether it held one.
+/// are `s`, `ǽ` is `ae`, `ά` is `α`, `α` and `Α` are `α`, `ð` is `ð` -- and
+/// says whether it held one: not for a code point outside it, nor for one
+/// it says to lowercase first (`LOWER`, `Þ`). Inlined into the tokenizer's loop, a call apart cost Greek
+/// 4% and Turkish 1% of the instructions tokenizing; one `push` of the
+/// letter it reads, not one an arm, keeps the copy small. The browser
+/// module, built for size, keeps it a function of its own.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 fn fold_into(buf: &mut String, c: char) -> bool {
-    let byte = fold::at(c as u32)
-        .and_then(|at| fold::TABLE.get(at))
-        .copied()
-        .unwrap_or(0);
-    match byte {
-        0 => return false,
-        1..=0x1F => buf.push_str(fold::PAIRS.get(byte as usize - 1).copied().unwrap_or("")),
-        0x20..=0x7F => buf.push(byte as char),
-        _ => buf.push(char::from_u32(0x300 + byte as u32).unwrap_or(c)),
-    }
+    let Some(&byte) = fold::at(c as u32).and_then(|at| fold::TABLE.get(at)) else {
+        return false;
+    };
+    let one = match byte {
+        0 => c,
+        fold::LOWER => return false,
+        1..=0x1F => {
+            buf.push_str(fold::PAIRS.get(byte as usize - 1).copied().unwrap_or(""));
+            return true;
+        }
+        0x20..=0x7F => byte as char,
+        _ => char::from_u32(0x300 + byte as u32).unwrap_or(c),
+    };
+    buf.push(one);
     true
 }
 
@@ -1788,6 +1850,18 @@ mod tests {
         assert_eq!(ix.terms(), 5);
     }
 
+    /// What the tokenizer keeps as written without asking the table or
+    /// the lowercase (`KEPT`) is outside the table and its own lowercase,
+    /// so it reads as it did when it was lowercased and looked up.
+    #[test]
+    fn what_the_table_leaves_is_its_own_lowercase() {
+        for c in (KEPT_LO..=KEPT_HI).chain(KEPT_IPA_LO..=KEPT_IPA_HI) {
+            assert_eq!(fold::at(c as u32), None, "U+{:04X}", c as u32);
+            let mut l = c.to_lowercase();
+            assert_eq!((l.next(), l.next()), (Some(c), None), "U+{:04X}", c as u32);
+        }
+    }
+
     /// Case never decides a word: every character folds as its lowercase
     /// does, and a fold is folded already -- over every code point, so a
     /// table written from another Unicode than the standard library's
@@ -1925,11 +1999,7 @@ mod tests {
             let plain = Loose::default();
             let mine = |ids: Vec<DocId>| ids.into_iter().filter(|d| test(*d)).collect::<Vec<_>>();
             let a = mine(without.scored(q, plain, Some(alice)).unwrap());
-            assert_eq!(
-                a,
-                mine(with.scored(q, plain, Some(alice)).unwrap()),
-                "{q}"
-            );
+            assert_eq!(a, mine(with.scored(q, plain, Some(alice)).unwrap()), "{q}");
             assert!(a.contains(&1), "{q}");
             let keys = |ix: &TextIndex, reads: Reads| {
                 let mut k: Vec<String> = ix.read_terms(q, reads).into_keys().collect();
