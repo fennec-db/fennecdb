@@ -99,6 +99,9 @@ impl Database {
             let adds = match kind {
                 REC_DATA => op == Some(crate::store::OP_PUT),
                 REC_DROP => false,
+                // A slot's mark keeps a run's place, never room the
+                // tenant's rows take: a purge carrying one is let through.
+                super::REC_STATEMENT => op != Some(super::stored::OP_MARK),
                 _ => true,
             };
             if !adds {
@@ -131,7 +134,15 @@ impl Database {
     pub(super) fn app_writes(&self, b: &Block, from: usize) -> u64 {
         let mut last: Option<(u32, bool)> = None;
         let mut n = 0;
-        for &(_, cid, _) in &b.heads[from.min(b.heads.len())..] {
+        let mut start = HEAD_ROOM;
+        for &(kind, cid, end) in &b.heads[from.min(b.heads.len())..] {
+            let op = b.frames.get(start).copied();
+            start = end;
+            // A slot's mark riding a request's block is a run's, never a
+            // write the request is charged for.
+            if kind == super::REC_STATEMENT && op == Some(super::stored::OP_MARK) {
+                continue;
+            }
             let own = match last {
                 Some((c, own)) if c == cid => own,
                 _ => {

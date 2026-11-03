@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/statements.fennec");
 
-const SCHEMA: &str = "create collection accounts (owner text @hash, balance int);
+pub(crate) const SCHEMA: &str = "create collection accounts (owner text @hash, balance int);
 create collection entries (src int, dst int, amount int, by text);
 create collection likes (post int, user text);
 create index on likes (post, user) @unique";
@@ -44,13 +44,13 @@ const LIKE: &str = "create statement like($post int) claims (sub text) as
   insert likes {post: $post, user: $jwt.sub} if absent returning id";
 
 /// Each write's record, by its number.
-type Numbered = Vec<(u64, Vec<u8>)>;
+pub(crate) type Numbered = Vec<(u64, Vec<u8>)>;
 
 /// A sink keeping the file's bytes and each write's record, numbered.
 #[derive(Clone)]
-struct Tap {
-    file: Arc<Mutex<Vec<u8>>>,
-    writes: Arc<Mutex<Numbered>>,
+pub(crate) struct Tap {
+    pub(crate) file: Arc<Mutex<Vec<u8>>>,
+    pub(crate) writes: Arc<Mutex<Numbered>>,
 }
 
 impl Default for Tap {
@@ -80,16 +80,16 @@ impl Sink for Tap {
 
 impl Tap {
     /// A database writing into the tap.
-    fn database(&self) -> Database {
+    pub(crate) fn database(&self) -> Database {
         fennec_ql::install();
         Database::with_sink(Box::new(self.clone()))
     }
 
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         self.file.lock().unwrap().clone()
     }
 
-    fn last(&self) -> (u64, Vec<u8>) {
+    pub(crate) fn last(&self) -> (u64, Vec<u8>) {
         self.writes
             .lock()
             .unwrap()
@@ -100,7 +100,7 @@ impl Tap {
 }
 
 /// A database opened from `bytes`, as an open of its file reads it.
-fn opened(bytes: &[u8]) -> Database {
+pub(crate) fn opened(bytes: &[u8]) -> Database {
     fennec_ql::install();
     let mut db = Database::new();
     db.load(bytes).expect("the file opens");
@@ -108,7 +108,7 @@ fn opened(bytes: &[u8]) -> Database {
 }
 
 /// Each statement of `text` on its own, a block each.
-fn run(db: &mut Database, text: &str) -> Result<Response> {
+pub(crate) fn run(db: &mut Database, text: &str) -> Result<Response> {
     let mut last = Response::Affected(0);
     for s in fennec_ql::parse(text).expect("parse") {
         last = db.execute(&s)?;
@@ -117,13 +117,13 @@ fn run(db: &mut Database, text: &str) -> Result<Response> {
 }
 
 /// The statements of `text` as one block.
-fn block(db: &mut Database, text: &str) -> Result<Vec<Response>> {
+pub(crate) fn block(db: &mut Database, text: &str) -> Result<Vec<Response>> {
     let stmts = fennec_ql::parse(text).expect("parse");
     let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|s| (s, &[][..])).collect();
     db.execute_block(&pairs).map_err(|(_, e)| e)
 }
 
-fn schema(tap: &Tap) -> Database {
+pub(crate) fn schema(tap: &Tap) -> Database {
     let mut db = tap.database();
     run(&mut db, SCHEMA).unwrap();
     db
@@ -146,11 +146,11 @@ fn held(t: &Statements) -> Vec<Held> {
         .collect()
 }
 
-fn digest(text: &str) -> u64 {
+pub(crate) fn digest(text: &str) -> u64 {
     fennec_ql::definition(text).unwrap().digest().unwrap()
 }
 
-fn refused(r: Result<impl std::fmt::Debug>) -> String {
+pub(crate) fn refused(r: Result<impl std::fmt::Debug>) -> String {
     r.expect_err("refused").to_string()
 }
 
@@ -618,11 +618,16 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
             file.extend_from_slice(&body);
             file
         });
-        std::fs::write(FIXTURE, with_binding(file)).unwrap();
+        let file = crate::scheduled::with_schedule(with_binding(file));
+        std::fs::write(FIXTURE, file).unwrap();
     }
     let db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
     let t = db.statements();
-    assert_eq!(t.len(), 4, "transfer, like, stale and the binding");
+    assert_eq!(
+        t.len(),
+        5,
+        "transfer, like, stale, the binding and the schedule"
+    );
     for (name, text) in [("transfer", TRANSFER), ("like", LIKE)] {
         let s = t.get(name).unwrap();
         assert_eq!((s.epoch, s.digest), (1, digest(text)), "{name}");
@@ -751,7 +756,7 @@ fn binding(tap: &Tap) -> Database {
 
 /// `file` with the binding after its records, once, as this build writes
 /// it: what `tests/statements.fennec` gained in F2's slice 2.
-fn with_binding(file: Vec<u8>) -> Vec<u8> {
+pub(crate) fn with_binding(file: Vec<u8>) -> Vec<u8> {
     let tap = Tap {
         file: Arc::new(Mutex::new(file.clone())),
         writes: Arc::default(),
@@ -766,7 +771,7 @@ fn with_binding(file: Vec<u8>) -> Vec<u8> {
 
 /// Where a record's body starts: past its kind, its collection and its
 /// length.
-fn body_at(record: &[u8]) -> usize {
+pub(crate) fn body_at(record: &[u8]) -> usize {
     let mut p = 1;
     get_uvarint(record, &mut p).unwrap();
     get_uvarint(record, &mut p).unwrap();

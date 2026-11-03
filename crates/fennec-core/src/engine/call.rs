@@ -77,6 +77,15 @@ impl Database {
                 crate::named::Binding::events_named(*events)
             )));
         }
+        // A scheduled statement is the clock's: no call runs it until a
+        // server's scheduler does, with the rules of who may (F3's slice
+        // 3) -- one run by hand before them would be a run no one said.
+        if s.schedule.is_some() {
+            return Err(Error::Query(format!(
+                "statement `{}` runs by the clock: no call runs it",
+                call.name
+            )));
+        }
         // Judged by the tree it runs, or, where its text reads as another
         // statement here, by that one's signature: the mark below comes
         // after the claims, the arguments and `check`, as the design orders
