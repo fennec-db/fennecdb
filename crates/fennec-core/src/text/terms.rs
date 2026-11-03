@@ -890,7 +890,8 @@ impl Terms {
     }
 
     /// Every word's bytes, in no order, but the prefixes an index of them
-    /// marks `^`: the words a [`crate::fuzzy::Dictionary`] is made of.
+    /// marks `^` and the words as written beside their folds (`~`): the
+    /// words a [`crate::fuzzy::Dictionary`] is made of.
     pub fn words(&self) -> Vec<&[u8]> {
         let mut out = Vec::with_capacity(self.len());
         for s in self.shards() {
@@ -898,7 +899,7 @@ impl Terms {
             let ats = ones.chain(s.lists.iter().filter(|l| !l.docs.is_empty()).map(|l| l.at));
             for at in ats {
                 let w = word_at(&s.bytes, at as usize).0;
-                if w.first() != Some(&b'^') {
+                if !matches!(w.first(), Some(b'^' | b'~')) {
                     out.push(w);
                 }
             }

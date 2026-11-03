@@ -95,7 +95,8 @@ type Lazy<T> = std::sync::OnceLock<T>;
 #[cfg(all(feature = "text", target_arch = "wasm32"))]
 type Lazy<T> = std::cell::OnceCell<T>;
 
-/// Calls `f` with every term in `text`, lowercased and I-folded.
+/// Calls `f` with every term in `text`, lowercased, I-folded and its
+/// accents folded.
 ///
 /// The ASCII path hands out a borrowed slice and allocates nothing; anything
 /// else folds through the Unicode default case mapping into a reused buffer.
@@ -121,6 +122,15 @@ type Lazy<T> = std::cell::OnceCell<T>;
 /// meet; the point is the second column, where after the fold the two are the
 /// same number. Case no longer decides.
 ///
+/// **A Latin or Greek letter folds to its base letter** (`fold.rs`, written
+/// by `tools/fold/gen.py`): `Sütlaç`, `sütlaç` and `sutlac` are one term,
+/// so a word typed on a keyboard without the letters finds the word
+/// written with them. nDCG@10 by BM25 over WebFAQ's queries typed without
+/// accents went 0.4095 -> 0.4835 in Turkish, 0.2113 -> 0.6005 in
+/// Vietnamese and 0.3119 -> 0.6002 in Greek. A word whose accents make it
+/// another is indexed as written as well (`WRITTEN`), which a query typed
+/// with accents reads (`TextIndex::read_words`).
+///
 /// **A script written without spaces is indexed in runs of characters.** Han,
 /// kana and Hangul, and Thai, Lao, Khmer and Myanmar, run their words
 /// together or hang particles on them, so a run of them is indexed as its
@@ -134,8 +144,18 @@ type Lazy<T> = std::cell::OnceCell<T>;
 /// letters were 0.495 at a query three times as slow, too common to tell
 /// documents apart.
 pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
-    terms(text, false, &mut |t, _, _| f(t));
+    terms(text, false, &mut |t, _, _| {
+        if !t.starts_with(WRITTEN) {
+            f(t)
+        }
+    });
 }
+
+/// What a word's term as written starts with, beside its fold, where its
+/// accents make it another word: `Sütlaç` is `sutlac` and `~sütlaç`. A term
+/// is letters and digits by construction, so the mark is free, as `^` is
+/// for a prefix.
+pub(crate) const WRITTEN: char = '~';
 
 /// [`for_each_term`], each character of a run of Han, kana or Hangul handed
 /// out as well as each pair when `chars` is set (`TextIndexSpec::chars`).
@@ -144,12 +164,16 @@ pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
 /// for every caller -- insert, remove and search, with prefixes and without
 /// -- six copies and 8 KB of the browser module.
 ///
+/// A word whose accents make it another word is handed out twice, on the
+/// same span: its fold, then its form as written behind [`WRITTEN`].
+///
 /// Each term comes with where it stands in `text`, its first byte and the
 /// one past its last: what highlighting marks (`highlight.rs`), so that a
 /// marked span is exactly the text a term the index matched was read from.
 /// The index passes them over.
 pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usize)) {
     let mut buf = String::new();
+    let mut written = String::new();
     // A combining mark is not alphanumeric, so a plain `is_alphanumeric`
     // split would cut `I\u{307}stanbul` -- the decomposed spelling of
     // `İstanbul`, and what the default mapping leaves behind -- or a
@@ -194,30 +218,43 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                 grams(run, at, n, chars && n == 2, f);
                 continue;
             }
+            // The word folded into `buf`, and as written -- lowercased, the
+            // I forms folded, as the index read every word before it folded
+            // accents -- into `written`, after its mark.
             buf.clear();
+            written.clear();
+            written.push(WRITTEN);
             for c in run.chars() {
                 if c.is_ascii() {
-                    buf.push(c.to_ascii_lowercase());
+                    let l = c.to_ascii_lowercase();
+                    buf.push(l);
+                    written.push(l);
                     continue;
                 }
                 match c {
-                    'İ' | 'ı' => buf.push('i'),
-                    // A combining mark carries nothing once a letter is
-                    // folded: written after its letter (`e\u{301}`), it is
-                    // the accent the letter's fold drops, and U+0307 is what
-                    // the default mapping leaves behind for `İ`.
-                    '\u{0300}'..='\u{036F}' => {}
+                    'İ' | 'ı' => {
+                        buf.push('i');
+                        written.push('i');
+                    }
+                    // What the default mapping leaves behind for `İ`.
+                    '\u{0307}' => {}
+                    // An accent written after its letter (`e\u{301}`): the
+                    // word as written keeps it, and its fold drops it as it
+                    // drops a letter's own.
+                    '\u{0300}'..='\u{036F}' => written.push(c),
                     // A full-width Latin letter or digit, as Japanese and
                     // Chinese text writes them (`ＩＴ`, `２０２３`), is the
                     // ASCII one.
                     '\u{FF01}'..='\u{FF5E}' => {
                         let a = char::from_u32(c as u32 - 0xFEE0).unwrap_or(c);
                         buf.push(a.to_ascii_lowercase());
+                        written.push(a.to_ascii_lowercase());
                     }
                     // A letter the table folds is lowercase folded; any other
                     // is lowercased, and what that gives folded in turn (the
                     // Angström sign is `å`, so `a`).
                     _ => {
+                        written.extend(c.to_lowercase());
                         if !fold_into(&mut buf, c) {
                             for l in c.to_lowercase() {
                                 if !fold_into(&mut buf, l) {
@@ -233,6 +270,10 @@ pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usiz
                 continue;
             }
             f(&buf, at, at + run.len());
+            // Its accents make it another word as written.
+            if written.get(WRITTEN.len_utf8()..) != Some(buf.as_str()) {
+                f(&written, at, at + run.len());
+            }
         }
     }
 }
@@ -371,6 +412,10 @@ pub(crate) fn indexed_terms(
     let mut buf = String::new();
     terms(text, spec.chars, &mut |w, from, to| {
         f(w, from, to);
+        // A word's prefixes are its fold's.
+        if w.starts_with(WRITTEN) {
+            return;
+        }
         // `chars`, not bytes: a Turkish word is not one byte per letter, and
         // slicing it as if it were would panic on a boundary.
         let n = w.chars().count();
@@ -473,7 +518,9 @@ impl TextIndex {
         let spec = self.spec;
         let mut n = 0u32;
         for_each_indexed_term(text, &spec, |t| {
-            n += 1;
+            // A word as written is the word again: its fold is counted, so
+            // a document is as long as it was before accents folded.
+            n += u32::from(!t.starts_with(WRITTEN));
             if self.postings.bump(t, doc) {
                 if let Some(words) = self.words.get_mut() {
                     words.add(t);
@@ -568,16 +615,15 @@ impl TextIndex {
     /// words, what `facet` counts beside a loose `match`.
     pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
         let mut lists: Vec<Postings> = Vec::new();
-        for_each_indexed_term(query, &self.spec, |t| {
+        let qtf = self.query_terms(query);
+        for t in qtf.keys() {
             if let Some(list) = self.postings.get(t) {
-                if !lists.iter().any(|l| l.docs.as_ptr() == list.docs.as_ptr()) {
-                    lists.push(list);
-                }
+                lists.push(list);
             }
-        });
+        }
         if !loose.is_plain() {
             // A variant is no term of the query's own, so no list twice.
-            for r in self.reach(query, loose, &self.query_terms(query))? {
+            for r in self.reach(query, loose, &qtf)? {
                 lists.extend(r.found.iter().map(|f| f.2));
             }
         }
@@ -642,13 +688,59 @@ impl TextIndex {
     /// the walk.
     fn query_terms(&self, query: &str) -> Map<String, u32> {
         let mut qtf: Map<String, u32> = Map::default();
-        for_each_indexed_term(query, &self.spec, |t| match qtf.get_mut(t) {
+        let mut count = |t: &str| match qtf.get_mut(t) {
             Some(c) => *c += 1,
             None => {
                 qtf.insert(t.to_string(), 1);
             }
-        });
+        };
+        self.read_words(query, &mut |t, _| count(t));
+        if self.spec.prefixes().is_some() {
+            for_each_indexed_term(query, &self.spec, |t| {
+                if t.starts_with('^') {
+                    count(t);
+                }
+            });
+        }
         qtf
+    }
+
+    /// Each word of `query` as the index reads it, with its fold: the
+    /// fold -- the word however it is accented -- but a word written with
+    /// accents as written, where a document holds it so. A word typed
+    /// without them finds every spelling of it, and one typed with them
+    /// finds what was written as it was typed, as the index found it
+    /// before accents folded -- on Vietnamese, whose tones tell its
+    /// syllables apart, the fold took nDCG@10 0.6471 -> 0.6006 -- unless
+    /// nothing was: typed with an accent no document writes it with, it
+    /// finds every spelling.
+    fn read_words(&self, query: &str, f: &mut dyn FnMut(&str, &str)) {
+        // A word's fold comes first and its form as written after it.
+        let mut fold = String::new();
+        terms(query, self.spec.chars, &mut |t, _, _| {
+            if t.starts_with(WRITTEN) {
+                if self.postings.get(t).is_some() {
+                    f(t, &fold);
+                } else {
+                    f(&fold, &fold);
+                }
+                fold.clear();
+                return;
+            }
+            if !fold.is_empty() {
+                f(&fold, &fold);
+            }
+            fold.clear();
+            fold.push_str(t);
+        });
+        if !fold.is_empty() {
+            f(&fold, &fold);
+        }
+    }
+
+    /// The terms `query` reads (`query_terms`), what `highlight()` marks.
+    pub fn read_terms(&self, query: &str) -> Vec<String> {
+        self.query_terms(query).into_keys().collect()
     }
 
     /// A walk through `list` weighted `times` its idf, or none where
@@ -741,23 +833,25 @@ impl TextIndex {
         loose: Loose,
         qtf: &Map<String, u32>,
     ) -> Result<Vec<Reach<'a>>> {
-        let mut words: Vec<(String, u32)> = Vec::new();
+        // Each word's fold, what it reads and how often: its variants are
+        // its fold's, scaled below what it reads.
+        let mut words: Vec<(String, String, u32)> = Vec::new();
         let mut last = 0;
-        terms(query, self.spec.chars, &mut |t, _, _| {
-            last = match words.iter().position(|w| w.0 == t) {
+        self.read_words(query, &mut |t, fold| {
+            last = match words.iter().position(|w| w.1 == t) {
                 Some(i) => {
-                    words[i].1 += 1;
+                    words[i].2 += 1;
                     i
                 }
                 None => {
-                    words.push((t.to_string(), 1));
+                    words.push((fold.to_string(), t.to_string(), 1));
                     words.len() - 1
                 }
             };
         });
         let mut out = Vec::new();
         let mut near: Vec<(&str, u8)> = Vec::new();
-        for (i, (w, count)) in words.iter().enumerate() {
+        for (i, (w, read, count)) in words.iter().enumerate() {
             let k = typos(w.chars().count()).min(loose.fuzzy);
             let prefix = loose.prefix && i == last;
             if k == 0 && !prefix {
@@ -776,7 +870,10 @@ impl TextIndex {
             }
             let mut found = Vec::new();
             for &(t, d) in &near {
-                if t == w || qtf.contains_key(t) {
+                // A word read as written has its fold, its other
+                // spellings, among its variants, as near as a word it
+                // begins.
+                if (t == w && read == w) || qtf.contains_key(t) {
                     continue;
                 }
                 if let Some(list) = self.postings.get(t) {
@@ -785,7 +882,7 @@ impl TextIndex {
             }
             out.push(Reach {
                 count: *count,
-                own: self.postings.get(w),
+                own: self.postings.get(read),
                 found,
             });
         }
@@ -1397,6 +1494,58 @@ mod tests {
             ["the", "quick", "brown", "fox", "naive", "cafe"]
         );
         assert_eq!(tokenize("naïve café"), ["naive", "cafe"]);
+    }
+
+    /// A word is indexed by its fold and, where its accents make it another
+    /// word, as written beside it: typed without accents a query finds
+    /// every spelling, typed with them the spelling it typed -- or every
+    /// spelling, where no document writes it so.
+    #[test]
+    fn a_word_typed_with_accents_reads_it_as_written() {
+        let mut ix = TextIndex::new(spec());
+        ix.insert(1, "Sütlaç tarifi");
+        ix.insert(2, "sutlac tarifi");
+        ix.insert(3, "SÜTLAÇ");
+        ix.insert(4, "köfte");
+        let found = |ix: &TextIndex, q: &str| {
+            let mut ids: Vec<DocId> = ix.search(q, 10, |_| true).iter().map(|h| h.0).collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(found(&ix, "sutlac"), [1, 2, 3]);
+        assert_eq!(found(&ix, "SUTLAC"), [1, 2, 3]);
+        assert_eq!(found(&ix, "sütlaç"), [1, 3]);
+        assert_eq!(found(&ix, "SÜTLAÇ"), [1, 3]);
+        // Spelt as no document spells it, it reads the fold.
+        assert_eq!(found(&ix, "sütlac"), [1, 2, 3]);
+        assert_eq!(found(&ix, "kofte"), [4]);
+        assert_eq!(ix.matching("sütlaç"), [1, 3]);
+        assert_eq!(ix.matching("sutlac tarifi"), [1, 2, 3]);
+        assert_eq!(ix.read_terms("Sütlaç"), ["~sütlaç"]);
+        assert_eq!(ix.read_terms("sutlac"), ["sutlac"]);
+        // A document is as long as its words, the written forms aside:
+        // BM25 scores it as it did before accents folded.
+        assert_eq!(ix.lengths.get(1), 2);
+        assert_eq!(ix.lengths.get(3), 1);
+        // No written form is a word the dictionary holds, nor has prefixes.
+        assert!(ix.postings.words().iter().all(|w| !w.starts_with(b"~")));
+        let mut prefixed = Vec::new();
+        let p = TextIndexSpec {
+            prefix_max: 4,
+            ..spec()
+        };
+        for_each_indexed_term("Sütlaç", &p, |t| prefixed.push(t.to_string()));
+        assert_eq!(prefixed, ["sutlac", "^sut", "^sutl", "~sütlaç"]);
+        assert_eq!(tokenize("Sütlaç"), ["sutlac"]);
+        // The last document written so gone, the spelling reads the fold.
+        ix.remove(1, "Sütlaç tarifi");
+        ix.remove(3, "SÜTLAÇ");
+        assert_eq!(found(&ix, "sütlaç"), [2]);
+        assert_eq!(ix.terms(), 4, "sutlac, tarifi, kofte, ~köfte");
+        // ASCII is never written apart from its fold.
+        let mut ix = TextIndex::new(spec());
+        ix.insert(1, "The Quick brown FOX");
+        assert_eq!(ix.terms(), 4);
     }
 
     /// Case never decides a word: every character folds as its lowercase

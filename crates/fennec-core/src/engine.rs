@@ -11140,9 +11140,11 @@ impl Database {
         ) else {
             return Ok((None, Vec::new()));
         };
-        let mut terms = crate::highlight::Terms::new(&query, spec);
+        let ix = c.text(&m.field)?;
+        let read = ix.map(|ix| ix.read_terms(&query)).unwrap_or_default();
+        let mut terms = crate::highlight::Terms::new(read, spec);
         if m.fuzzy > 0 || m.prefix {
-            if let Some(ix) = c.text(&m.field)? {
+            if let Some(ix) = ix {
                 for w in ix.loose_words(&query, m.loose())? {
                     terms.add(w);
                 }

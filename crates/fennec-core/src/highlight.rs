@@ -36,13 +36,14 @@ pub struct Terms {
 }
 
 impl Terms {
-    pub fn new(query: &str, spec: TextIndexSpec) -> Terms {
+    /// The terms the index reads of a query (`TextIndex::read_terms`): a
+    /// word's fold, or a word written with accents as written, where the
+    /// index holds it so -- `sütlaç` marks `Sütlaç` and not `Sutlac`.
+    pub fn new(read: Vec<String>, spec: TextIndexSpec) -> Terms {
         let mut terms: Map<String, u32> = Map::default();
-        indexed_terms(query, &spec, &mut |t, _, _| {
-            if !terms.contains_key(t) {
-                terms.insert(t.to_string(), 1);
-            }
-        });
+        for t in read {
+            terms.insert(t, 1);
+        }
         Terms { spec, terms }
     }
 
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn a_window_holds_the_marks_it_was_centred_on() {
         let words: Vec<String> = (0..30).map(|i| format!("w{i}")).collect();
-        let terms = Terms::new("x", TextIndexSpec::default());
+        let terms = Terms::new(vec!["x".into()], TextIndexSpec::default());
         for tokens in 1..12 {
             for gap in 0..tokens {
                 for first in 0..30 - gap {

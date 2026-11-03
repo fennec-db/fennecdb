@@ -175,8 +175,9 @@ type Pos = (usize, usize);
 /// The words of a text index in byte order -- a term's characters' order,
 /// UTF-8 being made so -- in chunks of at most [`CHUNK`]. A word is its
 /// bytes and a 4-byte end: 1.2 MB for 99 558 words, where a `Box<str>` each
-/// was 2.4 MB. Not the words an index of prefixes (`prefix=N`) marks `^`:
-/// they are not words a query types.
+/// was 2.4 MB. Not the words an index of prefixes (`prefix=N`) marks `^`,
+/// nor a word as written beside its fold (`~`): they are not words a query
+/// types, and a word's variants are its fold's.
 #[derive(Default)]
 pub struct Dictionary {
     chunks: Vec<Chunk>,
@@ -185,7 +186,7 @@ pub struct Dictionary {
 impl Dictionary {
     /// The dictionary of `words`, in any order, each once.
     pub fn of<'a>(words: impl Iterator<Item = &'a str>) -> Dictionary {
-        let words = words.filter(|w| !w.starts_with('^'));
+        let words = words.filter(|w| !w.starts_with(['^', '~']));
         Dictionary::of_bytes(words.map(str::as_bytes).collect())
     }
 
@@ -244,7 +245,7 @@ impl Dictionary {
 
     /// A word the index has just made its first posting for.
     pub fn add(&mut self, w: &str) {
-        if w.starts_with('^') {
+        if w.starts_with(['^', '~']) {
             return;
         }
         let w = w.as_bytes();

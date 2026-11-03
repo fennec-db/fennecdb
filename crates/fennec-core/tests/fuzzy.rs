@@ -391,16 +391,20 @@ fn accents_fold_before_a_word_is_read_loosely() {
     assert_eq!(sorted(ns(&db, whole, "sutlac")), [0, 1, 4]);
     assert_eq!(
         sorted(ns(&db, whole, "SÜTLAÇ")),
-        [0, 1, 4],
-        "the accented query finds the plain text too"
+        [0, 1],
+        "typed with its accents, the word finds it written so"
     );
     assert_eq!(ns(&db, whole, "kofte"), [2]);
     assert_eq!(ns(&db, whole, "cay"), [3]);
     assert_eq!(ns(&db, whole, "bahcesi"), [3]);
-    // A typo of six letters takes one edit, counted over the folds.
+    // A typo of six letters takes one edit, counted over the folds, and a
+    // spelling no document writes reads every spelling.
     let fuzzy = "get d select n match body $1 fuzzy limit 10";
     assert_eq!(sorted(ns(&db, fuzzy, "sutlca")), [0, 1, 4]);
     assert_eq!(sorted(ns(&db, fuzzy, "sütlaçı")), [0, 1, 4]);
+    // Typed with its accents, the word as written ranks first, its other
+    // spellings after it.
+    assert_eq!(ns(&db, fuzzy, "sütlaç"), [0, 1, 4]);
     // A word begun, by `prefix` and by an index of prefixes.
     let prefix = "get d select n match body $1 prefix limit 10";
     assert_eq!(ns(&db, prefix, "köf"), [2]);

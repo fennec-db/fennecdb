@@ -236,6 +236,9 @@ impl TextIndex {
     ) -> crate::error::Result<Vec<&str>> {
         match self.never {}
     }
+    pub fn read_terms(&self, query: &str) -> Vec<String> {
+        match self.never {}
+    }
 }
 
 pub struct SparseIndex {
