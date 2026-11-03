@@ -189,6 +189,22 @@ impl Zone {
         })
     }
 
+    /// The stretch of one offset `t` is in, for a schedule's slots
+    /// (`engine/due.rs`): where it starts, where the next begins
+    /// (`i64::MIN` and `i64::MAX` past the table's changes) and the offset.
+    #[cfg(feature = "statements")]
+    pub(crate) fn stretch(&self, t: i64) -> (i64, i64, i64) {
+        let p = self.piece(t);
+        (p.start, p.end, p.off)
+    }
+
+    /// The first instant whose clock reads `w` or later: where a slot
+    /// named by the clock's time runs.
+    #[cfg(feature = "statements")]
+    pub(crate) fn first_reading(&self, w: i64) -> i64 {
+        self.first_at_or_after(w)
+    }
+
     /// The first instant whose clock reads `w` or later. Every offset is
     /// within a day of UTC, so the pieces from a day before `w` hold it:
     /// in the first of them that reaches `w`, where it does or where the

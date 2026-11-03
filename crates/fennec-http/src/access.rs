@@ -3459,11 +3459,7 @@ pub fn judged(
     // is the 404 a missing one is, as an ungranted one is, so a `call`
     // line naming it (logged as the server starts, `calls::log_unheld`)
     // tells the token nothing the engine's words would -- what it binds.
-    if db
-        .statements()
-        .get(&c.name)
-        .is_some_and(|s| s.after.is_some())
-    {
+    if db.statements().get(&c.name).is_some_and(|s| !s.called()) {
         return Err(Error::NotFound(format!("statement `{}`", c.name)));
     }
     let callee = db.callee(c, params).map_err(|e| match e {

@@ -156,8 +156,10 @@ struct Beside {
     parts: Vec<BesidePart>,
     history: Option<Vec<u8>>,
     /// The named statements as they stood, written after the collections:
-    /// a table other than this one at the swap -- a definition, a drop or a
-    /// mark meanwhile -- leaves the image not fitting.
+    /// a table defining others at the swap -- a definition or a drop
+    /// meanwhile -- leaves the image not fitting. A slot's mark meanwhile
+    /// does not: the swap writes each schedule's last mark as it stands
+    /// then, so a schedule at a minute's cadence never fails a compact.
     statements: Arc<super::Statements>,
     reclaimed: usize,
     /// Where the counter's header is in the side file, and where the body
@@ -917,7 +919,8 @@ impl Database {
             .then(|| self.history.record());
         let same = self.order.len() == b.parts.len()
             && history == b.history
-            && Arc::ptr_eq(&self.statements, &b.statements)
+            && (Arc::ptr_eq(&self.statements, &b.statements)
+                || self.statements.defines_as(&b.statements))
             && b.parts.iter().zip(&tails).all(|(p, t)| {
                 t.as_ref().is_some_and(|t| !t.schema)
                     && self.collections.get(&p.name).is_some_and(|c| c.id == p.cid)
@@ -949,6 +952,13 @@ impl Database {
                 b.side.write(&counter)?;
             }
         }
+        // Each schedule's last mark as it stands at the swap, after the
+        // definitions the image holds: one landed meanwhile, or pending.
+        let side = &mut b.side;
+        self.last_marks(&mut |body| {
+            side.write(&record_head(super::REC_STATEMENT, 0, body.len()))?;
+            side.write(body)
+        })?;
         let len = b.side.at();
         b.side
             .patch(b.head_at + 1, &self.changes.seq().to_le_bytes())?;

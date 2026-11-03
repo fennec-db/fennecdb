@@ -62,6 +62,7 @@ mod replica;
 mod require;
 mod returning;
 mod rewrite;
+mod scheduled;
 mod sorted;
 mod sparse;
 mod spill;
