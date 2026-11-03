@@ -8,8 +8,10 @@
    it is, and the embedding of its opening (search-vectors.js). Both texts
    are indexed with their prefixes, so a word being typed finds the words it
    begins -- `compa` finds compaction -- and an inflected word its stem, with
-   no dictionary. The tokenizer folds İ, I, ı and i onto one letter, so a
-   query typed on a Turkish keyboard finds the English text.
+   no dictionary. The tokenizer folds İ, I, ı and i onto one letter and a
+   Latin or Greek letter's accents away, so a query typed on a Turkish
+   keyboard finds the English text and one typed without accents the words
+   written with them.
 
    The same prefixes make a word of a question reach every word that begins
    with its first three letters: `telefonda` reaches `tell`, `veri` reaches
@@ -168,8 +170,17 @@ export function search(db, text, section = null, limit = 10, vector = null) {
   return { hits, facets, by: !ranked ? 'words' : alone ? 'meaning' : 'words and meaning' };
 }
 
-/* The text index folds İ, I, ı and i onto one letter, and so does this. */
-const fold = (s) => normalQuery(s).replaceAll('ı', 'i');
+/* The text index folds İ, I, ı and i onto one letter and a Latin or Greek
+   letter onto its base letter, and so does this: the accents a letter
+   decomposes into dropped, and the letters Unicode gives no decomposition
+   by what they are (crates/fennec-core/tools/fold/gen.py). */
+const BASE = { ı: 'i', ø: 'o', ł: 'l', đ: 'd', ħ: 'h', ŧ: 't', ŀ: 'l', æ: 'ae', œ: 'oe', ß: 'ss', ς: 'σ' };
+const fold = (s) =>
+  normalQuery(s)
+    .normalize('NFD')
+    .replace(/([\p{Script=Latin}\p{Script=Greek}])[̀-ͯ]+/gu, '$1')
+    .normalize('NFC')
+    .replace(/[ıøłđħŧŀæœßς]/g, (c) => BASE[c]);
 const WORD = /[\p{L}\p{N}\p{M}]+/gu;
 const shared = (a, b) => {
   let i = 0;

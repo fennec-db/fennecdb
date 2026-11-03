@@ -59,7 +59,8 @@ over the arena. A <code>HashMap&lt;DocId, Loc&gt;</code> offset index is the
 only helper structure in the whole store.</p>
 
 <p>Search is not bolted on. <code>@text</code> is an index and
-<code>match</code> a query clause, ranked by BM25, with <code>fuzzy</code>,
+<code>match</code> a query clause, ranked by BM25, a word typed without
+accents finding it written with them, with <code>fuzzy</code>,
 <code>highlight()</code> and <code>facet</code> beside it; for search by
 meaning, <code>vector&lt;N&gt;</code> is a type, <code>@hnsw</code> an index
 and <code>near</code> a clause. The planner knows them all, so a filter and a

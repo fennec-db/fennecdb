@@ -90,7 +90,9 @@ create the collection, or add it later with <code>create index</code>.</p>
     under <code>or</code>, and <code>!=</code>, <code>~</code> or
     <code>has</code>, reads every row.</li>
   <li><b>For Turkish, Chinese or Japanese text</b>, see <code>prefix</code>
-    and <code>chars</code> below.</li>
+    and <code>chars</code> below. Accents need nothing: every
+    <code>@text</code> index finds <code>Sütlaç</code> by
+    <code>sutlac</code> (<a href="fennecql-search.html#accents">accents</a>).</li>
 </ul>
 
 <details class="deep"><summary>Index options and what they cost, measured</summary>
