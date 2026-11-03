@@ -1019,10 +1019,10 @@ class Query private constructor(private val s: State) {
         }
         if (s.aggregate) {
             // Ungrouped, order, limit and offset pick the rows folded; a
-            // lookup hangs off the groups, keyed by a column.
+            // lookup hangs off the groups, keyed by a column. Beside them
+            // match is a filter: the rows it finds are folded.
             val clash = when {
                 s.near != null -> "near"
-                s.match != null -> "match"
                 s.count && s.group == null -> "count"
                 else -> null
             }
@@ -1069,7 +1069,8 @@ class Query private constructor(private val s: State) {
             }
         }
         if (s.count) {
-            (extraClause() ?: if (s.require.isNotEmpty()) "require" else null)
+            // Beside count, match is a filter: it counts the rows it finds.
+            (extraClause(counts = true) ?: if (s.require.isNotEmpty()) "require" else null)
                 ?.let { throw refuse("count cannot be used with `$it`") }
         }
 
@@ -1174,9 +1175,9 @@ class Query private constructor(private val s: State) {
 
     private fun whereOf(cond: List<Node>, bind: Binder): String? = Builder.prune(Node.And(cond))?.let { Builder.render(it, bind) }
 
-    private fun extraClause(picks: Boolean = false): String? = when {
+    private fun extraClause(picks: Boolean = false, counts: Boolean = false): String? = when {
         s.near != null -> "near"
-        s.match != null -> "match"
+        s.match != null && !counts -> "match"
         s.rerank != null -> "rerank"
         s.order.isNotEmpty() && !picks -> "order"
         s.limit != null && !picks -> "limit"

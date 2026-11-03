@@ -1,6 +1,6 @@
 <!--
 title: fennecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that usually needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 332 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that usually needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 336 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -301,10 +301,12 @@ description: One database from the screen to the server: state your screens foll
       <code>prefix</code> one half typed, as a search box sends them;
       <code>highlight()</code> and <code>snippet()</code> mark what matched,
       and <code>facet</code> counts each brand or colour over every match for
-      the sidebar, in the same query. A vector field adds search by meaning
+      the sidebar, in the same query; beside <code>order</code> or
+      <code>count</code>, <code>match</code> gives the matches newest first
+      and how many there are. A vector field adds search by meaning
       with <code>near</code>, and <code>fuse</code> puts the two rankings
       together. It is the same engine in a browser tab, on a phone and on the
-      server, and in the page it is 332 KB of gzipped WebAssembly with no
+      server, and in the page it is 336 KB of gzipped WebAssembly with no
       dependencies.</p>
 
     <figure class="motion rise" data-scenes="search">

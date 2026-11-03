@@ -9,7 +9,7 @@ and sharing their disk syncs, a server that usually needs no cache in front of i
 a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
 Written in Rust with no dependencies but TLS's (rustls, in the server, the
-router and the shell), it runs inside a web page as 332 KB of
+router and the shell), it runs inside a web page as 336 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FennecQL**).
@@ -208,7 +208,7 @@ import { Fennec } from './fennec.js';
 const db = await Fennec.open('./fennec.wasm');
 ```
 
-332 KB of gzipped WebAssembly and a 65 KB gzipped client — no wasm-bindgen, no
+336 KB of gzipped WebAssembly and a 65 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fennecdb/web/client`, 10 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fennecdb.com/docs/javascript#packages)). With live
@@ -325,7 +325,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
 | **Case-insensitive text** | `email text nocase @unique` — compared by its Unicode case fold wherever it is compared (`=`, its indexes, `order`, `group`, `facet`), kept as written, PostgreSQL's `citext`; Turkish's `I`/`ı` and `İ`/`i` under `collate tr` |
-| **Text search** | `match` ranked by BM25 over `@text` · `fuzzy` for a word typed wrong and `prefix` for one half typed · `highlight()` and `snippet()` marking what matched · `facet` counts beside the page, disjunctive and by ranges · Chinese, Japanese, Korean and Thai split into runs of characters |
+| **Text search** | `match` ranked by BM25 over `@text`, or a filter beside `order`, `count` and aggregates (the matches newest first, how many) · `fuzzy` for a word typed wrong and `prefix` for one half typed · `highlight()` and `snippet()` marking what matched · `facet` counts beside the page, disjunctive and by ranges · Chinese, Japanese, Korean and Thai split into runs of characters |
 | **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` (in metres) — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fennecdb.com/docs/geo)) |
 | **Instead of Redis** | counters (`set c {n: n + 1}`), rate limits (fixed and sliding windows, token buckets), locks with fencing tokens, sessions and caches under `@ttl`, leaderboards, sets, HyperLogLog, job queues with leases and a claim held until a job comes, delayed jobs, streams, pub/sub, idempotency keys — each a statement or two a test runs; no LRU eviction, no Lua ([Instead of Redis](https://fennecdb.com/docs/redis)) |
 | **No cache in front** | the file is mapped, so the operating system keeps the pages in use in memory and fennecdb copies none into a buffer pool of its own: a separate cache in front of `fennec-server` is usually unnecessary while the working set fits in memory. On YCSB in Docker against Redis 7.4, the same durability mode against the same, Redis does more operations a second in none of the 33 cells measured both ways (A to F at 1, 4 and 16 clients, durable and buffered; C, which writes nothing, buffered alone): fennec-server's C at 16 clients, buffered, is 18.4 k against Redis's 14.0 k, and its B, durable, 18.2 k against 9.25 k (one node over Docker's network, 1 KB records; a cache nearer the app than the database is not measured; about a database's reads, not an HTTP or CDN response cache — [the figures and their conditions](https://fennecdb.com/docs/redis#cache-in-front)) |
@@ -342,7 +342,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fennecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fennecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 332 KB gzip wasm + 65 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
+| **Runtime size** | 336 KB gzip wasm + 65 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 

@@ -852,6 +852,38 @@ public sealed class DocsBuilderTests
         Sends(sent, "get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]");
     }
 
+    [Fact(DisplayName = "docs: matches, newest first")]
+    public async Task MatchesNewestFirst()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles")
+            .Match("body", "ownership")
+            .Order("year", "desc")
+            .Limit(20)
+            .RowsAsync();
+        Sends(sent, "get articles match body $1 order year desc limit $2", "[\"ownership\", 20]");
+    }
+
+    [Fact(DisplayName = "docs: matches counted")]
+    public async Task MatchesCounted()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles").Match("body", "ownership").CountAsync();
+        Sends(sent, "get articles match body $1 count", "[\"ownership\"]");
+    }
+
+    [Fact(DisplayName = "docs: matches counted by topic")]
+    public async Task MatchesCountedByTopic()
+    {
+        using var db = Db(out var sent);
+        await db.From("articles")
+            .Select("topic", "count(*)")
+            .Match("body", "ownership")
+            .Group("topic")
+            .RowsAsync();
+        Sends(sent, "get articles select topic, count(*) group topic match body $1", "[\"ownership\"]");
+    }
+
     [Fact(DisplayName = "docs: products matching a misspelt word")]
     public async Task ProductsMatchingAMisspeltWord()
     {

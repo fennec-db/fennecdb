@@ -990,14 +990,13 @@ class Query {
     }
     if (_aggregate) {
       // Ungrouped, order, limit and offset pick the rows folded; a lookup
-      // hangs off the groups, keyed by a column.
+      // hangs off the groups, keyed by a column. Beside them match is a
+      // filter: the rows it finds are folded.
       final clash = _near != null
           ? 'near'
-          : _match != null
-              ? 'match'
-              : _count && _group == null
-                  ? 'count'
-                  : null;
+          : _count && _group == null
+              ? 'count'
+              : null;
       if (clash != null) throw _refuse('aggregates cannot be combined with $clash');
       if (_group == null && _require.isNotEmpty) {
         throw _refuse('require counts the rows a query answers, and an aggregate answers one');
@@ -1049,7 +1048,8 @@ class Query {
       }
     }
     if (_count) {
-      final extra = _extraClause() ?? (_require.isNotEmpty ? 'require' : null);
+      // Beside count, match is a filter: it counts the rows it finds.
+      final extra = _extraClause(counts: true) ?? (_require.isNotEmpty ? 'require' : null);
       if (extra != null) throw _refuse('count cannot be used with `$extra`');
     }
 
@@ -1160,9 +1160,9 @@ class Query {
     return root == null ? null : _render(root, bind);
   }
 
-  String? _extraClause({bool picks = false}) => _near != null
+  String? _extraClause({bool picks = false, bool counts = false}) => _near != null
       ? 'near'
-      : _match != null
+      : _match != null && !counts
           ? 'match'
           : _rerank != null
               ? 'rerank'

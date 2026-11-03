@@ -42,6 +42,7 @@ mod lookup;
 mod lookup_aggregate;
 mod maintenance;
 mod mapped;
+mod match_filter;
 mod mcp_docs;
 mod memory;
 mod read_calls;

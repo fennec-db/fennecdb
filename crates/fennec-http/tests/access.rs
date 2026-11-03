@@ -1023,6 +1023,69 @@ fn a_scoped_match_scores_nothing_of_rows_the_token_cannot_read() {
     );
 }
 
+/// Beside `order`, `count` or an aggregate a scoped `match` is a filter
+/// over the token's rows alone: bob's 200 memos holding the word are in no
+/// page, count or sum of alice's, as they are in no ranking of hers.
+#[test]
+fn a_scoped_match_filter_reads_only_the_tokens_rows() {
+    let n = start_with(
+        "memos  read,write  where owner = $jwt.sub\n",
+        &["create collection memos (owner text @hash, body text @text, n int)"],
+    );
+    let (alice, bob) = (n.token(r#"{"sub":"alice"}"#), n.token(r#"{"sub":"bob"}"#));
+    for (i, body) in ["the initech memo", "lunch on friday", "initech again"]
+        .iter()
+        .enumerate()
+    {
+        let doc = format!(r#"{{"body":"{body}","n":{i}}}"#);
+        assert_eq!(n.call(Some(&alice), "POST", "/memos", &doc).0, 201);
+    }
+    let memos: Vec<String> = (0..200)
+        .map(|i| format!(r#"{{"body":"initech deal {i}","n":{}}}"#, 100 + i))
+        .collect();
+    let (status, body) = n.call(
+        Some(&bob),
+        "POST",
+        "/memos",
+        &format!("[{}]", memos.join(",")),
+    );
+    assert_eq!(status, 201, "{body}");
+    for (ask, want) in [
+        (
+            r#"get memos match body "initech" count"#,
+            r#"[{"count":2}]"#,
+        ),
+        (
+            r#"get memos select n match body "initech" order n desc"#,
+            r#"[{"n":2},{"n":0}]"#,
+        ),
+        (
+            r#"get memos select count(*), sum(n) match body "initech""#,
+            r#"[{"count":2,"sum(n)":2}]"#,
+        ),
+        (
+            r#"get memos select owner, count(*) match body "initech" group owner"#,
+            r#"[{"owner":"alice","count":2}]"#,
+        ),
+    ] {
+        let (status, body) = n.query(&alice, ask);
+        assert_eq!(status, 200, "{ask}: {body}");
+        assert_eq!(body.trim(), want, "{ask}");
+    }
+    // The server's own token counts every row holding it.
+    let (_, every) = n.query(ROOT, r#"get memos match body "initech" count"#);
+    assert_eq!(every.trim(), r#"[{"count":202}]"#);
+    // Nor does `explain` tell her how many rows the words reached: the
+    // rows she kept alone.
+    let ask = r#"explain get memos match body "initech" count"#;
+    let (status, plan) = n.query(&alice, ask);
+    assert_eq!(status, 200, "{plan}");
+    assert!(plan.contains("a filter: 2 rows kept"), "{plan}");
+    assert!(!plan.contains("202") && !plan.contains("scored"), "{plan}");
+    let (_, plan) = n.query(ROOT, ask);
+    assert!(plan.contains("202 rows scored, 202 kept"), "{plan}");
+}
+
 /// A radius, a box and `near` over a point read only the token's rows: its
 /// filter is ANDed in beside the point's conditions, and the point index
 /// narrows to rows the filter then holds to the token.
