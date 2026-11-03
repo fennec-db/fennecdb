@@ -17,6 +17,7 @@ use fennec_core::prelude::*;
 use fennec_http::schedule::{hint, Node, Outcome, Run};
 use fennec_http::tenants::{Tenant, Tenants};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -133,6 +134,16 @@ fn count(nd: &Nd, name: &str, collection: &str) -> i64 {
     }
 }
 
+/// The hint's lines by tenant, its later line where named twice.
+fn hinted(dir: &std::path::Path) -> std::collections::HashMap<String, hint::Line> {
+    let mut out = std::collections::HashMap::new();
+    let read = hint::read(dir, &mut |n, l| {
+        out.insert(n.to_string(), l);
+    });
+    read.unwrap().expect("a hint");
+    out
+}
+
 fn open(nd: &Nd) -> Vec<String> {
     nd.tenants.stats().open.into_iter().map(|o| o.0).collect()
 }
@@ -242,7 +253,7 @@ fn a_start_opens_no_tenant_before_its_slot_and_a_hint_removed_is_learned_again()
     let named: Vec<String> = nd.node.named().into_iter().map(|n| n.0).collect();
     assert_eq!(named, ["acme"]);
     assert!(open(&nd).is_empty());
-    let read = hint::read(&nd.dir).unwrap().expect("written again");
+    let read = hinted(&nd.dir);
     assert_eq!(read.keys().collect::<Vec<_>>(), ["acme"]);
 }
 
@@ -262,7 +273,7 @@ fn a_tenant_enters_the_hint_before_its_first_schedule_lands() {
     assert!(!g.holds_schedules());
     drop(g);
     drop(t);
-    let read = hint::read(&nd.dir).unwrap().unwrap();
+    let read = hinted(&nd.dir);
     assert!(
         read.contains_key("acme"),
         "named before it landed: {read:?}"
@@ -275,12 +286,12 @@ fn a_tenant_enters_the_hint_before_its_first_schedule_lands() {
     assert!(nd.node.pass(now_ms()).is_empty());
     assert!(nd.node.named().is_empty(), "{:?}", nd.node.named());
     assert!(open(&nd).is_empty());
-    assert!(!hint::read(&nd.dir).unwrap().unwrap().contains_key("acme"));
+    assert!(!hinted(&nd.dir).contains_key("acme"));
 
     // Its last schedule dropped, it leaves as it closes.
     let h = hour();
     tenant(&nd, "beta", h + 1, &[TICKS, TICK]);
-    assert!(hint::read(&nd.dir).unwrap().unwrap().contains_key("beta"));
+    assert!(hinted(&nd.dir).contains_key("beta"));
     let t = nd.tenants.get("beta").unwrap();
     exec(&t, "drop statement tick");
     drop(t);
@@ -290,7 +301,7 @@ fn a_tenant_enters_the_hint_before_its_first_schedule_lands() {
     );
     nd.tenants.close_idle(Duration::ZERO);
     nd.node.write_hint().unwrap();
-    assert!(!hint::read(&nd.dir).unwrap().unwrap().contains_key("beta"));
+    assert!(!hinted(&nd.dir).contains_key("beta"));
 }
 
 /// A definition the hint cannot name is refused, nothing of it written: a
@@ -316,7 +327,7 @@ fn a_definition_the_hint_cannot_name_is_refused() {
     assert!(!t.db.read().unwrap().holds_schedules());
     std::fs::remove_dir(&path).unwrap();
     exec(&t, TICK);
-    assert!(hint::read(&nd.dir).unwrap().unwrap().contains_key("acme"));
+    assert!(hinted(&nd.dir).contains_key("acme"));
 }
 
 /// A database holding a schedule, as an install's image.
@@ -340,7 +351,7 @@ fn a_tenant_installed_or_restored_in_is_learned() {
     let nd = node("installed");
     let h = hour();
     nd.tenants.import_as("inst", &image(h + 1), None).unwrap();
-    assert!(hint::read(&nd.dir).unwrap().unwrap().contains_key("inst"));
+    assert!(hinted(&nd.dir).contains_key("inst"));
 
     // Written into the directory behind the node: unknown until opened.
     {
@@ -429,7 +440,7 @@ fn a_closed_tenant_s_pending_mark_is_kept_until_its_file_changes() {
     let runs = nd.node.pass(h + HOUR + MINUTE);
     assert_eq!(names(&runs), ["acme"]);
     assert!(open(&nd).is_empty());
-    let kept = hint::read(&nd.dir).unwrap().unwrap()["acme"].kept.clone();
+    let kept = hinted(&nd.dir)["acme"].kept.clone();
     let kept = kept.expect("the mark kept as it closed");
     assert_eq!(kept.marks[0].1.at, h + HOUR);
 
@@ -584,6 +595,215 @@ fn a_run_charges_no_rate() {
     // The client's own write is charged: the next waits its debt out.
     let (status, body) = query(port, "acme", "put ticks {slot: 2}");
     assert_eq!(status, 429, "{body}");
+}
+
+/// The node's one shutdown, for a scheduler thread a test starts: it ends
+/// as its registry goes.
+fn ignored(_: i32) {}
+
+/// Waits for what must happen, bounded.
+fn until(what: &str, f: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !f() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A database holding `tick`, due now -- defined two hours ago -- and `pad`
+/// rows of `bytes` each: an install's image.
+fn due_image(pad: usize, bytes: usize) -> Vec<u8> {
+    fennec_ql::install();
+    let mut db = Database::new();
+    db.allow_schedules();
+    db.set_clock(Some(now_ms() - 2 * HOUR));
+    for q in [TICKS, TICK, "create collection pad (body text)"] {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
+    db.set_clock(None);
+    let row = format!("insert pad {{body: '{}'}}", "x".repeat(bytes));
+    let row = fennec_ql::parse_one(&row).unwrap();
+    for _ in 0..pad {
+        db.execute(&row).unwrap();
+    }
+    db.snapshot()
+}
+
+/// An install racing a scheduler that looks all the time -- its thread
+/// running and a loop of looks beside it -- runs its slot and stays named:
+/// its first look queued before the file was in place found none, and the
+/// tenant left the queue and the hint for good, never run. Its look is
+/// asked of the node, never by opening it: a client's open names it again.
+#[test]
+fn an_install_racing_a_looking_scheduler_runs_and_stays_named() {
+    let nd = node("race");
+    nd.node.set_arriving(0);
+    nd.node.start(ignored).unwrap();
+    let image = due_image(32, 1 << 20);
+    let done = Arc::new(AtomicBool::new(false));
+    let looking = {
+        let (node, done) = (Arc::clone(&nd.node), Arc::clone(&done));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                node.pass(now_ms());
+            }
+        })
+    };
+    nd.tenants.import("big", &image).unwrap();
+    until("its look opened it", || nd.node.opens() >= 1);
+    done.store(true, Ordering::SeqCst);
+    looking.join().unwrap();
+    assert_eq!(count(&nd, "big", "ticks"), 1);
+    assert!(nd.node.named().iter().any(|n| n.0 == "big"));
+    nd.node.write_hint().unwrap();
+    assert!(hinted(&nd.dir).contains_key("big"));
+}
+
+/// An installed tenant -- a move's target -- runs nothing before it
+/// arrived (`schedule::ARRIVING`), however it is opened meanwhile: a node
+/// learns of no flip without a lease, and a move undone takes the file
+/// back within the move's own call, gone by then -- its source runs the
+/// slot alone. Arrived, it runs its slot.
+#[test]
+fn an_installed_tenant_runs_nothing_until_it_arrived_and_one_taken_back_none() {
+    let nd = node("arrive");
+    let now = now_ms();
+    nd.tenants
+        .import_as("moved", &due_image(0, 0), Some(0x5eed))
+        .unwrap();
+    // As the install's route opens it, to answer with its lineage.
+    drop(nd.tenants.get("moved").unwrap());
+    let arrived = nd.node.named()[0].1.expect("waits for its arrival");
+    assert!(arrived >= now + MINUTE, "{arrived} against {now}");
+    assert!(nd.node.pass(arrived - 1).is_empty());
+    // Taken back, as a move undone takes it: nothing to run.
+    assert_eq!(nd.tenants.reclaim("moved", &[0x5eed]).ok(), Some(true));
+    assert!(nd.node.pass(arrived).is_empty());
+    assert!(nd.node.named().is_empty(), "{:?}", nd.node.named());
+    assert_eq!(nd.node.opens(), 0);
+
+    nd.tenants
+        .import_as("moved", &due_image(0, 0), Some(0x5eee))
+        .unwrap();
+    let arrived = nd.node.named()[0].1.expect("waits for its arrival");
+    assert_eq!(names(&nd.node.pass(arrived)), ["moved"]);
+}
+
+/// A schedule replacing another on a tenant the hint names already is
+/// named again, synced, before it lands: a crash before the hint's next
+/// whole write finds the tenant to look at at once, never at the slot the
+/// one replaced held -- a yearly one's, and the hourly runs till then
+/// lost.
+#[test]
+fn a_replaced_schedule_is_looked_at_at_once_after_a_crash() {
+    let nd = node("replaced");
+    let now = now_ms();
+    let yearly = "create statement tick at '0 0 1 1 *' as insert ticks {slot: slot(), at: now()}";
+    tenant(&nd, "acme", now - 2 * HOUR, &[TICKS, yearly]);
+    nd.node.write_hint().unwrap();
+    let held = hinted(&nd.dir)["acme"].next.expect("its next slot");
+    assert!(held > now + 24 * HOUR, "the new year's");
+    let t = nd.tenants.get("acme").unwrap();
+    {
+        let mut g = t.db.write().unwrap();
+        g.set_clock(Some(now - 2 * HOUR));
+        let hourly = TICK.replace("create statement", "create or replace statement");
+        g.execute(&fennec_ql::parse_one(&hourly).unwrap()).unwrap();
+        g.set_clock(None);
+    }
+    drop(t);
+    // A crash: the hint not written whole since.
+    let nd = restart(nd, false);
+    assert_eq!(nd.node.named(), [("acme".to_string(), None)], "at once");
+    assert_eq!(names(&nd.node.pass(now_ms())), ["acme"]);
+}
+
+/// A closed tenant its node's lease does not let it write is not opened
+/// for its slot -- a node whose lease lapsed opened each of its scheduled
+/// tenants every minute to find so -- and runs it once the lease names it.
+#[test]
+fn a_node_without_its_lease_opens_no_tenant_for_its_slot() {
+    let dir = scratch("unleased");
+    let h = hour();
+    {
+        let nd = over(&dir, |t| t);
+        tenant(&nd, "acme", h + 1, &[TICKS, TICK]);
+        tenant(&nd, "beta", h + 1, &[TICKS, TICK]);
+        nd.node.write_hint().unwrap();
+        std::fs::write(dir.join(".kept"), "").unwrap();
+    }
+    std::fs::remove_file(dir.join(".kept")).unwrap();
+    let nd = over(&dir, |t| t.with_lease());
+    for m in 1..=5 {
+        assert!(nd.node.pass(h + HOUR + m * MINUTE).is_empty());
+    }
+    assert_eq!(nd.node.opens(), 0, "none opened");
+    let primaries = Some(vec!["acme".to_string(), "beta".to_string()]);
+    let lease = nd.tenants.lease().expect("a leased node");
+    assert!(lease.grant(60_000, "e1", primaries).is_ok());
+    let mut ran = names(&nd.node.pass(h + HOUR + 6 * MINUTE))
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ran.sort();
+    assert_eq!(ran, ["acme", "beta"]);
+    assert_eq!(nd.node.opens(), 2);
+}
+
+/// A closed tenant whose slot its quota holds waits the hold's backoff out
+/// before it is opened again -- a minute, then two, then four -- nothing
+/// moving a closed tenant's rows: opened each minute, a node of tenants at
+/// their quotas opened every one of them every minute.
+#[test]
+fn a_closed_tenant_s_held_slot_waits_its_backoff_out() {
+    let nd = node("backoff");
+    let h = hour();
+    tenant(
+        &nd,
+        "acme",
+        h + 1,
+        &[TICKS, TICK, "put ticks {slot: 1}; put ticks {slot: 2}"],
+    );
+    let set = fennec_http::quota::Set::parse(r#"{"rows": 2}"#).unwrap();
+    nd.tenants.set_quota("acme", set).unwrap();
+    nd.tenants.close_idle(Duration::ZERO);
+    let outcomes = |runs: &[(String, Run)]| runs.iter().map(|r| r.1.outcome).collect::<Vec<_>>();
+    let t0 = h + HOUR + MINUTE;
+    assert_eq!(outcomes(&nd.node.pass(t0)), [Outcome::Held(507)]);
+    assert!(open(&nd).is_empty());
+    let opens = nd.node.opens();
+    assert_eq!(outcomes(&nd.node.pass(t0 + MINUTE)), [Outcome::Held(507)]);
+    assert!(nd.node.pass(t0 + 2 * MINUTE).is_empty());
+    assert_eq!(
+        outcomes(&nd.node.pass(t0 + 3 * MINUTE)),
+        [Outcome::Held(507)]
+    );
+    for m in 4..7 {
+        assert!(nd.node.pass(t0 + m * MINUTE).is_empty());
+    }
+    assert_eq!(nd.node.opens(), opens + 2, "at its backoff's ends alone");
+}
+
+/// A frozen tenant -- a move's source -- whose delete fails once it was
+/// closed, its freeze gone with it, leaves the queue and the hint: named,
+/// a look or a restart ran its slots into a file no router sends to.
+#[test]
+fn a_frozen_tenant_whose_delete_fails_leaves_the_hint() {
+    let nd = node("leftfail");
+    let h = hour();
+    tenant(&nd, "acme", h + 1, &[TICKS, TICK]);
+    nd.tenants.freeze("acme").unwrap();
+    // Its identity's sidecar a directory: the delete puts it away, and
+    // cannot.
+    let sidecar = nd.dir.join("acme.instance");
+    let _ = std::fs::remove_file(&sidecar);
+    std::fs::create_dir_all(sidecar.join("held")).unwrap();
+    assert!(nd.tenants.delete("acme").is_err());
+    assert!(nd.dir.join("acme.fennec").exists());
+    assert!(nd.node.named().is_empty(), "{:?}", nd.node.named());
+    assert!(!hinted(&nd.dir).contains_key("acme"));
+    assert!(nd.node.pass(h + HOUR + MINUTE).is_empty(), "nothing runs");
+    std::fs::remove_dir_all(&sidecar).unwrap();
 }
 
 fn query(port: u16, tenant: &str, q: &str) -> (u16, String) {

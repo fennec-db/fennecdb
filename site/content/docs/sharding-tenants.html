@@ -162,12 +162,20 @@ next slot, and opens one only as its slot comes.</p>
     is charged for a run: a tenant's clients are not slowed by its schedule,
     nor its schedule by them.</li>
   <li><b>Under the lease, and never on a frozen tenant.</b> A node runs
-    nothing for a tenant its lease does not name, and logs a run that
-    landed as its lease lapsed, as a write is answered
-    <code>outcome: unknown</code>. A move's source, frozen, runs nothing
-    after its export, and leaves the node's schedules as it is deleted,
-    even where a request still holding it keeps its file there; its target
-    runs the slot then due, and a move undone leaves it to the source.</li>
+    nothing for a tenant its lease does not name, and opens no closed tenant
+    for it, and logs a run that landed as its lease lapsed, as a write is
+    answered <code>outcome: unknown</code>. A move's source, frozen, runs
+    nothing after its export, and leaves the node's schedules as it is
+    deleted, even where a request still holding it keeps its file there or
+    the delete fails. Its target runs the slot then due a minute after the
+    install, by which time a move undone has taken the file back and left
+    the slot to the source: a node without a lease never learns of the
+    move's flip.</li>
+  <li><b>One tenant's failure is its own.</b> A run's refusal is that
+    slot's. A panic outside a run holds that tenant's schedules back a
+    minute, doubling to fifteen, and the node runs every other tenant's as
+    before. A tenant held at its quota is opened again only as that wait
+    ends.</li>
   <li><b>A failover runs a slot once in the history that survives.</b> The
     promoted copy holds the run and its mark, or neither: it runs the slot
     its old primary ran only where that run never reached it, its
@@ -181,9 +189,11 @@ next slot, and opens one only as its slot comes.</p>
 <code>schedules.hint</code>: the tenants holding a schedule, and those
 alone, each with its next slot. A tenant is named in it before its first
 schedule lands — defined, installed, moved in or promoted — so a start
-opens no tenant before its slot, and none that holds no schedule. The hint
-is derived from the files: deleted, the node opens each tenant once as it
-next starts, four at a time, to write it again, and says so in its log. A
+opens no tenant before its slot, and none that holds no schedule. It is
+written again before each schedule is defined or replaced, so a crash finds
+the tenant to look at at once. The hint is derived from the files: deleted,
+the node opens each tenant once as it next starts, one at a time before its
+first run, to write it again, and says so in its log. A
 file put into the directory behind the node's back, a <code>fennec
 restore</code> into a directory it serves, is learned as something first
 opens it. A node under <code>--http-read-only</code> runs none, takes no

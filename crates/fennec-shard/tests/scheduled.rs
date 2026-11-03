@@ -195,13 +195,17 @@ fn a_moved_tenant_runs_its_slot_on_its_target_once_and_its_frozen_source_none() 
     // names it no more: a restart, its freeze gone with the process, runs
     // nothing into a file no router sends to.
     assert!(!nodes[0].schedule.named().iter().any(|n| n.0 == "t"));
-    let hint = fennec_http::schedule::hint::read(nodes[0].tenants.dir())
-        .unwrap()
-        .expect("written");
-    assert!(!hint.contains_key("t"), "{hint:?}");
+    let mut hinted = Vec::new();
+    let read = fennec_http::schedule::hint::read(nodes[0].tenants.dir(), &mut |n, _| {
+        hinted.push(n.to_string())
+    });
+    assert!(read.unwrap().is_some(), "written");
+    assert!(!hinted.iter().any(|n| n == "t"), "{hinted:?}");
 
     writable(to, "t");
-    let at = slot + 2000;
+    // Past its arrival too: an installed tenant is first looked at a
+    // minute after its install (`schedule::ARRIVING`).
+    let at = slot.max(now_ms() + MINUTE) + 2000;
     assert_eq!(one(&to.schedule.pass(at)), (slot, Outcome::Ran));
     assert_eq!(ticks(to, "t"), [(slot, at)]);
     assert!(to.schedule.pass(at + MINUTE).is_empty(), "once");

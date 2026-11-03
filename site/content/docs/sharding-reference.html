@@ -63,7 +63,9 @@ while its reads go on.</p>
     scheduled statement is opened as its slot comes, counted as no client's
     use: a client's open closes it first under <code>--max-memory</code>,
     its own open closes no tenant a client used, and it is closed once its
-    run is done unless a request opened it meanwhile.</li>
+    run is done unless a request opened it meanwhile. A closed tenant the
+    node's lease does not name is not opened for one, and a tenant installed
+    or moved in is first looked at a minute after its install.</li>
   <li><b>Shutdown</b> syncs every open tenant and checkpoints the ones with a
     graph, holding their write locks until exit; the marks of scheduled
     runs that wrote nothing are kept in <code>schedules.hint</code>.</li>

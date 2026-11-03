@@ -151,4 +151,4 @@ how many it holds (`schedule::unrun`). A refusal the statement makes marks
 its slot, the state's leaves it due (`schedule::Held`), and only the
 server's token calls one, marking nothing. A new path running a body owes
 its mark in the block, and a new way a file reaches a node the scheduler's
-word (`Node::enter`, `Node::opened`).
+word (`Node::note`, `Node::installed`, `Node::opened`).

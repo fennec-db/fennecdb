@@ -997,14 +997,24 @@ impl Tenants {
     /// here counts as never used ([`UNUSED`]): a client's open evicts it
     /// before any tenant a client touched, and this open evicts none a
     /// client touched, never a hot tenant for a nightly purge. 404 where
-    /// there is no file.
-    pub(crate) fn for_run(&self, name: &str) -> std::result::Result<(Arc<Tenant>, bool), Refused> {
+    /// there is no file. For a `run`, `None` where it is closed and its
+    /// lease lets this node write it no more: opened, it would run nothing,
+    /// and a node whose lease lapsed opened each of its scheduled tenants a
+    /// minute to find so.
+    pub(crate) fn for_run(
+        &self,
+        name: &str,
+        run: bool,
+    ) -> std::result::Result<Option<(Arc<Tenant>, bool)>, Refused> {
         check_name(name)?;
         let t = self.with_slot(name, |held| {
             if let Held::Open(t) = held {
-                return Ok((Arc::clone(t), false));
+                return Ok(Some((Arc::clone(t), false)));
             }
             self.refuse_if_shutting_down()?;
+            if run && self.lease.as_ref().is_some_and(|l| l.allows(name).is_err()) {
+                return Ok(None);
+            }
             let path = self.path(name);
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
@@ -1012,23 +1022,23 @@ impl Tenants {
             let t = self.open_file(name, &path)?;
             t.last_used.store(UNUSED, Ordering::Relaxed);
             *held = Held::Open(Arc::clone(&t));
-            Ok((t, true))
-        });
-        let (t, opened) = t?;
-        if opened {
+            Ok(Some((t, true)))
+        })?;
+        if let Some((_, true)) = &t {
             self.make_room(name, true);
         }
-        Ok((t, opened))
+        Ok(t)
     }
 
     /// Closes a tenant a scheduled run opened ([`Self::for_run`]), its run
     /// done, unless a request used it meanwhile -- its `last_used` moved --
     /// or something holds it: then it closes as any tenant does, idle.
-    pub(crate) fn close_after_run(&self, name: &str) {
+    /// Whether it closed.
+    pub(crate) fn close_after_run(&self, name: &str) -> bool {
         self.with_slot(name, |held| match held {
             Held::Open(t) if t.last_used.load(Ordering::Relaxed) == UNUSED => self.close(held),
             _ => false,
-        });
+        })
     }
 
     /// Takes this tenant's writes on a replica node: its history forks
@@ -1782,10 +1792,20 @@ impl Tenants {
         // The marks of its runs that wrote nothing, and where its file
         // stands, for the scheduler to keep by name: lost with the database,
         // each closed tenant's empty runs were made again at every open.
-        let closing = self
-            .scheduler
-            .get()
-            .map(|node| (node, crate::schedule::closing(&t.read())));
+        // Synced here rather than by its drop, which only logs a failure: a
+        // tenant whose last schedule's drop did not reach the disk leaves
+        // the hint no sooner.
+        let closing = self.scheduler.get().map(|node| {
+            let mut g = t.write();
+            let synced = match g.is_dirty() {
+                false => true,
+                true => g
+                    .sync()
+                    .map_err(|e| crate::log!("sync error ({}): {e}", t.name))
+                    .is_ok(),
+            };
+            (node, crate::schedule::closing(&g, synced))
+        });
         if let (Some(streams), Some(feed)) = (&self.streams, feed) {
             let g = t.read();
             let place = (g.change_seq(), g.history().clone());
@@ -1977,11 +1997,14 @@ impl Tenants {
             return Err(Refused(400, "the image is cut short".into()));
         }
         // An image holding a schedule -- an install, a move's target -- enters
-        // the tenant in the scheduler's hint before its file is in place, so
-        // a start finds it whatever opens it first. A node running no
+        // the tenant in the scheduler's hint, synced, before its file is in
+        // place, so a start finds it whatever opens it first; its first look
+        // is queued once the file is in place, never before, where a look
+        // finding no file forgot the tenant for good. A node running no
         // scheduler (`--http-read-only`) takes no definition, and no image
         // holding one: a schedule no one runs. Not a 409, which a move reads
         // as a file left at the target.
+        let mut scheduled = None;
         if let Some(s) = check.statements().iter().find(|s| s.schedule.is_some()) {
             let Some(node) = self.scheduler.get() else {
                 return Err(Refused(
@@ -1993,7 +2016,7 @@ impl Tenants {
                     ),
                 ));
             };
-            node.enter(name).map_err(|e| {
+            node.note(name, false).map_err(|e| {
                 Refused(
                     500,
                     format!(
@@ -2002,6 +2025,7 @@ impl Tenants {
                     ),
                 )
             })?;
+            scheduled = Some(node);
         }
         drop(check);
 
@@ -2045,10 +2069,21 @@ impl Tenants {
                 ));
             }
             self.forget_place(name);
+            // In place: its first look queued, the thread woken -- under the
+            // slot, which a look's open waits on.
+            if let Some(node) = scheduled {
+                node.installed(name);
+            }
             Ok((!self.standby())
                 .then(|| self.stamp(name, proposed, held))
                 .flatten())
-        })?;
+        });
+        // Not installed: the tenant noted for it looked at once, and
+        // forgotten where there is no file.
+        if let (Err(_), Some(node)) = (&id, scheduled) {
+            node.woken(name, 0);
+        }
+        let id = id?;
         self.touch(name);
         Ok(id)
     }
@@ -2120,12 +2155,14 @@ impl Tenants {
     /// it is closed, before it goes. Whether the file was there to take.
     pub fn reclaim(&self, name: &str, named: &[u64]) -> std::result::Result<bool, Kept> {
         check_name(name)?;
+        let mut frozen = false;
         let out = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
             if matches!(held, Held::Closed) && !path.exists() {
                 return Ok(false);
             }
+            frozen = matches!(&*held, Held::Open(t) if t.is_frozen());
             let is_named = |id: Option<u64>| id.is_some_and(|id| named.contains(&id));
             let carried = self.carried(name, held);
             if !is_named(carried) {
@@ -2147,6 +2184,10 @@ impl Tenants {
                 .map(|_| true)
                 .map_err(Kept::from)
         });
+        // A frozen copy kept, refused or closed and then kept: as a delete's.
+        if out.is_err() && frozen {
+            self.left_frozen(name);
+        }
         match &out {
             Ok(true) => {
                 crate::log!("tenant `{name}`'s file, left by a router, taken back");
@@ -2162,20 +2203,29 @@ impl Tenants {
     }
 
     fn delete_held(&self, name: &str, held: &mut Held) -> std::result::Result<(), Refused> {
+        let frozen = matches!(&*held, Held::Open(t) if t.is_frozen());
+        let deleted = self.delete_unfrozen(name, held);
+        if deleted.is_err() && frozen {
+            self.left_frozen(name);
+        }
+        deleted
+    }
+
+    /// A move's source, deleted after the flip, its delete refused -- a
+    /// request holds it -- or failed once it was closed, its freeze gone
+    /// with it: no longer this node's to run. Named in the hint, a look or
+    /// a restart -- the freeze memory's -- would run its slots into a file
+    /// no router sends to, which the router takes back by its identity.
+    fn left_frozen(&self, name: &str) {
+        if let Some(node) = self.scheduler.get() {
+            node.left(name);
+        }
+    }
+
+    /// [`Self::delete_held`] but for what a frozen tenant's failure owes.
+    fn delete_unfrozen(&self, name: &str, held: &mut Held) -> std::result::Result<(), Refused> {
         if let Held::Open(t) = &*held {
-            if let Err(refused) = release(t, name) {
-                // A move's source, deleted after the flip and held by a
-                // request: no longer this node's to run. Named in the hint,
-                // a restart -- its freeze gone with the process -- would
-                // run its slots into a file no router sends to, which the
-                // router takes back by its identity.
-                if t.is_frozen() {
-                    if let Some(node) = self.scheduler.get() {
-                        node.left(name);
-                    }
-                }
-                return Err(refused);
-            }
+            release(t, name)?;
             // The last `Arc`: dropping it syncs, and the file is closed
             // before it is removed.
             *held = Held::Closed;
@@ -2315,7 +2365,7 @@ impl Tenants {
                 // never began; what its empty runs marked is kept as a close
                 // keeps it.
                 if self.scheduler.get().is_some() {
-                    kept.push((t.name.clone(), crate::schedule::closing(&g)));
+                    kept.push((t.name.clone(), crate::schedule::closing(&g, false)));
                 }
                 let graphs = g.stats().iter().any(|s| !s.vector_indexes.is_empty());
                 if checkpoint && self.checkpoint && graphs {

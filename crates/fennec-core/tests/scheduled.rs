@@ -266,6 +266,29 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
     assert_eq!(ops_in(&tap.last().1), Vec::<u8>::new());
 }
 
+/// A pending mark handed back as a tenant opens again
+/// (`Database::keep_pending`) counts only past its name's landed mark: one
+/// older outranked it by order, and ran again the slots between them.
+#[test]
+fn a_pending_mark_handed_back_counts_only_past_the_landed_one() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    let now = t0() + HOUR;
+    let slot = due(&db, now).run.unwrap().0;
+    let writes = format!("put holds {{state: 'held', until: {}}}; {BODY}", t0());
+    run_slot(&mut db, &writes, "lapse", slot, 0).unwrap();
+    assert_eq!(db.last_mark("lapse").map(|m| m.at), Some(slot));
+    let older = ran(&db, "lapse", slot - 15 * MINUTE, 0);
+    db.keep_pending(vec![("lapse".into(), older)]);
+    assert!(db.pending().is_empty(), "older than the one landed");
+    assert_eq!(due(&db, now).run, None);
+    db.keep_pending(vec![("lapse".into(), ran(&db, "lapse", slot, 0))]);
+    assert!(db.pending().is_empty(), "the landed one's own slot");
+    let later = ran(&db, "lapse", slot + 15 * MINUTE, 0);
+    db.keep_pending(vec![("lapse".into(), later)]);
+    assert_eq!(db.pending().len(), 1, "past it");
+}
+
 #[test]
 fn a_mark_takes_no_room_a_quota_counts_nor_a_write_a_rate_charges() {
     let tap = Tap::default();

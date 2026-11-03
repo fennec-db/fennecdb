@@ -1115,9 +1115,11 @@ impl super::Database {
         }
         // And before anything is written, a tenant node's hint names the
         // tenant: a block landing its first schedule where the node's next
-        // start would not look was a slot no one runs.
+        // start would not look was a slot no one runs, and one replacing or
+        // adding a schedule where the hint's slot is later than its own, a
+        // slot run late by as much.
         if def.schedule.is_some() {
-            self.entered()?;
+            self.entering()?;
         }
         let name = &def.name;
         let held = self.statements.get(name);
@@ -1378,12 +1380,10 @@ impl super::Database {
     #[cfg(feature = "statements")]
     pub(super) fn tell_schedules(&self) {
         if let Some(tell) = &self.on_schedules {
-            tell(
-                self.statements
-                    .iter()
-                    .filter(|s| s.schedule.is_some())
-                    .count(),
-            );
+            let n = (self.statements.iter())
+                .filter(|s| s.schedule.is_some())
+                .count();
+            let _ = tell(Some(n));
         }
     }
 

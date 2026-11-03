@@ -16,7 +16,8 @@
 //! own catch -- a look, a log line, a sync -- stops the server through the
 //! one shutdown, as anything beside the database does (`stop_with`): a
 //! server answering while its schedules never run is the gap F3 must never
-//! leave.
+//! leave. A node's scheduler holds a panic in one tenant's look to that
+//! tenant ([`Node`]): the one shutdown stopped every other with it.
 //!
 //! **A look** ([`pass`], which a test drives with the time it names) asks
 //! [`Database::due`] of each database it is due for, and runs each due
@@ -297,9 +298,10 @@ pub fn watch(
         g.allow_schedules();
         let hook = Arc::downgrade(&w);
         g.on_schedules(Arc::new(move |n| {
-            if let (true, Some(w)) = (n > 0, hook.upgrade()) {
+            if let (Some(1..), Some(w)) = (n, hook.upgrade()) {
                 wake(&w);
             }
+            Ok(())
         }));
         g.holds_schedules()
     };
@@ -334,9 +336,10 @@ pub fn unrun(what: &str, why: &'static str, db: &mut Database) {
     let told = std::sync::atomic::AtomicUsize::new(held);
     let what = what.to_string();
     db.on_schedules(Arc::new(move |n| {
-        if told.swap(n, Ordering::Relaxed) != n {
+        if let Some(n) = n.filter(|&n| told.swap(n, Ordering::Relaxed) != n) {
             tell_unrun(&what, why, n);
         }
+        Ok(())
     }));
 }
 
@@ -481,14 +484,17 @@ fn look(w: &Watched, db: &RwLock<Database>, now: i64, live: bool, out: Option<&m
         durable: w.durable,
         live,
     };
-    let (next, _) = look_at(&ctx, db, now, &mut st, usize::MAX, out);
+    let (next, _, _) = look_at(&ctx, db, now, &mut st, usize::MAX, out);
     w.next.store(next, Ordering::Release);
 }
 
 /// A look at `db` at `now`, running at most `most` slots: when to look
-/// again, and whether a due slot was left for the next look -- a tenant's
-/// look runs one, so ten thousand tenants due at once each run once before
-/// any runs twice ([`Node`]).
+/// again -- open, and closed after the look -- and whether a due slot was
+/// left for the next look: a tenant's look runs one, so ten thousand
+/// tenants due at once each run once before any runs twice ([`Node`]). A
+/// closed tenant's held slot waits its backoff out: nothing moves its
+/// counter or its limit, and opened each minute to find so, a tenant at its
+/// quota was ten thousand opens a minute on a node of them.
 pub(crate) fn look_at(
     w: &Ctx<'_>,
     db: &RwLock<Database>,
@@ -496,7 +502,7 @@ pub(crate) fn look_at(
     st: &mut State,
     most: usize,
     mut out: Option<&mut Look>,
-) -> (i64, bool) {
+) -> (i64, i64, bool) {
     let (dues, writes, following, seq, limit) = {
         let g = held::read(db);
         // A following database's writes are its primary's, the runs among
@@ -561,13 +567,18 @@ pub(crate) fn look_at(
     // node's ten thousand copies looked at each minute were ten thousand
     // looks for nothing.
     let blocked = !writes && !following && dues.iter().any(|d| d.run.is_some());
-    if !st.held.is_empty() || blocked {
+    if blocked {
         next = next.min(now.saturating_add(MINUTE));
     }
-    if following {
-        next = NONE;
+    let mut closed = next;
+    for (_, h) in &st.held {
+        next = next.min(now.saturating_add(MINUTE));
+        closed = closed.min(h.tried.saturating_add(h.backoff));
     }
-    (next, more)
+    if following {
+        (next, closed) = (NONE, NONE);
+    }
+    (next, closed, more)
 }
 
 /// `name`'s due slot run, with an id of its own for the lines it writes,

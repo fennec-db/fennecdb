@@ -11,10 +11,11 @@
 //! computed again from a tenant's file as the scheduler opens it, so a
 //! hint too early opens a tenant to find nothing due, and one naming a
 //! tenant that holds none opens it once to learn so. What it must never do
-//! is miss one that holds one: a tenant is entered, synced, before the
-//! block bringing its first schedule lands -- a line appended and fsynced,
-//! one line whatever the node holds -- while the whole is written again by
-//! rename at most once a minute ([`write`]).
+//! is miss one that holds one, or hold a later slot than one defined: a
+//! tenant is entered, synced, before every block bringing a schedule lands
+//! -- a line appended and fsynced, one line whatever the node holds --
+//! while the whole is written again by rename at most once a minute
+//! ([`write`]).
 //!
 //! One line a tenant, its fields apart by a space:
 //!
@@ -31,13 +32,13 @@
 //! <status>,<reason in hex>`, a status of 0 a run that ran. A line is the
 //! tenant's latest where it is named twice: an entry appended after the
 //! whole was written. An appended line cut short by a crash -- no newline
-//! -- was a definition that never landed, and is passed over; a file that
-//! does not read otherwise is no hint, and the node learns one again.
+//! -- was a definition that never landed, and is passed over, the next
+//! append cutting it off first ([`append`]); a file that does not read
+//! otherwise is no hint, and the node learns one again.
 
 use fennec_core::engine::SlotMark;
 use fennec_core::prelude::*;
-use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// The hint's file, in a node's directory.
@@ -90,9 +91,14 @@ fn invalid(why: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, why)
 }
 
-/// The hint in `dir`: `None` where there is none, an error where it does
-/// not read -- each a node that learns one again.
-pub fn read(dir: &Path) -> io::Result<Option<HashMap<String, Line>>> {
+/// Reads the hint in `dir`, each tenant's line handed to `each` in the
+/// file's order -- a tenant named twice, its later line last: `None` where
+/// there is none, an error where it does not read -- each a node that
+/// learns one again -- and otherwise whether a last line cut short was
+/// passed over, for the caller to write the hint whole. Into the caller's
+/// own table: a map built here only to be moved there was the server's
+/// bytes for nothing.
+pub fn read(dir: &Path, each: &mut dyn FnMut(&str, Line)) -> io::Result<Option<bool>> {
     let bytes = match std::fs::read(path(dir)) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -109,16 +115,16 @@ pub fn read(dir: &Path) -> io::Result<Option<HashMap<String, Line>>> {
     if lines.next() != Some(HEAD) {
         return Err(invalid(format!("its first line is not `{HEAD}`")));
     }
-    let mut out = HashMap::new();
     for (i, l) in lines.enumerate() {
-        let (name, line) =
-            parse(l).ok_or_else(|| invalid(format!("line {} does not read: {l:?}", i + 2)))?;
-        out.insert(name, line);
+        let Some((name, line)) = parse(l) else {
+            return Err(invalid(format!("line {} does not read: {l:?}", i + 2)));
+        };
+        each(name, line);
     }
-    Ok(Some(out))
+    Ok(Some(whole.len() + 1 < text.len()))
 }
 
-fn parse(l: &str) -> Option<(String, Line)> {
+fn parse(l: &str) -> Option<(&str, Line)> {
     let mut f = l.split(' ');
     let name = f.next()?;
     crate::tenants::check_name(name).ok()?;
@@ -135,11 +141,14 @@ fn parse(l: &str) -> Option<(String, Line)> {
                 history: u64::from_str_radix(s.next()?, 16).ok()?,
                 forks: s.next()?.parse().ok()?,
             };
-            let marks = f.map(mark).collect::<Option<Vec<_>>>()?;
+            let mut marks = Vec::new();
+            for m in f {
+                marks.push(mark(m)?);
+            }
             Some(Kept { stood, marks })
         }
     };
-    Some((name.to_string(), Line { next, kept }))
+    Some((name, Line { next, kept }))
 }
 
 fn mark(m: &str) -> Option<(String, SlotMark)> {
@@ -170,27 +179,35 @@ fn mark(m: &str) -> Option<(String, SlotMark)> {
 }
 
 fn unhex(h: &str) -> Option<String> {
-    if !h.len().is_multiple_of(2) {
-        return None;
+    let mut bytes = Vec::with_capacity(h.len() / 2);
+    let mut at = 0;
+    while at < h.len() {
+        bytes.push(u8::from_str_radix(h.get(at..at + 2)?, 16).ok()?);
+        at += 2;
     }
-    let bytes = (0..h.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok())
-        .collect::<Option<Vec<u8>>>()?;
     String::from_utf8(bytes).ok()
 }
 
-/// `name`'s line, its newline included.
-fn line_into(out: &mut String, name: &str, line: &Line) {
+/// A whole hint's first line, for [`line_into`] to follow and [`write`]
+/// to write.
+pub(crate) fn begun() -> String {
+    let mut out = String::from(HEAD);
+    out.push('\n');
+    out
+}
+
+/// `name`'s line, its newline included: its next slot -- `None` to look at
+/// once -- and a closed tenant's marks kept.
+pub(crate) fn line_into(out: &mut String, name: &str, next: Option<i64>, kept: Option<&Kept>) {
     use std::fmt::Write as _;
     out.push_str(name);
-    match line.next {
+    match next {
         Some(t) => {
             let _ = write!(out, " {t}");
         }
         None => out.push_str(" -"),
     }
-    if let Some(k) = &line.kept {
+    if let Some(k) = kept {
         let s = k.stood;
         let _ = write!(out, " {}/{:x}/{}", s.change, s.history, s.forks);
         for (stmt, m) in &k.marks {
@@ -208,16 +225,12 @@ fn line_into(out: &mut String, name: &str, line: &Line) {
     out.push('\n');
 }
 
-/// Writes the hint whole: beside, synced, renamed over the one before and
-/// the rename made durable -- an entry appended after a rename the
-/// directory had not kept went with it at a power loss. Its caller writes
-/// it at most once a minute, where it changed.
-pub fn write<'a>(dir: &Path, lines: impl Iterator<Item = (&'a str, Line)>) -> io::Result<()> {
-    let mut text = String::from(HEAD);
-    text.push('\n');
-    for (name, line) in lines {
-        line_into(&mut text, name, &line);
-    }
+/// Writes the hint whole, `text` from [`begun`] and [`line_into`]: beside,
+/// synced, renamed over the one before and the rename made durable -- an
+/// entry appended after a rename the directory had not kept went with it
+/// at a power loss. Its caller writes it at most once a minute, where it
+/// changed.
+pub fn write(dir: &Path, text: &str) -> io::Result<()> {
     let to = path(dir);
     let tmp = dir.join(format!("{FILE}.writing"));
     let written = std::fs::File::create(&tmp)
@@ -234,12 +247,30 @@ pub fn write<'a>(dir: &Path, lines: impl Iterator<Item = (&'a str, Line)>) -> io
 }
 
 /// Enters `name`, synced: a line appended to the hint, to look at at once.
-/// `NotFound` where there is no hint to append to -- one an operator
-/// removed -- for the caller to write it whole.
+/// A last line a crash cut short is cut off first: appended to as it was,
+/// `acme` and `beta -` read as `acmebeta`, and `beta` was in no line; ended
+/// with a newline, the piece left would be a line that does not read, and
+/// the hint none. `NotFound` where there is no hint to append to -- one an
+/// operator removed, or none whole -- for the caller to write it whole.
 pub fn append(dir: &Path, name: &str) -> io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path(dir))?;
+    let mut last = [0u8];
+    f.seek(io::SeekFrom::End(-1))
+        .and_then(|_| f.read_exact(&mut last))
+        .map_err(|_| io::Error::from(io::ErrorKind::NotFound))?;
+    if last[0] != b'\n' {
+        let mut all = Vec::new();
+        f.seek(io::SeekFrom::Start(0))?;
+        f.read_to_end(&mut all)?;
+        let end = (all.iter().rposition(|&b| b == b'\n'))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        f.set_len(end as u64 + 1)?;
+    }
     let mut line = String::new();
-    line_into(&mut line, name, &Line::default());
-    let mut f = std::fs::OpenOptions::new().append(true).open(path(dir))?;
+    line_into(&mut line, name, None, None);
     f.write_all(line.as_bytes())?;
     f.sync_data()
 }
@@ -247,6 +278,7 @@ pub fn append(dir: &Path, name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -256,6 +288,16 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The hint's lines by tenant, its later line where named twice, and
+    /// whether a torn last line was passed over.
+    fn lines(dir: &Path) -> io::Result<Option<(HashMap<String, Line>, bool)>> {
+        let mut out = HashMap::new();
+        let torn = read(dir, &mut |n, l| {
+            out.insert(n.to_string(), l);
+        })?;
+        Ok(torn.map(|t| (out, t)))
     }
 
     /// What is written reads back as it was: a slot, a tenant to look at,
@@ -291,47 +333,55 @@ mod tests {
                 ),
             ],
         };
-        let lines = [
-            (
-                "acme",
-                Line {
-                    next: Some(1_700_000_120_000),
-                    kept: Some(kept.clone()),
-                },
-            ),
-            ("beta", Line::default()),
-        ];
-        write(&dir, lines.iter().map(|(n, l)| (*n, l.clone()))).unwrap();
+        let mut text = begun();
+        line_into(&mut text, "acme", Some(1_700_000_120_000), Some(&kept));
+        line_into(&mut text, "beta", None, None);
+        write(&dir, &text).unwrap();
         append(&dir, "gamma").unwrap();
-        let read = read(&dir).unwrap().unwrap();
+        let (read, torn) = lines(&dir).unwrap().unwrap();
+        assert!(!torn);
         assert_eq!(read.len(), 3);
         assert_eq!(read["acme"].kept.as_ref(), Some(&kept));
         assert_eq!(read["acme"].next, Some(1_700_000_120_000));
         assert_eq!(read["beta"], Line::default());
         assert_eq!(read["gamma"], Line::default());
 
-        // An append a crash cut short is passed over; a line that does not
-        // read makes the hint none.
+        // An append a crash cut short is passed over, and said to be.
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(path(&dir))
             .unwrap();
         f.write_all(b"delta -").unwrap();
-        assert!(!read_names(&dir).contains(&"delta".to_string()));
+        let (read, torn) = lines(&dir).unwrap().unwrap();
+        assert!(torn && !read.contains_key("delta"));
+        // A line appended after it cuts it off first: `omega` is named,
+        // never `delta -omega`, and the piece left never reads as a line.
+        append(&dir, "omega").unwrap();
+        let (read, torn) = lines(&dir).unwrap().unwrap();
+        assert!(!torn);
+        assert!(read.contains_key("omega"), "{read:?}");
+        assert!(!read.keys().any(|k| k.contains("delta")), "{read:?}");
+        assert_eq!(read.len(), 4, "{read:?}");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path(&dir))
+            .unwrap();
+        f.write_all(b"del").unwrap();
+        append(&dir, "psi").unwrap();
+        let (read, _) = lines(&dir).unwrap().unwrap();
+        assert!(read.contains_key("psi") && !read.contains_key("del"));
+
+        // A line that does not read makes the hint none.
         std::fs::write(path(&dir), format!("{HEAD}\nacme soon\n")).unwrap();
-        assert!(super::read(&dir).is_err());
+        assert!(lines(&dir).is_err());
         std::fs::write(path(&dir), "acme -\n").unwrap();
-        assert!(super::read(&dir).is_err());
+        assert!(lines(&dir).is_err());
         std::fs::remove_file(path(&dir)).unwrap();
-        assert!(super::read(&dir).unwrap().is_none());
+        assert!(lines(&dir).unwrap().is_none());
         assert_eq!(
             append(&dir, "acme").unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn read_names(dir: &Path) -> Vec<String> {
-        read(dir).unwrap().unwrap().into_keys().collect()
     }
 }

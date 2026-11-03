@@ -39,7 +39,6 @@ use crate::tz::Zone;
 use crate::value::Value;
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::sync::Arc;
 
 thread_local! {
     /// The slot `slot()` reads on this thread: the run's, or the latest at
@@ -128,36 +127,24 @@ impl Database {
         self.scheduling = true;
     }
 
-    /// Has a scheduled definition ask `enter` before anything of it is
-    /// written, refused with what it answers: a tenant node names the
-    /// tenant in its hint, synced, so the block bringing its first schedule
-    /// never lands where the node's next start would not look for it --
-    /// asked under the write lock, as the definition is.
-    pub fn before_schedules(&mut self, enter: Arc<dyn Fn() -> Result<()> + Send + Sync>) {
-        self.entering = Some(enter);
-    }
-
-    /// The hook [`Self::before_schedules`] set, asked by a scheduled
-    /// definition before its record is written.
-    pub(super) fn entered(&self) -> Result<()> {
-        match &self.entering {
-            Some(enter) => enter(),
-            None => Ok(()),
-        }
-    }
-
     /// Hands back the marks of runs that wrote nothing which a tenant node
     /// kept as the file closed ([`Self::pending`]), read off it while it
     /// stood where it stands now -- its change and its history the same:
     /// each counts as it did, landing with the next block, and one of a
     /// definition replaced since counts for nothing. A following database
-    /// runs and marks none, and takes none back.
+    /// runs and marks none, and takes none back; nor does one whose slot is
+    /// not past its name's landed mark. A pending mark outranks the landed
+    /// one by order ([`Self::due`]), so one handed back older than a mark
+    /// landed since would run again the slots between them.
     pub fn keep_pending(&mut self, marks: Vec<(String, SlotMark)>) {
         if marks.is_empty() || self.history.following {
             return;
         }
-        let pending = self.pending.get_or_insert_with(Default::default);
         for (name, m) in marks {
+            if self.last_mark(&name).is_some_and(|l| l.at >= m.at) {
+                continue;
+            }
+            let pending = self.pending.get_or_insert_with(Default::default);
             if !pending.iter().any(|(n, _)| *n == name) {
                 pending.push((name, m));
             }
@@ -169,9 +156,24 @@ impl Database {
     /// adopted, a replica's apply, a copy promoted -- under the write lock:
     /// what wakes a scheduler that sleeps with no slot to wait for, never a
     /// timer, and what lets a server running none say it holds one unrun.
-    /// Asked at a schema change and a promotion alone (`rebind`, `fork`).
-    pub fn on_schedules(&mut self, tell: Arc<dyn Fn(usize) + Send + Sync>) {
+    /// Asked at a schema change and a promotion alone (`rebind`, `fork`),
+    /// its answer unread. And with `None` before a scheduled definition
+    /// writes anything, refused with what it answers: a tenant node names
+    /// the tenant in its hint, synced, so the block bringing a schedule
+    /// never lands where the node's next start would not look for it --
+    /// asked under the write lock, as the definition is. One hook for both:
+    /// a node's open makes one, not two.
+    pub fn on_schedules(&mut self, tell: super::SchedulesHook) {
         self.on_schedules = Some(tell);
+    }
+
+    /// [`Self::on_schedules`]' hook asked with `None`, by a scheduled
+    /// definition before its record is written.
+    pub(super) fn entering(&self) -> Result<()> {
+        match &self.on_schedules {
+            Some(tell) => tell(None),
+            None => Ok(()),
+        }
     }
 
     /// Whether the table holds a scheduled statement.
