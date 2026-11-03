@@ -2441,6 +2441,9 @@ pub struct VectorIndexStats {
 
 /// State of a single full-text index. `postings` is the number that matters
 /// for both memory and query cost: a `match` walks the lists of its terms.
+/// Every term the index keeps is counted, its prefixes (`^`, `prefix=N`)
+/// and, under `@text(accents)`, its words as written (`~`) among them, with
+/// their documents: what the option costs is read here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextIndexStats {
     pub field: String,
@@ -11218,11 +11221,33 @@ impl Database {
             return Ok((None, Vec::new()));
         };
         let ix = c.text(&m.field)?;
-        let read = ix.map(|ix| ix.read_terms(&query)).unwrap_or_default();
+        // A scoped token's words read as its ranking read them: a word
+        // typed with accents its spelling only where a row its filter
+        // selects holds it (`TextIndex::holds`), so a mark says nothing of
+        // a row it cannot read. A row whose test fails to evaluate is one
+        // it does not read, as `matching_ids` left it out of the ranking's.
+        // The browser holds no scoped token: none of it is built there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let test = match m.within && spec.accents {
+            true => sel.filter.as_ref().map(|f| Filter::new(c, f, ctx)),
+            false => None,
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let seen = |d: DocId| {
+            test.as_ref()
+                .is_some_and(|t| t.matches(d, ctx).unwrap_or(false))
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let reads = test.as_ref().map(|_| &seen as &dyn Fn(DocId) -> bool);
+        #[cfg(target_arch = "wasm32")]
+        let reads: crate::text::Reads = None;
+        let read = ix
+            .map(|ix| ix.read_terms(&query, reads))
+            .unwrap_or_default();
         let mut terms = crate::highlight::Terms::new(read, spec);
         if m.fuzzy > 0 || m.prefix {
             if let Some(ix) = ix {
-                for w in ix.loose_words(&query, m.loose())? {
+                for w in ix.loose_words(&query, m.loose(), reads)? {
                     terms.add(w);
                 }
             }
@@ -11287,15 +11312,29 @@ impl Database {
             Value::Text(t) => t,
             _ => return Ok(Vec::new()),
         };
-        let mut ids = match m.fuzzy == 0 && !m.prefix {
-            true => ix.matching(&query),
-            false => ix.matching_loose(&query, m.loose())?,
+        let test = filter.as_ref().map(|f| Filter::new(c, f, ctx));
+        // A scoped token's words read as its ranking read them, by the rows
+        // its filter selects (`TextIndex::holds`). A row whose test fails
+        // to evaluate is read as one it does not read: it is in the set the
+        // words reach either way, and tested again below. The browser holds
+        // no scoped token: none of it is built there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let seen = |d: DocId| {
+            test.as_ref()
+                .is_some_and(|t| t.matches(d, ctx).unwrap_or(false))
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let reads = match m.within && test.is_some() {
+            true => Some(&seen as &dyn Fn(DocId) -> bool),
+            false => None,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let reads: crate::text::Reads = None;
+        let mut ids = ix.matching_loose(&query, m.loose(), reads)?;
         // Every row the words reach, which a facet counts over: charged to
         // a call as a scan's rows are.
         self.examine(ids.len())?;
-        if let Some(f) = filter {
-            let test = Filter::new(c, f, ctx);
+        if let Some(test) = &test {
             let mut kept = Vec::with_capacity(ids.len());
             for id in ids {
                 if test.matches(id, ctx)? {

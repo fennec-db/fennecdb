@@ -229,7 +229,7 @@ pub struct TextIndexSpec {
     /// typed with them nDCG@10 0.6471 -> 0.6006; kept as written as well,
     /// 0.6453. On Turkish and French it scored within 0.0005 of the fold
     /// (0.4839 against 0.4835, 0.4942 against 0.4943), on Greek below it
-    /// (0.5975 against 0.6002), for 16 to 76% more postings, so it is off
+    /// (0.5971 against 0.6002), for 16 to 76% more postings, so it is off
     /// unless asked for.
     pub accents: bool,
 }
@@ -1386,8 +1386,7 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
             if kind == 5 {
                 let c = *buf.get(*pos).ok_or_else(ended)?;
                 *pos += 1;
-                spec.quant = Quant::from_code(c)
-                    .ok_or_else(|| Error::Corrupt(format!("unknown quantization {c}")))?;
+                spec.quant = Quant::from_code(c).ok_or_else(|| unknown("quantization", c))?;
             }
             IndexKind::Vector(spec.resolved())
         }
@@ -1398,7 +1397,7 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
                     let f = *buf.get(*pos).ok_or_else(ended)?;
                     *pos += 1;
                     if f & !TEXT_FLAGS != 0 {
-                        return Err(Error::Corrupt(format!("unknown text index options {f}")));
+                        return Err(unknown("text index options", f));
                     }
                     f
                 }
@@ -1419,6 +1418,19 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
         },
         6 => IndexKind::Inverted,
         10 => IndexKind::Geo,
-        o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
+        o => return Err(unknown("index kind", o)),
     })
+}
+
+/// A byte of an index's kind [`decode_index`] knows no meaning of: the
+/// file is refused, never misread. One body for the three, written out
+/// with no `format!`: kind 11's options with a refusal of their own were
+/// 207 bytes of the browser module, and one `format!` shared 221.
+#[inline(never)]
+fn unknown(what: &str, byte: u8) -> Error {
+    let mut m = String::from("unknown ");
+    m.push_str(what);
+    m.push(' ');
+    crate::json::int_into(&mut m, byte as i64);
+    Error::Corrupt(m)
 }

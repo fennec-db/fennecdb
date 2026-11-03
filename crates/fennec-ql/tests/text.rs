@@ -464,7 +464,18 @@ fn the_accents_option_is_carried_through_the_schema() {
             "create collection e (t text @text(Chars = true))",
             "`Chars` takes no value: write `@text(chars)`",
         ),
-        ("create collection e (t text @text(accent))", "expected `=`"),
+        // A name it does not know, flag or not, is refused naming the
+        // ones it does.
+        (
+            "create collection e (t text @text(accent))",
+            "unknown text parameter `accent`: `@text` takes `k1`, `b`, `prefix`, \
+             `prefix_min`, `prefix_max`, `chars` and `accents`",
+        ),
+        (
+            "create collection e (t text @text(accent=1))",
+            "unknown text parameter `accent`: `@text` takes",
+        ),
+        ("create collection e (t text @text(k1))", "expected `=`"),
     ] {
         let e = parse(src).unwrap_err().to_string();
         assert!(e.contains(want), "{src}: {e}");

@@ -1953,6 +1953,18 @@ impl Parser {
             }
             let key = self.ident()?;
             let lowered = key.to_ascii_lowercase();
+            // A name it does not know is refused naming every one it does,
+            // before an `=` is asked for: `@text(accent)` was told `expected
+            // `=`, found `)``, which named neither.
+            if !matches!(
+                lowered.as_str(),
+                "chars" | "accents" | "k1" | "b" | "prefix" | "prefix_max" | "prefix_min"
+            ) {
+                return self.err(format!(
+                    "unknown text parameter `{key}`: `@text` takes `k1`, `b`, `prefix`, \
+                     `prefix_min`, `prefix_max`, `chars` and `accents`"
+                ));
+            }
             // `chars` and `accents` are flags: each character of a script
             // written without spaces indexed as well as each pair, and a
             // word its accents make another kept as written beside its
@@ -1988,7 +2000,7 @@ impl Parser {
                     }
                 }
                 // `prefix` is the longest prefix indexed; 0 is off.
-                "prefix" | "prefix_max" | "prefix_min" => {
+                _ => {
                     if !(0.0..=64.0).contains(&v) || v.fract() != 0.0 {
                         let mut got = String::new();
                         fennec_core::num::f64_into(&mut got, v);
@@ -2001,7 +2013,6 @@ impl Parser {
                         spec.prefix_max = v as u8;
                     }
                 }
-                other => return self.err(format!("unknown text parameter `{other}`")),
             }
             if !matches!(self.peek(), Tok::Comma) {
                 break;

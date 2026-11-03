@@ -2,11 +2,15 @@
 """Writes src/text/fold.rs: what `@text` folds a Latin or a Greek letter to,
 so that `sutlac` finds `Sütlaç`, `kofte` `köfte` and `ελληνικα` `ελληνικά`.
 
-    python3 crates/fennec-core/tools/fold/gen.py [UnicodeData.txt]
+    python3 crates/fennec-core/tools/fold/gen.py [--check] [UnicodeData.txt]
 
 Without a path the script fetches Unicode 17.0.0's UnicodeData.txt, the
 version of the standard library's case mappings (`char::UNICODE_VERSION`),
-which the tokenizer lowercases with before it folds.
+which the tokenizer lowercases with before it folds. It writes the file
+through rustfmt, as `cargo fmt --check` wants it; `--check` writes
+nothing and fails where src/text/fold.rs is not what it would write -- a
+table edited by hand, or formatted apart from this script (CI's fmt job
+runs it).
 
 A letter folds to its base letter, its marks dropped: its canonical
 decomposition's first code point when that is a letter of its own script
@@ -30,13 +34,18 @@ with Latin Extended-A and -B, Greek and Coptic, and Latin Extended
 Additional (Vietnamese) with Greek Extended (polytonic Greek): 0 for a
 code point that stays, an ASCII letter for itself, `n` up to 31 for the
 `n`th of `PAIRS`, and from 0x80 up U+0300 past it -- a Greek letter. 1 056
-bytes; ASCII text never reaches it.
+bytes; ASCII text never reaches it. Where a code point is in it is a
+function of the ranges, `at`, each range's offset a constant of its arm:
+a loop over the ranges, summing their lengths, cost Cyrillic and Greek a
+walk of them for every letter.
 """
 
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 UNICODE = "17.0.0"
@@ -75,11 +84,25 @@ def load(path):
     return chars
 
 
+def fetch():
+    """UnicodeData.txt into a directory of its own, tried three times: CI
+    runs `--check` on a fresh machine."""
+    path = os.path.join(tempfile.mkdtemp(), "UnicodeData.txt")
+    for attempt in range(3):
+        try:
+            urllib.request.urlretrieve(URL, path)
+            return path
+        except OSError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+
+
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    if path is None:
-        path = os.path.join(tempfile.mkdtemp(), "UnicodeData.txt")
-        urllib.request.urlretrieve(URL, path)
+    args = sys.argv[1:]
+    check = "--check" in args
+    args = [a for a in args if a != "--check"]
+    path = args[0] if args else fetch()
     chars = load(path)
 
     def lower(cp):
@@ -168,10 +191,22 @@ def main():
         "// UnicodeData.txt; do not edit. What a Latin or Greek letter folds to under",
         "// `@text` -- the rule is the script's.",
         "",
-        "/// The code points the table holds, each range's first and the one past",
-        "/// its last, in the table's order.",
-        "pub(super) const RANGES: [(u32, u32); %d] = [%s];" % (
-            len(RANGES), ", ".join("(0x%04X, 0x%04X)" % r for r in RANGES)),
+        "/// Where the code point `u` is in `TABLE`, if it holds it: the ranges it",
+        "/// holds in order, each at the bytes of those before it.",
+        "pub(super) fn at(u: u32) -> Option<usize> {",
+        "    let at = match u {",
+    ]
+    before = 0
+    for lo, hi in RANGES:
+        # The first range's offset left out: clippy's `identity_op`.
+        plus = " + 0x%04X" % before if before else ""
+        out.append("        0x%04X..=0x%04X => u - 0x%04X%s," % (lo, hi - 1, lo, plus))
+        before += hi - lo
+    out += [
+        "        _ => return None,",
+        "    };",
+        "    Some(at as usize)",
+        "}",
         "",
         "/// The folds of two letters, the `n`th named by a byte `n` of `TABLE`.",
         "pub(super) const PAIRS: [&str; %d] = [%s];" % (
@@ -189,8 +224,20 @@ def main():
                 " ".join("0x%02X," % b for b in table[at:at + n]), row))
             at += n
     out.append("];")
-    with open(OUT, "w", encoding="utf-8") as fh:
+    # As `cargo fmt --check` wants it: written here, then through rustfmt,
+    # so that what the script writes is the file as committed.
+    target = OUT
+    if check:
+        target = os.path.join(tempfile.mkdtemp(), "fold.rs")
+    with open(target, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out) + "\n")
+    subprocess.run(["rustfmt", "--edition", "2021", target], check=True)
+    if check:
+        with open(target, encoding="utf-8") as a, open(OUT, encoding="utf-8") as b:
+            if a.read() != b.read():
+                sys.exit("%s is not what tools/fold/gen.py writes: run it" % OUT)
+        print("%s is what tools/fold/gen.py writes" % OUT)
+        return
 
     print("%d code points fold, %d bytes, pairs %s" % (len(folds), len(table), pairs))
     for cp, f, why in left:

@@ -27,6 +27,11 @@ jobs:
 
       - run: cargo fmt --all --check
 
+      # docs/design/text.md#tokenizer: the accent fold's table is written by
+      # its script alone, through rustfmt, from Unicode's UnicodeData.txt.
+      - name: The accent fold's table is what tools/fold/gen.py writes
+        run: python3 crates/fennec-core/tools/fold/gen.py --check
+
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 

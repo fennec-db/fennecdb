@@ -524,7 +524,7 @@ messages   read,insert  where room in (get members select room where user = $jwt
     it did (<a
     href="https://github.com/fennec-db/fennecdb/tree/main/crates/fennec-http/examples/policy.rs"><code>make
     policy-bench</code></a>, <code>ARGS=streams</code>).</li>
-  <li><b><code>match</code> scores over the rows the token may read.</b>
+  <li id="scoped-match"><b><code>match</code> scores over the rows the token may read.</b>
     BM25's statistics — how many documents, their mean length, how many
     hold each word — are taken over the rows the query's filter selects,
     the token's rules among them, not over the collection: there a user's
@@ -536,7 +536,12 @@ messages   read,insert  where room in (get members select room where user = $jwt
     costs the token's query its rows' lengths and each word's count among
     them: over 100 000 documents, a filter keeping 2.5% took 0.16 ms and
     takes 0.24, one keeping half 5.4 and 6.2. The server's own token
-    scores over the collection, as before.</li>
+    scores over the collection, as before. Under <a
+    href="fennecql-search.html#accents-option"><code>@text(accents)</code></a>
+    the same rows decide whether a word typed with accents reads its
+    spelling, in the ranking, its facets and its marks alike: a spelling
+    only another user's rows write leaves the token's word read as every
+    spelling.</li>
   <li><b><a href="http-reference.html#subscriptions">Subscriptions</a></b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it — rows leaving as a rule

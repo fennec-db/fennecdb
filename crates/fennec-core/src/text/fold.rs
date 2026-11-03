@@ -2,9 +2,17 @@
 // UnicodeData.txt; do not edit. What a Latin or Greek letter folds to under
 // `@text` -- the rule is the script's.
 
-/// The code points the table holds, each range's first and the one past
-/// its last, in the table's order.
-pub(super) const RANGES: [(u32, u32); 3] = [(0x00C0, 0x0250), (0x0370, 0x0400), (0x1E00, 0x2000)];
+/// Where the code point `u` is in `TABLE`, if it holds it: the ranges it
+/// holds in order, each at the bytes of those before it.
+pub(super) fn at(u: u32) -> Option<usize> {
+    let at = match u {
+        0x00C0..=0x024F => u - 0x00C0,
+        0x0370..=0x03FF => u - 0x0370 + 0x0190,
+        0x1E00..=0x1FFF => u - 0x1E00 + 0x0220,
+        _ => return None,
+    };
+    Some(at as usize)
+}
 
 /// The folds of two letters, the `n`th named by a byte `n` of `TABLE`.
 pub(super) const PAIRS: [&str; 7] = ["ae", "dz", "ij", "lj", "nj", "oe", "ss"];

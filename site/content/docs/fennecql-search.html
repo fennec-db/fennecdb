@@ -80,9 +80,10 @@ get articles match body $1 rerank embed $2 candidates 500 limit 10
   <li><b>A word typed without accents finds it written with them.</b>
     <code>sutlac</code> finds <code>Sütlaç</code>, <code>cafe</code>
     <code>café</code>, <code>pho</code> <code>Phở</code> and
-    <code>ελληνικα</code> <code>Ελληνικά</code>; typed with its accents, a
-    word finds it written as it was typed. Case never decides a word (<a
-    href="#accents">accents</a>).</li>
+    <code>ελληνικα</code> <code>Ελληνικά</code>; typed with its accents it
+    finds every spelling too, or under <code>@text(accents)</code> the one
+    it was typed in. Case never decides a word, with the option or without
+    (<a href="#accents">accents</a>).</li>
 </ul>
 
 <details class="deep"><summary>How match filters, and what rerank is for</summary>
@@ -217,9 +218,11 @@ written with them, and the other way round: <code>sutlac</code> and
     they always were. An accent written apart from its letter (an
     <code>e</code> and U+0301) folds with it.</li>
   <li><b>What does not:</b> Cyrillic and every other script are read as
-    written — <code>ё</code> is not <code>е</code>. Only <code>@text</code>
-    folds: <code>=</code>, <code>~</code>, <code>nocase</code>, collations
-    and the other indexes compare as they always did.</li>
+    written — <code>ё</code> is not <code>е</code>, written whole or as an
+    <code>е</code> and U+0308: an accent written apart stays with a letter
+    the fold leaves. Only <code>@text</code> folds: <code>=</code>,
+    <code>~</code>, <code>nocase</code>, collations and the other indexes
+    compare as they always did.</li>
   <li><b><code>fuzzy</code> and <code>prefix</code> compare folded
     words</b>: <code>sutlc</code> finds <code>Sütlaç</code>.</li>
   <li><b><code>highlight()</code> marks what was found</b>, as it is
@@ -249,7 +252,7 @@ get articles match title "ma"   -- ma, má, mà, mả, mã, mạ</code></pre>
     the other languages measured, leave it out: the fold alone scores as
     well or better.</li>
   <li><b>It costs memory.</b> Every word written with accents is a second
-    term: 76% more postings over Vietnamese, 70% over Greek, 28% over
+    term: 76% more postings over Vietnamese, 66% over Greek, 28% over
     Turkish, 16% over French; text with no accents, nothing. Building the
     index takes longer by about as much.</li>
   <li><b>With the other options:</b> it combines with <code>k1</code>,
@@ -260,6 +263,19 @@ get articles match title "ma"   -- ma, má, mà, mả, mã, mạ</code></pre>
     other spellings after it; <code>highlight()</code> marks the spelling
     a word typed with accents found — <code>sütlaç</code> marks
     <code>Sütlaç</code> and <code>SÜTLAÇ</code>, not <code>sutlac</code>.</li>
+  <li><b>Only rows the query may read decide.</b> A word typed with accents
+    reads its spelling where a row holds it; for a token <a
+    href="http-access.html#scoped-match">held to some rows</a>, a row its rules let it read,
+    as its scores count only those rows — a row it cannot read never turns
+    its <code>sütlaç</code> from every spelling to one. Its ranking, facets
+    and marks read the word alike.</li>
+  <li><b>A word written decomposed is another spelling.</b> Written whole
+    (<code>ü</code>, as nearly every text and keyboard writes it) or as a
+    letter and its accent apart (<code>u</code> and U+0308, as macOS file
+    names and some Vietnamese keyboards write it), a word is two spellings
+    under the option, and a query typed one way reads the rows written that
+    way where some are; typed without accents it finds both. Without the
+    option the two are one word.</li>
   <li><b>Older binaries refuse the file.</b> The option is stored with the
     index, so a fennecdb from before it refuses to open a database
     declaring it rather than read every accented word as every
@@ -283,7 +299,7 @@ it.</p>
 <tr><td>Turkish, typed without accents</td><td class="n">10 000</td><td class="n">0.4095</td><td class="n">0.4835</td><td class="n">0.4835</td></tr>
 <tr><td>Vietnamese, as typed</td><td class="n">10 000</td><td class="n">0.6471</td><td class="n">0.6006</td><td class="n">0.6453</td></tr>
 <tr><td>Vietnamese, typed without accents</td><td class="n">10 000</td><td class="n">0.2113</td><td class="n">0.6005</td><td class="n">0.6005</td></tr>
-<tr><td>Greek, as typed</td><td class="n">3 852</td><td class="n">0.5956</td><td class="n">0.6002</td><td class="n">0.5975</td></tr>
+<tr><td>Greek, as typed</td><td class="n">3 852</td><td class="n">0.5956</td><td class="n">0.6002</td><td class="n">0.5971</td></tr>
 <tr><td>Greek, typed without accents</td><td class="n">3 852</td><td class="n">0.3119</td><td class="n">0.6002</td><td class="n">0.6002</td></tr>
 <tr><td>French, as typed</td><td class="n">10 000</td><td class="n">0.4932</td><td class="n">0.4943</td><td class="n">0.4942</td></tr>
 <tr><td>French, typed without accents</td><td class="n">10 000</td><td class="n">0.4105</td><td class="n">0.4943</td><td class="n">0.4943</td></tr>
@@ -294,7 +310,7 @@ it.</p>
 <p>English SciFact scores 0.6618 all three ways. The index's postings,
 without the fold / <code>@text</code> / <code>@text(accents)</code>:
 Turkish 4.13 / 4.13 / 5.28 million (64.6 / 64.2 / 82.9 MB), French 24.2 /
-24.1 / 28.0 million, Greek 1.58 / 1.58 / 2.69 million, Vietnamese 5.71 /
+24.1 / 28.0 million, Greek 1.58 / 1.58 / 2.63 million, Vietnamese 5.71 /
 5.47 / 10.06 million (73.1 / 69.9 / 125.5 MB).</p>
 </details>
 

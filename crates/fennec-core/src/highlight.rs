@@ -36,15 +36,13 @@ pub struct Terms {
 }
 
 impl Terms {
-    /// The terms the index reads of a query (`TextIndex::read_terms`): a
-    /// word's fold, or under `@text(accents)` a word written with accents
-    /// as written, where the index holds it so -- `sütlaç` marks `Sütlaç`
-    /// and not `Sutlac`.
-    pub fn new(read: Vec<String>, spec: TextIndexSpec) -> Terms {
-        let mut terms: Map<String, u32> = Map::default();
-        for t in read {
-            terms.insert(t, 1);
-        }
+    /// The terms the index reads of a query, as its search counted them
+    /// (`TextIndex::read_terms`): a word's fold, or under `@text(accents)`
+    /// a word written with accents as written, where a row the statement
+    /// reads holds it so -- `sütlaç` marks `Sütlaç` and not `Sutlac`. The
+    /// map as it is: copied into a `Vec` and back, it was 930 bytes of the
+    /// browser module.
+    pub fn new(terms: Map<String, u32>, spec: TextIndexSpec) -> Terms {
         Terms { spec, terms }
     }
 
@@ -267,7 +265,9 @@ mod tests {
     #[test]
     fn a_window_holds_the_marks_it_was_centred_on() {
         let words: Vec<String> = (0..30).map(|i| format!("w{i}")).collect();
-        let terms = Terms::new(vec!["x".into()], TextIndexSpec::default());
+        let mut x = Map::default();
+        x.insert("x".to_string(), 1);
+        let terms = Terms::new(x, TextIndexSpec::default());
         for tokens in 1..12 {
             for gap in 0..tokens {
                 for first in 0..30 - gap {
