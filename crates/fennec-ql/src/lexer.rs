@@ -24,6 +24,18 @@ pub enum Tok {
     /// refused as before.
     #[cfg(feature = "statements")]
     Named(String),
+    /// `event.metadata."order-id"`: a path with a key FennecQL does not
+    /// write as a name, quoted as a policy quotes a claim
+    /// (`$jwt."cognito:groups"`) -- its names and keys as written, cut by
+    /// dots, which no key holds (`event.metadata.order-id`). A webhook
+    /// consumer reads one where it reads its event (a parameter's `from`,
+    /// its condition) and every other place refuses it: a dot before a
+    /// `"` was no token at all, so no text that lexed reads otherwise.
+    /// Without named statements it is that error still. A `String`, as
+    /// [`Tok::Ident`]'s: a list of keys made every token's copy and drop
+    /// an arm longer, the lexer's loop 0.9 KB.
+    #[cfg(feature = "statements")]
+    Keys(String),
     /// Numbers alone between brackets, read as the parser reads such a
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
@@ -76,6 +88,8 @@ impl Tok {
             Tok::Param(i) => format!("${}", i + 1),
             #[cfg(feature = "statements")]
             Tok::Named(n) => format!("`${n}`"),
+            #[cfg(feature = "statements")]
+            Tok::Keys(k) => format!("`{}`", keys_written(k)),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
@@ -140,6 +154,105 @@ fn named_at(src: &str, s: usize) -> (Tok, usize) {
     (Tok::Named(src.get(s..i).unwrap_or_default().to_string()), i)
 }
 
+/// A path's names and keys, cut by dots, as FennecQL writes them: each
+/// bare where it reads as a name, else in double quotes --
+/// `event.metadata."order-id"`.
+#[cfg(feature = "statements")]
+#[cold]
+pub(crate) fn keys_written(path: &str) -> String {
+    let mut out = String::new();
+    for (i, k) in path.split('.').enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        let bare = k.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && k.chars().all(|c| c.is_alphanumeric() || c == '_');
+        match bare {
+            true => out.push_str(k),
+            false => {
+                out.push('"');
+                out.push_str(k);
+                out.push('"');
+            }
+        }
+    }
+    out
+}
+
+/// At a `.` at byte `i`: where it stands right after a name, the last of
+/// `out`, and before a `"` (`event.metadata."order-id"`), the path read on
+/// into [`Tok::Keys`] in that name's place -- each key in quotes, each name
+/// after a dot -- and where it ends; `None` for every other dot, the error
+/// it was. A quoted key is taken as written, the JSON's own: a character
+/// at least, no `\`, and no `.`, which cuts a path's keys. Out of the
+/// lexer's loop, every check with it, reached where a dot alone was
+/// refused: no text that lexed pays for it.
+#[cfg(feature = "statements")]
+#[cold]
+#[inline(never)]
+fn quoted_keys(src: &str, out: &mut [Token], mut i: usize, start: usize) -> Result<Option<usize>> {
+    let b = src.as_bytes();
+    let after_name = (src.get(..i).and_then(|s| s.chars().next_back()))
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let Some(Token { tok: last, .. }) = out.last_mut() else {
+        return Ok(None);
+    };
+    let Tok::Ident(first) = last else {
+        return Ok(None);
+    };
+    if b.get(i + 1) != Some(&b'"') || !after_name {
+        return Ok(None);
+    }
+    let refused = |why: String| Err(Error::Query(format!("position {start}: {why}")));
+    let mut path = std::mem::take(first);
+    loop {
+        // At a `.`, a `"` or a name's first character after it.
+        path.push('.');
+        if b.get(i + 1) == Some(&b'"') {
+            let s = i + 2;
+            let mut j = s;
+            loop {
+                match b.get(j) {
+                    None => return refused(UNTERMINATED.into()),
+                    Some(b'"') => break,
+                    Some(b'\\') => {
+                        return refused(
+                            "a quoted key is taken as written, the JSON's own, with no `\\`".into(),
+                        )
+                    }
+                    Some(_) => j += 1,
+                }
+            }
+            let key = src.get(s..j).unwrap_or_default();
+            if key.is_empty() || key.contains('.') {
+                return refused(format!(
+                    "`\"{key}\"` is no key of a path: a key holds a character at least, and no \
+                     dot, which cuts a path's keys"
+                ));
+            }
+            path.push_str(key);
+            i = j + 1;
+        } else {
+            let s = i + 1;
+            let mut j = s;
+            while let Some(c) = src.get(j..).and_then(|t| t.chars().next()) {
+                if !(c.is_alphanumeric() || c == '_') {
+                    break;
+                }
+                j += c.len_utf8();
+            }
+            path.push_str(src.get(s..j).unwrap_or_default());
+            i = j;
+        }
+        match (b.get(i), src.get(i + 1..).and_then(|t| t.chars().next())) {
+            (Some(b'.'), Some(c)) if c == '"' || c.is_alphabetic() || c == '_' => {}
+            _ => break,
+        }
+    }
+    *last = Tok::Keys(path);
+    Ok(Some(i))
+}
+
 fn subtracts(last: Option<&Token>) -> bool {
     match last.map(|t| &t.tok) {
         Some(
@@ -154,7 +267,7 @@ fn subtracts(last: Option<&Token>) -> bool {
             | Tok::RBracket,
         ) => true,
         #[cfg(feature = "statements")]
-        Some(Tok::Named(_)) => true,
+        Some(Tok::Named(_) | Tok::Keys(_)) => true,
         _ => false,
     }
 }
@@ -701,6 +814,16 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 Tok::Ident(src.get(s..i).unwrap_or_default().to_string())
             }
             other => {
+                // `event.metadata."order-id"`: a dot right after a name,
+                // before a `"`, reads the name on as a path with a quoted
+                // key (`Tok::Keys`), out of line -- it was this error.
+                #[cfg(feature = "statements")]
+                if other == '.' {
+                    if let Some(end) = quoted_keys(src, &mut out, i, start)? {
+                        i = end;
+                        continue;
+                    }
+                }
                 // The character as the text holds it: a `char` formatted
                 // was 274 bytes of the browser module for this alone.
                 let other = src
@@ -797,6 +920,54 @@ mod tests {
         assert_eq!(toks("$1")[..1], [Tok::Param(0)]);
         assert!(tokenize("$_a").is_err() && tokenize("$").is_err() && tokenize("$ a").is_err());
         assert_eq!(tokenize("$ş").unwrap_err(), tokenize("$_").unwrap_err());
+    }
+
+    /// A dot right after a name and before a `"` reads the name on as a
+    /// path whose keys may be quoted (a webhook consumer's), names and
+    /// quoted keys after it; every other dot is the error it was.
+    #[cfg(feature = "statements")]
+    #[test]
+    fn a_quoted_key_reads_a_path_on() {
+        let toks =
+            |s: &str| -> Vec<Tok> { tokenize(s).unwrap().into_iter().map(|t| t.tok).collect() };
+        let keys = |k: &[&str]| Tok::Keys(k.join("."));
+        assert_eq!(
+            toks("event.metadata.\"order-id\""),
+            [keys(&["event", "metadata", "order-id"]), Tok::Eof]
+        );
+        assert_eq!(
+            toks("event.\"a b\".c.\"0\".şehir=1"),
+            [
+                keys(&["event", "a b", "c", "0", "şehir"]),
+                Tok::Eq,
+                Tok::Int(1),
+                Tok::Eof
+            ]
+        );
+        assert_eq!(
+            toks("x.\"k\"-1")[..3],
+            [keys(&["x", "k"]), Tok::Minus, Tok::Int(1)]
+        );
+        // Placed where the name began, as every token is.
+        let t = tokenize("get e where EVENT.\"x-y\" = 1").unwrap();
+        assert_eq!((t[3].pos, &t[3].tok), (12, &keys(&["EVENT", "x-y"])));
+        assert_eq!(keys_written("event.x-y._a1.0"), "event.\"x-y\"._a1.\"0\"");
+        // Unclosed is a string unclosed, which the shell reads on past.
+        let e = tokenize("event.\"order").unwrap_err().to_string();
+        assert!(e.ends_with(UNTERMINATED), "{e}");
+        for (text, words) in [
+            ("event.\"\"", "no key of a path"),
+            ("event.\"a.b\"", "no key of a path"),
+            ("event.\"a\\\"b\"", "with no `\\`"),
+            // A dot after a space, a `*` or a text is no path's.
+            ("event .\"a\"", "unexpected character `.`"),
+            ("o.*.\"a\"", "unexpected character `.`"),
+            ("\"a\".\"b\"", "unexpected character `.`"),
+            ("event.\"a\".5", "unexpected character `.`"),
+        ] {
+            let e = tokenize(text).unwrap_err().to_string();
+            assert!(e.contains(words), "{text}: {e}");
+        }
     }
 
     #[test]
@@ -1074,6 +1245,64 @@ mod tests {
                             (Some('.'), Some(&n)) if n.is_alphabetic() || n == '_' => i += 1,
                             _ => break,
                         }
+                    }
+                    // A quoted key, since a webhook consumer's paths were
+                    // read: the path read on, names and quoted keys.
+                    #[cfg(feature = "statements")]
+                    if b.get(i) == Some(&'.') && b.get(i + 1) == Some(&'"') && b[i - 1] != '*' {
+                        let dot = i;
+                        let mut path: String = b[s..i].iter().collect();
+                        loop {
+                            path.push('.');
+                            if b.get(i + 1) == Some(&'"') {
+                                let mut j = i + 2;
+                                while j < b.len() && b[j] != '"' && b[j] != '\\' {
+                                    j += 1;
+                                }
+                                let why = match b.get(j) {
+                                    None => Some(UNTERMINATED.to_string()),
+                                    Some('\\') => Some(
+                                        "a quoted key is taken as written, the JSON's own, \
+                                         with no `\\`"
+                                            .to_string(),
+                                    ),
+                                    _ => None,
+                                };
+                                let key: String = b[(i + 2).min(j)..j].iter().collect();
+                                let why = why.or_else(|| {
+                                    (key.is_empty() || key.contains('.')).then(|| {
+                                        format!(
+                                            "`\"{key}\"` is no key of a path: a key holds a \
+                                             character at least, and no dot, which cuts a \
+                                             path's keys"
+                                        )
+                                    })
+                                });
+                                if let Some(why) = why {
+                                    return Err(Error::Query(format!("position {dot}: {why}")));
+                                }
+                                path.push_str(&key);
+                                i = j + 1;
+                            } else {
+                                let k = i + 1;
+                                let mut j = k;
+                                while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
+                                    j += 1;
+                                }
+                                path.extend(&b[k..j]);
+                                i = j;
+                            }
+                            match (b.get(i), b.get(i + 1)) {
+                                (Some('.'), Some(&n))
+                                    if n == '"' || n.is_alphabetic() || n == '_' => {}
+                                _ => break,
+                            }
+                        }
+                        out.push(Token {
+                            tok: Tok::Keys(path),
+                            pos: start,
+                        });
+                        continue;
                     }
                     Tok::Ident(b[s..i].iter().collect())
                 }

@@ -770,7 +770,9 @@ fn kind(s: &Statement) -> Kind {
         // condition go on until `as`, which the parser refuses the text's
         // end before, and then its body is a callable one's. A scheduled
         // one too: its schedule, its zone and `every 1` before its unit
-        // (`Parser::cut`) go on until `as`.
+        // (`Parser::cut`) go on until `as`. And a webhook consumer: its
+        // parameters' paths, `on` before its `hook` (`Parser::cut`), its
+        // hook and its condition go on until `as`.
         Statement::CreateStatement(d) if d.block => Kind::Schema,
         Statement::CreateStatement(_) => Kind::Write,
     }
