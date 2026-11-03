@@ -706,17 +706,17 @@ pub const HOOKED_PARAMS: &str = "each parameter of a webhook consumer reads the 
 #[cold]
 fn keys_refused(keys: &str) -> Option<String> {
     use crate::value::MAX_PATH_KEYS;
-    if keys.split('.').count() > MAX_PATH_KEYS {
-        return Some(format!(
-            "a path names at most {MAX_PATH_KEYS} keys past `event`"
-        ));
+    let mut n = 0;
+    for k in keys.split('.') {
+        if k.is_empty() || k == "*" {
+            return Some(format!(
+                "`event.{keys}` names no part of the event: a key holds a character at least, \
+                 and `*` none -- the whole body is a `json` parameter's, `$e json from event`"
+            ));
+        }
+        n += 1;
     }
-    keys.split('.').any(|k| k.is_empty() || k == "*").then(|| {
-        format!(
-            "`event.{keys}` names no part of the event: a key holds a character at least, and \
-             `*` none -- the whole body is a `json` parameter's, `$e json from event`"
-        )
-    })
+    (n > MAX_PATH_KEYS).then(|| format!("a path names at most {MAX_PATH_KEYS} keys past `event`"))
 }
 
 /// Why a webhook consumer's parameter `p` cannot read `s`, if it cannot,
@@ -2335,12 +2335,15 @@ impl Canon {
         self.list(3, &h.sources, |c, s| {
             c.node(8);
             match s {
-                // Each key under 2, as a list of them was written.
+                // Each key under 2, as a list of them was written: a text
+                // each, its length and its bytes, as `Canon::str` writes it.
                 Source::Event(keys) if !keys.is_empty() => {
+                    let keys = keys.as_bytes().split(|&b| b == b'.');
                     c.tag(2);
-                    c.uint(keys.split('.').count() as u64);
-                    for k in keys.split('.') {
-                        c.str(k);
+                    c.uint(keys.clone().count() as u64);
+                    for k in keys {
+                        c.uint(k.len() as u64);
+                        c.0.extend_from_slice(k);
                     }
                 }
                 Source::Event(_) => {}

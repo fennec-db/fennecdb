@@ -772,19 +772,16 @@ fn row_field(name: &str) -> Option<(bool, &str)> {
 #[inline(never)]
 fn event_part(path: &str) -> std::result::Result<fennec_core::named::Source, bool> {
     use fennec_core::named::Source;
-    let (head, rest) = path.split_once('.').unwrap_or((path, ""));
-    if head.eq_ignore_ascii_case("event") {
-        return Ok(Source::Event(rest.into()));
-    }
-    if !head.eq_ignore_ascii_case("hook") {
-        return Err(false);
-    }
-    match () {
-        _ if rest.eq_ignore_ascii_case("id") => Ok(Source::HookId),
-        _ if rest.eq_ignore_ascii_case("at") => Ok(Source::HookAt),
-        _ if rest.eq_ignore_ascii_case("event") => Ok(Source::HookEvent),
-        _ => Err(true),
-    }
+    // Its words in lower case, its keys as written.
+    let lower = path.to_ascii_lowercase();
+    Ok(match lower.as_str() {
+        "event" => Source::Event(String::new()),
+        "hook.id" => Source::HookId,
+        "hook.at" => Source::HookAt,
+        "hook.event" => Source::HookEvent,
+        l if l.starts_with("event.") => Source::Event(path.get(6..).unwrap_or_default().into()),
+        l => return Err(l == "hook" || l.starts_with("hook.")),
+    })
 }
 
 /// What `new.<field>` or `old.<field>` in a webhook consumer is refused
@@ -3996,7 +3993,7 @@ impl Parser {
                 return why;
             }
             if self.next_kw("hook") {
-                return self.hooked_statement(replace, name, at, Vec::new(), Vec::new(), None);
+                return self.hooked_statement(replace, name, at, Vec::new(), 0, None);
             }
         }
         if !matches!(self.peek(), Tok::LParen) {
@@ -4008,11 +4005,10 @@ impl Parser {
         let paren = self.i;
         self.skip();
         let mut params: Vec<Param> = Vec::new();
-        // What the parameters read of a webhook's event, each saying
-        // (`from event.<path>`), handed on where `on hook` follows the
-        // parentheses and dropped before the clauses otherwise; where the
-        // first parameter saying none stands, and the first `from`.
-        let mut sources: Vec<Source> = Vec::new();
+        // Where the first parameter reading no part of a webhook's event
+        // stands, and the first `from` (`from event.<path>`): what each
+        // reads is read again by `hooked_statement`, which alone keeps it,
+        // where `on hook` follows the parentheses.
         let (mut bare, mut from_at) = (None, None);
         while !matches!(self.peek(), Tok::RParen) {
             if params.len() == MAX_PARAMS {
@@ -4029,14 +4025,9 @@ impl Parser {
             }
             params.push(p);
             match source {
-                Some((s, word)) => {
-                    from_at.get_or_insert(word);
-                    sources.push(s);
-                }
-                None => {
-                    bare.get_or_insert(at);
-                }
-            }
+                Some((_, word)) => from_at.get_or_insert(word),
+                None => bare.get_or_insert(at),
+            };
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
@@ -4044,9 +4035,8 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         if self.peek_kw("on") && self.next_kw("hook") {
-            return self.hooked_statement(replace, name, at, params, sources, bare);
+            return self.hooked_statement(replace, name, at, params, paren, bare);
         }
-        drop(sources);
         let (mut claims, mut public, mut scans) = (None, false, false);
         let (mut comment, mut check) = (None, None);
         let twice = |p: &Parser, what: &str| p.err(format!("`{what}` is written once"));
@@ -4561,10 +4551,12 @@ impl Parser {
     /// ...)] on hook <hook> [where <condition>] [comment '<text>'] [check
     /// <expr>] [scans] as <body>`, at `on`: a statement taking the events
     /// another service sends, called by no token -- no claims, `$jwt` or
-    /// `public` -- each parameter reading a part of the event (`sources`,
-    /// in the signature's order; `bare`, where the first parameter that
-    /// reads none stands), its condition the event's paths and literals
-    /// alone. Out of line, as every path only a definition takes.
+    /// `public` -- each parameter reading a part of the event, read again
+    /// from the parentheses at `paren` for it (`bare`, where the first
+    /// that reads none stands), its condition the event's paths and
+    /// literals alone. Out of line, as every path only a definition takes:
+    /// kept by `create_statement`, what the parameters read was a vector
+    /// its every return dropped.
     #[cfg(feature = "statements")]
     #[cold]
     #[inline(never)]
@@ -4574,7 +4566,7 @@ impl Parser {
         name: String,
         at: usize,
         params: Vec<fennec_core::named::Param>,
-        sources: Vec<fennec_core::named::Source>,
+        paren: usize,
         bare: Option<usize>,
     ) -> Result<Statement> {
         use fennec_core::named::{
@@ -4585,7 +4577,18 @@ impl Parser {
             self.i = dollar;
             return self.err(HOOKED_PARAMS);
         }
-        self.i += 2;
+        // What each parameter reads, its list read again: read once
+        // already, it reads alike.
+        let on = self.i;
+        let mut sources = Vec::with_capacity(params.len());
+        self.i = paren;
+        for _ in &params {
+            self.i += 1;
+            let mut source = None;
+            self.param(&mut source)?;
+            sources.extend(source.map(|(s, _)| s));
+        }
+        self.i = on + 2;
         let named = self.i;
         let hook = self.ident()?;
         if !valid_name(&hook) {
