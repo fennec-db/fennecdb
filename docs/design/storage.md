@@ -136,9 +136,11 @@ At 1.8 million x 128, a 1.1 GB file, writes waited at most 24 ms against 1.22
 s, for a peak of +67 MB; cloning the segments rather than sharing them held
 the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
 created, dropped or altered meanwhile fails it, and so does a named statement
-defined or dropped; a scheduled statement's mark (kind 13, op 5) does not:
-the swap writes each schedule's last mark as it stands then
-(`Statements::defines_as`, [named-statements.md](named-statements.md#what-f3-has-built)).
+defined or dropped; a scheduled statement's mark (kind 13, op 5) does not,
+kept beside the statements' table rather than in it: the swap writes each
+schedule's last mark as it stands then (`last_marks`;
+`Statements::defines_as` asks the definitions alone,
+[named-statements.md](named-statements.md#what-f3-has-built)).
 Only a lone statement takes this path; a batch, the shell and `execute`
 hold the lock.
 

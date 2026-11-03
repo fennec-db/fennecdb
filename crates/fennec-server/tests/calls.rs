@@ -86,3 +86,37 @@ fn a_call_line_naming_no_statement_is_logged() {
     server.http().with_token("root").run("drop statement mine");
     assert!(server.logged(mine, Duration::from_secs(10)));
 }
+
+/// A `call` line naming a scheduled statement is logged, as one naming a
+/// statement bound to writes is: the clock runs it, and no call of a
+/// token's does. So is a `wake` line naming it, which no write wakes. The
+/// fixture a server's build wrote holds `lapse`, run every 15 minutes.
+#[test]
+fn a_call_line_naming_a_scheduled_statement_is_logged() {
+    let file = tmp("calls", "scheduled.fennec");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fennec-core/tests/statements.fennec"
+        ),
+        &file,
+    )
+    .unwrap();
+    let (secret, policy) = policy("scheduled", "lapse call\nlapse wake\n");
+    let server = start(&[
+        "--file",
+        file.to_str().unwrap(),
+        "--http-token",
+        "root",
+        "--jwt-secret-file",
+        &secret,
+        "--policy",
+        &policy,
+    ]);
+    for line in [
+        "policy line 1 grants calling statement `lapse`, which runs by the clock",
+        "policy line 2 grants waking statement `lapse`, which runs by the clock",
+    ] {
+        assert!(server.logged(line, Duration::from_secs(10)), "{line}");
+    }
+}

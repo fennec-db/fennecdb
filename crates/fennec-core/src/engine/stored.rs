@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use crate::codec::{decode_str, encode_str, get_uvarint, put_uvarint, unzigzag, zigzag};
+use crate::codec::{decode_str, encode_str, get_uvarint, put_uvarint};
+#[cfg(feature = "statements")]
+use crate::codec::{unzigzag, zigzag};
 use crate::error::{Error, Result};
 #[cfg(feature = "statements")]
 use crate::schema::{IndexKind, Schema};
@@ -38,11 +40,14 @@ const OP_DROP: u8 = 2;
 /// land without their rows (`docs/design/named-statements.md`, *A
 /// binding's record*).
 const OP_BOUND: u8 = 3;
-/// A statement run by the clock (F3): op 1's fields, then its schedule
-/// outside the text -- [`Times`], the zone's name -- and `since`, so a
-/// build that cannot read the text keeps it and computes its slots. A
-/// build before it refuses the op, never taking it for a callable
-/// statement whose schedule nobody runs (*A schedule's record*).
+/// A statement run by the clock (F3): op 1's fields, its text, then its
+/// schedule outside the text -- [`Times`], the zone's name -- and `since`,
+/// so a build that cannot read the text computes its slots. After the
+/// text, the record's tail: a build that runs none -- the browser module --
+/// keeps it as the bytes it is, reading none of it; before the text, it was
+/// a walk over the schedule to find the text, 0.2 KB of the module. A build
+/// before it refuses the op, never taking it for a callable statement
+/// whose schedule nobody runs (*A schedule's record*).
 const OP_SCHEDULED: u8 = 4;
 /// The mark of a slot a scheduled statement ran for, or refused (F3):
 /// `[5][name][slot][history][change][outcome][status][skipped][reason]`.
@@ -97,12 +102,18 @@ pub struct Stored {
     /// [`DEL`]). `None` for a callable statement (op 1).
     pub after: Option<(String, u8)>,
     /// When a scheduled statement runs, from its record (op 4), never from
-    /// its text. `None` for one that is called or bound.
+    /// its text. `None` for one that is called or bound. Where it runs, the
+    /// mark of the last slot it ran for is beside the table, not in it
+    /// ([`super::Database::last_mark`]): a mark a slot changing the table
+    /// copied every statement in it, texts and all, a slot a tenant.
     pub schedule: Option<Timing>,
-    /// The mark of the last slot it ran for, or refused, that landed (op
-    /// 5): what its next slot is counted from, beside `since`. A
-    /// replacement clears it; an image writes it again.
-    pub last: Option<SlotMark>,
+    /// Where it runs not, the record body of the mark of the last slot it
+    /// ran for, as it came, for an image to write after it: the module's,
+    /// which takes a mark only as a file opens, the table its own, and
+    /// whose table beside this one was 0.4 KB of it. A replacement, a new
+    /// entry, holds none.
+    #[cfg(not(feature = "statements"))]
+    pub(super) last: Option<Vec<u8>>,
     /// Why it cannot be called, where it cannot: never stored -- an open
     /// finds it again, from the digest and the schema.
     pub broken: Option<String>,
@@ -140,10 +151,10 @@ impl Stored {
             encode_str(&mut out, collection);
             out.push(*events);
         }
+        encode_str(&mut out, &self.text);
         if let Some(t) = &self.schedule {
             t.encode(&mut out);
         }
-        encode_str(&mut out, &self.text);
         out
     }
 
@@ -156,9 +167,8 @@ impl Stored {
 }
 
 /// When a scheduled statement runs, as its record (op 4) holds it outside
-/// its text: what a build that reads no text -- the browser module -- keeps
-/// through its images, and what its slots are computed from
-/// (`Database::due`).
+/// its text: what its slots are computed from (`Database::due`).
+#[cfg(feature = "statements")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timing {
     pub times: Times,
@@ -170,7 +180,17 @@ pub struct Timing {
     pub since: i64,
 }
 
+/// A build that runs no schedule -- the browser module -- keeps one as the
+/// record's tail, from the schedule's tag to `since`, and writes it back as
+/// it came, reading none of it: read into [`Times`], a zone and `since`,
+/// and written again from them, it was much of the 2.2 KB reading op 4 and
+/// op 5 first cost the module (`take_statement`).
+#[cfg(not(feature = "statements"))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timing(Vec<u8>);
+
 /// `every <interval>` or `at '<cron>'`, as the record writes them.
+#[cfg(feature = "statements")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Times {
     /// `every`: a step of whole minutes counted from an origin -- a week's
@@ -234,6 +254,7 @@ impl Stored {
     }
 }
 
+#[cfg(feature = "statements")]
 impl Timing {
     /// `[1][step][origin]`, `[2][months]` or `[3][five masks]`, then the
     /// zone and `since`.
@@ -251,13 +272,11 @@ impl Timing {
         put_uvarint(out, zigzag(self.since));
     }
 
-    /// Read back: a tag and its values, a loop over them -- each kind a
-    /// match arm of its own was half a kilobyte of the browser module.
-    /// Times this version does not run -- a step not of whole minutes, a
-    /// cron field naming nothing or past its values: what a later
+    /// Read back: a tag and its values, a loop over them. A tag past three,
+    /// or times this version does not run -- a step not of whole minutes,
+    /// a cron field naming nothing or past its values: what a later
     /// version's finer schedule would be -- are refused as the record this
-    /// version does not read, never run at other times. The browser module,
-    /// which runs none, keeps them as they came.
+    /// version does not read, never run at other times.
     fn decode(body: &[u8], p: &mut usize) -> Result<Timing> {
         let tag = *body.get(*p).ok_or_else(cut)?;
         *p += 1;
@@ -276,13 +295,32 @@ impl Timing {
             2 => Times::Months(v[0] as i64),
             _ => Times::Cron(v),
         };
-        #[cfg(feature = "statements")]
         if !times.runs() {
             return Err(unread());
         }
         let zone = decode_str(body, p)?;
         let since = unzigzag(get_uvarint(body, p)?);
         Ok(Timing { times, zone, since })
+    }
+}
+
+#[cfg(not(feature = "statements"))]
+impl Timing {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.0);
+    }
+
+    /// The record's tail after the text, kept as it came: the tag, its
+    /// values, the zone and `since`, none of them read -- this build runs
+    /// none, and the server that next opens the file reads them, refusing
+    /// what it does not. A tail of nothing is a record cut short.
+    fn decode(body: &[u8], p: &mut usize) -> Result<Timing> {
+        let tail = body.get(*p..).unwrap_or_default();
+        if tail.is_empty() {
+            return Err(cut());
+        }
+        *p = body.len();
+        Ok(Timing(tail.to_vec()))
     }
 }
 
@@ -297,7 +335,9 @@ impl Times {
                 step >= MINUTE && step % MINUTE == 0 && (0..step).contains(&origin)
             }
             Times::Months(n) => (1..=1200).contains(&n),
-            Times::Cron(masks) => (masks.iter().zip(CRON_BITS)).all(|(m, bits)| *m != 0 && m >> bits == 0),
+            Times::Cron(masks) => {
+                (masks.iter().zip(CRON_BITS)).all(|(m, bits)| *m != 0 && m >> bits == 0)
+            }
         }
     }
 }
@@ -306,6 +346,7 @@ impl Times {
 /// record (op 5), landing in the block of the run's writes, or -- a run
 /// that wrote nothing -- with the next block that lands
 /// (`Database::pending`).
+#[cfg(feature = "statements")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotMark {
     /// The slot's instant, in epoch milliseconds.
@@ -321,6 +362,7 @@ pub struct SlotMark {
 }
 
 /// The record's body for `name`'s mark.
+#[cfg(feature = "statements")]
 pub(super) fn marked(name: &str, s: &SlotMark) -> Vec<u8> {
     let (status, reason) = s.refused.as_ref().map_or((0, ""), |r| (r.0, &*r.1));
     let mut out = Vec::with_capacity(24 + name.len() + reason.len());
@@ -343,7 +385,9 @@ pub(super) enum Record {
     Defined(Stored),
     /// A drop, by the statement's name.
     Dropped(String),
-    /// A slot's mark, by the statement's name.
+    /// A slot's mark, by the statement's name: a build running no schedule
+    /// takes its bytes as they are instead ([`super::Database::take_statement`]).
+    #[cfg(feature = "statements")]
     Marked(String, SlotMark),
 }
 
@@ -359,6 +403,7 @@ fn unread() -> Error {
 }
 
 /// Op 5's body past its op.
+#[cfg(feature = "statements")]
 fn decode_mark(body: &[u8]) -> Result<Record> {
     let mut p = 1;
     let name = decode_str(body, &mut p)?;
@@ -428,6 +473,7 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
     let op = *body.first().ok_or_else(cut)?;
     match op {
         OP_DEFINE | OP_DROP | OP_BOUND | OP_SCHEDULED => {}
+        #[cfg(feature = "statements")]
         OP_MARK => return decode_mark(body),
         _ => return Err(unread()),
     }
@@ -457,11 +503,11 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
         }
         _ => None,
     };
+    let text = decode_str(body, &mut p)?;
     let schedule = match op {
         OP_SCHEDULED => Some(Timing::decode(body, &mut p)?),
         _ => None,
     };
-    let text = decode_str(body, &mut p)?;
     if p != body.len() {
         return Err(unread());
     }
@@ -477,6 +523,7 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
         text,
         after,
         schedule,
+        #[cfg(not(feature = "statements"))]
         last: None,
         broken: None,
         #[cfg(feature = "statements")]
@@ -600,25 +647,37 @@ impl Statements {
         Some(s)
     }
 
-    /// Where `slot` is a mark of the scheduled statement `name` as defined
-    /// now -- the version it names its definition's -- the statement it
-    /// marks. A mark of a definition replaced or dropped since is none:
-    /// a replacement clears the mark, and a drop takes it.
-    pub(super) fn marks(&mut self, name: &str, slot: &SlotMark) -> Option<&mut Stored> {
-        let i = self.at(name).ok()?;
-        let s = &mut self.all[i];
-        (s.schedule.is_some() && s.version == slot.version).then_some(s)
+    /// Whether `version` is the scheduled statement `name`'s as defined
+    /// now: a mark naming it marks the statement the table holds, and one
+    /// of a definition replaced or dropped since marks none.
+    #[cfg(feature = "statements")]
+    pub(super) fn marks(&self, name: &str, version: (u64, u64)) -> bool {
+        self.get(name)
+            .is_some_and(|s| s.schedule.is_some() && s.version == version)
+    }
+
+    /// The module's: `body`, a mark of `name`'s definition at `version`,
+    /// made its last mark, where that is the definition the table holds.
+    #[cfg(not(feature = "statements"))]
+    fn mark(&mut self, name: &str, version: (u64, u64), body: &[u8]) {
+        let i = self.at(name).unwrap_or(usize::MAX);
+        if let Some(s) = self.all.get_mut(i) {
+            if s.schedule.is_some() && s.version == version {
+                s.last = Some(body.to_vec());
+            }
+        }
     }
 
     /// The definitions alone, as an image writes them: whether `other`
-    /// holds each by the same name and version, whatever their marks --
-    /// what a compact beside the database asks at its swap, the marks it
-    /// writes then ([`super::Database::last_marks`]). A version names a
-    /// definition's text, and a mark of broken never reaches a record.
+    /// holds each by the same name and version -- what a compact beside the
+    /// database asks at its swap, the marks it writes then
+    /// ([`super::Database::last_marks`]). A version names a definition's
+    /// text, and a mark of broken never reaches a record.
     #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
     pub(super) fn defines_as(&self, other: &Statements) -> bool {
         self.all.len() == other.all.len()
-            && (self.all.iter().zip(&other.all)).all(|(a, b)| a.name == b.name && a.version == b.version)
+            && (self.all.iter().zip(&other.all))
+                .all(|(a, b)| a.name == b.name && a.version == b.version)
     }
 
     /// [`Self::bound`] made again from `all`, walked in name order, each
@@ -830,14 +889,43 @@ impl super::Database {
     /// finds it: read into its tree, and checked, by
     /// [`Self::read_statements`].
     pub(super) fn take_statement(&mut self, body: &[u8]) -> Result<()> {
+        // A build running no schedule reads of a mark its name and version
+        // alone, the slot between them passed over, and keeps its bytes:
+        // never its outcome, which it neither reads nor refuses -- it runs
+        // no slot, and writes the mark back as it came for the server that
+        // next opens the file to read. Read whole and written again, the
+        // mark was most of the 0.9 KB its image first cost the module.
+        #[cfg(not(feature = "statements"))]
+        if body.first() == Some(&OP_MARK) {
+            let mut p = 1;
+            let name = decode_str(body, &mut p)?;
+            let mut v = [0u64; 3];
+            for x in &mut v {
+                *x = get_uvarint(body, &mut p)?;
+            }
+            changed(&mut self.statements).mark(&name, (v[1], v[2]), body);
+            return Ok(());
+        }
+        // A replacement or a drop takes the mark with it: a new entry
+        // holds none.
         match decode(body)? {
-            Record::Defined(s) => changed(&mut self.statements).put(s),
-            Record::Dropped(name) => drop(changed(&mut self.statements).remove(&name)),
-            // A mark binds no write: no mask to set again. One of a
-            // definition replaced or dropped since is passed over.
+            Record::Defined(s) => {
+                #[cfg(feature = "statements")]
+                self.marks.retain(|m| m.0 != s.name);
+                changed(&mut self.statements).put(s)
+            }
+            Record::Dropped(name) => {
+                #[cfg(feature = "statements")]
+                self.marks.retain(|m| m.0 != name);
+                drop(changed(&mut self.statements).remove(&name))
+            }
+            // A mark binds no write: no mask to set again, and no table
+            // made. One of a definition replaced or dropped since is
+            // passed over.
+            #[cfg(feature = "statements")]
             Record::Marked(name, slot) => {
-                if let Some(s) = changed(&mut self.statements).marks(&name, &slot) {
-                    s.last = Some(slot);
+                if self.statements.marks(&name, slot.version) {
+                    self.set_mark(name, slot);
                 }
                 return Ok(());
             }
@@ -846,20 +934,54 @@ impl super::Database {
         Ok(())
     }
 
-    /// The record body of each scheduled statement's last mark, as an
-    /// image writes them after the definitions: the one landed, or one
-    /// pending past it ([`Self::pending`]) -- an image holding the run of a
-    /// slot that wrote nothing, as the checkpoint the one shutdown writes
-    /// does. A compact keeps the last mark alone. Each handed to `write`
-    /// as it is made: a list of them was 0.4 KB of the browser module.
+    /// `name`'s last mark, as it landed: the mark of the slot it last ran
+    /// for, or refused, that its next slot is counted from beside `since`
+    /// -- `None` where it has none, or where the one held names a
+    /// definition replaced or dropped since.
+    #[cfg(feature = "statements")]
+    pub fn last_mark(&self, name: &str) -> Option<&SlotMark> {
+        let (_, m) = self.marks.iter().find(|m| m.0 == name)?;
+        self.statements.marks(name, m.version).then_some(m)
+    }
+
+    /// Makes `slot` `name`'s last mark, giving back the one it held.
+    #[cfg(feature = "statements")]
+    pub(super) fn set_mark(&mut self, name: String, slot: SlotMark) -> Option<SlotMark> {
+        match self.marks.iter_mut().find(|m| m.0 == name) {
+            Some(m) => Some(std::mem::replace(&mut m.1, slot)),
+            None => {
+                self.marks.push((name, slot));
+                None
+            }
+        }
+    }
+
+    /// The record body of `s`'s last mark, as an image writes it after its
+    /// definition: the one landed, or one pending past it
+    /// ([`Self::pending`]) -- an image holding the run of a slot that wrote
+    /// nothing, as the checkpoint the one shutdown writes does. A compact
+    /// keeps the last mark alone.
+    #[cfg(feature = "statements")]
+    pub(super) fn mark_record(&self, s: &Stored) -> Option<Vec<u8>> {
+        let m = self.pending_of(s).or(self.last_mark(&s.name))?;
+        Some(marked(&s.name, m))
+    }
+
+    /// Each scheduled statement's last mark, as a compact beside the
+    /// database writes them at its swap, after the definitions its side
+    /// file wrote as they stood: each handed to `write` as it is made.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
     pub(super) fn last_marks(&self, write: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
         for s in self.statements.iter() {
             #[cfg(feature = "statements")]
-            let last = self.pending_of(s).or(s.last.as_ref());
+            if let Some(m) = self.mark_record(s) {
+                write(&m)?;
+            }
+            // A build running no schedule writes the record's body back
+            // as it came.
             #[cfg(not(feature = "statements"))]
-            let last = s.last.as_ref();
-            if let Some(m) = last {
-                write(&marked(&s.name, m))?;
+            if let Some(m) = &s.last {
+                write(m)?;
             }
         }
         Ok(())
@@ -1023,7 +1145,12 @@ impl super::Database {
         // A replacement of a scheduled one takes no place of its own.
         if def.schedule.is_some()
             && held.is_none()
-            && self.statements.iter().filter(|s| s.schedule.is_some()).count() >= MAX_SCHEDULED
+            && self
+                .statements
+                .iter()
+                .filter(|s| s.schedule.is_some())
+                .count()
+                >= MAX_SCHEDULED
         {
             return Err(Error::Query(format!(
                 "a database schedules at most {MAX_SCHEDULED} statements"
@@ -1065,13 +1192,13 @@ impl super::Database {
             text: def.text.clone(),
             after: def.after.as_ref().map(|b| (b.collection.clone(), b.events)),
             schedule,
-            last: None,
             broken: None,
             tree,
             misread: None,
         };
         let after = stored.after.clone();
         self.statement_record(&stored.encode(), |t| t.put(stored))?;
+        self.unmark(name);
         if let Some((c, events)) = &after {
             super::bound::note_changed(name, (c, *events));
         }
@@ -1097,12 +1224,27 @@ impl super::Database {
         let after = self.statements.get(name).and_then(|s| s.after.clone());
         let body = dropped(name, (self.history.current(), self.next_change()));
         self.statement_record(&body, |t| drop(t.remove(name)))?;
+        self.unmark(name);
         if let Some((c, events)) = &after {
             super::bound::note_changed(name, (c, *events));
         }
         Ok(crate::query::Response::Ok(format!(
             "statement `{name}` dropped"
         )))
+    }
+
+    /// Takes `name`'s mark, as its replacement or its drop does -- a
+    /// replacement's schedule starts again from its own `since` -- for the
+    /// block to put back with the definition.
+    #[cfg(feature = "statements")]
+    fn unmark(&mut self, name: &str) {
+        let Some(i) = self.marks.iter().position(|m| m.0 == name) else {
+            return;
+        };
+        let (name, was) = self.marks.swap_remove(i);
+        if let Some(b) = &mut self.block {
+            b.was.push(super::Undo::Mark(Box::new((name, Some(was)))));
+        }
     }
 
     /// The number the next write takes: the counter's, past the writes the
@@ -1305,7 +1447,9 @@ fn chained(t: &Statements, def: &crate::named::Definition, collection: &str) -> 
 fn misread_kind(d: &crate::named::Definition, s: &Stored) -> Option<&'static str> {
     match (&d.schedule, &s.schedule) {
         (Some(_), None) => return Some("reads as a scheduled statement"),
-        (Some(a), Some(t)) => return (!t.runs_as(a)).then_some("runs at other times than its record"),
+        (Some(a), Some(t)) => {
+            return (!t.runs_as(a)).then_some("runs at other times than its record")
+        }
         (None, Some(_)) if d.after.is_some() => return Some("reads as a bound statement"),
         (None, Some(_)) => return Some("reads as a callable statement"),
         (None, None) => {}

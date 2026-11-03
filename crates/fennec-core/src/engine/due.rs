@@ -111,7 +111,7 @@ impl Database {
                 _ => false,
             },
         };
-        let mark = self.pending_of(s).or(s.last.as_ref()).map(|m| m.at);
+        let mark = self.pending_of(s).or(self.last_mark(&s.name)).map(|m| m.at);
         let anchor = mark.map_or(t.since, |m| m.max(t.since));
         if anchor > now {
             due.ahead = Some(anchor);
@@ -150,13 +150,17 @@ impl Database {
             }
             Some(_) => {}
         }
+        // Beside the table, never a new one: a mark changes its statement's
+        // entry alone, and the block keeps the one before to put back.
         if self.block.as_ref().is_some_and(|b| !b.heads.is_empty()) {
-            let body = marked(name, &slot);
-            return self.statement_record(&body, |t| {
-                if let Some(s) = t.marks(name, &slot) {
-                    s.last = Some(slot);
-                }
-            });
+            self.wal(super::REC_STATEMENT, 0, &marked(name, &slot))?;
+            self.note(0, crate::changes::SCHEMA_MARK);
+            let was = self.set_mark(name.to_string(), slot);
+            if let Some(b) = &mut self.block {
+                b.was
+                    .push(super::Undo::Mark(Box::new((name.to_string(), was))));
+            }
+            return Ok(());
         }
         let pending = self.pending.get_or_insert_with(Default::default);
         pending.retain(|(n, _)| n != name);
@@ -175,7 +179,7 @@ impl Database {
     /// passed, or a replacement left, counts for nothing.
     pub(super) fn pending_of(&self, s: &Stored) -> Option<&SlotMark> {
         let (_, p) = self.pending().iter().find(|(n, _)| *n == s.name)?;
-        let past = s.last.as_ref().is_none_or(|l| p.at > l.at);
+        let past = self.last_mark(&s.name).is_none_or(|l| p.at > l.at);
         (s.schedule.is_some() && p.version == s.version && past).then_some(p)
     }
 
@@ -199,12 +203,10 @@ impl Database {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let t = super::stored::changed(&mut self.statements);
         for (name, p) in *pending {
-            if let Some(s) = t.marks(&name, &p) {
-                if s.last.as_ref().is_none_or(|l| p.at > l.at) {
-                    s.last = Some(p);
-                }
+            let past = self.last_mark(&name).is_none_or(|l| p.at > l.at);
+            if past && self.statements.marks(&name, p.version) {
+                self.set_mark(name, p);
             }
         }
     }
@@ -287,7 +289,9 @@ impl Clock<'_> {
                 }
                 let (_, _, after) = self.zone.stretch(end);
                 if after > off {
-                    let together = self.times.count(self.high(end - 1), end.saturating_add(after));
+                    let together = self
+                        .times
+                        .count(self.high(end - 1), end.saturating_add(after));
                     n = n.saturating_sub(together.saturating_sub(1));
                 }
                 x = end;
@@ -297,7 +301,9 @@ impl Clock<'_> {
         for _ in 0..STRETCHES {
             let (_, end, off) = self.zone.stretch(x);
             let hi = b.min(end.saturating_sub(1));
-            n += self.times.count(x.saturating_add(off), hi.saturating_add(off));
+            n += self
+                .times
+                .count(x.saturating_add(off), hi.saturating_add(off));
             if end > b {
                 break;
             }
@@ -366,9 +372,13 @@ impl Times {
             return 0;
         }
         let n = match *self {
-            Times::Step(step, origin) => (b - origin).div_euclid(step) - (a - origin).div_euclid(step),
+            Times::Step(step, origin) => {
+                (b - origin).div_euclid(step) - (a - origin).div_euclid(step)
+            }
             Times::Months(n) => month_of(b).div_euclid(n) - month_of(a).div_euclid(n),
-            Times::Cron(c) => return cron_count(&c, a.div_euclid(MINUTE) + 1, b.div_euclid(MINUTE)),
+            Times::Cron(c) => {
+                return cron_count(&c, a.div_euclid(MINUTE) + 1, b.div_euclid(MINUTE))
+            }
         };
         n.max(0) as u64
     }
@@ -643,9 +653,6 @@ mod tests {
             leap.latest(utc(2104, 2, 28, 0, 0)),
             Some(utc(2096, 2, 29, 0, 0))
         );
-        assert_eq!(
-            leap.count(utc(2000, 1, 1, 0, 0), utc(2104, 3, 1, 0, 0)),
-            26
-        );
+        assert_eq!(leap.count(utc(2000, 1, 1, 0, 0), utc(2104, 3, 1, 0, 0)), 26);
     }
 }

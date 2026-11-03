@@ -138,18 +138,22 @@ keeps collection, events and kinds of write (a `put` makes and sets).
 **[A scheduled statement's record is kept by every build, and run by none
 yet.](../../docs/design/named-statements.md#what-f3-has-built)**
 `create statement <n> every <interval> | at '<cron>' [in '<zone>'] as ...`
-is kind 13's op 4, its schedule and `since` outside its text, and a slot's
+is kind 13's op 4, its schedule and `since` after its text, and a slot's
 mark op 5 (`SlotMark`): each one write `writes_in` counts, refused by a
-binary from before, never misread. Every build reads both into
-`Stored::schedule` and `Stored::last` and keeps them through every image,
-each schedule's last mark alone, and a compact beside the database writes
-the marks at its swap (`last_marks`; `Statements::defines_as`, so a mark
-meanwhile fails none); a replica applies them, `/_changes` passes over
-them. A run's mark lands in its block; one of a run that wrote nothing
-waits in `Database::pending` for the next block `commit` lands, kept by
-one put back and written by an image. A mark of a definition replaced
-counts for nothing; a replacement clears the mark, moves `since` and keeps
-the kind (`named::Kind`). `grows` and a rate pass over op 5;
+binary from before, never misread. A server reads the schedule into
+`Stored::schedule` and a mark into the marks beside the table
+(`Database::last_mark`), which a mark changes alone -- never the table,
+put back by `Undo::Mark`; a build running none (the module) keeps the
+schedule as the record's tail and a mark as its body (`Stored::last`),
+reading only its name and version. Every image keeps each schedule's last
+mark after its definition, and a compact beside the database writes the
+marks at its swap (`last_marks`); a replica applies them, `/_changes`
+passes over them. A run's mark lands in its block; one of a run that
+wrote nothing waits in `Database::pending` for the next block `commit`
+lands, kept by one put back and written by an image. A mark of a
+definition replaced counts for nothing; a replacement clears the mark,
+moves `since` and keeps the kind (`named::Kind`). `grows` and a rate pass
+over op 5;
 `MAX_SCHEDULED` bounds them; `Database::due` is each one's slot, a pure
 function of the table, the marks and a time (`AHEAD_MAX`). Until a server
 runs one, every way in refuses a definition (`SCHEDULED_NOT_BUILT`) but a

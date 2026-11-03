@@ -48,7 +48,9 @@ pub use due::Due;
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
-pub use stored::{SlotMark, Statements, Stored, Times, Timing};
+#[cfg(feature = "statements")]
+pub use stored::{SlotMark, Times};
+pub use stored::{Statements, Stored, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
@@ -749,6 +751,11 @@ enum Undo {
     /// or marked broken as the block landed: the table before.
     #[cfg(feature = "statements")]
     Statements(Arc<Statements>),
+    /// A scheduled statement's last mark changed -- a run's landed in the
+    /// block, or one taken by a replacement or a drop: the mark before,
+    /// `None` where it had none.
+    #[cfg(feature = "statements")]
+    Mark(Box<(String, Option<SlotMark>)>),
 }
 
 /// What [`Undo::Altered`] puts back.
@@ -3897,9 +3904,17 @@ pub struct Database {
     #[cfg(not(target_arch = "wasm32"))]
     behind: bool,
     /// The named statements the database holds, in a cell of their own:
-    /// a definition, a drop or a mark makes a new table, never changes one
-    /// a reader holds ([`Self::statements`]).
+    /// a definition or a drop makes a new table, never changes one a reader
+    /// holds ([`Self::statements`]).
     statements: Arc<Statements>,
+    /// Each scheduled statement's last mark that landed, by name, beside
+    /// the table rather than in it ([`Self::last_mark`]): a slot's mark is
+    /// read under the lock alone, and in the table it made a new one, each
+    /// statement copied, a slot a tenant. One naming a definition replaced
+    /// or dropped since marks nothing. A build running no schedule keeps
+    /// each mark's bytes on its statement's entry instead (`Stored::last`).
+    #[cfg(feature = "statements")]
+    marks: Vec<(String, SlotMark)>,
     /// Whether a schema change that breaks a named statement marks it
     /// broken rather than being refused: a writer that cannot refuse
     /// ([`Self::internally`]).
@@ -4020,6 +4035,8 @@ impl Database {
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
+            #[cfg(feature = "statements")]
+            marks: Vec::new(),
             internal: false,
             unbound: false,
             #[cfg(feature = "statements")]
@@ -4541,17 +4558,26 @@ impl Database {
             }
         }
         // After the collections they read, each with its version, epoch
-        // and digest: a compact keeps them as they were. Then each
-        // schedule's last mark, after its definition.
+        // and digest: a compact keeps them as they were. A schedule's last
+        // mark right after its definition, in one walk: a walk of the
+        // marks after the definitions, and the closure writing each, were
+        // 0.15 KB of the browser module, which writes a mark's bytes back
+        // as they came.
         for st in self.statements.iter() {
             let body = st.encode();
             out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
             out.write(&body)?;
+            #[cfg(feature = "statements")]
+            let mark = self.mark_record(st);
+            #[cfg(feature = "statements")]
+            let mark = mark.as_deref();
+            #[cfg(not(feature = "statements"))]
+            let mark = st.last.as_deref();
+            if let Some(m) = mark {
+                out.write(&record_head(REC_STATEMENT, 0, m.len()))?;
+                out.write(m)?;
+            }
         }
-        self.last_marks(&mut |body| {
-            out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
-            out.write(body)
-        })?;
         let body_len = out.at() - body_at;
         out.patch(head_at + 9, &body_len.to_le_bytes())
     }
@@ -6113,6 +6139,7 @@ impl Database {
         // database runs none, and marks none.
         #[cfg(feature = "statements")]
         {
+            self.marks = fresh.marks;
             self.pending = None;
         }
         self.rebind();
@@ -6571,6 +6598,14 @@ impl Database {
                 Undo::Statements(t) => {
                     self.statements = t;
                     rebound = true;
+                }
+                #[cfg(feature = "statements")]
+                Undo::Mark(m) => {
+                    let (name, was) = *m;
+                    match was {
+                        Some(was) => drop(self.set_mark(name, was)),
+                        None => self.marks.retain(|m| m.0 != name),
+                    }
                 }
                 Undo::Uncomposed(cid, at, b) => {
                     if let Some(name) = self.named(cid) {

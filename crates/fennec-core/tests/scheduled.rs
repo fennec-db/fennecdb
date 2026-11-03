@@ -128,14 +128,18 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
     let before = db.change_seq();
     run(&mut db, LAPSE).unwrap();
     let (seq, record) = tap.last();
-    assert_eq!((record[0], record[body_at(&record)]), (13, 4), "kind 13, op 4");
+    assert_eq!(
+        (record[0], record[body_at(&record)]),
+        (13, 4),
+        "kind 13, op 4"
+    );
     assert_eq!(writes_in(&record).unwrap(), 1);
     assert_eq!(seq, before + 1);
     let s = db.statements().get("lapse").unwrap().clone();
     let t = s.schedule.as_ref().expect("its schedule, from the record");
     assert_eq!(t.times, Times::Step(15 * MINUTE, 0));
     assert_eq!((t.zone.as_str(), t.since), ("Europe/Berlin", t0()));
-    assert!(s.tree.is_some() && s.broken.is_none() && s.last.is_none());
+    assert!(s.tree.is_some() && s.broken.is_none() && db.last_mark("lapse").is_none());
     assert!(!s.called());
     assert!(s.depends.iter().any(|d| d == "holds.state"));
     // No call runs one: the clock's, once a server runs it.
@@ -152,29 +156,45 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
 fn a_mark_lands_as_the_last_record_of_its_run_s_block_or_goes_back_with_it() {
     let tap = Tap::default();
     let mut db = defined(&tap);
-    run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+    run(
+        &mut db,
+        &format!("put holds {{state: 'held', until: {}}}", t0()),
+    )
+    .unwrap();
     db.set_clock(Some(t0() + HOUR));
     let slot = due(&db, t0() + HOUR).run.expect("a slot due").0;
     let before = db.change_seq();
+    let table = Arc::clone(db.statements());
     run_slot(&mut db, BODY, "lapse", slot, 3).unwrap();
+    assert!(
+        Arc::ptr_eq(&table, db.statements()),
+        "a mark changes its statement's alone, never making a table"
+    );
     let (seq, record) = tap.last();
     assert_eq!(ops_in(&record), vec![5], "the mark, after the run's write");
     assert_eq!(writes_in(&record).unwrap(), 2, "the write and its mark");
     assert_eq!(seq, before + 2);
-    let last = db.statements().get("lapse").unwrap().last.clone().unwrap();
+    let last = db.last_mark("lapse").cloned().unwrap();
     assert_eq!((last.at, last.skipped, last.refused), (slot, 3, None));
 
     // Put back with its block: the mark too.
-    run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+    run(
+        &mut db,
+        &format!("put holds {{state: 'held', until: {}}}", t0()),
+    )
+    .unwrap();
     db.begin().unwrap();
     run(&mut db, BODY).unwrap();
-    db.mark_slot("lapse", ran(&db, "lapse", slot + 15 * MINUTE, 0)).unwrap();
+    db.mark_slot("lapse", ran(&db, "lapse", slot + 15 * MINUTE, 0))
+        .unwrap();
     db.rollback();
-    assert_eq!(db.statements().get("lapse").unwrap().last.as_ref().unwrap().at, slot);
+    assert_eq!(db.last_mark("lapse").unwrap().at, slot);
     assert!(db.pending().is_empty());
 
     // A mark of another statement, or of a definition since replaced.
-    let e = db.mark_slot("nothing", ran(&db, "lapse", slot, 0)).unwrap_err();
+    let e = db
+        .mark_slot("nothing", ran(&db, "lapse", slot, 0))
+        .unwrap_err();
     assert!(matches!(e, Error::NotFound(_)), "{e}");
     let mut stale = ran(&db, "lapse", slot, 0);
     stale.version.1 += 1;
@@ -194,7 +214,7 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
     run_slot(&mut db, BODY, "lapse", slot, 0).unwrap();
     assert_eq!(tap.writes.lock().unwrap().len(), writes, "nothing landed");
     assert_eq!(db.pending().len(), 1);
-    assert!(db.statements().get("lapse").unwrap().last.is_none());
+    assert!(db.last_mark("lapse").is_none());
     // Due again? No: the pending mark counts, landed or not.
     let d = due(&db, now);
     assert_eq!(d.run, None);
@@ -211,8 +231,7 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
 
     // An image holds it, and leaves it pending.
     let image = opened(&db.snapshot());
-    let kept = image.statements().get("lapse").unwrap();
-    assert_eq!(kept.last.as_ref().map(|m| m.at), Some(slot));
+    assert_eq!(image.last_mark("lapse").map(|m| m.at), Some(slot));
     assert_eq!(db.pending().len(), 1);
 
     // The next block that lands carries it as its last record.
@@ -222,11 +241,11 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
     assert_eq!(ops_in(&record), vec![5]);
     assert_eq!((writes_in(&record).unwrap(), seq), (2, before + 2));
     assert!(db.pending().is_empty());
-    let last = db.statements().get("lapse").unwrap().last.clone().unwrap();
+    let last = db.last_mark("lapse").cloned().unwrap();
     assert_eq!(last.at, slot);
     // The file read again holds it.
     let again = opened(&tap.bytes());
-    assert_eq!(again.statements().get("lapse").unwrap().last, Some(last));
+    assert_eq!(again.last_mark("lapse"), Some(&last));
 
     // One a later run's landed mark passed counts for nothing: the run
     // landing its writes and its mark leaves it behind.
@@ -237,7 +256,7 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
     run_slot(&mut db, &writes, "lapse", next + 15 * MINUTE, 1).unwrap();
     assert_eq!(ops_in(&tap.last().1), vec![5], "its own mark alone");
     assert!(db.pending().is_empty());
-    let last = db.statements().get("lapse").unwrap().last.clone().unwrap();
+    let last = db.last_mark("lapse").cloned().unwrap();
     assert_eq!((last.at, last.skipped), (next + 15 * MINUTE, 1));
     run(&mut db, "put other {n: 3}").unwrap();
     assert_eq!(ops_in(&tap.last().1), Vec::<u8>::new());
@@ -247,10 +266,13 @@ fn a_run_that_wrote_nothing_is_marked_pending_until_a_block_lands() {
 fn a_mark_takes_no_room_a_quota_counts_nor_a_write_a_rate_charges() {
     let tap = Tap::default();
     let mut db = defined(&tap);
-    run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+    run(
+        &mut db,
+        &format!("put holds {{state: 'held', until: {}}}", t0()),
+    )
+    .unwrap();
     let slot = due(&db, t0() + HOUR).run.unwrap().0;
-    run_slot(&mut db, "del holds where state = 'none'", "lapse", slot, 0)
-        .unwrap();
+    run_slot(&mut db, "del holds where state = 'none'", "lapse", slot, 0).unwrap();
     assert_eq!(db.pending().len(), 1);
     // At its quota: what grows is refused, a delete let through.
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -281,7 +303,11 @@ fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_the_marks() {
     )
     .unwrap();
     for i in 0..3 {
-        run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+        run(
+            &mut db,
+            &format!("put holds {{state: 'held', until: {}}}", t0()),
+        )
+        .unwrap();
         let slot = t0() + (i + 1) * 15 * MINUTE;
         run_slot(&mut db, BODY, "lapse", slot, i as u64).unwrap();
     }
@@ -295,14 +321,19 @@ fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_the_marks() {
     run(&mut db, "put holds {state: 'x'}").unwrap();
     db.mark_slot("nightly", refusal.clone()).unwrap();
     db.commit().unwrap();
-    let want: Vec<_> = db.statements().iter().cloned().map(|s| (s.name, s.schedule, s.last)).collect();
     let marks = |db: &Database| -> Vec<_> {
         db.statements()
             .iter()
-            .cloned()
-            .map(|s| (s.name, s.schedule, s.last))
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.schedule.clone(),
+                    db.last_mark(&s.name).cloned(),
+                )
+            })
             .collect()
     };
+    let want = marks(&db);
     assert_eq!(want[1].2.as_ref().unwrap().refused, refusal.refused);
 
     // An open of the file, and an image, which writes the last mark alone.
@@ -329,7 +360,11 @@ fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_the_marks() {
         })
         .unwrap();
     assert_eq!(last, db.change_seq());
-    assert_eq!(statements, 2 + 4, "two definitions and four marks, numbered");
+    assert_eq!(
+        statements,
+        2 + 4,
+        "two definitions and four marks, numbered"
+    );
 
     // A compact keeps each schedule's last mark, of a file read into memory
     // and of a mapped one.
@@ -385,7 +420,11 @@ fn a_compact_beside_the_database_keeps_a_mark_landed_meanwhile() {
     run(&mut db, LAPSE).unwrap();
     db.set_clock(Some(t0() + HOUR));
     for _ in 0..50 {
-        run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+        run(
+            &mut db,
+            &format!("put holds {{state: 'held', until: {}}}", t0()),
+        )
+        .unwrap();
     }
     run(&mut db, "del holds where state = 'held'").unwrap();
     let db = std::sync::RwLock::new(db);
@@ -394,18 +433,22 @@ fn a_compact_beside_the_database_keeps_a_mark_landed_meanwhile() {
     Database::maintain_with(&db, &compact, &mut || {
         let mut g = db.write().unwrap();
         slot += 15 * MINUTE;
-        run(&mut g, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+        run(
+            &mut g,
+            &format!("put holds {{state: 'held', until: {}}}", t0()),
+        )
+        .unwrap();
         run_slot(&mut g, BODY, "lapse", slot, 0).unwrap();
     })
     .expect("a compact beside the database")
     .expect("not refused for a mark landed meanwhile");
     let db = db.into_inner().unwrap();
-    let last = db.statements().get("lapse").unwrap().last.clone().unwrap();
+    let last = db.last_mark("lapse").cloned().unwrap();
     assert_eq!(last.at, slot);
     drop(db);
     let bytes = std::fs::read(&path).unwrap();
     let again = opened(&bytes);
-    assert_eq!(again.statements().get("lapse").unwrap().last, Some(last));
+    assert_eq!(again.last_mark("lapse"), Some(&last));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -413,7 +456,11 @@ fn a_compact_beside_the_database_keeps_a_mark_landed_meanwhile() {
 fn a_replacement_keeps_the_kind_moves_since_and_clears_the_mark() {
     let tap = Tap::default();
     let mut db = defined(&tap);
-    run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+    run(
+        &mut db,
+        &format!("put holds {{state: 'held', until: {}}}", t0()),
+    )
+    .unwrap();
     // A mark a clock a year ahead left.
     let ahead = t0() + 365 * DAY;
     run_slot(&mut db, BODY, "lapse", ahead, 0).unwrap();
@@ -422,16 +469,19 @@ fn a_replacement_keeps_the_kind_moves_since_and_clears_the_mark() {
     assert_eq!(db.pending().len(), 1);
     let later = t0() + 2 * HOUR + 20 * MINUTE;
     db.set_clock(Some(later));
-    run(
-        &mut db,
-        "create or replace statement lapse every 1d in 'Europe/Berlin'
-  as set holds {state: 'lapsed'} where state = 'held' and until < now()",
-    )
-    .unwrap();
+    let daily = "create or replace statement lapse every 1d in 'Europe/Berlin'
+  as set holds {state: 'lapsed'} where state = 'held' and until < now()";
+    // A replacement put back with its block puts the mark it took back.
+    db.begin().unwrap();
+    run(&mut db, daily).unwrap();
+    assert!(db.last_mark("lapse").is_none());
+    db.rollback();
+    assert_eq!(db.last_mark("lapse").map(|m| m.at), Some(ahead));
+    run(&mut db, daily).unwrap();
     let s = db.statements().get("lapse").unwrap().clone();
     let t = s.schedule.unwrap();
     assert_eq!((t.times, t.since), (Times::Step(DAY, 0), later));
-    assert!(s.last.is_none(), "the mark cleared");
+    assert!(db.last_mark("lapse").is_none(), "the mark cleared");
     // The pending mark names the definition replaced: it counts for
     // nothing, and the next block drops it.
     let d = due(&db, later + HOUR);
@@ -443,7 +493,11 @@ fn a_replacement_keeps_the_kind_moves_since_and_clears_the_mark() {
 
     // The kind is kept: called, bound and scheduled each stay what they
     // are, a `drop` and a `create` making another.
-    run(&mut db, "create statement ask() as get holds select id where state = 'x'").unwrap();
+    run(
+        &mut db,
+        "create statement ask() as get holds select id where state = 'x'",
+    )
+    .unwrap();
     for (text, what) in [
         (
             "create or replace statement ask every 1h as set holds {state: 'y'} where state = 'x'",
@@ -475,7 +529,10 @@ fn a_database_schedules_at_most_sixteen_and_a_schema_change_meets_each() {
         )
         .unwrap();
     }
-    let e = refused(run(&mut db, "create statement one_more every 1h as del holds where state = 'x'"));
+    let e = refused(run(
+        &mut db,
+        "create statement one_more every 1h as del holds where state = 'x'",
+    ));
     assert!(e.contains("at most 16"), "{e}");
     run(
         &mut db,
@@ -502,10 +559,13 @@ fn a_schedule_or_a_mark_this_version_does_not_read_is_refused() {
         body.extend_from_slice(&1u64.to_le_bytes());
         encode_str(&mut body, "later");
         put_uvarint(&mut body, 0);
+        encode_str(
+            &mut body,
+            "create statement later every 1m as del holds where id = 1",
+        );
         body.extend_from_slice(times);
         encode_str(&mut body, "");
         put_uvarint(&mut body, 0);
-        encode_str(&mut body, "create statement later every 1m as del holds where id = 1");
         body
     };
     let mark = |outcome: u8, status: u64| {
@@ -551,7 +611,8 @@ fn a_schedule_or_a_mark_this_version_does_not_read_is_refused() {
         match (db.load(&f), reads) {
             (Ok(_), true) => {}
             (Err(e), false) => assert!(
-                e.to_string().contains("a statement record this version does not read"),
+                e.to_string()
+                    .contains("a statement record this version does not read"),
                 "{e}"
             ),
             (r, _) => panic!("{body:?}: {:?}", r.err()),
@@ -668,7 +729,11 @@ pub(crate) fn with_schedule(file: Vec<u8>) -> Vec<u8> {
     db.allow_schedules();
     run(&mut db, HOLDS).unwrap();
     run(&mut db, LAPSE).unwrap();
-    run(&mut db, &format!("put holds {{state: 'held', until: {}}}", t0())).unwrap();
+    run(
+        &mut db,
+        &format!("put holds {{state: 'held', until: {}}}", t0()),
+    )
+    .unwrap();
     let now = utc(2026, 3, 28, 13, 5);
     db.set_clock(Some(now));
     let (slot, skipped) = due(&db, now).run.unwrap();
@@ -690,15 +755,18 @@ fn the_fixture_s_schedule_and_its_mark_are_read_and_kept() {
     assert!(s.tree.is_some() && s.broken.is_none(), "{:?}", s.broken);
     let t = s.schedule.clone().unwrap();
     assert_eq!((t.times, t.since), (Times::Step(15 * MINUTE, 0), t0()));
-    let last = s.last.clone().expect("its mark");
+    let last = db.last_mark("lapse").cloned().expect("its mark");
     assert_eq!((last.at, last.skipped), (utc(2026, 3, 28, 13, 0), 3));
     assert_eq!(last.version, s.version);
     assert_eq!(
-        db.query(&fennec_ql::parse_one("get holds select state").unwrap(), &[])
-            .unwrap()
-            .rows()
-            .unwrap()
-            .rows[0]
+        db.query(
+            &fennec_ql::parse_one("get holds select state").unwrap(),
+            &[]
+        )
+        .unwrap()
+        .rows()
+        .unwrap()
+        .rows[0]
             .values,
         vec![Value::Text("lapsed".into())],
         "the run's write, landed with its mark"

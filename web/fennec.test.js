@@ -796,16 +796,33 @@ test('a file holding named statements opens in the module, which keeps them thro
   ];
   // The mark's record: kind 13 of no collection, op 5, its statement's
   // name, then its slot -- 2026-03-28T13:00Z, as a zigzag varint.
-  const slot = BigInt(Date.UTC(2026, 2, 28, 13)) * 2n;
-  const varint = [];
-  for (let v = slot; ; v >>= 7n) {
-    if (v < 128n) { varint.push(Number(v)); break; }
-    varint.push(Number(v & 127n) | 128);
-  }
-  const mark = Buffer.from([5, 5, ...Buffer.from('lapse'), ...varint]);
+  const zigzag = (ms) => {
+    const out = [];
+    for (let v = BigInt(ms) * 2n; ; v >>= 7n) {
+      if (v < 128n) { out.push(Number(v)); break; }
+      out.push(Number(v & 127n) | 128);
+    }
+    return out;
+  };
+  const mark = Buffer.from([5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13))]);
   const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t)) && Buffer.from(image).includes(mark);
   assert.ok(Buffer.from(file).includes(mark), 'the fixture holds the mark');
   assert.ok(keeps(db.snapshot()), 'each text and the mark as they came');
+  // The module reads a mark's name and version alone, and keeps its bytes:
+  // a later slot's mark of the same definition, its outcome (9) one no
+  // version writes, is taken as the last and written back as it came, for
+  // the server that next opens the file to read, or refuse.
+  const version = Buffer.from(file).indexOf(mark) + mark.length;
+  let end = version;
+  for (let n = 0; n < 2; end++) if (file[end] < 128) n++;
+  const later = Buffer.from([
+    5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13, 15)),
+    ...file.subarray(version, end), 9, 0, 0, 0,
+  ]);
+  const marked = await Fennec.open(wasm);
+  marked.load(new Uint8Array(Buffer.concat([file, Buffer.from([13, 0, later.length]), later])));
+  const laterImage = Buffer.from(marked.snapshot());
+  assert.ok(laterImage.includes(later) && !laterImage.includes(mark), 'the later mark alone, as it came');
   // A schedule binds no write, and the module runs none: what it writes
   // writes as ever, and its call is refused, as every call is here.
   assert.equal(db.run('get holds count').rows[0].count, 1);
