@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from conftest import TOKEN, URL, fresh
-from fennecdb import AsyncClient, Client, FennecError, call
+from fennecdb import AsyncClient, Client, FennecError, HeldSlot, LastRun, call
 
 
 class Bank:
@@ -294,6 +294,51 @@ def test_the_async_client_awaits_the_same_call(bank):
     asyncio.run(go())
 
 
+def _new_years():
+    """Berlin's 03:00 on 1 January, 02:00 UTC: this year's, or next."""
+    now = datetime.now(timezone.utc)
+    first = datetime(now.year, 1, 1, 2, tzinfo=timezone.utc)
+    return first if now < first else first.replace(year=now.year + 1)
+
+
+def test_the_statements_a_server_holds_are_listed_a_scheduled_one_with_its_clock(client):
+    """`statements`, typed: a scheduled statement with its clause and next
+    slot -- New Year's, so no run of the clock lands while the test looks --
+    and no run yet, and a called one with no clock; the server's token runs
+    the scheduled one now, marking no slot."""
+    tag = fresh("s")
+    ticks, tick, ticked = f"ticks_{tag}", f"tick_{tag}", f"ticked_{tag}"
+    client.query(f"create collection {ticks} (n int, at timestamp)")
+    client.query(
+        f"create statement {tick} at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' "
+        f"as insert {ticks} {{n: 1, at: slot()}}"
+    )
+    client.query(f"create statement {ticked}() as get {ticks} count")
+    try:
+        listed = {s.name: s for s in client.statements()}
+        s, c = listed[tick], listed[ticked]
+        assert (s.schedule, s.next, s.last, s.held) == (
+            "at '0 3 1 1 *' in 'Europe/Berlin'",
+            _new_years(),
+            None,
+            None,
+        )
+        assert (s.comment, s.writes, s.signature, s.after, s.broken) == ("A tick a year", True, "()", None, None)
+        assert len(s.version) == 2
+        assert (c.signature, c.writes, c.schedule, c.next, c.last, c.held) == ("()", False, None, None, None, None)
+        assert client.call(tick) == {"affected": 1}
+        async def listed_async():
+            async with AsyncClient(URL, TOKEN) as db:
+                return await db.statements()
+
+        again = {s.name: s for s in asyncio.run(listed_async())}
+        assert (again[tick].next, again[tick].last) == (_new_years(), None)
+    finally:
+        client.query(f"drop statement if exists {tick}")
+        client.query(f"drop statement if exists {ticked}")
+        client.query(f"drop collection if exists {ticks}")
+
+
 # ------------------------------------------------------- against a scripted server
 
 
@@ -388,3 +433,37 @@ def test_the_async_call_is_marked_alike():
     near, home = seen
     assert near["fennec-read"] == "replica" and "fennec-read" not in home
     assert near["body"] == home["body"] == {"query": "call history", "params": []}
+
+
+def test_a_listed_run_and_a_held_slot_are_read_as_times():
+    """`last` and `held` as the server lists them, read into their types:
+    the slots and the hold's start as aware UTC datetimes, a binding's
+    `after` a pair."""
+    row = {
+        "name": "lapse",
+        "version": [-3244637736030576075, 4],
+        "signature": "()",
+        "writes": True,
+        "comment": None,
+        "broken": None,
+        "after": None,
+        "schedule": "every 15m",
+        "next": "2026-05-04T12:15:00Z",
+        "last": {"outcome": "refused", "reason": "no hold", "skipped": 2, "slot": "2026-05-04T12:00:00Z", "status": 412},
+        "held": {"since": "2026-05-04T12:16:00.250Z", "slot": "2026-05-04T12:15:00Z", "status": 507},
+    }
+    bound = {**row, "name": "billed", "after": ["bills", "insert or set"], "schedule": None, "next": None, "last": None, "held": None}
+    port, seen = _scripted([(200, [row, bound], {}), (200, [row], {})])
+    lapse, billed = Client(f"http://127.0.0.1:{port}").statements()
+    assert seen[0]["body"] == {"query": "statements", "params": []}
+    utc = timezone.utc
+    assert lapse.next == datetime(2026, 5, 4, 12, 15, tzinfo=utc)
+    assert lapse.last == LastRun(datetime(2026, 5, 4, 12, tzinfo=utc), "refused", 412, "no hold", 2)
+    assert lapse.held == HeldSlot(datetime(2026, 5, 4, 12, 15, tzinfo=utc), 507, datetime(2026, 5, 4, 12, 16, 0, 250000, tzinfo=utc))
+    assert (lapse.version, billed.after, billed.last, billed.held) == ((-3244637736030576075, 4), ("bills", "insert or set"), None, None)
+    async def listed_async():
+        async with AsyncClient(f"http://127.0.0.1:{port}") as db:
+            return await db.statements()
+
+    [again] = asyncio.run(listed_async())
+    assert again == lapse

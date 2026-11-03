@@ -1217,6 +1217,62 @@ export interface SchemaInfo {
   fields: { name: string; type: string; index?: string; also?: string }[];
 }
 
+/**
+ * A named statement as `statements` lists it to the server's token
+ * (`FennecHttp.statements`), each column `null` where it says nothing of
+ * the statement: a called one has no `after` and no clock, a statement
+ * whose text this server's build cannot read no signature.
+ */
+export interface NamedStatement {
+  name: string;
+  /**
+   * The definition's version: the history and change its record landed at.
+   * The history is a signed 64-bit identity, which a number holds exactly
+   * only within 2^53 -- `JSON.parse` rounds one past it -- so compare the
+   * change, not the history.
+   */
+  version: [number, number];
+  /** `($from int, $to int = ...) claims (sub text)`, as a call is written; `()` for none. */
+  signature: string | null;
+  writes: boolean | null;
+  comment: string | null;
+  /** Why the schema broke it: it runs no more until redefined, or until the schema reads again. */
+  broken: string | null;
+  /** A write-bound statement's collection and the writes that run it: `['orders', 'set or del']`. */
+  after: [collection: string, events: string] | null;
+  /** A scheduled statement's clause as its text writes it: `every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`. */
+  schedule: string | null;
+  /** The slot due next: in the past while one is overdue or held back. */
+  next: Timestamp | null;
+  /** Its last run, landed or pending; `null` before the first. */
+  last: LastRun | null;
+  /** A due slot the server's state holds back -- a tenant's quota, a storage error -- tried again as it changes; `null` otherwise. */
+  held: HeldSlot | null;
+}
+
+/** A scheduled statement's last run, as `statements` lists it. */
+export interface LastRun {
+  /** The slot it ran for: what `slot()` read. */
+  slot: Timestamp;
+  /** `refused`: the statement's own refusal -- a `require` not met, a broken statement -- which marks the slot as run. */
+  outcome: 'ran' | 'refused';
+  /** A refusal's status: 412 a `require` not met, 409 broken or a value taken, ... */
+  status: number | null;
+  /** The words a refusing `require ... else '...'` gave. */
+  reason: string | null;
+  /** The slots passed over before it: missed slots run once, the latest. */
+  skipped: number;
+}
+
+/** A due slot the server's state holds back, as `statements` lists it. */
+export interface HeldSlot {
+  slot: Timestamp;
+  /** The refusal holding it: 507 a tenant's quota, 500 a storage error. */
+  status: number;
+  /** When it was first held. */
+  since: Timestamp;
+}
+
 /** Remote endpoint options. Without `fetch`, `globalThis.fetch` is used. */
 export interface HttpOptions {
   token?: string;
@@ -1276,6 +1332,15 @@ export declare class FennecHttp<S extends AnySchema<S> = Schema, Rel extends Rel
    *                 { idempotencyKey: 'xfer-7' });
    */
   call(name: string, args?: Record<string, unknown> | null, opts?: CallOptions): Promise<any>;
+  /**
+   * `statements`: each named statement the database holds, as the server
+   * lists them to its own token -- a scoped one is refused (403): its
+   * signature, whether it writes, its comment, why the schema broke it,
+   * what a binding is bound to, and a scheduled one's clock.
+   *
+   *   const held = (await db.statements()).filter((s) => s.held);
+   */
+  statements(): Promise<NamedStatement[]>;
   /**
    * `POST /batch`: the statements in order as one block -- every write
    * lands or none does -- and each one's answer. A statement that stops

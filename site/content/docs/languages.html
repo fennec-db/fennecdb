@@ -688,6 +688,45 @@ language spells them:</p>
     client, and what the call wrote comes back through the shapes.</li>
 </ul>
 
+<p>Every SDK lists them too, as the server lists them to its own token (a
+scoped token is refused, 403): the text <code>statements</code>, sent as
+<code>/query</code> sends any, each row read into a type of its own — the
+signature, whether the statement writes, its comment, why the schema broke
+it, what a <a href="fennecql.html#write-bound-statements">binding</a> is bound
+to (<code>after</code>), and a <a
+href="fennecql.html#scheduled-statements">scheduled statement</a>'s clock: its
+<code>schedule</code> as its text writes it, the <code>next</code> slot, the
+<code>last</code> run — <code>ran</code>, or <code>refused</code> with its
+status and the reason its <code>require</code> gave, and the slots a restart
+passed over — and a slot the server's state holds back (<code>held</code>: a
+tenant at its quota). The server's token runs a scheduled statement now with
+<code>call</code>, which marks no slot.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Language</th><th>Method</th><th>Its types, and a time as</th></tr></thead>
+<tbody>
+<tr><td>JavaScript</td><td><code>await db.statements()</code></td><td><code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; the server's ISO text</td></tr>
+<tr><td>Python</td><td><code>db.statements()</code>, async the same</td><td><code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; an aware UTC <code>datetime</code></td></tr>
+<tr><td>Go</td><td><code>db.Statements(ctx)</code></td><td><code>NamedStatement</code>, <code>*LastRun</code>, <code>*HeldSlot</code>; <code>time.Time</code></td></tr>
+<tr><td>.NET</td><td><code>await db.StatementsAsync()</code></td><td>the records <code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; <code>DateTimeOffset</code></td></tr>
+<tr><td>Swift</td><td><code>try await db.statements()</code></td><td><code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; <code>Date</code></td></tr>
+<tr><td>Kotlin</td><td><code>db.statements()</code> (suspend), <code>statementsBlocking()</code></td><td><code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; milliseconds since the epoch</td></tr>
+<tr><td>Dart</td><td><code>await db.statements()</code></td><td><code>NamedStatement</code>, <code>LastRun</code>, <code>HeldSlot</code>; a UTC <code>DateTime</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Each type's <code>version</code> is the history and change the definition
+landed at, the history a signed 64-bit integer — negative where its top bit
+is set — that every SDK holds exactly but JavaScript and Dart compiled for the
+web, which read one past 2<sup>53</sup> rounded: the history is an identity,
+so there compare the change, not the history.</p>
+
+<p>Swift's, Kotlin's and Dart's own database lists the statements its file
+holds the same way. The library runs no schedule: a server's file opened in
+an app keeps its schedules for the server that next opens it.</p>
+
 <h2 id="http">From the shell</h2>
 
 <p>The same request from <code>curl</code>:</p>

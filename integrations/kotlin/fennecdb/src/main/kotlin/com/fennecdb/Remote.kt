@@ -225,6 +225,17 @@ class FennecRemote private constructor(
         return asCalled(wait, read).send(st.text, st.params, idempotencyKey)
     }
 
+    /**
+     * The named statements the server holds, as it lists them to its own
+     * token (`statements`) -- a scoped one is refused (403): each one's
+     * signature, whether it writes, its comment, why the schema broke it,
+     * what a binding is bound to, and a scheduled one's clock.
+     */
+    suspend fun statements(): List<NamedStatement> = query("statements").map(NamedStatement::of)
+
+    /** [statements], on the calling thread. */
+    fun statementsBlocking(): List<NamedStatement> = send("statements", emptyList(), null).rows.map(NamedStatement::of)
+
     /** This connection, or a copy of it that waits and reads as a call asks. */
     private fun asCalled(wait: Long?, read: Boolean): FennecRemote {
         var c = if (read) asRead() else this

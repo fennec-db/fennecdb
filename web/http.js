@@ -143,6 +143,11 @@ export class FennecHttp {
     return this.run(sql, params, { idempotencyKey, wait, signal, read });
   }
 
+  /** `statements`, as the server lists them to its own token: a scheduled one's clock among the columns. */
+  async statements() {
+    return this.rows('statements');
+  }
+
   /**
    * `POST /batch`: the statements in order under one write lock, as one
    * block -- their writes all land, or at the first error none of them do.

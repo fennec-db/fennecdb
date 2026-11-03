@@ -14,6 +14,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -356,6 +357,94 @@ func TestABindingThatRefusesAWriteIsNamed(t *testing.T) {
 	_, err = db.Exec(ctx, "set "+orders+" {status: 'x'} where id = 1 require 2")
 	if e := statusOf(t, err); e.Status != 412 || e.Binding != "" {
 		t.Fatalf("a refusal no binding made: %+v", e)
+	}
+}
+
+// newYears is Berlin's 03:00 on 1 January, 02:00 UTC: this year's, or next.
+func newYears() time.Time {
+	now := time.Now().UTC()
+	first := time.Date(now.Year(), 1, 1, 2, 0, 0, 0, time.UTC)
+	if now.Before(first) {
+		return first
+	}
+	return first.AddDate(1, 0, 0)
+}
+
+// The statements the server holds, typed: a scheduled one with its clause
+// and next slot -- New Year's, so no run of the clock lands while the test
+// looks -- and no run yet, and a called one with no clock. The server's
+// token runs the scheduled one now, marking no slot; a scoped token is
+// refused the listing.
+func TestTheStatementsAServerHoldsAreListedAScheduledOneWithItsClock(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	ticks, tick, ticked := fresh("ticks"), fresh("tick"), fresh("ticked")
+	must(db.Exec(ctx, "create collection "+ticks+" (n int, at timestamp)")).of(t)
+	must(db.Exec(ctx, "create statement "+tick+" at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' "+
+		"as insert "+ticks+" {n: 1, at: slot()}")).of(t)
+	must(db.Exec(ctx, "create statement "+ticked+"() as get "+ticks+" count")).of(t)
+	defer func() {
+		_, _ = db.Exec(ctx, "drop statement if exists "+tick)
+		_, _ = db.Exec(ctx, "drop statement if exists "+ticked)
+	}()
+	listed := map[string]fennecdb.NamedStatement{}
+	for _, s := range must(db.Statements(ctx)).of(t) {
+		listed[s.Name] = s
+	}
+	s, c := listed[tick], listed[ticked]
+	if s.Schedule != "at '0 3 1 1 *' in 'Europe/Berlin'" || s.Next == nil || !s.Next.Equal(newYears()) || s.Last != nil || s.Held != nil {
+		t.Fatalf("the scheduled one's clock: %+v", s)
+	}
+	if s.Comment != "A tick a year" || !s.Writes || s.Signature != "()" || s.After != nil || s.Broken != "" {
+		t.Fatalf("the scheduled one: %+v", s)
+	}
+	if c.Signature != "()" || c.Writes || c.Schedule != "" || c.Next != nil || c.Last != nil || c.Held != nil {
+		t.Fatalf("the called one: %+v", c)
+	}
+	if r := must(db.Call(ctx, tick, nil)).of(t); r.Affected != 1 {
+		t.Fatalf("run now: %+v", r)
+	}
+	for _, s := range must(db.Statements(ctx)).of(t) {
+		if s.Name == tick && (s.Last != nil || s.Next == nil || !s.Next.Equal(newYears())) {
+			t.Fatalf("a run by hand marked a slot: %+v", s)
+		}
+	}
+	out, err := exec.Command(binary, "--jwt-secret", jwtSecret, "--mint-token", `{"sub":"alice"}`).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := fennecdb.New(primary, fennecdb.WithToken(strings.TrimSpace(string(out))))
+	if _, err := alice.Statements(ctx); statusOf(t, err).Status != 403 {
+		t.Fatalf("a scoped token's listing: %v", err)
+	}
+}
+
+// A run and a held slot as the server lists them, read into their types:
+// the times as time.Time, a binding's After its collection and events.
+func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,` +
+			`"broken":null,"after":null,"schedule":"every 15m","next":"2026-05-04T12:15:00Z",` +
+			`"last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},` +
+			`"held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},` +
+			`{"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,` +
+			`"after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]`))
+	}))
+	defer srv.Close()
+	listed := must(fennecdb.New(srv.URL).Statements(context.Background())).of(t)
+	at := func(m, s, ms int) time.Time { return time.Date(2026, 5, 4, 12, m, s, ms*1e6, time.UTC) }
+	lapse, billed := listed[0], listed[1]
+	if lapse.Version != [2]int64{-3244637736030576075, 4} || !lapse.Next.Equal(at(15, 0, 0)) {
+		t.Fatalf("the listing: %+v", lapse)
+	}
+	if l := lapse.Last; !l.Slot.Equal(at(0, 0, 0)) || l.Outcome != "refused" || l.Status != 412 || l.Reason != "no hold" || l.Skipped != 2 {
+		t.Fatalf("the last run: %+v", l)
+	}
+	if h := lapse.Held; !h.Slot.Equal(at(15, 0, 0)) || h.Status != 507 || !h.Since.Equal(at(16, 0, 250)) {
+		t.Fatalf("the held slot: %+v", h)
+	}
+	if !reflect.DeepEqual(billed.After, []string{"bills", "insert or set"}) || billed.Last != nil || billed.Next != nil {
+		t.Fatalf("a binding: %+v", billed)
 	}
 }
 

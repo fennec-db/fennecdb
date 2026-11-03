@@ -282,8 +282,11 @@ dotnet add package FennecDb</pre>
     sent to a tenant's read replica near the client, after its own writes
     (<code>WithReadsNearest()</code>, <code>ReadsNearest</code>; <a
     href="sharding-read-replicas.html#read-replicas">Read replicas</a>), a subscription,
-    the change stream, a tenant, the health check, and a typed error
-    carrying the status.</li>
+    the change stream, a tenant, the health check, a named statement's call
+    and the statements listed with a scheduled one's clock
+    (<code>Statements</code>, <code>StatementsAsync</code>; <a
+    href="languages.html#named-statements">Named statements</a>), and a
+    typed error carrying the status.</li>
   <li><b>The query builder,</b> as Python's and JavaScript's have it:
     <code>db.From("docs").Where("year", "&gt;=", 2024).Near("embed",
     v).Limit(5)</code>, immutable, ending in <code>Rows</code>,

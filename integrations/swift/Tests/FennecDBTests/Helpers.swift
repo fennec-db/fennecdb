@@ -40,3 +40,13 @@ func date(_ text: String) -> Value {
 
 /// The ISO text `Date`s since the epoch are written as.
 func isoText(seconds: Double) -> String { iso(Date(timeIntervalSince1970: seconds)) }
+
+/// Berlin's 03:00 on 1 January, 02:00 UTC -- this year's, or next -- as
+/// `iso` writes it.
+func newYearsText() -> String {
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    let now = Date()
+    let first = utc.date(from: DateComponents(year: utc.component(.year, from: now), month: 1, day: 1, hour: 2))!
+    return iso(now < first ? first : utc.date(byAdding: .year, value: 1, to: first)!)
+}

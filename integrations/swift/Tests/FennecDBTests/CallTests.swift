@@ -158,6 +158,40 @@ let bindingStatements = [
         return db
     }
 
+    /// The statements the library holds, listed: a called one with its
+    /// signature and no clock.
+    @Test func theStatementsAreListed() async throws {
+        let db = try await EmbeddedCall.bank()
+        let transfer = try await db.statements().first { $0.name == "transfer" }
+        #expect(transfer?.signature == "($from int, $to int, $amount int)" && transfer?.writes == true)
+        #expect(transfer?.schedule == nil && transfer?.next == nil && transfer?.last == nil && transfer?.held == nil)
+        #expect(transfer?.after == nil && transfer?.broken == nil && transfer?.version.count == 2)
+        try await db.close()
+    }
+
+    /// A run and a held slot as a server lists them, read into their
+    /// types: the times as `Date`s, a binding's `after` its collection and
+    /// events.
+    @Test func aListedRunAndAHeldSlotAreReadAsTimes() throws {
+        let rows = try Value.parse(
+            #"""
+            [{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+              "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
+              "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
+              "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
+             {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
+              "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
+            """#
+        ).array!.compactMap(\.object)
+        let (lapse, billed) = (NamedStatement(rows[0]), NamedStatement(rows[1]))
+        #expect(lapse.version == [-3244637736030576075, 4] && lapse.schedule == "every 15m" && lapse.next.map(iso) == "2026-05-04T12:15:00.000Z")
+        let last = lapse.last.map { [iso($0.slot), $0.outcome, "\($0.status ?? 0)", $0.reason ?? "", "\($0.skipped)"] }
+        #expect(last == ["2026-05-04T12:00:00.000Z", "refused", "412", "no hold", "2"])
+        let held = lapse.held.map { [iso($0.slot), "\($0.status)", iso($0.since)] }
+        #expect(held == ["2026-05-04T12:15:00.000Z", "507", "2026-05-04T12:16:00.250Z"])
+        #expect(billed.after == ["bills", "insert or set"] && billed.last == nil && billed.next == nil)
+    }
+
     /// A binding's refusal through the library names it beside its reason;
     /// one no binding made names none.
     @Test func aBindingThatRefusesAWriteIsNamed() async throws {
@@ -254,6 +288,31 @@ let bindingStatements = [
             try await db.execute("create statement stamp() public as insert notes {body: 'z'} returning id")
             try await db.execute("create statement mine() claims (sub text) as get notes select body where by = $jwt.sub")
             return db
+        }
+
+        /// The statements the server holds, typed: a scheduled one with its
+        /// clause and next slot -- New Year's, so no run of the clock lands
+        /// while the test looks -- and no run yet, and a called one with no
+        /// clock; the server's token runs the scheduled one now, marking no
+        /// slot.
+        @Test func theStatementsAreListedAScheduledOneWithItsClock() async throws {
+            let s = try await Server("statements")
+            defer { s.stop() }
+            let db = Fennec.connect(url: s.url)
+            try await db.execute("create collection ticks (n int, at timestamp)")
+            try await db.execute(
+                "create statement tick at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' "
+                    + "as insert ticks {n: 1, at: slot()}")
+            try await db.execute("create statement ticked() as get ticks count")
+            let listed = try await db.statements()
+            let tick = listed.first { $0.name == "tick" }
+            let ticked = listed.first { $0.name == "ticked" }
+            #expect(tick?.schedule == "at '0 3 1 1 *' in 'Europe/Berlin'" && tick?.next.map(iso) == newYearsText())
+            #expect(tick?.last == nil && tick?.held == nil && tick?.comment == "A tick a year" && tick?.writes == true)
+            #expect(ticked?.signature == "()" && ticked?.writes == false && ticked?.schedule == nil && ticked?.next == nil)
+            #expect(try await db.call("tick").affected == 1)
+            let again = try await db.statements().first { $0.name == "tick" }
+            #expect(again?.next.map(iso) == newYearsText() && again?.last == nil)
         }
 
         /// A binding's refusal over HTTP names it to the server's token;
