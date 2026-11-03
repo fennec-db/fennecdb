@@ -356,3 +356,168 @@ fn an_index_of_prefixes_reads_loosely_as_any() {
         [2, 0]
     );
 }
+
+/// The words are folded before they are read loosely: a typo or a word
+/// begun meets the word whatever accents either is written with.
+#[test]
+fn accents_fold_before_a_word_is_read_loosely() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection d (n int, body text @text, short text @text(prefix=3))",
+        &[],
+    );
+    for (i, b) in [
+        "Sütlaç tarifi",
+        "sütlaç fırında",
+        "köfte ve pilav",
+        "çay bahçesi",
+        "fırın sutlac",
+    ]
+    .iter()
+    .enumerate()
+    {
+        exec(
+            &mut db,
+            "put d {n: $1, body: $2, short: $2}",
+            &[Value::Int(i as i64), Value::Text(b.to_string())],
+        );
+    }
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v
+    };
+    let whole = "get d select n match body $1 limit 10";
+    assert_eq!(sorted(ns(&db, whole, "sutlac")), [0, 1, 4]);
+    assert_eq!(
+        sorted(ns(&db, whole, "SÜTLAÇ")),
+        [0, 1, 4],
+        "the accented query finds the plain text too"
+    );
+    assert_eq!(ns(&db, whole, "kofte"), [2]);
+    assert_eq!(ns(&db, whole, "cay"), [3]);
+    assert_eq!(ns(&db, whole, "bahcesi"), [3]);
+    // A typo of six letters takes one edit, counted over the folds.
+    let fuzzy = "get d select n match body $1 fuzzy limit 10";
+    assert_eq!(sorted(ns(&db, fuzzy, "sutlca")), [0, 1, 4]);
+    assert_eq!(sorted(ns(&db, fuzzy, "sütlaçı")), [0, 1, 4]);
+    assert_eq!(sorted(ns(&db, fuzzy, "sütlaç")), [0, 1, 4]);
+    // A word begun, by `prefix` and by an index of prefixes.
+    let prefix = "get d select n match body $1 prefix limit 10";
+    assert_eq!(ns(&db, prefix, "köf"), [2]);
+    assert_eq!(ns(&db, prefix, "bahc"), [3]);
+    let short = "get d select n match short $1 limit 10";
+    assert_eq!(sorted(ns(&db, short, "firi")), [1, 4]);
+    let r = rows(
+        &db,
+        r#"get d select highlight(body, "[", "]") match body $1 fuzzy prefix limit 1"#,
+        &[Value::Text("cay bahc".into())],
+    );
+    assert_eq!(r.rows[0].values[0], Value::Text("[çay] [bahçesi]".into()));
+}
+
+/// Under `@text(accents)` a word typed with its accents reads its spelling,
+/// and one typed without them every spelling: Vietnamese's tones tell its
+/// syllables apart -- `ma` a ghost, `má` a mother, `mạ` a seedling, `mả` a
+/// grave, `mã` a code -- which the fold alone would read as one word.
+#[test]
+fn under_accents_a_word_typed_with_them_reads_its_spelling() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection d (n int, body text @text(accents), folded text @text, \
+         short text @text(accents, prefix=4))",
+        &[],
+    );
+    for (i, b) in [
+        "con ma trong nhà",
+        "mẹ và má",
+        "mạ non trên ruộng",
+        "ngôi mả tổ",
+        "mã số bưu chính",
+        "Má tôi nấu phở",
+        "Nguyễn Văn An",
+        "nguyên liệu nấu phở",
+        "nguyện vọng của Nguyễn",
+    ]
+    .iter()
+    .enumerate()
+    {
+        exec(
+            &mut db,
+            "put d {n: $1, body: $2, folded: $2, short: $2}",
+            &[Value::Int(i as i64), Value::Text(b.to_string())],
+        );
+    }
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v
+    };
+    let whole = "get d select n match body $1 limit 10";
+    assert_eq!(sorted(ns(&db, whole, "má")), [1, 5], "its spelling alone");
+    assert_eq!(sorted(ns(&db, whole, "MÁ")), [1, 5]);
+    assert_eq!(ns(&db, whole, "mạ"), [2]);
+    assert_eq!(ns(&db, whole, "mã"), [4]);
+    assert_eq!(
+        sorted(ns(&db, whole, "ma")),
+        [0, 1, 2, 3, 4, 5],
+        "typed without its tones, every spelling"
+    );
+    // Typed with a tone no document writes it with, every spelling.
+    assert_eq!(sorted(ns(&db, whole, "mà")), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(sorted(ns(&db, whole, "nguyễn")), [6, 8]);
+    assert_eq!(sorted(ns(&db, whole, "nguyen")), [6, 7, 8]);
+    // The default index reads the fold however the word is typed.
+    let folded = "get d select n match folded $1 limit 10";
+    assert_eq!(sorted(ns(&db, folded, "má")), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(sorted(ns(&db, folded, "nguyễn")), [6, 7, 8]);
+    // Read loosely, its spelling ranks first and its other spellings after
+    // it, as near as a word it begins.
+    let fuzzy = "get d select n match body $1 fuzzy limit 10";
+    let got = ns(&db, fuzzy, "Nguyễn");
+    assert_eq!(sorted(got[..2].to_vec()), [6, 8], "{got:?}");
+    assert_eq!(got[2..], [7], "{got:?}");
+    assert_eq!(sorted(ns(&db, fuzzy, "nguyen")), [6, 7, 8]);
+    // A typo of it reads the fold's variants: every spelling.
+    assert_eq!(sorted(ns(&db, fuzzy, "nguyẽn")), [6, 7, 8]);
+    // A word begun reads its fold's completions, and so does an index of
+    // prefixes, whose prefixes are the fold's.
+    let prefix = "get d select n match body $1 prefix limit 10";
+    assert_eq!(sorted(ns(&db, prefix, "nguy")), [6, 7, 8]);
+    assert_eq!(sorted(ns(&db, prefix, "nguyễ")), [6, 7, 8]);
+    let short = "get d select n match short $1 limit 10";
+    assert_eq!(sorted(ns(&db, short, "nguy")), [6, 7, 8]);
+    // Its spelling first, then the words its fold's prefixes reach.
+    let got = ns(&db, short, "Nguyễn");
+    assert_eq!(sorted(got[..2].to_vec()), [6, 8], "{got:?}");
+    assert_eq!(got[2..], [7], "{got:?}");
+    // `highlight()` marks what was read: the spelling typed, or every one.
+    let marked = |q: &str, n: i64| -> Value {
+        let r = rows(
+            &db,
+            r#"get d select n, highlight(body, "[", "]") match body $1 limit 10"#,
+            &[Value::Text(q.into())],
+        );
+        r.rows
+            .iter()
+            .find(|r| r.values[0] == Value::Int(n))
+            .unwrap_or_else(|| panic!("{q}: no row {n}"))
+            .values[1]
+            .clone()
+    };
+    assert_eq!(
+        marked("Nguyễn", 8),
+        Value::Text("nguyện vọng của [Nguyễn]".into())
+    );
+    assert_eq!(
+        marked("nguyen", 8),
+        Value::Text("[nguyện] vọng của [Nguyễn]".into())
+    );
+    // `facet` counts the rows the query reads.
+    let r = rows(
+        &db,
+        "get d select n match body $1 facet n limit 10",
+        &[Value::Text("má".into())],
+    );
+    assert_eq!(r.facets[0].values.len(), 2, "{:?}", r.facets);
+}

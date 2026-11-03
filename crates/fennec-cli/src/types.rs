@@ -908,6 +908,9 @@ fn index_code(
             if spec.chars {
                 with.push("chars: true".into());
             }
+            if spec.accents {
+                with.push("accents: true".into());
+            }
             let mut s = format!("index('{name}').using('bm25', {target})");
             if !with.is_empty() {
                 s.push_str(&format!(".with({{ {} }})", with.join(", ")));

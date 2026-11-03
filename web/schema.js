@@ -312,7 +312,7 @@ class Index {
     if (!(col instanceof Column)) throw new FennecError('an index is on a column of the table');
     const path = t instanceof Column ? null : (t.path ?? null);
     const opts = Object.keys(this.options);
-    const allowed = { hnsw: ['m', 'ef_construction', 'ef_search', 'quant'], bm25: ['k1', 'b', 'prefix', 'prefix_min', 'chars'] }[this.method] ?? [];
+    const allowed = { hnsw: ['m', 'ef_construction', 'ef_search', 'quant'], bm25: ['k1', 'b', 'prefix', 'prefix_min', 'chars', 'accents'] }[this.method] ?? [];
     const stray = opts.find((k) => !allowed.includes(k));
     if (stray) throw new FennecError(`${this.method} indexes take no ${stray}`);
     let index;
@@ -445,7 +445,7 @@ class Table {
 
 /** An index as FennecQL declares it: what the declaration said, the engine's defaults for the rest. */
 function indexText(ix) {
-  const opts = (keys) => keys.filter((k) => ix[k] !== undefined).map((k) => (k === 'chars' ? (ix[k] ? 'chars' : null) : `${k}=${ix[k]}`)).filter(Boolean);
+  const opts = (keys) => keys.filter((k) => ix[k] !== undefined).map((k) => (k === 'chars' || k === 'accents' ? (ix[k] ? k : null) : `${k}=${ix[k]}`)).filter(Boolean);
   switch (ix.kind) {
     case 'ttl': {
       const unit = Object.entries(UNITS).reverse().find(([, n]) => ix.ms % n === 0);
@@ -454,7 +454,7 @@ function indexText(ix) {
     case 'hnsw':
       return `@hnsw(${[ix.metric, ...opts(['m', 'ef_construction', 'ef_search', 'quant'])].join(', ')})`;
     case 'text': {
-      const o = opts(['k1', 'b', 'prefix', 'prefix_min', 'chars']);
+      const o = opts(['k1', 'b', 'prefix', 'prefix_min', 'chars', 'accents']);
       return o.length ? `@text(${o.join(', ')})` : '@text';
     }
     default:

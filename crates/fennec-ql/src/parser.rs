@@ -1953,10 +1953,30 @@ impl Parser {
             }
             let key = self.ident()?;
             let lowered = key.to_ascii_lowercase();
-            // `chars` is a flag: each character of a script written without
-            // spaces indexed as well as each pair.
-            if lowered == "chars" {
-                spec.chars = true;
+            // A name it does not know is refused naming every one it does,
+            // before an `=` is asked for: `@text(accent)` was told `expected
+            // `=`, found `)``, which named neither.
+            if !matches!(
+                lowered.as_str(),
+                "chars" | "accents" | "k1" | "b" | "prefix" | "prefix_max" | "prefix_min"
+            ) {
+                return self.err(format!(
+                    "unknown text parameter `{key}`: `@text` takes `k1`, `b`, `prefix`, \
+                     `prefix_min`, `prefix_max`, `chars` and `accents`"
+                ));
+            }
+            // `chars` and `accents` are flags: each character of a script
+            // written without spaces indexed as well as each pair, and a
+            // word its accents make another kept as written beside its
+            // fold.
+            if lowered == "chars" || lowered == "accents" {
+                if matches!(self.peek(), Tok::Eq) {
+                    return self.err(format!("`{key}` takes no value: write `@text({lowered})`"));
+                }
+                match lowered.as_str() {
+                    "chars" => spec.chars = true,
+                    _ => spec.accents = true,
+                }
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
@@ -1980,7 +2000,7 @@ impl Parser {
                     }
                 }
                 // `prefix` is the longest prefix indexed; 0 is off.
-                "prefix" | "prefix_max" | "prefix_min" => {
+                _ => {
                     if !(0.0..=64.0).contains(&v) || v.fract() != 0.0 {
                         let mut got = String::new();
                         fennec_core::num::f64_into(&mut got, v);
@@ -1993,7 +2013,6 @@ impl Parser {
                         spec.prefix_max = v as u8;
                     }
                 }
-                other => return self.err(format!("unknown text parameter `{other}`")),
             }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
@@ -5829,6 +5848,7 @@ mod tests {
         "del notes where id = 3",
         "delete from notes where topic = 4 order posted limit 1 returning id",
         "create collection notes (body text @text(prefix=3), topic int @hash, posted timestamp @sorted, embed vector<384> @hnsw(cosine, m=16), @sorted(topic, posted desc))",
+        "create collection words (body text @text(accents, prefix=6), title text @hash @text(chars, accents))",
         "create collection if not exists users (email text nocase @unique, name text collate tr required)",
         "create index on notes (embed) @hnsw(cosine, quant=int8)",
         "create index if not exists on notes (topic, posted desc) @sorted",

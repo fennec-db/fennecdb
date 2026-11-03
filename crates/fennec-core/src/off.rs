@@ -231,7 +231,15 @@ impl TextIndex {
         &self,
         query: &str,
         loose: crate::text::Loose,
+        reads: crate::text::Reads,
     ) -> crate::error::Result<Vec<&str>> {
+        match self.never {}
+    }
+    pub fn read_terms(
+        &self,
+        query: &str,
+        reads: crate::text::Reads,
+    ) -> crate::maps::Map<String, u32> {
         match self.never {}
     }
 }

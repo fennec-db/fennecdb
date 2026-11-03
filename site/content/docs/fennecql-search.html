@@ -1,6 +1,6 @@
 <!--
 title: Text search — FennecQL — fennecdb
-description: Text search in FennecQL: match ranks by BM25 (beside order, count and aggregates, it filters), rerank, fuzzy and prefix for typos and words begun, highlight() and snippet(), facets, and fuse for words and meaning in one ranking.
+description: Text search in FennecQL: match ranks by BM25 (beside order, count and aggregates, it filters), rerank, fuzzy and prefix for typos and words begun, accents folded, highlight() and snippet(), facets, and fuse for words and meaning in one ranking.
 -->
 
 <h1>Text search</h1>
@@ -79,6 +79,13 @@ get articles match body $1 rerank embed $2 candidates 500 limit 10
     of the matched rows directly.</li>
   <li><b>Reranking cannot find what the words missed.</b> For that, use <a
     href="#hybrid">hybrid search</a>.</li>
+  <li><b>A word typed without accents finds it written with them.</b>
+    <code>sutlac</code> finds <code>Sütlaç</code>, <code>cafe</code>
+    <code>café</code>, <code>pho</code> <code>Phở</code> and
+    <code>ελληνικα</code> <code>Ελληνικά</code>; typed with its accents it
+    finds every spelling too, or under <code>@text(accents)</code> the one
+    it was typed in. Case never decides a word, with the option or without
+    (<a href="#accents">accents</a>).</li>
 </ul>
 
 <details class="deep"><summary>How match filters, and what rerank is for</summary>
@@ -189,8 +196,9 @@ length are Meilisearch's too: a short word has too many neighbours —
 <code>cart</code> is one letter from <code>card</code>, <code>care</code>,
 <code>cars</code>, <code>cat</code> and <code>art</code>. Words are folded
 as the index folds them before they are compared, so
-<code>İSTANBL</code> finds <code>istanbul</code>. Only the last word is a
-prefix; the words before it are whole.</p>
+<code>İSTANBL</code> finds <code>istanbul</code> and <code>sutlc</code>
+finds <code>Sütlaç</code> (<a href="#accents">accents</a>). Only the last
+word is a prefix; the words before it are whole.</p>
 
 <p>The words a word reaches count as one term of the query, a document's
 counts of them summed, so BM25's saturation holds over them as over a word
@@ -227,6 +235,123 @@ completions 4 µs.</p>
   queries written whole where they were. See <a
   href="benchmarks-text.html#typos">the whole table</a>.</p>
 </div>
+</details>
+
+<h2 id="accents">Accents</h2>
+
+<p>A <code>@text</code> index reads a Latin or Greek letter as its base
+letter, so a word typed on a keyboard without the letters finds the word
+written with them, and the other way round: <code>sutlac</code> and
+<code>sütlaç</code> both find <code>Sütlaç</code>, <code>SÜTLAÇ</code> and
+<code>sutlac</code>; <code>nguyen</code> finds <code>Nguyễn</code>,
+<code>oresund</code> <code>Øresund</code>. Nothing to declare; every
+<code>@text</code> index does it.</p>
+
+<ul>
+  <li><b>What folds:</b> every accent, cedilla, ogonek, caron and breve —
+    Turkish's <code>ç ğ ö ş ü</code>, Vietnamese's tones and its
+    <code>ơ ư</code>, Greek's tonos, dialytika and breathings — and
+    <code>ø</code>, <code>ł</code>, <code>đ</code>, <code>ħ</code> by the
+    letter they are, <code>æ</code>, <code>œ</code> and <code>ß</code> as
+    two letters, a final <code>ς</code> as <code>σ</code>. <code>İ</code>,
+    <code>I</code>, <code>ı</code> and <code>i</code> are one letter, as
+    they always were. An accent written apart from its letter (an
+    <code>e</code> and U+0301) folds with it.</li>
+  <li><b>What does not:</b> Cyrillic and every other script are read as
+    written — <code>ё</code> is not <code>е</code>, written whole or as an
+    <code>е</code> and U+0308: an accent written apart stays with a letter
+    the fold leaves. Only <code>@text</code> folds: <code>=</code>,
+    <code>~</code>, <code>nocase</code>, collations and the other indexes
+    compare as they always did.</li>
+  <li><b><code>fuzzy</code> and <code>prefix</code> compare folded
+    words</b>: <code>sutlc</code> finds <code>Sütlaç</code>.</li>
+  <li><b><code>highlight()</code> marks what was found</b>, as it is
+    written: <code>sutlac</code> marks <code>Sütlaç</code>,
+    <code>SÜTLAÇ</code> and <code>sutlac</code>.</li>
+</ul>
+
+<h3 id="accents-option">When accents tell words apart: <code>@text(accents)</code></h3>
+
+<p>In Vietnamese the tones tell syllables apart — <code>ma</code>,
+<code>má</code>, <code>mà</code>, <code>mả</code>, <code>mã</code> and
+<code>mạ</code> are six words — and folded they are one. Declare the index
+<code>@text(accents)</code> and it keeps each word whose accents make it
+another word as written as well, beside its fold: a word typed with its
+accents finds the word written with those accents, one typed without them
+finds every spelling, and one typed with accents no document writes it with
+finds every spelling too.</p>
+
+<pre data-lang="fennecql"><code>create collection articles (title text @text(accents), body text @text(accents, prefix=6))
+
+get articles match title "má"   -- má and Má: mother
+get articles match title "ma"   -- ma, má, mà, mả, mã, mạ</code></pre>
+
+<ul>
+  <li><b>Use it for Vietnamese</b>, or any text whose accents make
+    different words a reader means apart. For Turkish, French, Greek and
+    the other languages measured, leave it out: the fold alone scores as
+    well or better.</li>
+  <li><b>It costs memory.</b> Every word written with accents is a second
+    term: 76% more postings over Vietnamese, 66% over Greek, 28% over
+    Turkish, 16% over French; text with no accents, nothing. Building the
+    index takes longer by about as much.</li>
+  <li><b>With the other options:</b> it combines with <code>k1</code>,
+    <code>b</code>, <code>prefix=</code> and <code>chars</code>. A word's
+    prefixes are its fold's, so a word typed with accents reads its
+    spelling and the prefixes every spelling shares.</li>
+  <li><b><code>fuzzy</code></b> ranks the word as written first and its
+    other spellings after it; <code>highlight()</code> marks the spelling
+    a word typed with accents found — <code>sütlaç</code> marks
+    <code>Sütlaç</code> and <code>SÜTLAÇ</code>, not <code>sutlac</code>.</li>
+  <li><b>Only rows the query may read decide.</b> A word typed with accents
+    reads its spelling where a row holds it; for a token <a
+    href="http-access.html#scoped-match">held to some rows</a>, a row its rules let it read,
+    as its scores count only those rows — a row it cannot read never turns
+    its <code>sütlaç</code> from every spelling to one. Its ranking, facets
+    and marks read the word alike.</li>
+  <li><b>A word written decomposed is another spelling.</b> Written whole
+    (<code>ü</code>, as nearly every text and keyboard writes it) or as a
+    letter and its accent apart (<code>u</code> and U+0308, as macOS file
+    names and some Vietnamese keyboards write it), a word is two spellings
+    under the option, and a query typed one way reads the rows written that
+    way where some are; typed without accents it finds both. Without the
+    option the two are one word.</li>
+  <li><b>Older binaries refuse the file.</b> The option is stored with the
+    index, so a fennecdb from before it refuses to open a database
+    declaring it rather than read every accented word as every
+    spelling.</li>
+</ul>
+
+<details class="deep"><summary>What each way scores, and why the fold is the default</summary>
+<p>Measured with BM25 over WebFAQ, each set's queries as typed and the
+same queries with every accent taken off. Folding gives the queries typed
+without accents what they lost; keeping the word as written as well gives
+Vietnamese's queries typed with their tones back what the fold took, and
+nothing to the others, which pay its memory all the same — so the fold
+is the default and the option is there for the languages that need
+it.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>nDCG@10, BM25, WebFAQ</th><th class="n">queries</th><th class="n">no fold</th><th class="n"><code>@text</code></th><th class="n"><code>@text(accents)</code></th></tr></thead>
+<tbody>
+<tr><td>Turkish, as typed</td><td class="n">10 000</td><td class="n">0.4841</td><td class="n">0.4835</td><td class="n">0.4839</td></tr>
+<tr><td>Turkish, typed without accents</td><td class="n">10 000</td><td class="n">0.4095</td><td class="n">0.4835</td><td class="n">0.4835</td></tr>
+<tr><td>Vietnamese, as typed</td><td class="n">10 000</td><td class="n">0.6471</td><td class="n">0.6006</td><td class="n">0.6453</td></tr>
+<tr><td>Vietnamese, typed without accents</td><td class="n">10 000</td><td class="n">0.2113</td><td class="n">0.6005</td><td class="n">0.6005</td></tr>
+<tr><td>Greek, as typed</td><td class="n">3 852</td><td class="n">0.5956</td><td class="n">0.6002</td><td class="n">0.5971</td></tr>
+<tr><td>Greek, typed without accents</td><td class="n">3 852</td><td class="n">0.3119</td><td class="n">0.6002</td><td class="n">0.6002</td></tr>
+<tr><td>French, as typed</td><td class="n">10 000</td><td class="n">0.4932</td><td class="n">0.4943</td><td class="n">0.4942</td></tr>
+<tr><td>French, typed without accents</td><td class="n">10 000</td><td class="n">0.4105</td><td class="n">0.4943</td><td class="n">0.4943</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>English SciFact scores 0.6618 all three ways. The index's postings,
+without the fold / <code>@text</code> / <code>@text(accents)</code>:
+Turkish 4.13 / 4.13 / 5.28 million (64.6 / 64.2 / 82.9 MB), French 24.2 /
+24.1 / 28.0 million, Greek 1.58 / 1.58 / 2.63 million, Vietnamese 5.71 /
+5.47 / 10.06 million (73.1 / 69.9 / 125.5 MB).</p>
 </details>
 
 <h2 id="hybrid">Hybrid search</h2>
@@ -311,9 +436,12 @@ get articles select title, snippet(body, 20, $2, $3, $4) match body $1 limit 10
 <p>A row's text is read again at query time by the tokenizer of the
 <code>@text</code> index the <code>match</code> searched — the same splitting,
 the same folding (<code>İstanbul</code>, <code>ISTANBUL</code> and
-<code>istanbul</code> are one word), the same prefixes and runs of
+<code>istanbul</code> are one word, <code>Sütlaç</code> and
+<code>sutlac</code> another), the same prefixes and runs of
 characters — and every span a term of the query was read from is marked. So
-a mark is exactly what the index matched: a word; the whole word a prefix
+a mark is exactly what the index matched: a word as it is written, accents
+and all (<code>sutlac</code> marks <code>Sütlaç</code>, and
+<code>sütlaç</code> marks it where it is written so); the whole word a prefix
 of <code>@text(prefix=N)</code> was cut from (<code>kitapların</code> for
 <code>kitap</code>); the characters of a pair or a triple of Han, kana,
 Hangul or Thai, overlapping pairs made one mark (<code>東京都</code> for

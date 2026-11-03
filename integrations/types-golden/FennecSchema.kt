@@ -9,7 +9,7 @@ import com.fennecdb.Row
 /** A row of `articles`. */
 data class Articles(
     val id: Long,
-    val title: String, // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    val title: String, // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     val year: Long?, // int @hash
     val score: Double?, // float @sorted
     val draft: Boolean, // bool required
@@ -155,7 +155,7 @@ data class EveryTypeArgs(
 /** A row of what `every_type` answers. */
 data class EveryTypeRow(
     val id: Long,
-    val title: String, // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+    val title: String, // text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
     val year: Long?, // int @hash
     val draft: Boolean, // bool required
     val published: String?, // timestamp @ttl(30d)

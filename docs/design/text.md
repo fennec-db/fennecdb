@@ -270,6 +270,266 @@ kind of its own (7), as a quantized graph is, so a binary that knows no
 `chars` refuses the file. The tokenizer takes its callback as `&mut dyn
 FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
+**A Latin or Greek letter folds to its base letter; `@text(accents)` keeps
+a word its accents make another as written beside its fold.** The table is
+`text/fold.rs`, 1 056 bytes over the Latin and Greek blocks, written by
+`tools/fold/gen.py` from `UnicodeData.txt` -- through rustfmt, so that what
+it writes is the file as committed, which CI's fmt job holds it to
+(`--check`): a canonical decomposition's first letter, a compatibility
+decomposition into letters of the script, the letters with a stroke or a
+middle dot by what they are (`ø`, `ł`, `đ`, `ħ`), `æ`, `œ` and `ß` as two
+letters and the final sigma as `σ`; a letter folds as its lowercase does.
+A letter that folds to nothing is read in one lookup too: 0, one that is
+its own lowercase, is kept as it is, and a capital of one that stays is
+its lowercase where a byte holds it (`Α` is `α`), so every letter Greek
+text writes is one lookup; `LOWER`, lowercased and looked up again, is
+left to a capital whose lowercase no byte holds (`Þ`, `Ŋ`) and to one
+whose lowercase is outside the table. With 0 read as `LOWER`, as the
+table first had it, each of Greek's unaccented letters was looked up,
+lowercased and looked up again; the table is 400 bytes brotli, where it
+was 327 (414 with a byte for a letter kept and 0 for one lowered). Where a code point is in the table is a match of its three ranges, each
+range's offset a constant of its arm (`fold::at`): a loop summing the
+ranges' lengths walked them for every Cyrillic and Greek letter. A
+combining mark stays in its word; after a Latin or Greek letter, or ASCII,
+it is the accent the fold drops. ASCII never reaches the table; Cyrillic
+and every other script stay as written, and a mark after one of their
+letters stays with it: `е` and U+0308 is `ё` written decomposed, no more
+`е` than `ё` is. Dropped after any letter, as the option's first build
+had it, a decomposed `ё` found every `е` and a decomposed `й` every `и`.
+Measured by BM25 over WebFAQ (`make beir`'s
+pipeline; Turkish 144 846 documents, Vietnamese 123 972, Greek 38 516,
+French 569 505), each set's queries as typed and the same queries typed
+without accents (NFD, the marks taken off):
+
+| nDCG@10 | main | `@text`, folded | `@text(accents)`, kept as written |
+|---|---|---|---|
+| Turkish, as typed | 0.4841 | 0.4835 | 0.4839 |
+| Turkish, without accents | 0.4095 | 0.4835 | 0.4835 |
+| Vietnamese, as typed | 0.6471 | 0.6006 | 0.6453 |
+| Vietnamese, without accents | 0.2113 | 0.6005 | 0.6005 |
+| Greek, as typed | 0.5956 | 0.6002 | 0.5971 |
+| Greek, without accents | 0.3119 | 0.6002 | 0.6002 |
+| French, as typed | 0.4932 | 0.4943 | 0.4942 |
+| French, without accents | 0.4105 | 0.4943 | 0.4943 |
+| SciFact (English) | 0.6618 | 0.6618 | 0.6618 |
+
+Folded, a word is one term however it is accented, at index and query time
+alike: a word typed without accents finds every spelling, and so does one
+typed with them. That lost where accents tell words apart: Vietnamese's
+tones tell syllables apart (`ma`, `má`, `mà`, `mả`, `mã` and `mạ` are six
+words), and its queries typed with them lost 0.047, a folded syllable's
+list all of them -- a query took 1.75x as long (818 -> 1 432 us). Kept as
+written as well (`text::WRITTEN`, `~`), as Elasticsearch's
+`preserve_original` keeps the original beside its fold, a query's word
+typed without accents reads the fold, every spelling of it, and one typed
+with them its term as written where the index holds it and the fold where
+it does not -- typed with an accent no document writes it with, it finds
+every spelling (`TextIndex::read_words`, which ranking, `facet`,
+`highlight()` and `fuzzy` all read a query through, `query_terms` counting
+it). A written term is no word of the
+document's length, so BM25 scores a document as main did, and it has no
+prefixes and no place in the `fuzzy` dictionary: a loose `match` reads a
+word typed with accents as written and its fold among its variants, at a
+prefix's weight, below it.
+
+**Only a row the statement reads decides a spelling.** Whether a word
+typed with accents reads its term as written or its fold is asked of the
+rows the statement reads (`TextIndex::holds`, handed them as `text::Reads`):
+every row for most statements, and for a scoped token's `match` the rows
+its filter selects, the rows its BM25 counts (`Match::within`). Asked of
+the index, alice's own `sutlac tarifi` was found by `sütlaç` -- no row of
+hers writes it so, and the word read its fold -- until bob wrote a row of
+`sütlaç` she cannot read; then the spelling was read, which only his row
+held, and her empty answer told her a row she could not read held the
+word. The ranking (`search_within`, `search_loose`), the set a facet counts
+and a `match` beside `order` or `count` selects (`scored`, handed the rows
+the ranking reads as its `within`) and the marks of `highlight()`
+(`read_terms`, `loose_words`) all read the query through `read_words`, so
+a statement reads a word one way wherever it reads it: `tests/within.rs`
+holds a scoped statement's rows, scores, facets and marks to be the same
+with bob's rows as without them, and
+`a_row_a_statement_does_not_read_decides_no_word` each path. The fallback
+is "no row this statement reads writes it so", which for a scoped token is
+the access rule's to decide; for any other `match` the rows are the
+collection's, as its BM25's are, whatever its `where` keeps -- a `where`
+narrows the rows ranked and nothing counted. A filter that fails to
+evaluate fails the ranking and the set, which read its rows
+(`matching_ids`); the marks, asked of each row by the filter's test, count
+such a row as one the statement does not read. The browser holds no scoped
+token, and asks the index.
+
+**Case decides a word as written no more than its fold.** A term as
+written is the word lowercased, and a letter whose uppercase lowercases to
+another is that other, as the fold reads it (`as_written`): the final `ς`
+is `σ`, which `Σ` lowercases to wherever it stands, `ſ` is `s`, `ϐ ϑ ϕ ϖ ϰ
+ϱ ϵ` are `β θ φ π κ ρ ε`, `ẛ` is `ṡ` and the prosgegrammeni `ι`. Lowercased
+alone, every Greek word ending in `ς` had a term as written with no
+accent to it, and case decided the word: of `ΟΔΟΣ`, `οδος` and `Οδος`,
+`οδος` found the last two and `ΟΔΟΣ` all three.
+`under_accents_case_decides_nothing_the_fold_does_not` holds it over every
+code point, each beside its lowercase, and beside its uppercase wherever
+the fold reads the two alike. The figures first measured for Greek kept as
+written held that sigma's terms: 2 685 177 postings (+70% over main's
+1 583 771, 44.5 MB) and 0.5975 as typed, where Greek now holds 2 625 766
+(+66%, 43.8 MB) and scores 0.5971 -- little, since Greek's monotonic
+spelling accents nearly every word of more than one syllable, and the
+words ending in `ς` without one are a few short ones (`της`, `τους`,
+`τις`) in most documents. Vietnamese, which has no sigma, moved by 3
+postings of 10 061 133.
+
+**The fold is the default and keeping words as written an option, because
+the second helps Vietnamese alone.** On Turkish, French and Greek it scores
+as the fold does or worse (Greek 0.5971 against 0.6002), and every
+accented corpus pays its second term a word -- postings and
+`memory_bytes`, main / folded / kept: Turkish 4 129 247 / 4 128 332 /
+5 278 601 (+28%, 64.6 / 64.2 / 82.9 MB), French 24.20 / 24.11 / 28.04
+million (+16%, 311.9 / 310.2 / 360.5 MB), Greek 1.58 / 1.58 / 2.63 million
+(+66%, 25.8 / 25.5 / 43.8 MB) and Vietnamese 5.71 / 5.47 / 10.06 million
+(+76%, 73.1 / 69.9 / 125.5 MB), nearly every Greek and Vietnamese word
+bearing one; SciFact 633 949 / 633 936 / 634 010. `stats()` reads them:
+`TextIndexStats::terms`, `postings` and `bytes` count the `~` terms and
+their documents beside the folds, as they count a prefix index's `^`
+terms. Single runs under a load
+of 2 to 3, the index's build per document went 4.97 -> 6.19 us over
+Turkish, 8.69 -> 10.37 over Vietnamese and 17.8 -> 27.4 over Greek kept as
+written; a `match`, main / folded / kept, Turkish 87.0 / 88.2 / 86.7 us,
+Vietnamese 818 / 1 432 / 976, French 1 001 / 990 / 1 035, Greek 85 / 87 /
+99, SciFact 52.6 / 52.8 / 49.3 -- typed without accents, a query reads the
+fold either way. So `@text(accents)` is what a language whose accents make
+different words asks for, and the rest pay nothing for it: an index
+without it hands out no `~` term, its query reads a document's terms in
+one pass (`query_terms`), and no word is looked up as written nor tested
+for a mark. Under `prefix=6`
+Turkish scores 0.5532 kept as written as typed (main 0.5547) and 0.5528
+without accents (main 0.4681), its postings 14.07 -> 15.21 million: a
+word's prefixes are its fold's, so `prefix`, `chars`, `k1` and `b` all
+combine with it.
+
+**The tokenizer every index runs knows nothing of `accents`.** `terms`
+takes no flag. Under the option `indexed_terms` hands it one closure, which
+asks `as_written` of each word the tokenizer did not hand out as a slice of
+the text itself -- a word of lowercase ASCII and every gram of Han, kana,
+Hangul or Thai are their own spellings -- and makes a word's prefixes
+beside; without the option or prefixes it hands the tokenizer `f` as it
+is, and a query or an index tests the flag once a text. The option's
+first build tested it in the tokenizer, a word at a time, and an index
+without it paid: in turns of `for_each_term` over 20 000 WebFAQ documents
+(SciFact's 5 183 for English) under a load of 2 to 3, main / that build /
+this one, ns a byte, Russian 21.84 / 22.68 / 22.18, Greek 21.25 / 21.78 /
+21.71, English 3.80 / 3.41 / 3.55 and Turkish 8.13 / 6.51 / 6.62 (an
+uppercase ASCII word lowercased on the ASCII path, where main took the
+long one); `TextIndex::insert`, us a document, Russian 14.86 / 15.61 /
+15.06, Greek 16.79 / 18.01 / 16.83, English 15.23 / 15.57 / 14.59, Turkish
+4.06 / 3.62 / 3.41 -- rough figures, a few percent of noise, the formal
+timing in turns apart. A letter of a script neither the table nor its
+lowercase reaches -- Cyrillic and every block up to the Latin and Greek
+extensions, and every one past them but the Angström sign, whose lowercase
+is `å` -- is lowercased as before anything folded, its two lookups of the
+table spared; `every_character_folds_as_its_lowercase_and_once` holds those
+ranges to the table. Under the option the closure is a call a word the
+first build did not make: `insert` with `accents`, that build / this one,
+English 14.60 / 16.03 us, Russian 18.87 / 19.58, Greek 25.08 / 25.94,
+Turkish 4.85 / 4.96.
+
+**A script the fold never reaches retires no more instructions than main
+did.** The formal timing of that build against main (7 pairs in turns,
+each started below a load of 1.5) still had Russian slower in every pair:
+the tokenizer 21.11 -> 21.73 ns a byte (+3.0%), the index's build
+15.17 -> 15.54 us a document, a `put` 18.03 -> 18.47 us. Counted in
+instructions retired (`/usr/bin/time -l`, the reading of the documents
+taken off), it was the code, not where it landed: Russian's tokenizing
+retired 2.5% more than main's as an index reaches it and 3.7% more as
+`foldtime.rs` calls it, and with main's loop put back in the branch's
+tokenizer 0.6% fewer. Two calls of `char::to_lowercase` in the
+loop -- Cyrillic's arm and the fold's, for a letter the table did not
+hold -- left the standard library's lowercase lookup out of line, a call a
+letter, where main's one call had it inlined; and a `matches!` of the four
+ranges a Cyrillic letter is tested against was compiled into vector
+instructions, a dozen a letter. So the loop calls the lowercase once, for
+the scripts that stay (`stays`, a `match` of its ranges), and the fold's
+arm reads the table alone, a letter's lowercase among its bytes, the rare
+one no byte holds lowercased out of the loop (`lower_folded`, cold);
+`fold_into` is inlined into the loop, natively -- the browser module,
+built for size, keeps it a function. Latin-1's signs, IPA and the
+modifier letters, outside the table and each its own lowercase, are kept
+as written by an arm of their own (`KEPT`): sent down the cold path,
+Azerbaijani's `ə` and Uzbek's `ʻ` were a call a letter, where main
+lowercased them inline. Its terms are the same: the tokenizer,
+`@text(accents)` and a prefix index hand out what that build did for
+every code point in nine contexts and over 12 000 Russian and Greek,
+5 183 English, 30 000 Turkish and 4 869 Azerbaijani documents.
+Instructions retired, millions, main / that build / this one, five passes
+of the tokenizer as an index reaches it (`for_each_indexed_term`), three
+of `TextIndex::insert` and two of `create index` through the database (a
+`put` of the documents taken off):
+
+| | tokenizer | `insert` | `create index` |
+|---|---:|---:|---:|
+| Russian | 8 256 / 8 464 / 8 025 | 5 811 / 5 941 / 5 679 | 4 050 / 4 135 / 3 964 |
+| Greek | 9 542 / 9 843 / 7 672 | 6 721 / 6 902 / 5 600 | 4 679 / 4 801 / 3 931 |
+| English | 1 970 / 1 607 / 1 657 | 2 645 / 2 441 / 2 474 | 1 807 / 1 673 / 1 691 |
+| Turkish | 4 265 / 3 209 / 3 235 | 4 111 / 3 483 / 3 498 | 2 944 / 2 513 / 2 517 |
+| Azerbaijani | 886 / 729 / 650 | 808 / 714 / 668 | 577 / 516 / 483 |
+
+Russian is 2 to 3% under main, and its cycles with it: the tokenizer as
+`foldtime.rs` calls it, 2.177 / 2.248 / 2.145 billion, in turns. Greek is
+a fifth under main, where it was 3% over: its unaccented letters, most of
+its text, were looked up, lowercased and looked up again. English and
+Turkish keep what the fold's ASCII path won, within 3% of that build. Tried and dropped: the test for
+ASCII after the one for the scripts that stay (Turkish, mostly ASCII
+letters, 7% over that build), and the words that are not ASCII handed to
+a function of their own, which spared English's loop its registers but
+cost Russian a call a word (8 348, over main).
+
+**A word written decomposed is another spelling under `accents`.** A
+term as written keeps a word's letters as written: `sütlaç` written whole
+(NFC, as nearly every text and keyboard writes it) and `u` with U+0308,
+`c` with U+0327 (NFD, as macOS's file names and some Vietnamese input
+methods write it) are two terms as written of one fold. A query typed one
+way reads the rows written that way where the statement reads one, and
+the fold, every spelling, where it reads none; typed without accents it
+reads the fold. Without the option the two are one word. Making them one
+term takes each composed letter's marks: 746 of the table's code points
+decompose canonically, into up to three marks -- 3.2 KB raw and 452 bytes
+brotli of data alone (`tools/fold/gen.py` could emit it), before the code
+putting a decomposed word's marks in Unicode's order -- where the option
+whole costs the module about 200 bytes brotli, for text nearly never
+written so. So it is said here and on the site, not built.
+
+**`accents` is index kind 11, its options a byte after it.** `chars` took
+kind 7 beside the plain 3, as a quantized graph took 5 beside 2: a binary
+from before refuses a kind it does not know (`unknown index kind`) rather
+than build the index without the option -- here, read a word typed with
+accents as every spelling. Two more kinds for `accents` and `accents` with
+`chars` would have doubled with each option after it; kind 11 is followed
+by a byte of flags (`TEXT_CHARS` 1, `TEXT_ACCENTS` 2), and a bit this
+binary does not know is refused (`unknown text index options`), so the
+next option is a bit a binary from before refuses in turn. An index
+without `accents` is written as kind 3 or 7, as it always was, so a file
+that declares none stays one an older binary opens. `TextIndexSpec`'s
+`Debug` leaves `accents` out where it is unset, as `Field`'s leaves out
+`beside`: `make fennecql-corpus` compares trees by that form, and every
+`@text` of every text would have read as another.
+
+Weights tried for the fold beside the word as written, accented queries,
+Turkish / Vietnamese / Greek / French (Greek's before its final sigma was
+read as `σ`, above): none, as built, 0.4839 / 0.6453 / 0.5975 / 0.4942;
+`fuzzy`'s -- the whole weight, scaled below the least the written term
+adds to a document -- 0.4829 / 0.6400 / 0.5964 / 0.4945; a
+tenth 0.4816 / 0.6409 / 0.5943 / 0.4946; a quarter 0.4766 / 0.6339 /
+0.5871 / 0.4936; and the whole, unscaled -- both terms a query's, as
+Elasticsearch with `preserve_original` on both sides reads them -- 0.5384
+on Greek. Each weight counts an accented word twice against the words of
+the query typed without accents, and it walked one more list a word:
+Turkish's `match` 87 -> 101 us at a tenth, Vietnamese's 976 -> 1 241.
+Rejected as well, the layout the other way round: the word as written the
+plain term and its fold behind a mark, a word typed without accents
+reading its own term whole and the marked fold at less. The rare documents
+written without accents then ranked first: Greek's queries typed without
+accents scored 0.4310 at a quarter, 0.5246 at half and 0.5630 at
+`fuzzy`'s weight, against the fold's 0.6002, and reading the two whole is
+the fold again for a merge of two lists a word at query time.
+
 ## Text index is derived
 
 **The text index is derived data as well, but it is not persisted.** `@text`

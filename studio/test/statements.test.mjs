@@ -292,6 +292,8 @@ test('a plan is asked of a get as typed, explain in front, the same parameters',
 test('a schema change names only what FennecQL writes, and checks each option', () => {
   assert.deepEqual(S.createIndex('orders', 'total', { kind: 'sorted' }), { text: 'create index on orders (total) @sorted', params: [] });
   assert.equal(S.createIndex('docs', 'title', { kind: 'text', prefix: 6, chars: true }).text, 'create index on docs (title) @text(prefix=6, chars)');
+  assert.equal(S.createIndex('docs', 'title', { kind: 'text', accents: true }).text, 'create index on docs (title) @text(accents)');
+  assert.deepEqual(S.indexSpec({ kind: 'text', chars: true, accents: true }).json, { kind: 'text', chars: true, accents: true });
   assert.equal(S.createIndex('docs', 'title', { kind: 'text', prefix: '' }).text, 'create index on docs (title) @text');
   assert.equal(S.createIndex('docs', 'emb', { kind: 'hnsw', metric: 'l2', quant: 'int8' }).text, 'create index on docs (emb) @hnsw(l2, quant=int8)');
   assert.equal(S.createIndex('ev', 'at', { kind: 'ttl', ttl: '7d' }).text, 'create index on ev (at) @ttl(7d)');
