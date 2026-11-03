@@ -10006,7 +10006,7 @@ impl Database {
         }
         let whole_k = f.k.unwrap_or(DEFAULT_FUSE_K);
         let k = whole_k as f32;
-        let text = self.run_match(c, sel, m, depth, params, ctx)?;
+        let (text, _) = self.run_match(c, sel, m, depth, params, ctx)?;
         let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
         // Both sides charged to a call: `run_match` charged its own.
         self.examine(vectors.len())?;
@@ -10041,7 +10041,8 @@ impl Database {
     }
 
     /// `match`, and `rerank` on top of it when the query asks for one: the
-    /// first `want` rows, best first.
+    /// first `want` rows, best first, and the filter's rows where it read
+    /// them, which a facet beside it counts among.
     ///
     /// The two stages answer different questions. `match` is recall: cheap,
     /// lexical, and wrong about meaning. `rerank` is precision: exact vector
@@ -10055,7 +10056,7 @@ impl Database {
         want: usize,
         params: &[Value],
         ctx: &EvalCtx,
-    ) -> Result<Vec<(DocId, f32)>> {
+    ) -> Result<Ranked> {
         let (ix, query) = text_query(c, m, ctx)?;
 
         let allowed: Option<Vec<DocId>> = match &sel.filter {
@@ -10084,7 +10085,7 @@ impl Database {
                     hits.len()
                 )
             });
-            return Ok(hits);
+            return Ok((hits, allowed));
         };
 
         // The candidate set has to be at least as large as what the caller
@@ -10135,12 +10136,10 @@ impl Database {
         });
         plan(|| format!("rerank: {}, exact distance read from the store", rr.field));
         let mut ids = hits.into_iter().map(|h| (h.0, f32::NEG_INFINITY));
-        Ok(
-            order_exactly(&c.store, pos, metric, &qv, &mut ids, want, &mut |_| {
-                Ok(true)
-            })?
-            .0,
-        )
+        let hits = order_exactly(&c.store, pos, metric, &qv, &mut ids, want, &mut |_| {
+            Ok(true)
+        })?;
+        Ok((hits.0, allowed))
     }
 
     /// Collects the children of each parent row.
@@ -10822,9 +10821,13 @@ impl Database {
             scored = with_scores(self.run_fuse(c, sel, m, near, f, params, &ctx)?);
         } else if let Some(m) = sel.matcher.as_ref().filter(|_| sel.match_ranks()) {
             let want = ranked_rows(sel, params, "match", MAX_MATCH_ROWS)?;
-            scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
+            let (hits, allowed) = self.run_match(c, sel, m, want, params, &ctx)?;
+            scored = with_scores(hits);
+            // Every row it scores above zero, as beside `count`: the
+            // filter's rows the ranking read, read once.
             if wants_facets {
-                facet_ids = Some(self.matched_set(c, &sel.filter, m, &ctx)?);
+                let filter = (&sel.collection[..], &sel.filter);
+                facet_ids = Some(self.matched_rows(c, filter, m, allowed, false, &ctx)?);
             }
         } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
@@ -10981,13 +10984,11 @@ impl Database {
             let cap = page.filter(|_| !required);
             let counted = wants_facets && !all;
             let mut facet_ids = None;
+            // A `match` here is beside `order` (`Select::match_ranks`), so
+            // no page is cut before the order is put on its rows.
             let stop = if counted { None } else { cap };
             let mut ids = match &sel.matcher {
-                Some(m) => {
-                    let mut ids = self.matched_rows(c, sel, m, ctx)?;
-                    ids.truncate(stop.unwrap_or(usize::MAX));
-                    ids
-                }
+                Some(_) => self.selected_ids(c, sel, ctx)?,
                 None => self.matching_ids_capped(&sel.collection, &sel.filter, params, stop)?,
             };
             // `required` decides who is on the page, so it runs before the
@@ -11195,44 +11196,53 @@ impl Database {
     /// aggregate, those its `match` scores above zero ([`Self::matched_rows`]).
     fn selected_ids(&self, c: &Collection, sel: &Select, ctx: &EvalCtx) -> Result<Vec<DocId>> {
         match &sel.matcher {
-            Some(m) => self.matched_rows(c, sel, m, ctx),
+            Some(m) => self.matched_rows(c, (&sel.collection, &sel.filter), m, None, true, ctx),
             None => self.matching_ids(&sel.collection, &sel.filter, ctx.params),
         }
     }
 
-    /// What `match` is beside `order`, `count` or an aggregate: a filter,
-    /// the rows its ranking would score above zero ([`TextIndex::scored`])
-    /// that the statement's filter passes, ascending, none ranked -- as
-    /// `id in (get <c> match ... select id)` and the filter would select
-    /// them, with no ceiling: a count or an aggregate answers no rows, and
-    /// a page put in order is held to what an ordered `get` is. A scoped
-    /// token's `match` scores over the rows its filter selects
-    /// ([`Match::within`]), so its set is the one those scores are above
-    /// zero over; the filter holds its rules and `@ttl`'s `alive`, ANDed in
-    /// before the statement reached here. Every row the words reach is
-    /// charged to a call (`--call-max-rows`), as a ranking's are.
+    /// What `match` is beside `order`, `count` or an aggregate, and what a
+    /// `facet` beside any `match` counts over: a filter, the rows its
+    /// ranking would score above zero ([`TextIndex::scored`]) that `filter`
+    /// passes, ascending, none ranked -- as `id in <those rows>` and the
+    /// filter would select them, with no ceiling: a count, an aggregate or
+    /// a facet answers no rows, and a page put in order is held to what an
+    /// ordered `get` is. A scoped token's `match` scores over the rows its
+    /// filter selects ([`Match::within`]), so its set is the one those
+    /// scores are above zero over; the filter holds its rules and `@ttl`'s
+    /// `alive`, ANDed in before the statement reached here. `allowed` is
+    /// the filter's rows where a ranking beside read them. Every row the
+    /// words reach is charged to a call (`--call-max-rows`), as a
+    /// ranking's are. `told`: `explain` says what it did, as it does where
+    /// the rows are the statement's and not a facet's.
+    ///
+    /// The line is written here, after `scored`, which a build without the
+    /// text index never returns from: written by a caller, it was 0.7 KB
+    /// of the module without the indexes.
     fn matched_rows(
         &self,
         c: &Collection,
-        sel: &Select,
+        (name, filter): (&str, &Option<Expr>),
         m: &Match,
+        allowed: Option<Vec<DocId>>,
+        told: bool,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let (ix, query) = text_query(c, m, ctx)?;
-        let allowed = match (&sel.filter, m.within) {
-            (Some(_), true) => Some(self.matching_ids(&sel.collection, &sel.filter, ctx.params)?),
+        let allowed = match (allowed, filter, m.within) {
+            (Some(list), ..) => Some(list),
+            (None, Some(_), true) => Some(self.matching_ids(name, filter, ctx.params)?),
             _ => None,
         };
-        let mut ids = ix.scored(&query, m.loose(), allowed.as_deref())?;
+        let within = allowed.as_deref().filter(|_| m.within);
+        let mut ids = ix.scored(&query, m.loose(), within)?;
         self.examine(ids.len())?;
         let scored = ids.len();
-        // The filter's rows among them: the list it is a scoped token's,
-        // and otherwise what its index names, if one does, then each row
-        // the index did not answer tested -- the plan `id in <the set> and
+        // The filter's rows among them: the list read already, and
+        // otherwise what its index names, if one does, then each row the
+        // index did not answer tested -- the plan `id in <the set> and
         // <filter>` takes.
-        let kept_by =
-            |ids: &mut Vec<DocId>, list: &[DocId]| ids.retain(|id| list.binary_search(id).is_ok());
-        match (&sel.filter, &allowed) {
+        match (filter, &allowed) {
             (None, _) => {}
             (Some(_), Some(list)) => kept_by(&mut ids, list),
             (Some(f), None) => {
@@ -11251,50 +11261,21 @@ impl Database {
                 }
             }
         }
-        plan(|| {
-            format!(
-                "match: the text index on {}{}, a filter: {scored} rows scored, {} kept",
-                m.field,
-                loosely(m),
-                ids.len()
-            )
-        });
-        Ok(ids)
-    }
-
-    /// Every row `match` selects: each holding a term of the query, the
-    /// filter tested on those alone -- what `facet` counts over, where the
-    /// ranking keeps only the page.
-    fn matched_set(
-        &self,
-        c: &Collection,
-        filter: &Option<Expr>,
-        m: &Match,
-        ctx: &EvalCtx,
-    ) -> Result<Vec<DocId>> {
-        let Some(ix) = c.text(&m.field)? else {
-            return Ok(Vec::new());
-        };
-        let query = match eval(&m.query, &mut NoRow, ctx)? {
-            Value::Text(t) => t,
-            _ => return Ok(Vec::new()),
-        };
-        let mut ids = match m.fuzzy == 0 && !m.prefix {
-            true => ix.matching(&query),
-            false => ix.matching_loose(&query, m.loose())?,
-        };
-        // Every row the words reach, which a facet counts over: charged to
-        // a call as a scan's rows are.
-        self.examine(ids.len())?;
-        if let Some(f) = filter {
-            let test = Filter::new(c, f, ctx);
-            let mut kept = Vec::with_capacity(ids.len());
-            for id in ids {
-                if test.matches(id, ctx)? {
-                    kept.push(id);
-                }
-            }
-            ids = kept;
+        if told {
+            plan(|| {
+                // A scoped token is told the rows it kept alone: the words
+                // reach rows it cannot read, and how many is not its to
+                // learn.
+                let rows = match m.within {
+                    true => format!("{} rows kept", ids.len()),
+                    false => format!("{scored} rows scored, {} kept", ids.len()),
+                };
+                format!(
+                    "match: the text index on {}{}, a filter: {rows}",
+                    m.field,
+                    loosely(m)
+                )
+            });
         }
         Ok(ids)
     }
@@ -11358,7 +11339,8 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<(Vec<DocId>, bool)> {
         if let Some(m) = &sel.matcher {
-            return Ok((self.matched_set(c, filter, m, ctx)?, false));
+            let filter = (&sel.collection[..], filter);
+            return Ok((self.matched_rows(c, filter, m, None, false, ctx)?, false));
         }
         let required = sel.lookup.as_ref().filter(|l| l.required);
         if filter.is_none() && required.is_none() {
@@ -13074,18 +13056,44 @@ fn push_step(line: String) {
     });
 }
 
+/// A ranking's rows, best first, with their scores, and the rows its filter
+/// passes where it read them ([`Database::run_match`]).
+type Ranked = (Vec<(DocId, f32)>, Option<Vec<DocId>>);
+
+/// The ids of `ids` that `list` holds, both ascending: one walk of each,
+/// side by side, the kept ones written over the front of `ids`.
+fn kept_by(ids: &mut Vec<DocId>, list: &[DocId]) {
+    let (mut at, mut kept) = (0, 0);
+    for i in 0..ids.len() {
+        let id = ids[i];
+        while at < list.len() && list[at] < id {
+            at += 1;
+        }
+        if at < list.len() && list[at] == id {
+            ids[kept] = id;
+            kept += 1;
+        }
+    }
+    ids.truncate(kept);
+}
+
 /// The text index `m` searches and its query's text: the index or the
 /// refusal naming the field, the text or the refusal naming what it is --
 /// one place for a ranking and a filter, so both refuse alike.
+///
+/// A build without the text index holds none, so it refuses here, in line
+/// with each caller: what follows the call in a ranking and a filter is
+/// then no code of that module. Called, it was 0.5 KB of a module without
+/// the indexes, and the ranking's and the filter's paths after it more.
+#[cfg_attr(not(feature = "text"), inline(always))]
 fn text_query<'c>(c: &'c Collection, m: &Match, ctx: &EvalCtx) -> Result<(&'c TextIndex, String)> {
-    let ix = c.text(&m.field)?.ok_or_else(|| {
-        not_built_on(c, &m.field, "full-text index", true).unwrap_or_else(|| {
-            Error::Query(format!(
-                "field `{}` has no full-text index (declare it with @text)",
-                m.field
-            ))
-        })
-    })?;
+    let ix = match cfg!(feature = "text") {
+        true => c.text(&m.field)?,
+        false => None,
+    };
+    let Some(ix) = ix else {
+        return Err(no_text_index(c, &m.field));
+    };
     match eval(&m.query, &mut NoRow, ctx)? {
         Value::Text(t) => Ok((ix, t)),
         other => Err(Error::Type(format!(
@@ -13093,6 +13101,18 @@ fn text_query<'c>(c: &'c Collection, m: &Match, ctx: &EvalCtx) -> Result<(&'c Te
             other.type_name()
         ))),
     }
+}
+
+/// `match` over a field with no text index: the feature a build was made
+/// without, or the declaration the field lacks.
+#[cold]
+#[inline(never)]
+fn no_text_index(c: &Collection, field: &str) -> Error {
+    not_built_on(c, field, "full-text index", true).unwrap_or_else(|| {
+        Error::Query(format!(
+            "field `{field}` has no full-text index (declare it with @text)"
+        ))
+    })
 }
 
 /// `match`'s first `k`: a plain one down the path it always took, one

@@ -137,7 +137,9 @@ get articles select topic, count(*) group topic match body $1
     words as a ranking would, and <code>facet</code> counts the same rows
     the page or the count is of.</li>
   <li><b>Refused, naming what to write:</b> <code>rerank</code>, which
-    reorders a ranking there is none of here; <code>highlight()</code>
+    reorders a ranking there is none of here; <code>order _score</code>,
+    a ranking's score (leave out <code>order</code> and <code>match</code>
+    ranks best first); <code>highlight()</code>
     beside <code>count</code>, which answers no row to mark; and an
     aggregate's <code>limit</code> or <code>offset</code> with no
     <code>order</code>, which would fold the first matches by id rather

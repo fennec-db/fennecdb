@@ -262,7 +262,7 @@ fn what_does_not_combine_is_refused() {
         // a `limit` with no `order` would pick rows by id.
         (
             "get t select sum(n) match body \"x\" limit 3",
-            "write `order` to say which rows",
+            "`limit` and `offset` need `order`",
         ),
         // Ungrouped, `order` picks the rows folded: by what a row holds.
         ("get t select sum(n) order sum(n) limit 3", "picks the rows"),

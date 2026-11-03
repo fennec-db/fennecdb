@@ -2520,12 +2520,21 @@ impl Select {
         }
         // Beside `order`, `count` or an aggregate, `match` ranks nothing
         // ([`Self::match_ranks`]): there are no candidates to reorder, and
-        // the statement's own clause decides the rows.
-        if self.rerank.is_some() && !self.match_ranks() {
+        // the statement's own clause decides the rows. A build without the
+        // text index refuses every `match`, naming it, so these are asked
+        // where one is built.
+        let text = cfg!(feature = "text");
+        if text && self.rerank.is_some() && !self.match_ranks() {
             return Err(Error::Query(
-                "`rerank` reorders the rows `match` ranks, and beside `order`, `count` or an \
-                 aggregate `match` ranks none: leave out `rerank`, or what decides the rows"
+                "beside `order`, `count` or an aggregate `match` ranks nothing: leave out `rerank`"
                     .into(),
+            ));
+        }
+        // Nor is there a score to order by: `_score` is an answer's, a
+        // ranking's, and no field -- named, it was "not found".
+        if text && self.matcher.is_some() && self.order.iter().any(|s| s.field == "_score") {
+            return Err(Error::Query(
+                "`_score` is a ranking's: leave out `order`, and `match` ranks best first".into(),
             ));
         }
         // `lookup` does not combine with the clauses that rank or collapse
@@ -2693,7 +2702,7 @@ impl Select {
             } else if !self.aggregate.is_empty() {
                 "a row's text; aggregates answer groups"
             } else if self.count {
-                "a row's text; `count` answers a number"
+                "a row's text, and `count` answers no row: count without it"
             } else if self.marks.iter().any(|m| m.snippet == Some(0)) {
                 "at least one word: `snippet(<field>, <words>)`"
             } else if self.marks.iter().any(|m| {
@@ -3051,14 +3060,13 @@ impl Select {
             // Beside an aggregate `match` is a filter, ranking nothing: a
             // `limit` with no `order` would fold the first rows by id,
             // which reads as "the best 50" and is not.
-            if self.matcher.is_some()
+            if cfg!(feature = "text")
+                && self.matcher.is_some()
                 && self.order.is_empty()
                 && (self.limit.is_some() || !self.offset.is_zero())
             {
                 return Err(Error::Query(
-                    "beside an aggregate `match` is a filter and ranks nothing, so `limit` and \
-                     `offset` would pick rows by id: write `order` to say which rows, or fold \
-                     every row it finds"
+                    "beside an aggregate `match` ranks nothing: `limit` and `offset` need `order`"
                         .into(),
                 ));
             }

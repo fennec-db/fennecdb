@@ -206,9 +206,6 @@ impl TextIndex {
     {
         match self.never {}
     }
-    pub fn matching(&self, query: &str) -> Vec<DocId> {
-        match self.never {}
-    }
     pub fn search_loose<F>(
         &self,
         query: &str,
@@ -220,13 +217,6 @@ impl TextIndex {
     where
         F: Fn(DocId) -> bool,
     {
-        match self.never {}
-    }
-    pub fn matching_loose(
-        &self,
-        query: &str,
-        loose: crate::text::Loose,
-    ) -> crate::error::Result<Vec<DocId>> {
         match self.never {}
     }
     pub fn scored(

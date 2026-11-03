@@ -1075,6 +1075,15 @@ fn a_scoped_match_filter_reads_only_the_tokens_rows() {
     // The server's own token counts every row holding it.
     let (_, every) = n.query(ROOT, r#"get memos match body "initech" count"#);
     assert_eq!(every.trim(), r#"[{"count":202}]"#);
+    // Nor does `explain` tell her how many rows the words reached: the
+    // rows she kept alone.
+    let ask = r#"explain get memos match body "initech" count"#;
+    let (status, plan) = n.query(&alice, ask);
+    assert_eq!(status, 200, "{plan}");
+    assert!(plan.contains("a filter: 2 rows kept"), "{plan}");
+    assert!(!plan.contains("202") && !plan.contains("scored"), "{plan}");
+    let (_, plan) = n.query(ROOT, ask);
+    assert!(plan.contains("202 rows scored, 202 kept"), "{plan}");
 }
 
 /// A radius, a box and `near` over a point read only the token's rows: its

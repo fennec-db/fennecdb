@@ -135,11 +135,14 @@ walks, made by the functions that make them for it (`query_terms`,
 cursor, a word's `fuzzy` variants and `prefix` completions one a distance
 -- and a document is in it where a cursor weighing more than nothing holds
 it: a ranking keeps a document whose summed contributions are above zero,
-each its cursor's weight times a factor above zero. It is
-`TextIndex::matching`'s, what `facet` counts over, but for a word so
-common its idf rounds to 0 in `f32` -- every one of 2^23 documents or more
-holding it -- which no ranking scores and the set leaves out with it; a
-facet beside a ranking counts as it did. The filter is the statement's,
+each its cursor's weight times a factor above zero -- so a word so
+common its idf rounds to 0 in `f32`, every one of 2^23 documents or more
+holding it, adds none, as it adds none to a ranking. A `facet` counts over
+the same set beside a ranking too (`Database::matched_rows`, handed the
+filter's rows the ranking read, so a scoped token's are read once), where
+it counted `TextIndex::matching`'s -- every document holding a term --
+which took that word's list: the one place the two sets parted, gone with
+`matching` and `matching_loose`. The filter is the statement's,
 `scoped()`'s rules and `@ttl`'s `alive` ANDed in before it reaches
 `Database::matched_rows`: a scoped token's set is the one BM25 over its own
 rows scores above zero (`Match::within`, the filter's rows read first, as
@@ -160,18 +163,28 @@ to a twin whose expiry is written out.
 Bounds. A count or an aggregate answers no rows, and an ordered page reads
 every match as an ordered `get` reads every row its filter passes, so
 neither keeps the ranking's `MAX_MATCH_ROWS`: a `count` over 12 500
-matched rows answers 12 500. The set is a `Vec<DocId>`, four bytes a row,
-as `matching_ids` holds a `where`'s. What bounded it before bounds it and
-errors as it did: a word `fuzzy` or `prefix` reads as more than
-`MAX_EXPANSIONS` words, `--call-max-rows`, and the ranking's 10 000 rows
-wherever `match` still ranks.
+matched rows answers 12 500. The set is a `Vec<DocId>`, eight bytes a
+row, as `matching_ids` holds a `where`'s, and bounded by the index's
+documents, never by its lists' sum: the cursors' lists are laid end to end
+and put together (`sort_unstable`, `dedup`) whenever they pass the count
+of documents, so it holds twice that at most while it is made -- where
+each list copied and then sorted once held a query of 200 words, each in
+half of a million documents, as 100 million ids, 800 MB. In the common
+case, lists that together hold fewer ids than there are documents, it is
+the one sort it was. What bounded it before bounds it and errors as it
+did: a word `fuzzy` or `prefix` reads as more than `MAX_EXPANSIONS`
+words, `--call-max-rows`, and the ranking's 10 000 rows wherever `match`
+still ranks. `explain` says how many rows the words scored and how many
+the filter kept; to a scoped token it says the kept alone, since the words
+reach rows it cannot read.
 
 What answers beside it. `highlight()` and `snippet()` mark a row's words
 whatever orders it, the marks its ranking gives it, so they stay beside
 `order`; beside `count` there is no row to mark, refused. A row carries no
 `_score` under `order`: the order is the statement's, and a score would be
 BM25 worked out again over each row of the page for a column nothing
-ordered by -- a caller after relevance leaves `order` out. `rerank`
+ordered by -- a caller after relevance leaves `order` out, and `order
+_score`, which named no field ("not found"), is refused saying so. `rerank`
 reorders the rows `match` ranks, and here it ranks none: refused, as is an
 ungrouped aggregate's `limit` or `offset` with no `order`, which would fold
 the first matches by id and read as "the best 50". `facet` beside a
@@ -179,19 +192,28 @@ filtering `match` counts the rows it selects, what a `count` beside it
 counts. `near` and `fuse` are as they were; `fuse` was refused beside all
 three already.
 
-The browser module grew 3.1 KB raw, 1.4 KB gzip and 1.0 KB brotli
-(`matched_rows` 1.2 KB, `scored` 0.6, the index and query read once for
-both, `text_query`, 0.15 more than `run_match` held), the one without the
-indexes 0.4 KB brotli: kept in it, as a page's search box asks "how many"
-and "newest first" as a server's does.
+The browser module grew 1.3 KB raw, 0.8 KB gzip and 0.7 KB brotli
+(`matched_rows` 1.4 KB, `scored` 0.6, less the facets' own path, 1.8 KB:
+`matched_set`, `matching` and `matching_loose`): kept in it, as a page's
+search box asks "how many" and "newest first" as a server's does. The
+first cut grew it 3.1 KB raw, 1.0 brotli, before the facets shared the set.
+A build without the text index refuses `match` in `text_query`, in line
+with each caller (`no_text_index`), so neither the ranking's path nor the
+filter's after it is code of that module, nor `rerank`'s, and the checks
+only a built index would make (`order _score`, `rerank` or an aggregate's
+`limit` beside a filter) are asked where one is: the module without the
+indexes and the one with no feature lost 4.3 and 4.0 KB raw, 1.0 and 1.1
+brotli, against main.
 
 Rejected: putting the set into the filter as an `id in [...]` -- each id an
 `Expr`, then a `Value` encoded into the bound filter's `InSet` table, as a
-written list is -- for four bytes a row and its bound kept; the rows
+written list is -- for eight bytes a row and its bound kept; the rows
 holding a term (`matching`), which leaves the ranking's set at the `f32`
-edge above; and a ranking with no `k`, read off for its positive scores,
+edge above; a ranking with no `k`, read off for its positive scores,
 which walks every list a document at a time where the set is the lists
-copied and sorted once.
+put together; and merging each list into the set as it comes, a walk of
+the set a list, which gains only where the lists pass the documents, for a
+merge of its own in the module where the sort is the engine's one.
 
 ## Tokenizer
 
@@ -324,7 +346,7 @@ are cursors as any term's, so MaxScore stays rank-safe
 (`pruning_never_changes_a_loose_answer`). A word reaching
 more than `MAX_EXPANSIONS` (10 000) words is refused, never cut: FiQA's
 80 426 words hold no one-letter prefix past 7 020. `highlight()` marks the
-variants (`Terms::add`), `facet` counts their rows (`matching_loose`). A
+variants (`Terms::add`), `facet` counts their rows (`TextIndex::scored`). A
 plain `match` takes the path it did, `search_within` split into
 `query_terms`, `cursor` and `ranked`, the last in line natively: FiQA's
 0.261 ms p50 on main, 0.257 here (0.269 called), SciFact's 0.042 either
@@ -399,8 +421,9 @@ pairs, a snippet's `{marks, text}`; with them the marked text, not escaped.
 A snippet is the window of `N` words (a Han character a word) with the most
 marks, centred on them. `facet f [top N]` counts over the rows the query
 selects before `offset` and `limit` -- the filter's, `match`'s
-(`TextIndex::matching`, every row holding a term, the filter tested on
-those), a required `lookup`'s -- and is refused beside `near`, which ranks
+(`Database::matched_rows`, every row its ranking scores above zero, the
+filter's among them: [match as a filter](#match-as-a-filter)), a required
+`lookup`'s -- and is refused beside `near`, which ranks
 every row the filter passes rather than selecting some. A `@hash` field
 of text, int, bool or timestamp, whose bucket key is the value's encoding,
 counts from the buckets (a bitset of the set when there is a filter); the
@@ -431,7 +454,7 @@ are never what is left out -- split after them, `facet owner disjunctive`
 counted every user's rows (`tests/access.rs`). A select built in code is
 split in `answered_select`, before the expiry; one that leaves nothing
 out is a plain facet. Each disjunctive facet finds its own rows
-(`facet_set`: `matching_ids`, `match`'s `matched_set`, a required
+(`facet_set`: `matching_ids`, `match`'s `matched_rows`, a required
 `lookup`) in the same statement under the same lock. `facet price ranges
 [0, 2500, 5000]` counts a number by range, every range in order, value
 `[from, to]` (`facet_ranges`): through a `@sorted` field's index when every

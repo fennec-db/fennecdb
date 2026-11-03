@@ -302,27 +302,32 @@ fn what_cannot_be_answered_is_refused() {
     for (sql, want) in [
         (
             "get v match title $1 rerank e [1, 0] order id",
-            "`rerank` reorders the rows `match` ranks",
+            "ranks nothing: leave out `rerank`",
         ),
         (
             "get v match title $1 rerank e [1, 0] count",
-            "`rerank` reorders the rows `match` ranks",
+            "ranks nothing: leave out `rerank`",
         ),
         (
             "get r select highlight(title) match title $1 count",
-            "`count` answers a number",
+            "`count` answers no row",
         ),
         (
             "get r select count(*) match title $1 limit 50",
-            "write `order` to say which rows",
+            "`limit` and `offset` need `order`",
         ),
         (
             "get r select sum(n) match title $1 offset 5",
-            "write `order` to say which rows",
+            "`limit` and `offset` need `order`",
         ),
         (
             "get r match title $1 count limit 5",
             "`count` cannot be used together with `limit`",
+        ),
+        // No score to order by: a ranking's alone, and no field.
+        (
+            "get r match title $1 order _score desc",
+            "`_score` is a ranking's: leave out `order`",
         ),
     ] {
         let e = error(&db, sql, &p);
@@ -521,4 +526,13 @@ fn explain_names_the_filter() {
     // On its own `match` still ranks, and says so.
     let ranked = steps("explain get r match title $1 limit 5");
     assert_eq!(ranked[0], "match: the text index on title, 5 ranked");
+    // A facet beside the ranking counts the filter's set, and says nothing
+    // more of it.
+    let faceted = steps("explain get r match title $1 limit 5 facet kind");
+    let told: Vec<&String> = faceted.iter().filter(|s| s.starts_with("match:")).collect();
+    assert_eq!(
+        told,
+        ["match: the text index on title, 5 ranked"],
+        "{faceted:?}"
+    );
 }

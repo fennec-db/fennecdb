@@ -488,64 +488,34 @@ impl TextIndex {
         (w.len(), mean)
     }
 
-    /// Every document holding a term of `query`, ascending: the set a
-    /// `match` ranks, which `facet` counts over. The lists are ascending
-    /// already, so one alone is copied as it is; more are put together
-    /// through the engine's one sort of ids.
-    pub fn matching(&self, query: &str) -> Vec<DocId> {
-        self.matching_loose(query, Loose::default())
-            .unwrap_or_default()
-    }
-
-    /// [`Self::matching`] with the query's words read loosely: every
-    /// document holding a term of the query or a variant of one of its
-    /// words, what `facet` counts beside a loose `match`.
-    pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
-        let mut lists: Vec<Postings> = Vec::new();
-        for_each_indexed_term(query, &self.spec, |t| {
-            if let Some(list) = self.postings.get(t) {
-                if !lists.iter().any(|l| l.docs.as_ptr() == list.docs.as_ptr()) {
-                    lists.push(list);
-                }
-            }
-        });
-        if !loose.is_plain() {
-            // A variant is no term of the query's own, so no list twice.
-            for r in self.reach(query, loose, &self.query_terms(query))? {
-                lists.extend(r.found.iter().map(|f| f.2));
-            }
-        }
-        let mut out: Vec<DocId> = Vec::new();
-        for l in &lists {
-            out.extend_from_slice(l.docs);
-        }
-        if lists.len() > 1 {
-            out.sort_unstable();
-            out.dedup();
-        }
-        Ok(out)
-    }
-
     /// Every document `query` scores above zero, ascending: the rows a
     /// `match` beside `order`, `count` or an aggregate selects, a filter
-    /// there rather than a ranking. Its terms are the cursors a ranking
-    /// walks, weighed as [`Self::search_within`] and [`Self::search_loose`]
-    /// weigh them -- BM25's statistics over `within`, a scoped token's
-    /// rows, where it is given -- and a document is in the set where a term
-    /// weighing more than nothing holds it: a ranking keeps a document
-    /// whose score is above zero, and its score is the sum of its terms'
-    /// contributions, each its weight times a factor above zero. So the set
-    /// is the ranking's to the document: a term so common its idf rounds to
-    /// 0 in `f32` -- every one of 2^23 documents or more holding it -- adds
-    /// no document, as it adds none to a ranking, where [`Self::matching`],
-    /// what `facet` counts over, takes its list.
+    /// there rather than a ranking, and the rows `facet` counts beside
+    /// either. Its terms are the cursors a ranking walks, weighed as
+    /// [`Self::search_within`] and [`Self::search_loose`] weigh them --
+    /// BM25's statistics over `within`, a scoped token's rows, where it is
+    /// given -- and a document is in the set where a term weighing more
+    /// than nothing holds it: a ranking keeps a document whose score is
+    /// above zero, and its score is the sum of its terms' contributions,
+    /// each its weight times a factor above zero. So the set is the
+    /// ranking's to the document, a term so common its idf rounds to 0 in
+    /// `f32` -- every one of 2^23 documents or more holding it -- adding
+    /// none, as it adds none to a ranking.
+    ///
+    /// Its memory is bounded by the documents the index holds, never by
+    /// the lists' sum: the lists are put together through the engine's one
+    /// sort of ids whenever what they hold passes that count, so the set
+    /// never holds more than twice it -- where copying every list first
+    /// held a query of 200 words, each in half of a million documents, as
+    /// 100 million ids: 800 MB.
     pub fn scored(
         &self,
         query: &str,
         loose: Loose,
         within: Option<&[DocId]>,
     ) -> Result<Vec<DocId>> {
-        if self.lengths.len() == 0 {
+        let most = self.lengths.len();
+        if most == 0 {
             return Ok(Vec::new());
         }
         let within = within.filter(|_| cfg!(not(target_arch = "wasm32")));
@@ -559,11 +529,17 @@ impl TextIndex {
         };
         let unions = unions(&reach);
         let mut out: Vec<DocId> = Vec::new();
+        // How many ascending lists `out` holds laid end to end.
         let mut lists = 0;
-        for c in self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within) {
+        for c in &self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within) {
             if c.weight > 0.0 {
                 out.extend_from_slice(c.list.docs);
                 lists += 1;
+                if lists > 1 && out.len() > most {
+                    out.sort_unstable();
+                    out.dedup();
+                    lists = 1;
+                }
             }
         }
         if lists > 1 {
@@ -1280,6 +1256,11 @@ mod tests {
         TextIndexSpec::default()
     }
 
+    /// Every document a plain `query` scores above zero.
+    fn matching(ix: &TextIndex, query: &str) -> Vec<DocId> {
+        ix.scored(query, Loose::default(), None).unwrap()
+    }
+
     #[test]
     fn tokenizes_and_folds_case() {
         assert_eq!(tokenize("Rust and WASM"), ["rust", "and", "wasm"]);
@@ -1549,13 +1530,13 @@ mod tests {
         }
         assert_eq!(ix.terms(), 2 * n as usize + n as usize / 2 + 1);
         for d in (0..n).step_by(97) {
-            assert_eq!(ix.matching(&format!("t{d}a")), [d]);
-            assert_eq!(ix.matching(&format!("t{}c", d / 2)), [d & !1, d | 1]);
+            assert_eq!(matching(&ix, &format!("t{d}a")), [d]);
+            assert_eq!(matching(&ix, &format!("t{}c", d / 2)), [d & !1, d | 1]);
         }
         for d in (0..n).step_by(3) {
             ix.remove(d, &text(d));
         }
-        assert_eq!(ix.matching("t3a t4a t6b"), [4]);
+        assert_eq!(matching(&ix, "t3a t4a t6b"), [4]);
         let pair = ix.search("t5c t9b", 10, |_| true);
         ix.shrink_to_fit();
         assert_eq!(ix.search("t5c t9b", 10, |_| true), pair);
@@ -1563,7 +1544,37 @@ mod tests {
         ix.clear();
         assert_eq!((ix.terms(), ix.len()), (0, 0));
         ix.insert(1, "alpha");
-        assert_eq!(ix.matching("alpha"), [1]);
+        assert_eq!(matching(&ix, "alpha"), [1]);
+    }
+
+    /// A query whose lists hold many times the documents there are: the
+    /// set is put together as the lists pass that count, and is still
+    /// each document a term holds, ascending, once.
+    #[test]
+    fn a_set_whose_lists_pass_the_documents_is_each_once() {
+        let mut ix = TextIndex::new(spec());
+        // Document `d` holds `w<i>` where `d + i` is no multiple of 3:
+        // each word two thirds of the 300, and 50 more holding none.
+        for d in 0..300u64 {
+            let words: Vec<String> = (0..40)
+                .filter(|i| (d + i) % 3 != 0)
+                .map(|i| format!("w{i}"))
+                .collect();
+            ix.insert(d, &words.join(" "));
+        }
+        for d in 300..350u64 {
+            ix.insert(d, "other");
+        }
+        let every: Vec<String> = (0..40).map(|i| format!("w{i}")).collect();
+        assert_eq!(
+            matching(&ix, &every.join(" ")),
+            (0..300).collect::<Vec<_>>()
+        );
+        // `w0`, `w3`, ...: those whose `d` is no multiple of 3, 14 lists
+        // of 200 over 350 documents.
+        let thirds: Vec<String> = (0..40).step_by(3).map(|i| format!("w{i}")).collect();
+        let want: Vec<DocId> = (0..300).filter(|d| d % 3 != 0).collect();
+        assert_eq!(matching(&ix, &thirds.join(" ")), want);
     }
 
     /// The count `memory_bytes` reads is what the terms hold -- each
@@ -1609,7 +1620,7 @@ mod tests {
         }
         for q in ["w1", "w2 w3", "w7 w7 w30", "w39 w0 w12 w5"] {
             assert_eq!(ix.search(q, 50, |_| true), fresh.search(q, 50, |_| true));
-            assert_eq!(ix.matching(q), fresh.matching(q));
+            assert_eq!(matching(&ix, q), matching(&fresh, q));
         }
         assert_eq!(ix.postings_count(), fresh.postings_count());
         for (id, text) in docs {
@@ -1776,7 +1787,7 @@ mod tests {
             prefix: true,
         };
         assert_eq!(loose("datbas", both), [1, 2]);
-        assert_eq!(ix.matching_loose("databasse", fuzzy()).unwrap(), [1, 2]);
+        assert_eq!(ix.scored("databasse", fuzzy(), None).unwrap(), [1, 2]);
         let mut words = ix.loose_words("databasse indexes", fuzzy()).unwrap();
         words.sort_unstable();
         assert_eq!(words, ["database", "databases"]);
@@ -1911,7 +1922,7 @@ mod tests {
             .search_loose("pre", 5, |_| true, None, prefix)
             .unwrap_err();
         assert!(e.to_string().contains("refused rather than cut"), "{e}");
-        assert!(ix.matching_loose("pre", prefix).is_err());
+        assert!(ix.scored("pre", prefix, None).is_err());
         assert!(ix.search_loose("pre1", 5, |_| true, None, prefix).is_ok());
     }
 

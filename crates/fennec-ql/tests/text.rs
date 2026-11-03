@@ -484,23 +484,23 @@ fn clauses_that_contradict_each_other_are_refused() {
         // ranks nothing: there is nothing for `rerank` to reorder.
         (
             r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] order title"#,
-            "`rerank` reorders the rows `match` ranks",
+            "ranks nothing: leave out `rerank`",
         ),
         (
             r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] count"#,
-            "`rerank` reorders the rows `match` ranks",
+            "ranks nothing: leave out `rerank`",
         ),
         (
             r#"get docs select count(*) match title "rust" rerank embed [1.0, 0.0, 0.0]"#,
-            "`rerank` reorders the rows `match` ranks",
+            "ranks nothing: leave out `rerank`",
         ),
         (
             r#"get docs select highlight(title) match title "rust" count"#,
-            "`count` answers a number",
+            "`count` answers no row",
         ),
         (
             r#"get docs select count(*) match title "rust" limit 2"#,
-            "write `order` to say which rows",
+            "`limit` and `offset` need `order`",
         ),
         (r#"get docs match topic "lang""#, "no full-text index"),
         (
