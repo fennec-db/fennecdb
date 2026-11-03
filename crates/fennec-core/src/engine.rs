@@ -46,7 +46,7 @@ mod due;
 #[cfg(feature = "statements")]
 pub(crate) use due::slot_now;
 #[cfg(feature = "statements")]
-pub use due::Due;
+pub use due::{Due, HeldSlot};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -3979,6 +3979,14 @@ pub struct Database {
     /// definition writes anything ([`Self::on_schedules`]).
     #[cfg(feature = "statements")]
     on_schedules: Option<SchedulesHook>,
+    /// The due slots the scheduler running this database's statements
+    /// holds back -- the quota, a lapsed lease, a storage error -- as it
+    /// told them, for the listings' `held` ([`Self::set_held_slots`]): the
+    /// scheduler's memory, never the file's. A word, `None` while none is
+    /// held, as [`Self::pending`] is.
+    #[cfg(feature = "statements")]
+    #[allow(clippy::box_collection)]
+    held_slots: Option<Box<Vec<(String, due::HeldSlot)>>>,
 }
 
 /// What a scheduler watching a database is told of its schedules
@@ -4072,6 +4080,8 @@ impl Database {
             scheduling: false,
             #[cfg(feature = "statements")]
             on_schedules: None,
+            #[cfg(feature = "statements")]
+            held_slots: None,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]

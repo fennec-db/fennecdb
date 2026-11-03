@@ -164,19 +164,23 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
             crate::audit::statement(tenant, source, &buf, failed);
             noted.clear();
         });
-        let counted = Entry {
-            tenant: None,
-            text: String::new(),
-            id: hash(tenant, &buf),
-            calls: 1,
-            errors: failed as u64,
-            rows,
-            micros,
-            min_micros: micros,
-            max_micros: micros,
-        };
-        count(tenant, &buf, counted);
+        count(tenant, &buf, once(hash(tenant, &buf), rows, micros, failed));
     });
+}
+
+/// One call's counts, `id` its shape's key: what [`count`] adds.
+fn once(id: u64, rows: u64, micros: u64, failed: bool) -> Entry {
+    Entry {
+        tenant: None,
+        text: String::new(),
+        id,
+        calls: 1,
+        errors: failed as u64,
+        rows,
+        micros,
+        min_micros: micros,
+        max_micros: micros,
+    }
 }
 
 /// A shape's text as it is kept: cut at [`TEXT_MAX`] bytes.
@@ -199,7 +203,8 @@ fn kept(shape: &str) -> String {
 /// time its runs' -- which the writer's shape holds too, so an operator
 /// tuning a slow `set orders` sees what of it was the ledger -- and an
 /// error where it refused the write. Read as every shape is, by what reads
-/// every collection: a binding's name is the schema's.
+/// every collection: a binding's name is the schema's. Keyed apart from
+/// any text a client sends ([`own_key`]).
 pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
     let mut names: Vec<&str> = Vec::new();
     for ran in &r.ran {
@@ -213,7 +218,7 @@ pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
         let mut e = Entry {
             tenant: None,
             text: String::new(),
-            id: hash(tenant, &shape),
+            id: own_key(tenant, &shape),
             calls: 0,
             errors: (refused_by == Some(name)) as u64,
             rows: 0,
@@ -231,6 +236,25 @@ pub(crate) fn bound(tenant: Option<&str>, r: &Runs) {
         }
         count(tenant, &shape, e);
     }
+}
+
+/// A run of the scheduled statement `name`, counted as the shape `schedule
+/// <name>` (`docs/design/named-statements.md`, *Watching schedules*): its
+/// calls the runs, its rows theirs -- what the body's last statement
+/// answered, as a call's -- its time theirs under the write lock, never
+/// how late they were, and an error where the run was refused, by the
+/// statement or the state, or its outcome is unknown. On a tenant node it
+/// is the tenant's, read as every shape of the tenant's is. Keyed apart
+/// from any text a client sends ([`own_key`]): a failed parse of
+/// `schedule purge` counts as its own shape, never among the runs.
+pub(crate) fn scheduled(tenant: Option<&str>, name: &str, rows: u64, took: Duration, failed: bool) {
+    let shape = format!("schedule {name}");
+    let micros = took.as_micros().min(u64::MAX as u128) as u64;
+    count(
+        tenant,
+        &shape,
+        once(own_key(tenant, &shape), rows, micros, failed),
+    );
 }
 
 /// `counted` -- one request's counts of `shape`, its `id` the shape's hash
@@ -390,6 +414,15 @@ fn hash(tenant: Option<&str>, shape: &str) -> u64 {
     }
     shape.bytes().for_each(&mut eat);
     h
+}
+
+/// The key of a shape the server counts of its own -- a scheduled run's
+/// `schedule <name>`, a binding's `after <name>` -- which no text a client
+/// sends is shaped into: the shape's hash taken on over a byte no UTF-8
+/// text holds, so a client's `schedule purge`, a parse error, is a shape
+/// of its own and never adds to the runs' errors (slice 5's review).
+fn own_key(tenant: Option<&str>, shape: &str) -> u64 {
+    (hash(tenant, shape) ^ 0xfe).wrapping_mul(0x0100_0000_01b3)
 }
 
 /// Writes `text`'s shape into `out`: literals, parameters, and lists of

@@ -2403,32 +2403,42 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
         (Method::Get | Method::Head, ["_schema"]) => {
             let guard = held::read(db);
             let schemas = visible(&guard);
+            let fennecql = req.query.iter().any(|(k, v)| k == "as" && v == "fennecql");
             // The statements bound to each collection's writes, to the
             // server's token alone: a binding's name, its text and the
             // collections it writes are the schema's, which a scoped token
             // is told nothing of (it learns the names its `wake` lines
-            // grant from `/_whoami`).
-            let bound: Vec<(String, u8, String, String)> = match full {
+            // grant from `/_whoami`). A broken one is listed so, which the
+            // plan holds to no dependency.
+            type Bound = (String, u8, String, String, Option<String>);
+            let bound: Vec<Bound> = match full {
                 true => (guard.statements().iter())
                     .filter_map(|s| {
                         let (c, events) = s.after.clone()?;
-                        Some((c, events, s.name.clone(), s.text.clone()))
+                        Some((c, events, s.name.clone(), s.text.clone(), s.broken.clone()))
                     })
                     .collect(),
                 false => Vec::new(),
+            };
+            // The scheduled statements, to the server's token alone too, as
+            // `statements` lists them, written here under the lock.
+            let scheduled = match full && guard.holds_schedules() {
+                true => scheduled_into(&guard, fennecql),
+                false => String::new(),
             };
             drop(guard);
             // `?as=fennecql`: the same description with its collections as
             // the statements that make them -- what the studio shows a
             // collection as, written by the engine rather than again in
             // the page, and a body `/_schema/plan` takes back as it is --
-            // the bindings after them, each after the collections it names.
-            if req.query.iter().any(|(k, v)| k == "as" && v == "fennecql") {
+            // the bindings after them, each after the collections it names,
+            // and the scheduled ones last.
+            if fennecql {
                 let mut text = with_id_note(&schemas);
-                for (.., def) in &bound {
-                    text.push_str(def.trim_end_matches(|c: char| c == ';' || c.is_whitespace()));
-                    text.push_str(";\n");
+                for (.., def, broken) in &bound {
+                    definition_into(&mut text, def, broken.as_deref());
                 }
+                text.push_str(&scheduled);
                 let mut out = String::from("{\"format\":1,\"fennecql\":");
                 fennec_core::json::escape_into(&mut out, &text);
                 out.push('}');
@@ -2436,9 +2446,9 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             }
             // Each collection's bindings beside it, by name, events and
             // text: what `/_schema/plan` reads back (`fennec_ql::bound_into`).
-            let described = fennec_core::declared::describe_with(&schemas, |name, out| {
+            let mut described = fennec_core::declared::describe_with(&schemas, |name, out| {
                 let mut first = true;
-                for (_, events, n, def) in bound.iter().filter(|b| b.0 == name) {
+                for (_, events, n, def, broken) in bound.iter().filter(|b| b.0 == name) {
                     out.push_str(if first { ",\"bindings\":[" } else { "," });
                     first = false;
                     out.push_str("{\"name\":");
@@ -2448,12 +2458,22 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
                     fennec_core::json::escape_into(out, &named);
                     out.push_str(",\"text\":");
                     fennec_core::json::escape_into(out, def);
+                    if let Some(why) = broken {
+                        out.push_str(",\"broken\":");
+                        fennec_core::json::escape_into(out, why);
+                    }
                     out.push('}');
                 }
                 if !first {
                     out.push(']');
                 }
             });
+            // The scheduled statements after the collections.
+            if !scheduled.is_empty() {
+                described.pop();
+                described.push_str(&scheduled);
+                described.push('}');
+            }
             return Response::json(200, described);
         }
         (Method::Post, ["_schema", "plan"]) if follow => {
@@ -2494,6 +2514,91 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
         Ok(o) => Response::json(200, o.json()),
         Err(e) => error_response(&e),
     }
+}
+
+/// The scheduled statements `db` holds as `GET /_schema` describes them,
+/// written straight from its table: as `?as=fennecql`'s definitions, or as
+/// the description's `,"schedules":[{"name","schedule","text","next",
+/// "last","held"}]`, `"broken"` after the text of one that is -- what
+/// `/_schema/plan` reads back as their definitions (`fennec_ql::bound_into`),
+/// holding a broken one to no dependency; the clock's three are the
+/// server's to tell. Out of line, as a schema holding none never comes
+/// here.
+#[cold]
+#[inline(never)]
+fn scheduled_into(db: &Database, fennecql: bool) -> String {
+    use fennec_core::json::{escape_into, value_into};
+    let mut out = String::new();
+    let now = db.clock_for_schedules();
+    for s in db.statements().iter().filter(|s| s.schedule.is_some()) {
+        if fennecql {
+            definition_into(&mut out, &s.text, s.broken.as_deref());
+            continue;
+        }
+        out.push_str(match out.is_empty() {
+            true => ",\"schedules\":[",
+            false => ",",
+        });
+        let [schedule, next, last, held] = db.schedule_shown(s, now);
+        out.push_str("{\"name\":");
+        escape_into(&mut out, &s.name);
+        out.push_str(",\"schedule\":");
+        value_into(&mut out, &schedule);
+        out.push_str(",\"text\":");
+        escape_into(&mut out, &s.text);
+        if let Some(why) = &s.broken {
+            out.push_str(",\"broken\":");
+            escape_into(&mut out, why);
+        }
+        for (k, v) in [
+            (",\"next\":", next),
+            (",\"last\":", last),
+            (",\"held\":", held),
+        ] {
+            out.push_str(k);
+            value_into(&mut out, &v);
+        }
+        out.push('}');
+    }
+    if !fennecql && !out.is_empty() {
+        out.push(']');
+    }
+    out
+}
+
+/// A definition as `GET /_schema?as=fennecql` writes it after the
+/// collections: as written, or -- broken, naming what the schema no longer
+/// holds -- each line a comment under the reason, so the text reads back
+/// declaring only what its collections can hold, and the plan leaves the
+/// statement as it stands (slice 5's review).
+fn definition_into(out: &mut String, def: &str, broken: Option<&str>) {
+    // Up to its last byte that is no `;` and no ASCII space: a text is
+    // stored as written, and `char`'s whitespace was a table's walk here.
+    let end = (def.bytes()).rposition(|b| b != b';' && !b.is_ascii_whitespace());
+    let def = def.get(..end.map_or(0, |e| e + 1)).unwrap_or(def);
+    let Some(why) = broken else {
+        out.push_str(def);
+        out.push_str(";\n");
+        return;
+    };
+    commented(out, "-- broken: ", why);
+    commented(out, "-- ", def);
+}
+
+/// `text` as FennecQL comments, `lead` before its first line and a line
+/// break going on as a comment: the standard library's line splitting and
+/// `replace` were 2 KB here, and the two inlined 1.5.
+#[inline(never)]
+fn commented(out: &mut String, lead: &str, text: &str) {
+    out.push_str(lead);
+    let mut rest = text;
+    while let Some(end) = rest.bytes().position(|b| b == b'\n') {
+        out.push_str(rest.get(..end).unwrap_or_default());
+        out.push_str("\n-- ");
+        rest = rest.get(end + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out.push('\n');
 }
 
 /// `POST /_admin/tenants/<t>/query`: one read of a tenant, answered as

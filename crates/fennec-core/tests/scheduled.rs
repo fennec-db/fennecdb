@@ -853,7 +853,9 @@ fn a_run_reads_its_start_once_and_its_slot() {
     assert_eq!(slot, t0() + HOUR);
     db.set_clock(Some(t0()));
     db.begin().unwrap();
-    let version = db.run_slot("stamp", slot, late).unwrap();
+    let (version, rows) = db.run_slot("stamp", slot, late).unwrap();
+    // The rows its last statement answered, as a call's are counted.
+    assert_eq!(rows, 1);
     let mark = SlotMark {
         at: slot,
         version,

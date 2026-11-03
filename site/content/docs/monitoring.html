@@ -71,6 +71,10 @@ are reported as gauges.</p>
 <tr><td><code>fennec_slow_statements_total</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
 <tr><td><code>fennec_bound_runs_total</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#write-bound-statements">statements bound to writes</a>: one for each row a binding ran for. No label names a binding; <a href="#statements"><code>/_stats/statements</code></a> counts each by name</td></tr>
 <tr><td><code>fennec_bound_refused_total</code></td><td>counter</td><td>writes a bound statement refused: its guard, a <code>wake</code> grant the token lacked, a limit or a unique value its body met</td></tr>
+<tr><td><code>fennec_scheduled_runs_total{outcome}</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, each counted once by how it ended: <code>ran</code>, <code>refused</code>, <code>broken</code>, <code>held</code> (the server's state holds the slot back: a tenant's quota, a lapsed lease, a storage error) or <code>unknown</code> (it landed as its lease lapsed, or its fsync failed: whether the file, or the tenant's next primary, holds it is unknown). Exposed once the process's scheduler made a look: a server that never held a schedule shows none of the four</td></tr>
+<tr><td><code>fennec_scheduled_skipped_total</code></td><td>counter</td><td>slots passed over: a server down for a day runs the latest missed slot once and counts the others here</td></tr>
+<tr><td><code>fennec_scheduled_mark_ahead_total</code></td><td>counter</td><td>a last mark or a definition's time found ahead of the clock, each also the audit log's <code>clock</code> line</td></tr>
+<tr><td><code>fennec_scheduled_lateness_seconds</code></td><td>histogram</td><td>how late a run began past its slot, in buckets from 0.1 s to a day (0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 900, 1 800, 3 600, 7 200, 21 600, 86 400 s). A held slot's tries are not counted; its eventual run is. No label of the four names a tenant, a statement or a collection</td></tr>
 <tr><td><code>fennec_refused_total</code></td><td>counter</td><td>requests refused for their token (401), each also in the audit log</td></tr>
 <tr><td><code>fennec_connections</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
 <tr><td><code>fennec_connections_refused_total{reason}</code></td><td>counter</td><td>connections answered 503 with <code>Retry-After</code> as they were taken, never served: <code>ceiling</code>, past <code>--max-connections</code>; <code>no_thread</code>, the process could make no thread for one — at its thread limit (systemd's <code>TasksMax=</code>, a cgroup's <code>pids.max</code>, <code>ulimit -u</code>, macOS's 2 048 a process), said in the log a minute apart at most. Any <code>no_thread</code> is worth an alert</td></tr>
@@ -198,6 +202,19 @@ version as <code>statements</code> lists it, and the rows it ran for. The
 duration is the request's, which holds the bindings' runs.</p>
 
 <pre data-lang="json">{"at":"2026-10-05T09:31:40.870Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53114","request_id":"1c7e5a90d2b4f683","duration_ms":148.213,"kind":"write","failed":false,"statement":"POST /query {\"query\":\"set orders {status: 'paid'} where batch = 7\"}","bound":[["paid_ledger",[3,41],12]]}</pre>
+
+<p>A run of a <a href="/docs/fennecql#scheduled-statements">scheduled
+statement</a> is logged when its time under the write lock passes
+<code>--slow-ms</code>, never for how late it began. Its
+<code>statement</code> is the shape <code>schedule &lt;name&gt;</code>, its
+<code>kind</code> <code>write</code>, and <code>failed</code> is true where it
+was refused or held. <code>scheduled</code> is <code>[name, [history,
+change], slot, rows]</code>: the definition that ran as
+<code>statements</code> lists it, the slot it ran for and the rows its last
+statement answered, as in <code>"scheduled":["tick",[0,4],"2026-11-03T03:00:00Z",1]</code>.
+The line adds <code>tenant</code> on a tenant node, <code>bound</code> where
+the run's writes woke bindings, and the run's own <code>request_id</code>; it
+counts in <code>fennec_slow_statements_total</code>.</p>
 </details>
 
 <h2 id="statements">What each statement cost</h2>
@@ -240,6 +257,18 @@ are the statements that woke it, its rows the rows it ran for, its time its
 runs' and its errors the writes it refused. The writer's own shape holds the
 binding's time too, so an operator tuning a slow <code>set orders</code> sees
 what of it was the ledger. It is read with the rights every shape is.</p>
+
+<p>Each run of a <a href="/docs/fennecql#scheduled-statements">scheduled
+statement</a> is a shape of its own, <code>schedule lapse_holds</code>: its
+calls are the runs (each try of a held slot too), its rows what its last
+statement answered, its time the time under the write lock, and its errors
+the runs refused, broken, held or of an unknown outcome. A client's text
+that reads the same — a <code>schedule lapse_holds</code> sent to
+<code>/query</code>, a parse error — is counted as a shape of its own,
+never among the runs. On a tenant node a run is its tenant's
+shape, at <code>/t/&lt;tenant&gt;/_stats/statements</code>, and the admin
+token's <code>/_stats/statements</code> names every tenant's. The bindings a
+run woke are counted as <code>after &lt;name&gt;</code>, as for any write.</p>
 </details>
 
 <h2 id="audit">The audit log</h2>
@@ -515,6 +544,7 @@ OTEL_SERVICE_NAME=orders-db fennec-server --file data.fennec \
 <tr><td><code>lock.wait</code></td><td>internal</td><td>the wait for the database's lock, <code>fennec.lock</code> <code>read</code> or <code>write</code>: a read waits out a write's block, a write every read</td></tr>
 <tr><td><code>execute</code></td><td>internal</td><td>the statement run, under the lock; a <code>/batch</code>'s statements together, <code>fennec.statements</code> of them, and a <code>create index</code> or <code>compact</code> beside the database with <code>fennec.beside</code></td></tr>
 <tr><td><code>bound &lt;name&gt;</code></td><td>internal</td><td>a <a href="/docs/fennecql#write-bound-statements">bound statement</a>'s runs for one statement of the request, a child of the request's span: <code>db.operation.name</code> <code>bound</code>, <code>db.stored_procedure.name</code> its name and <code>fennec.rows_woken</code> the rows it ran for, never a row's value. The one that refused the write is marked failed with the status it answered and its <code>else</code>'s reason (<code>412 no ledger line</code>), <code>error.type</code> the status: never the engine's words, which may hold a row's value</td></tr>
+<tr><td><code>schedule &lt;name&gt;</code></td><td>internal</td><td>a <a href="/docs/fennecql#scheduled-statements">scheduled statement</a>'s run, the root of a trace of its own: its children are <code>lock.wait</code>, <code>execute</code>, <code>durability</code> where the run landed, and a <code>bound &lt;name&gt;</code> for each binding its writes woke. Its attributes follow the table</td></tr>
 <tr><td><code>durability</code></td><td>internal</td><td>a write's wait for the disk after the lock (<code>--sync always</code>); on a primary it holds <code>fsync</code> and <code>replication.wait_sent</code>, the wait for its replicas' streams to send the write</td></tr>
 <tr><td><code>fennec.wait_for_write</code></td><td>internal</td><td>a replica's wait for the write a <code>Fennec-After</code> names</td></tr>
 <tr><td><code>forward</code></td><td>client</td><td><code>fennec-shard</code>'s forward to the node, to its whole answer: the node's server span is its child</td></tr>
@@ -541,6 +571,25 @@ spans carry <code>fennec.tenant</code>, the router's <code>fennec.node</code>,
 and every server span <code>fennec.request_id</code>, the
 <a href="#request-id">request id</a> its log lines carry. A 5xx marks the
 server span an error; a 4xx is the client's and does not.</p>
+
+<p>A run of a <a href="/docs/fennecql#scheduled-statements">scheduled
+statement</a> is no request, so it is a trace of its own: sampled at
+<code>--trace-sample</code>, begun and ended on the scheduler's thread, which
+never waits on the collector. The root span <code>schedule &lt;name&gt;</code>
+carries <code>db.system</code> (<code>fennecdb</code>),
+<code>db.operation.name</code> (<code>schedule</code>),
+<code>db.stored_procedure.name</code> (the statement), <code>db.query.text</code>
+(<code>schedule &lt;name&gt;</code>), <code>fennec.slot</code> (the slot, an
+ISO timestamp), <code>fennec.lateness_ms</code>, <code>fennec.slots_skipped</code>,
+<code>fennec.outcome</code> (<code>ran</code>, <code>refused</code>,
+<code>broken</code>, <code>held</code> or <code>unknown</code>),
+<code>fennec.request_id</code> (the run's own id, the one its log lines
+carry) and <code>fennec.tenant</code> on a tenant node. A refused or held
+run's span is marked failed with its status and the reason its
+<code>else</code> wrote (<code>412 no tick at the epoch</code>),
+<code>error.type</code> the status: never the engine's words, which may hold a
+row's value. A run whose outcome is unknown is failed as <code>500</code>, as
+a client's write would be answered.</p>
 
 <p>A request's <code>traceparent</code> is read as the W3C spec writes it;
 one that does not parse starts a trace of its own, and

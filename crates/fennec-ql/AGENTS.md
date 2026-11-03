@@ -151,4 +151,14 @@ how many it holds (`schedule::unrun`). A refusal the statement makes marks
 its slot, the state's leaves it due (`schedule::Held`), and only the
 server's token calls one, marking nothing. A new path running a body owes
 its mark in the block, and a new way a file reaches a node the scheduler's
-word (`Node::note`, `Node::installed`, `Node::opened`).
+word (`Node::note`, `Node::installed`, `Node::opened`). A run is watched
+on the scheduler's thread (`schedule::watched`): `/_stats/statements`
+counts it by the shape `schedule <name>`, `/_metrics` by its outcome -- a
+landing past a lapsed lease or a failed fsync `unknown`, never `ran` --
+and its span is failed with its status and its `else` reason alone, never
+the engine's words. Its schedule, next slot, last run and held slot are
+described (`statements`, `GET /_schema`) to the server's token alone,
+`held` as the scheduler last told it (`Database::set_held_slots`), handed
+back to a node's queue before the look closes the tenant; a statement the
+schema broke is listed `broken`, which `/_schema/plan` holds to no
+dependency.

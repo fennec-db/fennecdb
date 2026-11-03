@@ -1626,58 +1626,152 @@ pub fn check_refused(e: &Expr) -> Option<String> {
 /// condition, or a text that is not one.
 #[cfg(feature = "statements")]
 pub fn condition_text(text: &str) -> Option<&str> {
-    let b = text.as_bytes();
-    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c >= 0x80;
-    let ends = |w: &str| {
-        ["as", "comment", "scans"]
-            .iter()
-            .any(|e| w.eq_ignore_ascii_case(e))
-    };
-    let line_end = |i: usize| {
-        b[i..]
-            .iter()
-            .position(|&c| c == b'\n')
-            .map_or(b.len(), |n| i + n)
-    };
     // 0 before `after`, 1 between it and `where`, 2 in the condition.
-    let (mut i, mut depth, mut state, mut start) = (0, 0i32, 0u8, 0);
-    while i < b.len() {
-        match b[i] {
-            b'#' => i = line_end(i),
-            b'-' if b.get(i + 1) == Some(&b'-') => i = line_end(i),
-            q @ (b'\'' | b'"') => {
-                i += 1;
-                loop {
-                    match b.get(i) {
-                        None => return None,
-                        Some(b'\\') => i += 2,
-                        Some(&c) if c == q && b.get(i + 1) == Some(&q) => i += 2,
-                        Some(&c) if c == q => break i += 1,
-                        Some(_) => i += 1,
-                    }
-                }
-            }
-            b'(' | b'[' | b'{' => (depth, i) = (depth + 1, i + 1),
-            b')' | b']' | b'}' => (depth, i) = (depth - 1, i + 1),
-            c if word(c) => {
-                let from = i;
-                while i < b.len() && word(b[i]) {
-                    i += 1;
-                }
-                let w = text.get(from..i)?;
-                match state {
-                    _ if depth != 0 => {}
-                    0 if w.eq_ignore_ascii_case("after") => state = 1,
-                    1 if w.eq_ignore_ascii_case("where") => (state, start) = (2, i),
-                    1 if ends(w) => return None,
-                    2 if ends(w) => return text.get(start..from).map(str::trim),
-                    _ => {}
-                }
-            }
-            _ => i += 1,
+    let (mut state, mut start) = (0u8, 0);
+    for (w, from) in TopWords::of(text) {
+        match state {
+            0 if w.eq_ignore_ascii_case("after") => state = 1,
+            1 if w.eq_ignore_ascii_case("where") => (state, start) = (2, from + w.len()),
+            1 if clause_ends(w) => return None,
+            2 if clause_ends(w) => return text.get(start..from).map(str::trim),
+            _ => {}
         }
     }
     None
+}
+
+/// A scheduled statement's schedule as its text writes it -- `every
+/// <interval>` or `at '<cron>'`, and `in '<zone>'` after it, up to its
+/// `comment`, `scans` or `as` -- for the listings' `schedule` and the
+/// audit's `schema` line: the record holds the schedule by its meaning,
+/// and written back from it the schedule was 3 KB of the server
+/// (`Schedule::written`, cut at slice 3's review). Read from the text as
+/// [`condition_text`] reads a condition, so a statement this process holds
+/// no tree for shows it too, and ending at its last word or string: a
+/// comment after it is the text's, not the schedule's. `None` for any
+/// other text.
+#[cfg(feature = "statements")]
+pub fn schedule_text(text: &str) -> Option<&str> {
+    // 0 before `statement`, 1 at its name, 2 after it, 3 in the schedule.
+    let (mut state, mut start) = (0u8, 0);
+    let mut words = TopWords::of(text);
+    while let Some((w, from)) = words.next() {
+        match state {
+            0 if w.eq_ignore_ascii_case("statement") => state = 1,
+            1 => state = 2,
+            2 if w.eq_ignore_ascii_case("every") || w.eq_ignore_ascii_case("at") => {
+                (state, start) = (3, from)
+            }
+            2 => return None,
+            3 if clause_ends(w) => return text.get(start..words.before),
+            _ => {}
+        }
+    }
+    // A text ending in its schedule, and not in a string left open.
+    match state {
+        3 if !words.open => text.get(start..words.last),
+        _ => None,
+    }
+}
+
+/// A word ending a definition's clause: the next clause's, or its body's.
+#[cfg(feature = "statements")]
+fn clause_ends(w: &str) -> bool {
+    ["as", "comment", "scans"]
+        .iter()
+        .any(|e| w.eq_ignore_ascii_case(e))
+}
+
+/// The words of a definition's text outside its strings, comments and
+/// brackets, each with where it starts: what [`condition_text`] and
+/// [`schedule_text`] find a clause by. A word with a dot in it (`new.as`)
+/// is one word; a string left open ends them.
+#[cfg(feature = "statements")]
+struct TopWords<'t> {
+    text: &'t str,
+    i: usize,
+    depth: i32,
+    /// They ended in a string left open.
+    open: bool,
+    /// Where the last word, string or sign outside a comment ended.
+    last: usize,
+    /// Where the last one before the word given last ended: a clause's end.
+    before: usize,
+}
+
+#[cfg(feature = "statements")]
+impl<'t> TopWords<'t> {
+    fn of(text: &'t str) -> Self {
+        TopWords {
+            text,
+            i: 0,
+            depth: 0,
+            open: false,
+            last: 0,
+            before: 0,
+        }
+    }
+}
+
+#[cfg(feature = "statements")]
+impl<'t> Iterator for TopWords<'t> {
+    type Item = (&'t str, usize);
+
+    fn next(&mut self) -> Option<(&'t str, usize)> {
+        let b = self.text.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c >= 0x80;
+        let line_end = |i: usize| {
+            b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |n| i + n)
+        };
+        while self.i < b.len() {
+            let i = self.i;
+            match b[i] {
+                b'#' => self.i = line_end(i),
+                b'-' if b.get(i + 1) == Some(&b'-') => self.i = line_end(i),
+                q @ (b'\'' | b'"') => {
+                    self.i += 1;
+                    loop {
+                        match b.get(self.i) {
+                            None => {
+                                self.open = true;
+                                return None;
+                            }
+                            Some(b'\\') => self.i += 2,
+                            Some(&c) if c == q && b.get(self.i + 1) == Some(&q) => self.i += 2,
+                            Some(&c) if c == q => break self.i += 1,
+                            Some(_) => self.i += 1,
+                        }
+                    }
+                    self.last = self.i;
+                }
+                b'(' | b'[' | b'{' => {
+                    (self.depth, self.i, self.last) = (self.depth + 1, i + 1, i + 1)
+                }
+                b')' | b']' | b'}' => {
+                    (self.depth, self.i, self.last) = (self.depth - 1, i + 1, i + 1)
+                }
+                c if word(c) => {
+                    while self.i < b.len() && word(b[self.i]) {
+                        self.i += 1;
+                    }
+                    (self.before, self.last) = (self.last, self.i);
+                    if self.depth == 0 {
+                        return Some((self.text.get(i..self.i)?, i));
+                    }
+                }
+                c => {
+                    self.i += 1;
+                    if !c.is_ascii_whitespace() {
+                        self.last = self.i;
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Why a bound statement's condition is refused, if it is: it reads the
@@ -2546,7 +2640,7 @@ impl Canon {
 
 #[cfg(all(test, feature = "statements"))]
 mod tests {
-    use super::condition_text;
+    use super::{condition_text, schedule_text};
 
     /// A binding's condition as written, strings, comments and brackets
     /// stepped over, a dotted word a field: what `describe statement`
@@ -2581,5 +2675,49 @@ mod tests {
             None
         );
         assert_eq!(read("create statement p after set t where 'open"), None);
+    }
+
+    /// The schedule as written, its zone with it, and nothing of the body
+    /// or the clauses after it: the listings' `schedule` and the audit's.
+    #[test]
+    fn a_schedule_is_read_from_its_text_as_written() {
+        for (text, clause) in [
+            (
+                "create statement a every 15m as del t where n = 1",
+                Some("every 15m"),
+            ),
+            (
+                "CREATE OR REPLACE STATEMENT a EVERY 1 h IN 'Europe/Berlin' comment 'x' as del t",
+                Some("EVERY 1 h IN 'Europe/Berlin'"),
+            ),
+            (
+                "create statement a every 1d scans as del t",
+                Some("every 1d"),
+            ),
+            (
+                "create statement a at '0 3 * * 1-5'\n  in '+03:00'\nas del t where s = 'in'",
+                Some("at '0 3 * * 1-5'\n  in '+03:00'"),
+            ),
+            (
+                "create statement at at '0 3 * * *' -- at 3\nas del t",
+                Some("at '0 3 * * *'"),
+            ),
+            (
+                "create statement a every 1h\n-- a comment\n# and another\nas del t",
+                Some("every 1h"),
+            ),
+            (
+                "create statement a every 1h -- to the end",
+                Some("every 1h"),
+            ),
+            ("create statement a at 'it''s' as del t", Some("at 'it''s'")),
+            ("create statement a every 1h", Some("every 1h")),
+            ("create statement a() as get t count", None),
+            ("create statement a after del t as del u where id = 1", None),
+            ("create statement a at 'open", None),
+            ("drop statement a", None),
+        ] {
+            assert_eq!(schedule_text(text), clause, "{text}");
+        }
     }
 }

@@ -152,18 +152,24 @@ wrote.](../../docs/design/http.md#request-ids)** `tests/datadog.rs` and
 `tests/logs.rs` hold `monitoring/datadog/` to what is sent.
 
 **[A request is a trace, sent over OTLP.](../../docs/design/http.md#traces)** A
-thread-local from `begin` to `end`, `discard`ed before a stream takes the
-connection over; a span names a statement's shape, never a value, and a
-request never waits on the collector.
+thread-local from `begin` to `end` -- a scheduled run's from `begin_run` to
+`end_run`, one `start` and `finish` for both -- `discard`ed before a stream
+takes the connection over; a span names a statement's shape, never a value,
+and a request never waits on the collector.
 
 **[`/_metrics` counts at the edge, a shard per
 thread.](../../docs/design/http.md#metrics)** Timed around `handle`, counted
 before the answer is written; no label names a tenant or its collections,
-and `--metrics` attaches no watcher.
+and `--metrics` attaches no watcher. The scheduler's families are written
+only once a look was made (`schedule::LOOKED`), a server holding no
+schedule scraping the bytes it did, and are one set of atomics: one thread
+a process counts them.
 
 **[`/_stats/statements` counts by shape, a tenant's
 apart.](../../docs/design/http.md#statement-counts)** Literals are `$n`
-(`statements::shape`). A shape names every collection, so they take what
+(`statements::shape`); a shape the server counts of its own -- `schedule
+<name>`, `after <name>` -- is keyed where no client's text is
+(`statements::own_key`). A shape names every collection, so they take what
 reads the data unscoped or the admin token; on a tenant node a tenant
 reads its own, and every tenant's, named, are the admin's alone.
 

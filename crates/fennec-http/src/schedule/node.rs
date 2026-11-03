@@ -144,8 +144,12 @@ struct Entry {
     /// Its marks of runs that wrote nothing as it closed.
     kept: Option<Kept>,
     /// Its slots held back and marks told ahead -- taken by its look, put
-    /// back after.
-    state: State,
+    /// back before the look closes the tenant: `None` while a look holds
+    /// them.
+    state: Option<State>,
+    /// Opened while a look held its state, so told no `held`
+    /// ([`Node::opened`]): the look tells it as it ends.
+    reopened: bool,
     made: u64,
 }
 
@@ -166,7 +170,8 @@ impl Queue {
                 not_before: i64::MIN,
                 backoff: 0,
                 kept: None,
-                state: State::default(),
+                state: Some(State::default()),
+                reopened: false,
                 made: self.made,
             };
             self.entries.insert(name, e);
@@ -216,7 +221,7 @@ impl Queue {
             if let Some(e) = self.entries.get_mut(&name).filter(|e| e.queued) {
                 e.queued = false;
                 e.woken = false;
-                return Some((name, std::mem::take(&mut e.state)));
+                return Some((name, e.state.take().unwrap_or_default()));
             }
         }
         None
@@ -469,6 +474,13 @@ impl Node {
         r
     }
 
+    /// Whether `name` was opened while its look held its state, which
+    /// the look then tells it.
+    fn reopened(&self, name: &str) -> bool {
+        let mut q = lock(&self.queue);
+        (q.entries.get_mut(name)).is_some_and(|e| std::mem::take(&mut e.reopened))
+    }
+
     /// [`Self::look`], a panic in it caught: one tenant's look panicking
     /// holds that tenant back, the backoff a held slot waits, and the node
     /// goes on with the others. What panics outside a look -- the loop, the
@@ -521,11 +533,22 @@ impl Node {
     ) {
         #[cfg(test)]
         tests::panic_at(name);
-        let mut refused = None;
+        let (mut refused, mut handed) = (None, false);
         let (next, more) = match self.open_for(tenants, name, true) {
             Ok(Some((t, opened))) => {
+                // Opened since the look took its state -- by the look or a
+                // request -- the database was told no `held`: told as the
+                // look ends.
+                st.changed |= self.reopened(name);
                 let (open, closed, more) = self.look_open(&t, name, now, live, &mut st, out);
                 drop(t);
+                // Its state back before the close: a request opening the
+                // tenant again before the look ends reads `held` from it
+                // (slice 5's review).
+                if let Some(e) = lock(&self.queue).entries.get_mut(name) {
+                    e.state = Some(std::mem::take(&mut st));
+                    handed = true;
+                }
                 // Closed again, its held slots wait their backoff out.
                 match opened && tenants.close_after_run(name) {
                     true => (closed, more),
@@ -560,7 +583,9 @@ impl Node {
             return;
         };
         e.backoff = 0;
-        e.state = st;
+        if !handed {
+            e.state = Some(st);
+        }
         let failed = std::mem::replace(&mut e.failed, refused.is_some());
         let refused = refused.filter(|r| !failed && r.0 != 503);
         match more || e.woken {
@@ -598,6 +623,7 @@ impl Node {
         let what = format!("tenant `{name}`");
         let ctx = Ctx {
             what: &what,
+            tenant: Some(name),
             durable: self.durable,
             live,
         };
@@ -658,14 +684,28 @@ impl Node {
         }
         let now = now_ms();
         let next = next_of(&db.due(now), now);
-        let noted = {
+        let (noted, held) = {
             let mut q = lock(&self.queue);
-            let noted = q.entry(name).noted;
+            let e = q.entry(name);
+            // What its scheduler holds back, for its listings: kept by the
+            // entry across a close, unless a look holds it now -- which
+            // tells the database as it ends.
+            let held = match &e.state {
+                Some(st) => Some(super::shown_held(st)),
+                None => {
+                    e.reopened = true;
+                    None
+                }
+            };
+            let noted = e.noted;
             if next < NONE {
                 q.set_next(name, next);
             }
-            noted
+            (noted, held)
         };
+        if let Some(held) = held {
+            db.set_held_slots(held);
+        }
         if !noted {
             if let Err(e) = self.note(name, false) {
                 crate::log!(

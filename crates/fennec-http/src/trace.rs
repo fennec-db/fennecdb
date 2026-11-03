@@ -379,30 +379,12 @@ pub fn begin(req: &Request) {
     }
     CTX.with(|c| {
         let mut c = c.borrow_mut();
-        c.generation = c.generation.wrapping_add(1);
-        c.spans.clear();
-        c.open.clear();
         let given = req.header(TRACEPARENT).and_then(parse_traceparent);
-        let (id, parent, keep) = match given {
-            Some((id, parent, flag)) => (id, Some(parent), flag),
-            None => {
-                let mut id = [0u8; 16];
-                id[..8].copy_from_slice(&fresh().to_be_bytes());
-                id[8..].copy_from_slice(&fresh().to_be_bytes());
-                let keep = sampled(&id);
-                (id, None, keep)
-            }
-        };
-        c.active = true;
-        c.sampled = keep;
-        c.id = id;
-        c.parent = parent;
-        c.root = fresh().to_be_bytes();
         c.state = match (given, req.header(TRACESTATE)) {
             (Some(_), Some(s)) if !s.is_empty() && s.len() <= MAX_STATE => Some(s.to_string()),
             _ => None,
         };
-        if !keep {
+        if !start(&mut c, given) {
             return;
         }
         let start = now_unix();
@@ -449,6 +431,70 @@ pub fn begin(req: &Request) {
     });
 }
 
+/// Starts a scheduled statement's run on this thread -- the scheduler's --
+/// as a trace of its own (`docs/design/named-statements.md`, *Watching
+/// schedules*), sampled at the ratio as a request with no `traceparent`
+/// is: its root span `schedule <name>`, the shape `/_stats/statements`
+/// counts it as, its `db.operation.name` `schedule` and
+/// `db.stored_procedure.name` the statement. What the run learns under the
+/// lock -- its slot, how late it is -- is set on it as an attribute
+/// ([`attr`]); the lock's wait, the run and its sync are its children as a
+/// request's are, and its bindings' after it ([`bound_runs`]). It ends with
+/// [`end_run`], or goes as [`discard`] where no slot was run.
+#[cold]
+#[inline(never)]
+pub fn begin_run(name: &str, tenant: Option<&str>) {
+    if !on() {
+        return;
+    }
+    CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        c.state = None;
+        if !start(&mut c, None) {
+            return;
+        }
+        let shape = format!("schedule {name}");
+        let mut attrs: Vec<(&'static str, Val)> = Vec::with_capacity(12);
+        attrs.push(("db.system", Val::from("fennecdb")));
+        attrs.push(("db.operation.name", Val::from("schedule")));
+        attrs.push(("db.stored_procedure.name", Val::from(name.to_string())));
+        attrs.push(("db.query.text", Val::from(shape.clone())));
+        crate::request_id::with(|r| {
+            if !r.is_empty() {
+                attrs.push(("fennec.request_id", Val::from(r.to_string())));
+            }
+        });
+        if let Some(t) = tenant {
+            attrs.push(("fennec.tenant", Val::from(t.to_string())));
+        }
+        let root = c.root;
+        c.spans.push(Rec {
+            name: Cow::Owned(shape),
+            id: root,
+            parent: None,
+            kind: Kind::Internal,
+            start: now_unix(),
+            end: 0,
+            attrs,
+            error: None,
+        });
+    });
+}
+
+/// Ends this thread's run ([`begin_run`]) and hands its spans to the
+/// exporter, never waiting on it: `refused` the status a refusal answers
+/// and the reason its `else` wrote -- the statement's own text -- never
+/// the engine's words, which may hold a row's value, a unique value its
+/// body met among them: a span names a shape.
+#[cold]
+#[inline(never)]
+pub fn end_run(outcome: &'static str, refused: Option<(u16, Option<&str>)>) {
+    if !on() {
+        return;
+    }
+    finish("fennec.outcome", Val::from(outcome), refused);
+}
+
 /// Whether this thread's request is being recorded: worth working out an
 /// attribute for.
 #[inline]
@@ -485,6 +531,45 @@ pub fn end(status: u16) {
     if !on() {
         return;
     }
+    // A server span is an error for the server's own failures alone: a 4xx
+    // is the client's (OpenTelemetry's HTTP conventions).
+    let failed = (status >= 500).then_some((status, None));
+    finish("http.response.status_code", Val::Int(status as i64), failed);
+}
+
+/// Starts this thread's trace -- a request's ([`begin`]) or a run's
+/// ([`begin_run`]) -- under the context `given` names, else one of its own
+/// sampled at the ratio, letting go of anything it held before: whether
+/// its spans are kept. One body for both: the run's copy of it and of
+/// [`finish`] were a kilobyte of the server (slice 5's review).
+fn start(c: &mut Ctx, given: Option<([u8; 16], [u8; 8], bool)>) -> bool {
+    c.generation = c.generation.wrapping_add(1);
+    c.spans.clear();
+    c.open.clear();
+    let (id, parent, keep) = match given {
+        Some((id, parent, flag)) => (id, Some(parent), flag),
+        None => {
+            let mut id = [0u8; 16];
+            id[..8].copy_from_slice(&fresh().to_be_bytes());
+            id[8..].copy_from_slice(&fresh().to_be_bytes());
+            let keep = sampled(&id);
+            (id, None, keep)
+        }
+    };
+    c.active = true;
+    c.sampled = keep;
+    c.id = id;
+    c.parent = parent;
+    c.root = fresh().to_be_bytes();
+    keep
+}
+
+/// Ends this thread's trace, its root span given `key` -- a request's
+/// status, a run's outcome -- and failed where `failed` says, with the
+/// status and the reason an `else` wrote, never the engine's words; and
+/// hands its spans to the exporter, never waiting on it. A child still
+/// open -- a guard held past the answer -- ends with it.
+fn finish(key: &'static str, val: Val, failed: Option<(u16, Option<&str>)>) {
     let trace = CTX.with(|c| {
         let mut c = c.borrow_mut();
         let was = std::mem::take(&mut c.active);
@@ -493,7 +578,6 @@ pub fn end(status: u16) {
             return None;
         }
         let now = now_unix();
-        // A child still open -- a guard held past the answer -- ends with it.
         for i in std::mem::take(&mut c.open) {
             if c.spans[i].end == 0 {
                 c.spans[i].end = now;
@@ -501,15 +585,12 @@ pub fn end(status: u16) {
         }
         let root = &mut c.spans[0];
         root.end = now;
-        set(
-            &mut root.attrs,
-            "http.response.status_code",
-            Val::Int(status as i64),
-        );
-        // A server span is an error for the server's own failures alone: a
-        // 4xx is the client's (OpenTelemetry's HTTP conventions).
-        if status >= 500 {
-            root.error = Some(format!("{status}"));
+        set(&mut root.attrs, key, val);
+        if let Some((status, reason)) = failed {
+            root.error = Some(match reason {
+                Some(r) => format!("{status} {r}"),
+                None => status.to_string(),
+            });
             set(&mut root.attrs, "error.type", Val::from(status.to_string()));
         }
         Some(Trace {

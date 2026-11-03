@@ -331,7 +331,10 @@ impl Database {
 
     /// `statements`: each named statement the database holds, by name.
     pub(super) fn list_statements(&self) -> Response {
-        let rows = self.statements.iter().map(|s| row(s, false)).collect();
+        let now = self.clock_for_schedules();
+        let rows = (self.statements.iter())
+            .map(|s| row(s, false, self.schedule_shown(s, now)))
+            .collect();
         Response::Rows(ResultSet {
             columns: columns(false),
             rows,
@@ -344,11 +347,22 @@ impl Database {
     /// token is told the statements it may call by `/_whoami`.
     pub(super) fn describe_statement(&self, name: &str) -> Result<Response> {
         let s = self.statements.get(name).ok_or_else(|| missing(name))?;
+        let shown = self.schedule_shown(s, self.clock_for_schedules());
         Ok(Response::Rows(ResultSet {
             columns: columns(true),
-            rows: vec![row(s, true)],
+            rows: vec![row(s, true, shown)],
             ..ResultSet::default()
         }))
+    }
+
+    /// The time a listing computes its schedules' next slots at: read only
+    /// where the table holds a schedule, so a listing of statements no
+    /// clock runs reads no clock.
+    pub fn clock_for_schedules(&self) -> Option<i64> {
+        match self.holds_schedules() {
+            true => self.now().ok(),
+            false => None,
+        }
     }
 
     /// What a definition's body is held to against the schema, beside its
@@ -714,27 +728,46 @@ fn exact_args(args: &Args, keeps: &[(&str, bool)], out: &mut super::Exactly) {
     }
 }
 
-/// `statements`' columns, and `describe statement`'s after them.
+/// `statements`' columns, and `describe statement`'s four after them.
+const COLUMNS: [&str; 15] = [
+    "name",
+    "version",
+    "signature",
+    "writes",
+    "comment",
+    "broken",
+    "after",
+    "schedule",
+    "next",
+    "last",
+    "held",
+    "answers",
+    "text",
+    "depends",
+    "condition",
+];
+
+/// [`COLUMNS`] as a result set holds them, each a `String`: from the
+/// static list, where a list made each time was an allocation and a free
+/// beside the names'.
 fn columns(described: bool) -> Vec<String> {
-    let mut c = vec![
-        "name",
-        "version",
-        "signature",
-        "writes",
-        "comment",
-        "broken",
-        "after",
-    ];
-    if described {
-        c.extend(["answers", "text", "depends", "condition"]);
-    }
-    c.into_iter().map(String::from).collect()
+    let listed = match described {
+        true => &COLUMNS[..],
+        false => &COLUMNS[..11],
+    };
+    listed.iter().map(|&c| String::from(c)).collect()
 }
 
-/// A statement as `statements` and `describe statement` answer it.
-fn row(s: &super::Stored, described: bool) -> Row {
+/// A statement as `statements` and `describe statement` answer it, `shown`
+/// what the clock does with it (`Database::schedule_shown`).
+fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
     let text = |t: &str| Value::Text(t.to_string());
     let def = s.tree.as_deref();
+    // One allocation a row, the four laid in with the rest: extended after
+    // them, each row's values were moved once more, a reallocation the
+    // allocator's free timed -- a fifth of a listing of statements no
+    // clock runs (slice 5's review).
+    let [schedule, next, last, held] = shown;
     let mut values = vec![
         text(&s.name),
         Value::List(vec![
@@ -755,6 +788,11 @@ fn row(s: &super::Stored, described: bool) -> Row {
                 Value::Text(crate::named::Binding::events_named(*events)),
             ])
         }),
+        // A scheduled statement's `schedule`, `next`, `last` and `held`.
+        schedule,
+        next,
+        last,
+        held,
     ];
     if described {
         values.push(def.map_or(Value::Null, |d| {

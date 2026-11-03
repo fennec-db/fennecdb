@@ -646,21 +646,12 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
 /// The schedule clause of `create [or replace] statement <name>`'s text,
 /// as written: `every <interval>` or `at '<cron>'`, and `in '<zone>'`
 /// after it, up to the clause after it -- `None` for any other text. Read
-/// off the lexer's tokens, which the parse links in already: the
-/// definition read again and its schedule written out by its meaning cost
-/// the server 3 KB for a log line.
+/// as the listings read it (`named::schedule_text`), so the line and
+/// `statements` name a schedule alike: the definition read again and its
+/// schedule written out by its meaning cost the server 3 KB for a log
+/// line.
 fn schedule_of(s: &str) -> Option<&str> {
-    use fennec_ql::lexer::Tok;
-    let toks = fennec_ql::lexer::tokenize(s).ok()?;
-    let is = |t: &Tok, w: &str| matches!(t, Tok::Ident(i) if i.eq_ignore_ascii_case(w));
-    let at = toks.iter().position(|t| is(&t.tok, "statement"))? + 2;
-    let first = toks
-        .get(at)
-        .filter(|t| is(&t.tok, "every") || is(&t.tok, "at"))?;
-    let end = (toks[at..].iter())
-        .find(|t| t.tok == Tok::Eof || ["comment", "scans", "as"].iter().any(|w| is(&t.tok, w)))
-        .map_or(s.len(), |t| t.pos);
-    s.get(first.pos..end).map(str::trim_end)
+    fennec_core::named::schedule_text(s)
 }
 
 /// The statement a `create [or replace] statement` or a `drop statement

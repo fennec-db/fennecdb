@@ -487,6 +487,8 @@ fn a_broken_statement_is_replaced_only_within_its_contract() {
         text: None,
         migrations: Vec::new(),
         bound: Vec::new(),
+        scheduled: Vec::new(),
+        broken: Vec::new(),
     };
     let text = format!("create collection accounts (owner text @hash, balance int); {reads}");
     fennec_ql::schema_into(&mut d, &text).unwrap();

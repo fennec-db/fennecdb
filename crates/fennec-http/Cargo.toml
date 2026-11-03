@@ -66,3 +66,9 @@ path = "tests/refused_counts.rs"
 [[test]]
 name = "tls_failures"
 path = "tests/tls_failures.rs"
+
+# Apart: the scheduler's counts and the statements' shapes are the
+# process's own.
+[[test]]
+name = "scheduled_counts"
+path = "tests/scheduled_counts.rs"

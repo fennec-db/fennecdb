@@ -1,0 +1,62 @@
+[
+  {
+    "name": "fennecdb: a scheduled statement refused its run",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.scheduled_runs.count{outcome:refused} by {host}.as_count() + sum:fennecdb.scheduled_runs.count{outcome:broken} by {host}.as_count() > 0",
+    "message": "A scheduled statement on {{host.name}} refused its run, or could not run at all (broken): its slot is marked refused and the next runs as due, so the work of this one is not done. The server's log names the statement, the slot, the status and why, with the run's request_id; `statements` (or GET /_schema) shows its `last` mark. A guard unmet (412) is the statement saying so; a broken one (409) is mended by `create or replace statement`.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: a scheduled run's outcome is unknown",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.scheduled_runs.count{outcome:unknown} by {host}.as_count() > 0",
+    "message": "A scheduled statement's run on {{host.name}} landed as its tenant's lease lapsed, or its fsync failed: whether the file holds its writes and its slot's mark -- on a tenant node, whether the tenant's next primary does -- is unknown, as a client's write would be answered 500. Where they were lost the slot runs again wherever the file is written next; where they were kept it ran once. The server's log names the statement and the slot with the run's request_id. A failed fsync stops the database's writes until it is opened again: check the disk. A lapsed lease: check the node's link to its router.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: a scheduled statement's slot is held back",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.scheduled_runs.count{outcome:held} by {host}.as_count() > 3",
+    "message": "A scheduled statement's slot on {{host.name}} was refused by the state of its database -- a tenant at its quota (507), a lapsed lease, a storage error -- and is held: tried again as the data or the limit changes, or after a backoff of a minute doubling to fifteen. Nothing of it is lost while it is held, but nothing of it is done, and the next slot passes over it. `statements` shows `held` with the status and since when; the log names the first refusal.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 3, "warning": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: a scheduled statement's mark is ahead of the clock",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.scheduled_mark_ahead.count{*} by {host}.as_count() > 0",
+    "message": "A scheduled statement's last mark on {{host.name}} stands ahead of the server's clock: the clock was stepped back behind a run, or a clock that was ahead ran it. Within an hour its slots wait for the clock to pass the mark; further ahead the schedule goes on from the clock and the slots the wrong clock ran run again as they come. Check the host's NTP. The audit log's `clock` line names the statement, the mark and the clock.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: scheduled statements run late",
+    "type": "query alert",
+    "query": "percentile(last_30m):p99:fennecdb.scheduled_lateness_seconds.bucket{*} by {host} > 120",
+    "message": "Scheduled runs on {{host.name}} began more than two minutes past their slots (p99): a node's tenants due at one instant run one at a time, each behind the runs before it, and a restart runs a missed slot late. Lateness is no fault in itself -- `slot()` names the slot a run was for -- but a node always this late wants its tenants' schedules spread or fewer tenants.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 120, "warning": 60},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  }
+]

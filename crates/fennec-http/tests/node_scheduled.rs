@@ -784,6 +784,54 @@ fn a_closed_tenant_s_held_slot_waits_its_backoff_out() {
     assert_eq!(nd.node.opens(), opens + 2, "at its backoff's ends alone");
 }
 
+/// A slot its quota holds is listed `held` once the look that held it
+/// closed the tenant and a request opened it again: the scheduler's state,
+/// handed back to the queue's entry before the close, is what the tenant's
+/// database is told as it opens (`Node::opened`). Yearly, so the slot held
+/// is the one due for as long as the test runs.
+#[test]
+fn a_held_slot_is_listed_once_a_request_opens_its_tenant_again() {
+    let nd = node("heldshown");
+    let since = now_ms() - 400 * 24 * HOUR;
+    tenant(
+        &nd,
+        "acme",
+        since,
+        &[
+            TICKS,
+            "create statement yearly at '0 0 1 1 *' as insert ticks {slot: slot(), at: now()}",
+            "put ticks {slot: 1}; put ticks {slot: 2}",
+        ],
+    );
+    let set = fennec_http::quota::Set::parse(r#"{"rows": 2}"#).unwrap();
+    nd.tenants.set_quota("acme", set).unwrap();
+    nd.tenants.close_idle(Duration::ZERO);
+    let at = now_ms();
+    let runs = nd.node.pass(at);
+    let outcomes: Vec<_> = runs.iter().map(|r| r.1.outcome).collect();
+    assert_eq!(outcomes, [Outcome::Held(507)]);
+    assert!(open(&nd).is_empty(), "closed after its look");
+    let cfg = fennec_http::Config {
+        addr: "127.0.0.1:0".into(),
+        admin_token: Some("adm".into()),
+        ..fennec_http::Config::default()
+    };
+    let server = fennec_http::Server::with_tenants(Arc::clone(&nd.tenants), cfg);
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let (status, body) = query(port, "acme", "statements");
+    assert_eq!(status, 200, "{body}");
+    let held = format!(
+        r#""held":{{"since":"{}","slot":"{}","status":507}}"#,
+        fennec_core::time::format_iso(at),
+        fennec_core::time::format_iso(runs[0].1.slot),
+    );
+    assert!(body.contains(&held), "{held} in {body}");
+}
+
 /// A frozen tenant -- a move's source -- whose delete fails once it was
 /// closed, its freeze gone with it, leaves the queue and the hint: named,
 /// a look or a restart ran its slots into a file no router sends to.
