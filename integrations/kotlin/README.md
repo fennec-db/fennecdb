@@ -177,6 +177,18 @@ database runs no named statement ...`) before anything runs or is queued:
 call the server through `Fennec.connect`, and what the call wrote comes back
 through the shapes' streams.
 
+`statements()` (suspend; `statementsBlocking()` for Java) lists them, on the
+embedded `Fennec` and on `FennecRemote` alike -- the server's to its own
+token (a scoped one is refused, 403): each a `NamedStatement` with its
+`signature`, `writes`, `comment`, `broken`, a binding's `after`, and a
+scheduled statement's clock -- its `schedule` (`every 1h`, `at '0 3 * * *'
+in 'Europe/Berlin'`), the `next` slot, the `last` run (a `LastRun`: `slot`,
+`outcome` `ran` or `refused`, `status`, `reason`, `skipped`) and a slot the
+server holds back (`held`, a `HeldSlot`), each time in milliseconds since
+the epoch (`Instant.ofEpochMilli`), since `java.time` is on Android from API
+26 only. The library runs no schedule: a server's file opened in the app
+keeps its schedules for the server that next opens it.
+
 ## Building and testing
 
 `make kotlin-test` builds the native library for Linux with its JNI

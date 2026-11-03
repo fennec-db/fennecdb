@@ -732,6 +732,19 @@ shape <code>schedule lapse_holds</code>), named in the <a
 href="/docs/monitoring#slow">slow-statement line</a> and given a <a
 href="/docs/monitoring#tracing">trace</a> a run.</p>
 
+<p>Every SDK reads the listing into types of its own —
+<code>db.statements()</code>, Go's <code>Statements</code>, .NET's
+<code>StatementsAsync</code>, each row a <code>NamedStatement</code> with its
+<code>LastRun</code> and <code>HeldSlot</code>, the times in the language's
+own (<a href="languages.html#named-statements">every SDK's</a>). <a
+href="studio.html#schema">fennec studio</a> lists a scheduled statement among
+the named statements by its schedule, with its next slot, last run and held
+slot, runs one now — <code>call lapse_holds</code>, marking no slot — and
+opens its definition as <code>create or replace statement ...</code>; its
+editor colours <code>every</code>, <code>slot</code> and the
+<code>at</code> before a cron text. The shell's <code>.help</code> gives the
+form, which a server defines and runs.</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

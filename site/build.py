@@ -205,7 +205,7 @@ KEYWORDS = {
         null true false collections describe compact begin commit on match fuse
         lookup group insert set del rerank absent returning fuzzy prefix like ilike
         between require else end call statement statements claims public scans
-        replace after new old""".split(),
+        replace after new old every slot""".split(),
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),
@@ -290,6 +290,12 @@ def token_pattern(lang):
     parts.append(r"(?P<string>\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')")
     parts.append(r"(?P<param>\$\d+)")
     parts.append(r"(?P<anno>@[A-Za-z_][\w]*)")
+    if lang == "fennecql":
+        # A schedule's `at '<cron>'` (or `"<cron>"`): a keyword only before
+        # its text, since `at` is a field many of the docs' examples read
+        # (`bucket(at, 1h)`). The lookahead stays on its line, as every
+        # token does.
+        parts.append(r"(?P<kw>\bat(?=[ \t]+['\"]))")
     parts.append(r"(?P<word>[A-Za-z_][\w]*)")
     parts.append(r"(?P<num>\b\d[\d_]*(?:\.\d+)?\b)")
     return "|".join(parts)

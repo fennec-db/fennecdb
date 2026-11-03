@@ -110,6 +110,12 @@ where the body answers rows, `Affected` where it does not, `Seq`, and `Replayed`
   ASCII letters, digits and `_`, a letter first, 59 bytes at most. A name that is not one, or arguments or claims
   that are not an object of values by name (a list, a text), throw `FennecQueryException` with the JS builder's
   message, before anything is sent.
+- `StatementsAsync()` lists the statements the server holds, as it lists them to its own token (a scoped one is
+  refused, 403): each a `NamedStatement` record -- `Signature`, `Writes`, `Comment`, `Broken`, a binding's `After`, and
+  a scheduled statement's clock: its `Schedule` (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `Next` slot as
+  a `DateTimeOffset`, the `Last` run (`LastRun`: `Slot`, `Outcome` `ran` or `refused`, `Status`, `Reason`,
+  `Skipped`) and a slot the server holds back (`Held`, a `HeldSlot`). `CallAsync` of a scheduled one runs it now, as
+  the server's token, marking no slot.
 
 `dotnet test FennecDb.Tests` runs against `fennec-server` processes it starts (`cargo build -p fennec-server`, or
 `FENNEC_SERVER`), and the builder against every case of `integrations/builder-golden.json`.

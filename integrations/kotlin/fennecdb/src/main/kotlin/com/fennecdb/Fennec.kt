@@ -280,6 +280,18 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
         return answerBlocking(st.text, st.params)
     }
 
+    /**
+     * The named statements this database holds (`statements`): each one's
+     * signature, whether it writes, its comment, why the schema broke it and
+     * what a binding is bound to. A scheduled one is listed with its clock,
+     * though the library runs none: a server's file opened here keeps its
+     * schedules for the server that next opens it.
+     */
+    suspend fun statements(): List<NamedStatement> = query("statements").map(NamedStatement::of)
+
+    /** [statements], on the calling thread. */
+    fun statementsBlocking(): List<NamedStatement> = queryBlocking("statements").map(NamedStatement::of)
+
     internal fun answerBlocking(text: String, params: List<Any?>, quiet: Boolean = false): Answer {
         if (closed.get()) throw FennecException(FennecException.Code.MISUSE, "the database was closed")
         val values = params.map { Values.normalize(it) }

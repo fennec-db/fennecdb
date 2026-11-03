@@ -277,6 +277,12 @@ public sealed partial class FennecClient : IDisposable
             head.Seq, head.Replayed);
     }
 
+    /// <summary>The named statements the database holds, as the server lists them to its own token
+    /// (<c>statements</c>) -- a scoped one is refused (403): each one's signature, whether it writes, its comment,
+    /// why the schema broke it, what a binding is bound to, and a scheduled one's clock.</summary>
+    public Task<IReadOnlyList<NamedStatement>> StatementsAsync(CancellationToken cancellationToken = default) =>
+        QueryAsync<NamedStatement>("statements", null, cancellationToken);
+
     /// <summary>Runs the statements in order under one write lock, as one block: their writes all land, or at the
     /// first error none of them do -- a <see cref="FennecException"/> whose <see cref="FennecException.Completed"/>
     /// says how many were applied. A batch holding a compact runs each statement on its own, and what ran before

@@ -1298,6 +1298,36 @@ test('a binding that refuses a write over HTTP is named in the error', { skip: b
   }
 });
 
+// The statements a server holds, listed to its token: a scheduled one with
+// its clause and next slot -- New Year's, so no run lands while the test
+// looks -- and no run yet; a called one with its signature and no clock.
+test('the statements a server holds are listed, a scheduled one with its clock', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  const db = client.connect(s.url);
+  try {
+    await db.run('create collection ticks (n int, at timestamp)');
+    await db.run("create statement tick at '0 3 1 1 *' in 'Europe/Berlin' comment 'A tick a year' as insert ticks {n: 1, at: slot()}");
+    await db.run('create statement ticked() as get ticks count');
+    const listed = Object.fromEntries((await db.statements()).map((x) => [x.name, x]));
+    // Berlin's 03:00 on 1 January is 02:00 UTC: this year's, or next.
+    const year = new Date().getUTCFullYear();
+    const next = Date.now() < Date.UTC(year, 0, 1, 2) ? year : year + 1;
+    const { tick, ticked } = listed;
+    assert.deepEqual(
+      [tick.schedule, tick.next, tick.last, tick.held, tick.comment, tick.writes, tick.signature, tick.after, tick.broken],
+      ["at '0 3 1 1 *' in 'Europe/Berlin'", `${next}-01-01T02:00:00Z`, null, null, 'A tick a year', true, '()', null, null],
+    );
+    assert.equal(tick.version.length, 2);
+    assert.deepEqual([ticked.signature, ticked.writes, ticked.schedule, ticked.next, ticked.last, ticked.held], ['()', false, null, null, null, null]);
+    // The server's token runs it now, marking no slot.
+    assert.equal((await db.call('tick')).count, 1);
+    const after = (await db.statements()).find((x) => x.name === 'tick');
+    assert.deepEqual([after.next, after.last], [`${next}-01-01T02:00:00Z`, null]);
+  } finally {
+    s.close();
+  }
+});
+
 // A claim held at the server until a job comes (`{ wait }`, `Fennec-Wait`):
 // taken by the builder's update and by `run`, ended on time with no row,
 // and given up by an AbortSignal; a database in the page refuses `wait`.

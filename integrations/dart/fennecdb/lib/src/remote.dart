@@ -345,6 +345,12 @@ class FennecRemote {
     return c.run(s.text, s.params);
   }
 
+  /// The named statements the server holds, as it lists them to its own
+  /// token (`statements`) -- a scoped one is refused (status 403): each one's
+  /// signature, whether it writes, its comment, why the schema broke it, what
+  /// a binding is bound to, and a scheduled one's clock.
+  Future<List<NamedStatement>> statements() async => (await query('statements')).map(namedStatement).toList();
+
   /// Lets the connections go: this one's, and every copy's.
   void close() => _shared.client.close();
 

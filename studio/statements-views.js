@@ -428,6 +428,8 @@ export function callStatement(n, args = {}) {
   return { text: `call ${n} $1`, params: [args] };
 }
 
+export const runNow = (n) => ({ text: `call ${statementName(n)}`, params: [] });
+
 /**
  * The parameters of a signature as `statements` writes it -- `($from int,
  * $to int = ..., $tags [text]) claims (sub text)` -- each `{name, type,

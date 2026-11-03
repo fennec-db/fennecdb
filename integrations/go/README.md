@@ -126,6 +126,12 @@ if errors.As(err, &e) && e.Status == 412 { fmt.Println(e.Reason) } // "insuffici
   `q.ToFennecQL()` does. Only the name goes into the text -- ASCII letters, digits and `_`, a letter first, at most 59
   bytes -- and an arguments value that is not an object is refused (`*fennecdb.QueryError`, nothing sent), both held
   to `integrations/builder-golden.json`.
+- `db.Statements(ctx)` lists the statements the server holds, as it lists them to its own token (a scoped one is
+  refused, 403): each a `NamedStatement` -- `Signature`, `Writes`, `Comment`, `Broken`, a binding's `After`, and a
+  scheduled statement's clock: its `Schedule` (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `Next` slot as a
+  `*time.Time`, the `Last` run (`*LastRun`: `Slot`, `Outcome` `ran` or `refused`, `Status`, `Reason`, `Skipped`) and a
+  slot the server holds back (`*HeldSlot`). `Call` of a scheduled one runs it now, as the server's token, marking no
+  slot.
 
 `go test` runs against `fennec-server` processes it starts (`cargo build -p fennec-server`, or `FENNEC_SERVER`), and the
 builder against every case of `integrations/builder-golden.json`.

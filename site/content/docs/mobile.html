@@ -295,6 +295,17 @@ a part of the rows: it is refused, in the SDK's error, and the app calls the
 server through its connection — what the call wrote comes back through the
 shapes' streams like any server write.</p>
 
+<p><code>db.statements()</code> lists them — Kotlin's
+<code>statementsBlocking()</code> too — each a <code>NamedStatement</code>:
+its signature, whether it writes, its comment, why the schema broke it, what a
+binding is bound to, and a <a href="fennecql.html#scheduled-statements">scheduled
+statement</a>'s clock, its <code>schedule</code>, <code>next</code> slot,
+<code>last</code> run and <code>held</code> slot (a <code>Date</code> in
+Swift, milliseconds since the epoch in Kotlin, a UTC <code>DateTime</code> in
+Dart). The server lists them to its own token alone; the app's own database
+lists what its file holds, and runs no schedule (<a
+href="languages.html#named-statements">every SDK's</a>).</p>
+
 <h2 id="live">Live queries</h2>
 
 <p>A live query hands over its rows at once, and again after a write to a

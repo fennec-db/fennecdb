@@ -93,6 +93,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
 __all__ = [
@@ -105,6 +106,9 @@ __all__ = [
     "Cond",
     "FacetCount",
     "FennecError",
+    "HeldSlot",
+    "LastRun",
+    "NamedStatement",
     "Param",
     "Query",
     "Rows",
@@ -210,6 +214,82 @@ class Changes(NamedTuple):
     writes: list
     next: int
     seq: int = 0
+
+
+class LastRun(NamedTuple):
+    """A scheduled statement's last run, landed or pending, as `statements`
+    lists it: the slot it ran for (what `slot()` read), `"ran"` or
+    `"refused"` -- the statement's own refusal, a `require` not met or a
+    broken statement, which marks the slot as run -- its status and the
+    `reason` its `require` gave, and the slots passed over before it."""
+
+    slot: datetime
+    outcome: str
+    status: int | None
+    reason: str | None
+    skipped: int
+
+
+class HeldSlot(NamedTuple):
+    """A due slot the server's state holds back -- a tenant's quota (507), a
+    storage error -- tried again as that changes, and since when."""
+
+    slot: datetime
+    status: int
+    since: datetime
+
+
+class NamedStatement(NamedTuple):
+    """A named statement as `statements` lists it to the server's token,
+    each column None where it says nothing of the statement: a called one
+    has no `after` and no clock. `after` is a write-bound statement's
+    collection and the writes that run it (`("orders", "set or del")`);
+    `schedule` a scheduled one's clause as its text writes it (`every 1h`,
+    `at '0 3 * * *' in 'Europe/Berlin'`), `next` the slot due next -- past
+    while one is overdue or held -- `last` its last run and `held` a slot
+    held back. `version` is the history and change its definition landed
+    at; `broken` why the schema broke it, which it runs no more until it
+    reads again."""
+
+    name: str
+    version: tuple[int, int]
+    signature: str | None
+    writes: bool | None
+    comment: str | None
+    broken: str | None
+    after: tuple[str, str] | None
+    schedule: str | None
+    next: datetime | None
+    last: LastRun | None
+    held: HeldSlot | None
+
+
+def _instant(text: str) -> datetime:
+    """The server's ISO text of a time, read as an aware UTC datetime:
+    `fromisoformat` takes a `Z` only from Python 3.11."""
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _named(row: Mapping[str, Any]) -> NamedStatement:
+    """A row of `statements` as a `NamedStatement`."""
+    last, held, after = row.get("last"), row.get("held"), row.get("after")
+    return NamedStatement(
+        name=row["name"],
+        version=tuple(row["version"]),
+        signature=row.get("signature"),
+        writes=row.get("writes"),
+        comment=row.get("comment"),
+        broken=row.get("broken"),
+        after=tuple(after) if after else None,
+        schedule=row.get("schedule"),
+        next=_instant(row["next"]) if row.get("next") else None,
+        last=(
+            LastRun(_instant(last["slot"]), last["outcome"], last.get("status"), last.get("reason"), last.get("skipped", 0))
+            if last
+            else None
+        ),
+        held=HeldSlot(_instant(held["slot"]), held["status"], _instant(held["since"])) if held else None,
+    )
 
 
 class _Shared:
@@ -406,6 +486,13 @@ class Client:
         said, a call goes home, as every text not known to read does."""
         text, params = Call(name, args, claims=claims).to_call()
         return self.query(text, params, idempotency_key=idempotency_key, wait=wait, read=read)
+
+    def statements(self) -> list[NamedStatement]:
+        """Each named statement the database holds, as the server lists them
+        to its own token (`statements`) -- a scoped one is refused (403):
+        its signature, whether it writes, its comment, why the schema broke
+        it, what a binding is bound to, and a scheduled one's clock."""
+        return [_named(r) for r in self.query("statements")]
 
     def query(
         self,
@@ -830,6 +917,10 @@ class AsyncClient:
         cancelled as any task is, its connection closed with it."""
         text, params = Call(name, args, claims=claims).to_call()
         return await self.query(text, params, idempotency_key=idempotency_key, wait=wait, read=read)
+
+    async def statements(self) -> list[NamedStatement]:
+        """The named statements the database holds, as `Client.statements`."""
+        return [_named(r) for r in await self.query("statements")]
 
     async def query(
         self,

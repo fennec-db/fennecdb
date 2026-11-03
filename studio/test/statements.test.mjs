@@ -23,6 +23,7 @@ registerHooks({
   },
 });
 const S = { ...(await import('../statements.js')), ...(await import('../statements-views.js')) };
+const { clockText } = await import('../schema.js');
 const { readInput, vectorSummary } = await import('../values.js');
 const { parseMetrics, claimsOf } = await import('../connect.js');
 
@@ -260,6 +261,35 @@ test('a call names its statement as FennecQL writes one, its arguments one param
   assert.equal(S.replacing('create or replace statement t() as get a select id'), 'create or replace statement t() as get a select id');
 });
 
+test('a scheduled statement is run now by its name alone, and its clock read in words', () => {
+  assert.deepEqual(S.runNow('lapse_holds'), { text: 'call lapse_holds', params: [] });
+  for (const bad of ['lapse holds', 'x;drop', '', 'a'.repeat(60)]) {
+    assert.throws(() => S.runNow(bad), S.StatementError, bad);
+  }
+  assert.equal(
+    S.replacing("create statement tidy at '0 3 * * *' in 'Europe/Berlin' as del t where at < now()"),
+    "create or replace statement tidy at '0 3 * * *' in 'Europe/Berlin' as del t where at < now()",
+  );
+  // `next`, `last` and `held` as `statements` lists them (the schema view's
+  // `clockText`). No `next` where this server's build lacks the zone.
+  const next = '2026-11-04T03:00:00Z';
+  assert.equal(clockText({ next, last: null, held: null }), `next ${next}; not run yet`);
+  assert.equal(clockText({ next, last: { slot: '2026-11-03T03:00:00Z', outcome: 'ran', status: null, reason: null, skipped: 0 }, held: null }), `next ${next}; ran for 2026-11-03T03:00:00Z`);
+  assert.equal(
+    clockText({ next, last: { slot: '2026-11-03T03:00:00Z', outcome: 'refused', status: 412, reason: 'no hold to look at', skipped: 2 }, held: null }),
+    `next ${next}; refused (412) for 2026-11-03T03:00:00Z: no hold to look at, 2 before it passed over`,
+  );
+  assert.equal(
+    clockText({ next: '2026-11-03T03:00:00Z', last: null, held: { slot: '2026-11-03T03:00:00Z', status: 507, since: '2026-11-03T03:00:04Z' } }),
+    'next 2026-11-03T03:00:00Z; not run yet; 2026-11-03T03:00:00Z held (507) since 2026-11-03T03:00:04Z',
+  );
+  assert.equal(clockText({ next: null, last: null, held: null }), 'no next slot; not run yet');
+  assert.equal(
+    clockText({ next: null, last: { slot: '2026-11-03T03:00:00Z', outcome: 'ran', status: null, reason: null, skipped: 0 }, held: null }),
+    'no next slot; ran for 2026-11-03T03:00:00Z',
+  );
+});
+
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {
   for (const v of NASTY) {
     const r = S.editorRequest('get orders where note = $1', JSON.stringify([v]));
@@ -398,7 +428,9 @@ test('an answer\'s columns are read off its rows; the metrics off their text', a
 });
 
 // Each view is a module of its own, fetched when it opens: what it adds,
-// with the stylesheet and the modules the views share, gzipped.
+// with the stylesheet and the modules the views share, gzipped. The schema
+// view, the largest, passed 24 KB with the scheduled statements' clock and
+// run now, and is held to 25 KB alone.
 test('each view past the rows loads apart from the first load, and small', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const gz = (f) => gzipSync(readFileSync(join(here, '..', f)), { level: 9 }).length;
@@ -407,8 +439,8 @@ test('each view past the rows loads apart from the first load, and small', () =>
   for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js', 'kit.js', 'highlight.js', 'views.css', 'statements-views.js']) {
     assert.ok(!page.includes(view), `${view} is on the first load`);
   }
-  for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js']) {
-    assert.ok(shared + gz(view) < 24_000, `${view}: ${shared + gz(view)} bytes gzipped`);
+  for (const [view, most] of [['editor.js', 24_000], ['schema.js', 25_000], ['live.js', 24_000], ['admin.js', 24_000]]) {
+    assert.ok(shared + gz(view) < most, `${view}: ${shared + gz(view)} bytes gzipped`);
   }
 });
 

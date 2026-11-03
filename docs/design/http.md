@@ -30,12 +30,14 @@ rules that apply to it, the filter as the policy writes it
 (`Scope::summary_into`). The grid reads 100 rows a block, the block after
 one in id order by `id > $last`, a jump or an order by offset, and draws
 only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 65 KB of JS
+the longest frame 18.7 ms in headless Chrome. Its first load is 71 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
 The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
-`views.css`): 19, 19, 7 and 13 KB gzipped with what they share, none of
-it on the first load (`statements.test.mjs` holds both). The editor runs
+`views.css`): 22, 24, 18 and 20 KB gzipped with what they share, none of
+it on the first load (`statements.test.mjs` holds both, each view under
+24 000 bytes but the schema view, under 25 000 since it listed the scheduled
+statements' clocks, 23 819 to 24 202, [named-statements.md](named-statements.md#what-f3-has-built)). The editor runs
 the text as typed -- cut at each `;` outside strings and comments, one
 statement to `/query`, several one `/batch` -- and shows the status,
 `Fennec-Seq`, `X-Request-Id` (exposed to CORS for it) and `explain` of a
