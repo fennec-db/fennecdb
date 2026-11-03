@@ -69,7 +69,12 @@ tenant's gate entered and let go, so a freeze goes through beside it --
 and its time is out of the slow log; a tenant closed answers it 503 with
 `Retry-After` and `retry_after`, a wait that ran out answers its last
 answer though a write it has not looked at landed in the moment before
-(its head woken late: the job is the next claim's, never lost), a SIGTERM
+(its head woken late: the job is the next claim's, never lost) -- under
+`--sync always` once what that answer read is durable, as a write's
+refusal waits (`durability.md`, *Storage errors*; `held_answered`), since
+a keyed run and a `/batch` that wrote nothing were kept back with no
+durability of their own, the 412 of a `del` another worker landed a power
+loss could take back among them -- a SIGTERM
 answers every one at once with its last answer before the sync
 (`end_all`, `HELD_GRACE`), a client gone hands the row to the next (a
 `peek` before each run), a keyed one keeps no key while it writes nothing

@@ -25,7 +25,28 @@ exactly as a second process would. `freeze` takes a per-tenant gate
 exclusively so a write that passed the frozen check cannot land after the final
 export. A move is freeze, copy the image, install, flip the directory in one
 statement, delete the source; the change sequence travels in the image, so a
-caught-up subscriber resumes on the target without a reseed. A node's tenants
+caught-up subscriber resumes on the target without a reseed. A tenant's
+file is on disk with its name before a create or an install answers that
+it is there, as every file renamed into a database's place is
+(`durability.md`, *The sync log*): an install writes the image beside,
+fsyncs it, forgets the old sync log durably, renames it into place and then
+fsyncs the directory -- the last step missing until the #495 review found
+it, so a power loss after the answer could take the name back, and a
+move's flip pointed the router at a node with no file. A create's open
+writes the magic alone with no fsync (`fs::open`), so the registry runs
+the database's first durability before anything else can write it, which
+fsyncs what the sink inherited (`Disk::inherited`; on a primary its `Tee`
+waits for no stream, none attached yet), and then fsyncs the directory
+(`made_durable`, for an open that found the file missing or empty). Either
+step failing takes the file back -- the install's renamed file, the
+create's made one -- and answers 500: kept, it was a file at the place
+that no router placed and none could take back by its identity, unstamped,
+which every install after it met as there (409). A file opened that was
+there takes neither. `tenants::tests`'s
+`a_tenants_file_is_durable_in_its_directory_before_it_is_answered` holds
+the steps' order, on a node with a feed and one without; that each fsync
+reaches the disk is fennec-core's, and nothing a process sees of its own
+short of a power loss. A node's tenants
 are replicated to its standby, each through its own feed at
 `/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
 them there one at a time -- separate databases, nothing to make atomic
@@ -144,7 +165,19 @@ request begins (`metrics::begin_request`): cleared by `record` alone, they
 outlived the admin schema's answer, which records none, and the next read
 on its keep-alive connection was answered as a write once its lease
 lapsed under it (`tests/lease_answers.rs`, each failing with its part taken
-out). What
+out). A replayed `Idempotency-Key` found by a call whose statement reads
+(`read_call`) is a write's answer too: the key was kept by the call when its
+statement wrote, since made to read, and a reading call keeps none. Run
+read-only under a freeze or a lapsed lease, that branch of
+`handle_admitted` handed back every answer but a 403 as it was, and the
+read path never set `metrics::wrote`, so a lapsed node's kept 200 went out
+where it is `outcome: unknown` -- the #495 review's find. The replay sets
+it (counted in `/_metrics` as the write it answers, as every other replay
+is), and the branch asks `answered_under_lease` of every answer but the 403
+it turns into a 503; under a freeze alone, the lease holding, the kept
+answer goes out, its block landed before the freeze and so in the export
+(`a_write_replayed_by_a_call_made_to_read_is_asked_of_the_lease`, failing
+with either part out). What
 leases do not cover: a VM stopped by its host is no suspend to the guest --
 under QEMU/KVM's defaults a `stop` and `cont` (QEMU sets the kvmclock back,
 on arm64 the virtual counter), and under any of its settings a save and

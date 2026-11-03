@@ -355,12 +355,15 @@ fn at_seq(mut r: Response, seq: u64) -> Response {
 /// file to be durable before the answer: what `f` wrote, and where it
 /// wrote nothing, what it read -- a consumer another request made a
 /// moment before, its fsync not yet run, is not answered as there until
-/// it is. `f`'s refusal is answered as it is, nothing written. Gives `f`'s
-/// answer and the change the database stood at after it. A replica's
-/// consumers are its primary's, so it refuses each of these whatever `f`
-/// would change: a `POST` of one that is there writes nothing, and had
-/// passed, leaving a relay pointed at a replica to fail at its first
-/// commit rather than as it starts.
+/// it is. `f`'s refusal too, nothing written, as a write's refusal waits
+/// (`crate::refusal_durability`): a `POST` ahead of a consumer another made
+/// a moment before (409), a `PATCH` of one another let go (404), answered
+/// at once, told its client of a consumer a power loss took back or
+/// brought back. Gives `f`'s answer and the change the database stood at
+/// after it. A replica's consumers are its primary's, so it refuses each of
+/// these whatever `f` would change: a `POST` of one that is there writes
+/// nothing, and had passed, leaving a relay pointed at a replica to fail at
+/// its first commit rather than as it starts.
 fn changed<T>(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
@@ -376,16 +379,22 @@ fn changed<T>(
                 "this database is a replica: its consumers are its primary's".into(),
             ));
         }
-        let out = match f(&mut g)? {
-            Ok(out) => out,
-            Err(refused) => return Ok(Err(refused)),
+        let out = match f(&mut g) {
+            Ok(Ok(out)) => out,
+            Ok(Err(refused)) => return Ok(Err((refused, crate::settled(cfg, &mut g)?))),
+            Err(e) => {
+                let durability = crate::refusal_durability(cfg, &mut g, &e)?;
+                return Ok(Err((crate::error_response(&e), durability)));
+            }
         };
         let seq = g.change_seq();
         Ok(Ok((out, seq, crate::flush_for(cfg, &mut g)?)))
     })();
     let (out, seq, durability) = match done {
         Ok(Ok(done)) => done,
-        Ok(Err(refused)) => return Err(refused),
+        Ok(Err((refused, durability))) => {
+            return Err(crate::refused_after(db, durability, refused))
+        }
         Err(e) => return Err(crate::error_response(&e)),
     };
     crate::await_durable(db, durability).map_err(|e| crate::error_response(&e))?;

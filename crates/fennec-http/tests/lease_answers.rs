@@ -333,6 +333,66 @@ fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
     assert!(none.body.contains(r#""count":0"#), "{}", none.body);
 }
 
+/// A key a writing call kept, sent again once its statement was made to
+/// read, is answered the write's kept answer by the read path (`read_call`)
+/// -- the write's answer, asked of the lease as every write's is. Under a
+/// lapsed lease it is the 500 of an unknown outcome: answered as a read's,
+/// the kept 200 told its client the write was made where the tenant may
+/// have been failed over without it. Under a freeze, the lease holding,
+/// it is the kept answer: its block landed before the freeze, so in the
+/// export. Once the lease is granted again, the kept answer.
+#[test]
+fn a_write_replayed_by_a_call_made_to_read_is_asked_of_the_lease() {
+    let n = Node::start("replayed-call");
+    let mut c = Conn::open(n.port);
+    for q in [
+        "create collection notes (title text)",
+        "create statement stamp() public as insert notes {title: \"a\"}",
+    ] {
+        let a = c.query(q);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    let key = "Idempotency-Key: stamp-1\r\n";
+    let call = |c: &mut Conn| c.send_with("POST", "/t/acme/_call/stamp", key, "");
+    let replayed = |a: &Answer| {
+        a.headers
+            .iter()
+            .any(|h| h.to_ascii_lowercase().starts_with("idempotent-replayed"))
+    };
+    let made = call(&mut c);
+    assert_eq!(made.status, 200, "{}", made.body);
+    for q in [
+        "drop statement stamp",
+        "create statement stamp() public as get notes count",
+    ] {
+        let a = c.query(q);
+        assert_eq!(a.status, 200, "{q}: {}", a.body);
+    }
+    n.tenants.freeze("acme").unwrap();
+    let frozen = call(&mut c);
+    assert_eq!(
+        (frozen.status, replayed(&frozen), &frozen.body),
+        (200, true, &made.body)
+    );
+    n.tenants.thaw("acme").unwrap();
+    assert!(n.lease.grant(0, "e1", None).is_ok());
+    let lapsed = call(&mut c);
+    assert_eq!(lapsed.status, 500, "{}", lapsed.body);
+    assert!(
+        lapsed.body.contains(r#""outcome":"unknown""#),
+        "{}",
+        lapsed.body
+    );
+    n.grant();
+    let again = call(&mut c);
+    assert_eq!(
+        (again.status, replayed(&again), &again.body),
+        (200, true, &made.body)
+    );
+    let one = c.query("get notes count");
+    assert!(one.body.contains(r#""count":1"#), "{}", one.body);
+}
+
 /// A request is asked of its own writes alone: the schema a router applies
 /// through the admin route is answered on a path that counts no statement,
 /// which cleared what a request wrote, so the read after it on the same

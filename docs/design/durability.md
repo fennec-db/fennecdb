@@ -54,6 +54,50 @@ touching nothing. After `Database::fail` a durability is refused as every
 write is, and a replay with it, under either `--sync`: the write it
 answers may be among what the disk lost.
 
+So is a write's refusal: it is read from what other writes left, from the
+moment they land. Under `--sync always` an `insert` of an id another
+`insert` had just landed was answered 409 while that one's fsync ran --
+the #495 review held the first at `SlowDisk`'s gate and the second was told
+"holds a document 7 already" -- and a power loss then took back the row
+the client acted on: an insert it never sent again, an id it took for
+another's. As were a `@unique` clash, a `create collection`, `create
+statement` or `create index` that exists (409), a `require` another's
+`del` left unmet (412), a REST write to a collection another dropped (404)
+and a `/_changes` consumer's `POST` ahead of one another made (409). Every
+write path that refuses under its write lock now asks the durability a
+success would have waited for (fennec-http's `refusal_durability`:
+`flush` under the write lock it holds, `settled` where no error says what
+it read) and runs it after the lock (`refused_after`) -- REST writes,
+routed or run, `/query` keyed or not, `/batch` as a block and statement by
+statement, `create index` beside the database, `/_schema/apply`'s plan
+refused, a consumer's write. An fsync that covered those writes already
+runs none, one under way is waited out at the disk, and a failed one is
+the answer, a 500, as it is a write's. A storage error's refusal and a
+replica's (`ReadOnly`) wait for nothing: the one is its own answer, a
+durability after it refused, and the other says nothing of what a write
+left. A held write (`Fennec-Wait`) whose run wrote nothing is answered at
+its wait's end with that run's answer, `affected 0` or a `require`'s 412,
+which a keyed run and a `/batch` kept back with no durability; the wait's
+end asks it under the read lock (`held_answered`, `Database::durability`),
+a sink's error then going to `Database::fail` as a replay's does. Under
+`--sync <ms>` nothing waits, as no answer does. Every refusal under the
+lock is asked so but the memory ceiling's 507, which is the server's
+memory and not what a write left: chosen by error kind rather than for the
+few named, a refusal reading a field another `alter` dropped, a row a
+scoped token's rule reads or a quota's bytes waits as well, and none is a
+path that succeeds. A rule judged by the answer's status at the edge was the
+other way: it could not tell a refusal from a 429 or the 422 of a key sent
+with another request, which say nothing of what a write left, and would
+have asked the lock again for each. The paths that succeed run nothing
+new; a refusal asks the sink, the replay's cost where its bytes are
+covered (`http.md`, *Idempotency keys*), and is rare. `tests/server.rs`'s
+`a_refusal_is_answered_once_what_it_read_is_on_disk` holds fourteen
+refusals, each through its path, to the held fsync -- each answered before
+it with the change taken out, the two held writes' with the wait's end's
+alone -- and `a_refusal_read_from_a_write_whose_fsync_failed_is_no_refusal`
+an `insert`'s 409 whose reading fsync failed to the 500, with no fsync of
+its own.
+
 A file's sink fsyncs, too, what it inherited once (`Disk::inherited`): the
 bytes an earlier process left in the file, maybe in the page cache alone
 after its crash, are on disk once no fsync of this sink has run, and a
@@ -127,7 +171,10 @@ and wipes the header, so a file cut below the log's end after that open
 is not written over at the next. Everything that renames a file into a
 database's place removes the log first and makes the removal durable --
 `swap_in` after syncing the file it replaces, a restore, a backup
-unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
+unsealed, a tenant's import (`fs::forget_sync_log`) -- and syncs the
+directory after the rename (`fs::sync_dir`), which a tenant's import
+missed until the #495 review, as a tenant's create missed fsyncing the
+file its open made (`tenants.md`); a clean close syncs
 the file and removes it, so a node keeps none beside a closed tenant, and
 `Tenants::stats` counts it; a log that cannot be made is not tried again
 until the next open, each try being 260 KB of writes. `open_read_only`

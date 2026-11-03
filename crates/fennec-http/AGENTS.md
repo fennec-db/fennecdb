@@ -145,6 +145,8 @@ sent as its answer was to be: under `--sync always` every path that finds
 a key runs `Database::durability` after its lock (`idempotent::replay`),
 and a failed fsync is its answer, never the kept success; after a storage
 error a replay is the refusal under either `--sync`, its outcome unknown.
+A replay is a write's answer on every path, a call made to read's too
+(`metrics::wrote`), asked of a tenant's lease (`answered_under_lease`).
 
 **[Refusals and schema changes are logged; a refusal
 waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
@@ -231,8 +233,9 @@ but as a field against `now()` plus or minus integers or parameters, is
 refused (`holdable`). A call is held by its body, an `insert` refused, and
 whether it wrote is asked of the database (`waits::Mark`), never its last
 statement's answer; a binding's unmet `require` (`Database::woken`) is
-answered at once, never held. The builders refuse `wait` on a database in
-the page (`LOCAL_WAIT`).
+answered at once, never held. Its answer at its wait's end waits for the
+disk as a refusal does (`held_answered`). The builders refuse `wait` on a
+database in the page (`LOCAL_WAIT`).
 
 **[A write wakes the held writes reading what it wrote, a row going to the
 group ranking it first](../../docs/design/waits.md#waking-held-writes)**

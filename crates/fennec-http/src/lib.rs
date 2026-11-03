@@ -1182,7 +1182,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // connection closed and nothing more of it read.
         let gone = || reader.buffer().is_empty() && conn.gone();
         let hold = tenant.as_ref().map(|t| &t.quota);
-        let (resp, waited, held) = respond(run, hub, db, &req, gone, hold);
+        let held_by = (&**db, cfg.sync_on_write);
+        let (resp, waited, held) = respond(run, hub, held_by, &req, gone, hold);
         if let Some(t) = &tenant {
             quota::noted(&resp, t.name(), &req);
         }
@@ -1277,7 +1278,7 @@ fn bound_noted(tenant: Option<&str>, took: std::time::Duration) {
 fn respond(
     run: impl Fn() -> Response,
     hub: &Arc<Hub>,
-    db: &RwLock<Database>,
+    (db, durable): (&RwLock<Database>, bool),
     req: &Request,
     gone: impl Fn() -> bool,
     quota: Option<&Arc<quota::Held>>,
@@ -1341,6 +1342,7 @@ fn respond(
             }
             waits::Next::End => {
                 ticket.leave(false);
+                resp = held_answered(db, durable, resp);
                 break;
             }
             waits::Next::Closed => {
@@ -1356,6 +1358,33 @@ fn respond(
     }
     drop(waiting);
     (resp, held.elapsed().saturating_sub(ran), true)
+}
+
+/// A held write's answer as its wait ends: its last run's, kept back while
+/// the run was held -- `affected 0`, a `require`'s 412 -- and read from
+/// what other writes left as that run saw it. Under `--sync always` it goes
+/// out once those are durable, as a write's refusal does
+/// ([`refusal_durability`]): a keyed run and a `/batch` that wrote nothing
+/// waited for nothing as they were held. Asked under the read lock
+/// ([`Database::durability`]), run after it; a sink's error as it is asked
+/// goes to the engine, as a replay's does.
+fn held_answered(db: &RwLock<Database>, durable: bool, resp: Response) -> Response {
+    if !durable {
+        return resp;
+    }
+    let asked = {
+        let g = held::read(db);
+        g.refuse_if_failed().map(|_| g.durability())
+    };
+    match asked {
+        // After a storage error, the refusal every write meets.
+        Err(refused) => error_response(&refused),
+        Ok(Ok(durability)) => refused_after(db, durability, resp),
+        Ok(Err(e)) => {
+            storage_failed(db, &e);
+            error_response(&e)
+        }
+    }
 }
 
 /// How long until `resp`, a tenant's refusal for its rates of writes, lets
@@ -1716,10 +1745,16 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
             handle(&t.db, &read_only, req)
         }
     };
+    // Run read-only, the request wrote nothing, but it may answer a write:
+    // a replayed key a writing call kept, found by a call since made to
+    // read ([`read_call`]), is asked of the lease as every write's answer
+    // is, and is `outcome: unknown` once it lapsed. Answered as it was, a
+    // lapsed node's kept 200 told the client its write was made where the
+    // tenant may have been failed over without it.
     if let Some(why) = refused {
         return match resp.status {
             403 => Response::retry_after(503, &why, 1),
-            _ => resp,
+            _ => answered_under_lease(t, req, resp),
         };
     }
     answered_under_lease(t, req, resp)
@@ -2170,14 +2205,16 @@ fn rest_write(
         };
         return rest_run(db, cfg, who, key, guard, run, ready);
     }
+    // Refused here, it is refused by what the lock shows -- a collection
+    // another write dropped, a field it changed -- and waits for it.
     let routed = match api::route(&guard, req) {
         Ok(r) => r,
-        Err(e) => return error_response(&e),
+        Err(e) => return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e)),
     };
     let mut mask = None;
     let (stmt, bound) = match scoped_under(who, &guard, routed.statement, &[], &mut mask) {
         Ok(s) => s,
-        Err(e) => return error_response(&e),
+        Err(e) => return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e)),
     };
     let run = Run {
         shape: &routed.shape,
@@ -2253,19 +2290,20 @@ fn rest_run(
         Some(k) => {
             let resp = answer(&result);
             if let Err(e) = keyed(&mut guard, k, &resp, result.is_ok(), ttl) {
-                return error_response(&e);
+                return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e));
             }
             Some(resp)
         }
         None => None,
     };
     let seq = result.is_ok().then(|| At::of(&guard));
-    let durability = match result {
-        Ok(_) => match flush_for(cfg, &mut guard) {
-            Ok(d) => d,
-            Err(e) => return error_response(&e),
-        },
-        Err(_) => None,
+    let durability = match &result {
+        Ok(_) => flush_for(cfg, &mut guard),
+        Err(e) => refusal_durability(cfg, &mut guard, e),
+    };
+    let durability = match durability {
+        Ok(d) => d,
+        Err(e) => return error_response(&e),
     };
     drop(guard);
     if let Err(e) = await_durable(db, durability) {
@@ -2703,11 +2741,15 @@ pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str)
     let mut guard = held::write(db);
     let r = fennec_abi::schema(&mut guard, body, true, Some(now));
     let durability = match &r {
-        Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
-            Ok(d) => d,
-            Err(e) => return error_response(&e),
-        },
-        _ => None,
+        Ok(o) if o.applied => flush_for(cfg, &mut guard),
+        // The plan's refusals are read from the schema other writes left.
+        Ok(o) if !o.plan.refusals.is_empty() => settled(cfg, &mut guard),
+        Ok(_) => Ok(None),
+        Err(e) => refusal_durability(cfg, &mut guard, e),
+    };
+    let durability = match durability {
+        Ok(d) => d,
+        Err(e) => return error_response(&e),
     };
     let seq = At::of(&guard);
     drop(guard);
@@ -3028,16 +3070,22 @@ fn run_query(
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
         // write does.
-        let durability = match built {
+        let durability = match &built {
             Ok(_) => {
                 let mut g = db.write().unwrap_or_else(|e| e.into_inner());
                 seq = Some(At::of(&g));
-                match flush_for(cfg, &mut g) {
-                    Ok(d) => d,
-                    Err(e) => return error_response(&e),
-                }
+                flush_for(cfg, &mut g)
             }
-            Err(_) => None,
+            // `create index`'s 409 is read from an index another made.
+            Err(e) if cfg.sync_on_write => {
+                let mut g = db.write().unwrap_or_else(|e| e.into_inner());
+                refusal_durability(cfg, &mut g, e)
+            }
+            Err(_) => Ok(None),
+        };
+        let durability = match durability {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
         };
         if let Err(e) = await_durable(db, durability) {
             return error_response(&e);
@@ -3092,12 +3140,13 @@ fn run_query(
             waits::plan(&guard, &[(&stmt, &params)], before);
         }
         seq = Some(At::of(&guard));
-        let durability = match r {
-            Ok(_) => match flush_for(cfg, &mut guard) {
-                Ok(d) => d,
-                Err(e) => return error_response(&e),
-            },
-            Err(_) => None,
+        let durability = match &r {
+            Ok(_) => flush_for(cfg, &mut guard),
+            Err(e) => refusal_durability(cfg, &mut guard, e),
+        };
+        let durability = match durability {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
         };
         drop(guard);
         timing::lap(timing::Phase::Execute);
@@ -3292,15 +3341,16 @@ fn keyed_query(
         return with_seq(resp, Some(At::of(&guard)));
     }
     if let Err(e) = keyed(&mut guard, key, &resp, result.is_ok(), ttl) {
-        return error_response(&e);
+        return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e));
     }
     let seq = result.is_ok().then(|| At::of(&guard));
-    let durability = match result {
-        Ok(_) => match flush_for(cfg, &mut guard) {
-            Ok(d) => d,
-            Err(e) => return error_response(&e),
-        },
-        Err(_) => None,
+    let durability = match &result {
+        Ok(_) => flush_for(cfg, &mut guard),
+        Err(e) => refusal_durability(cfg, &mut guard, e),
+    };
+    let durability = match durability {
+        Ok(d) => d,
+        Err(e) => return error_response(&e),
     };
     drop(guard);
     if let Err(e) = await_durable(db, durability) {
@@ -3370,6 +3420,13 @@ fn read_call(
                 key.and_then(|k| idempotent::replay(&guard, k, ttl, cfg.sync_on_write))
             {
                 drop(guard);
+                // A call that reads keeps no key: one found was kept by a
+                // writing call since made to read, and its answer is that
+                // write's -- counted as a write's, and on a tenant asked of
+                // the lease as one ([`answered_under_lease`]). Taken for a
+                // read's, a lapsed node's kept 200 went out where it is
+                // `outcome: unknown`.
+                metrics::wrote();
                 return Some(replay.answer(db));
             }
         }
@@ -3612,8 +3669,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     for (at, ((stmt, params), mask)) in stmts.iter().zip(&masks).enumerate() {
         // Measured before each statement, as a lone one is: the batch
         // stops at the first the ceiling refuses, as at an error.
+        // A stop, and whether it may be read from what writes left
+        // ([`refusal_durability`]): the ceiling's is the server's memory.
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
-            Some(why) => Err((507, why, None, None)),
+            Some(why) => Err(((507, why, None, None), false)),
             None => match &unscoped {
                 None => access::judge_call(who, &guard, stmt, params)
                     .and_then(|_| {
@@ -3624,7 +3683,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }
-            .map_err(|e| api::bound_stop(&e, bound_by(who, &guard, &e).as_deref())),
+            .map_err(|e| {
+                let stop = api::bound_stop(&e, bound_by(who, &guard, &e).as_deref());
+                (stop, read_from_writes(&e))
+            }),
         };
         match r {
             Ok(r) => {
@@ -3632,26 +3694,32 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 statements::rows(counted(&r));
                 results.push(r)
             }
-            Err(stop) if block => {
+            Err((stop, read)) if block => {
                 // Nothing of the block reached the file: none of it is left.
                 guard.rollback();
-                // A `require` unmet wrote nothing: held, it waits.
+                let at = results.len();
+                // A `require` unmet wrote nothing: held, it waits, and its
+                // answer at the wait's end waits for the disk there
+                // ([`respond`]).
                 if wait && stop.0 == 412 {
                     held_plan(&guard, before);
+                    return batch_stop(stop, 0, at);
                 }
-                let at = results.len();
-                return batch_stop(stop, 0, at);
+                return refused_under(db, cfg, guard, read, batch_stop(stop, 0, at));
             }
-            Err(stop) => {
-                // Sync on the error path too: whatever was applied is durable.
-                // The statement's error is the one reported.
+            Err((stop, read)) => {
+                let n = results.len();
+                // Sync on the error path too: whatever was applied is durable,
+                // and what the refusal read. The statement's error is the one
+                // reported -- but where nothing was applied, whose refusal's
+                // failed fsync is its answer, as a lone write's is.
                 if !results.is_empty() {
                     let durability = flush_for(cfg, &mut guard).ok().flatten();
                     drop(guard);
                     let _ = await_durable(db, durability);
+                    return batch_stop(stop, n, n);
                 }
-                let n = results.len();
-                return batch_stop(stop, n, n);
+                return refused_under(db, cfg, guard, read, batch_stop(stop, n, n));
             }
         }
     }
@@ -3688,9 +3756,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(kept) => kept,
         Err(e @ Error::Quota(_)) => {
             let at = stmts.len().saturating_sub(1);
-            return batch_stop(api::stop_of(&e), 0, at);
+            let stop = batch_stop(api::stop_of(&e), 0, at);
+            return refused_under(db, cfg, guard, true, stop);
         }
-        Err(e) => return error_response(&e),
+        Err(e) => return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e)),
     };
     let seq = Some(At::of(&guard));
     calls::after_drop(
@@ -4045,6 +4114,88 @@ fn flush_for(cfg: &Config, db: &mut Database) -> fennec_core::error::Result<Opti
     } else {
         Ok(db.write_behind())
     }
+}
+
+/// What a write refused under its write lock waits for before the refusal
+/// is answered: under `--sync always` the durability a write's answer waits
+/// for ([`flush_for`]), run once the lock is let go ([`refused_after`]);
+/// under `--sync <ms>`, where no answer waits for an fsync, nothing.
+///
+/// A refusal is read from what other writes left -- an `insert`'s 409 from
+/// the row another put there, a `@unique` clash from the value, `create`'s
+/// 409 from the collection or statement, a `require`'s 412 from the count
+/// another's `del` left, a REST write's 404 from a collection another
+/// dropped -- and a write's block is read from the moment it lands, under
+/// the lock, its fsync running after it. Answered at once, a refusal told
+/// its client of a row a power loss before that fsync took back, and the
+/// client acted on it: an `insert` it never sent again, an id it took for
+/// another's. An fsync that covered those writes already makes it run none
+/// (the group commit), one under way it waits out at the disk, and a failed
+/// one is the answer, a 500, as it is a write's. A storage error's refusal
+/// waits for nothing, being its own answer and a durability after it
+/// refused, nor does a replica's (`ReadOnly`), which says nothing of what
+/// any write left.
+fn refusal_durability(
+    cfg: &Config,
+    db: &mut Database,
+    e: &Error,
+) -> fennec_core::error::Result<Option<Durability>> {
+    match read_from_writes(e) {
+        true => settled(cfg, db),
+        false => Ok(None),
+    }
+}
+
+/// Whether the refusal `e` may be read from what writes left
+/// ([`refusal_durability`]): all but a storage error's and a replica's.
+fn read_from_writes(e: &Error) -> bool {
+    !matches!(e, Error::Io(_) | Error::ReadOnly(_))
+}
+
+/// What an answer read under the write lock waits for when no error says
+/// what it read -- a refusal of a write's own (a schema's plan, a consumer
+/// ahead): under `--sync always` the database's durability, after the lock
+/// ([`refusal_durability`]).
+fn settled(cfg: &Config, db: &mut Database) -> fennec_core::error::Result<Option<Durability>> {
+    match cfg.sync_on_write {
+        true => db.flush(),
+        false => Ok(None),
+    }
+}
+
+/// `resp`, a write's refusal, once `durability` ran with no lock held
+/// ([`refusal_durability`]); a failed fsync its answer in its place.
+fn refused_after(
+    db: &RwLock<Database>,
+    durability: Option<Durability>,
+    resp: Response,
+) -> Response {
+    match await_durable(db, durability) {
+        Ok(()) => resp,
+        Err(e) => error_response(&e),
+    }
+}
+
+/// `resp`, a refusal a write met under the write lock `guard`, `read` where
+/// it may be read from what writes left ([`read_from_writes`]): the lock
+/// let go, answered once that is durable ([`refusal_durability`]).
+fn refused_under(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    mut guard: held::Writing<'_>,
+    read: bool,
+    resp: Response,
+) -> Response {
+    let durability = match read {
+        true => settled(cfg, &mut guard),
+        false => Ok(None),
+    };
+    let durability = match durability {
+        Ok(d) => d,
+        Err(e) => return error_response(&e),
+    };
+    drop(guard);
+    refused_after(db, durability, resp)
 }
 
 /// Waits for the writes `flush_for` handed over, without the lock. A
