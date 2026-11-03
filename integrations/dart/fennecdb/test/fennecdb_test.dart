@@ -236,37 +236,6 @@ void main() {
   // A statement bound to a write, whose guard refuses it: named beside its
   // reason, the library's and a server's alike; null where no binding
   // refused.
-  // The statements the library holds, listed: a called one with its
-  // signature and no clock; and a run and a held slot as a server lists them,
-  // read into their types, the times UTC DateTimes.
-  test('the statements are listed, a run and a held slot read as times', () async {
-    final db = await Fennec.memory();
-    await db.execute('create collection ticks (n int)');
-    await db.execute('create statement ticked() as get ticks count');
-    final ticked = (await db.statements()).single;
-    expect((ticked.name, ticked.signature, ticked.writes, ticked.version.length), ('ticked', '()', false, 2));
-    expect([ticked.schedule, ticked.next, ticked.last, ticked.held, ticked.after, ticked.broken], everyElement(isNull));
-    await db.close();
-    final rows = (jsonDecode('''
-      [{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
-        "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
-        "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
-        "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
-       {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
-        "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
-      ''') as List).cast<Map<String, Object?>>();
-    final lapse = namedStatement(rows[0]);
-    final billed = namedStatement(rows[1]);
-    final noon = DateTime.utc(2026, 5, 4, 12);
-    expect(lapse.version, [0, 4]);
-    expect(lapse.next, noon.add(const Duration(minutes: 15)));
-    expect(lapse.last, LastRun(noon, 'refused', 412, 'no hold', 2));
-    expect(lapse.held,
-        HeldSlot(noon.add(const Duration(minutes: 15)), 507, noon.add(const Duration(minutes: 16, milliseconds: 250))));
-    expect(billed.after, ['bills', 'insert or set']);
-    expect((billed.next, billed.last, billed.held), (null, null, null));
-  });
-
   test('a binding that refuses a write is named', () async {
     final db = await Fennec.memory();
     await db.execute('create collection orders (status text)');
@@ -286,6 +255,37 @@ void main() {
         412, {'error': 'bound statement `voided` ...', 'reason': 'no ledger line', 'binding': 'voided', 'at': 1}, null);
     expect((remote.at, remote.reason, remote.binding), (1, 'no ledger line', 'voided'));
     expect(FennecRemote.refused(412, {'error': 'unmet'}, null).binding, isNull);
+  });
+
+  // The statements the library holds, listed: a called one with its
+  // signature and no clock; and a run and a held slot as a server lists them,
+  // read into their types, the times UTC DateTimes.
+  test('the statements are listed, a run and a held slot read as times', () async {
+    final db = await Fennec.memory();
+    await db.execute('create collection ticks (n int)');
+    await db.execute('create statement ticked() as get ticks count');
+    final ticked = (await db.statements()).single;
+    expect((ticked.name, ticked.signature, ticked.writes, ticked.version.length), ('ticked', '()', false, 2));
+    expect([ticked.schedule, ticked.next, ticked.last, ticked.held, ticked.after, ticked.broken], everyElement(isNull));
+    await db.close();
+    final rows = (jsonDecode('''
+      [{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+        "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
+        "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
+        "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
+       {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
+        "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
+      ''') as List).cast<Map<String, Object?>>();
+    final lapse = namedStatement(rows[0]);
+    final billed = namedStatement(rows[1]);
+    final noon = DateTime.utc(2026, 5, 4, 12);
+    expect(lapse.version, [-3244637736030576075, 4]);
+    expect(lapse.next, noon.add(const Duration(minutes: 15)));
+    expect(lapse.last, LastRun(noon, 'refused', 412, 'no hold', 2));
+    expect(lapse.held,
+        HeldSlot(noon.add(const Duration(minutes: 15)), 507, noon.add(const Duration(minutes: 16, milliseconds: 250))));
+    expect(billed.after, ['bills', 'insert or set']);
+    expect((billed.next, billed.last, billed.held), (null, null, null));
   });
 
   // The builder's call beside the golden file's cases (golden_test.dart):

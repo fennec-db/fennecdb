@@ -36,8 +36,8 @@ The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
 `views.css`): 22, 24, 18 and 20 KB gzipped with what they share, none of
 it on the first load (`statements.test.mjs` holds both, each view under
-25 000 bytes: the schema view passed 24 000 as it listed the scheduled
-statements' clocks, 23 819 to 24 368, [named-statements.md](named-statements.md#what-f3-has-built)). The editor runs
+24 000 bytes but the schema view, under 25 000 since it listed the scheduled
+statements' clocks, 23 819 to 24 202, [named-statements.md](named-statements.md#what-f3-has-built)). The editor runs
 the text as typed -- cut at each `;` outside strings and comments, one
 statement to `/query`, several one `/batch` -- and shows the status,
 `Fennec-Seq`, `X-Request-Id` (exposed to CORS for it) and `explain` of a

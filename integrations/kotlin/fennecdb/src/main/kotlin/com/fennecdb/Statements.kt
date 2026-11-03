@@ -9,7 +9,7 @@ package com.fennecdb
  */
 data class NamedStatement(
     val name: String,
-    /** The history and change its definition landed at. */
+    /** The history and change its definition landed at: signed, a history negative where its top bit is set. */
     val version: List<Long>,
     /** `($from int, $to int = ...) claims (sub text)`, as a call is written; `()` for none. */
     val signature: String?,
@@ -83,7 +83,7 @@ data class HeldSlot(val slot: Long, val status: Int, val since: Long)
  */
 internal fun epochMillis(text: String): Long {
     val m = Regex("""(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,3}))?Z""").matchEntire(text)
-        ?: throw FennecException(FennecException.Code.CORRUPT, "not a time the server writes: $text")
+        ?: throw FennecException(FennecException.Code.QUERY, "the answer holds a time the binding cannot read: $text")
     val (y0, mo, d, h, mi, s) = m.destructured
     val ms = m.groupValues[7].padEnd(3, '0').toLong()
     // Howard Hinnant's days-from-civil.

@@ -505,8 +505,10 @@ func (c *Client) Call(ctx context.Context, name string, args any, options ...Cal
 // statement: a called one has no After and no clock.
 type NamedStatement struct {
 	Name string `json:"name"`
-	// Version is the history and change its definition landed at.
-	Version [2]uint64 `json:"version"`
+	// Version is the history and change its definition landed at, as the
+	// server writes them: signed, a history negative where its top bit is
+	// set.
+	Version [2]int64 `json:"version"`
 	// Signature is `($from int, $to int = ...) claims (sub text)`, as a
 	// call is written; "()" for none.
 	Signature string `json:"signature"`

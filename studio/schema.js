@@ -25,6 +25,12 @@ function indexText(ix) {
   return `@${kind}${args.length ? `(${args.join(', ')})` : ''}`;
 }
 
+export function clockText({ next, last, held }) {
+  const ran = last ? `${last.outcome === 'ran' ? 'ran' : `refused (${last.status})`} for ${last.slot}${last.reason ? `: ${last.reason}` : ''}` : 'not run yet';
+  const passed = last?.skipped ? `, ${last.skipped} before it passed over` : '';
+  return `${next ? `next ${next}` : 'no next slot'}; ${ran}${passed}${held ? `; ${held.slot} held (${held.status}) since ${held.since}` : ''}`;
+}
+
 export function mount(host, ctx) {
   const title = h('h1', { class: 'view-title' });
   const actions = h('div', { class: 'sc-actions' });
@@ -110,14 +116,12 @@ export function mount(host, ctx) {
       if (!named.rows.length) return hint('The database holds none: create statement in the query editor defines one.');
       // A statement bound to the writes of a collection (`after`) is run by
       // them, never called: listed by what it is bound to, with no call form.
-      // One the server's clock runs (`every`, `at`) is listed by its
-      // schedule, with its next slot, last run and held slot, and run now.
       rows = named.rows.map((s) =>
         h(
           'tr',
           { dataset: { statement: s.name } },
           h('td', { class: 'mono' }, s.name, h('span', { class: 'sc-paths' }, s.after ? 'bound' : s.schedule ? 'scheduled' : s.writes ? 'writes' : 'reads')),
-          h('td', { class: 'mono muted' }, s.after ? `after ${s.after[1]} ${s.after[0]}` : (s.schedule ?? s.signature ?? ''), s.schedule ? h('span', { class: 'sc-paths' }, S.clockText(s)) : null),
+          h('td', { class: 'mono muted' }, s.after ? `after ${s.after[1]} ${s.after[0]}` : (s.schedule ?? s.signature ?? ''), s.schedule ? h('span', { class: 'sc-paths' }, clockText(s)) : null),
           h('td', {}, s.broken ? h('span', { class: 'ed-error' }, `Broken: ${s.broken}`) : (s.comment ?? '')),
           h(
             'td',
@@ -170,8 +174,7 @@ export function mount(host, ctx) {
    * as it is, or -- to a token not shown the signature -- the arguments as
    * a JSON object; the statement it sends written out below them. It runs
    * in the query editor, its answer in the grid, under an `Idempotency-Key`
-   * as the studio's writes are. `run`: a scheduled statement run now, its
-   * name alone (`call <name>`), the server marking no slot for it.
+   * as the studio's writes are.
    */
   function callForm(n, signature, run = false) {
     const params = signature === null ? null : S.signatureParams(signature).params;

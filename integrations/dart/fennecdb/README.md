@@ -163,7 +163,10 @@ binding's `after`, and a scheduled statement's clock -- its `schedule`
 (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `next` slot as a UTC
 `DateTime`, the `last` run (a `LastRun`: `slot`, `outcome` `ran` or
 `refused`, `status`, `reason`, `skipped`) and a slot the server holds back
-(`held`, a `HeldSlot`). The library runs no schedule: a server's file opened
+(`held`, a `HeldSlot`). Its `version` is the history and change the
+definition landed at, the history a signed 64-bit identity: compiled for the
+web, one past 2^53 is read rounded, as JavaScript reads it, so compare the
+change, not the history. The library runs no schedule: a server's file opened
 in the app keeps its schedules for the server that next opens it.
 
 The embedded `Fennec` has `callStatement(name, args:, claims:)` too: the file's

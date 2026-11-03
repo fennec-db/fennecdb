@@ -282,8 +282,11 @@ call('transfer', { from: 1, to: 2, amount: 300 }).toCall();   // ['call transfer
     <code>next</code> slot, the <code>last</code> run (<code>ran</code> or
     <code>refused</code>, its status, reason and the slots passed over) and
     a slot the server holds back (<code>held</code>), the times the server's
-    ISO text. <code>db.call(name)</code> runs a scheduled one now, as the
-    server's token, marking no slot.</li>
+    ISO text. Its <code>version</code> is the history and change the
+    definition landed at; the history, a signed 64-bit identity, is read
+    rounded past 2<sup>53</sup>, so compare the change, not the history.
+    <code>db.call(name)</code> runs a scheduled one now, as the server's
+    token, marking no slot.</li>
   <li><b>Not in the page:</b> the module refuses a call (<i>named
     statements are a server's</i>) and so does a synced database's local
     copy; call through <code>connect(url)</code> or <code>sync.remote</code>,

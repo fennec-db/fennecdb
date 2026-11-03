@@ -187,7 +187,7 @@ class CallLocalTest {
     fun aListedRunAndAHeldSlotAreReadAsTimes() {
         val rows = (
             Json.parse(
-                """[{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+                """[{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
                     "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
                     "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
                     "held":{"since":"2026-05-04T12:16:00.25Z","slot":"2026-05-04T12:15:00Z","status":507}},
@@ -199,12 +199,12 @@ class CallLocalTest {
         // 2026-05-04T12:00:00Z, as Json.iso writes it back.
         val noon = 1_777_896_000_000L
         assertEquals("2026-05-04T12:00:00.000Z", Json.iso(noon))
-        assertEquals(listOf(0L, 4L), lapse.version)
+        assertEquals(listOf(-3244637736030576075L, 4L), lapse.version)
         assertEquals(noon + 15 * 60_000, lapse.next)
         assertEquals(LastRun(noon, "refused", 412, "no hold", 2), lapse.last)
         assertEquals(HeldSlot(noon + 15 * 60_000, 507, noon + 16 * 60_000 + 250), lapse.held)
         assertEquals(listOf<Any?>(listOf("bills", "insert or set"), null, null), listOf(billed.after, billed.next, billed.last))
-        assertFailsWith<FennecException> { epochMillis("2026-05-04 12:00:00") }
+        assertEquals(FennecException.Code.QUERY, assertFailsWith<FennecException> { epochMillis("2026-05-04 12:00:00") }.code)
     }
 
     /** A binding's refusal through the library names it beside its reason; one no binding made names none. */

@@ -206,7 +206,10 @@ class Answer {
 class NamedStatement {
   final String name;
 
-  /// The history and change its definition landed at.
+  /// The history and change its definition landed at, as the server writes
+  /// them: signed, a history negative where its top bit is set. Compiled for
+  /// the web, a history past 2^53 is read rounded, as JavaScript reads it: it
+  /// is an identity, so compare the change, not the history.
   final List<int> version;
 
   /// `($from int, $to int = ...) claims (sub text)`, as a call is written;

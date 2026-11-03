@@ -423,7 +423,7 @@ func TestTheStatementsAServerHoldsAreListedAScheduledOneWithItsClock(t *testing.
 // the times as time.Time, a binding's After its collection and events.
 func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,` +
+		_, _ = w.Write([]byte(`[{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,` +
 			`"broken":null,"after":null,"schedule":"every 15m","next":"2026-05-04T12:15:00Z",` +
 			`"last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},` +
 			`"held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},` +
@@ -434,7 +434,7 @@ func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
 	listed := must(fennecdb.New(srv.URL).Statements(context.Background())).of(t)
 	at := func(m, s, ms int) time.Time { return time.Date(2026, 5, 4, 12, m, s, ms*1e6, time.UTC) }
 	lapse, billed := listed[0], listed[1]
-	if lapse.Version != [2]uint64{0, 4} || !lapse.Next.Equal(at(15, 0, 0)) {
+	if lapse.Version != [2]int64{-3244637736030576075, 4} || !lapse.Next.Equal(at(15, 0, 0)) {
 		t.Fatalf("the listing: %+v", lapse)
 	}
 	if l := lapse.Last; !l.Slot.Equal(at(0, 0, 0)) || l.Outcome != "refused" || l.Status != 412 || l.Reason != "no hold" || l.Skipped != 2 {

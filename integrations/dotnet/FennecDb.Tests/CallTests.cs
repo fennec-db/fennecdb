@@ -352,7 +352,7 @@ public sealed class CallTests(Servers servers)
         using var db = new FennecClient("http://scripted.invalid", new()
         {
             HttpClient = new HttpClient(new Answering("""
-                [{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+                [{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
                   "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
                   "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
                   "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
@@ -363,7 +363,7 @@ public sealed class CallTests(Servers servers)
         var listed = await db.StatementsAsync();
         var (lapse, billed) = (listed[0], listed[1]);
         DateTimeOffset At(int m, int s = 0, int ms = 0) => new(2026, 5, 4, 12, m, s, ms, TimeSpan.Zero);
-        Assert.Equal([0L, 4L], lapse.Version);
+        Assert.Equal([-3244637736030576075L, 4L], lapse.Version);
         Assert.Equal(At(15), lapse.Next);
         Assert.Equal(new LastRun(At(0), "refused", 412, "no hold", 2), lapse.Last);
         Assert.Equal(new HeldSlot(At(15), 507, At(16, 0, 250)), lapse.Held);

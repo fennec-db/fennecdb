@@ -1225,7 +1225,12 @@ export interface SchemaInfo {
  */
 export interface NamedStatement {
   name: string;
-  /** The definition's version: the history and change its record landed at. */
+  /**
+   * The definition's version: the history and change its record landed at.
+   * The history is a signed 64-bit identity, which a number holds exactly
+   * only within 2^53 -- `JSON.parse` rounds one past it -- so compare the
+   * change, not the history.
+   */
   version: [number, number];
   /** `($from int, $to int = ...) claims (sub text)`, as a call is written; `()` for none. */
   signature: string | null;

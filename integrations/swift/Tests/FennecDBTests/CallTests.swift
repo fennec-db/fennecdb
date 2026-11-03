@@ -175,7 +175,7 @@ let bindingStatements = [
     @Test func aListedRunAndAHeldSlotAreReadAsTimes() throws {
         let rows = try Value.parse(
             #"""
-            [{"name":"lapse","version":[0,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
+            [{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
               "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
               "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
               "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
@@ -184,7 +184,7 @@ let bindingStatements = [
             """#
         ).array!.compactMap(\.object)
         let (lapse, billed) = (NamedStatement(rows[0]), NamedStatement(rows[1]))
-        #expect(lapse.version == [0, 4] && lapse.schedule == "every 15m" && lapse.next.map(iso) == "2026-05-04T12:15:00.000Z")
+        #expect(lapse.version == [-3244637736030576075, 4] && lapse.schedule == "every 15m" && lapse.next.map(iso) == "2026-05-04T12:15:00.000Z")
         let last = lapse.last.map { [iso($0.slot), $0.outcome, "\($0.status ?? 0)", $0.reason ?? "", "\($0.skipped)"] }
         #expect(last == ["2026-05-04T12:00:00.000Z", "refused", "412", "no hold", "2"])
         let held = lapse.held.map { [iso($0.slot), "\($0.status)", iso($0.since)] }

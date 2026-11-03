@@ -34,6 +34,7 @@ SAMPLES = [
     'create statement tidy every 1h as del sessions where at < now() order at limit 1000',
     "get sales select bucket(at, 1h) as hour where at > '2026-01-01' and format = 'at'",
     "create statement late at\n  '0 3 * * *' as del t where at < now()",
+    'create statement nightly at "0 3 * * *" as del t where at < now()',
     '',
 ]
 
@@ -76,6 +77,14 @@ def main():
         by_line = "\n".join(build.highlight(ln, "fennecql") for ln in s.split("\n"))
         if whole != by_line:
             raise SystemExit(f"a token spans a line in {s!r}: the editor would colour it apart")
+    # `at` is a keyword before a schedule's text alone, in either quotes; a
+    # field elsewhere.
+    kw_at = '<span class="t-kw">at</span>'
+    for s in ("create statement n at '0 3 * * *' as del t", 'create statement n at "0 3 * * *" as del t'):
+        if kw_at not in build.highlight(s, "fennecql"):
+            raise SystemExit(f"`at` before a schedule's text is no keyword in {s!r}")
+    if kw_at in build.highlight("get sales select bucket(at, 1h) where at > $1", "fennecql"):
+        raise SystemExit("`at` is a keyword where it is a field")
     # The rules are written in, not copied: a keyword the docs know is one here.
     assert re.search(r'"fuse"', build.highlight_js())
     # fennec studio serves the file as the repository holds it: the one

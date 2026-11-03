@@ -173,8 +173,9 @@ extension Fennec {
 /// `after` and no clock.
 public struct NamedStatement: Sendable, Equatable {
     public let name: String
-    /// The history and change its definition landed at.
-    public let version: [Int]
+    /// The history and change its definition landed at, as the server
+    /// writes them: signed, a history negative where its top bit is set.
+    public let version: [Int64]
     /// `($from int, $to int = ...) claims (sub text)`, as a call is
     /// written; `()` for none.
     public let signature: String?
@@ -198,7 +199,7 @@ public struct NamedStatement: Sendable, Equatable {
 
     init(_ row: Row) {
         name = row["name"]?.string ?? ""
-        version = row["version"]?.array?.compactMap(\.int) ?? []
+        version = row["version"]?.array?.compactMap { v -> Int64? in if case .int(let n) = v { return n } else { return nil } } ?? []
         signature = row["signature"]?.string
         writes = row["writes"]?.bool
         comment = row["comment"]?.string

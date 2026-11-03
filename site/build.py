@@ -291,10 +291,11 @@ def token_pattern(lang):
     parts.append(r"(?P<param>\$\d+)")
     parts.append(r"(?P<anno>@[A-Za-z_][\w]*)")
     if lang == "fennecql":
-        # A schedule's `at '<cron>'`: a keyword only before its text, since
-        # `at` is a field many of the docs' examples read (`bucket(at, 1h)`).
-        # The lookahead stays on its line, as every token does.
-        parts.append(r"(?P<kw>\bat(?=[ \t]+'))")
+        # A schedule's `at '<cron>'` (or `"<cron>"`): a keyword only before
+        # its text, since `at` is a field many of the docs' examples read
+        # (`bucket(at, 1h)`). The lookahead stays on its line, as every
+        # token does.
+        parts.append(r"(?P<kw>\bat(?=[ \t]+['\"]))")
     parts.append(r"(?P<word>[A-Za-z_][\w]*)")
     parts.append(r"(?P<num>\b\d[\d_]*(?:\.\d+)?\b)")
     return "|".join(parts)

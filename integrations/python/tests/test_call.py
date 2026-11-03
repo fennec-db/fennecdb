@@ -441,7 +441,7 @@ def test_a_listed_run_and_a_held_slot_are_read_as_times():
     `after` a pair."""
     row = {
         "name": "lapse",
-        "version": [0, 4],
+        "version": [-3244637736030576075, 4],
         "signature": "()",
         "writes": True,
         "comment": None,
@@ -460,7 +460,7 @@ def test_a_listed_run_and_a_held_slot_are_read_as_times():
     assert lapse.next == datetime(2026, 5, 4, 12, 15, tzinfo=utc)
     assert lapse.last == LastRun(datetime(2026, 5, 4, 12, tzinfo=utc), "refused", 412, "no hold", 2)
     assert lapse.held == HeldSlot(datetime(2026, 5, 4, 12, 15, tzinfo=utc), 507, datetime(2026, 5, 4, 12, 16, 0, 250000, tzinfo=utc))
-    assert (lapse.version, billed.after, billed.last, billed.held) == ((0, 4), ("bills", "insert or set"), None, None)
+    assert (lapse.version, billed.after, billed.last, billed.held) == ((-3244637736030576075, 4), ("bills", "insert or set"), None, None)
     async def listed_async():
         async with AsyncClient(f"http://127.0.0.1:{port}") as db:
             return await db.statements()
