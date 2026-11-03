@@ -840,7 +840,11 @@ export declare class Query<
   ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
   /**
-   * Full-text search over a `@text` index; `_score` is added to the result.
+   * Full-text search over a `@text` index. On its own -- with `where`,
+   * `limit`, `offset`, `facet` -- it ranks, best first, and each row
+   * carries its `_score`; beside `order`, `count()` or an aggregate it is a
+   * filter, the rows it would score above zero, and they carry none. The
+   * builder cannot tell which from the type, so `_score` is optional.
    * `fuzzy: true` matches each word within the edits its length allows
    * (none under 5 characters, one up to 8, two from 9), `fuzzy: 1` one at
    * most; `prefix: true` matches the last word as the start of a word too.
@@ -849,7 +853,7 @@ export declare class Query<
     field: TextKey<F>,
     query: string,
     opts?: { fuzzy?: boolean | 0 | 1 | 2; prefix?: boolean },
-  ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
+  ): Query<F, P & { _score?: number }, L, Rel, At, Fa>;
 
   /**
    * With both `match` and `near`: ranks by both. Each side takes its own
@@ -859,8 +863,10 @@ export declare class Query<
   fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L, Rel, At, Fa>;
 
   /**
-   * Reorders what `match` found by exact vector distance. Requires `match`,
-   * but not an `@hnsw` index: the vectors are read out of the store.
+   * Reorders what `match` found by exact vector distance, each row carrying
+   * its `_score`. Requires a `match` that ranks -- none beside `order`,
+   * `count()` or an aggregate -- but not an `@hnsw` index: the vectors are
+   * read out of the store.
    */
   rerank(
     field: VectorKey<F>,

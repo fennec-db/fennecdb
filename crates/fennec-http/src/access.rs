@@ -2165,7 +2165,9 @@ fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
     let Statement::Select(sel) = &mut stmt else {
         unreachable!("made a select")
     };
-    let ranked = sel.near.is_some() || sel.matcher.is_some();
+    // A `match` beside `order` or an aggregate is a filter, read as a
+    // `where` is (`Select::match_ranks`).
+    let ranked = sel.near.is_some() || sel.match_ranks();
     let plain = !ranked
         && sel.aggregate.is_empty()
         && sel.group.is_empty()

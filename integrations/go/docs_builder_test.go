@@ -708,6 +708,32 @@ func TestDocsBuilderTabs(t *testing.T) {
 		sent(t, err, "get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
 	})
 
+	t.Run("docs: matches, newest first", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").
+			Match("body", "ownership").
+			Order("year", "desc").
+			Limit(20).
+			Rows(ctx)
+		sent(t, err, "get articles match body $1 order year desc limit $2", "[\"ownership\", 20]")
+	})
+
+	t.Run("docs: matches counted", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").Match("body", "ownership").Count(ctx)
+		sent(t, err, "get articles match body $1 count", "[\"ownership\"]")
+	})
+
+	t.Run("docs: matches counted by topic", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("articles").
+			Select("topic", "count(*)").
+			Match("body", "ownership").
+			Group("topic").
+			Rows(ctx)
+		sent(t, err, "get articles select topic, count(*) group topic match body $1", "[\"ownership\"]")
+	})
+
 	t.Run("docs: products matching a misspelt word", func(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("products").

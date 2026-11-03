@@ -82,8 +82,11 @@ get events select props.plan, sum(props.v) group props.plan
   <li><b>A <code>lookup</code> hangs off the groups</b>, keyed by a column
     of the list, and a <a href="fennecql-lookup.html#lookup-folds">lookup level's list may
     aggregate</a>, each parent's children folded.</li>
-  <li><b>Aggregates do not combine</b> with <code>near</code> or
-    <code>match</code>.</li>
+  <li><b>Aggregates do not combine</b> with <code>near</code>. Beside
+    <code>match</code> they fold the rows it finds, <a
+    href="fennecql-search.html#match-as-a-filter">a filter there</a>:
+    <code>get articles select topic, count(*) group topic match body
+    $1</code> counts the matches by topic.</li>
 </ul>
 
 <details class="deep"><summary>Each aggregate, group keys and having</summary>
@@ -168,8 +171,9 @@ was written as — <code>sum(total)</code>, <code>count(distinct user)</code>,
     hold the child's key to. <code>required</code> there drops the groups
     no child matches, before <code>order</code> and <code>limit</code>, and
     <code>count</code> after <code>group</code> counts those kept.</li>
-  <li><b>What does not combine</b> is what ranks rows an aggregate
-    collapses: <code>near</code> and <code>match</code>.</li>
+  <li><b>What does not combine</b> with the <code>lookup</code> is
+    <code>near</code> and <code>match</code>, as on any <code>get</code>
+    with a <code>lookup</code>.</li>
 </ul>
 
 <p><b>How it runs.</b> Every item is bound to the collection once a query:

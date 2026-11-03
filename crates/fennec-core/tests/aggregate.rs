@@ -258,7 +258,12 @@ fn what_does_not_combine_is_refused() {
         ("get t select sum(g)", "int or float"),
         ("get t select max(v)", "an order"),
         ("get t select sum(n) near v [1.0, 0.0]", "near"),
-        ("get t select sum(n) match body \"x\"", "match"),
+        // Beside an aggregate `match` is a filter, which ranks nothing:
+        // a `limit` with no `order` would pick rows by id.
+        (
+            "get t select sum(n) match body \"x\" limit 3",
+            "`limit` and `offset` need `order`",
+        ),
         // Ungrouped, `order` picks the rows folded: by what a row holds.
         ("get t select sum(n) order sum(n) limit 3", "picks the rows"),
         ("get t select g, sum(n)", "neither aggregated nor grouped"),

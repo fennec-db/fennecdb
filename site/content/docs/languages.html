@@ -115,7 +115,7 @@ await db.from('docs').insert({ title: 'Night at the oasis', year: 2024 });
 const rows = await db.from('docs').select('title', 'year').where('year', '&gt;=', 2020).order('year', 'desc').limit(5).rows();
 //    rows: { title: string | null; year: number | null }[]
 const hits = await db.from('docs').select('title').match('title', 'oasys', { fuzzy: true }).rows();
-//    hits: { title: string | null; _score: number }[]</pre>
+//    hits: { title: string | null; _score?: number }[]</pre>
 <p>The same code runs as plain JavaScript, without the types. In the
 browser there is no server at all: the same database runs in the page
 (<a href="javascript.html">JavaScript and TypeScript</a>).</p>
@@ -721,7 +721,9 @@ JavaScript they are without their types; the tab's code itself is type-checked u
 TypeScript example in these docs is (<code>make docs-types</code>).</p>
 
 <p>Every answer is JSON: a read is an array of rows, a ranked search's rows
-(<code>match</code>, <code>near</code>) carry their <code>_score</code>, a
+(<code>match</code>, <code>near</code>) carry their <code>_score</code> --
+none where <code>match</code> stands beside <code>order</code>,
+<code>count</code> or an aggregate, a filter there -- a
 write is <code>{"affected": n}</code>, and
 a refusal is a status of 400 and up with <code>{"error": "..."}</code> — 401
 for a missing or wrong token, 404 for a collection that is not there, 409

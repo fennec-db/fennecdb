@@ -313,6 +313,7 @@ c('a negative fuse k is refused', docs, ['fuse', { k: -1 }], Q);
 c('rerank with a candidate budget', docs, ['match', 'body', 'rust'], ['rerank', 'embed', [1, 0, 0], { candidates: 500 }], ['limit', 5], Q);
 c('rerank without a budget', docs, ['match', 'body', 'x'], ['rerank', 'embed', [1, 0, 0]], Q);
 c('rerank needs match', docs, ['rerank', 'embed', [1, 0, 0]], Q);
+c('match and order: the matches in that order', docs, ['select', 'title'], ['match', 'body', 'rust', { prefix: true }], ['order', 'year', 'desc'], ['order', 'id', 'desc'], ['limit', 20], Q);
 c('a negative rerank budget is refused', docs, ['match', 'body', 'x'], ['rerank', 'embed', [1], { candidates: -5 }], Q);
 
 // highlight and snippet: select-list items, their tags parameters.
@@ -368,7 +369,8 @@ c('aggregate names keep their field as written', ['from', 'orders'], ['select', 
 c('group needs an aggregate', ['from', 'orders'], ['select', 'status'], ['group', 'status'], Q);
 c('a whole-collection aggregate folds the rows its order and limit pick', ['from', 'orders'], ['select', 'count(*)', 'avg(distance)'], ['where', 'courier', 5], ['order', 'at', 'desc'], ['limit', 50], ['offset', 2], Q);
 c('an aggregate takes no near', ['from', 'orders'], ['select', 'count(*)'], ['near', 'v', [1, 0]], Q);
-c('an aggregate takes no match', ['from', 'orders'], ['select', 'sum(total)'], ['match', 'body', 'x'], Q);
+c('an aggregate folds the rows match finds', ['from', 'orders'], ['select', 'sum(total)'], ['match', 'body', 'x'], Q);
+c('an aggregate of each group match finds', ['from', 'orders'], ['select', 'status', 'count(*)'], ['match', 'body', 'x'], ['group', 'status'], ['order', 'count', 'desc'], Q);
 c('an aggregate hangs a lookup off its groups', ['from', 'orders'], ['select', 'courier', 'count(*)'], ['where', 'status', 'done'], ['group', 'courier'], ['order', 'count', 'desc'], ['limit', 10], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', select: ['name', 'code'] }], Q);
 c('an aggregate that is not there', ['from', 'orders'], ['select', 'median(total)'], Q);
 c('an aggregate of two fields', ['from', 'orders'], ['select', 'sum(a b)'], Q);
@@ -451,7 +453,8 @@ c('count takes no limit', docs, ['limit', 5], ['count']);
 c('count takes no offset', docs, ['offset', 1], ['count']);
 c('count takes no order', docs, ['order', 'year'], ['count']);
 c('count takes no near', docs, ['near', 'embed', [1, 2]], ['count']);
-c('count takes no match', docs, ['match', 'body', 'x'], ['count']);
+c('count counts the rows match finds', docs, ['where', 'year', '>=', 2024], ['match', 'body', 'x', { fuzzy: true }], ['count']);
+c('count takes no rerank', docs, ['match', 'body', 'x'], ['rerank', 'embed', [1]], ['count']);
 c('count takes no aggregate', ['from', 'orders'], ['select', 'count(*)'], ['count']);
 c('explain runs the query under explain', docs, ['where', 'tag', 'rust'], ['near', 'embed', [1, 0]], ['limit', 3], ['explain']);
 
@@ -708,6 +711,9 @@ c('docs: users in Turkish order', users, ['select', 'name'], ['order', 'name'], 
 c('docs: articles matching words', arts, ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: articles matching words since a year', arts, ['where', 'year', '>=', 2024], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: articles matching words reranked', arts, ['match', 'body', 'ownership'], ['rerank', 'embed', vec, { candidates: 500 }], ['limit', 10], ['rows']);
+c('docs: matches, newest first', arts, ['match', 'body', 'ownership'], ['order', 'year', 'desc'], ['limit', 20], ['rows']);
+c('docs: matches counted', arts, ['match', 'body', 'ownership'], ['count']);
+c('docs: matches counted by topic', arts, ['select', 'topic', 'count(*)'], ['match', 'body', 'ownership'], ['group', 'topic'], ['rows']);
 c('docs: matches with their marks', arts, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: matches with their marks tagged', arts, ['select', 'title'], ['highlight', 'body', { pre: '<mark>', post: '</mark>' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: matches with a snippet', arts, ['select', 'title'], ['snippet', 'body', 20, { ellipsis: '…' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);

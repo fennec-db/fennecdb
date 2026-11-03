@@ -112,7 +112,7 @@ ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
 -abi, -wasm or -ffi, its tree pinned (`tools/deps_check.py`).
 
 **[Limits error, they do not truncate.](docs/design/crates.md#limits)**
-`near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
+`near`, `match` and `fuse` rankings cap at 10 000 rows, expressions at 512 levels,
 a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
 `get` 4 levels deep), each a query error, never a cut result; a new limit
 takes that shape.
@@ -254,6 +254,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - `collate und` and `collate tr` are ICU's orders.
 - `nocase` text compares by its case fold wherever it compares.
 - `match` prunes with MaxScore.
+- Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero.
 - `@text` matches whole words unless told otherwise.
 - The text index is derived and never persisted.
 - A text index's words are a table of their own (`text/terms.rs`).

@@ -838,8 +838,8 @@ feature; another set is a build option.</p>
 <pre data-lang="bash">make wasm                              # every feature: 278 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
-make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 206 KB
-make wasm FEATURES=none SCHEMA=0       # no feature at all: 183 KB
+make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 205 KB
+make wasm FEATURES=none SCHEMA=0       # no feature at all: 182 KB
 </pre>
 
 <div class="tbl">
@@ -1316,7 +1316,12 @@ value type, access to an unselected field, <code>near</code> applied to a
 non-vector field, and a type mismatch inside <code>insert</code>. Objects
 inside <code>or</code>, <code>and</code> and <code>not</code> are checked
 against the query's collection rather than the first argument. A query using
-<code>near</code> or <code>match</code> gains <code>_score: number</code>.</p>
+<code>near</code> gains <code>_score: number</code>, and one using
+<code>match</code> <code>_score?: number</code>: a <code>match</code> on its
+own ranks and every row carries its score, but beside <code>order</code>,
+<code>count()</code> or an aggregate it is a <a
+href="fennecql-search.html#match-as-a-filter">filter</a> and the rows carry
+none.</p>
 
 <p>A standalone <code>from()</code> cannot know the collection name, since the
 schema lives in the call rather than in <code>db</code>. In TypeScript it binds

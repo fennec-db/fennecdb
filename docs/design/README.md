@@ -26,7 +26,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
 - [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms
-- [text.md](text.md) -- collations, `nocase`, `match`, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
+- [text.md](text.md) -- collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
@@ -191,3 +191,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 147. [`--tls-cert` and `--tls-key` make a listener HTTPS alone](http.md#tls) (added after the move, under *The HTTP server*)
 148. [A field keeps one index, and a text field `@text` beside a `@hash`, `@unique` or `@sorted`](indexes.md#two-indexes-on-a-field) (added after the move, under *Indexes*)
 149. [Every HTTP dial takes HTTPS by its URL](http.md#dialing-https) (added after the move, under *The HTTP server*)
+150. [Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero](text.md#match-as-a-filter) (added after the move, under *Text*)

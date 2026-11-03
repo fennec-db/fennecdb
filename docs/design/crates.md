@@ -128,12 +128,15 @@ holds libc's taken at its version and refused at another.
 
 ## Limits
 
-**Limits error, they do not truncate.** `near`, `match` and `fuse` results
+**Limits error, they do not truncate.** `near`, `match` and `fuse` rankings
 cap at 10 000 rows (`limit + offset`), expression depth at 512 levels, a
 `lookup` chain at 8, an `in (get ...)` at 100 000 values and 4 levels and
 an `in $n` parameter's list at the inner `get`'s 100 000 values
 (`query::param_list`); all of them return a query error, because a
-silently cut result is a wrong answer believed right. Full table in `site/content/docs/limits.html`.
+silently cut result is a wrong answer believed right. A `match` beside
+`order`, `count` or an aggregate ranks nothing and keeps no ceiling of its
+own: a count answers no rows, and a page put in order is held to what an
+ordered `get` is ([text.md](text.md#match-as-a-filter)). Full table in `site/content/docs/limits.html`.
 
 ## Profiles
 
