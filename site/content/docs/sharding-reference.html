@@ -84,7 +84,7 @@ image:</p>
 <tr><td><code>GET /_admin/open</code></td><td>the open tenants: name, memory, frozen</td></tr>
 <tr><td><code>GET /_admin/tenants</code></td><td>names on disk</td></tr>
 <tr><td><code>GET /_admin/sizes</code></td><td>each tenant's bytes on disk, which the router's <code>GET /_shard/tenants?bytes</code> joins into its list</td></tr>
-<tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists), answered once its file and its name in the directory are on disk</td></tr>
+<tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists), answered once its file and its name in the directory are on disk; one the disk would not make durable is taken back (500)</td></tr>
 <tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/schema</code></td><td>a schema description, applied as <code>/_schema/apply</code> applies it: what the router sends for a tenant created with a schema</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/query</code></td><td>a read, <code>{query, params}</code> as <code>/query</code> takes it, answered as <code>/query</code> answers it; a statement that writes is refused (403). What the router sends each tenant for a <a href="sharding-tenants.html#across-tenants">query across tenants</a></td></tr>

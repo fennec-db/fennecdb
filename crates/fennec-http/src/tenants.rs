@@ -241,9 +241,9 @@ fn made_durable(db: &mut Database, file: &Path) -> fennec_core::error::Result<()
     if let Some(durable) = db.flush()? {
         durable()?;
     }
-    step("file synced");
+    step("file synced")?;
     fennec_core::fs::sync_dir(file)?;
-    step("directory synced");
+    step("directory synced")?;
     Ok(())
 }
 
@@ -254,15 +254,28 @@ thread_local! {
     /// nothing a test sees from inside.
     static STEPS: std::cell::RefCell<Vec<&'static str>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The step a test has fail as the disk would, its call made and its
+    /// error the answer: what takes a failed fsync's path, which no disk
+    /// here fails on demand.
+    static FAILS: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
-/// Notes `what` among a test build's [`STEPS`]; nothing otherwise.
+/// Notes `what` among a test build's [`STEPS`], or fails it where the test
+/// asked ([`FAILS`]); nothing otherwise, an `Ok` the optimiser drops.
 #[inline(always)]
-fn step(what: &'static str) {
+fn step(what: &'static str) -> std::io::Result<()> {
     #[cfg(test)]
-    STEPS.with(|s| s.borrow_mut().push(what));
+    {
+        if FAILS.with(|f| f.get()) == Some(what) {
+            return Err(std::io::Error::other(format!(
+                "{what} failed, as the test asked"
+            )));
+        }
+        STEPS.with(|s| s.borrow_mut().push(what));
+    }
     #[cfg(not(test))]
     let _ = what;
+    Ok(())
 }
 
 /// Notes in a tenant's `.follows` that its copy has heard from the node it
@@ -1466,6 +1479,25 @@ impl Tenants {
         })
     }
 
+    /// Removes `file`, the one an open of tenant `name` at `path` made and
+    /// could not make durable, once its database was let go: under
+    /// `<file>.lock` taken again, as a delete removes a file
+    /// ([`Self::delete_unfrozen`]). The database's own hold went with it,
+    /// so removed after the drop with none, a process that took the lock
+    /// meanwhile -- a shell, an app -- wrote on into a file gone; removed
+    /// before it, under the hold, a mapped file stays where it is open
+    /// (Windows). Held by another by then, the file is its, and stays.
+    fn take_back_made(&self, name: &str, path: &Path, file: &Path) {
+        let Ok(_held) = hold_tenant(name, path) else {
+            return;
+        };
+        if std::fs::remove_file(file).is_ok() {
+            let _ = step("taken back");
+        }
+        // A sync log its first durability began names the file gone.
+        let _ = fennec_core::fs::forget_sync_log(path);
+    }
+
     fn open_file(&self, name: &str, path: &Path) -> std::result::Result<Arc<Tenant>, Refused> {
         self.open_as(name, path, false)
     }
@@ -1493,7 +1525,13 @@ impl Tenants {
         // Made by this open where it is missing or empty: written the magic
         // alone (`fs::open`), with no fsync.
         let file = fennec_core::fs::resolved(path);
-        let made = std::fs::metadata(&file).map_or(true, |m| m.len() == 0);
+        // Missing alone: a `stat` that fails otherwise -- a permission, an
+        // I/O error -- says nothing of this open having made the file, and
+        // taken for it, a failed fsync then removed a tenant that was there.
+        let made = match std::fs::metadata(&file) {
+            Ok(m) => m.len() == 0,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        };
         let (mut db, feed) = match &self.repl {
             None => {
                 let wrap = fennec_abi::lock::holding(lock);
@@ -1519,7 +1557,7 @@ impl Tenants {
         if made {
             if let Err(e) = made_durable(&mut db, &file) {
                 drop((db, feed));
-                let _ = std::fs::remove_file(&file);
+                self.take_back_made(name, path, &file);
                 return Err(failed(e));
             }
         }
@@ -2103,7 +2141,7 @@ impl Tenants {
                     f.write_all(image)?;
                     f.sync_all()
                 })
-                .inspect(|_| step("image synced"));
+                .and_then(|_| step("image synced"));
             // A log a tenant of this name left (`fennec_core::fs`) is not
             // this image's: gone, durably, before the rename.
             // Nor is an identity one left, a binary from before this one
@@ -2112,10 +2150,10 @@ impl Tenants {
             // birth time could give this one its inode.
             let written = written
                 .and_then(|_| fennec_core::fs::forget_sync_log(&target))
-                .inspect(|_| step("log forgotten"))
+                .and_then(|_| step("log forgotten"))
                 .and_then(|_| instance::put_away(&self.dir, name))
                 .and_then(|_| std::fs::rename(&tmp, &target))
-                .inspect(|_| step("renamed"));
+                .and_then(|_| step("renamed"));
             if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(Refused(
@@ -2131,14 +2169,15 @@ impl Tenants {
             // undone: kept, it was a file at the place no router had placed
             // and none could take back, which every install after it met
             // as there (409).
-            if let Err(e) = dir_synced(&target) {
-                let _ = std::fs::remove_file(&target);
+            if let Err(e) = dir_synced(&target).and_then(|_| step("directory synced")) {
+                if std::fs::remove_file(&target).is_ok() {
+                    let _ = step("taken back");
+                }
                 return Err(Refused(
                     500,
                     format!("could not make tenant `{name}`'s file durable in its directory: {e}"),
                 ));
             }
-            step("directory synced");
             self.forget_place(name);
             // In place: its first look queued, the thread woken -- under the
             // slot, which a look's open waits on.
@@ -2783,6 +2822,76 @@ mod tests {
                 run(&reg.get(name).unwrap(), "put n {i: 1}");
             }
             assert!(steps_taken().is_empty(), "an open of a file that was there");
+            drop(reg);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// A create or an install whose file the disk would not make durable
+    /// is answered 500 and leaves no file: kept, it was a tenant no router
+    /// placed and none could take back by its identity, met by every later
+    /// create and install as there (409). The create's file is removed
+    /// once its database let the lock go, under the lock taken again, so
+    /// the name is free: made again, the tenant is there. Each fsync failed
+    /// where it is made ([`FAILS`]), a node with replicas too.
+    #[test]
+    fn a_tenants_file_the_disk_would_not_keep_is_taken_back() {
+        for replicated in [false, true] {
+            let dir = scratch(&format!("taken-back-{replicated}"));
+            let reg = Tenants::new(&dir).unwrap();
+            let reg = match replicated {
+                false => reg,
+                true => reg.with_replication(Replicated {
+                    token: "repl".into(),
+                    buffer: 1 << 20,
+                    upstream: None,
+                    sync_on_write: true,
+                }),
+            };
+            let image = {
+                run(
+                    &reg.create("source").unwrap(),
+                    "create collection n (i int)",
+                );
+                reg.export("source").unwrap()
+            };
+            for (at, failing) in [("file synced", "made"), ("directory synced", "named")] {
+                let what = format!("a create whose {at} failed, replicated {replicated}");
+                steps_taken();
+                FAILS.with(|f| f.set(Some(at)));
+                let refused = reg.create(failing).map(|_| ());
+                FAILS.with(|f| f.set(None));
+                let Err(Refused(status, why)) = refused else {
+                    panic!("{what}: answered");
+                };
+                assert_eq!(status, 500, "{what}: {why}");
+                assert!(steps_taken().ends_with(&["taken back"]), "{what}");
+                assert!(!reg.path(failing).exists(), "{what}: the file stayed");
+                assert!(reg.get(failing).is_err(), "{what}: the registry kept it");
+                // The name free and its lock let go: made again, it is there.
+                run(&reg.create(failing).unwrap(), "create collection n (i int)");
+                assert_eq!(
+                    steps_taken(),
+                    ["file synced", "directory synced"],
+                    "{what}: made again"
+                );
+            }
+            let what = format!("an install whose directory sync failed, replicated {replicated}");
+            FAILS.with(|f| f.set(Some("directory synced")));
+            let refused = reg.import("installed", &image);
+            FAILS.with(|f| f.set(None));
+            assert!(
+                matches!(refused, Err(Refused(500, _))),
+                "{what}: {refused:?}"
+            );
+            assert_eq!(
+                steps_taken(),
+                ["image synced", "log forgotten", "renamed", "taken back"],
+                "{what}"
+            );
+            assert!(!reg.path("installed").exists(), "{what}: the file stayed");
+            reg.import("installed", &image).unwrap();
+            run(&reg.get("installed").unwrap(), "put n {i: 1}");
             drop(reg);
             let _ = std::fs::remove_dir_all(dir);
         }

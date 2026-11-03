@@ -356,9 +356,13 @@ an <code>insert</code> of the id it took (409), a <code>@unique</code> value, a
 collection or statement it made, a <code>require</code> its <code>del</code>
 left unmet (412), a <code>/_changes</code> consumer it made — is answered once
 that write is on disk too, as its success would be: answered at once, a power
-loss could take back the row the client was told was there. An
-<code>fsync</code> that covered it already costs the refusal nothing; one that
-failed is its answer (500).</p>
+loss could take back the row the client was told was there. So is a
+<code>/_schema/apply</code> that finds nothing to apply, a quota's 507 as a
+block lands, and a <code>/batch</code> stopped after some of its statements were
+made, which answers once those are on disk. An <code>fsync</code> that covered
+it already costs the refusal nothing; one that failed is its answer (500). A
+refusal of the request alone — a body that is not JSON, a path no route
+takes — waits for nothing.</p>
 
 <p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
 and a final sync runs before exit. The exclusive lock is <b>held</b> until

@@ -338,7 +338,8 @@ fn a_call_to_a_frozen_or_lapsed_tenant_is_told_to_come_back_unjudged() {
 /// -- the write's answer, asked of the lease as every write's is. Under a
 /// lapsed lease it is the 500 of an unknown outcome: answered as a read's,
 /// the kept 200 told its client the write was made where the tenant may
-/// have been failed over without it. Under a freeze, the lease holding,
+/// have been failed over without it -- sent marked a read too, which runs
+/// read-only with no question of the lease. Under a freeze, the lease holding,
 /// it is the kept answer: its block landed before the freeze, so in the
 /// export. Once the lease is granted again, the kept answer.
 #[test]
@@ -382,6 +383,17 @@ fn a_write_replayed_by_a_call_made_to_read_is_asked_of_the_lease() {
         lapsed.body.contains(r#""outcome":"unknown""#),
         "{}",
         lapsed.body
+    );
+    // Marked a read, as an SDK reading near sends a call, it runs
+    // read-only past the lease's question -- and is still the write's
+    // answer, asked of the lease all the same.
+    let marked = format!("{key}Fennec-Read: replica\r\n");
+    let marked = c.send_with("POST", "/t/acme/_call/stamp", &marked, "");
+    assert_eq!(marked.status, 500, "{}", marked.body);
+    assert!(
+        marked.body.contains(r#""outcome":"unknown""#),
+        "{}",
+        marked.body
     );
     n.grant();
     let again = call(&mut c);

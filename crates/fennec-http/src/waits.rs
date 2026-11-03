@@ -507,8 +507,10 @@ pub fn nothing_written(stmt: &Statement, r: &Response) -> bool {
 /// call's are its body's, planned with the arguments and claims it ran
 /// with bound in -- the definition the lock still holds -- and a plan with
 /// nothing to look for, a call that only reads, holds nothing: it is
-/// answered as it ran.
-pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
+/// answered as it ran. Whether it left one: a run that did keeps its
+/// answer back for [`crate::respond`], which asks the durability of what
+/// it read as the wait ends (`held_answered`), so the run asks none.
+pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) -> bool {
     let mut tests = Vec::new();
     let mut collections = Vec::new();
     for (stmt, params) in stmts {
@@ -524,7 +526,7 @@ pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
         }
     }
     if tests.is_empty() {
-        return;
+        return false;
     }
     let at = next_moment(db, &tests, before);
     let p = Plan {
@@ -534,6 +536,7 @@ pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
         seq: db.change_seq(),
     };
     PLANNED.with(|slot| *slot.borrow_mut() = Some(p));
+    true
 }
 
 /// [`plan`]'s test of one `set` or `del`, bound to `params`: the `get` of
