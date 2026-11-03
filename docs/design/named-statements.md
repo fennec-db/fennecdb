@@ -1526,9 +1526,9 @@ What a text that is no definition pays, over the 10 395 texts of the corpus that
 
 *The upgrade.* `make upgrade-check` gains `OP6_BASE`, `effc12ce`, the last main before op 6: its server refuses to open the fixture in words ("a statement record this version does not read"), an old replica of this tree's server serving it refuses the image and connects again, an old archiver keeps the image it is sent and takes none of its own once a write follows, and its `fennec types` refuses the file; this tree's server opens it, answers its reads, takes its writes and refuses `call stripe_paid`. No primary defines one until slice 3, which brings RELEASING.md's note.
 
-*Size of the server.* SERVER_SIZE
+*Size of the server.* `fennec-server`'s code (`make size-report BIN=fennec-server`, this branch and slice 1's head, each built alone): 4 371.8 KB against 4 369.2, +2.6 KB (+0.06%) -- fennec-core's +1.5, fennec-http's +0.7, the standard library's and `alloc`'s +0.4: op 6 read and written, the kind's arms, a call's refusal and the policy's two lines. `take_event` -- its judging, typing, reader and the key's collection -- is none of it: no route of the server calls it yet, so the linker keeps none; slice 3's route brings it, and measures it.
 
-*Time.* A write to a database holding no hook asks nothing new: the engine's write path is as it was, a hook binding no write, and `Database` gains a `bool` beside `scheduling` (`hooking`). TIME_FIGURES
+*Time.* A write to a database holding no hook asks nothing new: the engine's write path is as it was, a hook binding no write, and `Database` gains a `bool` beside `scheduling` (`hooking`). Measured as F3's slice 2 was -- `insert`, `set` by id and `del` by id in process, 50 000 each over a fresh database in a file, main's build and this branch's in turns, seven pairs, each run the median of nine rounds and its loop's instructions an op (`proc_pid_rusage`), made once the 1-minute load is under 1.5 and made again where it rose past 2.5: the figures are this pull request's to add once the run is made.
 
 ### F4's risks
 
