@@ -1007,3 +1007,74 @@ fn admin_and_tenant_bodies_come_chunked() {
     let r = query(n.port, "copy", "put docs {title: 'eleventh'}");
     assert_eq!(r.status, 507, "{}", r.text());
 }
+
+/// A tenant node runs no tenant's schedules until F3's slice 4 brings its
+/// scheduler there, so it takes none: a scheduled statement's definition is
+/// refused (400) in the engine's words, never a schedule no one runs; a
+/// callable statement is defined as ever.
+#[test]
+fn a_tenant_node_takes_no_scheduled_statement_yet() {
+    let n = start("scheduled", admin_cfg());
+    create(n.port, "acme");
+    let r = query(n.port, "acme", "create collection holds (state text @hash)");
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = query(
+        n.port,
+        "acme",
+        "create statement tidy every 1d as del holds where state = 'x'",
+    );
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(
+        r.text()
+            .contains("no scheduler runs this database's statements"),
+        "{}",
+        r.text()
+    );
+    let r = query(n.port, "acme", "statements");
+    assert!(!r.text().contains("tidy"), "{}", r.text());
+    let r = query(
+        n.port,
+        "acme",
+        "create statement tidy() public as del holds where state = 'x'",
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+
+    // Nor an image holding one -- an install, a move's target: refused,
+    // never a 409 a move would read as a file left there, and no file.
+    fennec_ql::install();
+    let mut db = fennec_core::engine::Database::new();
+    db.allow_schedules();
+    for q in [
+        "create collection holds (state text @hash)",
+        "create statement nightly every 1d as del holds where state = 'x'",
+    ] {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
+    let image = db.snapshot();
+    let r = call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/held/file",
+        &image,
+        Some(ADMIN),
+    );
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(
+        r.text()
+            .contains("holds the scheduled statement `nightly`, and a tenant node runs no"),
+        "{}",
+        r.text()
+    );
+    assert!(!n.dir.join("held.fennec").exists());
+    // Dropped, it installs.
+    db.execute(&fennec_ql::parse_one("drop statement nightly").unwrap())
+        .unwrap();
+    let r = call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/held/file",
+        &db.snapshot(),
+        Some(ADMIN),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+}

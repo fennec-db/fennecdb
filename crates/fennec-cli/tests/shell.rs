@@ -216,8 +216,8 @@ fn a_binding_over_lines_reads_as_one_statement() {
 
 /// A statement run by the clock, written over lines -- its schedule, its
 /// unit on a line of its own, its zone and its body each going on with the
-/// next line -- reads whole, and is refused once, in the engine's words,
-/// until a server runs schedules (F3's slice 1); the lines after it run.
+/// next line -- reads whole, and is refused once, in the engine's words:
+/// the shell runs no schedule, so takes none; the lines after it run.
 #[test]
 fn a_schedule_over_lines_reads_as_one_statement() {
     let d = Dir::new("schedule");
@@ -231,7 +231,7 @@ fn a_schedule_over_lines_reads_as_one_statement() {
     let errors: Vec<&str> = err.lines().filter(|l| l.starts_with("error:")).collect();
     assert_eq!(errors.len(), 1, "{err}");
     assert!(
-        errors[0].contains("scheduled statements are not built yet"),
+        errors[0].contains("no scheduler runs this database's statements"),
         "{err}"
     );
     assert!(!err.contains("begins no statement"), "{err}");
@@ -856,4 +856,38 @@ mod pty {
             out
         }
     }
+}
+
+/// The shell holds a file for a session and runs no schedule: a file
+/// whose slot is due -- `tick`, every hour, defined a day ago -- takes the
+/// shell's reads and writes and keeps its slot due, unmarked, for the
+/// server that next writes it.
+#[test]
+fn the_shell_runs_no_schedule() {
+    let d = Dir::new("scheduled");
+    let f = d.0.join("ticks.fennec");
+    {
+        fennec_ql::install();
+        let mut db = fennec_core::fs::open(&f).unwrap();
+        db.allow_schedules();
+        let now = fennec_core::time::now_ms().unwrap();
+        db.set_clock(Some(now - 25 * 3_600_000));
+        for q in [
+            "create collection ticks (slot timestamp, n int)",
+            "create statement tick every 1h as insert ticks {slot: slot(), n: 1}",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        if let Some(sync) = db.flush().unwrap() {
+            sync().unwrap();
+        }
+    }
+    let out = c(&f, "put ticks {n: 2}");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = c(&f, "get ticks count");
+    assert_eq!(tables(&text(&out.stdout)), [["1"]]);
+    let db = fennec_core::fs::open(&f).unwrap();
+    assert!(db.last_mark("tick").is_none() && db.pending().is_empty());
+    let due = db.due(fennec_core::time::now_ms().unwrap());
+    assert!(due[0].run.is_some(), "still due");
 }

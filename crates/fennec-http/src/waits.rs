@@ -145,6 +145,10 @@ pub struct Stats {
     pub runs: u64,
     /// Of the looks, those that ran a group's whole pick.
     pub picks: u64,
+    /// The landings that could not name their collections, each waking
+    /// every group ([`Waits::wrote`]`(None)`): a load, a compact, a schema
+    /// change -- never a write whose block carries a slot's mark alone.
+    pub epoch: u64,
 }
 
 #[derive(Default)]
@@ -750,6 +754,7 @@ impl Waits {
             looks: self.looks.load(Ordering::Relaxed),
             runs: self.runs.load(Ordering::Relaxed),
             picks: self.picks.load(Ordering::Relaxed),
+            epoch: self.epoch.load(Ordering::Relaxed),
         }
     }
 }
@@ -1071,6 +1076,8 @@ pub fn totals() -> Stats {
         looks: LOOKS.load(Ordering::Relaxed),
         runs: RUNS.load(Ordering::Relaxed),
         picks: PICKS.load(Ordering::Relaxed),
+        // Each database's own: the process counts none.
+        epoch: 0,
     }
 }
 

@@ -253,6 +253,35 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         "a binding's refusal grows no count"
     );
 
+    // A scheduled statement's definition names its schedule, whose texts
+    // its shape made parameters; a mark its scheduler finds ahead of the
+    // clock is a `clock` line, once a statement and mark.
+    let db = Arc::new(RwLock::new(Database::new()));
+    db.write().unwrap().allow_schedules();
+    let sched = serve(Server::new(
+        Arc::clone(&db),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some(ROOT.into()),
+            ..Config::default()
+        },
+    ));
+    for q in [
+        r#"{"query":"create collection jobs (n int)"}"#,
+        r#"{"query":"create statement nightly at '0 3 * * mon-fri' in 'Europe/Berlin' scans as del jobs where n = 0"}"#,
+    ] {
+        assert_eq!(call(sched, Some(ROOT), "POST", "/query", q), 200);
+    }
+    let now = fennec_core::time::now_ms().unwrap();
+    let ahead = fennec_http::schedule::pass(&db, now + 5 * 86_400_000);
+    assert_eq!(ahead.runs.len(), 1, "{ahead:?}");
+    let look = fennec_http::schedule::pass(&db, now);
+    assert_eq!(look.ahead.len(), 1, "{look:?}");
+    assert!(
+        fennec_http::schedule::pass(&db, now).ahead.is_empty(),
+        "once"
+    );
+
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let events: Vec<&str> = lines
@@ -266,7 +295,8 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         events,
         [
             "refused", "refused", "refused", "schema", "refused", "schema", "schema", "schema",
-            "schema", "schema", "schema", "unwoken", "schema", "schema", "bound"
+            "schema", "schema", "schema", "unwoken", "schema", "schema", "bound", "schema",
+            "schema", "clock"
         ],
         "{text}"
     );
@@ -294,7 +324,18 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     assert!(bound.contains("no log line"), "{bound}");
     assert!(bound.contains(r#""http_status":412"#), "{bound}");
     assert!(bound.contains(r#""path":"/query""#), "{bound}");
-    for l in &lines {
+    let defined = lines[16];
+    assert!(
+        defined.contains(r#""schedule":"at '0 3 * * mon-fri' in 'Europe/Berlin'""#),
+        "{defined}"
+    );
+    assert!(defined.contains(r#""statement":"create statement nightly at $1 in $2"#));
+    let clock = lines[17];
+    assert!(clock.contains(r#""statement":"nightly""#), "{clock}");
+    assert!(clock.contains(r#""waits":false"#), "{clock}");
+    assert!(clock.contains(r#""level":"warn""#), "{clock}");
+    // The scheduler's line is no request's: the rest came over HTTP.
+    for l in &lines[..17] {
         let doc = fennec_core::json::parse_object(l).unwrap();
         let field = |k: &str| doc.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert!(

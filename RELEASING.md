@@ -154,6 +154,29 @@ running. `make upgrade-check` drives each against `OP3_BASE`, beside the
 server, a replica and `fennec types` refusing fennec-core's
 `tests/statements.fennec`.
 
+**A statement run by the clock moves it once more.** From the release
+whose server runs them (`docs/design/named-statements.md`, F3's slice 3), a
+file's primary writes one by `create statement ... every` or `... at`, or a
+declared schema's apply: kind 13's op 4, its schedule and `since` outside
+its text, and each run's mark, op 5, in the block of the run's writes -- or
+in the next block that lands, where the run wrote nothing. A binary from
+before them -- the last main before the ops, `cd907d6c` -- reads either as
+a statement record it does not read and refuses it, never taking a schedule
+for a callable statement nobody runs. Its notes name `every` and `at` as
+the clauses that move the format, under the same upgrade heading and in the
+same order: every archiver, router and node upgraded before any primary
+defines a schedule. A tenant node takes none in that release (a scheduler
+runs a file's alone until F3's slice 4), so a tenant's schema declaring one
+is refused, nothing placed. Where the order is not kept, each older binary
+stops in words ("a statement record this version does not read"): a
+replica stops following at the record and connects again, taking no write
+past it; an archiver keeps the stream and takes no image of its own, and
+its `fennec restore` refuses the archive this tree's restores; the server
+refuses to open the file that restore wrote. `make upgrade-check` drives
+each against `OP4_BASE`, a schedule defined over `/query` by this tree's
+primary, beside the server, a replica and `fennec types` refusing
+fennec-core's `tests/statements.fennec`.
+
 **A node recorded at `https://` waits for every router and node.** From
 the release that dials HTTPS (TLS slice 3), a node serving HTTPS
 (`--tls-cert`) is recorded at its `https://host:port` address (`PUT

@@ -1260,9 +1260,11 @@ fn main() {
         }
     }
 
+    let read_only = http_cfg.read_only;
     let shared = Arc::new(RwLock::new(db));
     // From here threads run beside the database -- the graph keeper, the
-    // sweeper, a replica's follower, the mirror, the listener -- and every
+    // sweeper, the scheduler, a replica's follower, the mirror, the
+    // listener -- and every
     // way down is the one shutdown: a thread the start cannot make is logged
     // and stops the server through it (`durability::stop_with`), never past
     // its sync, and with no checkpoint, the server having served nothing
@@ -1335,6 +1337,27 @@ fn main() {
         }
 
         let mut http_server = fennec_http::Server::new(Arc::clone(&shared), http_cfg);
+        // The scheduled statements run by the clock, a replica's by its
+        // primary until it is promoted. Here, after both listeners -- a
+        // first look may run a missed slot, and a server failing at a port
+        // has written none -- once `Server::new` gave the database its
+        // `--call-max-rows` and its watcher, and before the endpoint takes
+        // a definition. A server taking no writes runs none, and says how
+        // many it holds unrun; its file keeps their slots due, to the
+        // server that next writes it.
+        let what = file.as_deref().unwrap_or("the database");
+        if read_only {
+            let mut g = shared.write().unwrap_or_else(|e| e.into_inner());
+            fennec_http::schedule::unrun(what, "--http-read-only runs none", &mut g);
+        } else {
+            fennec_http::schedule::watch(
+                what,
+                &shared,
+                sync == SyncPolicy::Always,
+                durability::stop_with,
+            )?;
+        }
+
         if let Some(repl) = repl {
             http_server = http_server.with_replication(repl);
         }

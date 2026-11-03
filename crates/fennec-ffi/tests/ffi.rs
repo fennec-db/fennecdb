@@ -892,3 +892,51 @@ fn a_synced_handle_refuses_a_call_that_reads() {
     assert!(status.contains(r#""pending":0"#), "{status}");
     assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
 }
+
+/// The native library runs no schedule (F3's decision 8): an app's file
+/// whose slot is due -- `tick`, every hour, defined a day ago by a server
+/// -- takes the app's writes and keeps its slot due and unmarked; the app
+/// runs one by hand with `call`, in the server's token's place, which marks
+/// nothing; and the library takes no definition, which no scheduler of its
+/// would run.
+#[test]
+fn the_native_library_runs_no_schedule() {
+    let path = scratch("scheduled");
+    {
+        fennec_ql::install();
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        db.allow_schedules();
+        let now = fennec_core::time::now_ms().unwrap();
+        db.set_clock(Some(now - 25 * 3_600_000));
+        for q in [
+            "create collection ticks (slot timestamp, n int)",
+            "create statement tick every 1h as insert ticks {slot: slot(), n: 1}",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        if let Some(sync) = db.flush().unwrap() {
+            sync().unwrap();
+        }
+    }
+    let p = path.to_str().unwrap();
+    let h = open(p, 0).unwrap();
+    query(h, "put ticks {n: 2}", "");
+    query(h, "call tick", "");
+    let (code, text) = query_with(
+        h,
+        "create statement tock every 1d as insert ticks {n: 3}",
+        "",
+        &[],
+    );
+    assert_ne!(code, FENNEC_OK, "{text}");
+    assert!(text.contains("no scheduler runs"), "{text}");
+    assert_eq!(by_handle(fennec_close, h).0, FENNEC_OK);
+    let db = fennec_core::fs::open(&path).unwrap();
+    assert!(db.last_mark("tick").is_none() && db.pending().is_empty());
+    let due = db.due(fennec_core::time::now_ms().unwrap());
+    assert!(due[0].run.is_some(), "still due");
+    let ticks = (db.stats().iter())
+        .find(|s| s.name == "ticks")
+        .map_or(0, |s| s.documents);
+    assert_eq!(ticks, 2, "the app's row and its call's");
+}

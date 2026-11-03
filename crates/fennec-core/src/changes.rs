@@ -60,6 +60,17 @@ pub const HELD_MOST: usize = 1 << 20;
 /// collides.
 pub const SCHEMA_MARK: DocId = 0;
 
+/// Document id of a scheduled statement's slot mark (record kind 13's op
+/// 5), noted on collection 0 as a definition is -- always on 0, which no
+/// collection's id is: one write the counter counts, which changes nothing
+/// a read, a stream or a held write reads, so
+/// [`ChangeLog::changed_collections`] passes it over -- a block holding a
+/// run's writes names their collections alone, and one carrying a mark
+/// alone names none, where the definition's [`SCHEMA_MARK`] names a
+/// collection no name stands for and wakes everything.
+#[cfg(feature = "statements")]
+pub const SLOT_MARK: DocId = DocId::MAX;
+
 /// The mark of a single write. It does *not* carry the document (module header).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mark {
@@ -305,7 +316,26 @@ impl ChangeLog {
         let mut out: Vec<u64> = self.ring.iter().skip(start).map(|m| m.cid as u64).collect();
         out.sort_unstable();
         out.dedup();
+        // A slot's mark changes nothing a reader reads ([`SLOT_MARK`]): its
+        // collection 0 goes where no definition's mark put it there. Asked
+        // of the answer, never of each mark: a filter on the walk cost every
+        // look twice main's time and instructions (3 480 to 7 938 a
+        // `changed_collections_since` 64 marks back), its `Vec` grown by
+        // doubling where the walk's exact length had made it once.
+        #[cfg(feature = "statements")]
+        if out.first() == Some(&0) && self.slots_alone(start) {
+            out.remove(0);
+        }
         Some(out.into_iter().map(|cid| cid as u32).collect())
+    }
+
+    /// Whether every mark on collection 0 from `start` is a slot's
+    /// ([`SLOT_MARK`]): out of line, asked only where collection 0 changed.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn slots_alone(&self, start: usize) -> bool {
+        (self.ring.iter().skip(start)).all(|m| m.cid != 0 || m.id == SLOT_MARK)
     }
 }
 
@@ -435,5 +465,26 @@ mod tests {
         log.record(1, 2);
         assert_eq!(log.changed_collections(0), Some(vec![1, 2]));
         assert_eq!(log.changed_collections(2), Some(vec![1]));
+    }
+
+    /// A slot's mark names no collection: alone, none; among writes, theirs;
+    /// beside a definition's mark after the cursor, collection 0 still --
+    /// and only the marks after the cursor count.
+    #[cfg(feature = "statements")]
+    #[test]
+    fn a_slot_mark_names_no_collection() {
+        let mut log = ChangeLog::new(16);
+        log.record(0, SCHEMA_MARK); // 1: a definition
+        log.record(0, SLOT_MARK); // 2
+        assert_eq!(log.changed_collections(1), Some(vec![]));
+        assert_eq!(log.changed_collections(0), Some(vec![0]));
+        log.record(3, 7); // 3
+        log.record(0, SLOT_MARK); // 4
+        assert_eq!(log.changed_collections(1), Some(vec![3]));
+        log.record(0, SCHEMA_MARK); // 5
+        log.record(0, SLOT_MARK); // 6
+        assert_eq!(log.changed_collections(1), Some(vec![0, 3]));
+        assert_eq!(log.changed_collections(5), Some(vec![]));
+        assert_eq!(log.changed_collections(4), Some(vec![0]));
     }
 }

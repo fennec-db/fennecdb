@@ -190,6 +190,35 @@ pub(crate) fn bound(r: &fennec_core::engine::Runs) {
     BOUND.with(|b| b.set(b.get() | HELD));
 }
 
+/// A scheduled statement's last mark, or its `since`, found ahead of the
+/// clock (`fennec_http::schedule`): one of the two readings was wrong, a
+/// clock stepped back behind a run or a mark left by a clock that was
+/// ahead. Its `clock` line names the database (`what`), the statement, the
+/// mark and the clock, and whether the schedule waits for the clock to
+/// pass the mark -- ahead by `named::AHEAD_MAX` at most -- or goes on from
+/// the clock, the slots the wrong one ran early running again as they
+/// come. Once a statement and mark, by its scheduler.
+pub fn clock(what: &str, name: &str, mark: i64, now: i64, waits: bool) {
+    if !on() {
+        return;
+    }
+    let iso = fennec_core::time::format_iso;
+    event(
+        "clock",
+        &[
+            ("database", Field::Text(what)),
+            ("statement", Field::Text(name)),
+            ("mark", Field::Text(&iso(mark))),
+            ("clock", Field::Text(&iso(now))),
+            (
+                "ahead_ms",
+                Field::Int(mark.saturating_sub(now).max(0) as u64),
+            ),
+            ("waits", Field::Bool(waits)),
+        ],
+    );
+}
+
 /// What [`bound`] held for the request before, let go of: out of line, so
 /// that the request every connection reads pays a `Cell`'s look alone.
 #[cold]
@@ -452,7 +481,7 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         return;
     };
     let level = match name {
-        "refused" | "quota" | "unwoken" => Level::Warn,
+        "refused" | "quota" | "unwoken" | "clock" => Level::Warn,
         _ => Level::Info,
     };
     let line = line(name, level, fields);
@@ -566,7 +595,11 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         0 => Vec::new(),
         _ => HELD_BOUND.with(|h| h.borrow().1.clone()),
     };
-    let mut each: Vec<String> = Vec::new();
+    // Each by its shape, and a scheduled statement defined or replaced by
+    // its schedule as well, whose texts -- the cron expression, the zone --
+    // the shape made parameters: the clause as written ([`schedule_of`]),
+    // which holds no row's value.
+    let mut each: Vec<(String, Option<&str>)> = Vec::new();
     match fennec_ql::spans(text) {
         Ok(spans) => {
             for (from, to) in spans {
@@ -575,7 +608,8 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
                 if changes_schema(s) {
                     let mut one = String::new();
                     crate::statements::shape_to(s, &mut one, fennec_core::named::MAX_TEXT);
-                    each.push(one);
+                    let schedule = statement_named(&one).and_then(|_| schedule_of(s));
+                    each.push((one, schedule));
                 }
             }
         }
@@ -583,10 +617,10 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
             shape
                 .split(';')
                 .filter(|o| changes_schema(o))
-                .map(|o| o.to_string()),
+                .map(|o| (o.to_string(), None)),
         ),
     }
-    for one in &each {
+    for (one, schedule) in &each {
         let mut fields = vec![("statement", Field::Text(one.trim_ascii()))];
         if let Some(t) = tenant {
             fields.push(("tenant", Field::Text(t)));
@@ -602,8 +636,31 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
             fields.push(("bound_collection", Field::Text(c)));
             fields.push(("bound_events", Field::Text(e)));
         }
+        if let Some(sched) = schedule {
+            fields.push(("schedule", Field::Text(sched)));
+        }
         event("schema", &fields);
     }
+}
+
+/// The schedule clause of `create [or replace] statement <name>`'s text,
+/// as written: `every <interval>` or `at '<cron>'`, and `in '<zone>'`
+/// after it, up to the clause after it -- `None` for any other text. Read
+/// off the lexer's tokens, which the parse links in already: the
+/// definition read again and its schedule written out by its meaning cost
+/// the server 3 KB for a log line.
+fn schedule_of(s: &str) -> Option<&str> {
+    use fennec_ql::lexer::Tok;
+    let toks = fennec_ql::lexer::tokenize(s).ok()?;
+    let is = |t: &Tok, w: &str| matches!(t, Tok::Ident(i) if i.eq_ignore_ascii_case(w));
+    let at = toks.iter().position(|t| is(&t.tok, "statement"))? + 2;
+    let first = toks
+        .get(at)
+        .filter(|t| is(&t.tok, "every") || is(&t.tok, "at"))?;
+    let end = (toks[at..].iter())
+        .find(|t| t.tok == Tok::Eof || ["comment", "scans", "as"].iter().any(|w| is(&t.tok, w)))
+        .map_or(s.len(), |t| t.pos);
+    s.get(first.pos..end).map(str::trim_end)
 }
 
 /// The statement a `create [or replace] statement` or a `drop statement
@@ -817,6 +874,37 @@ pub fn succeeded(peer: Option<IpAddr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schedule clause as written, its zone with it, and nothing of
+    /// the body or the clauses after it.
+    #[test]
+    fn a_schedule_is_named_as_written() {
+        for (text, clause) in [
+            (
+                "create statement a every 15m as del t where n = 1",
+                Some("every 15m"),
+            ),
+            (
+                "CREATE OR REPLACE STATEMENT a EVERY 1 h IN 'Europe/Berlin' comment 'x' as del t",
+                Some("EVERY 1 h IN 'Europe/Berlin'"),
+            ),
+            (
+                "create statement a every 1d scans as del t",
+                Some("every 1d"),
+            ),
+            (
+                "create statement a at '0 3 * * 1-5'\n  in '+03:00'\nas del t where s = 'in'",
+                Some("at '0 3 * * 1-5'\n  in '+03:00'"),
+            ),
+            ("create statement a at 'it''s' as del t", Some("at 'it''s'")),
+            ("create statement a every 1h", Some("every 1h")),
+            ("create statement a() as get t count", None),
+            ("create statement a after del t as del u where id = 1", None),
+            ("drop statement a", None),
+        ] {
+            assert_eq!(schedule_of(text), clause, "{text}");
+        }
+    }
 
     #[test]
     fn the_wait_doubles_to_its_ceiling_and_a_success_forgives() {

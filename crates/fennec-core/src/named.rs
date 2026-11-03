@@ -304,8 +304,8 @@ pub struct Place {
 /// What a statement run by the clock is defined to run at
 /// (`docs/design/named-statements.md`, *Scheduled statements (F3)*): the
 /// edges `bucket` cuts, or the times a cron expression names, on a zone's
-/// clock. Nothing runs one yet: the engine refuses its definition
-/// ([`SCHEDULED_NOT_BUILT`]).
+/// clock. A file's server runs one (`fennec_http::schedule`); a database
+/// no scheduler runs refuses its definition ([`SCHEDULED_UNRUN`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schedule {
     pub when: When,
@@ -360,12 +360,15 @@ pub const MAX_SCHEDULED: usize = 16;
 /// ahead, and the schedule goes on from the clock.
 pub const AHEAD_MAX: i64 = 3_600_000;
 
-/// What the engine refuses a scheduled statement's definition with until a
-/// server runs one (F3's slices 1 and 2): a schedule defined where nothing
-/// runs it would be a slot no one runs without a word. A test lets one be
-/// defined (`Database::allow_schedules`).
-pub const SCHEDULED_NOT_BUILT: &str =
-    "scheduled statements are not built yet: no server runs one, so none is defined";
+/// What the engine refuses a scheduled statement's definition with where
+/// no scheduler runs the database's -- a tenant node's until F3's slice 4,
+/// the shell, the native library, a server's database a scheduler does not
+/// watch: a schedule defined where nothing runs it would be a slot no one
+/// runs without a word. A file's server lets one be defined
+/// (`Database::allow_schedules`, `fennec_http::schedule::watch`).
+pub const SCHEDULED_UNRUN: &str = "no scheduler runs this database's statements, so none \
+                                   runs by the clock here: a scheduled statement is defined \
+                                   on a file's server (`fennec-server <file>`), which runs it";
 
 /// What a parameter, a claim, `check`, `public` or parentheses in a
 /// scheduled statement are refused with.

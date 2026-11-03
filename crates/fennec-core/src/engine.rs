@@ -44,6 +44,8 @@ pub use call::{claims_carried, CallRead, Callee};
 #[cfg(feature = "statements")]
 mod due;
 #[cfg(feature = "statements")]
+pub(crate) use due::slot_now;
+#[cfg(feature = "statements")]
 pub use due::Due;
 mod maintenance;
 mod stored;
@@ -3962,10 +3964,17 @@ pub struct Database {
     #[cfg(feature = "statements")]
     #[allow(clippy::box_collection)]
     pending: Option<Box<Vec<(String, SlotMark)>>>,
-    /// Whether a scheduled statement may be defined: a test's, until a
-    /// server runs one ([`Self::allow_schedules`]).
+    /// Whether a scheduled statement may be defined: set where a server's
+    /// scheduler runs this database's ([`Self::allow_schedules`]), so no
+    /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
+    /// What is told how many schedules the table holds -- a definition, an
+    /// image adopted, a replica's apply, a promotion -- the scheduler it
+    /// wakes or the server's word on those it runs none of, asked at a
+    /// schema change and a promotion alone ([`Self::on_schedules`]).
+    #[cfg(feature = "statements")]
+    on_schedules: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -4051,6 +4060,8 @@ impl Database {
             pending: None,
             #[cfg(feature = "statements")]
             scheduling: false,
+            #[cfg(feature = "statements")]
+            on_schedules: None,
             #[cfg(not(target_arch = "wasm32"))]
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -5766,7 +5777,12 @@ impl Database {
     /// names none. `id` must be one no other database holds; the caller
     /// draws it at random.
     pub fn fork(&mut self, id: u64) -> Result<()> {
-        self.set_history(self.history.forked(id, self.changes.seq()))
+        self.set_history(self.history.forked(id, self.changes.seq()))?;
+        // A copy promoted runs its schedules from here: its scheduler, which
+        // ran none while it followed, looks at once.
+        #[cfg(feature = "statements")]
+        self.tell_schedules();
+        Ok(())
     }
 
     /// Takes a primary's history, and from then on no write of its own:
@@ -5957,11 +5973,21 @@ impl Database {
         body: &[u8],
         notes: &mut Vec<(u32, DocId)>,
     ) -> Result<()> {
-        notes.push((cid, SCHEMA_MARK));
-        // Taken as the primary wrote it, its digest checked here.
+        // Taken as the primary wrote it, its digest checked here. A slot's
+        // mark is noted as the primary noted it, a write that changes
+        // nothing read ([`crate::changes::SLOT_MARK`]), on collection 0
+        // whatever the record's head said -- the ring tells a mark by its
+        // collection first: no statement to read again after it.
         if kind == REC_STATEMENT {
+            #[cfg(feature = "statements")]
+            if body.first() == Some(&stored::OP_MARK) {
+                notes.push((0, crate::changes::SLOT_MARK));
+                return self.take_statement(body);
+            }
+            notes.push((cid, SCHEMA_MARK));
             return self.take_statement(body);
         }
+        notes.push((cid, SCHEMA_MARK));
         if kind == REC_DROP {
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             self.collections.remove(&name);
@@ -6196,8 +6222,12 @@ impl Database {
         self.fence = fence;
     }
 
-    /// The fence's refusal, when it has one ([`Self::set_fence`]).
-    pub(crate) fn fenced(&self) -> Result<()> {
+    /// The fence's refusal, when it has one ([`Self::set_fence`]): what a
+    /// server's scheduler asks before a run, and after one refused as
+    /// [`Error::ReadOnly`] to tell a lapsed lease's refusal -- the slot left
+    /// due to the tenant's next primary -- from a hook's, which marks it
+    /// (`fennec_http::schedule`).
+    pub fn fenced(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(f) = &self.fence {
             return f().map_err(Error::ReadOnly);

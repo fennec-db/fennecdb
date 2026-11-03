@@ -564,7 +564,7 @@ if (isMain(import.meta.url)) {
     a lease and a back-off deletes the object (<a href="/docs/functions#queue">Functions
     and webhooks</a>).</li>
   <li><b>An upload never finished</b> leaves a pending row and, at most, an
-    object under <code>pending/</code>. A statement on a timer sweeps the row, and the
+    object under <code>pending/</code>. A <a href="/docs/fennecql#scheduled-statements">scheduled statement</a> sweeps the row, and the
     consumer sees the deletion like any other:
     <code>del files where state = "pending" and created &lt; now() - 3600000</code>.</li>
 </ul>

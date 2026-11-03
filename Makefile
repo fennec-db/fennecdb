@@ -1065,7 +1065,9 @@ packaging-test:
 ## server, a replica and `fennec types` refuse fennec-core's
 ## tests/statements.fennec. Then a schedule and its mark, ops 4 and 5, in
 ## that fixture: the server, a replica, an archiver and `fennec types` built
-## before them refuse it in words, and this tree's server opens it.
+## before them refuse it in words, and this tree's server opens it; and one
+## defined by this tree's primary over /query: a replica, an archiver,
+## `fennec restore` and the server built before the ops stop at it in words.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- and OP4_BASE -- cd907d6c,
 ## the last before op 4 -- in scratch worktrees: minutes. Not in CI.

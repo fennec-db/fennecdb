@@ -1451,6 +1451,14 @@ impl Tenants {
             db.set_call_max_rows(calls.0);
             crate::calls::log_unheld(calls.1.as_deref(), &db, Some(name));
         }
+        // What can still bring a schedule here -- a file restored into the
+        // directory, a primary's that was, through its stream -- is said,
+        // never held unrun without a word: an install refuses one.
+        crate::schedule::unrun(
+            &format!("tenant `{name}`"),
+            "a tenant node runs no scheduled statement yet",
+            &mut db,
+        );
         // Before anything can write it -- its follower starts below: the
         // node's streams that stand where the file does send from its
         // feed, and its writes wait for them.
@@ -1870,6 +1878,21 @@ impl Tenants {
             .map_err(|e| Refused(400, format!("the image does not load: {e}")))?;
         if whole < image.len() {
             return Err(Refused(400, "the image is cut short".into()));
+        }
+        // A tenant node runs no scheduled statement yet, and refuses one's
+        // definition (`named::SCHEDULED_UNRUN`): an image holding one -- an
+        // install, a move's target -- would be a schedule no one runs. Not a
+        // 409, which a move reads as a file left at the target.
+        if let Some(s) = check.statements().iter().find(|s| s.schedule.is_some()) {
+            return Err(Refused(
+                400,
+                format!(
+                    "the image holds the scheduled statement `{}`, and a tenant node runs no \
+                     scheduled statement yet -- a later release runs them here: drop it before \
+                     the install, or serve the file with `fennec-server <file>`, which runs it",
+                    s.name
+                ),
+            ));
         }
         drop(check);
 
