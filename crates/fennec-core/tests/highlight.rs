@@ -177,8 +177,8 @@ fn emoji_and_astral_characters_count_as_javascript_counts_them() {
 fn an_accent_folds_and_the_word_is_marked_as_written() {
     let t = "Sütlaç tarifi: sütlaç fırında, SÜTLAÇ ve sutlac";
     let db = one("", &[t]);
-    // Typed without its accents, the word finds every way it is written,
-    // and each is marked whole; typed with them, the word written so.
+    // Typed with its accents or without them, the word finds every way it
+    // is written, and each is marked whole.
     let every = [
         at(t, "Sütlaç", 0),
         at(t, "sütlaç", 0),
@@ -186,9 +186,14 @@ fn an_accent_folds_and_the_word_is_marked_as_written() {
         at(t, "sutlac", 0),
     ];
     assert_eq!(marks(&db, "sutlac", 0), every);
-    assert_eq!(marks(&db, "Sütlaç", 0), every[..3]);
-    // Typed as nothing is written, every way it is.
+    assert_eq!(marks(&db, "Sütlaç", 0), every);
     assert_eq!(marks(&db, "sütlac", 0), every);
+    // Under `accents`, typed with them, the word written so; typed as
+    // nothing is written, every way it is.
+    let kept = one("(accents)", &[t]);
+    assert_eq!(marks(&kept, "sutlac", 0), every);
+    assert_eq!(marks(&kept, "Sütlaç", 0), every[..3]);
+    assert_eq!(marks(&kept, "sütlac", 0), every);
     assert_eq!(marks(&db, "firinda", 0), [at(t, "fırında", 0)]);
     let rs = answer(
         &db,

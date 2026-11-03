@@ -121,7 +121,7 @@ export interface FieldDescription {
 export type IndexDescription =
   | { kind: 'hash' | 'unique' | 'sorted' | 'inverted' }
   | { kind: 'ttl'; ms: number }
-  | { kind: 'text'; k1?: number; b?: number; prefix?: number; prefix_min?: number; chars?: boolean }
+  | { kind: 'text'; k1?: number; b?: number; prefix?: number; prefix_min?: number; chars?: boolean; accents?: boolean }
   | {
       kind: 'hnsw';
       metric?: 'cosine' | 'l2' | 'dot';

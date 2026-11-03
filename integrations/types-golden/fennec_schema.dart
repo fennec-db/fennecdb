@@ -5,7 +5,7 @@
 /// A row of `articles`.
 class Articles {
   final int id;
-  /// text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+  /// text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
   final String title;
   /// int @hash
   final int? year;
@@ -189,7 +189,7 @@ class EveryTypeArgs {
 /// A row of what `every_type` answers.
 class EveryTypeRow {
   final int id;
-  /// text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required
+  /// text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required
   final String title;
   /// int @hash
   final int? year;

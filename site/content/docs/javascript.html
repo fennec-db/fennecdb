@@ -650,7 +650,7 @@ off.</p>
 <tr><td><code>index().using('hash', t.n)</code> / <code>uniqueIndex().on(t.n)</code></td><td><code>@hash</code> / <code>@unique</code></td></tr>
 <tr><td><code>index().on(t.owner, t.at.desc())</code> / <code>uniqueIndex().on(t.org, t.slug)</code></td><td><code>@sorted(owner, at desc)</code> / <code>@unique(org, slug)</code></td></tr>
 <tr><td><code>index().using('hnsw', t.e.op('vector_l2_ops')).with({ m, ef_construction, ef_search, quant })</code></td><td><code>@hnsw(l2, m=.., ...)</code></td></tr>
-<tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars })</code></td><td><code>@text(...)</code></td></tr>
+<tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars, accents })</code></td><td><code>@text(...)</code></td></tr>
 <tr><td><code>index().using('inverted', t.splade)</code></td><td><code>@inverted</code></td></tr>
 <tr><td><code>index().using('hash', t.meta.path('lang'))</code></td><td><code>create index on t (meta.lang) @hash</code></td></tr>
 </tbody>

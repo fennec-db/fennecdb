@@ -37,8 +37,9 @@ pub struct Terms {
 
 impl Terms {
     /// The terms the index reads of a query (`TextIndex::read_terms`): a
-    /// word's fold, or a word written with accents as written, where the
-    /// index holds it so -- `sütlaç` marks `Sütlaç` and not `Sutlac`.
+    /// word's fold, or under `@text(accents)` a word written with accents
+    /// as written, where the index holds it so -- `sütlaç` marks `Sütlaç`
+    /// and not `Sutlac`.
     pub fn new(read: Vec<String>, spec: TextIndexSpec) -> Terms {
         let mut terms: Map<String, u32> = Map::default();
         for t in read {

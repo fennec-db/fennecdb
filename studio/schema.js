@@ -438,6 +438,7 @@ export function mount(host, ctx) {
         return [
           box('sc-prefix', 'Prefixes', (v.prefixEl = h('input', { id: 'sc-prefix', type: 'text', inputmode: 'numeric', value: v.prefix ?? '', placeholder: 'off', spellcheck: 'false', autocomplete: 'off' })), 'up to N characters, for inflected words'),
           box('sc-chars', 'Characters', h('label', { class: 'sc-check' }, (v.charsEl = h('input', { id: 'sc-chars', type: 'checkbox', checked: !!v.chars })), ' each character of Han, kana and Hangul')),
+          box('sc-accents', 'Accents', h('label', { class: 'sc-check' }, (v.accentsEl = h('input', { id: 'sc-accents', type: 'checkbox', checked: !!v.accents })), ' a word typed with accents reads its spelling (Vietnamese)')),
         ];
       }
       if (kind === 'hnsw') {
@@ -455,9 +456,10 @@ export function mount(host, ctx) {
         if (el && el.isConnected) v[k] = el.value;
       }
       if (v.charsEl?.isConnected) v.chars = v.charsEl.checked;
+      if (v.accentsEl?.isConnected) v.accents = v.accentsEl.checked;
       if (v.nocaseEl?.isConnected) v.nocase = v.nocaseEl.checked;
     };
-    const spec = () => (v.kind ? { kind: v.kind, ttl: v.ttl, prefix: v.prefix, chars: v.chars, metric: v.metric, quant: v.quant } : null);
+    const spec = () => (v.kind ? { kind: v.kind, ttl: v.ttl, prefix: v.prefix, chars: v.chars, accents: v.accents, metric: v.metric, quant: v.quant } : null);
     /** The statement, and the change the plan is asked of. */
     const made = () => {
       switch (op) {

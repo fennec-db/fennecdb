@@ -1,6 +1,6 @@
 <!--
 title: Indexes — FennecQL — fennecdb
-description: Indexes in FennecQL: declaring one on a field or with create index, @hash, @unique and @sorted, @text's prefix and chars, indexes over several fields, and rows that expire with @ttl and the reaper.
+description: Indexes in FennecQL: declaring one on a field or with create index, @hash, @unique and @sorted, @text's prefix, chars and accents, indexes over several fields, and rows that expire with @ttl and the reaper.
 -->
 
 <h1>Indexes</h1>
@@ -92,7 +92,9 @@ create the collection, or add it later with <code>create index</code>.</p>
   <li><b>For Turkish, Chinese or Japanese text</b>, see <code>prefix</code>
     and <code>chars</code> below. Accents need nothing: every
     <code>@text</code> index finds <code>Sütlaç</code> by
-    <code>sutlac</code> (<a href="fennecql-search.html#accents">accents</a>).</li>
+    <code>sutlac</code> (<a href="fennecql-search.html#accents">accents</a>).
+    For Vietnamese, whose tones tell words apart, <code>accents</code>
+    below.</li>
 </ul>
 
 <details class="deep"><summary>Index options and what they cost, measured</summary>
@@ -100,6 +102,7 @@ create the collection, or add it later with <code>create index</code>.</p>
 create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
 create index on products (title) @text(chars)     -- short Chinese or Japanese text
+create index on articles (body) @text(accents)    -- Vietnamese: accents tell words apart
 create index on articles (title) @sorted
 create index on users (email) @unique             -- refused if a value is held twice
 </pre>
@@ -181,6 +184,23 @@ none is missed and it is 0.87.</p>
   product titles gain a fifth, news and questions lose a little, and the
   index holds 1.6 to 1.9&times; the postings for a query 3 to 8&times;
   slower. Off unless asked for.</p>
+</div>
+
+<div class="note">
+  <p><b><code>accents</code> keeps a word as written beside its fold.</b>
+  Every <code>@text</code> reads a Latin or Greek letter as its base letter,
+  so <code>ma</code>, <code>má</code> and <code>mạ</code> are one word to it;
+  in Vietnamese they are three. With <code>accents</code> a word whose
+  accents make it another is indexed as written as well, and a query's word
+  typed with accents reads that spelling, one typed without them every
+  spelling (<a href="fennecql-search.html#accents-option">accents</a>).
+  Vietnamese's queries typed with their tones score 0.6453 with it and
+  0.6006 without (WebFAQ, nDCG@10); Turkish, French and Greek score the same
+  or a little less with it. Its cost is a second term for each word written
+  with accents: 76% more postings over Vietnamese, 70% over Greek, 28% over
+  Turkish, none over English. Off unless asked for; it combines with
+  <code>prefix</code>, <code>chars</code>, <code>k1</code> and
+  <code>b</code>.</p>
 </div>
 
 <div class="tbl">

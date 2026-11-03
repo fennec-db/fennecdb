@@ -178,7 +178,7 @@ impl Default for VectorIndexSpec {
 /// schemas against live ones. Two tuning knobs are not worth taking that
 /// away from every caller. The defaults are the pair BEIR standardised on,
 /// and the numbers in `text.rs` were measured with them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TextIndexSpec {
     /// Term-frequency saturation, in hundredths. BEIR's k1 = 0.9 -> 90.
     pub k1_pct: u16,
@@ -218,6 +218,20 @@ pub struct TextIndexSpec {
     /// Japanese JaGovFaqs 0.582 -> 0.576. For 1.6 to 1.9x the postings and a
     /// query 3 to 8x slower, so it is off unless asked for.
     pub chars: bool,
+    /// Whether a word whose accents make it another word is indexed as
+    /// written as well as by its fold (`@text(accents)`, `text::WRITTEN`):
+    /// a query's word typed with accents reads that spelling, one typed
+    /// without them every spelling.
+    ///
+    /// Every `@text` folds a Latin or Greek letter to its base letter, and
+    /// a word typed with its accents finds every spelling too. On WebFAQ's
+    /// Vietnamese, whose tones tell its syllables apart, that cost queries
+    /// typed with them nDCG@10 0.6471 -> 0.6006; kept as written as well,
+    /// 0.6453. On Turkish and French it scored within 0.0005 of the fold
+    /// (0.4839 against 0.4835, 0.4942 against 0.4943), on Greek below it
+    /// (0.5975 against 0.6002), for 16 to 76% more postings, so it is off
+    /// unless asked for.
+    pub accents: bool,
 }
 
 impl Default for TextIndexSpec {
@@ -228,7 +242,26 @@ impl Default for TextIndexSpec {
             prefix_max: 0,
             prefix_min: 3,
             chars: false,
+            accents: false,
         }
+    }
+}
+
+/// `accents` written only where it is set, so an index without it reads as
+/// it did: the FennecQL corpus compares trees by this form
+/// (`tools/fennecql_corpus.py`), as `Field`'s leaves out `beside`.
+impl std::fmt::Debug for TextIndexSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("TextIndexSpec");
+        d.field("k1_pct", &self.k1_pct)
+            .field("b_pct", &self.b_pct)
+            .field("prefix_max", &self.prefix_max)
+            .field("prefix_min", &self.prefix_min)
+            .field("chars", &self.chars);
+        if self.accents {
+            d.field("accents", &self.accents);
+        }
+        d.finish()
     }
 }
 
@@ -255,6 +288,9 @@ impl TextIndexSpec {
         }
         if self.chars {
             out.push_str(", chars");
+        }
+        if self.accents {
+            out.push_str(", accents");
         }
         out
     }
@@ -1285,8 +1321,23 @@ fn encode_index(out: &mut Vec<u8>, index: &IndexKind) {
             // One that indexes characters is a kind of its own, as a
             // quantized index is: a version that knows no `chars` refuses
             // the file rather than index pairs alone and answer a query of
-            // one character with nothing.
-            out.push(if spec.chars { 7 } else { 3 });
+            // one character with nothing. One that keeps accents is kind
+            // 11, its options a byte of flags after it (`TEXT_FLAGS`): a
+            // version that knows no `accents` refuses the file rather than
+            // read a word typed with them as every spelling, and the next
+            // option is a bit of that byte, which a version that knows it
+            // not refuses in turn, rather than two more kinds a time. An
+            // index without `accents` is written as it always was.
+            if spec.accents {
+                out.push(11);
+                out.push(if spec.chars {
+                    TEXT_CHARS | TEXT_ACCENTS
+                } else {
+                    TEXT_ACCENTS
+                });
+            } else {
+                out.push(if spec.chars { 7 } else { 3 });
+            }
             put_uvarint(out, spec.k1_pct as u64);
             put_uvarint(out, spec.b_pct as u64);
             put_uvarint(out, spec.prefix_max as u64);
@@ -1304,6 +1355,15 @@ fn encode_index(out: &mut Vec<u8>, index: &IndexKind) {
         IndexKind::Geo => out.push(10),
     }
 }
+
+/// A text index of kind 11's options, a bit each in the byte after it: each
+/// character of a script written without spaces (`chars`, kind 7's), and
+/// words kept as written beside their folds (`accents`).
+const TEXT_CHARS: u8 = 1;
+const TEXT_ACCENTS: u8 = 2;
+/// Every bit of kind 11's byte this version reads: any other is an option
+/// it does not know, and the file is refused rather than misread.
+const TEXT_FLAGS: u8 = TEXT_CHARS | TEXT_ACCENTS;
 
 /// An index's kind as [`encode_index`] wrote it.
 fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
@@ -1331,13 +1391,28 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
             }
             IndexKind::Vector(spec.resolved())
         }
-        3 | 7 => IndexKind::Text(TextIndexSpec {
-            k1_pct: get_uvarint(buf, pos)? as u16,
-            b_pct: get_uvarint(buf, pos)? as u16,
-            prefix_max: get_uvarint(buf, pos)? as u8,
-            prefix_min: get_uvarint(buf, pos)? as u8,
-            chars: kind == 7,
-        }),
+        3 | 7 | 11 => {
+            let flags = match kind {
+                7 => TEXT_CHARS,
+                11 => {
+                    let f = *buf.get(*pos).ok_or_else(ended)?;
+                    *pos += 1;
+                    if f & !TEXT_FLAGS != 0 {
+                        return Err(Error::Corrupt(format!("unknown text index options {f}")));
+                    }
+                    f
+                }
+                _ => 0,
+            };
+            IndexKind::Text(TextIndexSpec {
+                k1_pct: get_uvarint(buf, pos)? as u16,
+                b_pct: get_uvarint(buf, pos)? as u16,
+                prefix_max: get_uvarint(buf, pos)? as u8,
+                prefix_min: get_uvarint(buf, pos)? as u8,
+                chars: flags & TEXT_CHARS != 0,
+                accents: flags & TEXT_ACCENTS != 0,
+            })
+        }
         4 => IndexKind::SORTED,
         9 => IndexKind::Sorted {
             ttl: Some(get_uvarint(buf, pos)?),

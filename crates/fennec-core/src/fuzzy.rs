@@ -176,8 +176,8 @@ type Pos = (usize, usize);
 /// UTF-8 being made so -- in chunks of at most [`CHUNK`]. A word is its
 /// bytes and a 4-byte end: 1.2 MB for 99 558 words, where a `Box<str>` each
 /// was 2.4 MB. Not the words an index of prefixes (`prefix=N`) marks `^`,
-/// nor a word as written beside its fold (`~`): they are not words a query
-/// types, and a word's variants are its fold's.
+/// nor a word as written beside its fold (`~`, `@text(accents)`): they are
+/// not words a query types, and a word's variants are its fold's.
 #[derive(Default)]
 pub struct Dictionary {
     chunks: Vec<Chunk>,

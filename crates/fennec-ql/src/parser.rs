@@ -1953,10 +1953,18 @@ impl Parser {
             }
             let key = self.ident()?;
             let lowered = key.to_ascii_lowercase();
-            // `chars` is a flag: each character of a script written without
-            // spaces indexed as well as each pair.
-            if lowered == "chars" {
-                spec.chars = true;
+            // `chars` and `accents` are flags: each character of a script
+            // written without spaces indexed as well as each pair, and a
+            // word its accents make another kept as written beside its
+            // fold.
+            if lowered == "chars" || lowered == "accents" {
+                if matches!(self.peek(), Tok::Eq) {
+                    return self.err(format!("`{key}` takes no value: write `@text({lowered})`"));
+                }
+                match lowered.as_str() {
+                    "chars" => spec.chars = true,
+                    _ => spec.accents = true,
+                }
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
                 }
@@ -5829,6 +5837,7 @@ mod tests {
         "del notes where id = 3",
         "delete from notes where topic = 4 order posted limit 1 returning id",
         "create collection notes (body text @text(prefix=3), topic int @hash, posted timestamp @sorted, embed vector<384> @hnsw(cosine, m=16), @sorted(topic, posted desc))",
+        "create collection words (body text @text(accents, prefix=6), title text @hash @text(chars, accents))",
         "create collection if not exists users (email text nocase @unique, name text collate tr required)",
         "create index on notes (embed) @hnsw(cosine, quant=int8)",
         "create index if not exists on notes (topic, posted desc) @sorted",

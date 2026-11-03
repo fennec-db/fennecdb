@@ -200,13 +200,11 @@ completions 4 µs.</p>
 
 <p>A <code>@text</code> index reads a Latin or Greek letter as its base
 letter, so a word typed on a keyboard without the letters finds the word
-written with them: <code>sutlac</code> finds <code>Sütlaç</code>,
-<code>SÜTLAÇ</code> and <code>sutlac</code>, <code>nguyen</code> finds
-<code>Nguyễn</code>, <code>oresund</code> <code>Øresund</code>. A word typed
-with its accents finds the word written as it was typed —
-<code>sütlaç</code> finds <code>Sütlaç</code> and <code>SÜTLAÇ</code> but
-not <code>sutlac</code> — unless nothing is written so, when it finds every
-spelling. Nothing to declare; every <code>@text</code> index does it.</p>
+written with them, and the other way round: <code>sutlac</code> and
+<code>sütlaç</code> both find <code>Sütlaç</code>, <code>SÜTLAÇ</code> and
+<code>sutlac</code>; <code>nguyen</code> finds <code>Nguyễn</code>,
+<code>oresund</code> <code>Øresund</code>. Nothing to declare; every
+<code>@text</code> index does it.</p>
 
 <ul>
   <li><b>What folds:</b> every accent, cedilla, ogonek, caron and breve —
@@ -222,58 +220,82 @@ spelling. Nothing to declare; every <code>@text</code> index does it.</p>
     written — <code>ё</code> is not <code>е</code>. Only <code>@text</code>
     folds: <code>=</code>, <code>~</code>, <code>nocase</code>, collations
     and the other indexes compare as they always did.</li>
-  <li><b>Typed with accents, a word means them.</b> Vietnamese tells
-    syllables apart by their tones — <code>ma</code>, <code>má</code>,
-    <code>mà</code>, <code>mả</code>, <code>mã</code> and <code>mạ</code> are
-    six words — so a word typed with its tones finds the word written with
-    those tones, and one typed without finds every one of them.</li>
   <li><b><code>fuzzy</code> and <code>prefix</code> compare folded
-    words</b>: <code>sutlc</code> finds <code>Sütlaç</code>. With
-    <code>fuzzy</code>, a word typed with its accents ranks the word as
-    written first and its other spellings after it.</li>
+    words</b>: <code>sutlc</code> finds <code>Sütlaç</code>.</li>
   <li><b><code>highlight()</code> marks what was found</b>, as it is
-    written: <code>sutlac</code> marks <code>Sütlaç</code> and
-    <code>sutlac</code>, <code>sütlaç</code> only <code>Sütlaç</code>.</li>
+    written: <code>sutlac</code> marks <code>Sütlaç</code>,
+    <code>SÜTLAÇ</code> and <code>sutlac</code>.</li>
 </ul>
 
-<details class="deep"><summary>How it is indexed, what it costs and what it scores</summary>
-<p>Each word is indexed by its fold, and a word whose accents make it
-another word is indexed as written as well, beside it — what
-Elasticsearch's <code>preserve_original</code> keeps. A query's word typed
-without accents reads the fold, every spelling of the word; one typed with
-them reads the word as written. A document is as long as its words, so
-BM25 scores it as it did before accents folded, and English text, which
-has none, holds nothing more.</p>
+<h3 id="accents-option">When accents tell words apart: <code>@text(accents)</code></h3>
 
-<p>Folding alone — a word one term however it is accented — found every
-spelling for every query, and lost where accents tell words apart:
-Vietnamese queries typed with their tones scored 0.6471 before and 0.6006
-folded. Keeping the word as written gives them back 0.6453 and keeps what
-the fold gives the queries typed without accents. Reading the fold as well
-beside the word as written, at any weight tried, cost the queries typed
-with accents more than it found.</p>
+<p>In Vietnamese the tones tell syllables apart — <code>ma</code>,
+<code>má</code>, <code>mà</code>, <code>mả</code>, <code>mã</code> and
+<code>mạ</code> are six words — and folded they are one. Declare the index
+<code>@text(accents)</code> and it keeps each word whose accents make it
+another word as written as well, beside its fold: a word typed with its
+accents finds the word written with those accents, one typed without them
+finds every spelling, and one typed with accents no document writes it with
+finds every spelling too.</p>
+
+<pre data-lang="fennecql"><code>create collection articles (title text @text(accents), body text @text(accents, prefix=6))
+
+get articles match title "má"   -- má and Má: mother
+get articles match title "ma"   -- ma, má, mà, mả, mã, mạ</code></pre>
+
+<ul>
+  <li><b>Use it for Vietnamese</b>, or any text whose accents make
+    different words a reader means apart. For Turkish, French, Greek and
+    the other languages measured, leave it out: the fold alone scores as
+    well or better.</li>
+  <li><b>It costs memory.</b> Every word written with accents is a second
+    term: 76% more postings over Vietnamese, 70% over Greek, 28% over
+    Turkish, 16% over French; text with no accents, nothing. Building the
+    index takes longer by about as much.</li>
+  <li><b>With the other options:</b> it combines with <code>k1</code>,
+    <code>b</code>, <code>prefix=</code> and <code>chars</code>. A word's
+    prefixes are its fold's, so a word typed with accents reads its
+    spelling and the prefixes every spelling shares.</li>
+  <li><b><code>fuzzy</code></b> ranks the word as written first and its
+    other spellings after it; <code>highlight()</code> marks the spelling
+    a word typed with accents found — <code>sütlaç</code> marks
+    <code>Sütlaç</code> and <code>SÜTLAÇ</code>, not <code>sutlac</code>.</li>
+  <li><b>Older binaries refuse the file.</b> The option is stored with the
+    index, so a fennecdb from before it refuses to open a database
+    declaring it rather than read every accented word as every
+    spelling.</li>
+</ul>
+
+<details class="deep"><summary>What each way scores, and why the fold is the default</summary>
+<p>Measured with BM25 over WebFAQ, each set's queries as typed and the
+same queries with every accent taken off. Folding gives the queries typed
+without accents what they lost; keeping the word as written as well gives
+Vietnamese's queries typed with their tones back what the fold took, and
+nothing to the others, which pay its memory all the same — so the fold
+is the default and the option is there for the languages that need
+it.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>nDCG@10, BM25, WebFAQ</th><th class="n">queries</th><th class="n">before</th><th class="n">folded alone</th><th class="n">as written beside the fold</th></tr></thead>
+<thead><tr><th>nDCG@10, BM25, WebFAQ</th><th class="n">queries</th><th class="n">no fold</th><th class="n"><code>@text</code></th><th class="n"><code>@text(accents)</code></th></tr></thead>
 <tbody>
-<tr><td>Turkish, as typed</td><td class="n">10 000</td><td class="n">0.4841</td><td class="n">0.4835</td><td class="n"><b>0.4839</b></td></tr>
-<tr><td>Turkish, typed without accents</td><td class="n">10 000</td><td class="n">0.4095</td><td class="n">0.4835</td><td class="n"><b>0.4835</b></td></tr>
-<tr><td>Vietnamese, as typed</td><td class="n">10 000</td><td class="n">0.6471</td><td class="n">0.6006</td><td class="n"><b>0.6453</b></td></tr>
-<tr><td>Vietnamese, typed without accents</td><td class="n">10 000</td><td class="n">0.2113</td><td class="n">0.6005</td><td class="n"><b>0.6005</b></td></tr>
-<tr><td>Greek, as typed</td><td class="n">3 852</td><td class="n">0.5956</td><td class="n">0.6002</td><td class="n"><b>0.5975</b></td></tr>
-<tr><td>Greek, typed without accents</td><td class="n">3 852</td><td class="n">0.3119</td><td class="n">0.6002</td><td class="n"><b>0.6002</b></td></tr>
-<tr><td>French, as typed</td><td class="n">10 000</td><td class="n">0.4932</td><td class="n">0.4943</td><td class="n"><b>0.4942</b></td></tr>
-<tr><td>French, typed without accents</td><td class="n">10 000</td><td class="n">0.4105</td><td class="n">0.4943</td><td class="n"><b>0.4943</b></td></tr>
+<tr><td>Turkish, as typed</td><td class="n">10 000</td><td class="n">0.4841</td><td class="n">0.4835</td><td class="n">0.4839</td></tr>
+<tr><td>Turkish, typed without accents</td><td class="n">10 000</td><td class="n">0.4095</td><td class="n">0.4835</td><td class="n">0.4835</td></tr>
+<tr><td>Vietnamese, as typed</td><td class="n">10 000</td><td class="n">0.6471</td><td class="n">0.6006</td><td class="n">0.6453</td></tr>
+<tr><td>Vietnamese, typed without accents</td><td class="n">10 000</td><td class="n">0.2113</td><td class="n">0.6005</td><td class="n">0.6005</td></tr>
+<tr><td>Greek, as typed</td><td class="n">3 852</td><td class="n">0.5956</td><td class="n">0.6002</td><td class="n">0.5975</td></tr>
+<tr><td>Greek, typed without accents</td><td class="n">3 852</td><td class="n">0.3119</td><td class="n">0.6002</td><td class="n">0.6002</td></tr>
+<tr><td>French, as typed</td><td class="n">10 000</td><td class="n">0.4932</td><td class="n">0.4943</td><td class="n">0.4942</td></tr>
+<tr><td>French, typed without accents</td><td class="n">10 000</td><td class="n">0.4105</td><td class="n">0.4943</td><td class="n">0.4943</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>The queries typed without accents are the sets' own with every accent
-taken off. English SciFact scores 0.6618 all three ways. The cost is the
-words written with accents, a second term each: the index holds 28% more
-postings over Turkish (64.6 &rarr; 82.9 MB), 16% over French, and 70 to
-76% over Greek and Vietnamese, where nearly every word bears one.</p>
+<p>English SciFact scores 0.6618 all three ways. The index's postings,
+without the fold / <code>@text</code> / <code>@text(accents)</code>:
+Turkish 4.13 / 4.13 / 5.28 million (64.6 / 64.2 / 82.9 MB), French 24.2 /
+24.1 / 28.0 million, Greek 1.58 / 1.58 / 2.69 million, Vietnamese 5.71 /
+5.47 / 10.06 million (73.1 / 69.9 / 125.5 MB).</p>
 </details>
 
 <h2 id="hybrid">Hybrid search</h2>

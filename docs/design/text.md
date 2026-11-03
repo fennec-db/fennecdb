@@ -135,8 +135,8 @@ kind of its own (7), as a quantized graph is, so a binary that knows no
 `chars` refuses the file. The tokenizer takes its callback as `&mut dyn
 FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
-**A Latin or Greek letter folds to its base letter, and a word its accents
-make another is kept as written beside its fold.** The table is
+**A Latin or Greek letter folds to its base letter; `@text(accents)` keeps
+a word its accents make another as written beside its fold.** The table is
 `text/fold.rs`, 1 056 bytes over the Latin and Greek blocks, written by
 `tools/fold/gen.py` from `UnicodeData.txt`: a canonical decomposition's
 first letter, a compatibility decomposition into letters of the script,
@@ -149,7 +149,7 @@ pipeline; Turkish 144 846 documents, Vietnamese 123 972, Greek 38 516,
 French 569 505), each set's queries as typed and the same queries typed
 without accents (NFD, the marks taken off):
 
-| nDCG@10 | main | folded alone | kept as written |
+| nDCG@10 | main | `@text`, folded | `@text(accents)`, kept as written |
 |---|---|---|---|
 | Turkish, as typed | 0.4841 | 0.4835 | 0.4839 |
 | Turkish, without accents | 0.4095 | 0.4835 | 0.4835 |
@@ -161,22 +161,66 @@ without accents (NFD, the marks taken off):
 | French, without accents | 0.4105 | 0.4943 | 0.4943 |
 | SciFact (English) | 0.6618 | 0.6618 | 0.6618 |
 
-Folded alone, a word was one term however it was accented, and Vietnamese
-queries typed with their tones lost 0.047: its tones tell syllables apart
-(`ma`, `má`, `mà`, `mả`, `mã` and `mạ` are six words), and a folded
-syllable's list is all of them -- a query took 1.75x as long (818 -> 1 432
-us). So each word is indexed by its fold, the plain term, and a word whose
-accents make it another as written as well, behind `~` (`WRITTEN`), as
-Elasticsearch's `preserve_original` keeps the original beside its fold. A
-query's word typed without accents reads the fold, every spelling of it; one
-typed with them reads its term as written where the index holds it, and the
-fold where it does not -- typed with an accent no document writes it with,
-it finds every spelling (`TextIndex::read_words`, which ranking, `facet`,
+Folded, a word is one term however it is accented, at index and query time
+alike: a word typed without accents finds every spelling, and so does one
+typed with them. That lost where accents tell words apart: Vietnamese's
+tones tell syllables apart (`ma`, `má`, `mà`, `mả`, `mã` and `mạ` are six
+words), and its queries typed with them lost 0.047, a folded syllable's
+list all of them -- a query took 1.75x as long (818 -> 1 432 us). Kept as
+written as well (`text::WRITTEN`, `~`), as Elasticsearch's
+`preserve_original` keeps the original beside its fold, a query's word
+typed without accents reads the fold, every spelling of it, and one typed
+with them its term as written where the index holds it and the fold where
+it does not -- typed with an accent no document writes it with, it finds
+every spelling (`TextIndex::read_words`, which ranking, `facet`,
 `highlight()` and `fuzzy` all ask). A written term is no word of the
 document's length, so BM25 scores a document as main did, and it has no
 prefixes and no place in the `fuzzy` dictionary: a loose `match` reads a
 word typed with accents as written and its fold among its variants, at a
 prefix's weight, below it.
+
+**The fold is the default and keeping words as written an option, because
+the second helps Vietnamese alone.** On Turkish, French and Greek it scores
+as the fold does or worse (Greek 0.5975 against 0.6002), and every
+accented corpus pays its second term a word -- postings and
+`memory_bytes`, main / folded / kept: Turkish 4 129 247 / 4 128 332 /
+5 278 601 (+28%, 64.6 / 64.2 / 82.9 MB), French 24.20 / 24.11 / 28.04
+million (+16%, 311.9 / 310.2 / 360.5 MB), Greek 1.58 / 1.58 / 2.69 million
+(+70%, 25.8 / 25.5 / 44.5 MB) and Vietnamese 5.71 / 5.47 / 10.06 million
+(+76%, 73.1 / 69.9 / 125.5 MB), nearly every Greek and Vietnamese word
+bearing one; SciFact 633 949 / 633 936 / 634 010. Single runs under a load
+of 2 to 3, the index's build per document went 4.97 -> 6.19 us over
+Turkish, 8.69 -> 10.37 over Vietnamese and 17.8 -> 27.4 over Greek kept as
+written; a `match`, main / folded / kept, Turkish 87.0 / 88.2 / 86.7 us,
+Vietnamese 818 / 1 432 / 976, French 1 001 / 990 / 1 035, Greek 85 / 87 /
+99, SciFact 52.6 / 52.8 / 49.3 -- typed without accents, a query reads the
+fold either way. So `@text(accents)` is what a language whose accents make
+different words asks for, and the rest pay nothing for it: an index
+without it hands out no `~` term, its query reads a document's terms in
+one pass (`query_terms`), and no word is looked up as written nor tested
+for a mark -- the tokenizer's second pass over a word (`as_written`) runs
+under the option alone, behind one test of a flag. Under `prefix=6`
+Turkish scores 0.5532 kept as written as typed (main 0.5547) and 0.5528
+without accents (main 0.4681), its postings 14.07 -> 15.21 million: a
+word's prefixes are its fold's, so `prefix`, `chars`, `k1` and `b` all
+combine with it. A word written decomposed (`e` and U+0301) keeps its
+marks in its written term, another spelling than the composed one, which
+a query reaches through the fold.
+
+**`accents` is index kind 11, its options a byte after it.** `chars` took
+kind 7 beside the plain 3, as a quantized graph took 5 beside 2: a binary
+from before refuses a kind it does not know (`unknown index kind`) rather
+than build the index without the option -- here, read a word typed with
+accents as every spelling. Two more kinds for `accents` and `accents` with
+`chars` would have doubled with each option after it; kind 11 is followed
+by a byte of flags (`TEXT_CHARS` 1, `TEXT_ACCENTS` 2), and a bit this
+binary does not know is refused (`unknown text index options`), so the
+next option is a bit a binary from before refuses in turn. An index
+without `accents` is written as kind 3 or 7, as it always was, so a file
+that declares none stays one an older binary opens. `TextIndexSpec`'s
+`Debug` leaves `accents` out where it is unset, as `Field`'s leaves out
+`beside`: `make fennecql-corpus` compares trees by that form, and every
+`@text` of every text would have read as another.
 
 Weights tried for the fold beside the word as written, accented queries,
 Turkish / Vietnamese / Greek / French: none, as built, 0.4839 / 0.6453 /
@@ -195,28 +239,6 @@ written without accents then ranked first: Greek's queries typed without
 accents scored 0.4310 at a quarter, 0.5246 at half and 0.5630 at
 `fuzzy`'s weight, against the fold's 0.6002, and reading the two whole is
 the fold again for a merge of two lists a word at query time.
-
-The rule set before measuring took this over folding alone with an
-`@text(accents)` to opt out: Vietnamese as typed within 0.005 of main,
-Turkish within 0.001, every set's queries typed without accents within
-0.01 of the fold, Turkish's postings 40% over main's at most and English's
-index and query unmoved. Its cost is the words written with accents, a
-second term each -- postings and `memory_bytes`, main against kept:
-Turkish 4 129 247 -> 5 278 601 (+28%, 64.6 -> 82.9 MB), French 24.20 ->
-28.04 million (+16%, 311.9 -> 360.5 MB), Greek 1.58 -> 2.69 million (+70%,
-25.8 -> 44.5 MB) and Vietnamese 5.71 -> 10.06 million (+76%, 73.1 -> 125.5
-MB), nearly every Greek and Vietnamese word bearing one; SciFact 633 949 ->
-634 010. Single runs under a load of 2 to 3, the index's build per document
-went 4.97 -> 6.19 us over Turkish, 8.69 -> 10.37 over Vietnamese and 17.8
--> 27.4 over Greek, and SciFact's 16.2 -> 15.6; a `match`, main / folded
-alone / kept, Turkish 87.0 / 88.2 / 86.7 us, Vietnamese 818 / 1 432 / 976,
-French 1 001 / 990 / 1 035, Greek 85 / 87 / 99, SciFact 52.6 / 52.8 /
-49.3 -- typed without accents, a query reads the fold as folding alone
-did. Under `prefix=6` Turkish scores 0.5532 as typed (main 0.5547) and
-0.5528 without accents (main 0.4681), its postings 14.07 -> 15.21 million:
-a word's prefixes are its fold's. A word written decomposed (`e` and
-U+0301) keeps its marks in its written term, another spelling than the
-composed one, which a query reaches through the fold.
 
 ## Text index is derived
 

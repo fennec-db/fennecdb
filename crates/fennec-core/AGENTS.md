@@ -343,13 +343,16 @@ together and a Latin or Greek letter to its base letter, its accents
 dropped (`sutlac` is `Sütlaç`), at index and query time alike, through
 `text/fold.rs` -- written by `tools/fold/gen.py`, never by hand -- where a
 letter folds as its lowercase does; unspaced scripts go by grams
-(`text::grams`). A word its accents make another is indexed as written too
-(`text::WRITTEN`), never counted in a document's length, given prefixes or
-put in the `fuzzy` dictionary; a query's word typed with accents reads that
-term where the index holds it, else its fold, and whatever reads a query's
-terms -- ranking, `facet`, `highlight()`, `fuzzy` -- asks
-`TextIndex::read_words`. Nothing else folds: `=`, `like`, `nocase`,
-collations and the other indexes compare as they did.
+(`text::grams`). Under `@text(accents)` alone (index kind 11, a byte of
+flags after it, an unknown bit refused) a word its accents make another is
+indexed as written too (`text::WRITTEN`), never counted in a document's
+length, given prefixes or put in the `fuzzy` dictionary; a query's word
+typed with accents reads that term where the index holds it, else its
+fold, and whatever reads a query's terms -- ranking, `facet`,
+`highlight()`, `fuzzy` -- asks `TextIndex::read_words`. An index without
+it hands out, looks up and tests for no written term. Nothing else folds:
+`=`, `like`, `nocase`, collations and the other indexes compare as they
+did.
 
 **[The text index is derived and never
 persisted.](../../docs/design/text.md#text-index-is-derived)**

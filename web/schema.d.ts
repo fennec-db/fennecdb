@@ -170,6 +170,8 @@ export interface Bm25Options {
   prefix_min?: number;
   /** Also each character of Han, kana and Hangul. */
   chars?: boolean;
+  /** Also each word as written where its accents make it another word: a query typed with accents reads its spelling (Vietnamese). */
+  accents?: boolean;
 }
 /** A duration: `'45s'`, `'30m'`, `'12h'`, `'7d'`. */
 export type Duration = `${number}${'ms' | 's' | 'm' | 'h' | 'd'}`;

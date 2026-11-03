@@ -11,7 +11,7 @@ namespace FennecSchema;
 /// <summary>A row of <c>articles</c>.</summary>
 public sealed record Articles(
     [property: JsonPropertyName("id")] long Id,
-    /* text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required */ [property: JsonPropertyName("title")] string Title,
+    /* text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required */ [property: JsonPropertyName("title")] string Title,
     /* int @hash */ [property: JsonPropertyName("year")] long? Year,
     /* float @sorted */ [property: JsonPropertyName("score")] double? Score,
     /* bool required */ [property: JsonPropertyName("draft")] bool Draft,
@@ -72,7 +72,7 @@ public sealed record EveryTypeArgs(
 /// <summary>A row of what <c>every_type</c> answers.</summary>
 public sealed record EveryTypeRow(
     [property: JsonPropertyName("id")] long Id,
-    /* text collate tr @text(k1=0.9, b=0.4, prefix=6, chars) required */ [property: JsonPropertyName("title")] string Title,
+    /* text collate tr @text(k1=0.9, b=0.4, prefix=6, chars, accents) required */ [property: JsonPropertyName("title")] string Title,
     /* int @hash */ [property: JsonPropertyName("year")] long? Year,
     /* bool required */ [property: JsonPropertyName("draft")] bool Draft,
     /* timestamp @ttl(30d) */ [property: JsonPropertyName("published")] string? Published,

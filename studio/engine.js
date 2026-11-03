@@ -57,6 +57,7 @@ function indexText(ix) {
   if (kind === 'hnsw') args.push(o.metric ?? 'cosine');
   for (const k of ['k1', 'b', 'm', 'ef_construction', 'ef_search', 'prefix', 'prefix_min', 'quant']) if (o[k] !== undefined) args.push(`${k}=${o[k]}`);
   if (o.chars) args.push('chars');
+  if (o.accents) args.push('accents');
   return `@${kind}${args.length ? `(${args.join(', ')})` : ''}`;
 }
 

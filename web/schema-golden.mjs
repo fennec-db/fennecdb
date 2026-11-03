@@ -69,6 +69,7 @@ d('bm25', `fennecTable('t', { body: text() }, (t) => [index('t_body').using('bm2
 d('bm25, its options', `fennecTable('t', { body: text() }, (t) => [
   index('t_body').using('bm25', t.body).with({ k1: 1.2, b: 0.75, prefix: 6, prefix_min: 4, chars: true }),
 ])`);
+d('bm25 keeping accents', `fennecTable('t', { body: text() }, (t) => [index('t_body').using('bm25', t.body).with({ accents: true })])`);
 d('an inverted index', `fennecTable('t', { s: sparsevec({ dimensions: 100 }) }, (t) => [index('t_s').using('inverted', t.s)])`);
 d('a point and its index', `fennecTable('places', { loc: geometry({ type: 'point' }), route: geo().array() }, (t) => [index('places_loc').using('gist', t.loc)])`);
 d('a point of another srid', `fennecTable('t', { loc: geometry({ type: 'point', srid: 3857 }) })`);

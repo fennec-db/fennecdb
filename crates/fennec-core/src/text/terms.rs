@@ -890,8 +890,9 @@ impl Terms {
     }
 
     /// Every word's bytes, in no order, but the prefixes an index of them
-    /// marks `^` and the words as written beside their folds (`~`): the
-    /// words a [`crate::fuzzy::Dictionary`] is made of.
+    /// marks `^` and the words as written beside their folds (`~`,
+    /// `@text(accents)`): the words a [`crate::fuzzy::Dictionary`] is made
+    /// of.
     pub fn words(&self) -> Vec<&[u8]> {
         let mut out = Vec::with_capacity(self.len());
         for s in self.shards() {

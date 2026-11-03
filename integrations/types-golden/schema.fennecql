@@ -11,7 +11,7 @@
 -- `lookup`'s rows), a write answering only what it wrote, and parameters
 -- named as keywords are.
 create collection articles (
-  title text required collate tr @text(prefix=6, chars),
+  title text required collate tr @text(prefix=6, chars, accents),
   year int @hash,
   score float @sorted,
   draft bool required,
