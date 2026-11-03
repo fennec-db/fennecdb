@@ -162,3 +162,24 @@ described (`statements`, `GET /_schema`) to the server's token alone,
 back to a node's queue before the look closes the tenant; a statement the
 schema broke is listed `broken`, which `/_schema/plan` holds to no
 dependency.
+
+**[A webhook consumer's record is kept by every build, and no server takes
+its events yet.](../../docs/design/named-statements.md#what-f4-has-built)**
+`create statement <n>($p <type> from event.<path>, ...) on hook <h> [where
+...] as ...` is kind 13's op 6, its hook's name after its text: one write
+`writes_in` counts, refused by a binary from before, never misread. A
+server reads the name into `Stored::hook`; the module keeps it as the
+record's tail behind its op (`Timing`), reading none of it. An event is
+taken by `Database::take_event`: its key (`<hook>`, `U+001F`, the key)
+looked up in `_hook_events` first, again under the write lock, and where
+held answered as its first taking was (`Took::Held`), a second body too,
+never run; else the hook's statements in name order, each condition asked
+and each parameter typed with no cast (`named::event_at`, a key of digits a
+list's place), their bodies and the key's row -- its own `until`,
+`@ttl(1ms)` -- one block under one `--call-max-rows`. A statement broken
+by its body refuses the events its condition takes, an unread one every
+event of its hook (409). A replacement keeps the kind
+(`named::Kind::Hooked`), its hook changing freely; `MAX_HOOKED` bounds a
+hook's statements; `/_changes` passes over `_hook_events`. Until a server
+takes events every way in refuses a definition (`HOOKED_NOT_BUILT`) but a
+test's (`Database::allow_hooks`), and no call runs one.

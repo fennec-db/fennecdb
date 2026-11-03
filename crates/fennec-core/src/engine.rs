@@ -47,6 +47,10 @@ mod due;
 pub(crate) use due::slot_now;
 #[cfg(feature = "statements")]
 pub use due::{Due, HeldSlot};
+#[cfg(feature = "statements")]
+mod hooked;
+#[cfg(feature = "statements")]
+pub use hooked::{Event, HeldKey, Took, HOOK_EVENTS};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -3973,6 +3977,11 @@ pub struct Database {
     /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
+    /// Whether a webhook consumer may be defined: a test's alone until a
+    /// server takes events ([`Self::allow_hooks`], F4's slice 2), so no
+    /// hook is stored that no sender reaches.
+    #[cfg(feature = "statements")]
+    hooking: bool,
     /// What is told how many schedules the table holds -- a definition, an
     /// image adopted, a replica's apply, a promotion -- the scheduler it
     /// wakes or the server's word on those it runs none of, asked at a
@@ -4079,6 +4088,8 @@ impl Database {
             pending: None,
             #[cfg(feature = "statements")]
             scheduling: false,
+            #[cfg(feature = "statements")]
+            hooking: false,
             #[cfg(feature = "statements")]
             on_schedules: None,
             #[cfg(feature = "statements")]

@@ -627,7 +627,7 @@ fn a_schedule_or_a_mark_this_version_does_not_read_is_refused() {
         (mark(2, 409), true),
         (mark(3, 0), false),
         (mark(1, 200), false),
-        (vec![6u8, 0], false),
+        (vec![7u8, 0], false),
     ] {
         let mut f = file.clone();
         f.push(13);

@@ -1,0 +1,1065 @@
+//! Webhook consumers as their database keeps them and takes their events
+//! (`docs/design/named-statements.md`, F4's slice 2): a definition is
+//! record kind 13's op 6, its hook's name after its text -- one write the
+//! counter counts, put back with its block, kept by every open, image and
+//! compact, applied by a replica and passed over by a reader of the
+//! changes -- refused where a test does not let it be defined
+//! (`Database::allow_hooks`); and `Database::take_event`, an event's
+//! statements run in name order with its key's row in `_hook_events` as
+//! one block, a held key answered as the first taking was.
+
+use crate::stored::{body_at, opened, refused, run, Tap};
+use fennec_core::codec::{encode_str, put_uvarint};
+use fennec_core::engine::{writes_in, ChangeKind, Event, HeldKey, Took, HOOK_EVENTS};
+use fennec_core::named::{event_at, GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_HOOKED};
+use fennec_core::prelude::*;
+use std::sync::Arc;
+
+const MINUTE: i64 = 60_000;
+const DAY: i64 = 86_400_000;
+
+const ORDERS: &str = "create collection orders (ref text @hash, total int, currency text, \
+                      status text, intent text, at timestamp)";
+
+/// The design's example: an order marked paid by the intent Stripe says
+/// succeeded, for its whole total alone.
+const STRIPE_PAID: &str = "create statement stripe_paid(
+    $intent text from event.data.object.id,
+    $order text from event.data.object.metadata.order,
+    $amount int from event.data.object.amount_received,
+    $currency text from event.data.object.currency)
+  on hook stripe
+  where event.type = 'payment_intent.succeeded' and event.livemode = true
+  comment 'Marks the order an intent paid, for its whole total alone'
+as set orders {status: 'paid', intent: $intent}
+   where ref = $order and total = $amount and currency = $currency
+     and (status = 'open' or intent = $intent)
+   require 1 else 'no open order of that total'";
+
+/// Saturday 28 March 2026, noon UTC: the clock every test here reads.
+fn t0() -> i64 {
+    (fennec_core::time::days_from_civil(2026, 3, 28) * 1440 + 12 * 60) * MINUTE
+}
+
+/// A database over `orders` holding order `o-1` of 2000 euros, its clock
+/// at `t0`, letting a hook be defined.
+fn orders(tap: &Tap) -> Database {
+    let mut db = tap.database();
+    db.set_clock(Some(t0()));
+    db.allow_hooks();
+    run(&mut db, ORDERS).unwrap();
+    run(
+        &mut db,
+        "put orders {ref: 'o-1', total: 2000, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    db
+}
+
+fn defined(tap: &Tap) -> Database {
+    let mut db = orders(tap);
+    run(&mut db, STRIPE_PAID).unwrap();
+    db
+}
+
+/// Stripe's `payment_intent.succeeded` for `order`, as its body parses.
+fn paid(id: &str, order: &str, amount: i64) -> Value {
+    fennec_core::json::parse_json(&format!(
+        r#"{{"id": "{id}", "type": "payment_intent.succeeded", "livemode": true,
+            "data": {{"object": {{"id": "pi_{id}", "amount_received": {amount},
+            "currency": "eur", "metadata": {{"order": "{order}"}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+/// An event of the hook `stripe` keyed by its `id`, kept for 30 days.
+fn event<'a>(body: &'a Value, key: &'a str, digest: u64) -> Event<'a> {
+    Event {
+        hook: "stripe",
+        key,
+        body,
+        digest,
+        at: Some(t0() - MINUTE),
+        event: None,
+        keep: 30 * DAY,
+    }
+}
+
+fn rows(db: &Database, text: &str) -> Vec<Vec<Value>> {
+    let stmt = fennec_ql::parse_one(text).unwrap();
+    match db.query(&stmt, &[]).unwrap() {
+        Response::Rows(rs) => rs.rows.into_iter().map(|r| r.values).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn status(db: &Database, reference: &str) -> Value {
+    rows(
+        db,
+        &format!("get orders select status where ref = '{reference}'"),
+    )
+    .first()
+    .map_or(Value::Null, |r| r[0].clone())
+}
+
+/// The keys `_hook_events` holds, as a read finds them.
+fn keys(db: &Database) -> Vec<Value> {
+    if db.collection(HOOK_EVENTS).is_err() {
+        return Vec::new();
+    }
+    rows(db, "get _hook_events select key order key")
+        .into_iter()
+        .map(|r| r[0].clone())
+        .collect()
+}
+
+/// The kinds of the records a write's record holds: its own, or a block's
+/// (kind 9) records', each with a kind-13 record's op.
+fn kinds_in(record: &[u8]) -> Vec<(u8, Option<u8>)> {
+    let mut p = body_at(record);
+    if record[0] != 9 {
+        return vec![(record[0], (record[0] == 13).then(|| record[p]))];
+    }
+    let mut out = Vec::new();
+    while p < record.len() {
+        let kind = record[p];
+        let mut q = p + 1;
+        fennec_core::codec::get_uvarint(record, &mut q).unwrap();
+        let len = fennec_core::codec::get_uvarint(record, &mut q).unwrap() as usize;
+        out.push((kind, (kind == 13).then(|| record[q])));
+        p = q + len;
+    }
+    out
+}
+
+// ------------------------------------------------------------ the record
+
+#[test]
+fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(&mut db, ORDERS).unwrap();
+    assert_eq!(
+        refused(run(&mut db, STRIPE_PAID)),
+        Error::Query(HOOKED_NOT_BUILT.into()).to_string()
+    );
+    assert!(db.statements().is_empty());
+
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    let before = db.change_seq();
+    run(&mut db, STRIPE_PAID).unwrap();
+    let (seq, record) = tap.last();
+    let p = body_at(&record);
+    assert_eq!((record[0], record[p]), (13, 6), "kind 13, op 6");
+    assert_eq!(writes_in(&record).unwrap(), 1);
+    assert_eq!(seq, before + 1);
+    // The hook's name is the record's tail, after the text.
+    let mut tail = Vec::new();
+    encode_str(&mut tail, STRIPE_PAID);
+    encode_str(&mut tail, "stripe");
+    assert!(record.ends_with(&tail), "the text, then the hook");
+    let s = db.statements().get("stripe_paid").unwrap().clone();
+    assert_eq!(s.hook.as_deref(), Some("stripe"));
+    assert!(s.tree.is_some() && s.broken.is_none(), "{:?}", s.broken);
+    assert_eq!(s.kind(), fennec_core::named::Kind::Hooked);
+    assert!(!s.called(), "no token's call is granted it");
+    assert_eq!(
+        s.depends,
+        [
+            "orders",
+            "orders.status",
+            "orders.intent",
+            "orders.ref",
+            "orders.total",
+            "orders.currency"
+        ]
+    );
+    // No call runs it: its events do.
+    let e = refused(run(&mut db, "call stripe_paid"));
+    assert!(e.contains("takes the events of hook `stripe`"), "{e}");
+    // What it reads, a schema change refused naming it.
+    let e = refused(run(&mut db, "alter collection orders drop field total"));
+    assert!(e.contains("statement `stripe_paid`"), "{e}");
+}
+
+#[test]
+fn a_block_put_back_puts_back_a_hook_s_definition() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    db.begin().unwrap();
+    run(&mut db, STRIPE_PAID).unwrap();
+    assert!(db.statements().get("stripe_paid").is_some());
+    db.rollback();
+    assert!(db.statements().get("stripe_paid").is_none());
+    assert_eq!(
+        refused(db.take_event(&event(&paid("evt_1", "o-1", 2000), "evt_1", 1))),
+        "already exists: no statement takes hook `stripe`"
+    );
+}
+
+#[test]
+fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_a_hook() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 7)).unwrap(),
+        Took::Ran(1)
+    );
+    let held = |db: &Database| -> Vec<_> {
+        db.statements()
+            .iter()
+            .map(|s| (s.name.clone(), s.version, s.hook.clone(), s.text.clone()))
+            .collect()
+    };
+    let want = held(&db);
+    let kept = Some(HeldKey {
+        taken: 1,
+        same: true,
+    });
+    let asked = event(&body, "evt_1", 7);
+
+    // An open of the file, and an image, each read at the clock the key
+    // was kept by: past its thirty days, a key is as if never kept.
+    let at_t0 = |bytes: &[u8]| {
+        let mut db = opened(bytes);
+        db.set_clock(Some(t0()));
+        db
+    };
+    let again = at_t0(&tap.bytes());
+    assert_eq!(held(&again), want);
+    assert_eq!(again.event_kept(&asked).unwrap(), kept);
+    let image = db.snapshot();
+    let mut again = at_t0(&image);
+    assert_eq!(held(&again), want);
+    assert_eq!(
+        again.statements().get("stripe_paid").unwrap().kind(),
+        fennec_core::named::Kind::Hooked
+    );
+    assert_eq!(again.event_kept(&asked).unwrap(), kept);
+    again.set_clock(Some(t0() + 30 * DAY + 1));
+    assert_eq!(again.event_kept(&asked).unwrap(), None);
+
+    // A replica, write for write, and a reader of the changes: the
+    // definition passed over as a statement, the event's block its writes.
+    let mut replica = Tap::default().database();
+    let writes = tap.writes.lock().unwrap().clone();
+    for (seq, record) in &writes {
+        replica.apply(record).unwrap();
+        assert_eq!(replica.change_seq(), *seq);
+    }
+    assert_eq!(held(&replica), want);
+    replica.set_clock(Some(t0()));
+    assert_eq!(replica.event_kept(&asked).unwrap(), kept);
+    let all: Vec<u8> = writes.iter().flat_map(|(_, r)| r.clone()).collect();
+    let (mut statements, mut collections) = (0, Vec::new());
+    let last = db
+        .changes_in(&all, 1, &mut |c| {
+            match c.kind {
+                ChangeKind::Statement => statements += 1,
+                _ => collections.push(c.collection.unwrap_or_default()),
+            }
+            true
+        })
+        .unwrap();
+    assert_eq!(last, db.change_seq());
+    assert_eq!(statements, 1, "the definition, numbered");
+    assert_eq!(
+        collections,
+        ["orders", "orders", "orders", HOOK_EVENTS, HOOK_EVENTS],
+        "the collection and the order, then the event's block: its write, the keys' \
+         collection made and its key"
+    );
+
+    // A compact keeps it, of a file read into memory and of a mapped one.
+    let dir = std::env::temp_dir().join(format!("fennec-hooked-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for mapped in [false, true] {
+        let path = dir.join(format!("compact-{mapped}.fennec"));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, &image).unwrap();
+        fennec_ql::install();
+        let mut db = match mapped {
+            true => fennec_core::fs::open_mapped(&path).unwrap(),
+            false => fennec_core::fs::open(&path).unwrap(),
+        };
+        run(&mut db, "compact").unwrap();
+        drop(db);
+        let mut again = opened(&std::fs::read(&path).unwrap());
+        assert_eq!(held(&again), want, "mapped: {mapped}");
+        again.set_clock(Some(t0()));
+        assert_eq!(again.event_kept(&asked).unwrap(), kept, "mapped: {mapped}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_replacement_keeps_the_kind_and_changes_its_hook_freely() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    // Its hook, condition, parameters and body: no grant hangs on them.
+    run(
+        &mut db,
+        "create or replace statement stripe_paid($order text from event.order) on hook \
+         stripe_test as set orders {status: 'paid'} where ref = $order require 1",
+    )
+    .unwrap();
+    let s = db.statements().get("stripe_paid").unwrap();
+    assert_eq!(s.hook.as_deref(), Some("stripe_test"));
+    run(
+        &mut db,
+        "create statement ask() as get orders select id where ref = 'x'",
+    )
+    .unwrap();
+    db.allow_schedules();
+    run(
+        &mut db,
+        "create statement tidy every 1d as del orders where ref = 'void'",
+    )
+    .unwrap();
+    for (text, what) in [
+        (
+            "create or replace statement ask($o text from event.o) on hook stripe as set orders \
+             {status: 'x'} where ref = $o",
+            "takes a hook's events, where it was called",
+        ),
+        (
+            "create or replace statement tidy($o text from event.o) on hook stripe as set orders \
+             {status: 'x'} where ref = $o",
+            "takes a hook's events, where it ran by the clock",
+        ),
+        (
+            "create or replace statement stripe_paid() as get orders select id where ref = 'x'",
+            "is called, where it took a hook's events",
+        ),
+        (
+            "create or replace statement stripe_paid every 1h as del orders where ref = 'x'",
+            "runs by the clock, where it took a hook's events",
+        ),
+        (
+            "create or replace statement stripe_paid after insert orders as set orders {status: \
+             'y'} where id = new.id",
+            "is bound to writes, where it took a hook's events",
+        ),
+    ] {
+        let e = refused(run(&mut db, text));
+        assert!(e.contains(what), "{text}: {e}");
+    }
+}
+
+#[test]
+fn a_hook_s_events_are_taken_by_at_most_sixteen() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    for i in 0..MAX_HOOKED {
+        run(
+            &mut db,
+            &format!(
+                "create statement s{i}($o text from event.o) on hook stripe as set orders \
+                 {{status: 's{i}'}} where ref = $o"
+            ),
+        )
+        .unwrap();
+    }
+    let e = refused(run(
+        &mut db,
+        "create statement one_more($o text from event.o) on hook stripe as set orders {status: \
+         'x'} where ref = $o",
+    ));
+    assert!(e.contains("at most 16"), "{e}");
+    // Another hook's are its own, and a replacement takes its own place.
+    run(
+        &mut db,
+        "create statement one_more($o text from event.o) on hook github as set orders {status: \
+         'x'} where ref = $o",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create or replace statement s0($o text from event.o) on hook stripe as set orders \
+         {status: 'z'} where ref = $o",
+    )
+    .unwrap();
+}
+
+/// An op-6 record written by hand: what a later build, or another, may
+/// have written.
+fn hooked_record(name: &str, text: &str, hook: &[u8], change: u64) -> Vec<u8> {
+    let mut body = vec![6u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, change);
+    put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+    body.extend_from_slice(&crate::stored::digest(text).to_le_bytes());
+    encode_str(&mut body, name);
+    put_uvarint(&mut body, 1);
+    encode_str(&mut body, "orders");
+    encode_str(&mut body, text);
+    body.extend_from_slice(hook);
+    body
+}
+
+fn with_record(file: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut f = file.to_vec();
+    f.push(13);
+    put_uvarint(&mut f, 0);
+    put_uvarint(&mut f, body.len() as u64);
+    f.extend_from_slice(body);
+    f
+}
+
+/// A hook's name that is no word, a byte past it, a record cut short and
+/// an op past 6 are refused as corrupt, never read as something else.
+#[test]
+fn a_hook_s_record_this_version_does_not_read_is_refused() {
+    let tap = Tap::default();
+    let db = orders(&tap);
+    let file = db.snapshot();
+    let text = "create statement late($o text from event.o) on hook stripe as set orders \
+                {status: 'x'} where ref = $o";
+    let hook = |h: &str| {
+        let mut b = Vec::new();
+        encode_str(&mut b, h);
+        b
+    };
+    let mut past = hook("stripe");
+    past.push(0);
+    for (tail, reads) in [
+        (hook("stripe"), true),
+        (hook(""), false),
+        (hook("1stripe"), false),
+        (hook("str-ipe"), false),
+        (past, false),
+        (Vec::new(), false),
+    ] {
+        let body = hooked_record("late", text, &tail, 99);
+        let mut db = Database::new();
+        // A tail of nothing is a record cut short, its name's length never
+        // read; the rest are a later version's, refused in words.
+        match (db.load(&with_record(&file, &body)), reads) {
+            (Ok(_), true) => {}
+            (Err(Error::Corrupt(_)), false) if tail.is_empty() => {}
+            (Err(e), false) => assert!(
+                e.to_string()
+                    .contains("a statement record this version does not read"),
+                "{e}"
+            ),
+            (r, _) => panic!("{tail:?}: {:?}", r.err()),
+        }
+    }
+    let mut db = Database::new();
+    let e = db.load(&with_record(&file, &[7u8, 0])).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("a statement record this version does not read"),
+        "{e}"
+    );
+}
+
+/// A hook's record whose text reads as another hook's, or as another kind,
+/// its digest and all, is none this build writes: marked broken, never
+/// taking events of a hook its record does not name.
+#[test]
+fn a_hook_s_record_reading_otherwise_is_marked_broken() {
+    let tap = Tap::default();
+    let db = orders(&tap);
+    let file = db.snapshot();
+    for (text, why) in [
+        (
+            "create statement late($o text from event.o) on hook github as set orders {status: \
+             'x'} where ref = $o",
+            "takes another hook's events than its record",
+        ),
+        (
+            "create statement late($o text) public as set orders {status: 'x'} where ref = $o",
+            "reads as a callable statement",
+        ),
+        (
+            "create statement late every 1h as del orders where ref = 'x'",
+            "reads as a scheduled statement",
+        ),
+    ] {
+        let mut hook = Vec::new();
+        encode_str(&mut hook, "stripe");
+        let mut db = opened(&with_record(&file, &hooked_record("late", text, &hook, 99)));
+        let s = db.statements().get("late").unwrap().clone();
+        assert!(s.tree.is_none(), "{text}");
+        assert_eq!(s.hook.as_deref(), Some("stripe"), "known from the record");
+        let broken = s.broken.unwrap_or_default();
+        assert!(broken.contains(why), "{text}: {broken}");
+        // Unread here, so every event of its hook is refused.
+        db.set_clock(Some(t0()));
+        let body = paid("evt_1", "o-1", 2000);
+        let e = refused(db.take_event(&event(&body, "evt_1", 1)));
+        assert!(
+            e.contains("statement `late`, which takes hook `stripe`, is held unread"),
+            "{e}"
+        );
+        assert!(keys(&db).is_empty());
+    }
+}
+
+// ------------------------------------------------------------ the taking
+
+#[test]
+fn an_event_is_taken_once_its_writes_and_its_key_one_block() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    let body = paid("evt_1", "o-1", 2000);
+    let before = db.change_seq();
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 7)).unwrap(),
+        Took::Ran(1)
+    );
+    assert_eq!(status(&db, "o-1"), Value::Text("paid".into()));
+    // One record: the order's write, then the keys' collection made, then
+    // the key, last.
+    let (seq, record) = tap.last();
+    assert_eq!(
+        kinds_in(&record),
+        [(3, None), (1, None), (3, None)],
+        "a block of the write, the collection made and the key"
+    );
+    assert_eq!(seq, before + 3);
+    assert_eq!(keys(&db), [Value::Text("stripe\u{1f}evt_1".into())]);
+    let until = rows(&db, "get _hook_events select until, taken, digest");
+    assert_eq!(
+        until,
+        [vec![
+            Value::Timestamp(t0() + 30 * DAY),
+            Value::Int(1),
+            Value::Int(7)
+        ]]
+    );
+
+    // The same event again -- a retry, a duplicate -- is answered from its
+    // key, nothing run, nothing written; a second body under it as well.
+    let held = HeldKey {
+        taken: 1,
+        same: true,
+    };
+    let seq = db.change_seq();
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 7)).unwrap(),
+        Took::Held(held)
+    );
+    assert_eq!(
+        db.event_kept(&event(&body, "evt_1", 7)).unwrap(),
+        Some(held)
+    );
+    let other = paid("evt_1", "o-2", 5);
+    assert_eq!(
+        db.take_event(&event(&other, "evt_1", 8)).unwrap(),
+        Took::Held(HeldKey {
+            taken: 1,
+            same: false
+        })
+    );
+    assert_eq!(db.change_seq(), seq, "nothing written");
+    // The key is the hook's: the same key sent to another hook is its own.
+    let mut test = event(&body, "evt_1", 7);
+    test.hook = "stripe_test";
+    assert_eq!(db.event_kept(&test).unwrap(), None);
+}
+
+#[test]
+fn a_refused_event_keeps_no_key_and_is_taken_at_a_retry() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    // Out of order: the payment before its order's row. Its guard refuses
+    // it (412), nothing lands, no key is kept.
+    let body = paid("evt_2", "o-2", 500);
+    let seq = db.change_seq();
+    let e = db.take_event(&event(&body, "evt_2", 1)).unwrap_err();
+    assert!(
+        matches!(&e, Error::Unmet(m) if m.starts_with("no open order of that total")),
+        "{e}"
+    );
+    assert_eq!(db.change_seq(), seq);
+    assert!(db.collection(HOOK_EVENTS).is_err(), "no collection made");
+    // The order lands; the sender's retry takes the event.
+    run(
+        &mut db,
+        "put orders {ref: 'o-2', total: 500, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    assert_eq!(
+        db.take_event(&event(&body, "evt_2", 1)).unwrap(),
+        Took::Ran(1)
+    );
+    assert_eq!(status(&db, "o-2"), Value::Text("paid".into()));
+    // In a block its caller opened, it lands with the block or not at all.
+    run(
+        &mut db,
+        "put orders {ref: 'o-3', total: 1, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    let body = paid("evt_3", "o-3", 1);
+    db.begin().unwrap();
+    assert_eq!(
+        db.take_event(&event(&body, "evt_3", 1)).unwrap(),
+        Took::Ran(1)
+    );
+    db.rollback();
+    assert_eq!(status(&db, "o-3"), Value::Text("open".into()));
+    assert_eq!(db.event_kept(&event(&body, "evt_3", 1)).unwrap(), None);
+}
+
+#[test]
+fn a_key_is_kept_until_its_own_until() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(
+        &mut db,
+        "create statement github_seen($o text from event.order) on hook github as insert orders \
+         {ref: $o, status: 'seen'}",
+    )
+    .unwrap();
+    let body = paid("evt_1", "o-1", 2000);
+    let push: Value = fennec_core::json::parse_json(r#"{"order": "g-1"}"#).unwrap();
+    db.take_event(&event(&body, "evt_1", 1)).unwrap();
+    let mut github = event(&push, "abc", 2);
+    github.hook = "github";
+    github.keep = 7 * DAY;
+    github.at = None;
+    assert_eq!(db.take_event(&github).unwrap(), Took::Ran(1));
+    // A week on, a millisecond past: the github key is let go of, each
+    // row by its own `until`, the stripe key kept.
+    db.set_clock(Some(t0() + 7 * DAY + 1));
+    assert!(db.event_kept(&event(&body, "evt_1", 1)).unwrap().is_some());
+    assert_eq!(db.event_kept(&github).unwrap(), None);
+    assert_eq!(db.take_event(&github).unwrap(), Took::Ran(1), "taken again");
+    assert_eq!(
+        rows(&db, "get orders count where ref = 'g-1'"),
+        [vec![Value::Int(2)]]
+    );
+    // And after thirty days the stripe key too: a resend after `keep` is
+    // taken again, its guards deciding what it writes -- `intent =
+    // $intent` writes what is there.
+    db.set_clock(Some(t0() + 30 * DAY + 1));
+    assert_eq!(db.event_kept(&event(&body, "evt_1", 1)).unwrap(), None);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 1)).unwrap(),
+        Took::Ran(1)
+    );
+}
+
+#[test]
+fn an_event_no_condition_takes_writes_nothing() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    let test_mode = fennec_core::json::parse_json(
+        r#"{"id": "evt_t", "type": "payment_intent.succeeded", "livemode": false}"#,
+    )
+    .unwrap();
+    let refund =
+        fennec_core::json::parse_json(r#"{"id": "evt_r", "type": "charge.refunded"}"#).unwrap();
+    let seq = db.change_seq();
+    for body in [&test_mode, &refund] {
+        assert_eq!(
+            db.take_event(&event(body, "evt_x", 1)).unwrap(),
+            Took::Passed
+        );
+    }
+    assert_eq!(db.change_seq(), seq);
+    assert!(db.collection(HOOK_EVENTS).is_err());
+    // A hook no statement takes is refused (409).
+    let mut other = event(&refund, "evt_x", 1);
+    other.hook = "github";
+    let e = db.take_event(&other).unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m == "no statement takes hook `github`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_event_s_statements_run_in_name_order_in_one_block() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(
+        &mut db,
+        "create collection ledger (ref text @hash, amount int)",
+    )
+    .unwrap();
+    // `a_note` runs first by its name and `z_check` last, reading what
+    // `stripe_paid` wrote before it.
+    for text in [
+        "create statement a_note($order text from event.data.object.metadata.order) on hook \
+         stripe as insert ledger {ref: $order, amount: 0}",
+        "create statement z_check($order text from event.data.object.metadata.order) on hook \
+         stripe where event.type = 'payment_intent.succeeded' as begin
+           get orders select id where ref = $order and status = 'paid' limit 1 require 1 \
+             else 'not paid';
+           set ledger {amount: 1} where ref = $order require 1
+         end",
+    ] {
+        run(&mut db, text).unwrap();
+    }
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 1)).unwrap(),
+        Took::Ran(3)
+    );
+    assert_eq!(
+        rows(&db, "get ledger select amount where ref = 'o-1'"),
+        [vec![Value::Int(1)]]
+    );
+    let (_, record) = tap.last();
+    assert_eq!(
+        kinds_in(&record).len(),
+        5,
+        "the ledger's row, the order, its line set, the collection and the key: one record"
+    );
+    assert_eq!(
+        rows(&db, "get _hook_events select taken"),
+        [vec![Value::Int(3)]]
+    );
+    // The last refusing: nothing of any lands, no key.
+    run(
+        &mut db,
+        "put orders {ref: 'o-4', total: 9, currency: 'eur', status: 'paid'}",
+    )
+    .unwrap();
+    let seq = db.change_seq();
+    let body = paid("evt_4", "o-4", 9);
+    let e = db.take_event(&event(&body, "evt_4", 1)).unwrap_err();
+    assert!(matches!(&e, Error::Unmet(_)), "{e}");
+    assert_eq!(db.change_seq(), seq);
+    assert_eq!(
+        rows(&db, "get ledger count where ref = 'o-4'"),
+        [vec![Value::Int(0)]]
+    );
+    assert_eq!(db.event_kept(&event(&body, "evt_4", 1)).unwrap(), None);
+}
+
+#[test]
+fn a_parameter_is_read_by_its_type_and_its_path() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    run(
+        &mut db,
+        "create collection seen (key text, at timestamp, kind text, n int, raw json, first text)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create statement keep_it(
+            $key text from hook.id,
+            $at timestamp from hook.at,
+            $kind text from hook.event = 'none',
+            $n int from event.n,
+            $raw json from event,
+            $first text from event.items.\"0\".name = null)
+          on hook github
+        as insert seen {key: $key, at: $at, kind: $kind, n: $n, raw: $raw, first: $first}",
+    )
+    .unwrap();
+    let take = |db: &mut Database, json: &str, key: &str, kind: Option<&str>| {
+        let body = fennec_core::json::parse_json(json).unwrap();
+        let e = Event {
+            hook: "github",
+            key,
+            body: &body,
+            digest: 1,
+            at: Some(t0() - MINUTE),
+            event: kind,
+            keep: DAY,
+        };
+        db.take_event(&e)
+    };
+    // `hook.id`, `hook.at`, `hook.event`, a path, the body whole, and a
+    // list's first element by its place.
+    let json = r#"{"n": 3, "items": [{"name": "a"}, {"name": "b"}]}"#;
+    assert_eq!(
+        take(&mut db, json, "d-1", Some("push")).unwrap(),
+        Took::Ran(1)
+    );
+    let row = rows(&db, "get seen select key, at, kind, n, first");
+    assert_eq!(
+        row,
+        [vec![
+            Value::Text("d-1".into()),
+            Value::Timestamp(t0() - MINUTE),
+            Value::Text("push".into()),
+            Value::Int(3),
+            Value::Text("a".into()),
+        ]]
+    );
+    assert_eq!(
+        rows(&db, "get seen select raw")[0][0],
+        fennec_core::json::parse_json(json).unwrap(),
+        "the body whole, as it came"
+    );
+    // A default stands in for a value missing; none, the event is refused.
+    take(&mut db, r#"{"n": 4}"#, "d-2", None).unwrap();
+    assert_eq!(
+        rows(&db, "get seen select kind, first where key = 'd-2'"),
+        [vec![Value::Text("none".into()), Value::Null]]
+    );
+    for (json, words) in [
+        (
+            r#"{"m": 1}"#,
+            "`$n`, int, reads `event.n`, which the event does not hold",
+        ),
+        (
+            r#"{"n": null}"#,
+            "`$n`, int, reads `event.n`, which the event does not hold",
+        ),
+        // No cast: a text of digits is no `int`.
+        (r#"{"n": "5"}"#, "`$n` is int, and `event.n` holds text"),
+        (
+            r#"{"n": 5, "items": {"0": {"name": 7}}}"#,
+            "`$first` is text, and `event.items.0.name` holds int",
+        ),
+    ] {
+        let e = take(&mut db, json, "d-3", None).unwrap_err();
+        assert!(
+            matches!(&e, Error::Query(m) if m.contains(words)),
+            "{json}: {e}"
+        );
+    }
+    assert_eq!(
+        rows(&db, "get seen count"),
+        [vec![Value::Int(2)]],
+        "nothing of a refused event written"
+    );
+    // A key or a body no event has.
+    for (json, key) in [
+        (r#"{"n": 1}"#, ""),
+        (r#"{"n": 1}"#, "a\u{1}b"),
+        (r#"[1]"#, "k"),
+    ] {
+        let e = take(&mut db, json, key, None).unwrap_err();
+        assert!(matches!(e, Error::Query(_)), "{json} {key:?}: {e}");
+    }
+    let long = "k".repeat(256);
+    assert!(take(&mut db, r#"{"n": 1}"#, &long, None).is_err());
+    assert_eq!(
+        take(&mut db, r#"{"n": 1}"#, &long[..255], None).unwrap(),
+        Took::Ran(1)
+    );
+}
+
+/// The decision slice 1 left: a key of digits indexes a list, by RFC
+/// 6901's places, and names an object's member of that name.
+#[test]
+fn a_key_of_digits_indexes_a_list_and_names_a_member() {
+    let body = fennec_core::json::parse_json(
+        r#"{"items": [{"id": "a"}, {"id": "b"}], "map": {"0": "zero", "01": "one"},
+            "deep": [[1, 2], [3]]}"#,
+    )
+    .unwrap();
+    for (keys, want) in [
+        ("items.0.id", Value::Text("a".into())),
+        ("items.1.id", Value::Text("b".into())),
+        ("items.2.id", Value::Null),
+        ("items.01.id", Value::Null),
+        ("items.-1.id", Value::Null),
+        ("items.99999999999999999999999.id", Value::Null),
+        ("items.id", Value::Null),
+        ("map.0", Value::Text("zero".into())),
+        ("map.01", Value::Text("one".into())),
+        ("deep.0.1", Value::Int(2)),
+        ("deep.1.0", Value::Int(3)),
+        ("deep.1.0.x", Value::Null),
+    ] {
+        assert_eq!(event_at(&body, keys), &want, "{keys}");
+    }
+}
+
+#[test]
+fn a_statement_broken_by_its_body_refuses_the_events_its_condition_takes() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(&mut db, "create collection notes (ref text @hash)").unwrap();
+    run(
+        &mut db,
+        "create statement refunded($o text from event.data.object.metadata.order) on hook \
+         stripe where event.type = 'charge.refunded' as insert notes {ref: $o}",
+    )
+    .unwrap();
+    // An internal writer takes away what `stripe_paid` reads: marked
+    // broken, never refused.
+    db.internally(|db| run(db, "alter collection orders drop field currency"))
+        .unwrap();
+    let broken = db.statements().get("stripe_paid").unwrap();
+    assert!(broken.broken.is_some() && broken.tree.is_some());
+    let body = paid("evt_1", "o-1", 2000);
+    let e = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.starts_with("statement `stripe_paid`, which takes \
+            hook `stripe`, is broken: it reads `orders.currency`")),
+        "{e}"
+    );
+    // An event its condition passes over is taken by the hook's others.
+    let refund = fennec_core::json::parse_json(
+        r#"{"id": "evt_r", "type": "charge.refunded",
+            "data": {"object": {"metadata": {"order": "o-1"}}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        db.take_event(&event(&refund, "evt_r", 1)).unwrap(),
+        Took::Ran(1)
+    );
+    assert_eq!(rows(&db, "get notes count"), [vec![Value::Int(1)]]);
+}
+
+#[test]
+fn check_holds_the_typed_values_and_now_is_the_taking() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    run(&mut db, "create collection stamps (n int, at timestamp)").unwrap();
+    for (name, n) in [("a_stamp", 1), ("b_stamp", 2)] {
+        run(
+            &mut db,
+            &format!(
+                "create statement {name}($n int from event.n) on hook clock check $n > 0 as \
+                 insert stamps {{n: $n + {n}, at: now()}}"
+            ),
+        )
+        .unwrap();
+    }
+    let body = fennec_core::json::parse_json(r#"{"n": 0}"#).unwrap();
+    let mut e = event(&body, "k-0", 1);
+    e.hook = "clock";
+    let err = db.take_event(&e).unwrap_err();
+    assert!(
+        matches!(&err, Error::Query(m) if m == "statement `a_stamp`: its `check` does not hold \
+            for this event"),
+        "{err}"
+    );
+    let body = fennec_core::json::parse_json(r#"{"n": 1}"#).unwrap();
+    let mut e = event(&body, "k-1", 1);
+    e.hook = "clock";
+    assert_eq!(db.take_event(&e).unwrap(), Took::Ran(2));
+    let at = rows(&db, "get stamps select at");
+    assert_eq!(
+        at,
+        [vec![Value::Timestamp(t0())], vec![Value::Timestamp(t0())]]
+    );
+}
+
+/// One `--call-max-rows` for every statement an event wakes: each alone
+/// within it, the two together past it.
+#[test]
+fn an_event_examines_at_most_call_max_rows_for_all_its_statements() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    run(&mut db, "create collection marks (n int)").unwrap();
+    for i in 0..3 {
+        run(&mut db, &format!("put marks {{n: {i}}}")).unwrap();
+    }
+    for name in ["one", "two"] {
+        run(
+            &mut db,
+            &format!(
+                "create statement {name}($n int from event.n) on hook scan scans as set marks \
+                 {{n: n + $n}} where n >= 0"
+            ),
+        )
+        .unwrap();
+    }
+    db.set_call_max_rows(4);
+    let body = fennec_core::json::parse_json(r#"{"n": 1}"#).unwrap();
+    let mut e = event(&body, "k-1", 1);
+    e.hook = "scan";
+    let err = db.take_event(&e).unwrap_err();
+    assert!(err.to_string().contains("--call-max-rows"), "{err}");
+    db.set_call_max_rows(6);
+    assert_eq!(db.take_event(&e).unwrap(), Took::Ran(2));
+}
+
+#[test]
+fn an_event_s_write_wakes_a_binding_in_its_block() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(
+        &mut db,
+        "create collection ledger (ref text @hash, amount int)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create statement paid_ledger after set orders where new.status = 'paid' and \
+         old.status = 'open' as insert ledger {ref: new.ref, amount: new.total}",
+    )
+    .unwrap();
+    let body = paid("evt_1", "o-1", 2000);
+    db.take_event(&event(&body, "evt_1", 1)).unwrap();
+    assert_eq!(
+        rows(&db, "get ledger select amount where ref = 'o-1'"),
+        [vec![Value::Int(2000)]]
+    );
+    let (_, record) = tap.last();
+    assert_eq!(
+        kinds_in(&record).len(),
+        4,
+        "the order, the ledger's line, the collection and the key: one record"
+    );
+}
+
+// ------------------------------------------------------------ the fixture
+
+/// `file` with `stripe_paid` after its records, once, as this build writes
+/// it, over an order of its own, and an event it took, its write and its
+/// key in one block: what `tests/statements.fennec` gained in F4's slice 2,
+/// which the browser module opens and keeps through its images
+/// (`web/fennec.test.js`).
+pub(crate) fn with_hook(file: Vec<u8>) -> Vec<u8> {
+    let tap = Tap {
+        file: Arc::new(std::sync::Mutex::new(file.clone())),
+        writes: Arc::default(),
+    };
+    let mut db = tap.database();
+    db.load(&file).unwrap();
+    if db.statements().get("stripe_paid").is_some() {
+        return tap.bytes();
+    }
+    db.set_clock(Some(t0()));
+    db.allow_hooks();
+    run(&mut db, ORDERS).unwrap();
+    run(
+        &mut db,
+        "put orders {ref: 'o-1', total: 2000, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    run(&mut db, STRIPE_PAID).unwrap();
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 7)).unwrap(),
+        Took::Ran(1)
+    );
+    tap.bytes()
+}
+
+/// `tests/statements.fennec` holds a hook after the schedule, and an event
+/// it took: every build reads them and keeps them through its images.
+#[test]
+fn the_fixture_s_hook_and_its_event_are_read_and_kept() {
+    let file = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/statements.fennec"
+    ))
+    .expect("the fixture");
+    let mut db = opened(&file);
+    let s = db
+        .statements()
+        .get("stripe_paid")
+        .expect("the hook")
+        .clone();
+    assert!(s.tree.is_some() && s.broken.is_none(), "{:?}", s.broken);
+    assert_eq!(s.hook.as_deref(), Some("stripe"));
+    assert_eq!(status(&db, "o-1"), Value::Text("paid".into()));
+    db.set_clock(Some(t0()));
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.event_kept(&event(&body, "evt_1", 7)).unwrap(),
+        Some(HeldKey {
+            taken: 1,
+            same: true
+        })
+    );
+    let again = opened(&db.snapshot());
+    assert_eq!(again.statements().get("stripe_paid"), Some(&s));
+}

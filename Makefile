@@ -1082,9 +1082,13 @@ packaging-test:
 ## before them refuse it in words, and this tree's server opens it; and one
 ## defined by this tree's primary over /query: a replica, an archiver,
 ## `fennec restore` and the server built before the ops stop at it in words.
+## Then a webhook consumer, op 6, and an event it took, in that fixture: the
+## server, a replica, an archiver and `fennec types` built before it refuse
+## it in words, and this tree's server opens it.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
-## OP3_BASE -- b73ce4ca, the last before op 3 -- and OP4_BASE -- cd907d6c,
-## the last before op 4 -- in scratch worktrees: minutes. Not in CI.
+## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
+## last before op 4 -- and OP6_BASE -- effc12ce, the last before op 6 -- in
+## scratch worktrees: minutes. Not in CI.
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
