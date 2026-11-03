@@ -71,7 +71,7 @@ are reported as gauges.</p>
 <tr><td><code>fennec_slow_statements_total</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
 <tr><td><code>fennec_bound_runs_total</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#write-bound-statements">statements bound to writes</a>: one for each row a binding ran for. No label names a binding; <a href="#statements"><code>/_stats/statements</code></a> counts each by name</td></tr>
 <tr><td><code>fennec_bound_refused_total</code></td><td>counter</td><td>writes a bound statement refused: its guard, a <code>wake</code> grant the token lacked, a limit or a unique value its body met</td></tr>
-<tr><td><code>fennec_scheduled_runs_total{outcome}</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, each counted once by how it ended: <code>ran</code>, <code>refused</code>, <code>broken</code>, <code>held</code> (the server's state holds the slot back: a tenant's quota, a lapsed lease, a storage error) or <code>unknown</code> (it landed as its lease lapsed, and whether the next primary holds it is unknown). Exposed once the process's scheduler made a look: a server that never held a schedule shows none of the four</td></tr>
+<tr><td><code>fennec_scheduled_runs_total{outcome}</code></td><td>counter</td><td>runs of <a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, each counted once by how it ended: <code>ran</code>, <code>refused</code>, <code>broken</code>, <code>held</code> (the server's state holds the slot back: a tenant's quota, a lapsed lease, a storage error) or <code>unknown</code> (it landed as its lease lapsed, or its fsync failed: whether the file, or the tenant's next primary, holds it is unknown). Exposed once the process's scheduler made a look: a server that never held a schedule shows none of the four</td></tr>
 <tr><td><code>fennec_scheduled_skipped_total</code></td><td>counter</td><td>slots passed over: a server down for a day runs the latest missed slot once and counts the others here</td></tr>
 <tr><td><code>fennec_scheduled_mark_ahead_total</code></td><td>counter</td><td>a last mark or a definition's time found ahead of the clock, each also the audit log's <code>clock</code> line</td></tr>
 <tr><td><code>fennec_scheduled_lateness_seconds</code></td><td>histogram</td><td>how late a run began past its slot, in buckets from 0.1 s to a day (0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 900, 1 800, 3 600, 7 200, 21 600, 86 400 s). A held slot's tries are not counted; its eventual run is. No label of the four names a tenant, a statement or a collection</td></tr>
@@ -262,7 +262,10 @@ what of it was the ledger. It is read with the rights every shape is.</p>
 statement</a> is a shape of its own, <code>schedule lapse_holds</code>: its
 calls are the runs (each try of a held slot too), its rows what its last
 statement answered, its time the time under the write lock, and its errors
-the runs refused, broken or held. On a tenant node a run is its tenant's
+the runs refused, broken, held or of an unknown outcome. A client's text
+that reads the same — a <code>schedule lapse_holds</code> sent to
+<code>/query</code>, a parse error — is counted as a shape of its own,
+never among the runs. On a tenant node a run is its tenant's
 shape, at <code>/t/&lt;tenant&gt;/_stats/statements</code>, and the admin
 token's <code>/_stats/statements</code> names every tenant's. The bindings a
 run woke are counted as <code>after &lt;name&gt;</code>, as for any write.</p>
@@ -585,7 +588,8 @@ carry) and <code>fennec.tenant</code> on a tenant node. A refused or held
 run's span is marked failed with its status and the reason its
 <code>else</code> wrote (<code>412 no tick at the epoch</code>),
 <code>error.type</code> the status: never the engine's words, which may hold a
-row's value.</p>
+row's value. A run whose outcome is unknown is failed as <code>500</code>, as
+a client's write would be answered.</p>
 
 <p>A request's <code>traceparent</code> is read as the W3C spec writes it;
 one that does not parse starts a trace of its own, and

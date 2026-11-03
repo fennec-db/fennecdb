@@ -403,8 +403,8 @@ fn scopes(query: &str) -> Vec<(String, Vec<(String, String)>)> {
 /// `monitors.json`'s monitors read only what arrives through `conf.yaml`,
 /// each tag they match a label a scrape carries -- a monitor over a name
 /// no server sends, or a value none has, never fires -- and they watch
-/// scheduled statements' refused and held runs, a mark ahead of the clock
-/// and how late runs begin.
+/// scheduled statements' refused, held and unknown runs, a mark ahead of
+/// the clock and how late runs begin.
 #[test]
 fn the_datadog_monitors_watch_what_the_servers_send() {
     let (exposed, text) = scrape();
@@ -415,7 +415,7 @@ fn the_datadog_monitors_watch_what_the_servers_send() {
     let Value::List(monitors) = fennec_core::json::parse_json(&file).expect("monitors.json") else {
         panic!("monitors.json is not a list");
     };
-    assert!(monitors.len() >= 4, "{monitors:?}");
+    assert!(monitors.len() >= 5, "{monitors:?}");
     let mut watched: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for m in &monitors {
         let Value::Object(m) = m else {
@@ -463,6 +463,10 @@ fn the_datadog_monitors_watch_what_the_servers_send() {
             Some(("outcome", "refused")),
         ),
         ("fennecdb.scheduled_runs.count", Some(("outcome", "held"))),
+        (
+            "fennecdb.scheduled_runs.count",
+            Some(("outcome", "unknown")),
+        ),
         ("fennecdb.scheduled_mark_ahead.count", None),
         ("fennecdb.scheduled_lateness_seconds.bucket", None),
     ] {

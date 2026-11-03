@@ -90,6 +90,14 @@ collections and the bound statements. Either form reads back through
 <code>schedule</code> other than its <code>text</code>'s is refused. A scoped
 token's <code>/_schema</code> names none.</p>
 
+<p>A bound or scheduled statement the schema broke — its collection or a
+field it reads dropped — is listed with why, <code>"broken":"..."</code>
+after its <code>text</code>, as <code>statements</code> lists it; the plan
+reads it back holding it to no collection, so the server's own description
+still plans nothing. <code>?as=fennecql</code> writes it as comments, a
+<code>-- broken: ...</code> line and its definition beneath, each line
+<code>-- </code>: the text declares only what its collections can hold.</p>
+
 <p>With <code>--mcp</code>, <code>/_mcp</code> is the Model Context
 Protocol's endpoint: an agent's <code>schema</code>, <code>search</code>,
 <code>query</code> and <code>get</code> tools, and <code>write</code> and a

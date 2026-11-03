@@ -167,8 +167,9 @@ pub struct Counts {
     pub refused: u64,
     pub broken: u64,
     pub held: u64,
-    /// Runs that landed as their lease lapsed: whether the tenant's next
-    /// primary holds them is unknown. Not among `ran`.
+    /// Runs that landed as their lease lapsed -- whether the tenant's next
+    /// primary holds them is unknown -- or whose fsync failed. Not among
+    /// `ran`.
     pub unknown: u64,
     pub skipped: u64,
     pub mark_ahead: u64,
@@ -257,11 +258,7 @@ pub(crate) fn metrics(out: &mut crate::metrics::Text) {
     }
     let c = counts();
     let name = "fennec_scheduled_runs_total";
-    out.family(
-        name,
-        "counter",
-        "Runs of scheduled statements, by outcome: ran (its writes and its slot's mark landed, or the mark waits for the next write), refused (the statement refused it, its slot marked), broken (the statement could not run, its slot marked), held (the state refused it -- the quota, a lapsed lease, a storage error -- its slot left due and tried again), unknown (it landed as its lease lapsed: whether the next primary holds it is unknown).",
-    );
+    out.family(name, "counter", "Runs of scheduled statements, by outcome.");
     for (outcome, n) in [
         ("ran", c.ran),
         ("refused", c.refused),
@@ -274,19 +271,19 @@ pub(crate) fn metrics(out: &mut crate::metrics::Text) {
     out.family(
         "fennec_scheduled_skipped_total",
         "counter",
-        "Slots of scheduled statements passed over: missed slots run once, the latest.",
+        "Slots of scheduled statements passed over.",
     );
     out.sample("fennec_scheduled_skipped_total", &[], c.skipped);
     out.family(
         "fennec_scheduled_mark_ahead_total",
         "counter",
-        "A scheduled statement's last mark, or its definition's time, found ahead of the clock -- a clock stepped back, or one that was ahead -- each also the audit's clock line.",
+        "Scheduled statements' marks found ahead of the clock.",
     );
     out.sample("fennec_scheduled_mark_ahead_total", &[], c.mark_ahead);
     out.family(
         "fennec_scheduled_lateness_seconds",
         "histogram",
-        "How late a scheduled statement's run began, past its slot: behind the runs before it, after a restart, a held slot tried again.",
+        "How late scheduled statements' runs began, past their slots.",
     );
     crate::metrics::histogram(out, "fennec_scheduled_lateness_seconds", &[], &[&LATE]);
 }
@@ -316,6 +313,19 @@ pub(crate) struct State {
     held: Vec<(String, Held)>,
     /// The marks ahead of the clock told, by statement: once each.
     told: Vec<(String, i64)>,
+    /// `held` changed since the database was told it, or the database was
+    /// opened since (`Node::opened`): told as the look ends
+    /// (`Database::set_held_slots`), the write lock taken for it then alone.
+    pub(crate) changed: bool,
+}
+
+impl State {
+    /// Holds `name`'s slot back no more.
+    fn let_go(&mut self, name: &str) {
+        let had = self.held.len();
+        self.held.retain(|(n, _)| n != name);
+        self.changed |= self.held.len() != had;
+    }
 }
 
 static WATCHED: Mutex<Vec<Arc<Watched>>> = Mutex::new(Vec::new());
@@ -589,7 +599,7 @@ pub(crate) fn look_at(
     if !LOOKED.load(Ordering::Relaxed) {
         LOOKED.store(true, Ordering::Relaxed);
     }
-    let (dues, writes, following, seq, limit, told) = {
+    let (dues, writes, following, seq, limit) = {
         let g = held::read(db);
         // A following database's writes are its primary's, the runs among
         // them; a failed one takes none until it is opened again; past a
@@ -597,15 +607,7 @@ pub(crate) fn look_at(
         // stays due, to whoever writes the file next.
         let following = g.history().following;
         let writes = !following && g.failure().is_none() && g.fenced().is_ok();
-        let told = g.held_slots().to_vec();
-        (
-            g.due(now),
-            writes,
-            following,
-            g.change_seq(),
-            limit_of(&g),
-            told,
-        )
+        (g.due(now), writes, following, g.change_seq(), limit_of(&g))
     };
     // A mark ahead of the clock: counted and told once a statement and
     // mark.
@@ -631,10 +633,12 @@ pub(crate) fn look_at(
     }
     // A slot held for a statement dropped, replaced past it or run since
     // is held no more.
+    let had = st.held.len();
     st.held.retain(|(n, h)| {
         dues.iter()
             .any(|d| d.name == *n && d.run.is_some_and(|r| r.0 >= h.slot))
     });
+    st.changed |= st.held.len() != had;
     let (mut ran, mut more) = (0, false);
     if writes {
         for d in dues.iter().filter(|d| d.run.is_some()) {
@@ -674,9 +678,8 @@ pub(crate) fn look_at(
     }
     // What the listings' `held` shows, told where it changed: the write
     // lock taken for it only then.
-    let shown = shown_held(st);
-    if shown != told {
-        held::write(db).set_held_slots(shown);
+    if std::mem::take(&mut st.changed) {
+        held::write(db).set_held_slots(shown_held(st));
     }
     (next, closed, more)
 }
@@ -742,9 +745,11 @@ struct Made {
     /// How late it began, past its slot, in milliseconds.
     late: i64,
     /// A refusal's status and the reason its `else` wrote -- never the
-    /// engine's words, which may hold a row's value.
+    /// engine's words, which may hold a row's value; a 500 where whether
+    /// it landed is unknown.
     refused: Option<(u16, Option<String>)>,
-    /// It landed as its lease lapsed.
+    /// It landed as its lease lapsed, or its fsync failed: whether it
+    /// holds is unknown.
     unknown: bool,
 }
 
@@ -768,7 +773,7 @@ fn watched(w: &Ctx<'_>, name: &str, m: &Made) {
         count(|c| &c.skipped, m.skipped);
         LATE.add(std::time::Duration::from_millis(m.late.max(0) as u64));
     }
-    let failed = !matches!(m.outcome, Outcome::Ran);
+    let failed = !matches!(m.outcome, Outcome::Ran) || m.unknown;
     // The statements its writes woke, noted by the engine on this thread
     // as a request's are: counted, shaped and traced as theirs.
     if Database::runs_noted() {
@@ -833,6 +838,7 @@ fn run_slot(
                 iso(slot)
             );
             st.held.remove(i);
+            st.changed = true;
         }
     }
     let s = g.statements().get(name)?;
@@ -882,7 +888,7 @@ fn run_slot(
     let told = (refusal.as_ref()).map(|(status, _, e)| (*status, e.reason().map(String::from)));
     let outcome = match refusal {
         None => {
-            st.held.retain(|(n, _)| n != name);
+            st.let_go(name);
             Outcome::Ran
         }
         // The state's: the slot is left due, and tried again.
@@ -896,6 +902,7 @@ fn run_slot(
                 Some((_, h)) => {
                     h.tried = now;
                     h.backoff = (h.backoff * 2).min(RETRY_MAX);
+                    st.changed |= h.status != status;
                     (h.seq, h.limit, h.status) = (seq, limit, status);
                 }
                 None => {
@@ -916,6 +923,7 @@ fn run_slot(
                             backoff: MINUTE,
                         },
                     ));
+                    st.changed = true;
                 }
             }
             Outcome::Held(status)
@@ -923,7 +931,7 @@ fn run_slot(
         // The statement's: the slot is marked refused, a run that lands
         // nothing, and the next runs as due.
         Some((status, words, e)) => {
-            st.held.retain(|(n, _)| n != name);
+            st.let_go(name);
             let reason = e.reason().unwrap_or_default().to_string();
             let mark = SlotMark {
                 at: slot,
@@ -965,6 +973,10 @@ fn run_slot(
     if let Err(e) = synced {
         crate::log!("{what}: sync error after scheduled statement `{name}`'s run: {e}");
         held::write(db).fail(&e);
+        // Landed in memory, its fsync failed: as a client's durable write
+        // is answered 500, whether the file holds it is unknown -- never a
+        // run counted `ran` (slice 5's review).
+        unknown = true;
     } else if landed && held::read(db).fenced().is_err() {
         // Landed, and its lease lapsed meanwhile: as `answered_under_lease`
         // tells a client, whether the tenant's next primary holds it is
@@ -976,6 +988,11 @@ fn run_slot(
         );
         unknown = true;
     }
+    // Told failed as a client's write is answered: a 500, never a reason.
+    let told = match unknown {
+        true => told.or(Some((500, None))),
+        false => told,
+    };
     Some(Made {
         slot,
         skipped,

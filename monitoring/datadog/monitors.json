@@ -12,6 +12,18 @@
     }
   },
   {
+    "name": "fennecdb: a scheduled run's outcome is unknown",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.scheduled_runs.count{outcome:unknown} by {host}.as_count() > 0",
+    "message": "A scheduled statement's run on {{host.name}} landed as its tenant's lease lapsed, or its fsync failed: whether the file holds its writes and its slot's mark -- on a tenant node, whether the tenant's next primary does -- is unknown, as a client's write would be answered 500. Where they were lost the slot runs again wherever the file is written next; where they were kept it ran once. The server's log names the statement and the slot with the run's request_id. A failed fsync stops the database's writes until it is opened again: check the disk. A lapsed lease: check the node's link to its router.",
+    "tags": ["service:fennecdb", "fennec:scheduled"],
+    "options": {
+      "thresholds": {"critical": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
     "name": "fennecdb: a scheduled statement's slot is held back",
     "type": "query alert",
     "query": "sum(last_1h):sum:fennecdb.scheduled_runs.count{outcome:held} by {host}.as_count() > 3",

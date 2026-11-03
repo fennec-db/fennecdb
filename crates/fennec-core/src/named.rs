@@ -1647,13 +1647,15 @@ pub fn condition_text(text: &str) -> Option<&str> {
 /// and written back from it the schedule was 3 KB of the server
 /// (`Schedule::written`, cut at slice 3's review). Read from the text as
 /// [`condition_text`] reads a condition, so a statement this process holds
-/// no tree for shows it too. `None` for any other text.
+/// no tree for shows it too, and ending at its last word or string: a
+/// comment after it is the text's, not the schedule's. `None` for any
+/// other text.
 #[cfg(feature = "statements")]
 pub fn schedule_text(text: &str) -> Option<&str> {
     // 0 before `statement`, 1 at its name, 2 after it, 3 in the schedule.
     let (mut state, mut start) = (0u8, 0);
     let mut words = TopWords::of(text);
-    for (w, from) in &mut words {
+    while let Some((w, from)) = words.next() {
         match state {
             0 if w.eq_ignore_ascii_case("statement") => state = 1,
             1 => state = 2,
@@ -1661,13 +1663,13 @@ pub fn schedule_text(text: &str) -> Option<&str> {
                 (state, start) = (3, from)
             }
             2 => return None,
-            3 if clause_ends(w) => return text.get(start..from).map(str::trim_end),
+            3 if clause_ends(w) => return text.get(start..words.before),
             _ => {}
         }
     }
     // A text ending in its schedule, and not in a string left open.
     match state {
-        3 if !words.open => text.get(start..).map(str::trim_end),
+        3 if !words.open => text.get(start..words.last),
         _ => None,
     }
 }
@@ -1691,6 +1693,10 @@ struct TopWords<'t> {
     depth: i32,
     /// They ended in a string left open.
     open: bool,
+    /// Where the last word, string or sign outside a comment ended.
+    last: usize,
+    /// Where the last one before the word given last ended: a clause's end.
+    before: usize,
 }
 
 #[cfg(feature = "statements")]
@@ -1701,6 +1707,8 @@ impl<'t> TopWords<'t> {
             i: 0,
             depth: 0,
             open: false,
+            last: 0,
+            before: 0,
         }
     }
 }
@@ -1737,18 +1745,29 @@ impl<'t> Iterator for TopWords<'t> {
                             Some(_) => self.i += 1,
                         }
                     }
+                    self.last = self.i;
                 }
-                b'(' | b'[' | b'{' => (self.depth, self.i) = (self.depth + 1, i + 1),
-                b')' | b']' | b'}' => (self.depth, self.i) = (self.depth - 1, i + 1),
+                b'(' | b'[' | b'{' => {
+                    (self.depth, self.i, self.last) = (self.depth + 1, i + 1, i + 1)
+                }
+                b')' | b']' | b'}' => {
+                    (self.depth, self.i, self.last) = (self.depth - 1, i + 1, i + 1)
+                }
                 c if word(c) => {
                     while self.i < b.len() && word(b[self.i]) {
                         self.i += 1;
                     }
+                    (self.before, self.last) = (self.last, self.i);
                     if self.depth == 0 {
                         return Some((self.text.get(i..self.i)?, i));
                     }
                 }
-                _ => self.i += 1,
+                c => {
+                    self.i += 1;
+                    if !c.is_ascii_whitespace() {
+                        self.last = self.i;
+                    }
+                }
             }
         }
         None
@@ -2681,7 +2700,15 @@ mod tests {
             ),
             (
                 "create statement at at '0 3 * * *' -- at 3\nas del t",
-                Some("at '0 3 * * *' -- at 3"),
+                Some("at '0 3 * * *'"),
+            ),
+            (
+                "create statement a every 1h\n-- a comment\n# and another\nas del t",
+                Some("every 1h"),
+            ),
+            (
+                "create statement a every 1h -- to the end",
+                Some("every 1h"),
             ),
             ("create statement a at 'it''s' as del t", Some("at 'it''s'")),
             ("create statement a every 1h", Some("every 1h")),

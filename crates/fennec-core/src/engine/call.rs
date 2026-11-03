@@ -728,25 +728,34 @@ fn exact_args(args: &Args, keeps: &[(&str, bool)], out: &mut super::Exactly) {
     }
 }
 
-/// `statements`' columns, and `describe statement`'s after them.
+/// `statements`' columns, and `describe statement`'s four after them.
+const COLUMNS: [&str; 15] = [
+    "name",
+    "version",
+    "signature",
+    "writes",
+    "comment",
+    "broken",
+    "after",
+    "schedule",
+    "next",
+    "last",
+    "held",
+    "answers",
+    "text",
+    "depends",
+    "condition",
+];
+
+/// [`COLUMNS`] as a result set holds them, each a `String`: from the
+/// static list, where a list made each time was an allocation and a free
+/// beside the names'.
 fn columns(described: bool) -> Vec<String> {
-    let mut c = vec![
-        "name",
-        "version",
-        "signature",
-        "writes",
-        "comment",
-        "broken",
-        "after",
-        "schedule",
-        "next",
-        "last",
-        "held",
-    ];
-    if described {
-        c.extend(["answers", "text", "depends", "condition"]);
-    }
-    c.into_iter().map(String::from).collect()
+    let listed = match described {
+        true => &COLUMNS[..],
+        false => &COLUMNS[..11],
+    };
+    listed.iter().map(|&c| String::from(c)).collect()
 }
 
 /// A statement as `statements` and `describe statement` answer it, `shown`
@@ -754,6 +763,11 @@ fn columns(described: bool) -> Vec<String> {
 fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
     let text = |t: &str| Value::Text(t.to_string());
     let def = s.tree.as_deref();
+    // One allocation a row, the four laid in with the rest: extended after
+    // them, each row's values were moved once more, a reallocation the
+    // allocator's free timed -- a fifth of a listing of statements no
+    // clock runs (slice 5's review).
+    let [schedule, next, last, held] = shown;
     let mut values = vec![
         text(&s.name),
         Value::List(vec![
@@ -774,9 +788,12 @@ fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
                 Value::Text(crate::named::Binding::events_named(*events)),
             ])
         }),
+        // A scheduled statement's `schedule`, `next`, `last` and `held`.
+        schedule,
+        next,
+        last,
+        held,
     ];
-    // A scheduled statement's `schedule`, `next`, `last` and `held`.
-    values.extend(shown);
     if described {
         values.push(def.map_or(Value::Null, |d| {
             Value::List(d.answers().into_iter().map(Value::Text).collect())

@@ -3,9 +3,13 @@
 //! four families -- none before a look, each run counted once by what came
 //! of it, the slots passed over, the marks found ahead of the clock and
 //! how late runs began -- no label naming a tenant, a statement or a
-//! collection; and `/_stats/statements`' shape `schedule <name>`, a
-//! tenant's apart and the admin's alone across tenants. Apart: the counts
-//! are the process's own.
+//! collection; `/_stats/statements`' shape `schedule <name>`, a tenant's
+//! apart and the admin's alone across tenants, keyed apart from a client's
+//! text; and a run whose outcome is unknown a failed span. Apart: the
+//! counts, and tracing, are the process's own.
+
+#[path = "../../fennec-server/tests/otlp.rs"]
+mod otlp;
 
 use fennec_core::engine::Landing;
 use fennec_core::prelude::*;
@@ -55,6 +59,45 @@ fn served(server: Server) -> u16 {
     port
 }
 
+/// A sink whose fsync fails once `failing` is set: a durable write's
+/// [`Durability`] errs, as a disk gone does.
+struct FailingSync(Arc<AtomicBool>);
+
+impl Sink for FailingSync {
+    fn append(&mut self, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    fn rewrite(&mut self, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<Option<Durability>> {
+        match self.0.load(Ordering::SeqCst) {
+            true => Ok(Some(Box::new(|| Err(Error::Io("the disk is gone".into()))))),
+            false => Ok(None),
+        }
+    }
+}
+
+/// `query` posted to `/query` with `token`.
+fn post(port: u16, token: &str, query: &str) -> (u16, String) {
+    let mut body = String::from("{\"query\":");
+    fennec_core::json::escape_into(&mut body, query);
+    body.push('}');
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(
+        s,
+        "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: \
+         {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let body = out.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+    (out[9..12].parse().unwrap(), body.to_string())
+}
+
 fn get(port: u16, token: Option<&str>, target: &str) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -80,19 +123,18 @@ fn sample(text: &str, line: &str) -> f64 {
 
 /// The shape `query`'s entry of a `/_stats/statements` answer.
 fn shape(stats: &str, query: &str) -> Value {
+    (shapes(stats, query).into_iter().next()).unwrap_or_else(|| panic!("no `{query}` in {stats}"))
+}
+
+/// Every entry of a `/_stats/statements` answer whose shape is `query`.
+fn shapes(stats: &str, query: &str) -> Vec<Value> {
     let doc = fennec_core::json::parse_json(stats).unwrap();
-    let member = |o: &Value, k: &str| match o {
-        Value::Object(m) => {
-            (m.iter().find(|(n, _)| n == k)).map_or(Value::Null, |(_, v)| v.clone())
-        }
-        _ => Value::Null,
-    };
-    let Value::List(all) = member(&doc, "statements") else {
+    let Value::List(all) = field(&doc, "statements") else {
         panic!("{stats}")
     };
     (all.into_iter())
-        .find(|e| member(e, "query") == Value::Text(query.into()))
-        .unwrap_or_else(|| panic!("no `{query}` in {stats}"))
+        .filter(|e| field(e, "query") == Value::Text(query.into()))
+        .collect()
 }
 
 fn field(entry: &Value, k: &str) -> Value {
@@ -107,6 +149,15 @@ fn field(entry: &Value, k: &str) -> Value {
 #[test]
 fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
     fennec_http::audit::set_delay(0);
+    let recv = otlp::Receiver::start();
+    let settings = fennec_http::trace::Options {
+        endpoint: Some(recv.url()),
+        ..Default::default()
+    }
+    .settings("fennec-http")
+    .unwrap()
+    .unwrap();
+    fennec_http::trace::install(settings).unwrap();
     // A file's server holding no schedule scrapes as it did: nothing of the
     // scheduler until a look is made.
     let idle = Arc::new(RwLock::new(Database::new()));
@@ -123,7 +174,8 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
     // Each outcome once, every slot a minute and a half late, two passed
     // over before it: a slot that ran, one the statement refused, one of a
     // statement broken, one the quota held, one that landed as its lease
-    // lapsed; and a definition ahead of the clock.
+    // lapsed and one whose fsync failed; and a definition ahead of the
+    // clock.
     let t0 = utc(2026, 5, 4, 12, 0);
     let at = t0 + 45 * MINUTE + 90_000;
     let ticks = "create collection ticks (slot timestamp, n int @hash)";
@@ -168,6 +220,20 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
             Ok(())
         })));
     }
+    let failing = Arc::new(AtomicBool::new(false));
+    let unsynced = {
+        let mut db = Database::with_sink(Box::new(FailingSync(Arc::clone(&failing))));
+        db.allow_schedules();
+        db.set_clock(Some(t0));
+        run(&mut db, ticks);
+        run(
+            &mut db,
+            "create statement fsynced every 15m as insert ticks {slot: slot(), n: 4}",
+        );
+        db.set_clock(None);
+        Arc::new(RwLock::new(db))
+    };
+    failing.store(true, Ordering::SeqCst);
     let ahead = defined_at(at + 30 * MINUTE, &[ticks, grow]);
     let outcomes = |db: &Arc<RwLock<Database>>| -> Vec<(String, Outcome)> {
         let look = schedule::pass(db, at);
@@ -192,6 +258,9 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
         lapsed.load(Ordering::SeqCst),
         "the lease lapsed as it landed"
     );
+    // Ran, as the look tells it: its fsync failed after, counted unknown.
+    assert_eq!(outcomes(&unsynced), all(&[("fsynced", Outcome::Ran)]));
+    assert!(unsynced.read().unwrap().failure().is_some());
     assert!(outcomes(&ahead).is_empty());
 
     // A tenant node's run, its tenant's name in no label.
@@ -238,19 +307,19 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
             ("refused", 1.0),
             ("broken", 1.0),
             ("held", 1.0),
-            ("unknown", 1.0),
+            ("unknown", 2.0),
         ] {
             let line = format!("fennec_scheduled_runs_total{{outcome=\"{outcome}\"}}");
             assert_eq!(sample(&text, &line), n, "{outcome}");
         }
-        assert_eq!(sample(&text, "fennec_scheduled_skipped_total"), 8.0);
+        assert_eq!(sample(&text, "fennec_scheduled_skipped_total"), 10.0);
         assert_eq!(sample(&text, "fennec_scheduled_mark_ahead_total"), 1.0);
-        // Five runs that did not hold, each a minute and a half late.
+        // Six runs that did not hold, each a minute and a half late.
         let late = "fennec_scheduled_lateness_seconds";
-        assert_eq!(sample(&text, &format!("{late}_count")), 5.0);
-        assert_eq!(sample(&text, &format!("{late}_sum")), 450.0);
+        assert_eq!(sample(&text, &format!("{late}_count")), 6.0);
+        assert_eq!(sample(&text, &format!("{late}_sum")), 540.0);
         assert_eq!(sample(&text, &format!("{late}_bucket{{le=\"60\"}}")), 0.0);
-        assert_eq!(sample(&text, &format!("{late}_bucket{{le=\"120\"}}")), 5.0);
+        assert_eq!(sample(&text, &format!("{late}_bucket{{le=\"120\"}}")), 6.0);
         // No label names a tenant, a statement or a collection.
         let scheduled = text.lines().filter(|l| l.starts_with("fennec_scheduled_"));
         for l in scheduled {
@@ -260,34 +329,57 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
                 "{l}"
             );
         }
-        for word in ["north", "tock", "gatekeep", "orphan", "sprout"] {
+        for word in ["north", "tock", "gatekeep", "orphan", "sprout", "fsynced"] {
             assert!(!text.contains(word), "{word} in the scrape:\n{text}");
         }
     }
 
     // `/_stats/statements`: each run counted as its schedule's shape, its
-    // rows what its last statement answered, a refusal an error.
+    // rows what its last statement answered, a refusal and an outcome
+    // unknown an error -- and a client's text shaped as a run is is a
+    // shape of its own, its error none of the runs'.
+    for _ in 0..3 {
+        let (status, body) = post(file, ROOT, "schedule tock");
+        assert_eq!(status, 400, "{body}");
+    }
     let (status, stats) = get(file, Some(ROOT), "/_stats/statements");
     assert_eq!(status, 200, "{stats}");
-    let tick = shape(&stats, "schedule tock");
-    assert_eq!(
-        (
-            field(&tick, "calls"),
-            field(&tick, "rows"),
-            field(&tick, "errors")
-        ),
-        (Value::Int(1), Value::Int(1), Value::Int(0))
-    );
-    for refused in ["schedule gatekeep", "schedule orphan"] {
+    let counted = |e: &Value| {
+        ["calls", "rows", "errors"].map(|k| match field(e, k) {
+            Value::Int(n) => n,
+            other => panic!("{k}: {other:?}"),
+        })
+    };
+    let mut tocks: Vec<_> = shapes(&stats, "schedule tock")
+        .iter()
+        .map(counted)
+        .collect();
+    tocks.sort();
+    assert_eq!(tocks, [[1, 1, 0], [3, 0, 3]], "{stats}");
+    for refused in ["schedule gatekeep", "schedule orphan", "schedule fsynced"] {
         let e = shape(&stats, refused);
         assert_eq!(field(&e, "errors"), Value::Int(1), "{refused}");
     }
     let grow = shape(&stats, "schedule sprout");
     assert_eq!(
         (field(&grow, "calls"), field(&grow, "errors")),
-        (Value::Int(2), Value::Int(1)),
+        (Value::Int(2), Value::Int(2)),
         "a run held and one landed as its lease lapsed"
     );
+    // A run whose outcome is unknown -- landed as its lease lapsed, or its
+    // fsync failed -- is a failed span, as a client's write would be
+    // answered: 500.
+    let unknown = |g: &otlp::Got| g.attr("fennec.outcome") == Some("unknown");
+    let spans = recv.until("the unknown runs' spans", |s| {
+        ["schedule sprout", "schedule fsynced"]
+            .iter()
+            .all(|n| s.iter().any(|g| g.name == *n && unknown(g)))
+    });
+    for g in spans.iter().filter(|g| unknown(g)) {
+        assert!(g.error, "{g:#?}");
+        assert_eq!(g.message.as_deref(), Some("500"), "{g:#?}");
+        assert_eq!(g.attr("error.type"), Some("500"), "{g:#?}");
+    }
     assert!(
         !stats.contains("north"),
         "a tenant's shape is its own: {stats}"

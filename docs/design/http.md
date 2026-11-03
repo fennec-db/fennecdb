@@ -410,6 +410,16 @@ nothing but a sampled parent's trace, and a collector that hangs or is down
 to costing no request its time; `fennec-shard`'s, a `[[test]]` of its own
 since tracing is the process's, a trace through the router into the node.
 
+A scheduled statement's run is no request, and a trace of its own on the
+scheduler's thread: `begin_run` to `end_run`, its root span `schedule
+<name>` ([named-statements.md](named-statements.md#scheduled-statements-f3),
+slice 5), its outcome `fennec.outcome`, failed with its status and its
+`else` reason, or a 500 where whether it landed is unknown -- a lapsed
+lease's landing, a failed fsync -- as a client's write is answered. Both
+kinds share one start (`start`: the id, the sampling, the reset) and one
+finish (`finish`, the root's last attributes a closure): the run's copies
+of them were a kilobyte of the server.
+
 ## Metrics
 
 **`/_metrics` counts at the edge, a shard per thread.** A statement is timed
@@ -441,6 +451,14 @@ router's thread held 5 to 10 ms past the write, none once it counts first
 answer is written, as before: count, clock and histogram all moved ahead of
 the write took its added p50 up 0.1 us, the count alone nothing measurable.
 
+The scheduler's four families (`fennec_scheduled_*`,
+[named-statements.md](named-statements.md#scheduled-statements-f3), slice 5)
+are the exception to a shard a thread: one thread a process counts them --
+a file's scheduler or a node's -- so they are one set of atomics, nothing
+contending for them. They are written only once a look was made
+(`schedule::LOOKED`), so a server that never held a schedule scrapes the
+bytes it did before them.
+
 ## Statement counts
 
 **`/_stats/statements` counts by shape, a tenant's apart.** Every
@@ -463,7 +481,12 @@ told apart where they are shown: shaped whole, a `put` of 1 000 128-dim
 rows spent 1.7 ms of its 12.6 there. They need what reads the data without a JWT's scope, or the admin
 token -- a shape names every collection -- and a tenant node keeps each
 tenant's apart (`statements::View`): its own under `/t/<tenant>/`, every
-tenant's, named, to the admin alone.
+tenant's, named, to the admin alone. The shapes the server counts of its own
+-- a scheduled run's `schedule <name>`, a binding's `after <name>` -- are
+keyed apart from every text a client sends (`statements::own_key`, the
+shape's hash taken on over `0xfe`, a byte no UTF-8 text holds): keyed by the
+shape alone, a client's `schedule purge`, a parse error, added to the
+runs' errors.
 
 ## Parse cache
 

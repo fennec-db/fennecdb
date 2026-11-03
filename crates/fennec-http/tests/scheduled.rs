@@ -1173,6 +1173,75 @@ fn the_listings_show_a_schedule_its_next_slot_its_last_run_and_a_held_slot() {
     );
 }
 
+/// What the schema broke reads back through `/_schema/plan` as a plan of
+/// nothing: `GET /_schema` lists a broken scheduled statement and a broken
+/// binding with why (`broken`), which the plan holds to no dependency, and
+/// `?as=fennecql` writes each as comments under its reason. A schedule is
+/// listed up to its last word, a comment after it the text's alone, and
+/// reads back as its text writes it.
+#[test]
+fn what_the_schema_broke_and_a_commented_schedule_read_back_as_a_plan_of_nothing() {
+    let db = defined_at(
+        t0(),
+        &[
+            HOLDS,
+            "create collection gone (n int)",
+            "create collection ledger (n int)",
+            "create statement orphan every 15m as insert gone {n: 1}",
+            "create statement noted after set holds as insert ledger {n: 1}",
+            "create statement tidy every 1h\n-- the hour's holds\nas del holds where state = 'x'",
+        ],
+    );
+    for dropped in ["drop collection gone", "drop collection ledger"] {
+        let s = fennec_ql::parse_one(dropped).unwrap();
+        db.write().unwrap().internally(|d| d.execute(&s)).unwrap();
+    }
+    let node = serve(&db);
+    let (status, body) = node.query(ROOT, "statements");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""schedule":"every 1h","#), "{body}");
+    let (status, described) = node.send(ROOT, "/_schema", "", "");
+    assert_eq!(status, 200, "{described}");
+    let doc = fennec_core::json::parse_json(&described).unwrap();
+    let member = |o: &Value, k: &str| match o {
+        Value::Object(m) => {
+            (m.iter().find(|(n, _)| n == k)).map_or(Value::Null, |(_, v)| v.clone())
+        }
+        other => panic!("{other:?}"),
+    };
+    let named = |list: Value, name: &str| match list {
+        Value::List(all) => (all.into_iter())
+            .find(|e| member(e, "name") == Value::Text(name.into()))
+            .unwrap_or_else(|| panic!("no {name} in {described}")),
+        other => panic!("{other:?}"),
+    };
+    let broken = |e: &Value| matches!(member(e, "broken"), Value::Text(t) if !t.is_empty());
+    let orphan = named(member(&doc, "schedules"), "orphan");
+    assert!(broken(&orphan), "{described}");
+    let tidy = named(member(&doc, "schedules"), "tidy");
+    assert!(!broken(&tidy), "{described}");
+    assert_eq!(member(&tidy, "schedule"), Value::Text("every 1h".into()));
+    let holds = named(member(&doc, "collections"), "holds");
+    assert!(
+        broken(&named(member(&holds, "bindings"), "noted")),
+        "{described}"
+    );
+    let (status, fennecql) = node.send(ROOT, "/_schema?as=fennecql", "", "");
+    assert_eq!(status, 200, "{fennecql}");
+    assert!(
+        fennecql.contains("-- broken: ") && fennecql.contains("-- create statement orphan"),
+        "{fennecql}"
+    );
+    for plan_of in [described, fennecql] {
+        let (status, body) = node.send(ROOT, "/_schema/plan", &plan_of, "");
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains(r#""statements":[]"#) && body.contains(r#""refusals":[]"#),
+            "{body}"
+        );
+    }
+}
+
 /// A held claim is answered by a run's write, its block naming `jobs`; a
 /// run that wrote nothing lands nothing and wakes nothing, and a client's
 /// write carrying its mark names its own collection alone -- never every

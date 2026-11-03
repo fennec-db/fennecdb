@@ -152,13 +152,21 @@ impl Database {
     /// `null`s for a statement no clock runs (`statements`, `describe
     /// statement`, `GET /_schema`). `now` is `None` where no clock reads.
     pub fn schedule_shown(&self, s: &Stored, now: Option<i64>) -> [Value; 4] {
-        if s.schedule.is_none() {
-            return [Value::Null, Value::Null, Value::Null, Value::Null];
+        match s.schedule {
+            None => [Value::Null, Value::Null, Value::Null, Value::Null],
+            Some(_) => self.scheduled_shown(s, now),
         }
+    }
+
+    /// [`Self::schedule_shown`] of a statement the clock runs: out of line,
+    /// so a listing of statements none is runs four `null`s a row.
+    #[cold]
+    #[inline(never)]
+    fn scheduled_shown(&self, s: &Stored, now: Option<i64>) -> [Value; 4] {
         let due = now.map(|now| self.due_of(s, now));
-        let next = due
-            .as_ref()
-            .and_then(|d| d.run.map(|r| r.0).or(d.next))
+        let due_slot = due.as_ref().and_then(|d| d.run.map(|r| r.0));
+        let next = due_slot
+            .or(due.and_then(|d| d.next))
             .map_or(Value::Null, Value::Timestamp);
         let mark = self.pending_of(s).or(self.last_mark(&s.name));
         let last = mark.map_or(Value::Null, |m| {
@@ -173,7 +181,9 @@ impl Database {
                     },
                 ),
             };
-            // Its members ascending by key, as an object holds them.
+            // Its members ascending by key, as an object holds them: a
+            // helper taking keys and values apart was 0.1 to 0.6 KB more
+            // of the server than these written out (slice 5's review).
             Value::Object(vec![
                 ("outcome".into(), Value::Text(outcome.into())),
                 ("reason".into(), reason),
@@ -184,7 +194,6 @@ impl Database {
         });
         // Held as long as the slot it holds is the one due: one run,
         // marked or passed over since is held no more.
-        let due_slot = due.as_ref().and_then(|d| d.run.map(|r| r.0));
         let held = (self.held_slots().iter())
             .find(|(n, h)| *n == s.name && Some(h.slot) == due_slot)
             .map_or(Value::Null, |(_, h)| {

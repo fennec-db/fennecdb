@@ -227,7 +227,7 @@ metric's summary.</p>
 
 <h2 id="monitors">The monitors</h2>
 
-<p><code>monitoring/datadog/monitors.json</code> holds four monitors on
+<p><code>monitoring/datadog/monitors.json</code> holds five monitors on
 <a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, an
 array Datadog's API takes one monitor a call (<code>POST
 /api/v1/monitor</code>).</p>
@@ -244,6 +244,7 @@ done
 <thead><tr><th>Monitor</th><th>Fires when</th></tr></thead>
 <tbody>
 <tr><td>a scheduled statement refused its run</td><td><code>outcome:refused</code> and <code>outcome:broken</code> runs together are over 0 in an hour</td></tr>
+<tr><td>a run's outcome is unknown</td><td><code>outcome:unknown</code> runs are over 0 in an hour: a run landed as its lease lapsed, or its fsync failed</td></tr>
 <tr><td>a slot is held back</td><td><code>outcome:held</code> runs are over 3 in an hour; a warning from 0</td></tr>
 <tr><td>a mark is ahead of the clock</td><td><code>fennecdb.scheduled_mark_ahead.count</code> is over 0 in an hour</td></tr>
 <tr><td>runs are late</td><td>the p99 of <code>fennecdb.scheduled_lateness_seconds.bucket</code> is over 120 s in 30 minutes; a warning from 60 s</td></tr>

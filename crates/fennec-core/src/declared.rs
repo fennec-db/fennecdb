@@ -94,6 +94,13 @@ pub struct Declared {
     /// to tell, and no plan reads it.
     #[cfg(not(target_arch = "wasm32"))]
     pub scheduled: Vec<(String, Option<String>, String)>,
+    /// The bound and scheduled statements a description's JSON lists
+    /// `broken`, as `GET /_schema` lists one whose dependency the schema
+    /// lost: read back as their definitions held to no dependency
+    /// (`fennec_ql::bound_into`), so the server's own description plans
+    /// nothing for them, and the plan compares them as it does any other.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub broken: Vec<String>,
 }
 
 /// One migration: run once, in order, and recorded.
@@ -206,9 +213,14 @@ pub fn parse(src: &str) -> Result<Declared> {
         None => Vec::new(),
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let (collections, bound) = collections(list(member(top, "collections"), "collections")?)?;
+    let mut broken = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
-    let scheduled = schedules(list(member(top, "schedules"), "schedules")?)?;
+    let (collections, bound) = collections(
+        list(member(top, "collections"), "collections")?,
+        &mut broken,
+    )?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let scheduled = schedules(list(member(top, "schedules"), "schedules")?, &mut broken)?;
     let mut migrations = Vec::new();
     for m in list(member(top, "migrations"), "migrations")? {
         migrations.push(match m {
@@ -239,6 +251,8 @@ pub fn parse(src: &str) -> Result<Declared> {
         bound,
         #[cfg(not(target_arch = "wasm32"))]
         scheduled,
+        #[cfg(not(target_arch = "wasm32"))]
+        broken,
     })
 }
 
@@ -246,16 +260,20 @@ pub fn parse(src: &str) -> Result<Declared> {
 /// name, its text and the schedule it is listed with, beside what the
 /// server tells of its runs (`next`, `last`, `held`), which no plan reads.
 #[cfg(not(target_arch = "wasm32"))]
-fn schedules(all: &[Value]) -> Result<Vec<(String, Option<String>, String)>> {
+fn schedules(
+    all: &[Value],
+    broken: &mut Vec<String>,
+) -> Result<Vec<(String, Option<String>, String)>> {
     let mut out = Vec::new();
     for s in all {
         let s = object(s, "a scheduled statement")?;
         only(
             s,
-            &["name", "schedule", "text", "next", "last", "held"],
+            &["name", "schedule", "text", "broken", "next", "last", "held"],
             "a scheduled statement",
         )?;
         let n = name(s, "name", "a scheduled statement")?;
+        listed_broken(s, &n, broken)?;
         let schedule = match member(s, "schedule") {
             None => None,
             Some(Value::Text(t)) => Some(t.clone()),
@@ -277,8 +295,20 @@ fn schedules(all: &[Value]) -> Result<Vec<(String, Option<String>, String)>> {
 #[cfg(not(target_arch = "wasm32"))]
 type Bound = Vec<(String, String, Option<String>, String)>;
 
+/// A bound or scheduled statement listed `broken`, with why, noted in
+/// `broken` ([`Declared::broken`]).
 #[cfg(not(target_arch = "wasm32"))]
-fn collections(all: &[Value]) -> Result<(Vec<Schema>, Bound)> {
+fn listed_broken(o: &[(String, Value)], n: &str, broken: &mut Vec<String>) -> Result<()> {
+    match member(o, "broken") {
+        None => {}
+        Some(Value::Text(_)) => broken.push(n.to_string()),
+        Some(_) => return Err(bad(n, "is listed `broken` with what is not a text")),
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collections(all: &[Value], broken: &mut Vec<String>) -> Result<(Vec<Schema>, Bound)> {
     let mut out: Vec<Schema> = Vec::new();
     let mut bound = Vec::new();
     for c in all {
@@ -289,8 +319,9 @@ fn collections(all: &[Value]) -> Result<(Vec<Schema>, Bound)> {
         let o = object(c, "a collection")?;
         for b in list(member(o, "bindings"), "bindings")? {
             let b = object(b, "a binding")?;
-            only(b, &["name", "events", "text"], "a binding")?;
+            only(b, &["name", "events", "text", "broken"], "a binding")?;
             let n = name(b, "name", "a binding")?;
+            listed_broken(b, &n, broken)?;
             let events = match member(b, "events") {
                 None => None,
                 Some(Value::Text(e)) => Some(e.clone()),

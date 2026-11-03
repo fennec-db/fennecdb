@@ -379,30 +379,12 @@ pub fn begin(req: &Request) {
     }
     CTX.with(|c| {
         let mut c = c.borrow_mut();
-        c.generation = c.generation.wrapping_add(1);
-        c.spans.clear();
-        c.open.clear();
         let given = req.header(TRACEPARENT).and_then(parse_traceparent);
-        let (id, parent, keep) = match given {
-            Some((id, parent, flag)) => (id, Some(parent), flag),
-            None => {
-                let mut id = [0u8; 16];
-                id[..8].copy_from_slice(&fresh().to_be_bytes());
-                id[8..].copy_from_slice(&fresh().to_be_bytes());
-                let keep = sampled(&id);
-                (id, None, keep)
-            }
-        };
-        c.active = true;
-        c.sampled = keep;
-        c.id = id;
-        c.parent = parent;
-        c.root = fresh().to_be_bytes();
         c.state = match (given, req.header(TRACESTATE)) {
             (Some(_), Some(s)) if !s.is_empty() && s.len() <= MAX_STATE => Some(s.to_string()),
             _ => None,
         };
-        if !keep {
+        if !start(&mut c, given) {
             return;
         }
         let start = now_unix();
@@ -467,20 +449,8 @@ pub fn begin_run(name: &str, tenant: Option<&str>) {
     }
     CTX.with(|c| {
         let mut c = c.borrow_mut();
-        c.generation = c.generation.wrapping_add(1);
-        c.spans.clear();
-        c.open.clear();
-        let mut id = [0u8; 16];
-        id[..8].copy_from_slice(&fresh().to_be_bytes());
-        id[8..].copy_from_slice(&fresh().to_be_bytes());
-        let keep = sampled(&id);
-        c.active = true;
-        c.sampled = keep;
-        c.id = id;
-        c.parent = None;
-        c.root = fresh().to_be_bytes();
         c.state = None;
-        if !keep {
+        if !start(&mut c, None) {
             return;
         }
         let shape = format!("schedule {name}");
@@ -522,38 +492,7 @@ pub fn end_run(outcome: &'static str, refused: Option<(u16, Option<&str>)>) {
     if !on() {
         return;
     }
-    let trace = CTX.with(|c| {
-        let mut c = c.borrow_mut();
-        let was = std::mem::take(&mut c.active);
-        if !(was && c.sampled) || c.spans.is_empty() {
-            c.spans.clear();
-            return None;
-        }
-        let now = now_unix();
-        for i in std::mem::take(&mut c.open) {
-            if c.spans[i].end == 0 {
-                c.spans[i].end = now;
-            }
-        }
-        let root = &mut c.spans[0];
-        root.end = now;
-        set(&mut root.attrs, "fennec.outcome", Val::from(outcome));
-        if let Some((status, reason)) = refused {
-            root.error = Some(match reason {
-                Some(r) => format!("{status} {r}"),
-                None => status.to_string(),
-            });
-            set(&mut root.attrs, "error.type", Val::from(status.to_string()));
-        }
-        Some(Trace {
-            id: c.id,
-            state: None,
-            spans: std::mem::take(&mut c.spans),
-        })
-    });
-    if let (Some(t), Some(e)) = (trace, EXPORTER.get()) {
-        e.push(t);
-    }
+    finish("fennec.outcome", Val::from(outcome), refused);
 }
 
 /// Whether this thread's request is being recorded: worth working out an
@@ -592,6 +531,45 @@ pub fn end(status: u16) {
     if !on() {
         return;
     }
+    // A server span is an error for the server's own failures alone: a 4xx
+    // is the client's (OpenTelemetry's HTTP conventions).
+    let failed = (status >= 500).then_some((status, None));
+    finish("http.response.status_code", Val::Int(status as i64), failed);
+}
+
+/// Starts this thread's trace -- a request's ([`begin`]) or a run's
+/// ([`begin_run`]) -- under the context `given` names, else one of its own
+/// sampled at the ratio, letting go of anything it held before: whether
+/// its spans are kept. One body for both: the run's copy of it and of
+/// [`finish`] were a kilobyte of the server (slice 5's review).
+fn start(c: &mut Ctx, given: Option<([u8; 16], [u8; 8], bool)>) -> bool {
+    c.generation = c.generation.wrapping_add(1);
+    c.spans.clear();
+    c.open.clear();
+    let (id, parent, keep) = match given {
+        Some((id, parent, flag)) => (id, Some(parent), flag),
+        None => {
+            let mut id = [0u8; 16];
+            id[..8].copy_from_slice(&fresh().to_be_bytes());
+            id[8..].copy_from_slice(&fresh().to_be_bytes());
+            let keep = sampled(&id);
+            (id, None, keep)
+        }
+    };
+    c.active = true;
+    c.sampled = keep;
+    c.id = id;
+    c.parent = parent;
+    c.root = fresh().to_be_bytes();
+    keep
+}
+
+/// Ends this thread's trace, its root span given `key` -- a request's
+/// status, a run's outcome -- and failed where `failed` says, with the
+/// status and the reason an `else` wrote, never the engine's words; and
+/// hands its spans to the exporter, never waiting on it. A child still
+/// open -- a guard held past the answer -- ends with it.
+fn finish(key: &'static str, val: Val, failed: Option<(u16, Option<&str>)>) {
     let trace = CTX.with(|c| {
         let mut c = c.borrow_mut();
         let was = std::mem::take(&mut c.active);
@@ -600,7 +578,6 @@ pub fn end(status: u16) {
             return None;
         }
         let now = now_unix();
-        // A child still open -- a guard held past the answer -- ends with it.
         for i in std::mem::take(&mut c.open) {
             if c.spans[i].end == 0 {
                 c.spans[i].end = now;
@@ -608,15 +585,12 @@ pub fn end(status: u16) {
         }
         let root = &mut c.spans[0];
         root.end = now;
-        set(
-            &mut root.attrs,
-            "http.response.status_code",
-            Val::Int(status as i64),
-        );
-        // A server span is an error for the server's own failures alone: a
-        // 4xx is the client's (OpenTelemetry's HTTP conventions).
-        if status >= 500 {
-            root.error = Some(format!("{status}"));
+        set(&mut root.attrs, key, val);
+        if let Some((status, reason)) = failed {
+            root.error = Some(match reason {
+                Some(r) => format!("{status} {r}"),
+                None => status.to_string(),
+            });
             set(&mut root.attrs, "error.type", Val::from(status.to_string()));
         }
         Some(Trace {

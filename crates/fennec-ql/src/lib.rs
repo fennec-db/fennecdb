@@ -108,7 +108,10 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 /// after the collections (`Declared::scheduled`) alike: each text one
 /// scheduled definition of the name it is listed by, run at the schedule
 /// it is listed with where it is -- as the text writes it, the clause
-/// `GET /_schema` lists, so a description claiming another is refused. A
+/// `GET /_schema` lists, so a description claiming another is refused.
+/// One listed `broken` (`Declared::broken`) is held to no dependency: the
+/// server describes what it holds, a statement whose collection or field
+/// the schema lost among it, and its description plans nothing for it. A
 /// build without named statements refuses a description listing one, as
 /// it refuses one written in FennecQL.
 #[cfg(not(target_arch = "wasm32"))]
@@ -197,7 +200,7 @@ fn declared_def(name: &str, text: &str) -> Result<fennec_core::named::Definition
 }
 
 /// `def` among `d`'s statements: declared once, naming only what `d`
-/// declares.
+/// declares -- unless listed broken, which names what it lost.
 #[cfg(all(not(target_arch = "wasm32"), feature = "statements"))]
 fn held_to(
     d: &mut fennec_core::declared::Declared,
@@ -208,9 +211,11 @@ fn held_to(
         return Err(bad(&def.name, "is declared twice"));
     }
     let collections = &d.collections;
-    if let Err(e) = def.depends(&|c| collections.iter().find(|s| s.name == c)) {
-        let why = fennec_core::declared::cat(&["names what is not declared: ", &e.to_string()]);
-        return Err(bad(&def.name, &why));
+    if !d.broken.contains(&def.name) {
+        if let Err(e) = def.depends(&|c| collections.iter().find(|s| s.name == c)) {
+            let why = fennec_core::declared::cat(&["names what is not declared: ", &e.to_string()]);
+            return Err(bad(&def.name, &why));
+        }
     }
     d.statements.push(def);
     Ok(())
