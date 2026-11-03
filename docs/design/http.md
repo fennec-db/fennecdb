@@ -246,6 +246,64 @@ A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
 
+**A replay answers only once the first try's record is as durable, and as
+sent, as its answer was to be** (`idempotent::replay`,
+`Database::durability`). The block lands under the write lock and its
+fsync (`--sync always`), and on a primary its wait for the streams
+(`Feed::wait_sent`), run after the lock -- but the key's row is read from
+the moment the block lands. So a second request with the key -- a
+client's retry, or the router's replay of a cut connection, which
+`replayable` sends again because it is keyed -- arriving between the two
+was answered the kept success at once: a power loss before the fsync, or
+a failover to a standby the block had not been sent, took the write back
+from a client that held it as made and would never send it again. Found
+reviewing the F4 design; every path that finds a key had it -- a REST
+write, `/query` and `/_call/<name>` of a writing statement (`keyed_query`),
+`/batch`, and a call kept by a writing statement since made to read,
+answered under the read lock (`read_call`); a tenant's routes are these
+same paths, and MCP's tools send no key. Now each, finding a kept answer
+under `--sync always`, asks the database for its durability under the
+lock it holds -- the read lock does, as `save_graphs` does: `flush`'s
+first half on `&self`, clearing nothing -- and runs it once the lock is
+let go, as a write's answer does (`await_durable`). It covers everything
+appended, the key's block among it: an fsync that covered it already
+makes it run none (the group commit), and one under way it waits out at
+the disk, held by that fsync; on a primary the `Tee` then waits for every
+stream keeping up to send it, `SENT_WAIT` at most, a lagging one not
+waited for. A failed fsync is its answer -- the first try's 500 -- and a
+replay after `Database::fail` is refused as every write is: the row is
+still in memory, and was handed out as a success before. Under `--sync
+<ms>` a first try's answer waits for no fsync, and a replay for none; the
+422 of a key sent with another request says nothing of the write and
+waits for nothing. A key an earlier process landed is in the file and may
+not be on the disk, that process having crashed before its fsync: a file
+sink's durability fsyncs what it inherited once, though it covers nothing
+appended (`durability.md`, *Storage errors*).
+
+The other design was a position: the engine keeping the change through
+which the file is durable (`durable_through`, moved after each fsync, a
+condvar beside it) and the `_idempotency` row the change of its block, a
+replay waiting for the one to pass the other. It needs a field in every
+kept row and a wait on another request's progress -- a first try whose
+thread died between its land and its durability leaves no one to move the
+position, and the replay waits out its bound. Running a durability of its
+own needs neither: the sink's `synced` and the feed's sent marks are the
+positions already, and the replay waits on nothing but the disk and the
+streams. It may fsync writes landed after the key's; a replay is rare and
+the fsync is shared.
+
+`tests/server.rs` holds every path to it on a disk whose fsync the test
+holds (`SlowDisk`): the replay's durability begins and waits, never its
+answer, until the first try's fsync is let go
+(`a_replay_is_answered_once_its_first_tries_fsync_is_done`), and where the
+fsync fails the replay and every send after it are 500
+(`a_replay_of_a_write_whose_fsync_failed_is_no_success`); lib.rs's
+`a_replay_waits_for_the_streams_as_its_first_try` holds a replay to a
+stream connected after the first answer, short of the block: it waits its
+`SENT_WAIT` (`waited_out`), and once the stream lags no longer. Each fails
+with its path's wait taken out. A write without a key and a keyed first
+try run no new code.
+
 ## Audit
 
 **Refusals and schema changes are logged; a refusal waits**

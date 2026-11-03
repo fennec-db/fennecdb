@@ -7,18 +7,21 @@
 //! (`_idempotency`), under the write lock: the write and its key land
 //! together or not at all, so a crash between the two cannot leave a
 //! write whose retry makes it again, and a second request with the key
-//! waits for the lock and finds it. A key is the subject's, for a scoped
-//! token, so no user is handed another's answer; the request it came with
-//! is kept as a hash, and the key sent with another request is refused
-//! (422), as the IETF draft has it. Kept for `idempotency_ttl`: the
-//! collection's `at` is `@ttl`, so a key past its time is out of every read
-//! at once and the sweeper deletes it ([`crate::sweep`]), where a purge of
-//! its own once ran on the write path at most once a minute. The change
-//! stream leaves these writes out.
+//! waits for the lock and finds it -- answered once the block holding it is
+//! as durable, and as sent, as the first try's answer waited for it to be
+//! ([`replay`]). A key is the subject's, for a scoped token, so no user is
+//! handed another's answer; the request it came with is kept as a hash,
+//! and the key sent with another request is refused (422), as the IETF
+//! draft has it. Kept for `idempotency_ttl`: the collection's `at` is
+//! `@ttl`, so a key past its time is out of every read at once and the
+//! sweeper deletes it ([`crate::sweep`]), where a purge of its own once ran
+//! on the write path at most once a minute. The change stream leaves these
+//! writes out.
 
 use crate::access::Who;
 use crate::http::{Request, Response};
 use fennec_core::prelude::*;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The collection the keys are kept in.
@@ -153,9 +156,62 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
     Ok(())
 }
 
-/// The answer kept for `key`, as it was sent: under the write lock, so a
-/// request with the key that is still running has landed by now.
-pub fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
+/// A key's kept answer, as a request sent with the key again is handed it
+/// ([`replay`]), and what it waits for first.
+pub struct Replay {
+    sent: Response,
+    durable: Option<fennec_core::engine::Durability>,
+}
+
+impl Replay {
+    /// The answer, once what it waits for ran -- with no lock held, as a
+    /// write's durability runs ([`crate::await_durable`]). A failed fsync
+    /// is the answer, as it is the first try's: a 500, never the success.
+    pub fn answer(self, db: &RwLock<Database>) -> Response {
+        match crate::await_durable(db, self.durable) {
+            Ok(()) => self.sent,
+            Err(e) => crate::error_response(&e),
+        }
+    }
+}
+
+/// The answer kept for `key`, as it was sent, found under a lock the
+/// caller lets go of before [`Replay::answer`]: a request with the key
+/// still running holds the write lock until its block has landed.
+///
+/// The block's fsync, and on a primary its wait for the streams to send
+/// it, run after its write lock, while the key is read from the moment
+/// the block lands: answered then, a replay -- the client's retry, the
+/// router's of a cut connection -- handed back a success that a power
+/// loss, or a failover to a standby the block never reached, took back,
+/// and the client sent it no more. So, `durable` (`--sync always`), it
+/// waits as that write's answer does: for the database's durability
+/// ([`Database::durability`]), everything appended -- the key's block
+/// among it -- on disk and sent to every stream keeping up, `SENT_WAIT` at
+/// most. An fsync that covered it already makes that one run none, and
+/// one under way is waited out at the disk; refused after a storage
+/// error. Under `--sync <ms>` a first try's answer waits for no fsync, and
+/// a replay for none. The 422 of a key sent with another request says
+/// nothing of the write and waits for nothing.
+pub fn replay(db: &Database, key: &Key, ttl_ms: i64, durable: bool) -> Option<Replay> {
+    let sent = answered(db, key, ttl_ms)?;
+    if !durable || sent.status == 422 {
+        return Some(Replay {
+            sent,
+            durable: None,
+        });
+    }
+    Some(match db.durability() {
+        Ok(durable) => Replay { sent, durable },
+        Err(e) => Replay {
+            sent: crate::error_response(&e),
+            durable: None,
+        },
+    })
+}
+
+/// The answer kept for `key`, as it was sent.
+fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
     db.collection(KEYS).ok()?;
     let fennec_core::query::Response::Rows(rs) =
         db.query(stmt(GET), &[Value::Text(key.name.clone())]).ok()?

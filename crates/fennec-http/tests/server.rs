@@ -78,6 +78,42 @@ impl Conn {
         Some((status, String::from_utf8_lossy(&body).into_owned()))
     }
 
+    /// A write sent with `Idempotency-Key: key`: `(status, whether it was
+    /// a replay, body)`.
+    fn keyed(&mut self, target: &str, key: &str, body: &str) -> (u16, bool, String) {
+        let req = format!(
+            "POST {target} HTTP/1.1\r\nHost: t\r\nIdempotency-Key: {key}\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        self.w.write_all(req.as_bytes()).unwrap();
+        let mut line = String::new();
+        self.r.read_line(&mut line).unwrap();
+        let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let (mut len, mut replayed) = (0, false);
+        loop {
+            let mut h = String::new();
+            self.r.read_line(&mut h).unwrap();
+            let h = h.trim_end();
+            if h.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = h.split_once(':') {
+                if k.eq_ignore_ascii_case("content-length") {
+                    len = v.trim().parse().unwrap();
+                }
+                replayed |= k.eq_ignore_ascii_case("idempotent-replayed");
+            }
+        }
+        let mut body = vec![0; len];
+        self.r.read_exact(&mut body).unwrap();
+        (
+            status,
+            replayed,
+            String::from_utf8_lossy(&body).into_owned(),
+        )
+    }
+
     /// A statement through `POST /query`.
     fn query(&mut self, q: &str) -> (u16, String) {
         let body = format!("{{\"query\": {}}}", json_string(q));
@@ -209,6 +245,11 @@ struct Gate {
     hold_until: Option<u64>,
     /// Fsyncs that reached the gate.
     reached: usize,
+    /// Durabilities that began to run, before they take the disk: a
+    /// replay waiting for the first try's fsync is one.
+    asked: usize,
+    /// Replays a test's client was answered.
+    replays: usize,
     timed_out: bool,
 }
 
@@ -247,6 +288,11 @@ impl fennec_core::engine::Sink for SlowDisk {
         let disk = self.clone();
         let upto = self.appended.load(Ordering::SeqCst);
         Ok(Some(Box::new(move || {
+            {
+                let (lock, cv) = &*disk.gate;
+                lock.lock().unwrap().asked += 1;
+                cv.notify_all();
+            }
             let mut synced = disk.synced.lock().unwrap();
             if *synced >= upto {
                 return Ok(());
@@ -298,6 +344,65 @@ impl SlowDiskServer {
     fn timed_out(&self) -> bool {
         self.gate.0.lock().unwrap().timed_out
     }
+
+    /// `(asked, replays)` as they stand.
+    fn counts(&self) -> (usize, usize) {
+        let g = self.gate.0.lock().unwrap();
+        (g.asked, g.replays)
+    }
+
+    /// Waits until `asked` durabilities in all began or a replay past
+    /// `replays` was answered, whichever comes first; whether one was.
+    fn replayed_or_waiting(&self, asked: usize, replays: usize) -> bool {
+        let (lock, cv) = &*self.gate;
+        let (g, waited) = cv
+            .wait_timeout_while(lock.lock().unwrap(), GATE_LIMIT, |g| {
+                g.asked < asked && g.replays <= replays
+            })
+            .unwrap();
+        assert!(!waited.timed_out(), "neither the replay nor its wait came");
+        g.replays > replays
+    }
+
+    /// Sends a keyed write again, as a retry, and counts its answer in.
+    fn replay(&self, target: &'static str, key: String, body: &'static str) -> Answer {
+        let (port, gate) = (self.h.port, Arc::clone(&self.gate));
+        std::thread::spawn(move || {
+            let answer = Conn::open(port).keyed(target, &key, body);
+            gate.0.lock().unwrap().replays += 1;
+            gate.1.notify_all();
+            answer
+        })
+    }
+}
+
+type Answer = std::thread::JoinHandle<(u16, bool, String)>;
+
+/// Every way a keyed write comes, and its body: a REST put, `/query`,
+/// `/batch` and a call of a statement that writes, each under the write
+/// lock; and a call of `r`, which writes as the first try runs and reads
+/// as it is sent again ([`now_reading`]), answered under the read lock.
+const KEYED: [(&str, &str); 5] = [
+    ("/t", r#"{"n": 1}"#),
+    ("/query", r#"{"query": "put t {n: 2}"}"#),
+    (
+        "/batch",
+        "{\"query\": \"put t {n: 3}\"}\n{\"query\": \"put t {n: 4}\"}",
+    ),
+    ("/_call/w", r#"{"params":{}}"#),
+    ("/_call/r", r#"{"params":{}}"#),
+];
+
+/// `r` made a statement that reads, as it is called again: written into
+/// the database alone, so no durability of its own runs.
+fn now_reading(db: &RwLock<Database>) {
+    let mut g = db.write().unwrap();
+    for q in [
+        "drop statement r",
+        "create statement r() public as get t count",
+    ] {
+        g.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
 }
 
 fn slow_disk_server(fail: bool) -> SlowDiskServer {
@@ -310,8 +415,13 @@ fn slow_disk_server(fail: bool) -> SlowDiskServer {
         synced: Arc::new(Mutex::new(0)),
         gate: Arc::clone(&gate),
     }));
-    db.execute(&fennec_ql::parse_one("create collection t (n int)").unwrap())
-        .unwrap();
+    for q in [
+        "create collection t (n int)",
+        "create statement w() public as insert t {n: 5}",
+        "create statement r() public as insert t {n: 6}",
+    ] {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
     let h = start(
         Config {
             sync_on_write: true,
@@ -382,6 +492,86 @@ fn a_failed_fsync_outside_the_lock_is_reported_and_stops_writes() {
 
     ok(c.query("get t count"));
     assert!(h.db.read().unwrap().failure().is_some());
+}
+
+/// A keyed write's first try sent, its fsync held at the gate, and the
+/// same request sent again: whether the replay was answered while the
+/// fsync was held, and the two answers to come once the test opens the
+/// gate. By the event: the replay's own durability began -- waiting at the
+/// disk the held fsync has -- or the replay was answered.
+fn race(
+    s: &SlowDiskServer,
+    target: &'static str,
+    body: &'static str,
+    key: &str,
+) -> (bool, Answer, Answer) {
+    let port = s.h.port;
+    let reached = s.gate.0.lock().unwrap().reached;
+    let (asked, replays) = s.counts();
+    s.hold_for(u64::MAX);
+    let first = {
+        let key = key.to_string();
+        std::thread::spawn(move || Conn::open(port).keyed(target, &key, body))
+    };
+    s.reached(reached + 1);
+    if target == "/_call/r" {
+        now_reading(&s.h.db);
+    }
+    let replay = s.replay(target, key.to_string(), body);
+    let early = s.replayed_or_waiting(asked + 2, replays);
+    (early, first, replay)
+}
+
+/// A write sent again with its `Idempotency-Key` while the first try's
+/// fsync runs is answered once that fsync is done, never before: its key
+/// is read from the moment its block lands, under the write lock, and the
+/// fsync runs after the lock -- answered then, a client's retry or the
+/// router's replay of a cut connection held a success a power loss took
+/// back, and was never sent again. Every way a keyed write comes, a call
+/// made to read meanwhile too (answered under the read lock).
+#[test]
+fn a_replay_is_answered_once_its_first_tries_fsync_is_done() {
+    let s = slow_disk_server(false);
+    for (i, &(target, body)) in KEYED.iter().enumerate() {
+        let (early, first, replay) = race(&s, target, body, &format!("held-{i}"));
+        s.open();
+        assert!(
+            !early,
+            "{target}: the replay was answered before the first try's fsync"
+        );
+        let (status, replayed, made) = first.join().unwrap();
+        assert!(status < 300 && !replayed, "{target}: {status} {made}");
+        let again = replay.join().unwrap();
+        assert_eq!(again, (status, true, made), "{target}");
+    }
+    assert!(!s.timed_out(), "an fsync waited out the gate");
+}
+
+/// A replay of a write whose fsync fails is not told it was made: it waits
+/// for that fsync and is answered its failure, the first try's 500, and
+/// sent after it the 500 every write is refused with until the file is
+/// opened again. Answered at once, as it was, it was the success the first
+/// try was never given. Every way a keyed write comes, each on a server of
+/// its own, since a failure stops the writes.
+#[test]
+fn a_replay_of_a_write_whose_fsync_failed_is_no_success() {
+    for (i, &(target, body)) in KEYED.iter().enumerate() {
+        let s = slow_disk_server(true);
+        let key = format!("failed-{i}");
+        let (early, first, replay) = race(&s, target, body, &key);
+        s.open();
+        assert!(
+            !early,
+            "{target}: the replay was answered before the fsync failed"
+        );
+        let (status, _, made) = first.join().unwrap();
+        assert_eq!(status, 500, "{target}: {made}");
+        let (status, replayed, again) = replay.join().unwrap();
+        assert_eq!((status, replayed), (500, false), "{target}: {again}");
+        let (status, replayed, after) = Conn::open(s.h.port).keyed(target, &key, body);
+        assert_eq!((status, replayed), (500, false), "{target}: {after}");
+        assert!(after.contains("refused"), "{target}: {after}");
+    }
 }
 
 /// The deepest expression the parser takes runs on a connection's stack:

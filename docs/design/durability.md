@@ -30,6 +30,29 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
 
+A durable write's block is read from the moment it lands, before its
+fsync after the lock has run, and so is an answer kept with it: a replayed
+`Idempotency-Key` was handed back the kept success at once, before the
+first try's fsync or its wait for the streams -- a write a power loss or a
+failover could take back from a client that held it as made, and never
+sent it again (`http.md`, *Idempotency keys*). A request answering a write
+another landed now waits for it as that write's answer does: it asks
+`Database::durability` -- `flush` on `&self`, under the read lock alone if
+that is what it holds, clearing nothing -- and runs it after its lock. The
+sink's group commit makes it free where an fsync covered the bytes and
+holds it at the disk where one runs; a failed fsync is its answer, and
+after `Database::fail` it is refused as every write is. A file's sink
+fsyncs, too, what it inherited once (`Disk::inherited`): the bytes an
+earlier process left in the file, maybe in the page cache alone after its
+crash, are on disk once no fsync of this sink has run, and a durability
+that covers nothing appended -- a replay after a restart, of a key that
+process landed -- fsynced nothing. Only a durability (`Sink::flush`) asks
+for them: a plain `sync`, which the shell runs as it exits, a read's
+one-shot run too, would have fsynced, and on Linux begun a 260 KB sync log,
+for nothing. A Linux file whose earlier process kept a log had them on disk
+already (`synclog::recover` fsyncs the file), and a primary's
+(`Sink::sync_existing`); a macOS one, with no log, did not.
+
 ## Writes behind the lock
 
 **Buffered writes are written behind the lock** (`Database::write_behind`,

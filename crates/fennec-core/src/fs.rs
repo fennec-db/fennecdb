@@ -70,6 +70,15 @@ struct Disk {
     /// Bytes appended that have been written, and that have been fsynced.
     written: u64,
     synced: u64,
+    /// No fsync of this sink has run, and the file holds bytes it did not
+    /// write: an earlier process's, which that process's crash may have
+    /// left in the page cache alone. A durability ([`Sink::flush`]) fsyncs
+    /// them once even where it covers nothing appended -- a replayed
+    /// `Idempotency-Key` after a restart answers a write that process
+    /// landed (`Database::durability`). A plain sync, a close's, leaves
+    /// them: the shell syncs as it exits, after a one-shot read too, which
+    /// would fsync, and on Linux begin a sync log, for nothing.
+    inherited: bool,
     /// fsyncs run, for the test that they are shared.
     #[cfg(test)]
     fsyncs: usize,
@@ -318,12 +327,13 @@ impl Disk {
         Ok(())
     }
 
-    /// Makes the first `upto` appended bytes durable, unless they are.
-    fn sync(&mut self, pending: &Mutex<Vec<u8>>, upto: u64) -> Result<()> {
+    /// Makes the first `upto` appended bytes durable, unless they are --
+    /// and, `inherited` asked, the bytes the file held before them, once.
+    fn sync(&mut self, pending: &Mutex<Vec<u8>>, upto: u64, inherited: bool) -> Result<()> {
         if let Some(e) = &self.failed {
             return Err(e.clone());
         }
-        if self.synced >= upto {
+        if self.synced >= upto && !(inherited && self.inherited) {
             return Ok(());
         }
         self.write_pending(pending)?;
@@ -340,6 +350,7 @@ impl Disk {
             self.fsyncs += 1;
         }
         self.synced = self.written;
+        self.inherited = false;
         Ok(())
     }
 }
@@ -369,6 +380,7 @@ impl FileSink {
                 disk.file = f;
                 disk.written = self.appended;
                 disk.synced = self.appended;
+                disk.inherited = false;
                 Ok(())
             }
             Err(e) => {
@@ -426,6 +438,7 @@ impl FileSink {
                 file,
                 written: 0,
                 synced: 0,
+                inherited: true,
                 #[cfg(test)]
                 fsyncs: 0,
                 failed: None,
@@ -642,8 +655,9 @@ impl Sink for FileSink {
     }
 
     fn sync_existing(&mut self) -> Result<()> {
-        let disk = lock(&self.disk);
+        let mut disk = lock(&self.disk);
         disk.file.sync_data()?;
+        disk.inherited = false;
         Ok(())
     }
 
@@ -652,17 +666,21 @@ impl Sink for FileSink {
     /// is called; fennecdb never fsyncs every write anyway -- this buffer
     /// extends that model.
     fn sync(&mut self) -> Result<()> {
-        lock(&self.disk).sync(&self.pending, self.appended)
+        lock(&self.disk).sync(&self.pending, self.appended, false)
     }
     /// Touches no file: the write and the fsync are both the durability's,
-    /// which runs without the database's lock.
+    /// which runs without the database's lock. It covers what an earlier
+    /// process left in the file as well (`Disk::inherited`): what an
+    /// answer waits for covers every byte a request may have been shown.
     fn flush(&mut self) -> Result<Option<Durability>> {
         let (disk, pending, upto) = (
             Arc::clone(&self.disk),
             Arc::clone(&self.pending),
             self.appended,
         );
-        Ok(Some(Box::new(move || lock(&disk).sync(&pending, upto))))
+        Ok(Some(Box::new(move || {
+            lock(&disk).sync(&pending, upto, true)
+        })))
     }
 }
 
@@ -1237,6 +1255,42 @@ mod tests {
         drop(sink);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// What an earlier process left in the file -- in the page cache alone,
+    /// had it crashed -- a durability fsyncs, once, though it covers nothing
+    /// appended: a replayed `Idempotency-Key` after a restart answers a
+    /// write that process landed. A close's sync leaves it, as it did.
+    #[test]
+    fn a_durability_covers_what_an_earlier_process_left() {
+        let dir =
+            std::env::temp_dir().join(format!("fennecdb-fs-inherited-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("left.fennec");
+        let (mut earlier, _) = FileSink::open(&path).unwrap();
+        earlier.append(b"landed").unwrap();
+        earlier.write_out().unwrap();
+        drop(earlier);
+
+        let (mut sink, held) = FileSink::open(&path).unwrap();
+        assert!(held.ends_with(b"landed"), "{held:?}");
+        sink.sync().unwrap();
+        assert_eq!(lock(&sink.disk).fsyncs, 0, "a close's sync fsynced");
+        sink.flush().unwrap().unwrap()().unwrap();
+        assert_eq!(
+            lock(&sink.disk).fsyncs,
+            1,
+            "the inherited bytes went unsynced"
+        );
+        sink.flush().unwrap().unwrap()().unwrap();
+        assert_eq!(
+            lock(&sink.disk).fsyncs,
+            1,
+            "inherited bytes are fsynced once"
+        );
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// With a sync log, durabilities handed out together share one entry

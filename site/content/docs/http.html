@@ -273,6 +273,12 @@ waits for it as after the first answer.</p>
   the write lock: they land together, so a crash cannot leave a write whose
   retry makes it again, and a second request with the key waits for the
   first and is handed its answer.</li>
+  <li>Under <code>--sync always</code> a repeat is answered no sooner than
+  the first answer was to be: once the write is on the disk and, on a
+  primary, sent to every replica keeping up. A retry that arrives while
+  the first try's fsync runs waits for it; one whose fsync failed is
+  answered that failure (500), never the first answer. Under
+  <code>--sync &lt;ms&gt;</code> neither waits for the disk.</li>
   <li>A write that failed keeps no key: sent again, it runs again.</li>
   <li>A key is for one request: the same key with another method, path or
   body is refused (422). A key is 1 to 255 bytes and holds no control
