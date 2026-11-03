@@ -304,10 +304,11 @@ test('match and rerank reject the combinations that contradict', async () => {
     () => q().match('body', 'x').near('embed', [1, 0, 0]).toFennecQL(),
     FennecError,
   );
-  // `count` runs the query, so it rejects rather than throwing.
+  // `count` runs the query, so it rejects rather than throwing. Beside it
+  // `match` is a filter, and `rerank` has no ranking to reorder.
   await assert.rejects(
-    () => q().match('body', 'x').count(),
-    /count cannot be used with `match`/,
+    () => q().match('body', 'x').rerank('embed', [1, 0, 0]).count(),
+    /count cannot be used with `rerank`/,
   );
   assert.throws(
     () => q().match('body', 'x').toInsert({ title: 'a' }),

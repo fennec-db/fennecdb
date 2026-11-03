@@ -135,6 +135,63 @@ fn match_composes_with_a_filter() {
     assert_eq!(titles(&r), ["rust"]);
 }
 
+/// Beside `order`, `count` or an aggregate `match` is a filter: the rows it
+/// scores above zero, put in order, counted or folded as a `where`'s rows
+/// are -- what `id in (get ... match ... select id)` answered, in one
+/// statement and with no ceiling of its own.
+#[test]
+fn match_beside_order_count_and_aggregates_is_a_filter() {
+    let mut db = setup();
+    let listed = r#"where id in (get docs select id match title "rust")"#;
+    for (new, old) in [
+        (
+            r#"get docs select title match title "rust" order topic desc"#.to_string(),
+            format!("get docs select title {listed} order topic desc"),
+        ),
+        (
+            r#"get docs select title where topic = "lang" match title "rust" order title"#
+                .to_string(),
+            format!(r#"get docs select title {listed} and topic = "lang" order title"#),
+        ),
+        (
+            r#"get docs match title "rust" count"#.to_string(),
+            format!("get docs {listed} count"),
+        ),
+        (
+            r#"get docs select topic, count(*) match title "rust" group topic order topic"#
+                .to_string(),
+            format!("get docs select topic, count(*) {listed} group topic order topic"),
+        ),
+        (
+            r#"get docs select count(*) match title "rust" order id desc limit 2"#.to_string(),
+            format!("get docs select count(*) {listed} order id desc limit 2"),
+        ),
+    ] {
+        let (a, b) = (run(&mut db, &new), run(&mut db, &old));
+        let (a, b) = (a.rows().unwrap(), b.rows().unwrap());
+        assert_eq!(a.columns, b.columns, "{new}");
+        let rows = |rs: &ResultSet| -> Vec<(DocId, Vec<Value>, Option<f32>)> {
+            rs.rows
+                .iter()
+                .map(|r| (r.id, r.values.clone(), r.score))
+                .collect()
+        };
+        assert_eq!(rows(a), rows(b), "{new}");
+    }
+    // Ties go in id order, as an ordered `get`'s do: three rows of
+    // "lang" and one of "misc", the python one matching nothing.
+    let r = run(
+        &mut db,
+        r#"get docs select title match title "rust" order topic"#,
+    );
+    assert_eq!(
+        titles(&r),
+        ["rust rust rust systems", "rust programming", "rust"]
+    );
+    let r = run(&mut db, r#"get docs match title "rust" count"#);
+    assert_eq!(r.rows().unwrap().rows[0].values, [Value::Int(3)]);
+}
+
 #[test]
 fn match_takes_a_parameter() {
     let mut db = setup();
@@ -420,16 +477,30 @@ fn clauses_that_contradict_each_other_are_refused() {
             "cannot be combined",
         ),
         (
-            r#"get docs match title "rust" order title"#,
-            "cannot be combined with `order`",
-        ),
-        (
             r#"get docs rerank embed [1.0, 0.0, 0.0]"#,
             "`rerank` needs `match`",
         ),
+        // Beside `order`, `count` or an aggregate `match` is a filter and
+        // ranks nothing: there is nothing for `rerank` to reorder.
         (
-            r#"get docs match title "rust" count"#,
-            "cannot be used together with `match`",
+            r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] order title"#,
+            "`rerank` reorders the rows `match` ranks",
+        ),
+        (
+            r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] count"#,
+            "`rerank` reorders the rows `match` ranks",
+        ),
+        (
+            r#"get docs select count(*) match title "rust" rerank embed [1.0, 0.0, 0.0]"#,
+            "`rerank` reorders the rows `match` ranks",
+        ),
+        (
+            r#"get docs select highlight(title) match title "rust" count"#,
+            "`count` answers a number",
+        ),
+        (
+            r#"get docs select count(*) match title "rust" limit 2"#,
+            "write `order` to say which rows",
         ),
         (r#"get docs match topic "lang""#, "no full-text index"),
         (

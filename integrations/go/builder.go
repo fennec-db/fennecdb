@@ -1741,10 +1741,9 @@ func (b *Builder) text(bind *binder) (string, error) {
 		switch {
 		case b.near != nil:
 			clash = "near"
-		case b.match != nil:
-			clash = "match"
 		// Ungrouped, Order, Limit and Offset pick the rows folded; a
-		// lookup hangs off the groups, keyed by a column.
+		// lookup hangs off the groups, keyed by a column. Beside them
+		// Match is a filter: the rows it finds are folded.
 		case b.count && len(b.group) == 0:
 			clash = "count"
 		}
@@ -1812,7 +1811,8 @@ func (b *Builder) text(bind *binder) (string, error) {
 		}
 	}
 	if b.count {
-		extra := b.extraClause(false)
+		// Beside Count, Match is a filter: it counts the rows it finds.
+		extra := b.extraClause(false, true)
 		if extra == "" && b.require != "" {
 			extra = "require"
 		}
@@ -2026,11 +2026,11 @@ func whereOf(cond []*node, bind *binder) (string, error) {
 	return render(root, bind, "")
 }
 
-func (b *Builder) extraClause(picks bool) string {
+func (b *Builder) extraClause(picks, counts bool) string {
 	switch {
 	case b.near != nil:
 		return "near"
-	case b.match != nil:
+	case b.match != nil && !counts:
 		return "match"
 	case b.rerank != nil:
 		return "rerank"
@@ -2056,7 +2056,7 @@ func (b *Builder) assertPlain(verb string) error {
 	if b.require != "" {
 		return refuse("%s takes require as its option: %s(..., { require: n })", verb, verb)
 	}
-	if extra := b.extraClause(verb == "update" || verb == "delete"); extra != "" {
+	if extra := b.extraClause(verb == "update" || verb == "delete", false); extra != "" {
 		return refuse("%s cannot be used with `%s`", verb, extra)
 	}
 	if len(b.lookups) > 0 {

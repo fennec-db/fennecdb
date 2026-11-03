@@ -86,8 +86,8 @@ set jobs {owner: $1} where run_at &lt;= now() order run_at asc limit $2 returnin
     with no fraction, is 20), and <code>-1</code>, <code>2.5</code>, a text
     or <code>null</code> is <code>`limit` takes a whole number from 0, not
     -1</code>. Past a ceiling it meets the check the number written meets:
-    <code>near</code> and <code>match</code> at 10 000 rows of <code>limit +
-    offset</code>, a facet's <code>top</code> from 1 to 10 000. A count
+    <code>near</code> and a ranking <code>match</code> at 10 000 rows of
+    <code>limit + offset</code>, a facet's <code>top</code> from 1 to 10 000. A count
     past what memory could hold is every row.</li>
   <li><b><code>require N</code> stays a number written.</b> Its count is
     what the statement guards — <code>require 1</code>, "this row and no

@@ -526,6 +526,53 @@ impl TextIndex {
         Ok(out)
     }
 
+    /// Every document `query` scores above zero, ascending: the rows a
+    /// `match` beside `order`, `count` or an aggregate selects, a filter
+    /// there rather than a ranking. Its terms are the cursors a ranking
+    /// walks, weighed as [`Self::search_within`] and [`Self::search_loose`]
+    /// weigh them -- BM25's statistics over `within`, a scoped token's
+    /// rows, where it is given -- and a document is in the set where a term
+    /// weighing more than nothing holds it: a ranking keeps a document
+    /// whose score is above zero, and its score is the sum of its terms'
+    /// contributions, each its weight times a factor above zero. So the set
+    /// is the ranking's to the document: a term so common its idf rounds to
+    /// 0 in `f32` -- every one of 2^23 documents or more holding it -- adds
+    /// no document, as it adds none to a ranking, where [`Self::matching`],
+    /// what `facet` counts over, takes its list.
+    pub fn scored(
+        &self,
+        query: &str,
+        loose: Loose,
+        within: Option<&[DocId]>,
+    ) -> Result<Vec<DocId>> {
+        if self.lengths.len() == 0 {
+            return Ok(Vec::new());
+        }
+        let within = within.filter(|_| cfg!(not(target_arch = "wasm32")));
+        let qtf = self.query_terms(query);
+        let (n, avgdl) = self.counted(within);
+        // A plain query's cursors are its terms' alone, as `search_within`
+        // makes them; `loose_cursors` makes those first.
+        let reach = match loose.is_plain() {
+            true => Vec::new(),
+            false => self.reach(query, loose, &qtf)?,
+        };
+        let unions = unions(&reach);
+        let mut out: Vec<DocId> = Vec::new();
+        let mut lists = 0;
+        for c in self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within) {
+            if c.weight > 0.0 {
+                out.extend_from_slice(c.list.docs);
+                lists += 1;
+            }
+        }
+        if lists > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+        Ok(out)
+    }
+
     /// Top `k` documents for `query`, best first.
     ///
     /// `accept` is the filter membership test; it is applied while the

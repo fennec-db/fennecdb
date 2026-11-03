@@ -337,6 +337,16 @@ compares.](../../docs/design/text.md#nocase)** Every such place goes through
 add in `f64`; `pruning_never_changes_the_answer` holds it to an
 exhaustive merge.
 
+**[Beside `order`, `count` or an aggregate, `match` is a filter: the rows
+its ranking scores above zero.](../../docs/design/text.md#match-as-a-filter)**
+`Select::match_ranks` tells the two apart. The set is `TextIndex::scored`,
+made from the ranking's own cursors and `within`, then the statement's
+filter -- a token's rules, `@ttl`'s `alive` -- as `id in (get ... match
+... select id)` would, which `tests/match_filter.rs` holds every form to
+row for row. It keeps no row ceiling (a ranking keeps `MAX_MATCH_ROWS`),
+its rows charged to a call; `rerank`, marks beside `count` and an
+ungrouped aggregate's `limit` without `order` are refused.
+
 **[`@text` matches whole words unless told
 otherwise.](../../docs/design/text.md#tokenizer)** It folds `I`, `İ`, `ı`, `i`
 together; unspaced scripts go by grams (`text::grams`).

@@ -229,6 +229,14 @@ impl TextIndex {
     ) -> crate::error::Result<Vec<DocId>> {
         match self.never {}
     }
+    pub fn scored(
+        &self,
+        query: &str,
+        loose: crate::text::Loose,
+        within: Option<&[DocId]>,
+    ) -> crate::error::Result<Vec<DocId>> {
+        match self.never {}
+    }
     pub fn loose_words(
         &self,
         query: &str,

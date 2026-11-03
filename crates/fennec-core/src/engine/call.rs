@@ -813,8 +813,10 @@ fn plain(sel: &Select) -> bool {
 /// Whether an index or an ordered walk narrows the rows `st` reads, as the
 /// plan would read them with any values: an equality, an `in` or a range
 /// over `id` or a field an index orders or hashes, an index over several
-/// fields led by one, `match` or `near` (their own indexes, capped), a
-/// pick an ordered index walks, or a `get` reading the first rows alone.
+/// fields led by one, `match` or `near` (their own indexes: a ranking
+/// capped, a `match` beside `order`, `count` or an aggregate the rows its
+/// words reach, each charged to the call), a pick an ordered index walks,
+/// or a `get` reading the first rows alone.
 fn narrowed(
     schema: &Schema,
     st: &Statement,

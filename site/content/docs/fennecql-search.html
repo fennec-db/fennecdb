@@ -1,6 +1,6 @@
 <!--
 title: Text search — FennecQL — fennecdb
-description: Text search in FennecQL: match ranks by BM25, rerank, fuzzy and prefix for typos and words begun, highlight() and snippet(), facets, and fuse for words and meaning in one ranking.
+description: Text search in FennecQL: match ranks by BM25 (beside order, count and aggregates, it filters), rerank, fuzzy and prefix for typos and words begun, highlight() and snippet(), facets, and fuse for words and meaning in one ranking.
 -->
 
 <h1>Text search</h1>
@@ -10,7 +10,9 @@ description: Text search in FennecQL: match ranks by BM25, rerank, fuzzy and pre
 matches your words, and the rest of a search box hangs off it:
 <code>fuzzy</code> and <code>prefix</code> for typos and words begun,
 <code>highlight()</code> and <code>snippet()</code> for where the words are,
-and <code>facet</code> for counts beside the page.</p>
+and <code>facet</code> for counts beside the page. Beside <code>order</code>,
+<code>count</code> or an aggregate it is a filter instead: the matches newest
+first, and how many there are.</p>
 
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
@@ -82,9 +84,10 @@ get articles match body $1 rerank embed $2 candidates 500 limit 10
 <details class="deep"><summary>How match filters, and what rerank is for</summary>
 <p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
 <code>_score</code> column. Like <code>near</code> it decides the ordering, so
-it combines with neither <code>order</code> nor <code>near</code> — unless
-<code>fuse</code> says how the two rankings make one (<a
-href="#hybrid">below</a>). A
+it does not combine with <code>near</code> — unless <code>fuse</code> says how
+the two rankings make one (<a href="#hybrid">below</a>) — and beside
+<code>order</code>, <code>count</code> or an aggregate it ranks nothing and is
+a filter (<a href="#match-as-a-filter">below</a>). A
 <code>where</code> filter is applied while the postings are merged, so it costs
 no second pass.</p>
 
@@ -105,6 +108,41 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   the answer at all, no amount of reranking will.</p>
 </div>
 </details>
+
+<h3 id="match-as-a-filter">Matches in another order, and counted</h3>
+
+<p>Beside <code>order</code>, <code>count</code> or an aggregate,
+<code>match</code> ranks nothing: it is a filter, and the statement's own
+clause decides the rest as it does for a <code>where</code>. A search page's
+"newest first", its "N results" and its counts by topic:</p>
+
+{{builder "docs: matches, newest first" "docs: matches counted" "docs: matches counted by topic"}}
+<pre data-lang="fennecql">get articles match body $1 order year desc limit 20
+get articles match body $1 count
+get articles select topic, count(*) group topic match body $1
+</pre>
+
+<ul>
+  <li><b>The rows are the ranking's.</b> Exactly the rows the same
+    <code>match</code> would rank on its own — every row holding a word of
+    the query, or with <code>fuzzy</code> and <code>prefix</code> a word
+    near one — that the <code>where</code> and a token's rules keep. Ties
+    of the order go in id order, as an ordered <code>get</code>'s do.</li>
+  <li><b>No 10 000-row ceiling.</b> A count or an aggregate answers no
+    rows, so it counts every match; a page put in order reads every match,
+    as an ordered <code>get</code> reads every row its <code>where</code>
+    keeps. On its own <code>match</code> keeps its ceiling.</li>
+  <li><b>No <code>_score</code>:</b> the order is the statement's.
+    <code>highlight()</code> and <code>snippet()</code> mark each row's
+    words as a ranking would, and <code>facet</code> counts the same rows
+    the page or the count is of.</li>
+  <li><b>Refused, naming what to write:</b> <code>rerank</code>, which
+    reorders a ranking there is none of here; <code>highlight()</code>
+    beside <code>count</code>, which answers no row to mark; and an
+    aggregate's <code>limit</code> or <code>offset</code> with no
+    <code>order</code>, which would fold the first matches by id rather
+    than the best ones.</li>
+</ul>
 
 <h2 id="typos">Typos and words begun</h2>
 

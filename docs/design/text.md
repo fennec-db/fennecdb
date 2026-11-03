@@ -1,6 +1,6 @@
 # Text
 
-The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Text*: collations, `nocase`, `match`, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Text*: collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Collations
 
@@ -112,6 +112,86 @@ Measured, with identical output: SciFact 179 -> 47 us, FiQA 1918 -> 311 us,
 Turkish WebFAQ 401 -> 82 us. `pruning_never_changes_the_answer` compares it
 against an exhaustive reference over 25 000 generated cases; scores accumulate
 in `f64` so the two orders of summation agree once rounded back to `f32`.
+
+## match as a filter
+
+**Beside `order`, `count` or an aggregate, `match` is a filter: the rows
+its ranking scores above zero.** A search page asks for "the matches,
+newest first" and "N results", and both were refused -- `match` decided the
+order, and a `count` or an aggregate beside it was refused as beside `near`
+-- so a caller wrote `get r where id in (get r match title $1 select id)
+order at desc limit 20` and the same list's `count`: two statements' work,
+the list the ranking's first 10 000 rows (its default page: past them a
+count was a count of a page, believed whole) and refused past an `in`
+list's 100 000 values. `Select::match_ranks` says which a `match` is: with
+`where`, `limit`, `offset`, `facet` and marks alone it ranks, down the code
+it took; with `order`, `count` or an aggregate list, grouped or not, it
+selects, and the statement's clause decides the rest as it does a
+`where`'s rows.
+
+The set is the ranking's own (`TextIndex::scored`): the cursors a ranking
+walks, made by the functions that make them for it (`query_terms`,
+`reach`, `loose_cursors`, `cursor`) with its `within` -- each word a
+cursor, a word's `fuzzy` variants and `prefix` completions one a distance
+-- and a document is in it where a cursor weighing more than nothing holds
+it: a ranking keeps a document whose summed contributions are above zero,
+each its cursor's weight times a factor above zero. It is
+`TextIndex::matching`'s, what `facet` counts over, but for a word so
+common its idf rounds to 0 in `f32` -- every one of 2^23 documents or more
+holding it -- which no ranking scores and the set leaves out with it; a
+facet beside a ranking counts as it did. The filter is the statement's,
+`scoped()`'s rules and `@ttl`'s `alive` ANDed in before it reaches
+`Database::matched_rows`: a scoped token's set is the one BM25 over its own
+rows scores above zero (`Match::within`, the filter's rows read first, as
+the ranking reads them), then held to those rows; any other filter's index
+candidates are intersected with the set and the rest of it tested a row at
+a time, the plan `id in <set> and <filter>` takes. A page is put in order
+as the list's would be (`order_ids`, `order_ids_by`), ties in id order, no
+ordered index walked, as none is beside an `id in` list. Every row the
+words reach is charged to a call (`--call-max-rows`), as a ranking's are.
+`tests/match_filter.rs` holds each form to its workaround's answer row for
+row over 3 000 rows -- eight queries, plain, `fuzzy` and `prefix`, by four
+filters (none, a hash equality, a scan, both), five orders, six counts and
+aggregates, each also scored over the filter's rows -- and the set to the
+ranking's ids; `tests/access.rs` holds a scoped token's page, count and
+groups to its own rows, and `tests/match_filter.rs` a row past its `@ttl`
+to a twin whose expiry is written out.
+
+Bounds. A count or an aggregate answers no rows, and an ordered page reads
+every match as an ordered `get` reads every row its filter passes, so
+neither keeps the ranking's `MAX_MATCH_ROWS`: a `count` over 12 500
+matched rows answers 12 500. The set is a `Vec<DocId>`, four bytes a row,
+as `matching_ids` holds a `where`'s. What bounded it before bounds it and
+errors as it did: a word `fuzzy` or `prefix` reads as more than
+`MAX_EXPANSIONS` words, `--call-max-rows`, and the ranking's 10 000 rows
+wherever `match` still ranks.
+
+What answers beside it. `highlight()` and `snippet()` mark a row's words
+whatever orders it, the marks its ranking gives it, so they stay beside
+`order`; beside `count` there is no row to mark, refused. A row carries no
+`_score` under `order`: the order is the statement's, and a score would be
+BM25 worked out again over each row of the page for a column nothing
+ordered by -- a caller after relevance leaves `order` out. `rerank`
+reorders the rows `match` ranks, and here it ranks none: refused, as is an
+ungrouped aggregate's `limit` or `offset` with no `order`, which would fold
+the first matches by id and read as "the best 50". `facet` beside a
+filtering `match` counts the rows it selects, what a `count` beside it
+counts. `near` and `fuse` are as they were; `fuse` was refused beside all
+three already.
+
+The browser module grew 3.1 KB raw, 1.4 KB gzip and 1.0 KB brotli
+(`matched_rows` 1.2 KB, `scored` 0.6, the index and query read once for
+both, `text_query`, 0.15 more than `run_match` held), the one without the
+indexes 0.4 KB brotli: kept in it, as a page's search box asks "how many"
+and "newest first" as a server's does.
+
+Rejected: putting the set into the filter as an `id in [...]` -- each id an
+`Expr`, then a `Value` encoded into the bound filter's `InSet` table, as a
+written list is -- for four bytes a row and its bound kept; the rows
+holding a term (`matching`), which leaves the ranking's set at the `f32`
+edge above; and a ranking with no `k`, read off for its positive scores,
+which walks every list a document at a time where the set is the lists
+copied and sorted once.
 
 ## Tokenizer
 

@@ -1113,9 +1113,8 @@ public sealed class Query
         if (s.Aggregate)
         {
             // Ungrouped, Order, Limit and Offset pick the rows folded; a lookup hangs off the groups, keyed by
-            // a column.
-            var clash = s.Near is not null ? "near" : s.Match is not null ? "match"
-                : s.Count && s.Group is null ? "count" : null;
+            // a column. Beside them Match is a filter: the rows it finds are folded.
+            var clash = s.Near is not null ? "near" : s.Count && s.Group is null ? "count" : null;
             if (clash is not null) throw Builder.Refuse($"aggregates cannot be combined with {clash}");
             if (s.Group is null && s.Require.Length > 0)
                 throw Builder.Refuse("require counts the rows a query answers, and an aggregate answers one");
@@ -1156,7 +1155,8 @@ public sealed class Query
                 seen.Add(l.Collection);
             }
         }
-        if (s.Count && (ExtraClause() ?? (s.Require.Length > 0 ? "require" : null)) is { } extra)
+        // Beside Count, Match is a filter: it counts the rows it finds.
+        if (s.Count && (ExtraClause(counts: true) ?? (s.Require.Length > 0 ? "require" : null)) is { } extra)
             throw Builder.Refuse($"count cannot be used with `{extra}`");
 
         var sql = new StringBuilder($"get {s.Collection}");
@@ -1256,9 +1256,9 @@ public sealed class Query
     static string? WhereOf(IReadOnlyList<Node> cond, Binder bind) =>
         Builder.Prune(new Node("and") { Items = [.. cond] }) is { } root ? Builder.Render(root, bind) : null;
 
-    string? ExtraClause(bool picks = false) =>
+    string? ExtraClause(bool picks = false, bool counts = false) =>
         _s.Near is not null ? "near"
-        : _s.Match is not null ? "match"
+        : _s.Match is not null && !counts ? "match"
         : _s.Rerank is not null ? "rerank"
         : _s.Order.Count > 0 && !picks ? "order"
         : _s.Limit is not null && !picks ? "limit"
