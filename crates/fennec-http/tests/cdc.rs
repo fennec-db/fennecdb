@@ -399,6 +399,49 @@ fn what_is_refused() {
     assert_eq!(n.call(None, "GET", "/_replication?since=0", "").status, 401);
 }
 
+/// The server's own collections are left out of the stream, every one by
+/// its `_` and the cursor past them: a migration's record in
+/// `_migrations`, a key's in `_idempotency` and a consumer's in
+/// `_consumers` are the server's bookkeeping, no app's row. On main the
+/// migrations' were sent, `_migrations` made and its row written.
+#[test]
+fn the_servers_own_collections_are_left_out() {
+    let n = start("own", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    let migrated = r#"{"format":1,"collections":[],"migrations":["create collection b (t text)"]}"#;
+    let a = n.call(Some(ROOT), "POST", "/_schema/apply", migrated);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let keyed = n.call_with(
+        Some(ROOT),
+        "POST",
+        "/query",
+        r#"{"query":"put a {t: \"x\"}"}"#,
+        "Idempotency-Key: k1\r\n",
+    );
+    assert_eq!(keyed.status, 200, "{}", keyed.body);
+    assert_eq!(n.make("c", "").status, 201);
+    n.run("put b {t: \"y\"}");
+    let db = n.db.read().unwrap();
+    for c in ["_migrations", "_idempotency", "_consumers"] {
+        assert!(db.collection(c).is_ok(), "{c} made");
+    }
+    drop(db);
+    let all = n.changes("since=0");
+    assert_eq!(all.status, 200, "{}", all.body);
+    let got: Vec<(String, String)> = events(&all.body).into_iter().map(|e| (e.1, e.2)).collect();
+    let named = |op: &str, c: &str| (op.to_string(), c.to_string());
+    assert_eq!(
+        got,
+        [
+            named("create", "a"),
+            named("create", "b"),
+            named("put", "a"),
+            named("put", "b"),
+        ]
+    );
+    assert_eq!(all.next, Some(n.seq()));
+}
+
 #[test]
 fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     let n = start("consumer", replication::DEFAULT_BUFFER);

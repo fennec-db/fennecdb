@@ -321,6 +321,9 @@ pub fn serve(
     let (mut sub, quiet, mut view, reach) = match sub {
         Ok(s) => s,
         Err(e) => {
+            // Over a collection the token is granted nothing on, the shape
+            // read against its schema told nothing of it.
+            let e = crate::path_refusal(who, req).unwrap_or(e);
             let _ = write_head(
                 out,
                 cfg,

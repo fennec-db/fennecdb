@@ -302,7 +302,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -315,6 +315,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A scoped token is held to its rules at every level, twice for writes.
 - A field a read rule withholds is held out of what a statement does.
 - A rule may read another collection, answered before each statement.
+- A collection whose name starts with `_` is the server's, out of every rule's reach.
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
 - An empty token is no token.

@@ -606,6 +606,82 @@ impl Bound {
             false => &self.filter,
         }
     }
+
+    /// Whether the rule is one of `collection`'s ([`covers`]).
+    #[inline]
+    fn covers(&self, collection: &str) -> bool {
+        covers(self.collection.as_deref(), collection)
+    }
+}
+
+impl Rule {
+    /// Whether the rule is one of `collection`'s ([`covers`]).
+    fn covers(&self, collection: &str) -> bool {
+        covers(self.collection.as_deref(), collection)
+    }
+}
+
+/// Whether a rule on `rule` -- `None` for `*` -- is one of `collection`'s:
+/// its own, or `*` over any collection but the server's own
+/// ([`fennec_core::declared::own`], a name starting with `_`). Those hold
+/// another subject's `Idempotency-Key`s and kept answers, consumers'
+/// cursors, a hook's keys: an unfiltered `* read` read every user's, a `*`
+/// granting `delete` took a key so its replay ran twice, and one granting
+/// `insert` planted one so a request was answered as done and never ran.
+/// No rule names one either ([`Access::with`] refuses it), so a token is
+/// granted nothing there, and they do not exist for it. The first byte is
+/// asked only of a `*` rule, the one place a rule matched every name.
+#[inline]
+fn covers(rule: Option<&str>, collection: &str) -> bool {
+    match rule {
+        Some(c) => c == collection,
+        None => !fennec_core::declared::own(collection),
+    }
+}
+
+/// The collection of the server's own (`_`-named) `stmt` would make,
+/// change or write, if any: refused to every token, the server's own
+/// among them, which reads them alone ([`crate::scoped`]). They are made
+/// with their own shape by the code that keeps them -- `_idempotency`'s by
+/// `idempotent::keep`, under the write lock beside the write it keys -- and
+/// written through the engine there, never by a client's statement: a
+/// `create collection _idempotency (key int)` of the server's token broke
+/// every keyed write after it, and a statement deleting a key made its
+/// write run twice. A scoped token never gets here with one: its rules
+/// reach none, and the rewrite answered it as a missing collection.
+#[inline]
+pub fn own_written(stmt: &Statement) -> Option<&str> {
+    let name = match stmt {
+        Statement::Put { collection, .. }
+        | Statement::Update { collection, .. }
+        | Statement::Delete { collection, .. }
+        | Statement::CreateIndex { collection, .. }
+        | Statement::CreateComposite { collection, .. }
+        | Statement::DropComposite { collection, .. }
+        | Statement::AlterCollection { collection, .. } => collection,
+        Statement::CreateCollection { schema, .. } => &schema.name,
+        Statement::DropCollection { name, .. } => name,
+        _ => return None,
+    };
+    fennec_core::declared::own(name).then_some(name.as_str())
+}
+
+/// [`own_written`] as the refusal it is (403).
+#[inline]
+pub fn own_refused(stmt: &Statement) -> Result<()> {
+    own_written(stmt).map_or(Ok(()), |name| Err(own_refusal(name)))
+}
+
+/// The refusal of a client's change to `name`, a collection of the
+/// server's own. Cold, its text made out of the line of every statement
+/// the server's token runs (`run_query`).
+#[cold]
+#[inline(never)]
+pub fn own_refusal(name: &str) -> Error {
+    denied(format!(
+        "`{name}` is the server's own: a collection whose name starts with `_` is made, \
+         changed and written by the server alone, and its token reads it"
+    ))
 }
 
 fn denied(msg: String) -> Error {
@@ -662,6 +738,15 @@ impl Access {
                 wakes.push(w);
                 continue;
             }
+            // The server's own collections are no rule's, `*` reaching none
+            // of them ([`covers`]): a rule naming one, or reading one through
+            // an inner `get`, would say otherwise.
+            let servers = |c: &str| {
+                at(format!(
+                    "`{c}` is the server's own: no rule names or reads a collection whose name \
+                     starts with `_`, and `*` reaches none of them"
+                ))
+            };
             let mut words = line.split_whitespace();
             if let (Some(c), Some("append-only")) = (words.next(), words.next()) {
                 if words.next().is_some() {
@@ -669,10 +754,18 @@ impl Access {
                                    every scoped token"
                         .into()));
                 }
+                if fennec_core::declared::own(c) {
+                    return Err(servers(c));
+                }
                 append_only.push(c.to_string());
                 continue;
             }
-            rules.push(rule(line).map_err(at)?);
+            let r = rule(line).map_err(at)?;
+            let mut named = r.collection.iter().chain(&r.reads);
+            if let Some(c) = named.find(|c| fennec_core::declared::own(c)) {
+                return Err(servers(c));
+            }
+            rules.push(r);
             lines.push(n + 1);
         }
         // A rule granting what an `append-only` line takes away says two
@@ -1711,7 +1804,7 @@ fn ring(rules: &[Rule], lines: &[usize]) -> Option<String> {
         rules
             .iter()
             .zip(lines)
-            .filter(|(r, _)| r.collection.as_deref().is_none_or(|x| x == c))
+            .filter(|(r, _)| r.covers(c))
             .flat_map(|(r, n)| r.reads.iter().map(move |d| (d.as_str(), *n)))
             .collect()
     };
@@ -2082,7 +2175,7 @@ fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
     let mut every = false;
     let mut either: Option<Expr> = None;
     for r in rules {
-        let here = r.collection.as_deref().is_none_or(|c| c == collection);
+        let here = r.covers(collection);
         if !here || r.ops & op == 0 {
             continue;
         }
@@ -2587,7 +2680,7 @@ impl Scope {
         let mut granting = self
             .rules
             .iter()
-            .filter(|r| r.ops & op != 0 && r.collection.as_deref().is_none_or(|c| c == collection));
+            .filter(|r| r.ops & op != 0 && r.covers(collection));
         let first = granting.next()?;
         Some(first.using().is_some() && granting.all(|r| r.using().is_some()))
     }
@@ -2723,15 +2816,16 @@ impl Scope {
     pub fn readable(&self, collection: &str) -> bool {
         self.rules
             .iter()
-            .any(|r| r.ops & READ != 0 && r.collection.as_deref().is_none_or(|c| c == collection))
+            .any(|r| r.ops & READ != 0 && r.covers(collection))
     }
 
     /// Whether any rule grants the token anything on `collection`: one
-    /// none does does not exist for it.
-    fn known(&self, collection: &str) -> bool {
+    /// none does does not exist for it, a REST path naming it answered so
+    /// whatever its route said (`path_refusal`).
+    pub fn known(&self, collection: &str) -> bool {
         self.rules
             .iter()
-            .any(|r| r.ops != 0 && r.collection.as_deref().is_none_or(|c| c == collection))
+            .any(|r| r.ops != 0 && r.covers(collection))
     }
 
     /// Why the token may not `what` in `collection`: it does not exist for
@@ -3098,11 +3192,9 @@ impl Scope {
     /// transition: there an update's row after is judged with its row
     /// before, by [`Self::overwrites`], and not on its own.
     fn transitions(&self, collection: &str) -> bool {
-        self.rules.iter().any(|r| {
-            r.transition
-                && r.ops & UPDATE != 0
-                && r.collection.as_deref().is_none_or(|c| c == collection)
-        })
+        self.rules
+            .iter()
+            .any(|r| r.transition && r.ops & UPDATE != 0 && r.covers(collection))
     }
 
     /// Whether the token may write `doc` over `old` in the collection
@@ -3126,8 +3218,7 @@ impl Scope {
         registry: &Registry,
     ) -> Result<()> {
         let name = schema.name.as_str();
-        let here =
-            |r: &&Bound| r.ops & UPDATE != 0 && r.collection.as_deref().is_none_or(|c| c == name);
+        let here = |r: &&Bound| r.ops & UPDATE != 0 && r.covers(name);
         if !self
             .rules
             .iter()
@@ -3222,9 +3313,9 @@ impl Scope {
             return Ok(false);
         }
         let granting = || {
-            self.rules.iter().filter(move |r| {
-                r.ops & op != 0 && r.collection.as_deref().is_none_or(|c| c == name)
-            })
+            self.rules
+                .iter()
+                .filter(move |r| r.ops & op != 0 && r.covers(name))
         };
         if granting().any(|r| r.using().is_none()) {
             return Ok(true);
@@ -3724,7 +3815,7 @@ impl Hook for Check {
             .rules
             .iter()
             .filter(|r| r.ops & READ != 0)
-            .filter(|r| r.collection.as_deref().is_none_or(|c| c == schema.name))
+            .filter(|r| r.covers(&schema.name))
             .filter_map(|r| r.text.as_deref())
             .collect();
         Err(denied(format!(

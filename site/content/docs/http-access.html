@@ -118,8 +118,14 @@ paid_ledger    wake                                               for customer
     list from rows: the <code>positions</code> rule above lets a customer
     read where the courier carrying their order is, and nothing of the
     others.</li>
+  <li><b>The server's own collections</b> — <code>_idempotency</code>,
+    <code>_consumers</code>, <code>_migrations</code>, every name starting
+    with <code>_</code> — are out of every rule's reach: <code>*</code>
+    grants nothing there, and a token is answered as if they were not
+    there (<a href="#own-collections">below</a>).</li>
   <li><b>The server's own <code>--http-token</code></b> still has full
-    access.</li>
+    access, but for changing the server's own collections, which it
+    reads.</li>
 </ul>
 
 <p>A whole product built on these rules is
@@ -293,6 +299,24 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     token: corrections, erasure and <code>@ttl</code>'s sweep stay with
     whoever holds that, and an app server that should only append is given
     a scoped token of its own, a role for instance.</li>
+  <li id="own-collections"><b>The server's own collections.</b> A
+    collection whose name starts with <code>_</code> is the server's:
+    <code>_idempotency</code> keeps each <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>
+    with the answer kept for it, <code>_consumers</code> the
+    <a href="/docs/http-reference#changes">change stream's</a> consumers,
+    <code>_migrations</code> the migrations a schema declared in code ran,
+    <code>_follow</code> what <code>--follow</code> follows, and a name
+    starting with <code>_</code> is kept for the next one. <code>*</code> reaches none
+    of them, and a rule naming one, or reading one through <code>in (get
+    …)</code>, stops the server at startup. A JSON Web Token is answered
+    404 for each, by every route, word for word as for a collection no
+    database holds, and none is listed to it — a REST path or a
+    subscription naming any collection the token is granted nothing on is
+    answered so before its filter is read. The server's own token reads
+    them, and no statement of its creates, alters, drops, indexes or
+    writes one (403), nor does a description or a migration sent to
+    <code>/_schema/apply</code>: the server makes and writes them itself,
+    in their own shape. The change stream leaves them out.</li>
   <li id="calls"><b>Calling a named statement.</b> A line grants calling by
     name, to a role or to every token. <code>call</code> stands alone on it:
 <pre data-lang="text"># statements       access  role

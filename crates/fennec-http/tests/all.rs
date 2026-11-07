@@ -24,6 +24,7 @@ mod named;
 mod node_archive;
 mod node_scheduled;
 mod ordered_claims;
+mod own;
 mod prepared;
 mod providers;
 mod reach;

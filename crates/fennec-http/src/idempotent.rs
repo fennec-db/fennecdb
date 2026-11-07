@@ -24,8 +24,8 @@ use fennec_core::prelude::*;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The collection the keys are kept in.
-pub const KEYS: &str = "_idempotency";
+/// The collection the keys are kept in, one of the server's own.
+pub const KEYS: &str = fennec_core::declared::IDEMPOTENCY;
 
 /// An answer longer than this is kept as its status and a note saying so:
 /// a write's answer is a count, and a batch's reads can be long.

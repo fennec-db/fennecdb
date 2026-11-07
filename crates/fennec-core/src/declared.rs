@@ -60,6 +60,39 @@ pub const MIGRATIONS: &str = "_migrations";
 pub const MIGRATIONS_DDL: &str =
     "create collection if not exists _migrations (n int @unique, text text, at timestamp)";
 
+/// A server's `Idempotency-Key`s, each with the answer kept for it
+/// (`fennec_http::idempotent`).
+pub const IDEMPOTENCY: &str = "_idempotency";
+/// `/_changes`' consumers' cursors (`fennec_http::cdc`).
+pub const CONSUMERS: &str = "_consumers";
+/// `--follow`'s record of which collection follows which slot
+/// (`fennec_import::follow`).
+pub const FOLLOW: &str = "_follow";
+/// A webhook consumer's keys, a row an event taken (F4,
+/// `engine::HOOK_EVENTS`).
+pub const HOOK_EVENTS: &str = "_hook_events";
+/// A synced replica's shapes, queue and optimistic rows
+/// (`fennec_abi::sync`), in the replica's own file.
+pub const SYNC_SHAPES: &str = "_sync_shapes";
+pub const SYNC_QUEUE: &str = "_sync_queue";
+pub const SYNC_TEMPS: &str = "_sync_temps";
+
+/// The collections the database's own code makes, writes and reads, named
+/// once here for every crate that keeps one. Every name starting with `_`
+/// is the database's ([`own`]), these and any added later, so a surface
+/// holding them out asks [`own`] and never this list: it is what the tests
+/// walk and the docs name, and a new one goes here beside its constant.
+pub const OWN: [&str; 8] = [
+    MIGRATIONS,
+    IDEMPOTENCY,
+    CONSUMERS,
+    FOLLOW,
+    HOOK_EVENTS,
+    SYNC_SHAPES,
+    SYNC_QUEUE,
+    SYNC_TEMPS,
+];
+
 /// A description read: the collections declared, and the migrations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declared {
@@ -873,7 +906,10 @@ pub fn fennecql<S: Borrow<Schema>>(schemas: &[S]) -> String {
     out
 }
 
-/// Whether a collection is the database's own, by its name.
+/// Whether a collection is the database's own, by its name: every one
+/// starting with `_` ([`OWN`] names those made today). Its own code makes
+/// and writes them; a server holds them out of every rule, listing and
+/// client statement (`docs/design/access.md#the-servers-own-collections`).
 pub fn own(name: &str) -> bool {
     name.starts_with('_')
 }
@@ -1788,5 +1824,18 @@ mod tests {
         assert!(applied(&[(1, "x".into())], &texts).is_err());
         assert!(applied(&[(1, "a".into()), (2, "b".into()), (3, "c".into())], &texts).is_err());
         assert!(applied(&[(2, "a".into())], &texts).is_err());
+    }
+
+    /// Every collection the database's code keeps is one [`own`] holds out,
+    /// named once: a surface holding them out asks the name's `_`, and a
+    /// name here without it would be reachable by every rule and statement.
+    #[test]
+    fn the_own_collections_are_each_named_once_with_their_underscore() {
+        for (i, c) in OWN.iter().enumerate() {
+            assert!(own(c), "{c}");
+            assert!(!OWN[i + 1..].contains(c), "{c} twice");
+        }
+        assert!(MIGRATIONS_DDL.contains(&format!(" {MIGRATIONS} (")));
+        assert!(!own("notes") && !own("a_b") && !own(""));
     }
 }

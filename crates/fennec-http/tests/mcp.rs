@@ -1987,3 +1987,59 @@ fn tool_calls_are_counted_by_tool_in_the_metrics() {
     assert!(count(r#"fennec_mcp_tool_calls_total{tool="schema",outcome="ok"}"#) >= 1);
     assert!(count(r#"fennec_mcp_tool_calls_total{tool="search",outcome="error"}"#) >= 1);
 }
+
+/// The server's own collections are no agent's: under an unfiltered `*`
+/// rule a scoped agent is told one is not there by every tool, as a
+/// collection no database holds, and the server's token reads it and
+/// writes it by none.
+#[test]
+fn the_servers_own_collections_are_no_agents() {
+    let access = Arc::new(Access::new(SECRET, "*  read,write\n").unwrap());
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            access: Some(access),
+            mcp: Some(Arc::new(Options {
+                write: true,
+                ..opts()
+            })),
+            ..Config::default()
+        },
+        &[
+            "create collection _consumers (key text @hash, n int)",
+            "put _consumers {key: \"k\", n: 1}",
+            "create collection docs (t text)",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (_, s) = n.call(Some(&alice), "schema", "{}");
+    assert!(!format!("{s:?}").contains("_consumers"), "{s:?}");
+    for (tool, args) in [
+        ("schema", r#"{"collection":"_consumers"}"#),
+        ("query", r#"{"query":"get _consumers"}"#),
+        ("get", r#"{"collection":"_consumers","ids":[1]}"#),
+        ("write", r#"{"statement":"del _consumers where n = 1"}"#),
+        ("write", r#"{"statement":"insert _consumers {key: 'x'}"}"#),
+    ] {
+        let (err, s) = n.call(Some(&alice), tool, args);
+        assert!(err, "{tool} {args}: {s:?}");
+        let said = text(at(&s, &["error"]));
+        assert!(
+            said.contains("_consumers") && !said.contains("own"),
+            "{said}"
+        );
+    }
+    let (err, s) = n.call(Some(ROOT), "query", r#"{"query":"get _consumers count"}"#);
+    assert!(!err, "{s:?}");
+    let (err, s) = n.call(
+        Some(ROOT),
+        "write",
+        r#"{"statement":"insert _consumers {key: 'x'}"}"#,
+    );
+    assert!(
+        err && text(at(&s, &["error"])).contains("the server's own"),
+        "{s:?}"
+    );
+    let (_, s) = n.call(Some(ROOT), "query", r#"{"query":"get _consumers count"}"#);
+    assert_eq!(at(&s, &["rows", "0", "count"]), &Value::Int(1), "{s:?}");
+}
