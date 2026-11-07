@@ -630,7 +630,15 @@ fn the_row_ceiling_errors_instead_of_truncating() {
         r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] candidates 20000"#,
     )
     .unwrap_err();
-    assert!(format!("{e}").contains("at most 10000 candidates"), "{e}");
+    let said = "`candidates` is 1 to 10000, not 20000";
+    assert!(format!("{e}").contains(said), "{e}");
+    // Neither cut to 32 bits, as a wasm32 build did, nor 0 lifted to 1.
+    for (n, said) in [("4294967297", "not 4294967297"), ("0", "not 0")] {
+        let sql =
+            format!(r#"get docs match title "rust" rerank embed [1.0, 0.0, 0.0] candidates {n}"#);
+        let e = try_run(&mut db, &sql).unwrap_err();
+        assert!(format!("{e}").contains(said), "{e}");
+    }
 }
 
 #[test]

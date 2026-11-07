@@ -58,7 +58,8 @@ use fennec_core::engine::Database;
 use fennec_core::error::{Error, Result};
 use fennec_core::query::*;
 use fennec_core::schema::{
-    Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec,
+    Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec, MAX_DIM,
+    MAX_M,
 };
 use fennec_core::value::{DataType, Value, VecPrec};
 
@@ -1101,6 +1102,23 @@ impl Parser {
         }
     }
 
+    /// A whole number from `lo` to `hi` -- a dimension, a beam, a count of
+    /// candidates or words -- read as written or refused naming the range,
+    /// never cut to fit it: `as usize` kept a wasm32 build's low 32 bits
+    /// (`fuse candidates 4294967297` was 1 in the browser module, which a
+    /// native build refuses past 10 000), and a clamp read `fuse k
+    /// 99999999999` as 4294967295 and `@hnsw(m=1)` as 2. `hi` is a `u32`,
+    /// so what is read fits every target's `usize` alike. One body and one
+    /// message for every such number: the browser module's bytes.
+    #[inline(never)]
+    fn int_in(&mut self, what: &str, lo: u32, hi: u32) -> Result<usize> {
+        let n = self.int()?;
+        match u32::try_from(n) {
+            Ok(v) if lo <= v && v <= hi => Ok(v as usize),
+            _ => self.err(format!("{what} is {lo} to {hi}, not {n}")),
+        }
+    }
+
     /// A `limit`, an `offset` or a facet's `top`: a whole number from 0, or
     /// a parameter, `limit $2`, read as the statement runs -- so a client
     /// paging through a list sends one text whatever the page. Read as an
@@ -2119,13 +2137,30 @@ impl Parser {
                         }
                     }
                 } else {
-                    let v = self.int()? as usize;
-                    match key.to_ascii_lowercase().as_str() {
-                        "m" => spec.m = v.max(2),
-                        "ef_construction" | "ef_c" => spec.ef_construction = v.max(8),
-                        "ef_search" | "ef" => spec.ef_search = v.max(1),
-                        other => return self.err(format!("unknown hnsw parameter `{other}`")),
-                    }
+                    // Each read as written within its bounds, as a declared
+                    // schema's are (`declared::index`): clamped, `m=1` built
+                    // an index of 2 and `ef_construction=4` one of 8, and
+                    // `m` past `MAX_M` cut a node's count of links to 16
+                    // bits. `m` from 2 and `ef_search` from 1, the floors
+                    // the clamps lifted to; `ef_construction` from 4,
+                    // pgvector's floor, which SQL's `with (..)` takes and
+                    // the `@hnsw(..)` written of it must read back as.
+                    let (slot, what, lo, hi) = match key.to_ascii_lowercase().as_str() {
+                        "m" => (&mut spec.m, "`m`", 2, MAX_M as u32),
+                        "ef_construction" | "ef_c" => {
+                            (&mut spec.ef_construction, "`ef_construction`", 4, u32::MAX)
+                        }
+                        "ef_search" | "ef" => (&mut spec.ef_search, "`ef_search`", 1, u32::MAX),
+                        other => {
+                            // The number read first, as it always was: a
+                            // text ending at `=` reads on. Read once before
+                            // the match instead, the range's test was a
+                            // function of its own, 33 bytes more.
+                            self.int()?;
+                            return self.err(format!("unknown hnsw parameter `{other}`"));
+                        }
+                    };
+                    *slot = self.int_in(what, lo, hi)?;
                 }
             } else {
                 // positional: the metric name
@@ -2163,10 +2198,7 @@ impl Parser {
             "geo" => DataType::Geo,
             "vector" | "vec" => {
                 self.expect(Tok::Lt)?;
-                let dim = self.int()?;
-                if dim <= 0 {
-                    return self.err("the vector dimension must be positive");
-                }
+                let dim = self.int_in("a vector's dimension", 1, MAX_DIM as u32)?;
                 // Optional storage precision: `vector<768, f16>`.
                 let prec = if matches!(self.peek(), Tok::Comma) {
                     self.skip();
@@ -2183,21 +2215,16 @@ impl Parser {
                     VecPrec::F32
                 };
                 self.expect(Tok::Gt)?;
-                DataType::Vector(dim as usize, prec)
+                DataType::Vector(dim, prec)
             }
             // `sparse<30522>`: a vector of that many dimensions of which only
             // the non-zero entries are kept -- a SPLADE vocabulary's size.
             "sparse" | "sparsevec" => {
                 self.expect(Tok::Lt)?;
-                let dim = self.int()?;
-                if dim <= 0 || dim as u64 > fennec_core::sparse::MAX_DIM as u64 {
-                    return self.err(format!(
-                        "a sparse vector's dimension is 1 to {}",
-                        fennec_core::sparse::MAX_DIM
-                    ));
-                }
+                // A vector's words, as `IndexKind::check`'s: one string.
+                let dim = self.int_in("a vector's dimension", 1, MAX_DIM as u32)?;
                 self.expect(Tok::Gt)?;
-                DataType::Sparse(dim as usize)
+                DataType::Sparse(dim)
             }
             other => return self.err(format!("unknown type `{other}`")),
         })
@@ -2742,7 +2769,9 @@ impl Parser {
             _ => None,
         };
         let at = |n: i64| -> Result<String> {
-            let i = (n as usize).wrapping_sub(1);
+            // Past `usize` no item: `as` made a wasm32 build's `order by
+            // 4294967297` the first.
+            let i = usize::try_from(n).map_or(usize::MAX, |n| n.wrapping_sub(1));
             let name = match (project, aggregate.get(i)) {
                 _ if n <= 0 => None,
                 (_, Some(c)) => Some(&c.name),
@@ -2838,8 +2867,10 @@ impl Parser {
                 let mut ef = None;
                 let mut exact = false;
                 loop {
+                    // A beam no wider than the most nodes a graph holds
+                    // (its ids are `u32`s); `ef 0` was read as 1.
                     if self.eat_kw("ef") {
-                        ef = Some(self.int()?.max(1) as usize);
+                        ef = Some(self.int_in("`ef`", 1, u32::MAX)?);
                         continue;
                     }
                     if self.eat_kw("exact") {
@@ -2895,13 +2926,19 @@ impl Parser {
                     k: None,
                     candidates: None,
                 };
+                // Each held to its bounds as it is read, the number written
+                // in the refusal: `k` past `MAX_FUSE_K` was clamped, and
+                // `candidates` past 32 bits cut in the browser module. The
+                // words are the clause's own, `rerank`'s alike: the
+                // refusal's position says which clause.
                 loop {
                     if self.eat_kw("k") {
-                        f.k = Some(self.int()?.clamp(0, u32::MAX as i64) as u32);
+                        f.k = Some(self.int_in("`k`", 0, MAX_FUSE_K)?);
                         continue;
                     }
                     if self.eat_kw("candidates") {
-                        f.candidates = Some(self.int()?.max(0) as usize);
+                        let most = fennec_core::engine::MAX_MATCH_ROWS as u32;
+                        f.candidates = Some(self.int_in("`candidates`", 1, most)?);
                         continue;
                     }
                     break;
@@ -2914,7 +2951,8 @@ impl Parser {
                 let vector = self.expr()?;
                 let mut candidates = None;
                 if self.eat_kw("candidates") {
-                    candidates = Some(self.int()?.max(1) as usize);
+                    let most = fennec_core::engine::MAX_MATCH_ROWS as u32;
+                    candidates = Some(self.int_in("`candidates`", 1, most)?);
                 }
                 sel.rerank = Some(Rerank {
                     field,
@@ -3590,7 +3628,7 @@ impl Parser {
         let mut words = None;
         if snippet {
             self.expect(Tok::Comma)?;
-            words = Some(self.int()?.max(0) as usize);
+            words = Some(self.int_in("a snippet's length in words", 1, u32::MAX)?);
         }
         let mut args = Vec::new();
         while matches!(self.peek(), Tok::Comma) {
