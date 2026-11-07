@@ -999,6 +999,210 @@ fn an_event_s_write_wakes_a_binding_in_its_block() {
     );
 }
 
+/// A replica refuses writes, and a storage error stops them: an event
+/// its statements would take is refused as any write is, before a body
+/// runs -- nothing written, no key kept -- in the block a caller opened as
+/// in one of its own.
+#[test]
+fn a_replica_and_a_failed_database_take_no_event() {
+    let body = paid("evt_1", "o-1", 2000);
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    db.follow(vec![(7, 0)]).unwrap();
+    let seq = db.change_seq();
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(matches!(err, Error::ReadOnly(_)), "{err}");
+    assert_eq!(db.change_seq(), seq, "nothing written");
+    assert_eq!(status(&db, "o-1"), Value::Text("open".into()));
+    assert!(keys(&db).is_empty());
+
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    db.fail(&Error::Io("the disk went away".into()));
+    let seq = db.change_seq();
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(matches!(err, Error::Io(_)), "{err}");
+    db.begin().unwrap();
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(matches!(err, Error::Io(_)), "{err}");
+    assert_eq!(db.block_writes(), 0, "nothing run in the caller's block");
+    db.rollback();
+    assert_eq!(db.change_seq(), seq, "nothing written");
+    assert_eq!(status(&db, "o-1"), Value::Text("open".into()));
+    assert!(keys(&db).is_empty());
+}
+
+/// `now()` is the event's taking on the system's clock as on a pinned one:
+/// one instant for every `check`, every body and the key's `until`,
+/// however long the taking runs. `a_slow`'s parameter, a list long enough
+/// that copying it as it is typed takes milliseconds, holds the taking
+/// past the millisecond the event came in before `b_mark` is judged and
+/// before any body runs; `b_mark`'s `check` holds only in that millisecond
+/// (`now() < $cut`). A `check` reading the clock as it is asked refuses
+/// every event, and a body reading it again writes a later time than the
+/// key's `until` was kept by.
+#[test]
+fn now_is_one_instant_of_the_system_s_clock_for_check_and_bodies() {
+    use fennec_core::time::now_ms;
+    use std::time::{Duration, Instant};
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    db.set_clock(None);
+    run(&mut db, "create collection stamps (n int, at timestamp)").unwrap();
+    for text in [
+        "create statement a_slow($big json from event.big) on hook clock as insert stamps {n: 1, \
+         at: now()}",
+        "create statement b_mark($cut timestamp from event.cut) on hook clock check now() < $cut \
+         as insert stamps {n: 2, at: now()}",
+        "create statement c_mark on hook clock as insert stamps {n: 3, at: now()}",
+    ] {
+        run(&mut db, text).unwrap();
+    }
+    // A list whose copy takes 2 ms here, debug build or release.
+    let mut n = 1i64 << 14;
+    let big = loop {
+        let big = Value::List((0..n).map(Value::Int).collect());
+        let t = Instant::now();
+        std::hint::black_box(big.clone());
+        if t.elapsed() >= Duration::from_millis(2) || n >= 1 << 23 {
+            break big;
+        }
+        n *= 2;
+    };
+    // Its members in order, as a parsed object holds them.
+    let mut body = Value::Object(vec![("big".into(), big), ("cut".into(), Value::Int(0))]);
+    for attempt in 0..20u64 {
+        // A millisecond just begun: the taking reads it, and `check` holds,
+        // unless this thread is put off between the two -- then nothing is
+        // written, and the event goes again under another key.
+        let start = now_ms().unwrap();
+        let mut came = start;
+        while came == start {
+            came = now_ms().unwrap();
+        }
+        if let Value::Object(fields) = &mut body {
+            fields[1].1 = Value::Int(came + 1);
+        }
+        let key = format!("k-{attempt}");
+        let e = Event {
+            hook: "clock",
+            key: &key,
+            body: &body,
+            digest: attempt,
+            at: None,
+            event: None,
+            keep: DAY,
+        };
+        match db.take_event(&e) {
+            Ok(took) => assert_eq!(took, Took::Ran(3)),
+            Err(Error::Query(m)) if m.contains("its `check` does not hold") => {
+                assert_eq!(rows(&db, "get stamps count"), [vec![Value::Int(0)]]);
+                continue;
+            }
+            Err(err) => panic!("{err}"),
+        }
+        let done = now_ms().unwrap();
+        let until = rows(&db, "get _hook_events select until");
+        let Value::Timestamp(until) = until[0][0] else {
+            panic!("{until:?}")
+        };
+        let taken = until - DAY;
+        assert!(came <= taken && taken <= done, "{came} {taken} {done}");
+        assert_eq!(
+            rows(&db, "get stamps select n, at order n"),
+            (1..=3)
+                .map(|n| vec![Value::Int(n), Value::Timestamp(taken)])
+                .collect::<Vec<_>>(),
+            "every `now()` the taking, the one `check` held at: before {}",
+            came + 1
+        );
+        // The clock given back: a statement after it reads its own time.
+        while now_ms().unwrap() <= taken {
+            std::hint::spin_loop();
+        }
+        run(&mut db, "insert stamps {n: 4, at: now()}").unwrap();
+        let after = rows(&db, "get stamps select at where n = 4");
+        assert!(
+            matches!(after[0][0], Value::Timestamp(t) if t > taken),
+            "{after:?}"
+        );
+        return;
+    }
+    panic!(
+        "every event refused by `b_mark`'s `check`: a taking never began in the millisecond its \
+         event came in, or `check` read a later clock than the taking's"
+    );
+}
+
+/// A statement that panics in a hook's code, run for an event in a block
+/// its caller opened, unwinds out of `take_event` with the rows its write
+/// woke kept -- no `whole` around it to let them go. The block put back,
+/// the next event, writing nothing a statement is bound to, runs no
+/// binding of those rows.
+#[test]
+fn rows_a_panic_left_woken_wake_nothing_in_the_next_event() {
+    struct Boom;
+    impl Hook for Boom {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn rewrites(&self) -> bool {
+            false
+        }
+        fn before_write(&self, _: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+            assert_ne!(doc.get("n"), Some(&Value::Int(11)), "a hook that panics");
+            Ok(())
+        }
+    }
+    impl Plugin for Boom {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn init(&self, reg: &mut Registry) -> Result<()> {
+            reg.register_hook(Arc::new(Boom));
+            Ok(())
+        }
+    }
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    for text in [
+        "create collection marks (n int)",
+        "create collection notes (n int)",
+        "create collection log (n int)",
+        "put marks [{n: 0}, {n: 10}]",
+        "create statement logged after set marks as insert log {n: new.n}",
+        "create statement a_bump on hook mix where event.kind = 'bump' scans as set marks {n: n \
+         + 1} where n >= 0",
+        "create statement b_note on hook mix where event.kind = 'note' as insert notes {n: 1}",
+    ] {
+        run(&mut db, text).unwrap();
+    }
+    db.install_plugin(&Boom).unwrap();
+    let bump = fennec_core::json::parse_json(r#"{"kind": "bump"}"#).unwrap();
+    let mut e = event(&bump, "k-bump", 1);
+    e.hook = "mix";
+    db.begin().unwrap();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = db.take_event(&e);
+    }));
+    assert!(unwound.is_err(), "the second row's hook panics");
+    db.rollback();
+    let note = fennec_core::json::parse_json(r#"{"kind": "note"}"#).unwrap();
+    let mut e = event(&note, "k-note", 2);
+    e.hook = "mix";
+    assert_eq!(db.take_event(&e).unwrap(), Took::Ran(1));
+    assert_eq!(rows(&db, "get notes count"), [vec![Value::Int(1)]]);
+    assert_eq!(
+        rows(&db, "get log count"),
+        [vec![Value::Int(0)]],
+        "no binding of the rows the panic left"
+    );
+    assert_eq!(
+        rows(&db, "get marks select n order n"),
+        [vec![Value::Int(0)], vec![Value::Int(10)]]
+    );
+}
+
 // ------------------------------------------------------------ the fixture
 
 /// `file` with `stripe_paid` after its records, once, as this build writes

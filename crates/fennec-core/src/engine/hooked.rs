@@ -29,10 +29,13 @@ use crate::schema::{Field, IndexKind, Schema};
 use crate::value::{DataType, DocId, Value};
 
 /// The collection an event's key is kept in: the server's own
-/// (`declared::own`), held out of every surface `_idempotency` is by its
-/// `_`, of the tenant's rows a quota counts (`Database::app_writes`) and,
-/// by its name, of `/_changes` (`fennec_http::cdc`). Made by the first
-/// event taken, never before.
+/// (`declared::own`), held by its `_` out of a body and of the tenant's
+/// rows a quota counts (`Database::app_writes`) and, by its name, out of
+/// `/_changes` (`fennec_http::cdc`). The listings, `/_schema` and a `*`
+/// rule hold it out only once the owed system-collections fix lands, as
+/// they hold `_idempotency` out only then: F4's slice 3 depends on it
+/// before any route takes an event. Made by the first event taken, never
+/// before.
 pub const HOOK_EVENTS: &str = "_hook_events";
 
 /// An event a hook's sender sent, verified and parsed by the server, as
@@ -132,8 +135,10 @@ impl Database {
     /// taking statement's parameters read from the event by their types,
     /// its `check` asked, and their bodies run, each statement through
     /// `run_one` -- waking the bindings its writes reach, seeing the writes
-    /// before it -- under one `--call-max-rows` for them all, `now()` the
-    /// event's taking; then its key's row, last. In the block open -- its
+    /// before it -- under one `--call-max-rows` for them all; then its
+    /// key's row, last. `now()` is the event's taking, one instant read
+    /// once: the key's `until` asked and kept, every `check`, every body
+    /// and binding. In the block open -- its
     /// caller's to land, or to put back where this refuses -- or in one of
     /// its own, landed whole or put back, so the event lands with every
     /// write it made and its key, or with none.
@@ -151,10 +156,22 @@ impl Database {
     /// a duplicate's answer waits for that as well (F4's slice 3).
     pub fn take_event(&mut self, e: &Event) -> Result<Took> {
         let key = kept_key(e)?;
-        if let Some(k) = self.kept(&key, e.digest)? {
+        // The clock fixed before anything reads it, as a scheduled run's
+        // is (`Clocked`): a `check` asked at one instant and a body run at
+        // a later one could pass an event its body then reads as past, or
+        // refuse one its body would take.
+        let now = self.now()?;
+        let before = self.clock.replace(now);
+        let c = Clocked { db: self, before };
+        c.db.take_at(e, &key, now)
+    }
+
+    /// [`Self::take_event`] with the clock fixed to `now`.
+    fn take_at(&mut self, e: &Event, key: &str, now: i64) -> Result<Took> {
+        if let Some(k) = self.kept(key, e.digest)? {
             return Ok(Took::Held(k));
         }
-        let takers = self.judged(e)?;
+        let takers = self.judged(e, now)?;
         if takers.is_empty() {
             return Ok(Took::Passed);
         }
@@ -162,11 +179,11 @@ impl Database {
         // lease asked as the block lands.
         self.may_start()?;
         if self.block.is_some() {
-            return self.taking(e, &key, &takers).map(Took::Ran);
+            return self.taking(e, key, &takers, now).map(Took::Ran);
         }
         self.whole(|db| {
             db.open_block();
-            match db.taking(e, &key, &takers) {
+            match db.taking(e, key, &takers, now) {
                 Ok(n) => db.commit().map(|_| Took::Ran(n)),
                 Err(err) => {
                     db.rollback();
@@ -201,9 +218,12 @@ impl Database {
     }
 
     /// The statements of `e`'s hook that take it, in name order, each with
-    /// the values its parameters read from it; refused as
-    /// [`Self::take_event`] says. Over `&Database`: nothing of it writes.
-    fn judged(&self, e: &Event) -> Result<Vec<Callee>> {
+    /// the values its parameters read from it, each `check` asked at `now`,
+    /// the taking's instant its bodies read; refused as
+    /// [`Self::take_event`] says. Over `&Database`: nothing of it writes,
+    /// and a caller judging before the write lock hands it the instant it
+    /// takes the event at.
+    fn judged(&self, e: &Event, now: i64) -> Result<Vec<Callee>> {
         let hook = e.hook;
         let of_hook = || (self.statements.iter()).filter(|s| s.hook.as_deref() == Some(hook));
         if of_hook().next().is_none() {
@@ -226,7 +246,7 @@ impl Database {
         let ctx = EvalCtx {
             params: &[],
             registry: &self.registry,
-            clock: self.clock,
+            clock: Some(now),
         };
         let mut takers = Vec::new();
         for s in of_hook() {
@@ -272,24 +292,25 @@ impl Database {
         Ok(takers)
     }
 
-    /// `takers`' bodies run in the block open, in their order, then `key`'s
-    /// row: how many took the event.
-    fn taking(&mut self, e: &Event, key: &str, takers: &[Callee]) -> Result<u32> {
-        // As a block of statements starts: what an earlier write's
-        // bindings or preparation left is not this event's.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.disarm();
+    /// `takers`' bodies run in the block open, in their order, the clock
+    /// fixed to `now`, then `key`'s row: how many took the event.
+    fn taking(&mut self, e: &Event, key: &str, takers: &[Callee], now: i64) -> Result<u32> {
+        // As a block of statements starts: rows a panic left woken -- a
+        // statement unwound out of a block its caller opened, which no
+        // `whole` settled -- are no binding's of this event's
+        // (`rows_a_panic_left_woken_wake_nothing_in_the_next_event`). No
+        // `disarm`, which `execute_many` and a lone statement ask: nothing
+        // here offers a preparation (`offer`), so a put of a body builds
+        // its own documents, and one a panic left is let go of by the next
+        // block that offers one.
         self.settle_woken();
-        let now = self.now()?;
         let until = now
             .checked_add(e.keep)
             .ok_or_else(|| Error::Query("a hook's `keep` runs past the clock".into()))?;
         let taken = takers.len() as u32;
-        let before = self.clock.replace(now);
-        let c = Clocked { db: self, before };
         // One budget for every statement the event wakes and their
         // bindings, fresh an event.
-        c.db.bounded(|db| {
+        self.bounded(|db| {
             for t in takers {
                 for s in &t.def.body {
                     db.run_one(s, &t.values)?;

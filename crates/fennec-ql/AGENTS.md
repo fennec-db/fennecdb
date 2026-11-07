@@ -176,7 +176,9 @@ held answered as its first taking was (`Took::Held`), a second body too,
 never run; else the hook's statements in name order, each condition asked
 and each parameter typed with no cast (`named::event_at`, a key of digits a
 list's place), their bodies and the key's row -- its own `until`,
-`@ttl(1ms)` -- one block under one `--call-max-rows`. A statement broken
+`@ttl(1ms)` -- one block under one `--call-max-rows`, refused first where
+writes are (`may_start`), `now()` one instant fixed as it starts for the
+key, every `check` and every body (`Clocked`). A statement broken
 by its body refuses the events its condition takes, an unread one every
 event of its hook (409). A replacement keeps the kind
 (`named::Kind::Hooked`), its hook changing freely; `MAX_HOOKED` bounds a
