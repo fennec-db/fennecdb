@@ -656,7 +656,11 @@ public sealed class ClientTests(Servers servers)
     [Fact]
     public async Task ASchemaIsComparedAndAppliedOnlyWhenAsked()
     {
-        using var db = Root();
+        // A server of its own: the migrations a schema ran are recorded in the server's own `_migrations`, which no
+        // statement changes, so a list starts over in a new file.
+        var url = servers.Serve("--file", Path.Combine(servers.Scratch, $"schema-{Guid.NewGuid():N}.fennec"),
+            "--http-token", Servers.RootToken);
+        using var db = new FennecClient(url, new FennecClientOptions { Token = Servers.RootToken });
         var name = Fresh("schema");
         var v1 = $"create collection {name} (title text required, n int @hash)";
         await db.ExecAsync(v1);
@@ -672,6 +676,5 @@ public sealed class ClientTests(Servers servers)
         object[] moved = [$"alter collection {name} rename field title to name"];
         Assert.Equal([1], (await db.SchemaAsync(v3, moved, migrate: true)).Migrations);
         Assert.Empty((await db.SchemaAsync(v3, moved, migrate: true)).Migrations);
-        await db.ExecAsync("drop collection _migrations");
     }
 }

@@ -615,7 +615,9 @@ fn full(cfg: &Config, req: &Request) -> bool {
 
 /// The statement as `who` may run it, and in `mask` what its answer must
 /// not show `who` (`access::Mask`, [`shown`]): `None` but where a rule
-/// names the fields a read shows.
+/// names the fields a read shows. The server's token runs it as sent, but
+/// for one making, changing or writing a collection of the server's own
+/// (`access::own_refused`), which it reads alone.
 fn scoped(
     who: &Who,
     stmt: Statement,
@@ -623,7 +625,7 @@ fn scoped(
     mask: &mut Option<access::Mask>,
 ) -> fennec_core::error::Result<Statement> {
     match who.scope() {
-        None => Ok(stmt),
+        None => access::own_refused(&stmt).map(|_| stmt),
         // A parameter's documents written in, each held to the rules.
         Some(scope) => scope.rewrite_with(stmt.with_documents(params)?, params, mask),
     }
@@ -2199,12 +2201,12 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         let guard = held::read(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
-            Err(e) => return error_response(&e),
+            Err(e) => return error_response(&path_refusal(&who, req).unwrap_or(e)),
         };
         let mut mask = None;
         let (stmt, bound) = match scoped_under(&who, &guard, routed.statement, &[], &mut mask) {
             Ok(s) => s,
-            Err(e) => return error_response(&e),
+            Err(e) => return error_response(&path_refusal(&who, req).unwrap_or(e)),
         };
         let shows = bound.as_ref().unwrap_or(&who);
         let running = trace::span("execute");
@@ -2219,6 +2221,71 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Err(e) => error_response(&e),
         }
     }
+}
+
+/// The collections a REST request's route reads the schema of, in the
+/// order it reads them ([`api::route`], [`api::subscription`]): the
+/// path's -- `/<name>`, `/<name>/all`, `/<name>/near`, `/<name>/changes`,
+/// none for the root and `GET /collections`, the listings -- and, for a
+/// `GET /<name>`, the one route reading one, each level of its `lookup`,
+/// left to right, the first `lookup` key as the route takes it. A level's
+/// `on`, `parent` and `select` name fields of these; an inner `get` in a
+/// `where=` is read by no route, and the rules answer it as in a
+/// statement.
+fn rest_collections(req: &Request) -> impl Iterator<Item = &str> {
+    let mut segments = req.path.split('/').filter(|s| !s.is_empty());
+    let (name, more) = (segments.next(), segments.next().is_some());
+    let reads = matches!(req.method, Method::Get | Method::Head);
+    let path = name.filter(|n| !(*n == "collections" && !more && reads));
+    let lookup = match (path, more, reads) {
+        (Some(_), false, true) => req.query.iter().find(|(k, _)| k == "lookup"),
+        _ => None,
+    };
+    let levels = lookup
+        .into_iter()
+        .flat_map(|(_, spec)| spec.split(',').map(str::trim).filter(|n| !n.is_empty()));
+    path.into_iter().chain(levels)
+}
+
+/// What a REST request or a subscription the route or the shape refused
+/// is answered with where it names a collection `who` may not reach, in
+/// place of that refusal: for a scoped token, where its path or a `lookup`
+/// level names one it is granted nothing on -- every collection of the
+/// server's own among them -- what a collection no database holds gets,
+/// the first such in the route's order; for the server's token writing one
+/// of the server's own by its path, that refusal (`access::own_refusal`).
+/// The route reads each collection's schema before the token's rules are
+/// asked, so a filter, a `select` or a level's `on` naming a field it
+/// lacks told a token the collection was there, and its fields: `GET
+/// /_follow?nosuch=eq.1` answered `field \`nosuch\` in collection
+/// \`_follow\``, where `_none` was `collection \`_none\``, and `GET
+/// /notes?lookup=_follow` asked for `_follow.on` where `_none` was not
+/// there. The answer is the request's and the rules' alone, whatever the
+/// database holds. Asked of a refusal alone: a request the route takes
+/// meets the rules after it, which refuse a collection the token is
+/// granted nothing on in the same words, and pays nothing for it.
+pub(crate) fn path_refusal(who: &Who, req: &Request) -> Option<Error> {
+    let mut named = rest_collections(req);
+    match who.scope() {
+        Some(scope) => named
+            .find(|c| !scope.known(c))
+            .map(|c| Error::NotFound(format!("collection `{c}`"))),
+        None => {
+            let name = named.next()?;
+            (fennec_core::declared::own(name) && wants_write(req))
+                .then(|| access::own_refusal(name))
+        }
+    }
+}
+
+/// The answer to the server's token's statement changing `name`, a
+/// collection of the server's own ([`access::own_refusal`]), out of
+/// [`run_query`]'s line, which every statement takes: there the check is
+/// a variant's tag and a name's first byte.
+#[cold]
+#[inline(never)]
+fn own_answer(name: &str) -> Response {
+    error_response(&access::own_refusal(name))
 }
 
 /// A REST write under the write lock, routed there unless [`early_put`]
@@ -2257,9 +2324,14 @@ fn rest_write(
     // dropped, a field it changed -- it waits for that; refused by the
     // request alone -- a path no route takes, a body that is no JSON --
     // it waits for nothing ([`api::refusal_read`]).
+    // A path naming a collection the token may not reach is refused by
+    // that ([`path_refusal`]), which reads nothing the writes made.
     let routed = match api::route(&guard, req) {
         Ok(r) => r,
         Err(e) => {
+            if let Some(told) = path_refusal(who, req) {
+                return refused_under(db, cfg, guard, false, error_response(&told));
+            }
             let read = read_from_writes(&e) && api::refusal_read(req, &e);
             return refused_under(db, cfg, guard, read, error_response(&e));
         }
@@ -2271,6 +2343,9 @@ fn rest_write(
         // outside them -- read nothing of the database; one whose rules
         // read another collection read that ([`scoped_under`]).
         Err(e) => {
+            if let Some(told) = path_refusal(who, req) {
+                return refused_under(db, cfg, guard, false, error_response(&told));
+            }
             let read = who.reaches_out() && read_from_writes(&e);
             return refused_under(db, cfg, guard, read, error_response(&e));
         }
@@ -2595,7 +2670,11 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             "the schema is the server's: a scoped token compares (?mode=follow) and does not apply",
         ),
         (Method::Post, ["_schema", "plan"]) => {
-            fennec_abi::schema(&mut held::write(db), body, false, None)
+            let mut guard = held::write(db);
+            match own_declared(&mut guard, body) {
+                Some(e) => Err(e),
+                None => fennec_abi::schema(&mut guard, body, false, None),
+            }
         }
         (Method::Post, ["_schema", "apply"]) => {
             if cfg.read_only {
@@ -2787,6 +2866,39 @@ fn writes(db: &RwLock<Database>, body: &[u8]) -> Option<String> {
     }
 }
 
+/// Why the description `body` reaches a collection of the server's own
+/// where it does -- one it declares, or one a migration `db` would run
+/// makes, changes or writes: refused before anything is planned, as the
+/// server's token's own statement is (`access::own_refused`), since a
+/// declared collection is a `create` and a migration runs as a statement
+/// of that token's. Asked under the write lock the plan or the apply
+/// takes, of the migrations still to run there alone
+/// ([`fennec_abi::unrecorded`]): one `db` recorded ran before these
+/// collections were the server's -- a `drop collection _old` an app's list
+/// keeps, as the list only grows -- and runs never again, and on a
+/// database holding none of its own collections the list is recorded
+/// unrun; asked of every one, such a list was refused at every plan after.
+/// A description `GET /_schema` writes declares none, leaving them out. A
+/// body that does not read is left to the plan, which says why.
+fn own_declared(db: &mut Database, body: &str) -> Option<fennec_core::error::Error> {
+    let d = fennec_abi::read(body).ok()?;
+    if let Some(s) = d
+        .collections
+        .iter()
+        .find(|s| fennec_core::declared::own(&s.name))
+    {
+        return Some(access::own_refusal(&s.name));
+    }
+    let texts = fennec_core::declared::migration_texts(&d).ok()?;
+    let (pending, runs) = fennec_abi::unrecorded(db, &texts).ok()?;
+    texts[pending]
+        .iter()
+        .filter(|_| runs)
+        .filter_map(|t| fennec_ql::parse(t).ok())
+        .flatten()
+        .find_map(|s| access::own_refused(&s).err())
+}
+
 /// `POST /_schema/apply`, and a tenant's schema as a router creates it
 /// (`POST /_admin/tenants/<t>/schema`): the description's migrations, then
 /// what only adds, one block under the write lock, synced as a write is.
@@ -2800,7 +2912,10 @@ pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str)
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     let mut guard = held::write(db);
-    let r = fennec_abi::schema(&mut guard, body, true, Some(now));
+    let r = match own_declared(&mut guard, body) {
+        Some(e) => Err(e),
+        None => fennec_abi::schema(&mut guard, body, true, Some(now)),
+    };
     let durability = match &r {
         Ok(o) if o.applied => flush_for(cfg, &mut guard),
         // Refused, or finding everything there as declared (`applied:
@@ -2929,7 +3044,12 @@ fn run_query(
     // into a copy of it.
     let mut mask = None;
     let stmt = match who.scope() {
-        None => stmt,
+        // As [`scoped`] holds it, the parse left shared: the name's first
+        // byte asked here, the refusal made out of line.
+        None => match access::own_written(&stmt) {
+            None => stmt,
+            Some(name) => return own_answer(name),
+        },
         Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params, &mut mask) {
             Ok(s) => Arc::new(s),
             Err(e) => return error_response(&e),

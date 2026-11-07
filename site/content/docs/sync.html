@@ -76,7 +76,10 @@ const db = await sync({
     working while the server moves ahead.</li>
   <li><b>Nothing is applied, not even an addition.</b> The schema changes
     where it lives, on the server: its owner's migrations, a deploy step's
-    <code>connect(url, { schema, migrations, migrate: true })</code>.</li>
+    <code>connect(url, { schema, migrations, migrate: true })</code>, each
+    recorded in the server's own <code>_migrations</code>, which no
+    statement changes — a list starts over in a new file, or a new
+    tenant.</li>
 </ul>
 
 <details class="deep"><summary>How the schema is compared</summary>

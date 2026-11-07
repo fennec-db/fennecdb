@@ -312,7 +312,7 @@ pub fn serve(
                     scope: Arc::clone(scope),
                     mask,
                 });
-                sub.filter = scope.restrict(&sub.collection, shape)?;
+                sub.filter = scope.subscribed(&sub.collection, shape)?;
             }
             Ok((sub, quiet, view, reach))
         });
@@ -321,6 +321,9 @@ pub fn serve(
     let (mut sub, quiet, mut view, reach) = match sub {
         Ok(s) => s,
         Err(e) => {
+            // Over a collection the token is granted nothing on, the shape
+            // read against its schema told nothing of it.
+            let e = crate::path_refusal(who, req).unwrap_or(e);
             let _ = write_head(
                 out,
                 cfg,
@@ -757,7 +760,7 @@ impl Reach {
         let bound = Arc::new(self.scope.bound_over(db, &[&self.collection])?);
         let mut project = self.project.clone();
         let (shape, mask) = bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
-        let filter = bound.restrict(&self.collection, shape)?;
+        let filter = bound.subscribed(&self.collection, shape)?;
         Ok((filter, project, View { scope: bound, mask }))
     }
 

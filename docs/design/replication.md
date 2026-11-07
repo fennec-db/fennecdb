@@ -381,9 +381,12 @@ tenant is frozen or its lease is out, then asked of the lease as it is
 answered. Run past the gate, one sent during a move landed on the source
 after its export and was lost at the flip, and a make lost so was made
 again later at the last write on disk, past every write in between. The
-stream leaves `_consumers`' own writes out, the
+stream leaves `_consumers`' own writes out, and every collection of the
+server's own with them -- each whose name starts with `_` (`declared::own`):
+`_idempotency`'s keys, `_migrations`' records, `--follow`'s `_follow`, a
+hook's keys -- the
 cursor going past them, and a `wait` waits on past them rather than answer
-nothing at once, while a commit to where nothing but cursors were written
+nothing at once, while a commit to where nothing but those were written
 since the consumer's place writes nothing (`unmoved`, the change ring's
 `changed_collections_since`): a sink that committed every answer
 committed its own commit's empty answer, 30 000 fsynced writes in a few

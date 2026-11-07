@@ -54,8 +54,9 @@ const LONGEST: Duration = Duration::from_secs(30);
 /// Bytes of records read from the feed at a time.
 const READ: usize = 4 << 20;
 
-/// The collection the consumers' cursors are kept in.
-pub const CONSUMERS: &str = "_consumers";
+/// The collection the consumers' cursors are kept in, one of the server's
+/// own.
+pub const CONSUMERS: &str = fennec_core::declared::CONSUMERS;
 
 /// `/_changes` and `/_changes/consumers/...`.
 pub fn route(db: &Arc<RwLock<Database>>, feed: &Feed, cfg: &Config, req: &Request) -> Response {
@@ -402,17 +403,18 @@ fn changed<T>(
 }
 
 /// Whether moving a consumer standing at `at` to `since` changes nothing
-/// it would read: every write after `at` is a cursor's (`_consumers`),
-/// which the stream leaves out, and `since` is past `at`. Written, a sink
-/// that commits each answer -- an empty one past its own last commit too
-/// -- made a write for every one it read, for ever.
+/// it would read: every write after `at` is to a collection of the
+/// server's own -- a cursor's (`_consumers`), a key's -- which the stream
+/// leaves out, and `since` is past `at`. Written, a sink that commits each
+/// answer -- an empty one past its own last commit too -- made a write for
+/// every one it read, for ever.
 fn unmoved(db: &Database, at: u64, since: i64) -> bool {
     if at > since as u64 {
         return false;
     }
     // `None`: past the ring, or a collection dropped since -- moved.
     db.changed_collections_since(at)
-        .is_some_and(|names| names.iter().all(|n| n == CONSUMERS))
+        .is_some_and(|names| names.iter().all(|n| fennec_core::declared::own(n)))
 }
 
 /// How long a page of `req` may wait for a write (`wait`, [`LONGEST`] at
@@ -548,13 +550,17 @@ fn lines(
         if n == limit {
             return false;
         }
-        // The consumers' own cursors, the writes' keys, the events' keys
-        // and a named statement defined or dropped, of no collection's
-        // rows: passed over, and the cursor with them.
-        if matches!(
-            c.collection.as_deref(),
-            Some(CONSUMERS | crate::idempotent::KEYS | fennec_core::engine::HOOK_EVENTS)
-        ) || matches!(c.kind, ChangeKind::Statement)
+        // The server's own collections -- the consumers' own cursors, the
+        // writes' keys, the events' keys, a migration's record -- and a
+        // named statement defined or dropped, of no collection's rows:
+        // passed over, and the cursor with them. By the name's `_`, as
+        // every other surface holds them out (`declared::own`), so a
+        // collection the server comes to keep is left out without a line
+        // here.
+        if c.collection
+            .as_deref()
+            .is_some_and(fennec_core::declared::own)
+            || matches!(c.kind, ChangeKind::Statement)
         {
             next = c.seq;
             return true;

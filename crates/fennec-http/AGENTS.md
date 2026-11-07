@@ -83,6 +83,21 @@ refused, never cut, and rules reading each other's collections, a `*` rule
 reading one, or `new.` or `expired()` in one are refused at startup
 (`ring`).
 
+**[A collection whose name starts with `_` is the server's, out of every
+rule's reach.](../../docs/design/access.md#the-servers-own-collections)**
+`*` reaches every other (`access::covers`, `declared::own`); a rule naming
+or reading one is refused at startup, and a scoped token is answered as
+for a missing collection on every route -- as for any it is granted
+nothing on, whatever a REST request's route read of the schemas its path
+and each `lookup` level name (`path_refusal`), a subscription's inner
+`get` held to the rules (`Scope::subscribed`). The server's token reads
+them, and `scoped()` refuses its statement making, changing, compacting
+or writing one (`access::own_refused`), as the schema routes a
+description declaring one or a migration still to run reaching one
+(`own_declared`, under the lock; one recorded is not asked). The server
+writes its own through the engine, never a statement; a new one is
+`_`-named and listed in `declared::OWN`.
+
 **[A token is bound to the tenant it
 names.](../../docs/design/access.md#tenant-binding)** `route_tenant` asks it,
 and no route below `/t/<t>/` may skip it; every tenant's database installs

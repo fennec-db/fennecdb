@@ -296,7 +296,9 @@ waits for it as after the first answer.</p>
   <code>compact</code> — which cannot be put back — does not; a read ignores
   it. An answer over 64 KB is kept as its status and a note.</li>
   <li>Keys are kept for <code>--idempotency-ttl</code> seconds, a day unless
-  given, in a <code>_idempotency</code> collection the change stream leaves
+  given, in a <code>_idempotency</code> collection, the
+  <a href="/docs/http-access#own-collections">server's own</a>: no rule
+  reaches it, no statement changes it, and the change stream leaves it
   out. Its <code>at</code> is <a href="/docs/fennecql-indexes#ttl"><code>@ttl</code></a>:
   a key past its time is gone at once, and the sweeper deletes it.</li>
 </ul>

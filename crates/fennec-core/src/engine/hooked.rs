@@ -35,12 +35,13 @@ use crate::schema::{Field, IndexKind, Schema};
 use crate::value::{DataType, DocId, Value};
 
 /// The collection an event's key is kept in: the server's own
-/// (`declared::own`), held by its `_` out of a body, of the tenant's rows a
-/// quota counts (`Database::app_writes`), of the listings, `/_schema` and
-/// a `*` rule, as every system collection is, and, by its name, out of
-/// `/_changes` (`fennec_http::cdc`). Made by the first event taken, never
-/// before.
-pub const HOOK_EVENTS: &str = "_hook_events";
+/// (`declared::own`, named among `declared::OWN`), held by its `_` out of
+/// a body, of the tenant's rows a quota counts (`Database::app_writes`),
+/// of `/_changes` (`fennec_http::cdc`), of the listings and `/_schema`,
+/// and out of every rule's reach, a client's statement changing none of
+/// it (`docs/design/access.md#the-servers-own-collections`). Made by the
+/// first event taken, never before.
+pub const HOOK_EVENTS: &str = crate::declared::HOOK_EVENTS;
 
 /// An event a hook's sender sent, verified and parsed by the server, as
 /// [`Database::take_event`] takes it.

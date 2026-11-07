@@ -40,8 +40,9 @@ use std::time::{Duration, Instant};
 /// A log position as PostgreSQL prints it, for reporting one.
 pub use fennec_wire::client::lsn_text;
 
-/// The collection in the target file that remembers what follows what.
-pub const MARKER: &str = "_follow";
+/// The collection in the target file that remembers what follows what, one
+/// of the database's own.
+pub const MARKER: &str = fennec_core::declared::FOLLOW;
 
 /// How long applied changes may wait for their fsync while the stream keeps
 /// the socket busy. An idle socket syncs at once; this only bounds the wait

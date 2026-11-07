@@ -920,7 +920,12 @@ func TestHealth(t *testing.T) {
 
 func TestASchemaIsComparedAndAppliedOnlyWhenAsked(t *testing.T) {
 	ctx := context.Background()
-	db := root()
+	// A server of its own: the migrations a schema ran are recorded in the
+	// server's own `_migrations`, which no statement changes, so a list
+	// starts over in a new file.
+	url, stop := serve("--file", filepath.Join(t.TempDir(), "schema.fennec"), "--http-token", rootToken)
+	defer stop()
+	db := fennecdb.New(url, fennecdb.WithToken(rootToken))
 	name := fresh("schema")
 	v1 := "create collection " + name + " (title text required, n int @hash)"
 	must(db.Exec(ctx, v1)).of(t)
@@ -949,7 +954,6 @@ func TestASchemaIsComparedAndAppliedOnlyWhenAsked(t *testing.T) {
 	if plan := must(db.Schema(ctx, v3, moved, true)).of(t); plan.Applied || len(plan.Migrations) != 0 {
 		t.Fatalf("again answered %+v", plan)
 	}
-	must(db.Exec(ctx, "drop collection _migrations")).of(t)
 }
 
 func TestARawAnswerKeepsItsColumnsOrderAndItsTag(t *testing.T) {
