@@ -1373,3 +1373,91 @@ fn a_panic_applying_a_write_ends_the_follower_and_never_its_halt() {
     assert!(!db.is_poisoned(), "the panic let go of the lock unwinding");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A database's sink in memory, keeping the records it is handed: what a
+/// primary's feed would send.
+#[derive(Clone, Default)]
+struct Tap(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+impl Sink for Tap {
+    fn append(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+        Ok(())
+    }
+    fn record(&mut self, _: u64, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.0.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    }
+    fn rewrite(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+        Ok(())
+    }
+}
+
+/// A copy that cannot apply a primary's record part way into what it was
+/// sent -- an index made on a collection whose fields the copy holds
+/// otherwise, after writes whose vectors wait to be linked with it -- puts
+/// back what it had not landed, connects again for an image and ends the
+/// primary's copy, taking writes on from there.
+#[test]
+fn a_copy_that_could_not_apply_a_write_takes_an_image_and_goes_on() {
+    let d = dir("apply-refused");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    let (status, body) = query(&p, "create collection items2 (y int)");
+    assert_eq!(status, 200, "{body}");
+    // The copy's `items2`, made as the primary's first write: the same
+    // collection to the counter and the history, with another field.
+    let tap = Tap::default();
+    let mut other = Database::with_sink(Box::new(tap.clone()));
+    let made = fennec_ql::parse_one("create collection items2 (x text)").unwrap();
+    other.execute(&made).unwrap();
+    let mut db = Database::new();
+    db.follow(p.db.read().unwrap().history().lineage.clone())
+        .unwrap();
+    db.apply(&tap.0.lock().unwrap().concat()).unwrap();
+    assert_eq!(db.change_seq(), seq(&p));
+    // Writes it takes, their vectors waiting together, and the record it
+    // cannot, sent to it together.
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    write_some(&p, 0, 5);
+    let (status, body) = query(&p, "create index on items2 (y) @sorted");
+    assert_eq!(status, 200, "{body}");
+    let db = Arc::new(RwLock::new(db));
+    let upstream = format!("http://127.0.0.1:{}", p.port);
+    let follower = Follower::new(&upstream, TOKEN.into(), Arc::clone(&db), None, false).unwrap();
+    follower.start("apply-refused".into()).unwrap();
+    let at = || db.read().unwrap().change_seq();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while follower.images() == 0 || at() != seq(&p) {
+        assert!(
+            Instant::now() < deadline,
+            "the copy is at {} after {} images, the primary at {}",
+            at(),
+            follower.images(),
+            seq(&p)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    write_some(&p, 5, 3);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while at() != seq(&p) {
+        assert!(Instant::now() < deadline, "the copy stayed at {}", at());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(follower.images(), 1);
+    assert!(db.read().unwrap().failure().is_none());
+    for sql in [
+        "get items",
+        "get items select id near e [3.0, 1.0, 0.5] exact limit 3",
+        "get items2 select id where y > 0",
+    ] {
+        let copy = db.read().unwrap();
+        let r = copy
+            .query(&fennec_ql::parse_one(sql).unwrap(), &[])
+            .unwrap();
+        let got: Vec<(u64, Vec<Value>)> = (r.rows().unwrap().rows.iter())
+            .map(|r| (r.id, r.values.clone()))
+            .collect();
+        assert_eq!(got, rows(&p, sql), "{sql}");
+    }
+    follower.halt();
+    let _ = std::fs::remove_dir_all(&d);
+}

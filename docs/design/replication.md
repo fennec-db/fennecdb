@@ -14,7 +14,7 @@ and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
 where it stopped. A record is handed on as a block lands, whole in memory
 first, and one that fails or a panic stops part way is put back whole,
-never half of it served; the follower catches the panic with the lock
+with every record after it not landed, never half of it served; the follower catches the panic with the lock
 held, as a write it could not apply, and connects again for an image --
 or stops, where the panic came from the sink call on and failed the copy
 ([engine.md](engine.md#blocks)). So every write goes through `wal`, and a record moves the

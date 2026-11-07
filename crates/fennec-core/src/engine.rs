@@ -891,7 +891,8 @@ impl Block {
 
     /// [`Self::remember`] for a frame a replica applies ([`Database::apply`]),
     /// the store's mark taken only before the first of its collection's
-    /// frames.
+    /// frames in the record -- its marks from `since` on -- so that a
+    /// record is put back without those landed before it.
     #[inline(always)]
     fn remember_frame(
         &mut self,
@@ -899,8 +900,9 @@ impl Block {
         id: DocId,
         was: Option<crate::store::Loc>,
         store: &Store,
+        since: usize,
     ) {
-        if !self.marks.iter().any(|(c, _)| *c == cid) {
+        if !self.marks[since..].iter().any(|(c, _)| *c == cid) {
             self.marks.push((cid, store.mark()));
         }
         self.was.push(Undo::Doc(cid, id, was));
@@ -4217,6 +4219,44 @@ impl Drop for Unlanded<'_> {
     }
 }
 
+/// A primary's record a replica applied and has not landed
+/// ([`Database::apply`]): where it is in the records, the writes it holds,
+/// and where its entries begin in the spare block's log -- what puts back
+/// it and the records after it, and none landed before it.
+struct Applied {
+    start: usize,
+    end: usize,
+    writes: usize,
+    was: usize,
+    marks: usize,
+}
+
+/// The records [`Database::land_applied`] hands the sink, from the one at
+/// `at` on: put back as it drops -- the one at `at` too unless it is in
+/// the sink's hands (`landing`), whose record the file may hold -- and
+/// the log of those landed let go of. It drops where the sink refuses
+/// one, or where a panic unwinds out of landing one: before its sink
+/// call, in it, or in its notes; forgotten once every one landed. Without
+/// it the whole log was let go of there, and the records after the one
+/// refused, or in the sink's hands, stayed applied in memory -- in no
+/// record and on no feed -- served by the replica until the next open.
+struct Handing<'a> {
+    db: &'a mut Database,
+    held: &'a [Applied],
+    at: usize,
+}
+
+impl Drop for Handing<'_> {
+    fn drop(&mut self) {
+        let from = self.at + usize::from(self.db.landing);
+        let log = self
+            .held
+            .get(from)
+            .map_or((usize::MAX, usize::MAX), |h| (h.was, h.marks));
+        self.db.put_back_applied(log, false);
+    }
+}
+
 pub struct Database {
     collections: Names<Collection>,
     order: Vec<String>,
@@ -6414,9 +6454,11 @@ impl Database {
     /// ([`Block::remember_frame`]). One that fails, or a panic part way
     /// into one, puts it back whole, and with it those before it that wait
     /// on the graph's batch, so no reader ever meets part of a record: the
-    /// counter where it was, the records landed before it kept. From the
-    /// sink call on a panic fails the database ([`Self::apply_unwound`]),
-    /// the records whole in memory.
+    /// counter where it was, the records landed before it kept. The sink's
+    /// refusal of one puts back it and every record after it, and stops
+    /// writes; from the sink call on a panic fails the database
+    /// ([`Self::apply_unwound`]), the record in the sink's hands whole in
+    /// memory and those after it put back ([`Handing`]).
     pub fn apply(&mut self, records: &[u8]) -> Result<usize> {
         self.refuse_if_failed()?;
         // A block open is its opener's, whose lock this is: the primary's
@@ -6428,11 +6470,13 @@ impl Database {
         }
         let before = self.changes.seq();
         let applied = self.unwinding(|db| db.apply_records(records), Self::apply_unwound);
+        // Every record not landed, the last write whole: an error may come
+        // part way into a schema change's upkeep of its indexes.
         if applied.is_err() {
-            self.put_back_applied(false);
+            self.put_back_applied((0, 0), true);
         }
         // A large one's log let go of, as a large block's buffers are.
-        if self.spare.was.capacity() > 1 << 10 {
+        if self.spare.was.capacity() > 1 << 10 || self.spare.marks.capacity() > 1 << 10 {
             self.spare = Block::default();
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -6495,8 +6539,9 @@ impl Database {
 
     /// [`Self::unwound`] for [`Self::apply`]: before the sink call the
     /// records not landed put back, the last write whole; from it the
-    /// database failed, the records whole in memory -- the file may hold
-    /// them -- as a block landing is.
+    /// database failed, the record in the sink's hands whole in memory --
+    /// the file may hold it -- as a block landing is, and those after it
+    /// put back as the panic left [`Handing`].
     #[cold]
     #[inline(never)]
     fn apply_unwound(&mut self) {
@@ -6512,20 +6557,32 @@ impl Database {
         let torn = std::thread::panicking();
         #[cfg(not(panic = "unwind"))]
         let torn = false;
-        self.put_back_applied(torn);
+        self.put_back_applied((0, 0), torn);
     }
 
-    /// Puts back the records [`Self::apply`] applied and did not land, by
-    /// the spare block's log, the last write first -- whole where a panic
-    /// may have stopped it (`torn`) -- as a block is put back.
-    fn put_back_applied(&mut self, torn: bool) {
-        let marks = std::mem::take(&mut self.spare.marks);
-        let mut was = std::mem::take(&mut self.spare.was);
-        self.rewind(&marks, &mut was, torn);
+    /// Puts back the records [`Self::apply`] applied and did not land from
+    /// where `from` says their entries begin in the spare block's log --
+    /// its undo entries and its stores' marks -- the last write first,
+    /// whole where a panic may have stopped it (`torn`), as a block is put
+    /// back; the entries before them, of records landed, let go of. Cold:
+    /// the put-back of a record that did not land.
+    #[cold]
+    #[inline(never)]
+    fn put_back_applied(&mut self, (was, marks): (usize, usize), torn: bool) {
+        let mut log = std::mem::take(&mut self.spare.was);
+        let mut stores = std::mem::take(&mut self.spare.marks);
+        let mut rest = log.split_off(was.min(log.len()));
+        log.clear();
+        // A store is marked before each record's first write to it, so a
+        // store may be marked more than once among them: taken back to
+        // each, the latest first, it ends where it stood before the first.
+        let from = marks.min(stores.len());
+        stores[from..].reverse();
+        self.rewind(&stores[from..], &mut rest, torn);
         // Their buffers kept.
-        self.spare.marks = marks;
-        self.spare.marks.clear();
-        self.spare.was = was;
+        stores.clear();
+        self.spare.marks = stores;
+        self.spare.was = log;
     }
 
     /// The records `bytes` holds, each remembered in the spare block's log
@@ -6541,11 +6598,10 @@ impl Database {
         let mut batch = VectorBatch::default();
         let mut n = 0;
         let mut pos = 0;
-        // The records applied and not landed yet, by where each is in
-        // `bytes` and the writes it holds -- the one being applied, and
-        // those before it whose vectors wait in `batch` -- and their
+        // The records applied and not landed yet -- the one being applied,
+        // and those before it whose vectors wait in `batch` -- and their
         // writes, in the spare's buffer.
-        let mut held: Vec<(usize, usize, usize)> = Vec::new();
+        let mut held: Vec<Applied> = Vec::new();
         let mut notes = std::mem::take(&mut self.spare.notes);
         notes.clear();
         while pos < bytes.len() {
@@ -6563,16 +6619,19 @@ impl Database {
                 self.index_batch(&mut batch);
             }
             let noted = notes.len();
+            // Where its entries begin in the log: its stores are marked
+            // anew, for it to be put back without those landed before it.
+            let (was, marks) = (self.spare.was.len(), self.spare.marks.len());
             match rec {
                 REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT => {
                     self.apply_schema(rec, cid, body, &mut notes)?
                 }
-                REC_DATA => self.apply_frames(cid, body, &mut batch, &mut notes)?,
+                REC_DATA => self.apply_frames(cid, body, &mut batch, &mut notes, marks)?,
                 // A block's records, whole: they came as one, and reach this
                 // database's file as one.
                 REC_BLOCK => each_inner(body, &mut |kind, cid, inner| {
                     if kind == REC_DATA {
-                        return self.apply_frames(cid, inner, &mut batch, &mut notes);
+                        return self.apply_frames(cid, inner, &mut batch, &mut notes, marks);
                     }
                     if !batch.docs.is_empty() {
                         self.index_batch(&mut batch);
@@ -6588,7 +6647,13 @@ impl Database {
             // Applied whole, and not handed to the sink.
             #[cfg(test)]
             unwinding::panic_at("applied");
-            held.push((start, pos, notes.len() - noted));
+            held.push(Applied {
+                start,
+                end: pos,
+                writes: notes.len() - noted,
+                was,
+                marks,
+            });
             // Landed once its vectors are in the graph, as a block's are
             // linked before it lands. The batch goes on over the records
             // after it: linked a record at a time, a stream of single `put`s
@@ -6608,58 +6673,70 @@ impl Database {
     /// The records `held` names -- applied whole, their vectors linked --
     /// handed to the sink in turn, each numbered as its last write, as the
     /// primary numbered it, and its writes noted on the feed; what puts
-    /// them back is let go of. From the first sink call a panic fails the
-    /// database, as one landing a block does ([`Self::handing`]), and a
-    /// sink's refusal stops writes: either leaves the records whole in
-    /// memory, the file holding those the sink took.
+    /// them back is let go of. As a block landing: the sink's refusal of
+    /// one puts it back, and every one after it, and stops writes; from
+    /// its sink call through its notes a panic fails the database
+    /// ([`Self::handing`]), the record whole in memory -- the file may
+    /// hold it -- and those after it put back ([`Handing`]). The file
+    /// holds those the sink took.
     fn land_applied(
         &mut self,
         bytes: &[u8],
-        held: &mut Vec<(usize, usize, usize)>,
+        held: &mut Vec<Applied>,
         notes: &mut Vec<(u32, DocId)>,
     ) -> Result<usize> {
         let mut noted = 0;
-        for &(start, end, writes) in held.iter() {
-            let record = &bytes[start..end];
-            let seq = self.changes.seq() + writes as u64;
-            let r = self.handing().record(seq, record);
-            if let Err(e) = self.storage(r) {
-                self.landing = false;
-                self.spare.marks.clear();
-                self.spare.was.clear();
+        let mut g = Handing {
+            db: self,
+            held: held.as_slice(),
+            at: 0,
+        };
+        for (k, h) in g.held.iter().enumerate() {
+            g.at = k;
+            let db = &mut *g.db;
+            let record = &bytes[h.start..h.end];
+            let seq = db.changes.seq() + h.writes as u64;
+            let r = db.handing().record(seq, record);
+            if let Err(e) = db.storage(r) {
+                // `g` puts back this one and those after it.
+                db.landing = false;
                 return Err(e);
             }
             // The frames went into the stores as the primary wrote them,
             // and the record into the file as it came.
             #[cfg(not(target_arch = "wasm32"))]
-            if self.mapped {
-                let at = *self.appended.get_mut();
-                handover::note_record(&mut self.landed, &mut self.landed_bytes, at, record);
-                self.landed_writes += writes as u64;
+            if db.mapped {
+                let at = *db.appended.get_mut();
+                handover::note_record(&mut db.landed, &mut db.landed_bytes, at, record);
+                db.landed_writes += h.writes as u64;
             }
-            *self.appended.get_mut() += record.len() as u64;
-            self.dirty = true;
-            let its = &notes[noted..noted + writes];
-            noted += writes;
+            *db.appended.get_mut() += record.len() as u64;
+            db.dirty = true;
+            let its = &notes[noted..noted + h.writes];
+            noted += h.writes;
             // A replica takes what its primary landed, and marks what it
             // breaks broken, never refusing it ([`Self::read_statements`]).
             // Asked only of a replica holding statements: a block of 50 000
             // writes would be walked for none.
             #[cfg(feature = "statements")]
-            let schema = !self.statements.is_empty() && its.iter().any(|n| n.1 == SCHEMA_MARK);
+            let schema = !db.statements.is_empty() && its.iter().any(|n| n.1 == SCHEMA_MARK);
             for &(cid, id) in its {
                 #[cfg(test)]
                 unwinding::panic_at("notes");
-                self.note(cid, id);
+                db.note(cid, id);
             }
             #[cfg(feature = "statements")]
             if schema {
-                self.read_statements();
+                db.read_statements();
             }
+            // Landed: a panic before the next one's sink call puts back
+            // that one and those after it, and leaves the database as it
+            // is -- this one in the file, on the feed and counted.
+            db.landing = false;
         }
+        std::mem::forget(g);
         self.spare.marks.clear();
         self.spare.was.clear();
-        self.landing = false;
         let n = held.len();
         held.clear();
         notes.clear();
@@ -6812,13 +6889,16 @@ impl Database {
     /// A data record's frames into collection `cid`, each through the index
     /// upkeep the write path does -- vectors into `batch`, which each frame
     /// that needs the graph as it stands after the ones before ends -- and
-    /// each noted in `notes`.
+    /// each noted in `notes`. `since`: where the record's marks begin in
+    /// the spare block's log, a store marked before the record's first
+    /// write to it.
     fn apply_frames(
         &mut self,
         cid: u32,
         body: &[u8],
         batch: &mut VectorBatch,
         notes: &mut Vec<(u32, DocId)>,
+        since: usize,
     ) -> Result<()> {
         let cut = || Error::Corrupt("a write record cut short".into());
         let name = self.named(cid).ok_or_else(|| missing(cid))?;
@@ -6829,29 +6909,44 @@ impl Database {
             p += 1;
             let id = get_uvarint(body, &mut p)?;
             let plen = get_uvarint(body, &mut p)? as usize;
-            let frame = body.get(at..p + plen).ok_or_else(cut)?;
-            p += plen;
+            let end = p.checked_add(plen).ok_or_else(cut)?;
+            let frame = body.get(at..end).ok_or_else(cut)?;
+            let payload = &body[p..end];
+            p = end;
             // Another collection's, or a document the batch holds: the
             // graph has to take the batch first.
             if !batch.docs.is_empty() && (cid != batch.cid || batch.ids.contains(&id)) {
                 self.index_batch(batch);
             }
             let c = self.collections.get_mut(&name).unwrap();
-            // Remembered before the frame changes anything, as a write is
-            // ([`Block::remember`]): a panic in its upkeep of the indexes
-            // puts it back whole, and the record with it. The row is read
-            // from the place remembered, not looked up a second time.
+            // The row it writes over, read from where it is, and the one it
+            // writes, read from the frame: a frame that does not read -- a
+            // payload no document, an op neither a put nor a del -- is
+            // refused before it changes anything. Read from the store once
+            // the frame was in, a payload that did not read was refused
+            // with the row before it still in its indexes, which the
+            // put-back indexed again (its words counted twice); and an op
+            // of neither took the row out of its indexes, the store still
+            // holding it.
             let was = c.store.loc(id);
-            self.spare.remember_frame(cid, id, was, &c.store);
             let old = match was {
                 Some(at) => Some(c.store.read_at(&c.schema, id, at)?),
                 None => None,
             };
-            c.store.append_frame(op, id, frame, plen);
-            let new = match op == OP_PUT {
-                true => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
-                false => None,
+            let new = match op {
+                OP_PUT => Some(c.schema.read_doc(id, payload)?),
+                OP_DEL => None,
+                other => {
+                    return Err(Error::Corrupt(format!(
+                        "a write op {other} is neither a put nor a del"
+                    )))
+                }
             };
+            // Remembered before the frame changes anything, as a write is
+            // ([`Block::remember`]): a panic in its upkeep of the indexes
+            // puts it back whole, and the record with it.
+            self.spare.remember_frame(cid, id, was, &c.store, since);
+            c.store.append_frame(op, id, frame, plen);
             if let Some(old) = &old {
                 c.unindex_doc(old, new.as_ref());
             }

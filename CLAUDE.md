@@ -142,7 +142,8 @@ lock.
 `commit` appends it whole and only then notes it, so a crash, a replica
 and a subscriber see all of it or none; a replica's `apply` lands each of
 its primary's records so, whole in memory, its vectors linked, before the
-sink takes it (`land_applied`). A failed one is undone in memory,
+sink takes it (`land_applied`), those after one refused or in the sink's
+hands at a panic put back (`Handing`). A failed one is undone in memory,
 a schema change too (`Undo`, a variant each), every write recording its
 undo before it changes anything (`Block::remember`) by the id it was
 handed, a hook changing that id refused natively (`ask_hooks`); whatever

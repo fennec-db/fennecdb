@@ -15,6 +15,10 @@ thread_local! {
     /// a name, or `+` or `-` and an index's name for that index taking a
     /// document in or out.
     static PANIC_AT: Cell<Option<&'static str>> = const { Cell::new(None) };
+    /// How many times [`armed`] passes that point by before it is armed: a
+    /// replica's records land one after another, each through the same
+    /// points, and the graph links a batch's vectors one after another.
+    static PANIC_SKIP: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Whether a test asked for a panic at `at`, which it is then told it
@@ -22,9 +26,20 @@ thread_local! {
 pub(crate) fn armed(at: &str) -> bool {
     let hit = PANIC_AT.with(|p| p.get()) == Some(at);
     if hit {
+        if PANIC_SKIP.with(|s| s.replace(s.get().saturating_sub(1))) > 0 {
+            return false;
+        }
         PANIC_AT.with(|p| p.set(None));
     }
     hit
+}
+
+/// A panic at `at` the `skip + 1`th time a write passes it, for the next
+/// write on this thread.
+#[cfg(all(feature = "std-fs", feature = "indexes", feature = "geo"))]
+fn arm(at: &'static str, skip: usize) {
+    PANIC_SKIP.with(|s| s.set(skip));
+    PANIC_AT.with(|p| p.set(Some(at)));
 }
 
 /// A panic where a test asked for one at `at`: a site in the landing or
@@ -193,7 +208,7 @@ mod on_file {
 #[cfg(all(feature = "std-fs", feature = "indexes", feature = "geo"))]
 mod torn {
     use super::super::*;
-    use super::{Scratch, PANIC_AT};
+    use super::{arm, Scratch, PANIC_AT};
     use crate::schema::{Field, TextIndexSpec, VectorIndexSpec};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::Path;
@@ -782,13 +797,18 @@ mod torn {
 
     /// How a write reaches a replica: its record alone; after the record
     /// of a `put` to `u`, in one `apply`, which waits for the graph to take
-    /// its vector with the write; or in one block record with that `put`.
+    /// its vector with the write; in one block record with that `put`; or
+    /// after the records of three, whose vectors wait together and go into
+    /// the graph one after another as the write's record comes.
     #[derive(Clone, Copy, Debug)]
     enum Shape {
         Alone,
         After,
         InBlock,
+        Three,
     }
+
+    const SHAPES: [Shape; 4] = [Shape::Alone, Shape::After, Shape::InBlock, Shape::Three];
 
     /// The records of `w` in `shape`, and the primary after them.
     fn shaped(w: Write, shape: Shape) -> (Vec<u8>, State) {
@@ -805,7 +825,36 @@ mod torn {
                 p.execute(&stmt)?;
                 p.commit()
             }
+            Shape::Three => {
+                for k in 3..=5 {
+                    p.execute(&put_u(k))?;
+                }
+                p.execute(&stmt).map(drop)
+            }
         })
+    }
+
+    /// Each of `records`, as the primary landed it.
+    fn each_record(records: &[u8]) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos < records.len() {
+            let r = record_at(records, &mut pos).expect("a record");
+            out.push(&records[r.at..pos]);
+        }
+        out
+    }
+
+    /// A replica's state after none of `each`, after the first, the first
+    /// two, and so on: what it holds once those landed.
+    fn steps(each: &[&[u8]]) -> Vec<State> {
+        (0..=each.len())
+            .map(|n| {
+                let mut db = made_on(Database::new());
+                db.apply(&each[..n].concat()).expect("the records");
+                state(&db)
+            })
+            .collect()
     }
 
     /// A replica over a file holding [`made`]'s rows, following.
@@ -837,10 +886,15 @@ mod torn {
     /// them or tell the replica from `after`, as the file opened again
     /// would.
     fn applied(dir: &Path, name: &str, at: &'static str, records: &[u8], after: &State) -> bool {
-        let path = dir.join(format!("{name}{at}.fennec").replace(['+', '@'], "_"));
+        let path = dir.join(format!("{name}{at}.fennec").replace(['+', '@', '*'], "_"));
         let mut db = replica(&path);
         let before = state(&db);
-        PANIC_AT.with(|p| p.set(Some(at)));
+        // `graph-link*1`: the second time the graph places a vector, the
+        // first linked -- a batch linked half way.
+        match at.split_once('*') {
+            Some((point, skip)) => arm(point, skip.parse().expect("a skip")),
+            None => arm(at, 0),
+        }
         let r = catch_unwind(AssertUnwindSafe(|| db.apply(records)));
         let reached = PANIC_AT.with(|p| p.take()).is_none();
         let tag = format!("{name} at {at}");
@@ -886,15 +940,16 @@ mod torn {
             Write::Del,
             Write::Upsert,
         ];
-        // The graph's own points aside: a replica links a batch, which
-        // `+v` stops before it changes the graph.
+        // The graph's own points but its placing a vector, the first and
+        // the second of a batch: a replica links a batch, never leaves one
+        // waiting.
         let points: Vec<&'static str> = (POINTS.iter().copied())
             .filter(|p| !p.starts_with("graph-"))
-            .chain(["applied", "before"])
+            .chain(["graph-link", "graph-link*1", "applied", "before"])
             .collect();
         let (mut reached, mut failed) = (Vec::new(), Vec::new());
         for w in writes {
-            for shape in [Shape::Alone, Shape::After, Shape::InBlock] {
+            for shape in SHAPES {
                 let (records, after) = shaped(w, shape);
                 let name = format!("{w:?}{shape:?}");
                 for &at in &points {
@@ -935,7 +990,9 @@ mod torn {
                     want.push(format!("{w:?} {d}{f}"));
                 }
             }
-            let landing = ["applied", "before"];
+            // The graph's in every write's shapes: a batch of `u`'s, three
+            // vectors in one.
+            let landing = ["graph-link", "graph-link*1", "applied", "before"];
             want.extend(also.iter().chain(&landing).map(|a| format!("{w:?} {a}")));
         };
         each(Write::Insert, "+", &[], &mid);
@@ -953,43 +1010,197 @@ mod torn {
     }
 
     /// From the sink call on, a panic fails the replica, as it fails a
-    /// primary landing a block: the record stays whole in memory, its
-    /// writes on no feed and the counter where it was -- no record takes
-    /// the numbers the file may hold -- and the file opened again holds it
-    /// or not, as far as the sink was handed it.
+    /// primary landing a block: the record in the sink's hands stays whole
+    /// in memory, its writes on no feed and the counter where it was -- no
+    /// record takes the numbers the file may hold -- the records landed
+    /// before it stay, and those after it, applied with it as their
+    /// vectors waited together, are put back: left in, they were served
+    /// by the failed replica, in no record. A panic before the sink call
+    /// of a record after the first puts back that one and those after it,
+    /// and the replica goes on. The file opened again holds the records
+    /// the sink was handed, and takes the rest.
     #[test]
     fn a_panic_landing_an_applied_record_fails_the_replica() {
         let scratch = Scratch::new("fennecdb-applied-landing");
-        let (records, after) = shaped(Write::Insert, Shape::Alone);
-        for (at, in_file) in [("sink", false), ("noted", true), ("notes", true)] {
-            let path = scratch.0.join(format!("{at}.fennec"));
-            let mut db = replica(&path);
-            let before = state(&db);
-            PANIC_AT.with(|p| p.set(Some(at)));
-            let r = catch_unwind(AssertUnwindSafe(|| db.apply(&records)));
-            assert!(r.is_err(), "{at}: no panic");
-            assert!(!db.in_block(), "{at}: a block left open");
-            assert!(!db.landing, "{at}: the landing left marked");
-            assert!(db.failure().is_some(), "{at}: the replica goes on");
-            let whole = State {
-                seq: before.seq,
-                ..after.clone()
-            };
-            assert_eq!(state(&db), whole, "{at}: in memory");
-            unfed(&db, before.seq, at);
-            let again = db.apply(&records);
-            assert!(matches!(again, Err(Error::Io(_))), "{at}: {again:?}");
-            drop(db);
-            let mut db = crate::fs::open(&path).expect("reopen");
-            if !in_file {
-                assert_eq!(state(&db), before, "{at}: the file");
-                db.apply(&records).expect("the record after the reopen");
+        let (mut cases, mut failed) = (0, Vec::new());
+        for shape in SHAPES {
+            let (records, _) = shaped(Write::Insert, shape);
+            let each = each_record(&records);
+            let steps = steps(&each);
+            for k in 0..each.len() {
+                // The notes of the records before it, passed by.
+                let noted = (steps[k].seq - steps[0].seq) as usize;
+                for (at, skip, in_file) in [
+                    ("before", k, false),
+                    ("sink", k, false),
+                    ("noted", k, true),
+                    ("notes", noted, true),
+                ] {
+                    let tag = format!("{shape:?} at {at} of record {k}");
+                    let path = scratch.0.join(format!("{shape:?}{at}{k}.fennec"));
+                    cases += 1;
+                    let case = || {
+                        let mut db = replica(&path);
+                        arm(at, skip);
+                        let r = catch_unwind(AssertUnwindSafe(|| db.apply(&records)));
+                        assert!(r.is_err(), "{tag}: no panic");
+                        assert!(!db.in_block(), "{tag}: a block left open");
+                        assert!(!db.landing, "{tag}: the landing left marked");
+                        let fails = at != "before";
+                        assert_eq!(db.failure().is_some(), fails, "{tag}: failed");
+                        let held = match fails {
+                            true => State {
+                                seq: steps[k].seq,
+                                ..steps[k + 1].clone()
+                            },
+                            false => steps[k].clone(),
+                        };
+                        assert_eq!(state(&db), held, "{tag}: in memory");
+                        unfed(&db, steps[k].seq, &tag);
+                        let rest = each[k..].concat();
+                        if fails {
+                            let again = db.apply(&rest);
+                            assert!(matches!(again, Err(Error::Io(_))), "{tag}: {again:?}");
+                        } else {
+                            db.apply(&rest).expect("the records after the put-back");
+                            assert_eq!(state(&db), steps[each.len()], "{tag}: taken again");
+                        }
+                        drop(db);
+                        let mut db = crate::fs::open(&path).expect("reopen");
+                        if fails {
+                            let landed = k + usize::from(in_file);
+                            assert_eq!(state(&db), steps[landed], "{tag}: the file");
+                            db.apply(&each[landed..].concat())
+                                .expect("the rest after the reopen");
+                        }
+                        assert_eq!(state(&db), steps[each.len()], "{tag}: the file");
+                    };
+                    if catch_unwind(AssertUnwindSafe(case)).is_err() {
+                        failed.push(tag);
+                    }
+                    PANIC_AT.with(|p| p.set(None));
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+                }
             }
-            assert_eq!(state(&db), after, "{at}: the file");
-            drop(db);
-            let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         }
+        drop(scratch);
+        assert!(
+            failed.is_empty(),
+            "{} of {cases} failed: {failed:#?}",
+            failed.len()
+        );
+        // Alone, after one, in a block, after three: records of one, two,
+        // one and four, at four points each.
+        assert_eq!(cases, 4 * (1 + 2 + 1 + 4));
+    }
+
+    /// A sink refusing every record from the `n`th it is handed on, as a
+    /// full disk does; `None` takes them all.
+    #[derive(Clone, Default)]
+    struct Refusing(std::sync::Arc<std::sync::Mutex<Option<usize>>>);
+
+    impl Sink for Refusing {
+        fn append(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, _: u64, _: &[u8]) -> Result<()> {
+            let mut n = self.0.lock().unwrap();
+            match *n {
+                Some(0) => Err(Error::Io("a test's refusal".into())),
+                Some(k) => {
+                    *n = Some(k - 1);
+                    Ok(())
+                }
+                None => Ok(()),
+            }
+        }
+        fn rewrite(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The sink's refusal of a record puts back it and every record after
+    /// it, applied with it as their vectors waited together, and stops
+    /// writes, as a primary's refused block is put back: the records
+    /// before it landed stay. Left in, the records after it were served by
+    /// the failed replica, in no record and on no feed -- the three rows of
+    /// `u` of [`Shape::Three`] refused at its first.
+    #[test]
+    fn a_refused_record_is_put_back_with_every_record_after_it() {
+        let (mut cases, mut failed) = (0, Vec::new());
+        for shape in SHAPES {
+            let (records, _) = shaped(Write::Insert, shape);
+            let each = each_record(&records);
+            let steps = steps(&each);
+            for k in 0..each.len() {
+                let tag = format!("{shape:?}, record {k} refused");
+                cases += 1;
+                let case = || {
+                    let sink = Refusing::default();
+                    let mut db = made_on(Database::with_sink(Box::new(sink.clone())));
+                    db.follow(vec![(7, 0)]).expect("follow");
+                    assert_eq!(state(&db), steps[0], "{tag}: made");
+                    *sink.0.lock().unwrap() = Some(k);
+                    let r = db.apply(&records);
+                    assert!(matches!(r, Err(Error::Io(_))), "{tag}: {r:?}");
+                    assert!(db.failure().is_some(), "{tag}: writes go on");
+                    assert!(!db.landing, "{tag}: the landing left marked");
+                    assert_eq!(state(&db), steps[k], "{tag}: put back");
+                    unfed(&db, steps[k].seq, &tag);
+                };
+                if catch_unwind(AssertUnwindSafe(case)).is_err() {
+                    failed.push(tag);
+                }
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "{} of {cases} failed: {failed:#?}",
+            failed.len()
+        );
+    }
+
+    /// A frame that does not read -- a payload no document, an op neither
+    /// a put nor a del -- is refused as corrupt before it changes anything,
+    /// alone and after a frame that read, which is put back. Read from the
+    /// store after the frame went in, a payload that did not read was put
+    /// back by difference into indexes it had never left, `t`'s row 1 in
+    /// its text indexes twice; and an op of neither was taken, the row out
+    /// of its indexes and the store still holding it.
+    #[test]
+    fn a_frame_that_does_not_read_changes_nothing() {
+        let (records, after) = landed(|p| p.execute(&write(Write::Over)).map(drop));
+        let one = record_at(&records, &mut 0).expect("a record");
+        assert_eq!(one.kind, REC_DATA);
+        let scratch = Scratch::new("fennecdb-applied-unread");
+        let path = scratch.0.join("unread.fennec");
+        let mut db = replica(&path);
+        let before = state(&db);
+        let bad = [
+            ("a payload no document", Store::frame(OP_PUT, 1, &[0xfe; 4])),
+            ("an op of neither", Store::frame(7, 1, &[])),
+        ];
+        for (what, frame) in &bad {
+            for first in [false, true] {
+                let tag = format!("{what}{}", if first { ", after one" } else { "" });
+                let mut body = match first {
+                    true => one.body.to_vec(),
+                    false => Vec::new(),
+                };
+                body.extend_from_slice(frame);
+                let r = db.apply(&framed(REC_DATA, one.cid, &body));
+                assert!(matches!(r, Err(Error::Corrupt(_))), "{tag}: {r:?}");
+                assert!(db.failure().is_none(), "{tag}: the replica failed");
+                assert_eq!(state(&db), before, "{tag}: put back");
+                unfed(&db, before.seq, &tag);
+            }
+        }
+        db.apply(&records).expect("the record");
+        assert_eq!(state(&db), after, "taken");
+        drop(db);
+        let db = crate::fs::open(&path).expect("reopen");
+        assert_eq!(state(&db), after, "the file");
     }
 
     /// A schema change applied, with a panic at each point it reaches:
