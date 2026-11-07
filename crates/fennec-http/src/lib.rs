@@ -2086,6 +2086,17 @@ fn is_mcp(req: &Request) -> bool {
     req.path.contains("_mcp") && req.segments() == ["_mcp"]
 }
 
+/// Whether `req`'s first segment starts with an underscore, the mark of the
+/// server's own paths -- `/_mcp` ([`is_mcp`]) and `/_hooks/` (`hooks::is_hook`)
+/// among them, the two [`handle`] judges before any token. One byte looked
+/// at past the slashes, as [`Request::segments`] skips them, so it says
+/// `true` of every path either route takes; the scan for `_mcp` it stands
+/// in front of was most of a `/query` write's route checks.
+#[inline]
+fn own_path(req: &Request) -> bool {
+    req.path.bytes().find(|&b| b != b'/') == Some(b'_')
+}
+
 /// Whether `req`'s path is a call's, `/_call/<name>` -- `Some(Some(name))`
 /// -- or another below `/_call`, `Some(None)`: an underscore's path, as
 /// `/_mcp`'s and `/_schema`'s are, kept out of every collection's way
@@ -2204,17 +2215,24 @@ fn judged_read_only(
 
 /// Turns a request into a response: auth, preflight, routing, execution.
 pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
-    // The MCP endpoint asks where a request comes from before its token,
-    // and answers in JSON-RPC, 404 on a server without `--mcp`.
-    if is_mcp(req) {
-        return mcp::http(db, cfg, req);
-    }
-    // A webhook event, judged before any token is asked for: its signature
-    // stands in for one, and nothing of it is read before that verifies
-    // ([`hooks`]). A server with no hooks file has no such route.
-    if let Some(h) = &cfg.hooks {
-        if hooks::is_hook(req) {
-            return hooks::handle(db, cfg, h, req);
+    // The two routes judged before any token are paths of the server's own,
+    // under an underscore: every other request -- a collection's, `/query`,
+    // `/batch` -- looks at its path's first byte past the slashes and goes
+    // on to its token, scanning for neither route ([`own_path`]).
+    if own_path(req) {
+        // The MCP endpoint asks where a request comes from before its
+        // token, and answers in JSON-RPC, 404 on a server without `--mcp`.
+        if is_mcp(req) {
+            return mcp::http(db, cfg, req);
+        }
+        // A webhook event, judged before any token is asked for: its
+        // signature stands in for one, and nothing of it is read before
+        // that verifies ([`hooks`]). A server with no hooks file has no
+        // such route.
+        if let Some(h) = &cfg.hooks {
+            if hooks::is_hook(req) {
+                return hooks::handle(db, cfg, h, req);
+            }
         }
     }
     // A scoped token's scope holds the database the runs of the statements
@@ -3482,11 +3500,8 @@ fn run_query(
         if let Err(e) = &r {
             bound = bound_by(who, &guard, e);
         }
-        if r.is_ok() {
-            calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
-            if !cfg.tenants {
-                hooks::after_change(cfg.hooks.as_deref(), &guard, std::iter::once(&*stmt));
-            }
+        if r.is_ok() && defines(&stmt) {
+            definitions_changed(cfg, &guard, std::iter::once(&*stmt));
         }
         let held = wait && held_run(&guard, (&stmt, &params), &r, (mark, before));
         seq = Some(At::of(&guard));
@@ -3748,6 +3763,39 @@ fn keyed_query(
     with_seq(resp, seq)
 }
 
+/// Whether `stmt` defines or drops a named statement: the one kind after
+/// which a policy's `call` and `wake` lines, or the hooks file's hooks, may
+/// name what the database no longer holds ([`definitions_changed`]). Asked
+/// inline of every write that landed: one look at the statement's kind.
+#[inline]
+fn defines(stmt: &Statement) -> bool {
+    matches!(
+        stmt,
+        Statement::CreateStatement(_) | Statement::DropStatement { .. }
+    )
+}
+
+/// After `stmts` landed, one of them defining or dropping a statement
+/// ([`defines`]): the policy's lines naming a statement it no longer holds
+/// (`calls::after_drop`), and the hooks no statement takes or the
+/// statements taking a hook the file does not name (`hooks::after_change`,
+/// a file's server's alone), logged again. Out of line and cold, so that a
+/// write defining nothing asks its statement's kind and calls nothing:
+/// `hooks::after_change` called for every write was the most of what F4's
+/// slice 3 added to a `/query` write's own code.
+#[cold]
+#[inline(never)]
+fn definitions_changed<'a>(
+    cfg: &Config,
+    db: &Database,
+    stmts: impl Iterator<Item = &'a Statement> + Clone,
+) {
+    calls::after_drop(cfg.access.as_deref(), db, None, stmts.clone());
+    if !cfg.tenants {
+        hooks::after_change(cfg.hooks.as_deref(), db, stmts);
+    }
+}
+
 /// Notes a lone call for its slow line ([`metrics::called`]): its name, and
 /// the version of it the write lock `db` held as it ran -- none where no
 /// statement of that name was there to run.
@@ -3904,6 +3952,12 @@ fn counted(resp: &fennec_core::prelude::Response) -> u64 {
 /// `compact` runs each statement on its own instead: it stops at the first
 /// error, and `completed` says
 /// how many were applied.
+///
+/// Out of line: with its after-statement logging out of line
+/// ([`definitions_changed`]), LLVM inlined it into [`handle`], 3 522
+/// instructions growing to 5 851, every request's dispatcher holding a
+/// batch's frame.
+#[inline(never)]
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
     let body = match std::str::from_utf8(&req.body) {
         Ok(b) => b,
@@ -4160,14 +4214,8 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return refused_under(db, cfg, guard, read_from_writes(&e), error_response(&e)),
     };
     let seq = Some(At::of(&guard));
-    calls::after_drop(
-        cfg.access.as_deref(),
-        &guard,
-        None,
-        stmts.iter().map(|(s, _)| s),
-    );
-    if !cfg.tenants {
-        hooks::after_change(cfg.hooks.as_deref(), &guard, stmts.iter().map(|(s, _)| s));
+    if stmts.iter().any(|(s, _)| defines(s)) {
+        definitions_changed(cfg, &guard, stmts.iter().map(|(s, _)| s));
     }
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
@@ -4773,6 +4821,50 @@ mod tests {
         assert!(!is_remote("127.0.0.1:8080"));
         assert!(!is_remote("localhost:8080"));
         assert!(is_remote("0.0.0.0:8080"));
+    }
+
+    /// The look `handle` asks before its two token-less routes says yes to
+    /// every path either takes -- the slashes before a segment skipped, as
+    /// `segments` skips them -- and no to a collection's or `/query`: taken
+    /// for `path[1] == '_'`, `//_mcp` would have gone to the token, where
+    /// `is_mcp` sends it to the endpoint.
+    #[test]
+    fn the_own_path_look_hides_no_route_judged_before_the_token() {
+        let req = |path: &str| Request {
+            method: Method::Post,
+            target: path.into(),
+            path: path.into(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            keep_alive: false,
+        };
+        for path in [
+            "/_mcp",
+            "//_mcp",
+            "/_mcp/",
+            "_mcp",
+            "/_hooks",
+            "/_hooks/stripe",
+        ] {
+            let r = req(path);
+            assert!(is_mcp(&r) || hooks::is_hook(&r), "{path} is a route");
+            assert!(own_path(&r), "{path}");
+        }
+        for path in [
+            "/query",
+            "/batch",
+            "/orders",
+            "/",
+            "",
+            "//",
+            "/t/a/_mcp",
+            "/q_mcp",
+        ] {
+            let r = req(path);
+            assert!(!is_mcp(&r) && !hooks::is_hook(&r), "{path} is no route");
+            assert!(!own_path(&r), "{path}");
+        }
     }
 
     /// The lease runs out between the door's check and the engine's fence:
