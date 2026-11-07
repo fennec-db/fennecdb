@@ -359,8 +359,12 @@ when each was due, each stream kept through its first look and 100 ms
 after, three turns against the build before, the load under 2.5) took
 212-231 ms at p99 and 242-261 at most, half of them past 50 ms, against
 0.55-0.59 ms alone. The seed's `get` is pinned under the lock
-its rules are bound under -- a scoped token's lists answered there, so the
-scope is the pin's moment -- its rows masked through the pin's schemas and
+its rules are bound under -- a scoped token's lists answered there, and
+the shape's own inner `get`s left in the statement `pin` judges, which
+walks them as it walks a query's, and answered on the pin
+(`Pinned::answer_subqueries`), so the scope and the lists the first look
+judges its changes by are the pin's moment, and an inner `get` scanning
+a million rows holds no writer for its scan -- its rows masked through the pin's schemas and
 `Seen` told of them after, and the seed names the pin's change: the
 stream's first look reads the changes after it, so a write landing during
 the read is in no seed and in the next change, once
@@ -402,8 +406,24 @@ the writes then went on beside the seeds at 46 500-49 300 a second, the
 longest 12-29 ms, against 4 600-10 100 and 550-1 284 ms under the lock, and
 a seed took 716-863 ms at its median against 531-1 346: it shares the cores
 with eight times the writes. A shape an index answers, or one of fewer than `PIN_AT` rows, is
-read under the lock as before, as is the shape read again where the rules
-of a stream reading another collection moved (`enter_and_leave`). The
+read under the lock as before. A look whose inner `get`s or rules reading
+another collection are due again (`sse::look`) answers the lists first,
+where a query of them would be: under the lock the rules bound, the ids
+written since the stream's cursor read (`Database::written_after`), what
+the inner `get`s read pinned with only those rows of the stream's
+collection beside them (`Database::pin_lists`, `Store::pinned_rows`),
+and the ring held back to that change till the next look; on the pin the
+lists answered and the rows judged as they stood
+(`Pinned::changes_held`). The shape runs again only where the lists
+moved (`enter_and_leave`), under a lock where they still hold
+(`sse::Kept`), pinned as a query of it would be. Pinned whole with the
+shape, a due look copied the id index of a million rows under the lock
+at every write to ten notes it read, moved or not: 0.84-1.16 ms of the
+process's CPU a write beside one stream, where answering the ten first
+takes 0.09-0.11, the write's own 0.06 among it
+([fennecql.md](fennecql.md#inner-gets)). Where a pin declines,
+or reached for an index, all of it runs under the lock, as a query's
+does. The
 browser module's code is the same to the byte: the hold is native, and its
 `record` drops a mark as it did.
 

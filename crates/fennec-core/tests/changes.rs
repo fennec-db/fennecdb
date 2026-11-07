@@ -400,3 +400,161 @@ fn schema_changes_name_their_collection_and_a_drop_names_everything() {
     run(&mut db, "create collection tasks (key text)");
     assert_eq!(changed(&db, cursor), None);
 }
+
+/// A stream's filter holding a long `in` list -- an inner `get` answered,
+/// as a server's stream holds it -- judged through `changes_held`, its
+/// lists kept from one look to the next, gives the answer `changes_since`'s
+/// row-at-a-time `eval` gives, look after look: rows in and out of the
+/// list, deletions, a `nocase` field's fold, and the lists bound again
+/// once the schema they were bound against changed.
+#[test]
+fn held_lists_answer_as_the_filter_does() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection notes (title text); create collection board (msg text, n int)",
+    );
+    #[cfg(feature = "nocase")]
+    run(&mut db, "alter collection board add field tag text nocase");
+    for i in 0..40 {
+        run(&mut db, &format!(r#"put notes {{title: "m{i}"}}"#));
+    }
+    // A title twice: a list may hold a value more than once.
+    run(&mut db, r#"put notes [{title: "m7"}, {title: "m39"}]"#);
+    // A `nocase` field's list is folded where it is bound, and kept so.
+    let (folded, kept) = match cfg!(feature = "nocase") {
+        true => (" or tag in (get notes select title)", 4),
+        false => ("", 3),
+    };
+    let mut filter = match fennec_ql::parse_one(&format!(
+        "get board where (msg in (get notes select title) or n in [1, 2, 3, 4, 5, 6, 7, 8, 9]{folded}) \
+         and not (msg in [\"m1\", \"m2\", \"m3\", \"m4\", \"m5\", \"m6\", \"m7\", \"m8\"])",
+    ))
+    .unwrap()
+    {
+        Statement::Select(s) => s.filter.unwrap(),
+        _ => unreachable!(),
+    };
+    db.answer_subqueries(&mut filter).unwrap();
+    let mut lists = fennec_core::engine::Lists::of(Some(&filter)).expect("a long list");
+    assert_eq!(lists.kept(), 0, "nothing bound before the first look");
+    let mut cursor = db.change_seq();
+    let look = |db: &Database, cursor: u64, lists: &mut fennec_core::engine::Lists| {
+        let eval = db
+            .changes_since("board", cursor, Some(&filter), None, &[])
+            .unwrap();
+        let written = db
+            .written_after("board", cursor)
+            .unwrap()
+            .expect("in the ring");
+        let held = db
+            .changes_held("board", written, Some(&filter), None, Some(lists))
+            .unwrap();
+        assert_eq!(held, eval);
+        match held {
+            Changes::Batch(b) => b,
+            Changes::Reseed => panic!("reseeded"),
+        }
+    };
+    let mut writes = vec![
+        r#"put board [{msg: "m0", n: 0}, {msg: "m1", n: 0}, {msg: "x", n: 3}, {msg: "y", n: 30}]"#
+            .to_string(),
+        r#"set board {n: 4} where msg = "y""#.to_string(),
+        r#"set board {msg: "m39"} where msg = "x""#.to_string(),
+        r#"del board where msg = "m0""#.to_string(),
+        // No message: a null is in no list, and the row is in by `n`.
+        r#"put board [{n: 2}, {n: 40}]"#.to_string(),
+    ];
+    #[cfg(feature = "nocase")]
+    writes.push(r#"put board [{msg: "z", n: 0, tag: "M5"}]"#.to_string());
+    // A schema change: the lists are bound again against the new one.
+    writes.push("alter collection board add field more int".to_string());
+    writes.push(r#"put board [{msg: "m20", n: 0}, {msg: "q", n: 0}]"#.to_string());
+    let mut told = 0;
+    for w in &writes {
+        run(&mut db, w);
+        let b = look(&db, cursor, &mut lists);
+        told += b.puts.rows.len() + b.dels.len();
+        cursor = b.seq;
+        // Kept from each look for the next, the schema's change among them.
+        assert_eq!(lists.kept(), kept, "after {w}");
+    }
+    assert!(told >= 8, "every look told something: {told}");
+    // Every row written again at once, looked at with the lists kept.
+    run(&mut db, "set board {more: 1}");
+    let b = look(&db, cursor, &mut lists);
+    let mut msgs: Vec<String> = (b.puts.rows.iter())
+        .map(|r| match &r.values[1] {
+            Value::Text(t) => t.clone(),
+            Value::Null => "-".to_string(),
+            v => panic!("{v:?}"),
+        })
+        .collect();
+    msgs.sort();
+    let mut want = vec!["-", "m20", "m39", "y"];
+    if cfg!(feature = "nocase") {
+        want.push("z");
+    }
+    assert_eq!(msgs, want);
+}
+
+/// The lists a look keeps are the schema's they were bound against: a
+/// `nocase` field's list is kept folded, and a field of the same name made
+/// again without the fold reads the values as written. Taken by its
+/// ordinal and its length alone, the folded set was the new field's too,
+/// and `M5` matched no title it was written as.
+#[cfg(feature = "nocase")]
+#[test]
+fn held_lists_are_bound_again_once_the_schema_changed() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection notes (title text); create collection board (tag text nocase, n int)",
+    );
+    for i in 0..10 {
+        run(&mut db, &format!(r#"put notes {{title: "M{i}"}}"#));
+    }
+    let mut filter =
+        match fennec_ql::parse_one("get board where tag in (get notes select title)").unwrap() {
+            Statement::Select(s) => s.filter.unwrap(),
+            _ => unreachable!(),
+        };
+    db.answer_subqueries(&mut filter).unwrap();
+    let mut lists = fennec_core::engine::Lists::of(Some(&filter)).expect("a long list");
+    let mut cursor = db.change_seq();
+    let mut look = |db: &Database, lists: &mut fennec_core::engine::Lists| {
+        let eval = db
+            .changes_since("board", cursor, Some(&filter), None, &[])
+            .unwrap();
+        let written = db
+            .written_after("board", cursor)
+            .unwrap()
+            .expect("in the ring");
+        let held = db
+            .changes_held("board", written, Some(&filter), None, Some(lists))
+            .unwrap();
+        assert_eq!(held, eval);
+        let Changes::Batch(b) = held else {
+            panic!("reseeded")
+        };
+        cursor = b.seq;
+        b
+    };
+    run(
+        &mut db,
+        r#"put board [{tag: "m5", n: 1}, {tag: "x", n: 2}]"#,
+    );
+    let b = look(&db, &mut lists);
+    assert_eq!(b.puts.rows.len(), 1, "the fold of M5: {b:?}");
+    assert_eq!(lists.kept(), 1, "the folded list kept");
+    run(&mut db, "alter collection board rename field tag to old");
+    run(&mut db, "alter collection board add field tag text");
+    run(
+        &mut db,
+        r#"put board [{tag: "M5", n: 3}, {tag: "m5", n: 4}, {tag: "M7", n: 5}]"#,
+    );
+    let b = look(&db, &mut lists);
+    let mut ns: Vec<&Value> = b.puts.rows.iter().map(|r| &r.values[2]).collect();
+    ns.sort_by_key(|v| format!("{v:?}"));
+    assert_eq!(ns, [&Value::Int(3), &Value::Int(5)], "{b:?}");
+}

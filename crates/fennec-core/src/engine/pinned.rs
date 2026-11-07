@@ -102,6 +102,30 @@ impl Pinned {
         held(self.db.query(stmt, params))
     }
 
+    /// [`Database::answer_subqueries`] as at the pin: a stream's inner
+    /// `get`s answered beside the writers, `None` where one would use an
+    /// index, for the caller to answer them under the lock.
+    pub fn answer_subqueries(&self, filter: &mut Expr) -> Option<Result<()>> {
+        held(self.db.answer_subqueries(filter))
+    }
+
+    /// [`Database::changes_held`] as at the pin: the ids `written` names,
+    /// read under the lock the pin was taken under, judged and read as the
+    /// rows stood then. `None` as [`Self::query`].
+    pub fn changes_held(
+        &self,
+        collection: &str,
+        written: Written,
+        filter: Option<&Expr>,
+        project: Option<&[String]>,
+        lists: Option<&mut Lists>,
+    ) -> Option<Result<Changes>> {
+        held(
+            self.db
+                .changes_held(collection, written, filter, project, lists),
+        )
+    }
+
     /// [`Database::query_json`] as at the pin, `None` as [`Self::query`].
     pub fn query_json(
         &self,
@@ -179,13 +203,15 @@ impl Database {
                 &bodies[..]
             }
         };
-        let mut long = false;
+        let mut long = self.pin_strays;
         let alone = stmts.len() == 1;
         for (stmt, params) in stmts {
             let Statement::Select(sel) = stmt else {
                 return None;
             };
-            long |= self.pinnable(sel, params, 0, alone)?;
+            if !self.pin_strays {
+                long |= self.pinnable(sel, params, 0, alone)?;
+            }
         }
         if !long {
             return None;
@@ -196,15 +222,58 @@ impl Database {
                 reads(sel, &mut names);
             }
         }
+        self.pinned_within(&names, None)
+    }
+
+    /// What a stream's look reads to answer its lists again and judge the
+    /// rows written since its cursor by them, pinned: the collections the
+    /// inner `get`s of `filter` read, where [`Self::pin`] would take a
+    /// query of them alone, and beside them only the rows of `collection`
+    /// that `written` names, as they stand -- for [`Pinned::answer_subqueries`]
+    /// and [`Pinned::changes_held`]. Judged with the stream's whole shape,
+    /// every look whose lists were due copied that collection's id index
+    /// for the rows a write made: a million rows' 12 MB under the lock,
+    /// 0.8-1.2 ms of CPU a stream at every write to ten notes whose list
+    /// did not move. `None` where `pin` would decline the inner `get`s, short or
+    /// answered by an index: the look answers them under the lock.
+    pub fn pin_lists(&self, filter: &Expr, collection: &str, written: &Written) -> Option<Pinned> {
+        let mut inner = Vec::new();
+        inner_gets(filter, &mut inner);
+        let mut long = self.pin_strays && !inner.is_empty();
+        let mut names: Vec<&str> = Vec::new();
+        for (_, sel) in inner {
+            if !self.pin_strays {
+                long |= self.pinnable(sel, &[], 0, false)?;
+            }
+            reads(sel, &mut names);
+        }
+        if !long {
+            return None;
+        }
+        self.pinned_within(&names, Some((collection, &written.ids)))
+    }
+
+    /// `names` pinned where the budget holds their id indexes, and the rows
+    /// `beside` names of another collection, where a `get` reads none of it.
+    fn pinned_within(&self, names: &[&str], beside: Option<(&str, &[DocId])>) -> Option<Pinned> {
+        let rows = beside
+            .filter(|(c, _)| !names.contains(c))
+            .and_then(|(c, ids)| Some((c, self.collections.get(c)?.pinned_rows(ids))));
         let held: usize = (names.iter())
             .filter_map(|n| self.collections.get(n))
             .map(|c| c.store.pinned_bytes())
+            .chain(rows.as_ref().map(|(_, c)| c.store.pinned_bytes()))
             .sum();
         if self.pins.fetch_add(held, Relaxed) + held > self.pin_budget {
             self.pins.fetch_sub(held, Relaxed);
             return None;
         }
-        Some(self.pinned_of(&names, held))
+        let mut p = self.pinned_of(names, held);
+        if let Some((name, c)) = rows {
+            p.db.collections.insert(name.to_string(), c);
+            p.db.order.push(name.to_string());
+        }
+        Some(p)
     }
 
     /// [`Self::pin`] of a call judged already ([`Self::callee`]): its body,
@@ -231,6 +300,14 @@ impl Database {
     /// The bytes this database's pins may hold together.
     pub fn set_pin_budget(&mut self, bytes: usize) {
         self.pin_budget = bytes;
+    }
+
+    /// Every read [`Self::pin`] or [`Self::pin_lists`] is handed pinned,
+    /// one an index answers too: for a test to see a pinned read reach for
+    /// the index, answer `None` and run again under the lock.
+    #[doc(hidden)]
+    pub fn set_pin_strays(&mut self, on: bool) {
+        self.pin_strays = on;
     }
 
     /// Every collection pinned, whatever would read it: for a test to run
@@ -411,6 +488,16 @@ impl Collection {
     /// one fails rather than plans without it; the graphs are left out,
     /// which only `near` reads, and `pin` declines.
     fn pinned(&self) -> Collection {
+        self.pinned_with(self.store.pinned())
+    }
+
+    /// [`Self::pinned`] holding the documents `ids` alone ([`Store::pinned_rows`]).
+    fn pinned_rows(&self, ids: &[DocId]) -> Collection {
+        self.pinned_with(self.store.pinned_rows(ids))
+    }
+
+    /// The collection as [`Self::pinned`] takes it, its documents `store`.
+    fn pinned_with(&self, store: Store) -> Collection {
         fn refused<T>() -> Derived<T> {
             Derived::refused(Error::Query(PINNED_OUT.into()))
         }
@@ -420,7 +507,7 @@ impl Collection {
         Collection {
             id: self.id,
             schema: self.schema.clone(),
-            store: self.store.pinned(),
+            store,
             vectors: Fields::default(),
             hashes: Fields(out(self.hashes.keys().cloned())),
             texts: Fields(out(self.texts.keys().cloned())),

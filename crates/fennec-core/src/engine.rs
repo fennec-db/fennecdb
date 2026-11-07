@@ -2557,6 +2557,249 @@ pub struct ChangeBatch {
     pub schema_changed: bool,
 }
 
+/// The ids of a collection written after a stream's cursor, and the change
+/// they reach ([`Database::written_after`]): read under the lock, judged
+/// by [`Database::changes_held`] there or on a pin taken under it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Written {
+    ids: Vec<DocId>,
+    seq: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Written {
+    /// The change the ids reach: the stream's cursor once it has looked.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+/// A long `in` list as a stream's look binds it, kept: its length, and its
+/// set ([`Positions`]).
+#[cfg(not(target_arch = "wasm32"))]
+type Held = (usize, Positions);
+
+/// A long `in` list's set as a stream's look binds it ([`Test::Listed`]):
+/// the position of each value in the filter's own list, open-addressed by
+/// the hash of the key a hash index files the value under -- folded where
+/// its field is `nocase` -- and beside each slot a byte of the hash, so a
+/// key the list does not hold is told so off those bytes alone, a fifth of
+/// the table, without reading a value. Five bytes a slot, two slots a
+/// value: 1.3 MB for 100 000 short titles. Kept as a [`HashIndex`] of the
+/// keys beside a copy of the values, a stream following them held 15.3 MB,
+/// the index's 11.5 of it, beside the filter's own list; with the hash's
+/// top half beside each position, eight bytes a slot, a look over 1 000
+/// rows the list did not hold read the whole table, 0.11-0.13 ms against
+/// the index's 0.10. A value the list holds twice is filed once, as a
+/// hash index files it: an inner `get` of a field few values fill would
+/// otherwise lay its copies end to end, a run every key landing in it
+/// walks. Hashed with random keys, as the indexes are: the values are
+/// rows of the inner collection, written by whoever may write it.
+#[cfg(not(target_arch = "wasm32"))]
+struct Positions {
+    keys: crate::maps::Keys,
+    /// A byte of each slot's hash, never 0; 0 where a slot is empty.
+    tags: Vec<u8>,
+    at: Vec<u32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Positions {
+    /// The set of `items`, a list over `slot` folded by `fold`, where each
+    /// value is one the field holds, so equal keys are equal values and no
+    /// others are ([`in_set`]); `None` otherwise, and the list is compared
+    /// a value at a time.
+    fn of(c: &Collection, slot: Slot, fold: Option<CaseFold>, items: &[Expr]) -> Option<Positions> {
+        let ty = match slot {
+            Slot::Id => DataType::Int,
+            Slot::At(p) => c.schema.fields[p].ty.clone(),
+            Slot::Path(_) => return None,
+        };
+        let n = (items.len() * 2).next_power_of_two();
+        if n > u32::MAX as usize {
+            return None;
+        }
+        let mut set = Positions {
+            keys: Default::default(),
+            tags: vec![0; n],
+            at: vec![0; n],
+        };
+        let (mut key, mut text) = (Vec::new(), String::new());
+        for (i, it) in items.iter().enumerate() {
+            let Expr::Lit(v) = it else {
+                return None;
+            };
+            key.clear();
+            match (&ty, v, fold) {
+                (DataType::Text, Value::Text(t), Some(f)) => {
+                    text.clear();
+                    crate::case::fold_into(t, f, &mut text);
+                    key.push(crate::codec::TAG_TEXT);
+                    crate::codec::encode_str(&mut key, &text);
+                }
+                (DataType::Int, Value::Int(_), _)
+                | (DataType::Text, Value::Text(_), _)
+                | (DataType::Timestamp, Value::Timestamp(_), _)
+                | (DataType::Bool, Value::Bool(_), _) => crate::codec::encode_value(&mut key, v),
+                _ => return None,
+            }
+            let same = |w: &Value| match (fold, w) {
+                (Some(f), Value::Text(y)) => {
+                    crate::case::cmp_to_folded(y, &text, f) == Ordering::Equal
+                }
+                _ => w.cmp_value(v) == Ordering::Equal,
+            };
+            let (mut at, tag) = set.first(&key);
+            loop {
+                match set.tags[at] {
+                    0 => {
+                        (set.tags[at], set.at[at]) = (tag, i as u32);
+                        break;
+                    }
+                    // Filed already.
+                    t if t == tag
+                        && matches!(items.get(set.at[at] as usize), Some(Expr::Lit(w)) if same(w)) =>
+                    {
+                        break
+                    }
+                    _ => at = (at + 1) & (n - 1),
+                }
+            }
+        }
+        Some(set)
+    }
+
+    /// The slot `key` is looked for from, and its byte.
+    fn first(&self, key: &[u8]) -> (usize, u8) {
+        use std::hash::BuildHasher;
+        let h = self.keys.hash_one(key);
+        (h as usize & (self.tags.len() - 1), ((h >> 56) as u8).max(1))
+    }
+
+    /// Whether a value of `items` is filed under `key` and is the one
+    /// `same` takes it for.
+    fn holds(&self, key: &[u8], items: &[Expr], same: impl Fn(&Value) -> bool) -> bool {
+        let (mut at, tag) = self.first(key);
+        loop {
+            match self.tags[at] {
+                0 => return false,
+                t if t == tag => {
+                    if let Some(Expr::Lit(w)) = items.get(self.at[at] as usize) {
+                        if same(w) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            at = (at + 1) & (self.tags.len() - 1);
+        }
+    }
+}
+
+/// The long `in` lists of a stream's filter as a look bound them, kept for
+/// the next ([`Database::changes_held`]): an inner `get` answered as 100
+/// 000 values was copied and hashed again at every write the stream looked
+/// at, a list a look where the rows it tests are one or two. Each is kept
+/// with the ordinal of its `in` among the long ones the bind meets, and
+/// all of them with the schema they were bound against: a change of it
+/// binds them again. Good for one filter, the stream's: a filter answered
+/// again takes a new one ([`Lists::of`]). A stream keeps one, so what it
+/// holds is bounded as the lists are: an inner `get`'s rows by its bound
+/// (100 000), a list a long `in` of the filter, and a stream a slot of
+/// `--max-streams`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct Lists {
+    /// Dropped by [`Lists`]'s `Drop` alone: dropped as fields where a
+    /// stream holds them, the glue of the lists was built a second time in
+    /// fennec-http.
+    kept: std::mem::ManuallyDrop<Bound>,
+}
+
+/// The schema a stream's long lists were bound against, and the lists by
+/// the ordinal of their `in` ([`Lists`]).
+#[cfg(not(target_arch = "wasm32"))]
+type Bound = (Option<SchemaCell>, Vec<(usize, Held)>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Lists {
+    // Out of line: a crate dropping one calls it.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: the fields are dropped once, here, and never read after.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.kept) }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Lists {
+    /// The lists of `filter` to keep, where it holds an `in` long enough
+    /// to be looked up in a set ([`IN_SET_AT`]); `None` where it holds
+    /// none, and a look evaluates it a row at a time as it did.
+    pub fn of(filter: Option<&Expr>) -> Option<Lists> {
+        fn long(e: &Expr) -> bool {
+            let mut any = matches!(e, Expr::In(_, items) if items.len() >= IN_SET_AT);
+            e.each_child(&mut |c| any = any || long(c));
+            any
+        }
+        filter.filter(|f| long(f)).map(|_| Lists::default())
+    }
+
+    /// How many lists it keeps: none before a look binds one.
+    #[doc(hidden)]
+    pub fn kept(&self) -> usize {
+        self.kept.1.len()
+    }
+
+    /// The lists, those bound against another schema than `schema` let go.
+    fn at(&mut self, schema: &SchemaCell) -> &mut Vec<(usize, Held)> {
+        let (was, held) = &mut *self.kept;
+        if !was.as_ref().is_some_and(|s| Arc::ptr_eq(s, schema)) {
+            *was = Some(Arc::clone(schema));
+            held.clear();
+        }
+        held
+    }
+}
+
+/// What a [`Filter`]'s bind takes the long lists an earlier look bound
+/// from ([`Lists`]), and the ordinal of each long `in` it binds as a set,
+/// for them to be kept again: a stream's look's alone, a query handing
+/// none. The browser module's holds nothing, its live queries run again
+/// whole.
+#[derive(Default)]
+struct Taking {
+    /// The earlier look's lists by ordinal, the last first: popped as met.
+    #[cfg(not(target_arch = "wasm32"))]
+    held: Vec<(usize, Held)>,
+    /// The long `in`s met so far.
+    #[cfg(not(target_arch = "wasm32"))]
+    met: usize,
+    /// The ordinal of each long `in` bound as a set, in the order bound.
+    #[cfg(not(target_arch = "wasm32"))]
+    bound: Vec<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Taking {
+    /// The set kept for the `n`th long `in`, of `len` values, if one was.
+    fn take(&mut self, n: usize, len: usize) -> Option<Positions> {
+        if self.held.last().is_none_or(|(k, _)| *k != n) {
+            return None;
+        }
+        let (_, (was, set)) = self.held.pop()?;
+        // The stream's own filter's, or none: a list of another length is
+        // another filter's, and nothing kept is trusted after it.
+        if was != len {
+            self.held.clear();
+            return None;
+        }
+        Some(set)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionStats {
     pub name: String,
@@ -4030,6 +4273,10 @@ pub struct Database {
     pin_budget: usize,
     #[cfg(not(target_arch = "wasm32"))]
     pins: Arc<std::sync::atomic::AtomicUsize>,
+    /// Every read pinned, one an index answers too: a test's, to see a
+    /// pinned read reach for an index ([`Self::set_pin_strays`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pin_strays: bool,
     /// The documents of a block's `put`s, built and encoded before the
     /// write lock ([`Self::prepare`]), while the block runs; and which of
     /// its statements is running, for its `put` to take its own.
@@ -4255,6 +4502,8 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             pins: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
+            pin_strays: false,
+            #[cfg(not(target_arch = "wasm32"))]
             preparation: Prepared::default(),
             #[cfg(not(target_arch = "wasm32"))]
             ready_at: None,
@@ -4416,13 +4665,7 @@ impl Database {
             Since::Reseed => return Ok(Changes::Reseed),
             Since::Ids(ids) => ids,
         };
-
-        let columns = projection_columns(&c.schema, &project.map(|p| p.to_vec()));
-        for col in &columns {
-            if col != "id" {
-                source_or_err(&c.schema, col, "")?;
-            }
-        }
+        let columns = changed_columns(c, project)?;
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
@@ -4444,58 +4687,118 @@ impl Database {
                 Some(&shape)
             }
         };
-
-        let mut rows = Vec::new();
-        let mut dels = Vec::new();
-        let mut schema_changed = false;
-        for id in ids {
-            if id == SCHEMA_MARK {
-                schema_changed = true;
-                continue;
-            }
-            if !c.store.contains(id) {
-                dels.push(id);
-                continue;
-            }
-            if let Some(f) = filter {
-                let mut row = StoreRow {
-                    store: &c.store,
-                    schema: &c.schema,
-                    id,
-                };
-                if !truthy(&eval(f, &mut row, &ctx)?) {
-                    // Does not match the shape: for the subscriber it is gone.
-                    dels.push(id);
-                    continue;
+        changed_rows(
+            c,
+            ids,
+            self.changes.seq(),
+            columns,
+            &mut |id| match filter {
+                Some(f) => {
+                    let mut row = StoreRow {
+                        store: &c.store,
+                        schema: &c.schema,
+                        id,
+                    };
+                    Ok(truthy(&eval(f, &mut row, &ctx)?))
                 }
-            }
-            let mut values = Vec::with_capacity(columns.len());
-            for col in &columns {
-                if col == "id" {
-                    values.push(Value::Int(id as i64));
-                } else {
-                    let at = source_or_err(&c.schema, col, "")?;
-                    values.push(read_source(&c.store, id, at)?);
-                }
-            }
-            rows.push(Row {
-                id,
-                values,
-                score: None,
-            });
-        }
-
-        Ok(Changes::Batch(ChangeBatch {
-            seq: self.changes.seq(),
-            puts: ResultSet {
-                columns,
-                rows,
-                nested: None,
-                facets: Vec::new(),
+                None => Ok(true),
             },
-            dels,
-            schema_changed,
-        }))
+        )
+    }
+
+    /// The ids of `collection` written after `since` and the change they
+    /// reach -- `None` where the ring no longer reaches back to it, a
+    /// reseed -- for [`Self::changes_held`] to judge: on this database, or
+    /// on a pin of it taken under the same lock ([`Self::pin`]), where a
+    /// stream's look reads what its inner `get`s answer beside the
+    /// writers (fennec-http's `sse::look`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn written_after(&self, collection: &str, since: u64) -> Result<Option<Written>> {
+        let c = self.collection(collection)?;
+        Ok(match self.changes.since(since, c.id) {
+            Since::Reseed => None,
+            Since::Ids(ids) => Some(Written {
+                ids,
+                seq: self.changes.seq(),
+            }),
+        })
+    }
+
+    /// [`Self::changes_since`] of the ids `written` names, a stream's
+    /// filter bound to the collection once a look ([`Filter`]) rather than
+    /// evaluated a row at a time: an `in` list an inner `get` answered,
+    /// 100 000 titles, took 2.4 s over 1 000 changed rows compared a value
+    /// at a time and is a lookup a row bound ([`Test::InSet`]). `lists`,
+    /// where the filter holds a long one ([`Lists::of`]), keeps its
+    /// values and its set from one look to the next, so a look binds them
+    /// once rather than copying and hashing every value at each write. A
+    /// server's alone, as its streams are.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn changes_held(
+        &self,
+        collection: &str,
+        written: Written,
+        filter: Option<&Expr>,
+        project: Option<&[String]>,
+        lists: Option<&mut Lists>,
+    ) -> Result<Changes> {
+        let c = self.collection(collection)?;
+        let columns = changed_columns(c, project)?;
+        let ctx = EvalCtx {
+            params: &[],
+            registry: &self.registry,
+            clock: self.clock,
+        };
+        // Asked apart: ANDed into a copy of the filter, as `changes_since`
+        // does, a list of 100 000 would be copied at every look.
+        let alive = self.alive(collection)?;
+        let mut lists = lists.map(|l| l.at(&c.schema));
+        let mut taking = Taking::default();
+        if let Some(held) = &mut lists {
+            taking.held = std::mem::take(*held);
+            taking.held.reverse();
+        }
+        let test = filter.map(|f| Filter::taking(c, f, &ctx, Some(&mut taking)));
+        let changes = changed_rows(c, written.ids, written.seq, columns, &mut |id| {
+            if let Some(t) = &test {
+                if !t.matches(id, &ctx)? {
+                    return Ok(false);
+                }
+            }
+            // One comparison, evaluated: a second bound filter was a
+            // second copy of the bound test's code.
+            match &alive {
+                Some(a) => {
+                    let mut row = StoreRow {
+                        store: &c.store,
+                        schema: &c.schema,
+                        id,
+                    };
+                    Ok(truthy(&eval(a, &mut row, &ctx)?))
+                }
+                None => Ok(true),
+            }
+        });
+        if let (Some(held), Some(t)) = (lists, test) {
+            *held = t.into_held(&taking.bound);
+        }
+        changes
+    }
+
+    /// `filter`, a stream's shape, with each `in (get ...)` in it answered
+    /// as the `in` list it is now -- the inner `get` run as [`Self::query`]
+    /// runs a statement's ([`Self::answered`]), held to the same bound and
+    /// depth -- for a look's test of each changed row
+    /// ([`Self::changes_held`]), which `eval` refuses an inner `get` in.
+    /// The stream answers it again where the inner `get`s' collections
+    /// were written (fennec-http's `sse::Reach`), under the lock its
+    /// changes are read under or on a pin taken under it
+    /// ([`Pinned::answer_subqueries`]), so the lists and the rows are one
+    /// moment. A server's alone: the browser module answers a live query
+    /// by running it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn answer_subqueries(&self, filter: &mut Expr) -> Result<()> {
+        filter.each_subquery_mut(&mut |e| self.answer_subquery(e, &[], 0))
     }
 
     pub fn registry(&self) -> &Registry {
@@ -14013,6 +14316,68 @@ fn wider(ef: usize, want: usize, dead: usize) -> usize {
     ef.max(want).saturating_add(dead)
 }
 
+/// The columns a stream's changes of `c` answer, each a field it holds.
+fn changed_columns(c: &Collection, project: Option<&[String]>) -> Result<Vec<String>> {
+    let columns = projection_columns(&c.schema, &project.map(|p| p.to_vec()));
+    for col in &columns {
+        if col != "id" {
+            source_or_err(&c.schema, col, "")?;
+        }
+    }
+    Ok(columns)
+}
+
+/// The changes of the rows `ids` of `c`, at `seq`: a row gone, or failing
+/// `test`, a deletion -- for the subscriber it is gone -- and the rest read
+/// as `columns` name them. One copy for both tests, through `dyn`: a look
+/// tests the row or two a write made.
+fn changed_rows(
+    c: &Collection,
+    ids: Vec<DocId>,
+    seq: u64,
+    columns: Vec<String>,
+    test: &mut dyn FnMut(DocId) -> Result<bool>,
+) -> Result<Changes> {
+    let mut rows = Vec::new();
+    let mut dels = Vec::new();
+    let mut schema_changed = false;
+    for id in ids {
+        if id == SCHEMA_MARK {
+            schema_changed = true;
+            continue;
+        }
+        if !c.store.contains(id) || !test(id)? {
+            dels.push(id);
+            continue;
+        }
+        let mut values = Vec::with_capacity(columns.len());
+        for col in &columns {
+            if col == "id" {
+                values.push(Value::Int(id as i64));
+            } else {
+                let at = source_or_err(&c.schema, col, "")?;
+                values.push(read_source(&c.store, id, at)?);
+            }
+        }
+        rows.push(Row {
+            id,
+            values,
+            score: None,
+        });
+    }
+    Ok(Changes::Batch(ChangeBatch {
+        seq,
+        puts: ResultSet {
+            columns,
+            rows,
+            nested: None,
+            facets: Vec::new(),
+        },
+        dels,
+        schema_changed,
+    }))
+}
+
 /// A filter bound to the collection it tests rows of, once a query: each
 /// field it compares with a value by position, and the value worked out.
 /// A row is then decoded once for every field the filter reads
@@ -14110,6 +14475,11 @@ enum Test<'q> {
     /// where the filter is bound, it was built for an `in` an index answers
     /// whole, and 2 000 ids took that query from 0.93 to 2.48 ms.
     InSet(Slot, Vec<Value>, std::cell::OnceCell<Option<HashIndex>>),
+    /// [`Test::InSet`] as a stream's look binds it: the field's fold, the
+    /// filter's own list, and its set, kept from one look to the next
+    /// ([`Lists`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    Listed(Slot, Option<CaseFold>, &'q [Expr], Box<Positions>),
     Like(Slot, Value),
     Has(Slot, Value),
     /// `distance(<a point field>, <point>) <op> <value>`, the call and its
@@ -14176,9 +14546,21 @@ enum Folded {
 
 impl<'q> Filter<'q> {
     fn new(c: &'q Collection, f: &'q Expr, ctx: &EvalCtx) -> Filter<'q> {
+        Filter::taking(c, f, ctx, None)
+    }
+
+    /// [`Filter::new`], its long lists taken from those an earlier look
+    /// bound where `taking` holds them ([`Lists`]): a stream's look's. A
+    /// query's has none, and asks nothing of its lists.
+    fn taking(
+        c: &'q Collection,
+        f: &'q Expr,
+        ctx: &EvalCtx,
+        taking: Option<&mut Taking>,
+    ) -> Filter<'q> {
         let mut positions = Vec::new();
         let mut paths = Vec::new();
-        let root = Filter::bind(c, f, ctx, &mut positions, &mut paths);
+        let root = Filter::bind(c, f, ctx, &mut positions, &mut paths, taking);
         let mut index_of = vec![usize::MAX; c.schema.fields.len()];
         for (i, p) in positions.iter_mut().enumerate() {
             index_of[*p] = i;
@@ -14198,12 +14580,16 @@ impl<'q> Filter<'q> {
         }
     }
 
+    // The browser module keeps no lists: `taking` holds nothing there, and
+    // is handed down alone.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::only_used_in_recursion))]
     fn bind(
         c: &Collection,
         e: &'q Expr,
         ctx: &EvalCtx,
         used: &mut Vec<usize>,
         paths: &mut Vec<(usize, &'q str)>,
+        mut taking: Option<&mut Taking>,
     ) -> Test<'q> {
         let mut slot = |e: &'q Expr| match e {
             Expr::Field(name) if name == "id" => Some(Slot::Id),
@@ -14257,14 +14643,14 @@ impl<'q> Filter<'q> {
         }
         match e {
             Expr::And(a, b) => Test::And(
-                Box::new(Filter::bind(c, a, ctx, used, paths)),
-                Box::new(Filter::bind(c, b, ctx, used, paths)),
+                Box::new(Filter::bind(c, a, ctx, used, paths, taking.as_deref_mut())),
+                Box::new(Filter::bind(c, b, ctx, used, paths, taking)),
             ),
             Expr::Or(a, b) => Test::Or(
-                Box::new(Filter::bind(c, a, ctx, used, paths)),
-                Box::new(Filter::bind(c, b, ctx, used, paths)),
+                Box::new(Filter::bind(c, a, ctx, used, paths, taking.as_deref_mut())),
+                Box::new(Filter::bind(c, b, ctx, used, paths, taking)),
             ),
-            Expr::Not(a) => Test::Not(Box::new(Filter::bind(c, a, ctx, used, paths))),
+            Expr::Not(a) => Test::Not(Box::new(Filter::bind(c, a, ctx, used, paths, taking))),
             Expr::IsNull(a) => match slot(a) {
                 Some(s) => Test::IsNull(s),
                 None => Test::Eval(e),
@@ -14302,6 +14688,22 @@ impl<'q> Filter<'q> {
                 };
                 let s = slot(a);
                 let fold = fold_of(s);
+                // A long list written in, as a stream's answered inner
+                // `get` is: the `n`th such, its set an earlier look kept,
+                // or made here, kept for the next.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (Some(s), Expr::In(_, written), Some(t)) = (s, e, taking) {
+                    if written.len() >= IN_SET_AT {
+                        let n = t.met;
+                        t.met += 1;
+                        let set = (t.take(n, written.len()))
+                            .or_else(|| Positions::of(c, s, fold, written));
+                        if let Some(set) = set {
+                            t.bound.push(n);
+                            return Test::Listed(s, fold, written, Box::new(set));
+                        }
+                    }
+                }
                 let mut values = Vec::with_capacity(items.len());
                 for it in items {
                     match (it.cloned(), fold) {
@@ -14504,6 +14906,8 @@ impl<'q> Filter<'q> {
     fn apart(&self, slot: Slot, t: &Test, v: &Value) -> bool {
         match t {
             Test::Folded(_, f, folded) => self.folded(slot, v, *f, folded),
+            #[cfg(not(target_arch = "wasm32"))]
+            Test::Listed(_, fold, items, set) => self.listed(v, *fold, items, set),
             Test::Pattern(_, p) => match v {
                 Value::Text(h) => {
                     let h = match p.fold {
@@ -14518,6 +14922,33 @@ impl<'q> Filter<'q> {
             t => geo_test(t, v),
             #[cfg(not(feature = "geo"))]
             _ => false,
+        }
+    }
+
+    /// A [`Test::Listed`] of a row's value `v`: its key looked up, folded
+    /// where the list is, and the value found there compared with it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn listed(&self, v: &Value, fold: Option<CaseFold>, items: &[Expr], set: &Positions) -> bool {
+        let mut key = self.key.borrow_mut();
+        key.clear();
+        match (v, fold) {
+            // A list a set holds is of the field's type: no null is in it.
+            (Value::Null, _) => false,
+            (Value::Text(x), Some(f)) => {
+                let mut s = self.scratch.borrow_mut();
+                s.clear();
+                crate::case::fold_into(x, f, &mut s);
+                key.push(crate::codec::TAG_TEXT);
+                crate::codec::encode_str(&mut key, &s);
+                set.holds(&key, items, |w| match w {
+                    Value::Text(y) => crate::case::cmp_to_folded(y, &s, f) == Ordering::Equal,
+                    _ => false,
+                })
+            }
+            (v, _) => {
+                crate::codec::encode_value(&mut key, v);
+                set.holds(&key, items, |w| w.cmp_value(v) == Ordering::Equal)
+            }
         }
     }
 
@@ -14589,6 +15020,36 @@ impl<'q> Filter<'q> {
                 n.is_empty() || h.as_bytes().windows(n.len()).any(|w| w == n)
             }
         }
+    }
+
+    /// The long lists it bound as sets ([`Test::Listed`]), each by its
+    /// ordinal among the long `in`s (`bound`, as [`Taking`] noted them):
+    /// what a stream keeps for its next look ([`Lists`]). The tests are
+    /// walked in the order the bind made them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn into_held(self, bound: &[usize]) -> Vec<(usize, Held)> {
+        fn walk(t: Test, bound: &[usize], out: &mut Vec<(usize, Held)>) {
+            match t {
+                Test::Listed(_, _, items, set) => {
+                    if let Some(&n) = bound.get(out.len()) {
+                        out.push((n, (items.len(), *set)));
+                    }
+                }
+                Test::And(a, b) | Test::Or(a, b) => {
+                    walk(*a, bound, out);
+                    walk(*b, bound, out);
+                }
+                Test::Not(a) => walk(*a, bound, out),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.root, bound, &mut out);
+        // As many sets as the bind noted, or none trusted.
+        if out.len() != bound.len() {
+            out.clear();
+        }
+        out
     }
 
     #[inline(never)]
@@ -14674,6 +15135,8 @@ impl<'q> Filter<'q> {
             | Test::Pattern(slot, _) => self.apart(*slot, t, get(*slot)),
             #[cfg(not(feature = "geo"))]
             Test::Folded(slot, ..) | Test::Pattern(slot, _) => self.apart(*slot, t, get(*slot)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Test::Listed(slot, ..) => self.apart(*slot, t, get(*slot)),
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,

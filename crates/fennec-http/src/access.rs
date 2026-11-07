@@ -2343,8 +2343,9 @@ fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
 }
 
 /// The collections `stmt` reads or writes, each `lookup` level's and each
-/// inner `get`'s among them: whose rules [`Scope::bound`] answers.
-fn statement_reads<'a>(stmt: &'a Statement, out: &mut Vec<&'a str>) {
+/// inner `get`'s among them: whose rules [`Scope::bound`] answers, and
+/// whose writes move a poll's tag (`unchanged`).
+pub(crate) fn statement_reads<'a>(stmt: &'a Statement, out: &mut Vec<&'a str>) {
     match stmt {
         Statement::Select(s) | Statement::Explain(s) => select_reads(s, out),
         Statement::Put { collection, .. } => out.push(collection),
@@ -2383,19 +2384,44 @@ fn expr_reads<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
     e.each_child(&mut |c| expr_reads(c, out));
 }
 
+/// The collections the inner `get`s of a stream's filter read, at any
+/// depth -- the subscriber's own and those the token's rules ANDed in --
+/// and whether one of them reads the time: what the stream answers them
+/// again on, a write to one of those collections or every look
+/// (`sse::Reach`).
+pub(crate) fn inner_reads(e: &Expr) -> (Vec<String>, bool) {
+    let (mut reads, mut clock) = (Vec::new(), false);
+    reached(e, &mut reads, &mut clock);
+    (reads, clock)
+}
+
 /// The collections the inner `get`s of `e` read, at any depth, and
-/// whether one of them reads the time ([`Scope::reached_from`]).
+/// whether one of them reads the time ([`inner_reads`]).
 fn reached(e: &Expr, reads: &mut Vec<String>, clock: &mut bool) {
     if let Expr::InSelect(_, sel) = e {
         if !reads.contains(&sel.collection) {
             reads.push(sel.collection.clone());
         }
+        *clock = *clock || reads_time(sel);
         if let Some(f) = &sel.filter {
-            *clock = *clock || f.calls_now();
             reached(f, reads, clock);
         }
     }
     e.each_child(&mut |c| reached(c, reads, clock));
+}
+
+/// Whether an inner `get` reads the time anywhere its list is made: its
+/// filter, an `order` key, an item of its list, a group key or `having`.
+/// Each moves the list with no write -- `order now() - at limit 5` the
+/// rows it keeps, `select bucket(now(), 1d)` the values -- where the
+/// filter's `now()` alone was asked.
+fn reads_time(sel: &Select) -> bool {
+    let now = |e: &Expr| e.calls_now();
+    sel.calls_now()
+        || sel.order.iter().filter_map(|s| s.expr.as_ref()).any(now)
+        || (sel.computed.iter().chain(&sel.aggregate)).any(|c| now(&c.expr))
+        || sel.group.iter().any(now)
+        || sel.having.as_ref().is_some_and(now)
 }
 
 /// The fields a filter pins to one value: the `field = value` terms of its
@@ -2797,22 +2823,6 @@ impl Scope {
             runs: self.runs.copied(),
             roles: (Arc::clone(&self.roles.0), Arc::clone(&self.roles.1)),
         })
-    }
-
-    /// What the token's rules of `collection` read beside it, at any depth,
-    /// and whether one reads the time there -- what a stream of it binds
-    /// them again on: a write to one of those collections, or every look.
-    /// `None` where no rule of it reads another collection.
-    pub fn reached_from(&self, collection: &str) -> Option<(Vec<String>, bool)> {
-        let mut reads = Vec::new();
-        let mut clock = false;
-        for r in &self.rules {
-            let here = r.reaches && r.collection.as_deref() == Some(collection);
-            if let (true, Some(f)) = (here, &r.filter) {
-                reached(f, &mut reads, &mut clock);
-            }
-        }
-        (!reads.is_empty()).then_some((reads, clock))
     }
 
     /// Whether the token may read `collection` at all: a rule granting
@@ -3933,6 +3943,42 @@ mod tests {
 
     fn access(policy: &str) -> Access {
         Access::new(SECRET, policy).unwrap()
+    }
+
+    /// An inner `get` reads the time wherever it makes its list -- its
+    /// filter, an `order` key, an item of its list, a group key, `having`,
+    /// at any depth -- and a stream answers it again at every look then;
+    /// the filter's `now()` alone was asked.
+    #[test]
+    fn an_inner_get_reads_the_time_wherever_it_makes_its_list() {
+        let reads = |inner: &str| {
+            let stmt =
+                fennec_ql::parse_one(&format!("get board where msg in (get {inner})")).unwrap();
+            let Statement::Select(sel) = stmt else {
+                unreachable!()
+            };
+            inner_reads(sel.filter.as_ref().unwrap())
+        };
+        for inner in [
+            "notes select title where at > now() - 1000",
+            "notes select title order now() - at limit 5",
+            "notes select bucket(now(), 1d) as day",
+            "notes select title group title having max(at) > now() - 1000",
+            "notes select title where k in (get keys select k where at < now())",
+        ] {
+            assert!(reads(inner).1, "{inner}");
+        }
+        for inner in [
+            "notes select title",
+            "notes select title order at desc limit 5",
+            "notes select title where k in (get keys select k)",
+        ] {
+            assert!(!reads(inner).1, "{inner}");
+        }
+        assert_eq!(
+            reads("notes select title where k in (get keys select k)").0,
+            ["notes", "keys"]
+        );
     }
 
     /// A binding's refusal tells a scoped writer its status and nothing it

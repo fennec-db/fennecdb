@@ -612,6 +612,43 @@ fn a_write_bytes_rate_charges_what_landed() {
     }
 }
 
+/// A description reaching the server's own collections is refused before
+/// it is a write: a tenant in debt to its write rate is told the 403 its
+/// description earned, where it was told the quota's 429, and one it may
+/// apply is held to the rate as every write is.
+#[test]
+fn a_schema_reaching_the_servers_own_is_refused_before_the_rate() {
+    let n = start("own-schema", Quota::default());
+    create(n.port, "acme", None);
+    ok(admin(
+        n.port,
+        "PUT",
+        "/_admin/tenants/acme/quota",
+        "{\"write_bytes\": 1}",
+    ));
+    // In debt at a byte a second: longer than any test runs.
+    ok(query(
+        n.port,
+        "acme",
+        "put notes {title: \"the first write\"}",
+    ));
+    let apply = |description: &str| call(n.port, "POST", "/t/acme/_schema/apply", description, &[]);
+    let r = apply(
+        r#"{"format":1,"collections":[{"name":"_idempotency","fields":[{"name":"key","type":"int"}]}]}"#,
+    );
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.contains("the server's own"), "{}", r.body);
+    let r = apply(
+        r#"{"format":1,"collections":[{"name":"more","fields":[{"name":"n","type":"int"}]}]}"#,
+    );
+    assert_eq!(
+        (r.status, r.quota()),
+        (429, Some("write_bytes")),
+        "{}",
+        r.body
+    );
+}
+
 /// Waits for `n` writes held on `tenant`, as a test waits for an event.
 fn until_held(n: &Node, tenant: &str, held: usize) {
     let t = Instant::now();

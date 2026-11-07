@@ -433,12 +433,24 @@ for each lock they take, the MCP tools as `/query`. The list is held to
 `get` read up to 1 002 rows, and grouped by its field for its distinct
 values only when it fills them -- grouped every time, a `set` under such
 a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
-(`sse::Reach`) binds them again under each look's lock where a collection
-they read was written since its change (every look where an inner `get`
-reads the time), runs the shape where the list moved and diffs by id
+(`sse::Reach`) binds them again under a look's lock where a collection
+they read was written since its change, where a row of one reached its
+`@ttl` since they were answered -- the stream wakes for it, as for a row
+of its own (`Reach::next`) -- or a second after the read answering them
+ended (`CLOCK_EVERY`, woken for too) where an inner `get` reads the time
+anywhere it makes its list (`access::reads_time`); runs the
+shape where the list moved and diffs by id
 against what it sent (`enter_and_leave`), a row leaving a deletion only of
 a row it was sent: a customer's stream gains the courier as the order is
 claimed and loses them at the delivery, no write to `positions` between.
+The subscriber's own inner `get`s take the same path, any token's: held
+to the rules (`Scope::subscribed`), then answered with the rules of the
+collections they read (`bound_over`, under the lock) and by the engine
+(`Database::answer_subqueries`) on a pin where a query of them would be,
+beside the writers, a write to an inner collection a reason to look again
+([fennecql.md](fennecql.md#inner-gets)).
+Before #504 a stream holding one ended at its first change, `eval`
+refusing the `InSelect` ([fennecql.md](fennecql.md#inner-gets)).
 It costs one inner `get` a statement -- `make policy-bench`, a crew's
 bucket of two: a `set` 2.1 us over a plain rule in process, 4.1 against
 2.0, a read by id 1.7 (3.9 against 2.2), over HTTP 4.7 and 4.3 us of 32.0
@@ -559,7 +571,17 @@ the tests to walk and the docs to name; no check reads it. So:
   `/batch` holding one runs none of its lines. `/_schema/plan` and
   `/_schema/apply` (a tenant's schema the router makes among them) refuse a description declaring one or a
   migration still to run reaching one (`own_declared`) before anything is
-  planned, since a migration runs as that token's statement. Still to
+  planned, since a migration runs as that token's statement. The first
+  is read off the body (`own_described`): `apply` asks it before the
+  write rate, so it is never counted a write and a tenant past its rate
+  is told the 403 it earned; then the rate, whose 429 takes no lock;
+  then, under the lock, the second (`own_migrations`), so a tenant past
+  its rate sending such a migration hears the 429 first: whether a
+  migration is still to run is the record's, which a parse of the body
+  cannot tell, and read under a read lock before the rate it cost 1.4 KB
+  of `fennec-server` (`unrecorded` through `query`, beside `schema`'s
+  read of it through `execute_with`) for a refusal a tenant past its rate
+  meets. Still to
   run: asked under the write lock the plan or apply takes, of the
   migrations `_migrations` has not recorded (`fennec_abi::unrecorded`,
   which a test holds to `fennec_abi::schema`'s own reading of the record),

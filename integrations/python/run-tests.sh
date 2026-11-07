@@ -26,7 +26,9 @@ server=$!
 "$root/target/debug/fennec-server" --file "$dir/schema.fennec" \
     --http 0.0.0.0:0 --http-token "$token" 2>"$dir/schema.log" &
 schema=$!
-trap 'kill $server $schema 2>/dev/null; rm -rf "$dir"' EXIT INT TERM
+# Each server waited for before its directory goes: killed and not yet
+# gone, one still writing its file or log raced the `rm`.
+trap 'kill $server $schema 2>/dev/null || true; wait $server 2>/dev/null || true; wait $schema 2>/dev/null || true; rm -rf "$dir"' EXIT INT TERM
 # The port a server's log says it listens on, once it does.
 port_of() {
     i=0

@@ -81,7 +81,14 @@ Its `in` lists are answered under each lock (`Scope::bound`), the scope
 `Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
 refused, never cut, and rules reading each other's collections, a `*` rule
 reading one, or `new.` or `expired()` in one are refused at startup
-(`ring`).
+(`ring`). A stream's filter reading another collection -- a rule's, or the
+shape's own inner `get`, any token's -- is answered again at each look
+after a write to what it reads, once a row of it reached its `@ttl`, or
+a second after the read answering it ended where it reads the time -- the
+stream wakes for both (`sse::Reach`), and writes its keep-alive once one
+passed with nothing written, whatever woke it -- on a pin where a query of
+it would be (`sse::look`); the shape runs again only where it moved, its
+rows sent as a diff against those it was sent (`enter_and_leave`).
 
 **[A collection whose name starts with `_` is the server's, out of every
 rule's reach.](../../docs/design/access.md#the-servers-own-collections)**
@@ -93,8 +100,9 @@ and each `lookup` level name (`path_refusal`), a subscription's inner
 `get` held to the rules (`Scope::subscribed`). The server's token reads
 them, and `scoped()` refuses its statement making, changing, compacting
 or writing one (`access::own_refused`), as the schema routes a
-description declaring one or a migration still to run reaching one
-(`own_declared`, under the lock; one recorded is not asked). The server
+description declaring one (`own_described`, off the body, before the
+write rate) or a migration still to run reaching one (`own_migrations`,
+under the lock; one recorded is not asked). The server
 writes its own through the engine, never a statement; a new one is
 `_`-named and listed in `declared::OWN`.
 
