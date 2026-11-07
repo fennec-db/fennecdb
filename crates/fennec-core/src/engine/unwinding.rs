@@ -44,10 +44,52 @@ pub(crate) fn panic_in(dir: char, index: &str) {
     }
 }
 
+/// A test's directory of its own, `<temp>/<name>/<pid>`, removed as the
+/// test ends however it ends but by an abort -- a second panic while one
+/// unwinds runs no drop, and left `fennecdb-torn-<pid>` directories behind
+/// -- and what an aborted run left removed by the next run's start: every
+/// directory beside its own that no run has written in for an hour. By
+/// its age, not its name alone: a run beside this one, another checkout's,
+/// is writing in its own, a file made and removed a case.
+#[cfg(feature = "std-fs")]
+struct Scratch(std::path::PathBuf);
+
+#[cfg(feature = "std-fs")]
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let parent = std::env::temp_dir().join(name);
+        let hour = std::time::Duration::from_secs(3600);
+        for e in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
+            let age = e.metadata().and_then(|m| m.modified()).map(|t| t.elapsed());
+            if age.is_ok_and(|a| a.is_ok_and(|a| a > hour)) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+        let dir = parent.join(std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        // A run ending beside this one removes the parent once it is empty,
+        // which may fall between the parent's making and its child's.
+        let made = (0..3).any(|_| std::fs::create_dir_all(&dir).is_ok());
+        assert!(made, "{} not made", dir.display());
+        Scratch(dir)
+    }
+}
+
+#[cfg(feature = "std-fs")]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        // The parent too, once no run holds a directory in it.
+        if let Some(parent) = self.0.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
 #[cfg(feature = "std-fs")]
 mod on_file {
     use super::super::*;
-    use super::PANIC_AT;
+    use super::{Scratch, PANIC_AT};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn put(db: &mut Database, n: i64) -> Result<Response> {
@@ -72,8 +114,8 @@ mod on_file {
     /// the records in it, the next block numbered past every one.
     #[test]
     fn a_panic_from_the_sink_call_on_fails_the_database() {
-        let dir = std::env::temp_dir().join(format!("fennecdb-landing-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let scratch = Scratch::new("fennecdb-landing");
+        let dir = &scratch.0;
         // The point, whether it fails the database, and whether the
         // panicking block's record is in the file.
         for (at, fails, in_file) in [
@@ -133,7 +175,6 @@ mod on_file {
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -150,7 +191,7 @@ mod on_file {
 #[cfg(all(feature = "std-fs", feature = "indexes", feature = "geo"))]
 mod torn {
     use super::super::*;
-    use super::PANIC_AT;
+    use super::{Scratch, PANIC_AT};
     use crate::schema::{Field, TextIndexSpec, VectorIndexSpec};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::Path;
@@ -562,8 +603,8 @@ mod torn {
 
     #[test]
     fn a_panic_anywhere_in_a_write_puts_its_block_back_whole() {
-        let dir = std::env::temp_dir().join(format!("fennecdb-torn-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let scratch = Scratch::new("fennecdb-torn");
+        let dir = &scratch.0;
         let writes = [
             Write::Insert,
             Write::Over,
@@ -576,7 +617,7 @@ mod torn {
             for at in POINTS {
                 for alone in [false, true] {
                     // Every case run, and those that failed named together.
-                    match catch_unwind(AssertUnwindSafe(|| case(&dir, w, at, alone))) {
+                    match catch_unwind(AssertUnwindSafe(|| case(dir, w, at, alone))) {
                         Ok(true) => reached.push(format!("{w:?} {at}")),
                         Ok(false) => {}
                         Err(_) => failed.push(format!("{w:?} {at} alone={alone}")),
@@ -584,7 +625,7 @@ mod torn {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(scratch);
         assert!(failed.is_empty(), "{} failed: {failed:#?}", failed.len());
         // Each write met a panic wherever it changes something: every index
         // it takes the row in or out of, part way into each, and the graph.

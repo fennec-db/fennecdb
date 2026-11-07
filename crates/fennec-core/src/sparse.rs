@@ -33,6 +33,17 @@ use std::collections::{BinaryHeap, HashMap};
 /// The largest dimension a `sparse<N>` may declare, pgvector's.
 pub const MAX_DIM: usize = 1_000_000_000;
 
+/// Whether a panic may stop a write part way -- a document in some of its
+/// lists and not yet counted -- and the write be put back whole
+/// ([`crate::engine::Collection`]'s `put_back_torn`), taking the document
+/// out of every list, holding it or not: the count of documents then
+/// moves by what the lists held, up as the first list takes it in, down
+/// where a removal finds it. Every other removal takes out what an insert
+/// put in whole, so a build that aborts on a panic -- the browser
+/// module's, which holds no put-back -- counts once a write, as it did:
+/// 52 bytes of the module.
+const TORN: bool = cfg!(panic = "unwind");
+
 /// Reads pgvector's text form, `{1:0.5,3:0.25}/30522`: the dimension, and
 /// the entries with their indices from 0, ascending. A zero weight is
 /// dropped -- it would put a document on a list it adds nothing to -- and
@@ -313,9 +324,9 @@ impl SparseIndex {
         self.at.get(&(i as DocId)).map(|k| &self.lists[*k as usize])
     }
 
-    /// Puts a document in, counted as the first of its lists takes it --
-    /// so that one a panic left in some of them is counted, as a removal
-    /// finding it in any uncounts it.
+    /// Puts a document in, counted -- where a panic unwinds ([`TORN`]) --
+    /// as the first of its lists takes it, so that one a panic left in
+    /// some of them is counted, as a removal finding it in any uncounts it.
     pub fn insert(&mut self, doc: DocId, entries: &[(u32, f32)]) {
         if entries.is_empty() {
             return;
@@ -335,12 +346,15 @@ impl SparseIndex {
             let before = list.bytes();
             let new = list.set(doc, w);
             self.heap += list.bytes() - before;
-            if new && !counted {
+            if TORN && new && !counted {
                 self.docs += 1;
                 counted = true;
             }
             #[cfg(test)]
             crate::engine::unwinding::panic_at("+sparse-dim");
+        }
+        if !TORN {
+            self.docs += 1;
         }
     }
 
@@ -349,7 +363,9 @@ impl SparseIndex {
     /// or a write a panic stopped part way, being put back: uncounted only
     /// where a list held it, a removal of what is not there moves nothing
     /// ([`crate::engine::Collection`]'s `put_back_torn`), where the count
-    /// fell by one for every removal, the document held or not.
+    /// fell by one for every removal, the document held or not. Only that
+    /// put-back removes what is not there, so a build no panic unwinds in
+    /// counts as it did ([`TORN`]).
     pub fn remove(&mut self, doc: DocId, entries: &[(u32, f32)]) {
         if entries.is_empty() {
             return;
@@ -367,7 +383,7 @@ impl SparseIndex {
             #[cfg(test)]
             crate::engine::unwinding::panic_at("-sparse-dim");
         }
-        self.docs = self.docs.saturating_sub(usize::from(held));
+        self.docs = self.docs.saturating_sub(usize::from(held || !TORN));
     }
 
     /// Each dimension's documents and weights, by dimension, and the count

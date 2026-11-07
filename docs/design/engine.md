@@ -509,9 +509,18 @@ a block, and where the id's record was) before it changes anything that
 entry puts back. A `put` remembers each document as its id is decided --
 before the hooks, which may panic, so an id handed out is handed out again
 with the mark, and before the row it writes over leaves the indexes -- and
-forgets the entry again where the document is passed over or refused:
-kept, an `if absent` passing over many rows left one each. Then the row
-written over leaves the indexes whose field changes (`unindex_doc`), the
+forgets the entry again where the document is passed over: kept, an `if
+absent` passing over many rows left one each. A refusal -- a hook's,
+`@unique`'s -- keeps its entry, which puts back nothing: it ends the
+statement, whose block is put back. A hook may change a document's fields,
+never its id (`Hook::before_write`): the entry holds the id the write was
+handed, and a write whose id a hook changed is refused (`Error::Plugin`,
+`ask_hooks`, a comparison a hook), a `set`'s too. Followed, as it was, a
+`put`'s frame went into the store under the hook's id while its block
+put back the other, so that row read `Corrupt` past the store's mark till
+the next open, and a `set` put its row into the indexes under the hook's
+id (`tests/blocks.rs`, `a_hook_changing_a_documents_id_is_refused`). Then
+the row written over leaves the indexes whose field changes (`unindex_doc`), the
 frame is appended, the document goes into the scalar indexes
 (`index_scalar`), and after the statement's documents their vectors go into
 the graph in a batch or are left waiting (`index_written`). A `set` -- an
@@ -541,7 +550,9 @@ there: a bucket's, the ordered chunks', the text index's `drop_doc` and
 its lengths, the graph's `remove` did already; the sparse index's count of
 documents fell by one at every removal, held or not, and falls now only
 where a list held the document, which is counted as the first of its lists
-takes it in. The writes before it in the block ended, and are put back by
+takes it in -- in a build whose panics unwind alone (`sparse::TORN`): no
+other removal meets a document a list does not hold, so the browser module
+counts as it did. The writes before it in the block ended, and are put back by
 difference as before. The sorted words are let go of first, sorted again
 by the next loose `match` ([text.md](text.md#fuzzy-and-prefix)): #501's
 panic left a chunk holding no word, and the put-back of the block's
@@ -585,10 +596,15 @@ by id 359 994.0 against 360 100.9 (-0.03%), every pair of each lower; the
 time 1 581 ns against 1 606, 3 137 against 3 175 and 42.0 us against 42.5
 (a `del` here is its text index's lists, every row sharing their words).
 The browser module, which aborts on a panic and holds no put-back, grew
-250 bytes (gzip and brotli within their noise): the entry made before the
-hooks and forgotten where a document is passed over (`execute_inner`
-+194, the two `remember`s -20) and the sparse index's count (+52);
-`fennec-server` 1.6 KB of code, the put-back of a write a panic stopped.
+503 bytes (gzip and brotli within their noise): 198 the entry made before
+the hooks and forgotten where a document is passed over (`execute_inner`
++194, the two `remember`s -20, `set_row` and `erase` +24), and 305 a hook
+changing a document's id refused -- `ask_hooks`, the one loop of the hooks
+a `put` and a `set` share, +66 (a loop and a check at each took 194), its
+refusal +137 and its words 96 bytes of data. The sparse index's count is
+kept by what its lists held only where panics unwind (`sparse::TORN`),
+which in the module took 52 bytes more; `fennec-server` 1.6 KB of code,
+the put-back of a write a panic stopped.
 Rejected: the collection's derived indexes let go of on a panic, rebuilt
 from the rows by the next read -- whole whatever the panic left inside an
 index, but a text index of a million rows is rebuilt at 16 us a row by the

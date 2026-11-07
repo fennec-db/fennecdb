@@ -8577,6 +8577,7 @@ impl Database {
                 // mark -- and before the row written over leaves the
                 // indexes: a panic from here to the document's last index
                 // finds it to put back. Passed over below, it is forgotten.
+                // The hooks keep the id it is remembered by ([`ask_hooks`]).
                 if let Some(b) = &mut self.block {
                     b.remember(cid, doc.id, c.store.loc(doc.id), mark);
                 }
@@ -8590,9 +8591,7 @@ impl Database {
                     WriteOp::Update => c.store.read(&schema, doc.id)?,
                     _ => None,
                 };
-                let checked = hooks
-                    .iter()
-                    .try_for_each(|h| h.before_write(&schema, op, &mut doc))
+                let checked = ask_hooks(hooks, &schema, op, &mut doc)
                     .and_then(|_| match &old {
                         Some(old) => hooks
                             .iter()
@@ -12200,9 +12199,7 @@ impl Database {
             return Ok(false);
         };
         let mut doc = updated(schema, &old, assigns, ctx, new)?;
-        for h in hooks {
-            h.before_write(schema, WriteOp::Update, &mut doc)?;
-        }
+        ask_hooks(hooks, schema, WriteOp::Update, &mut doc)?;
         for h in hooks {
             h.before_overwrite(schema, &old, &doc)?;
         }
@@ -13375,6 +13372,44 @@ fn updated(
 fn not_null(name: &str) -> Error {
     Error::Type(format!(
         "field `{name}` is required: it holds a value, never null"
+    ))
+}
+
+/// Asks each hook whether a `put` or a `set` may write `doc`
+/// ([`crate::plugin::Hook::before_write`]), each handed it as the hooks
+/// before it left it: its fields changed, never its id, which a hook
+/// changing is refused. The write was remembered by that id before the
+/// hooks ([`Block::remember`]), so that a block put back puts back what it
+/// wrote: followed, a `put`'s frame went into the store under the hook's
+/// id while the block put back the other -- that row read past the
+/// store's mark, `Corrupt`, till the next open -- and a `set` put its row
+/// into the indexes under the hook's id. One comparison a hook. Natively
+/// in its callers, where the loop was; one function in the browser module,
+/// where a loop and a check at each took 128 bytes more.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn ask_hooks(
+    hooks: &[Arc<dyn crate::plugin::Hook>],
+    schema: &Schema,
+    op: WriteOp,
+    doc: &mut Document,
+) -> Result<()> {
+    let id = doc.id;
+    for h in hooks {
+        h.before_write(schema, op, doc)?;
+        if doc.id != id {
+            return Err(id_changed(&**h, id, doc.id));
+        }
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn id_changed(hook: &dyn crate::plugin::Hook, id: DocId, to: DocId) -> Error {
+    Error::Plugin(format!(
+        "hook `{}` changed a document's id from {id} to {to}: a hook may change its fields, \
+         never its id",
+        hook.name()
     ))
 }
 

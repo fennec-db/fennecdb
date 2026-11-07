@@ -142,7 +142,8 @@ lock.
 `commit` appends it whole and only then notes it, so a crash, a replica
 and a subscriber see all of it or none. A failed one is undone in memory,
 a schema change too (`Undo`, a variant each), every write recording its
-undo before it changes anything (`Block::remember`); whatever counts records
+undo before it changes anything (`Block::remember`) by the id it was
+handed, a hook changing that id refused (`ask_hooks`); whatever counts records
 counts their writes (`writes_in`), and what cannot be undone, a compact,
 is refused in a block (`Statement::fits_block`). A server takes a lock a
 panic poisoned as it stands: a panic before the sink call puts the block
