@@ -61,12 +61,17 @@ fn start_with(policy: &str, ttl: Duration, setup: &[&str]) -> Node {
 /// A server under `policy` keeping keys for `ttl`, over a database `sql`
 /// makes.
 fn serve(policy: &str, ttl: Duration, sql: &[String]) -> Node {
-    fennec_http::audit::set_delay(0);
-    let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let mut db = Database::new();
     for s in sql {
         db.execute(&fennec_ql::parse_one(s).unwrap()).unwrap();
     }
+    serve_db(policy, ttl, db)
+}
+
+/// A server under `policy` keeping keys for `ttl`, over `db`.
+fn serve_db(policy: &str, ttl: Duration, db: Database) -> Node {
+    fennec_http::audit::set_delay(0);
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -298,6 +303,49 @@ fn a_star_rule_reaches_none_of_the_servers_collections() {
         (200, true, paid.body.as_str())
     );
     assert_eq!(n.rows("notes"), 1);
+}
+
+/// `_hook_events` as a webhook event taken makes it (`Database::take_event`,
+/// F4's slice 3), its row the event's key, kept so that a retry of the
+/// event runs nothing: an unfiltered `*` rule granting every verb reaches
+/// none of it -- each read, insert, update, put and delete, by every route,
+/// answered as the same statement over a collection no database holds,
+/// byte for byte but for the name -- and the key holds, the event sent
+/// again answered as its first taking.
+#[test]
+fn a_star_rule_reaches_no_webhook_events_key() {
+    use fennec_core::engine::{Event, Took, HOOK_EVENTS};
+    // The reader a server installs, which a hook's statement is read by.
+    fennec_ql::install();
+    let mut db = Database::new();
+    db.allow_hooks();
+    for q in [
+        "create collection orders (ref text @hash, status text)",
+        "put orders {ref: 'o-1', status: 'open'}",
+        "create statement paid($order text from event.order) on hook stripe as set orders \
+         {status: 'paid'} where ref = $order require 1",
+    ] {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
+    let body = fennec_core::json::parse_json(r#"{"id":"evt_1","order":"o-1"}"#).unwrap();
+    let event = Event {
+        hook: "stripe",
+        key: "evt_1",
+        body: &body,
+        digest: 1,
+        at: None,
+        event: None,
+        keep: 30 * 86_400_000,
+    };
+    assert!(matches!(db.take_event(&event).unwrap(), Took::Ran(1)));
+    let n = serve_db(POLICY, Duration::from_secs(3600), db);
+    assert_eq!(n.rows(HOOK_EVENTS), 1);
+    let alice = n.token("alice");
+    as_missing(&n, &alice, HOOK_EVENTS, "_none");
+    // Nothing was read into an answer, written or taken, and the key holds.
+    assert_eq!(n.rows(HOOK_EVENTS), 1);
+    let again = n.db.write().unwrap().take_event(&event).unwrap();
+    assert!(matches!(again, Took::Held(_)), "{again:?}");
 }
 
 /// A collection a token's rules grant nothing on is answered as one no
