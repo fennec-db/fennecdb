@@ -8576,7 +8576,7 @@ impl Database {
                 // handed out above is handed out again with the block's
                 // mark -- and before the row written over leaves the
                 // indexes: a panic from here to the document's last index
-                // finds it to put back. A refusal below forgets it again.
+                // finds it to put back. Passed over below, it is forgotten.
                 if let Some(b) = &mut self.block {
                     b.remember(cid, doc.id, c.store.loc(doc.id), mark);
                 }
@@ -8610,33 +8610,34 @@ impl Database {
                         Some(Err(Error::Duplicate(_))) if if_absent => Ok(false),
                         Some(r) => r.map(|_| true),
                     });
-                // Passed over or refused, it writes nothing for the block to
-                // put back, and its entry goes: kept, an `if absent` passing
-                // over many rows left one for each.
                 match checked {
                     Ok(true) => {}
                     Ok(false) => {
                         c.store.rewind(mark);
-                        if assigns.is_none() {
-                            if let Some(b) = &mut self.block {
-                                b.was.pop();
-                            }
-                            continue;
-                        }
                         // The row holding the first `@unique` value it
                         // holds, in the order the fields are declared.
-                        held = c.unique_holders(&doc)?.first().map(|(_, d)| *d);
+                        if assigns.is_some() {
+                            held = c.unique_holders(&doc)?.first().map(|(_, d)| *d);
+                        }
+                        // Passed over, or the row holding it set instead,
+                        // it writes nothing for the block to put back, and
+                        // its entry goes: kept, an `if absent` passing over
+                        // many rows left one for each. A refusal keeps its
+                        // entry, which puts back nothing: it ends the
+                        // statement, and the statement's block is put back.
+                        if let (Some(b), true) =
+                            (&mut self.block, held.is_some() || assigns.is_none())
+                        {
+                            b.was.pop();
+                        }
+                        if assigns.is_none() {
+                            continue;
+                        }
                         if !named {
                             doc.id = 0;
                         }
-                        if let (Some(b), Some(_)) = (&mut self.block, held) {
-                            b.was.pop();
-                        }
                     }
                     Err(e) => {
-                        if let Some(b) = &mut self.block {
-                            b.was.pop();
-                        }
                         c.store.rewind(mark);
                         return Err(e);
                     }
