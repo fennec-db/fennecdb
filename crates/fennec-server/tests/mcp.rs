@@ -89,3 +89,17 @@ fn the_flags_turn_the_endpoint_and_its_tools_on() {
     let a = h.ask("POST", "/mcp", r#"{"a": 1}"#);
     assert_eq!(a.status, 201, "with --mcp too: {}", a.body);
 }
+
+/// The memory collection is the app's: one named as the server's own --
+/// a name starting with `_`, which no statement writes -- is refused at
+/// the start rather than at every `remember`.
+#[test]
+fn a_memory_collection_of_the_servers_own_is_refused_at_the_start() {
+    let log = try_start(&["--mcp-memory", "_memories"])
+        .err()
+        .expect("a server refusing --mcp-memory _memories");
+    assert!(
+        log.contains("`_memories`") && log.contains("the server's own"),
+        "{log}"
+    );
+}

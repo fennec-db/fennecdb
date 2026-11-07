@@ -232,9 +232,7 @@ impl<'a> View<'a> {
         let rules: Vec<&Bound> = scope
             .rules
             .iter()
-            .filter(|r| {
-                r.ops & READ != 0 && r.collection.as_deref().is_none_or(|c| c == collection)
-            })
+            .filter(|r| r.ops & READ != 0 && r.covers(collection))
             .collect();
         if rules.iter().all(|r| r.read_fields.is_none()) {
             return None;
@@ -743,9 +741,7 @@ impl Scope {
             any
         }
         let readers: Vec<&Bound> = (self.rules.iter())
-            .filter(|r| {
-                r.ops & READ != 0 && r.collection.as_deref().is_none_or(|c| c == collection)
-            })
+            .filter(|r| r.ops & READ != 0 && r.covers(collection))
             .collect();
         walk(condition, &mut |f| {
             f != "id" && (readers.is_empty() || !readers.iter().all(|r| View::grants(r, f)))

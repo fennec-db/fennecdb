@@ -848,6 +848,14 @@ fn main() {
                         "--mcp-memory names a collection, and `{c}` is not a name"
                     ));
                 }
+                // Refused there to every token, the server's own among
+                // them: no statement writes a collection of the server's.
+                if fennec_core::declared::own(&c) {
+                    fail(&format!(
+                        "--mcp-memory names an app's collection, and `{c}`, starting with `_`, \
+                         is the server's own"
+                    ));
+                }
                 mcp.get_or_insert_with(Default::default).memory = Some(c);
             }
             flag @ ("--mcp-max-rows" | "--mcp-max-bytes" | "--mcp-calls-per-sec") => {
