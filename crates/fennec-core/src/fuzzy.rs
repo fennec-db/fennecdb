@@ -187,6 +187,9 @@ fn marked(w: &str) -> bool {
 /// not words a query types, and a word's variants are its fold's.
 #[derive(Default)]
 pub struct Dictionary {
+    /// None of them empty: `chunk_for`, `part` and the walk read a chunk's
+    /// first word, so a chunk its last word leaves goes (`remove`), and a
+    /// dictionary with none takes its next word as a chunk of one (`add`).
     chunks: Vec<Chunk>,
 }
 
@@ -234,6 +237,27 @@ impl Dictionary {
         self.chunks.is_empty()
     }
 
+    /// Its words in order, its chunks held to what every reader takes them
+    /// for: none empty, none past [`CHUNK`], each word above the one before.
+    #[cfg(test)]
+    pub(crate) fn sound(&self) -> Vec<&[u8]> {
+        let mut out: Vec<&[u8]> = Vec::new();
+        for (n, c) in self.chunks.iter().enumerate() {
+            assert!(
+                (1..=CHUNK).contains(&c.len()),
+                "chunk {n} holds {}",
+                c.len()
+            );
+            assert_eq!(c.ends.last().map(|&e| e as usize), Some(c.bytes.len()));
+            for i in 0..c.len() {
+                let w = c.at(i);
+                assert!(out.last().is_none_or(|&l| l < w), "chunk {n} out of order");
+                out.push(w);
+            }
+        }
+        out
+    }
+
     /// What it holds in memory.
     pub fn bytes(&self) -> usize {
         self.chunks.capacity() * std::mem::size_of::<Chunk>()
@@ -256,8 +280,14 @@ impl Dictionary {
             return;
         }
         let w = w.as_bytes();
+        // Sorted over no words, or every word taken out since: the word is a
+        // chunk of its own. Pushed empty first, as it was, the chunk was
+        // asked its first word below and panicked.
         if self.chunks.is_empty() {
-            self.chunks.push(Chunk::default());
+            let mut c = Chunk::default();
+            c.push(w);
+            self.chunks.push(c);
+            return;
         }
         let c = self.chunk_for(w);
         let Err(i) = self.chunks[c].find(w) else {
@@ -794,6 +824,101 @@ mod tests {
         }
         // Not a test of nothing: each bound found thousands.
         assert!(found.iter().all(|&n| n > 2_000), "{found:?}");
+    }
+
+    /// Kept up a word at a time, the dictionary is the one built from the
+    /// words it holds, and a walk finds in it what it finds in that one:
+    /// through runs of adds and of removes in turn -- adds filling it, from
+    /// nothing too, and splitting full chunks, removes emptying chunks
+    /// first, last and between and then the whole of it, each run taking a
+    /// word the other way one step in five. Its shape is held after every
+    /// step. Its first word after none panicked (`add`).
+    #[test]
+    fn a_dictionary_kept_up_is_the_one_built() {
+        let letters: Vec<char> = "abcdeé字".chars().collect();
+        // A word into none, a chunk split, and a chunk emptied first,
+        // between and last: how often each was met.
+        let mut met = [0usize; 5];
+        for seed in 1..=20u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let n = [1, 2, 7, 40, 700][seed as usize % 5];
+            let mut out: Vec<String> = Vec::new();
+            while out.len() < n {
+                let w = word(&mut rng, &letters);
+                if !out.contains(&w) {
+                    out.push(w);
+                }
+            }
+            // Sorted over some of them, or over none. `held` in order.
+            let mut held: Vec<String> = Vec::new();
+            if seed % 3 != 0 {
+                for _ in 0..rng.upto(n + 1) {
+                    held.push(out.swap_remove(rng.upto(out.len())));
+                }
+            }
+            held.sort_unstable();
+            let mut dict = Dictionary::of(held.iter().map(String::as_str));
+            let every = if n > 100 { 32 } else { 1 };
+            for (phase, adding) in (0..9).map(|p| (p, p % 2 == 0)) {
+                // Half the words a run takes out are taken at one place, the
+                // same share of the way in: a chunk there empties while those
+                // beside it hold words.
+                let (mut step, eighths) = (0, 1 + rng.upto(7));
+                while if adding {
+                    !out.is_empty()
+                } else {
+                    !held.is_empty()
+                } {
+                    step += 1;
+                    let add = match (held.is_empty(), out.is_empty()) {
+                        (true, _) => true,
+                        (_, true) => false,
+                        _ => adding == (rng.upto(5) != 0),
+                    };
+                    let chunks = dict.chunks.len();
+                    if add {
+                        let w = out.swap_remove(rng.upto(out.len()));
+                        dict.add(&w);
+                        let at = held.binary_search(&w).unwrap_err();
+                        held.insert(at, w);
+                        met[usize::from(chunks > 0)] += usize::from(dict.chunks.len() > chunks);
+                    } else {
+                        let at = match rng.upto(2) {
+                            0 => held.len() * eighths / 8,
+                            _ => rng.upto(held.len()),
+                        };
+                        let w = held.remove(at);
+                        let c = dict.chunk_for(w.as_bytes());
+                        dict.remove(&w);
+                        out.push(w);
+                        if dict.chunks.len() < chunks {
+                            met[2 + usize::from(c > 0) + usize::from(c + 1 == chunks && c > 0)] +=
+                                1;
+                        }
+                    }
+                    let want: Vec<&[u8]> = held.iter().map(|w| w.as_bytes()).collect();
+                    assert_eq!(dict.sound(), want, "seed {seed} phase {phase} step {step}");
+                    if step % every != 0 {
+                        continue;
+                    }
+                    let fresh = Dictionary::of(held.iter().map(String::as_str));
+                    let base = &[&held[..], &out[..]].concat()[rng.upto(n)];
+                    let q = typo(&mut rng, base, &letters);
+                    for k in 0..=2u8 {
+                        for prefix in [false, true] {
+                            let (mut a, mut b) = (Vec::new(), Vec::new());
+                            assert!(dict.near(&q, k, prefix, usize::MAX, &mut a));
+                            assert!(fresh.near(&q, k, prefix, usize::MAX, &mut b));
+                            a.sort_unstable();
+                            b.sort_unstable();
+                            assert_eq!(a, b, "seed {seed} phase {phase} step {step} {q:?} k {k}");
+                        }
+                    }
+                }
+            }
+        }
+        // Not a test of nothing: each met many times.
+        assert!(met.iter().all(|&n| n >= 8), "{met:?}");
     }
 
     /// A prefix is a range of the dictionary: every word holding it, and

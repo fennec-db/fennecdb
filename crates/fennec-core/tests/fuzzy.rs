@@ -283,6 +283,53 @@ fn the_words_follow_the_writes() {
     assert_eq!(ns(&fresh, fuzzy, "databse"), ns(&db, fuzzy, "databse"));
 }
 
+/// The words sorted, every one of them may go and words come back: emptied
+/// by a `del`, the sorted words take the next word in. The first word in
+/// once every one had gone was asked of a chunk holding none, and panicked:
+/// a `fuzzy` search, a `del` of the last row and an `insert` closed a
+/// server's connection.
+#[test]
+fn the_words_empty_and_fill_again() {
+    let text = |s: &str| [Value::Text(s.into())];
+    let fuzzy = "get p select n match name $1 fuzzy limit 5";
+    let prefix = "get p select n match name $1 prefix limit 5";
+    for first in [&["Tea"][..], &["Tea", "Green tea leaves", "Black tea"]] {
+        let mut db = Database::new();
+        exec(&mut db, "create collection p (n int, name text @text)", &[]);
+        for (n, name) in first.iter().enumerate() {
+            let p = [Value::Int(n as i64 + 1), Value::Text(name.to_string())];
+            exec(&mut db, "insert p {n: $1, name: $2}", &p);
+        }
+        // Sorts the words.
+        let found = ns(&db, fuzzy, "grean");
+        assert_eq!(found.is_empty(), first.len() == 1, "{found:?}");
+        exec(&mut db, "del p", &[]);
+        assert!(ns(&db, prefix, "te").is_empty());
+        exec(&mut db, "insert p {n: 2, name: $1}", &text("Oolong"));
+        assert_eq!(ns(&db, fuzzy, "oolomg"), [2]);
+        assert_eq!(ns(&db, prefix, "ool"), [2]);
+        // Emptied in a block, then filled in the same one.
+        let block = fennec_ql::parse("del p where n = 2; insert p {n: 3, name: $1}").unwrap();
+        let p = text("Sencha green tea");
+        let block: Vec<(&Statement, &[Value])> = vec![(&block[0], &[]), (&block[1], &p)];
+        db.execute_block(&block).unwrap();
+        assert_eq!(ns(&db, fuzzy, "grean"), [3]);
+        assert_eq!(ns(&db, prefix, "sen"), [3]);
+        assert!(ns(&db, fuzzy, "oolomg").is_empty());
+        // A block that empties it and fills it put back.
+        let block =
+            fennec_ql::parse(r#"del p where n = 3; insert p {n: 5, name: "Puerh"} require 2"#)
+                .unwrap();
+        let block: Vec<(&Statement, &[Value])> = block.iter().map(|s| (s, &[][..])).collect();
+        assert!(db.execute_block(&block).is_err());
+        assert_eq!(ns(&db, fuzzy, "grean"), [3]);
+        exec(&mut db, "del p where n = 3", &[]);
+        assert!(ns(&db, fuzzy, "grean").is_empty());
+        exec(&mut db, "insert p {n: 4, name: $1}", &text("Green"));
+        assert_eq!(ns(&db, fuzzy, "grean"), [4]);
+    }
+}
+
 #[test]
 fn a_word_reaching_too_many_is_refused_not_cut() {
     let mut db = Database::new();

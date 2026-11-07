@@ -377,7 +377,8 @@ counts each list's allocation past its bytes (`ALLOC`).
 
 **[`fuzzy` and `prefix` walk a sorted copy of the
 words.](../../docs/design/text.md#fuzzy-and-prefix)** Every write keeps it up
-once built, never in the file; a word reaching more than
+once built, never in the file, no chunk of it empty -- through its last word
+out and the next in (`Dictionary::sound`); a word reaching more than
 `MAX_EXPANSIONS` (10 000) words is refused, never cut.
 
 **[`rerank` deliberately uses no index.](../../docs/design/text.md#rerank)** It
