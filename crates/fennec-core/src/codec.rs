@@ -184,8 +184,18 @@ pub fn get_uvarint(buf: &[u8], pos: &mut usize) -> Result<u64> {
 /// build's low bits of one a 64-bit build wrote, `vector<4294967297>` a
 /// vector of one.
 pub fn get_usize(buf: &[u8], pos: &mut usize) -> Result<usize> {
-    usize::try_from(get_uvarint(buf, pos)?)
-        .map_err(|_| Error::Corrupt("a number past what this build's usize holds".into()))
+    get_within(buf, pos, usize::MAX as u64).map(|n| n as usize)
+}
+
+/// [`get_uvarint`] held to `most`, the widest a target's `usize` holds, so
+/// a test reads it at a wasm32 build's width natively. Refused as a varint
+/// past 64 bits is, the one string: its own was 48 bytes of the module.
+#[inline]
+fn get_within(buf: &[u8], pos: &mut usize, most: u64) -> Result<u64> {
+    match get_uvarint(buf, pos)? {
+        n if n <= most => Ok(n),
+        _ => Err(Error::Corrupt("varint overflow".into())),
+    }
 }
 
 #[inline]
@@ -860,6 +870,16 @@ mod tests {
             put_uvarint(&mut b, v);
             let got = get_usize(&b, &mut 0).ok();
             assert_eq!(got, usize::try_from(v).ok(), "{v}");
+            // At a wasm32 build's width, natively: past `u32` refused,
+            // where `as usize` read 4294967297 as 1.
+            let at_32 = get_within(&b, &mut 0, u32::MAX as u64);
+            match v {
+                v if v <= u32::MAX as u64 => assert_eq!(at_32.unwrap(), v),
+                _ => assert!(
+                    matches!(&at_32, Err(Error::Corrupt(m)) if m == "varint overflow"),
+                    "{v}: {at_32:?}"
+                ),
+            }
         }
     }
 }

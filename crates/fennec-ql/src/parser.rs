@@ -2141,17 +2141,21 @@ impl Parser {
                     // schema's are (`declared::index`): clamped, `m=1` built
                     // an index of 2 and `ef_construction=4` one of 8, and
                     // `m` past `MAX_M` cut a node's count of links to 16
-                    // bits. The floors are the clamps', refused under them:
-                    // a text that parsed reads as the tree it did.
+                    // bits. `m` from 2 and `ef_search` from 1, the floors
+                    // the clamps lifted to; `ef_construction` from 4,
+                    // pgvector's floor, which SQL's `with (..)` takes and
+                    // the `@hnsw(..)` written of it must read back as.
                     let (slot, what, lo, hi) = match key.to_ascii_lowercase().as_str() {
                         "m" => (&mut spec.m, "`m`", 2, MAX_M as u32),
                         "ef_construction" | "ef_c" => {
-                            (&mut spec.ef_construction, "`ef_construction`", 8, u32::MAX)
+                            (&mut spec.ef_construction, "`ef_construction`", 4, u32::MAX)
                         }
                         "ef_search" | "ef" => (&mut spec.ef_search, "`ef_search`", 1, u32::MAX),
                         other => {
                             // The number read first, as it always was: a
-                            // text ending at `=` reads on.
+                            // text ending at `=` reads on. Read once before
+                            // the match instead, the range's test was a
+                            // function of its own, 33 bytes more.
                             self.int()?;
                             return self.err(format!("unknown hnsw parameter `{other}`"));
                         }
@@ -2217,7 +2221,8 @@ impl Parser {
             // the non-zero entries are kept -- a SPLADE vocabulary's size.
             "sparse" | "sparsevec" => {
                 self.expect(Tok::Lt)?;
-                let dim = self.int_in("a sparse vector's dimension", 1, MAX_DIM as u32)?;
+                // A vector's words, as `IndexKind::check`'s: one string.
+                let dim = self.int_in("a vector's dimension", 1, MAX_DIM as u32)?;
                 self.expect(Tok::Gt)?;
                 DataType::Sparse(dim)
             }
@@ -2923,15 +2928,17 @@ impl Parser {
                 };
                 // Each held to its bounds as it is read, the number written
                 // in the refusal: `k` past `MAX_FUSE_K` was clamped, and
-                // `candidates` past 32 bits cut in the browser module.
+                // `candidates` past 32 bits cut in the browser module. The
+                // words are the clause's own, `rerank`'s alike: the
+                // refusal's position says which clause.
                 loop {
                     if self.eat_kw("k") {
-                        f.k = Some(self.int_in("`fuse`'s `k`", 0, MAX_FUSE_K)? as u32);
+                        f.k = Some(self.int_in("`k`", 0, MAX_FUSE_K)?);
                         continue;
                     }
                     if self.eat_kw("candidates") {
                         let most = fennec_core::engine::MAX_MATCH_ROWS as u32;
-                        f.candidates = Some(self.int_in("`fuse`'s `candidates`", 1, most)?);
+                        f.candidates = Some(self.int_in("`candidates`", 1, most)?);
                         continue;
                     }
                     break;
@@ -2945,7 +2952,7 @@ impl Parser {
                 let mut candidates = None;
                 if self.eat_kw("candidates") {
                     let most = fennec_core::engine::MAX_MATCH_ROWS as u32;
-                    candidates = Some(self.int_in("`rerank`'s `candidates`", 1, most)?);
+                    candidates = Some(self.int_in("`candidates`", 1, most)?);
                 }
                 sel.rerank = Some(Rerank {
                     field,

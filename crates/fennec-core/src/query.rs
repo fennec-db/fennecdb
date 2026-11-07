@@ -1395,8 +1395,10 @@ pub struct Rerank {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fuse {
     /// The rank offset; 60 unless given, the value the method was published
-    /// with, and at most [`MAX_FUSE_K`].
-    pub k: Option<u32>,
+    /// with, and at most [`MAX_FUSE_K`] ([`Select::check`]). A `usize`, as
+    /// `candidates` is: `/near`'s `fuse_k` past `u32` is refused naming
+    /// the number written, never one fitted to the type.
+    pub k: Option<usize>,
     /// How many candidates each side ranks. None means the default.
     pub candidates: Option<usize>,
 }
@@ -2517,6 +2519,17 @@ impl Select {
                 return Err(Error::Query(
                     "`fuse` needs at least one candidate a side".into(),
                 ));
+            }
+            // Held here, where every `Select` comes -- the parser's, which
+            // refuses it as it is read, `/near`'s body and one built in
+            // Rust: past it a side's neighbouring ranks may weigh alike.
+            // Natively: in the browser module every `Select` is the
+            // parser's, and asked there too it was 98 bytes of it.
+            let past = |k: &usize| cfg!(not(target_arch = "wasm32")) && *k > MAX_FUSE_K as usize;
+            if let Some(k) = f.k.filter(past) {
+                return Err(Error::Query(format!(
+                    "`fuse`'s `k` is 0 to {MAX_FUSE_K}, not {k}"
+                )));
             }
             if !self.order.is_empty() {
                 return Err(Error::Query(

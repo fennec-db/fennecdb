@@ -35,7 +35,7 @@ fn a_number_past_its_range_is_refused_naming_it() {
         ),
         (
             "create collection v (s sparse<4294967297>)".into(),
-            "a sparse vector's dimension is 1 to 1000000000, not 4294967297",
+            "a vector's dimension is 1 to 1000000000, not 4294967297",
         ),
         // Clamped, `m=1` built an index of 2; past `MAX_M` a node's count
         // of links was cut to 16 bits.
@@ -45,15 +45,15 @@ fn a_number_past_its_range_is_refused_naming_it() {
             "`m` is 2 to 32767, not 32768",
         ),
         (format!("{v} @hnsw(m=-1))"), "`m` is 2 to 32767, not -1"),
-        // 7 was built as 8: refused under the floor it was clamped to, so
-        // no text that parsed reads as another tree.
+        // pgvector's floor, which SQL's `with (..)` takes: 3 was built as
+        // 8, and 4 to 7 are read as written.
         (
-            format!("{v} @hnsw(cosine, ef_construction=7))"),
-            "`ef_construction` is 8 to 4294967295, not 7",
+            format!("{v} @hnsw(cosine, ef_construction=3))"),
+            "`ef_construction` is 4 to 4294967295, not 3",
         ),
         (
             format!("{v} @hnsw(ef_c=4294967296))"),
-            "`ef_construction` is 8 to 4294967295, not 4294967296",
+            "`ef_construction` is 4 to 4294967295, not 4294967296",
         ),
         (
             format!("{v} @hnsw(ef_search=0))"),
@@ -95,13 +95,13 @@ fn a_number_in_its_range_is_read_as_written() {
     };
     // Each bound itself.
     let (ty, s) = spec(
-        "create collection v (e vector<1000000000> @hnsw(m=32767, ef_construction=8, \
+        "create collection v (e vector<1000000000> @hnsw(m=32767, ef_construction=4, \
          ef_search=4294967295))",
     );
     assert_eq!(ty, DataType::Vector(1_000_000_000, VecPrec::F32));
     assert_eq!(
         (s.m, s.ef_construction, s.ef_search),
-        (32767, 8, 4294967295)
+        (32767, 4, 4294967295)
     );
     let (_, s) = spec("create collection v (e vector<3> @hnsw(m=2, ef_c=4294967295, ef=1))");
     assert_eq!((s.m, s.ef_construction, s.ef_search), (2, 4294967295, 1));
@@ -178,4 +178,135 @@ fn a_schema_is_held_to_the_same_bounds_where_no_parser_read_it() {
     assert!(e
         .unwrap_or_default()
         .contains("a vector's dimension is 1 to"));
+}
+
+/// `near ... ef 4294967295` -- as wide as a graph's node ids reach -- runs
+/// natively and answers the nearest, reserving no more than the walk found
+/// (`VectorIndex::search`): `Vec::with_capacity(ef)` asked for 64 GB.
+#[test]
+fn the_widest_beam_answers() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection v (n int, e vector<3> @hnsw(l2, m=2, ef_construction=4))",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "put v [{n: 1, e: [1, 0, 0]}, {n: 2, e: [0, 1, 0]}, {n: 3, e: [0, 0, 1]}]",
+    )
+    .unwrap();
+    let rows = |db: &mut Database, sql: &str| -> Vec<Value> {
+        let r = run(db, sql).unwrap();
+        let rows = r.rows().expect("rows");
+        let n = rows.columns.iter().position(|c| c == "n").unwrap();
+        rows.rows.iter().map(|r| r.values[n].clone()).collect()
+    };
+    let near = "get v select n near e [0.9, 0.1, 0] ef 4294967295";
+    assert_eq!(
+        rows(&mut db, &format!("{near} limit 2")),
+        [Value::Int(1), Value::Int(2)]
+    );
+    // Past tombstones the beam widens by their number, saturating.
+    run(&mut db, "del v where n = 2").unwrap();
+    assert_eq!(
+        rows(&mut db, &format!("{near} limit 2")),
+        [Value::Int(1), Value::Int(3)]
+    );
+}
+
+/// SQL's `with (m = 2, ef_construction = 4)`, pgvector's floor, builds an
+/// index every reader of its description takes back as it is: the
+/// `@hnsw(..)` the schema's FennecQL writes and the declaration its JSON
+/// is -- `fennec types --fennecql`, `fennec_abi::schema` and `follow`,
+/// `GET /_schema` handed to `/_schema/plan` -- where `ef_construction`
+/// from 8 refused what SQL made.
+#[test]
+fn pgvectors_floor_reads_back_as_it_was_made() {
+    let mut db = Database::new();
+    run(&mut db, "create table p (e vector(3))").unwrap();
+    run(
+        &mut db,
+        "create index on p using hnsw (e vector_l2_ops) with (m = 2, ef_construction = 4)",
+    )
+    .unwrap();
+    let made = db.collection("p").unwrap().schema.clone();
+    let IndexKind::Vector(spec) = made.fields[0].index else {
+        panic!("{:?}", made.fields[0].index)
+    };
+    assert_eq!((spec.m, spec.ef_construction), (2, 4));
+    let text = fennec_core::declared::fennecql(&[&*made]);
+    assert!(
+        text.contains("@hnsw(l2, m=2, ef_construction=4, "),
+        "{text}"
+    );
+    let Statement::CreateCollection { schema, .. } = parse_one(text.trim()).unwrap() else {
+        panic!("{text}")
+    };
+    assert_eq!(schema.fields, made.fields);
+    let json = fennec_core::declared::describe(&[&*made]);
+    let declared = fennec_core::declared::parse(&json).unwrap();
+    assert_eq!(declared.collections[0].fields, made.fields);
+}
+
+/// A collection a version before the bounds made out of them -- an `@hnsw`
+/// `m` past 32 767, which a node's 16-bit count of links already cut, or a
+/// `vector<N>` past 10^9 -- opens as it was, and every alter of it is
+/// refused saying so and the way out, rather than naming a field the alter
+/// does not touch; dropping the field asks nothing of the rest.
+#[test]
+fn a_field_made_out_of_range_before_is_named_at_any_alter() {
+    for (field, says) in [
+        (
+            {
+                let spec = VectorIndexSpec {
+                    m: 40_000,
+                    ..VectorIndexSpec::default()
+                };
+                Field::new("e", DataType::Vector(3, VecPrec::F32)).indexed(IndexKind::Vector(spec))
+            },
+            "@hnsw's `m` is 2 to 32767",
+        ),
+        (
+            Field::new("e", DataType::Vector(1_000_000_001, VecPrec::F32)),
+            "a vector's dimension is 1 to 1000000000",
+        ),
+    ] {
+        // Made as a version before made it: `Schema::new` refuses it now,
+        // and a create takes the schema it is handed.
+        let mut schema = Schema::new("b", vec![Field::new("n", DataType::Int)]).unwrap();
+        schema.fields.push(field);
+        let mut db = Database::new();
+        db.execute(&Statement::CreateCollection {
+            schema,
+            if_not_exists: false,
+        })
+        .unwrap();
+        let mut db = {
+            let mut opened = Database::new();
+            opened.load(&db.snapshot()).expect("it opens");
+            opened
+        };
+        run(&mut db, "put b {n: 1}").unwrap();
+        for alter in [
+            "alter collection b add field x int",
+            "alter collection b rename field n to m",
+        ] {
+            let e = run(&mut db, alter).expect_err(alter).to_string();
+            let held = "`b` holds a field a version before this one made, which this one no \
+                        longer takes (`e`: ";
+            assert!(e.contains(held) && e.contains(says), "{alter}: {e}");
+            assert!(
+                e.contains("drop it (`alter collection b drop field e`) and add it again"),
+                "{e}"
+            );
+        }
+        run(&mut db, "alter collection b drop field e").unwrap();
+        run(
+            &mut db,
+            "alter collection b add field e vector<3> @hnsw(m=16)",
+        )
+        .unwrap();
+        run(&mut db, "alter collection b rename field n to m").unwrap();
+    }
 }

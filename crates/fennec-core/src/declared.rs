@@ -558,10 +558,11 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
             // 2, and on a 32-bit build `as usize` kept the low bits.
             for (key, slot, lo, hi) in [
                 ("m", &mut spec.m, 2, MAX_M as u64),
+                // pgvector's floor, as the parser's and SQL's `with (..)`.
                 (
                     "ef_construction",
                     &mut spec.ef_construction,
-                    8,
+                    4,
                     u32::MAX as u64,
                 ),
                 ("ef_search", &mut spec.ef_search, 1, u32::MAX as u64),
@@ -594,16 +595,14 @@ pub fn type_named(s: &str) -> Option<DataType> {
         let inner = std::str::from_utf8(inner).ok()?;
         return Some(DataType::List(Box::new(type_named(inner)?)));
     }
-    // Ten digits folded in a `u64`, and held to `MAX_DIM` before they are
-    // a `usize`: folded in one, a 32-bit build wrapped `vector<4294967297>`
-    // and `sparse<4294967297>` to a dimension of one.
+    // Up to ten digits read whole (`dimension`), and held to `MAX_DIM`.
     let dim = |head: &[u8], tail: &[u8]| -> Option<usize> {
         let rest = b.strip_prefix(head)?.strip_suffix(tail)?;
         if rest.is_empty() || rest.len() > 10 || !rest.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        let n = rest.iter().fold(0u64, |n, d| n * 10 + u64::from(d - b'0'));
-        (1..=MAX_DIM as u64).contains(&n).then_some(n as usize)
+        let n = dimension(rest)?;
+        (1..=MAX_DIM as u32).contains(&n).then_some(n as usize)
     };
     if let Some(n) = dim(b"vector<", b", f16>") {
         return Some(DataType::Vector(n, VecPrec::F16));
@@ -624,6 +623,17 @@ pub fn type_named(s: &str) -> Option<DataType> {
         "json" => DataType::Json,
         "geo" => DataType::Geo,
         _ => return None,
+    })
+}
+
+/// A dimension's digits as a `u32`, none past it: checked at each digit,
+/// on every target alike, where a fold in a `usize` wrapped a 32-bit
+/// build's `vector<4294967297>` and `sparse<4294967297>` -- the native
+/// library's on a 32-bit device -- to a dimension of one. `MAX_DIM` is
+/// within `u32`.
+fn dimension(digits: &[u8]) -> Option<u32> {
+    digits.iter().try_fold(0u32, |n, &d| {
+        n.checked_mul(10)?.checked_add(u32::from(d - b'0'))
     })
 }
 
@@ -1714,8 +1724,8 @@ mod tests {
     /// A dimension and an index's parameters are held to the parser's
     /// bounds, refused past them, never clamped or cut: `m: 1` declared an
     /// index of 2, and a 32-bit build folded `vector<4294967297>` and
-    /// `sparse<4294967297>` to a dimension of one -- what the `u64` fold
-    /// and `MAX_DIM` refuse on every target alike.
+    /// `sparse<4294967297>` to a dimension of one -- what `dimension` and
+    /// `MAX_DIM` refuse on every target alike.
     #[test]
     fn a_number_past_the_parsers_bound_is_refused() {
         for t in [
@@ -1746,14 +1756,14 @@ mod tests {
             (r#""m":1"#, "has an `m` that is not 2 to 32767"),
             (r#""m":32768"#, "has an `m` that is not 2 to 32767"),
             (r#""m":4294967298"#, "has an `m` that is not 2 to 32767"),
-            // 7 was declared as 8.
+            // pgvector's floor: 3 was declared as 8.
             (
-                r#""ef_construction":7"#,
-                "has an `ef_construction` that is not 8 to 4294967295",
+                r#""ef_construction":3"#,
+                "has an `ef_construction` that is not 4 to 4294967295",
             ),
             (
                 r#""ef_construction":4294967296"#,
-                "has an `ef_construction` that is not 8 to 4294967295",
+                "has an `ef_construction` that is not 4 to 4294967295",
             ),
             (
                 r#""ef_search":0"#,
@@ -1764,14 +1774,27 @@ mod tests {
             assert!(e.contains(why), "{e} / {ix}");
         }
         // Within them, as written.
-        let d = hnsw(r#""m":32767,"ef_construction":8,"ef_search":4294967295"#).unwrap();
+        let d = hnsw(r#""m":32767,"ef_construction":4,"ef_search":4294967295"#).unwrap();
         let IndexKind::Vector(s) = d.collections[0].fields[0].index else {
             panic!("{:?}", d.collections[0].fields[0].index)
         };
         assert_eq!(
             (s.m, s.ef_construction, s.ef_search),
-            (32767, 8, 4294967295)
+            (32767, 4, 4294967295)
         );
+    }
+
+    /// A dimension's digits are read whole in a `u32` or not at all, on
+    /// every target: folded in a 32-bit build's `usize`, `4294967297`
+    /// wrapped to 1, a dimension `type_named` then took.
+    #[test]
+    fn a_dimension_past_32_bits_is_none_not_wrapped() {
+        assert_eq!(dimension(b"4294967297"), None);
+        assert_eq!(dimension(b"4294967296"), None);
+        assert_eq!(dimension(b"9999999999"), None);
+        assert_eq!(dimension(b"4294967295"), Some(u32::MAX));
+        assert_eq!(dimension(b"1000000000"), Some(1_000_000_000));
+        assert_eq!(dimension(b"0000000003"), Some(3));
     }
 
     fn schemas(src: &str) -> Vec<Schema> {

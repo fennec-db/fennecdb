@@ -596,15 +596,15 @@ test('a number past 32 bits is refused in the module, never cut to its low bits'
   for (const [sql, says] of [
     ['create collection v (e vector<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
     ['create collection v (e vector<1000000001>)', "a vector's dimension is 1 to 1000000000, not 1000000001"],
-    ['create collection v (s sparse<4294967297>)', "a sparse vector's dimension is 1 to 1000000000, not 4294967297"],
+    ['create collection v (s sparse<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
     ['create table v (e vector(4294967297))', "`e`: a vector's dimension is 1 to 1000000000"],
     ['create collection v (e vector<2> @hnsw(m=4294967298))', '`m` is 2 to 32767, not 4294967298'],
-    ['create collection v (e vector<2> @hnsw(ef_construction=4294967300))', '`ef_construction` is 8 to 4294967295, not 4294967300'],
-    [`${fuse} candidates 4294967297`, "`fuse`'s `candidates` is 1 to 10000, not 4294967297"],
-    [`${fuse} candidates 4294967296`, "`fuse`'s `candidates` is 1 to 10000, not 4294967296"],
-    [`${fuse} candidates 20000`, "`fuse`'s `candidates` is 1 to 10000, not 20000"],
-    [`${fuse} k 99999999999`, "`fuse`'s `k` is 0 to 1000000, not 99999999999"],
-    ['get d match body "rust" rerank e [1, 0] candidates 4294967297', "`rerank`'s `candidates` is 1 to 10000, not 4294967297"],
+    ['create collection v (e vector<2> @hnsw(ef_construction=4294967300))', '`ef_construction` is 4 to 4294967295, not 4294967300'],
+    [`${fuse} candidates 4294967297`, '`candidates` is 1 to 10000, not 4294967297'],
+    [`${fuse} candidates 4294967296`, '`candidates` is 1 to 10000, not 4294967296'],
+    [`${fuse} candidates 20000`, '`candidates` is 1 to 10000, not 20000'],
+    [`${fuse} k 99999999999`, '`k` is 0 to 1000000, not 99999999999'],
+    ['get d match body "rust" rerank e [1, 0] candidates 4294967297', '`candidates` is 1 to 10000, not 4294967297'],
     ['get d select snippet(body, 4294967297) match body "rust"', "a snippet's length in words is 1 to 4294967295, not 4294967297"],
     ['get d near e [1, 0] ef 4294967297', '`ef` is 1 to 4294967295, not 4294967297'],
     ['select body from d order by 4294967297', 'the list holds 1'],
@@ -616,6 +616,17 @@ test('a number past 32 bits is refused in the module, never cut to its low bits'
   assert.match(db.describe('fennecql').fennecql, /vector<2> @hnsw\(cosine, m=2, ef_construction=8, /);
   assert.equal(db.rows(`${fuse} k 1000000 candidates 10000 limit 2`).length, 2);
   assert.equal(db.rows('get d near e [1, 0] ef 4294967295 limit 1')[0].body, 'rust db');
+  // SQL's `with (..)` at pgvector's floor is described as an `@hnsw(..)`
+  // that reads back as it: one floor, 4, for both and a declaration.
+  db.run('create table p (e vector(2))');
+  db.run('create index on p using hnsw (e vector_l2_ops) with (m = 2, ef_construction = 4)');
+  const described = db.describe('fennecql').fennecql;
+  assert.match(described, /e vector<2> @hnsw\(l2, m=2, ef_construction=4, /);
+  const again = await Fennec.open(wasm);
+  for (const statement of described.split('\n').filter(Boolean)) again.run(statement);
+  assert.equal(again.describe('fennecql').fennecql, described);
+  const plan = again.checkSchema(db.describe('fennecql'));
+  assert.deepEqual([plan.statements, plan.refusals], [[], []]);
 });
 
 test('a text index beside a unique one, in the module: both answer, the unique one refusing every write', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {

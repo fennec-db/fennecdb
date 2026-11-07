@@ -692,9 +692,10 @@ neighbouring ranks' weights are more than an `f32` apart, so each of a
 side's 10 000 ranks weighs more than the next; past it neighbours may weigh
 the same, and past 2^24 `k` itself rounds. The parser clamped `k
 99999999999` to `u32::MAX`, where a side's first 256 ranks weigh alike;
-it refuses it now, naming the range, as the `/near` body's `fuse_k` is
-(`fuse_k_keeps_every_rank_apart`). `candidates` is 1 to 10 000, refused as
-it is read.
+it refuses it now, naming the range (`fuse_k_keeps_every_rank_apart`),
+and natively `Select::check` holds every `Select` to it -- the `/near`
+body's `fuse_k`, read as written, and one built in Rust. `candidates` is 1 to
+10 000, refused as it is read.
 
 **`fuse` cannot tell a list that found something from one that found
 chance**, so a caller whose words match nothing but prefixes leaves them out.
