@@ -82,6 +82,17 @@ impl Database {
                 crate::named::Binding::events_named(*events)
             )));
         }
+        // A hook's statement reads its values from an event, which no call
+        // carries yet: its events run it (`Database::take_event`). The
+        // server's token's call with an event is F4's slice 3's, and a
+        // token held to a policy meets the 404 a missing one is.
+        if let Some(h) = &s.hook {
+            return Err(Error::Query(format!(
+                "statement `{}` takes the events of hook `{h}`: its events run it, and no call \
+                 does",
+                call.name
+            )));
+        }
         // A scheduled statement is the clock's, and the server's token's
         // to run by hand -- a token held to a policy meets the 404 a
         // missing one is (`fennec_http::access`) -- its `slot()` the slot

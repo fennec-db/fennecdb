@@ -89,10 +89,12 @@ fn a_call_line_naming_no_statement_is_logged() {
 
 /// A `call` line naming a scheduled statement is logged, as one naming a
 /// statement bound to writes is: the clock runs it, and no call of a
-/// token's does. So is a `wake` line naming it, which no write wakes. The
-/// fixture a server's build wrote holds `lapse`, run every 15 minutes.
+/// token's does. So is a `wake` line naming it, which no write wakes, and
+/// either line naming a webhook consumer, whose events run it. The fixture
+/// a server's build wrote holds `lapse`, run every 15 minutes, and
+/// `stripe_paid`, taking hook `stripe`'s events.
 #[test]
-fn a_call_line_naming_a_scheduled_statement_is_logged() {
+fn a_call_line_naming_a_scheduled_or_a_hook_s_statement_is_logged() {
     let file = tmp("calls", "scheduled.fennec");
     std::fs::copy(
         concat!(
@@ -102,7 +104,10 @@ fn a_call_line_naming_a_scheduled_statement_is_logged() {
         &file,
     )
     .unwrap();
-    let (secret, policy) = policy("scheduled", "lapse call\nlapse wake\n");
+    let (secret, policy) = policy(
+        "scheduled",
+        "lapse call\nlapse wake\nstripe_paid call\nstripe_paid wake\n",
+    );
     let server = start(&[
         "--file",
         file.to_str().unwrap(),
@@ -116,6 +121,8 @@ fn a_call_line_naming_a_scheduled_statement_is_logged() {
     for line in [
         "policy line 1 grants calling statement `lapse`, which runs by the clock",
         "policy line 2 grants waking statement `lapse`, which runs by the clock",
+        "policy line 3 grants calling statement `stripe_paid`, which takes a hook's events",
+        "policy line 4 grants waking statement `stripe_paid`, which takes a hook's events",
     ] {
         assert!(server.logged(line, Duration::from_secs(10)), "{line}");
     }

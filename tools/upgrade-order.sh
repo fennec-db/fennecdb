@@ -48,7 +48,7 @@ cleanup() {
         [ -n "$p" ] && kill "$p" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    for tree in "$WORK/old" "$WORK/old3" "$WORK/old4"; do
+    for tree in "$WORK/old" "$WORK/old3" "$WORK/old4" "$WORK/old6"; do
         if [ -d "$tree" ]; then
             git -C "$ROOT" worktree remove --force "$tree" 2>/dev/null || true
         fi
@@ -707,3 +707,83 @@ grep -q "$UNREAD" "$WORK/restored4-open.log" || fail "the old server said nothin
 echo "old restore:  $(grep -m1 "$UNREAD" "$WORK/restore4-old.log")"
 echo "old open:     $(grep -m1 "$UNREAD" "$WORK/restored4-open.log")"
 echo "ok: the binaries from before stop in words at a schedule (op 4) and its mark (op 5)"
+
+# Op 6 (docs/design/named-statements.md, F4): a webhook consumer is kind
+# 13's op 6, its hook's name after its text. A binary from before it --
+# OP6_BASE, the last main before the op -- refuses an op it does not read,
+# never taking a hook's statement for a callable one whose text does not
+# read, marked broken, its sender answered 404 for days. No server defines
+# one yet (F4's slice 3 takes events): fennec-core's fixture holds one and
+# an event it took, its write and its key one block, written by its tests
+# (`tests/statements.fennec`), and
+#
+#   - the old server refuses to open it, in words;
+#   - this tree's server opens it, answers its reads, takes its writes and
+#     refuses a call of the hook's statement, which its events run;
+#   - an old replica of that server refuses the image holding op 6, and an
+#     old archiver takes no image of its own;
+#   - the old `fennec types` refuses it.
+OP6_BASE=${OP6_BASE:-6fb28002}
+if [ -n "${OLD6_BIN_DIR:-}" ]; then
+    OLD6=$OLD6_BIN_DIR
+else
+    echo "building fennec-server and fennec at $OP6_BASE ..."
+    git -C "$ROOT" worktree add --detach --quiet "$WORK/old6" "$OP6_BASE"
+    CARGO_TARGET_DIR="$WORK/old6-target" "${CARGO:-cargo}" build --quiet \
+        --manifest-path "$WORK/old6/Cargo.toml" -p fennec-server -p fennec-cli
+    OLD6="$WORK/old6-target/debug"
+fi
+cp "$ROOT/crates/fennec-core/tests/statements.fennec" "$WORK/hooked.fennec"
+cp "$WORK/hooked.fennec" "$WORK/hooked-old.fennec"
+
+"$OLD6/fennec-server" --file "$WORK/hooked-old.fennec" --http 127.0.0.1:0 \
+    >"$WORK/hooked-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 6"
+grep -q "$UNREAD" "$WORK/hooked-open.log" || fail "the old server said nothing of op 6"
+echo "old open:     $(grep -m1 "$UNREAD" "$WORK/hooked-open.log")"
+
+"$NEW/fennec-server" --file "$WORK/hooked.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/hooked-primary.log" &
+PIDS+=($!)
+HOOKED=$(address "$WORK/hooked-primary.log")
+query "$HOOKED" "get orders select status where ref = 'o-1'" | grep -q 'paid' ||
+    fail "this tree's server answered no read of the file holding op 6"
+query "$HOOKED" "call stripe_paid" | grep -q 'takes the events of hook' ||
+    fail "this tree's server ran a hook's statement by a call"
+
+# The old archiver keeps the primary's image as it came; the image of its
+# own it takes once a write follows reads op 6.
+"$OLD6/fennec" archive "$HOOKED" "$WORK/archive6" --token r --image-every 1s \
+    2>"$WORK/archiver6.log" &
+ARCHIVER6=$!
+PIDS+=($ARCHIVER6)
+said "$WORK/archiver6.log" "image at change" || fail "the old archiver took no image"
+query "$HOOKED" "put orders {ref: 'o-2', status: 'open'}" | grep -q '"error"' &&
+    fail "this tree's server refused a write beside a hook"
+said "$WORK/archiver6.log" "$UNREAD" || fail "the old archiver said nothing of op 6"
+echo "old archiver: $(grep -m1 "$UNREAD" "$WORK/archiver6.log")"
+kill "$ARCHIVER6" 2>/dev/null || true
+wait "$ARCHIVER6" 2>/dev/null || true
+
+"$OLD6/fennec-server" --file "$WORK/hooked-replica.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$HOOKED" \
+    2>"$WORK/hooked-replica.log" &
+PIDS+=($!)
+HOOKED_REPLICA=$(address "$WORK/hooked-replica.log")
+said "$WORK/hooked-replica.log" "$UNREAD" || fail "the old replica said nothing of op 6"
+query "$HOOKED_REPLICA" "get orders count" | grep -q '"count"' &&
+    fail "the old replica took the image holding op 6"
+echo "old replica:  $(grep -m1 "$UNREAD" "$WORK/hooked-replica.log")"
+
+if "$OLD6/fennec" types "$WORK/hooked-old.fennec" >"$WORK/hooked-types.log" 2>&1; then
+    fail "the old \`fennec types\` read a file holding op 6"
+fi
+grep -q "$UNREAD" "$WORK/hooked-types.log" || fail "the old \`fennec types\` said nothing of op 6"
+echo "old types:    $(grep -m1 "$UNREAD" "$WORK/hooked-types.log")"
+echo "ok: the binaries from before stop in words at a webhook consumer (op 6)"

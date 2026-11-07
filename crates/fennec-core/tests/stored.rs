@@ -620,15 +620,15 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
             file.extend_from_slice(&body);
             file
         });
-        let file = crate::scheduled::with_schedule(with_binding(file));
+        let file = crate::hooked::with_hook(crate::scheduled::with_schedule(with_binding(file)));
         std::fs::write(FIXTURE, file).unwrap();
     }
     let db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
     let t = db.statements();
     assert_eq!(
         t.len(),
-        5,
-        "transfer, like, stale, the binding and the schedule"
+        6,
+        "transfer, like, stale, the binding, the schedule and the hook"
     );
     for (name, text) in [("transfer", TRANSFER), ("like", LIKE)] {
         let s = t.get(name).unwrap();

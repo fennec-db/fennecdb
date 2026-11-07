@@ -548,12 +548,12 @@ fn lines(
         if n == limit {
             return false;
         }
-        // The consumers' own cursors, the writes' keys and a named
-        // statement defined or dropped, of no collection's rows: passed
-        // over, and the cursor with them.
+        // The consumers' own cursors, the writes' keys, the events' keys
+        // and a named statement defined or dropped, of no collection's
+        // rows: passed over, and the cursor with them.
         if matches!(
             c.collection.as_deref(),
-            Some(CONSUMERS | crate::idempotent::KEYS)
+            Some(CONSUMERS | crate::idempotent::KEYS | fennec_core::engine::HOOK_EVENTS)
         ) || matches!(c.kind, ChangeKind::Statement)
         {
             next = c.seq;

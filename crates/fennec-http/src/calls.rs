@@ -320,6 +320,11 @@ pub fn log_unheld(access: Option<&Access>, db: &Database, tenant: Option<&str>) 
                  clock: a token held to a policy never calls it, so the line grants nothing",
                 at()
             ),
+            Some(Kind::Hooked) => crate::log!(
+                "{}policy line {line} grants calling statement `{name}`, which takes a hook's \
+                 events: a token held to a policy never calls it, so the line grants nothing",
+                at()
+            ),
             Some(Kind::Called) => {}
         }
     }
@@ -339,6 +344,12 @@ pub fn log_unheld(access: Option<&Access>, db: &Database, tenant: Option<&str>) 
             Some(Kind::Scheduled) => crate::log!(
                 "{}policy line {line} grants waking statement `{name}`, which runs by the \
                  clock: `wake` grants a statement bound to writes alone, and no write wakes \
+                 it, so the line grants nothing",
+                at()
+            ),
+            Some(Kind::Hooked) => crate::log!(
+                "{}policy line {line} grants waking statement `{name}`, which takes a hook's \
+                 events: `wake` grants a statement bound to writes alone, and no write wakes \
                  it, so the line grants nothing",
                 at()
             ),
