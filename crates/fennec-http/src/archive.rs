@@ -675,7 +675,9 @@ impl Archive {
         let (at, history) = w.place();
         // A restore starts from an image, so an archive without one asks for
         // one, even where the primary could have sent every write instead.
-        let mut rx = upstream.open(at, history, w.wants_image())?;
+        // Marked an archiver's: no promotion takes a write from it, so the
+        // primary's hooks never wait for it.
+        let mut rx = (upstream.clone().archiving()).open(at, history, w.wants_image())?;
         let Message::Hello {
             image,
             seq,
@@ -1431,7 +1433,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         true => out,
         false => &resolved,
     };
-    let mut rx = upstream.open(0, 0, true)?;
+    let mut rx = upstream.clone().archiving().open(0, 0, true)?;
     let Message::Hello {
         image: true,
         seq,

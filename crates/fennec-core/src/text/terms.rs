@@ -1046,6 +1046,40 @@ impl Terms {
     fn split_into(&self) -> usize {
         self.shards.len()
     }
+
+    /// Every term with its documents and counts, in the words' order: the
+    /// same for two tables holding the same postings, however each was
+    /// grown.
+    pub fn dump(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in self.shards() {
+            for (i, t) in s.ones.iter().enumerate().filter(|(_, t)| t.tf != 0) {
+                let w = s.word(Place { i, list: false });
+                out.push(format!(
+                    "{:?} {:?} {:?}",
+                    String::from_utf8_lossy(w),
+                    [t.doc],
+                    [t.tf]
+                ));
+            }
+            for (i, l) in s
+                .lists
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| !l.docs.is_empty())
+            {
+                let w = s.word(Place { i, list: true });
+                out.push(format!(
+                    "{:?} {:?} {:?}",
+                    String::from_utf8_lossy(w),
+                    l.docs,
+                    l.tfs
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
 }
 
 #[cfg(test)]

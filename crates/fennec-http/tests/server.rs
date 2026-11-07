@@ -1565,3 +1565,268 @@ fn a_polled_read_is_answered_304_until_what_it_reads_is_written() {
     let (_, none, _) = ask("\"0\"", "get stock where n < now()");
     assert_eq!(none, None);
 }
+
+// ------------------------------------------------------------ webhook events
+
+/// The secret hook `stripe` of these servers verifies Stripe's events
+/// with.
+const HOOK_SECRET: &str = "whsec_held_fsync_tests";
+
+/// Hook `stripe`, as a hooks file names it.
+fn stripe_hooks() -> Arc<fennec_http::hooks::Hooks> {
+    let read = |_: &str| Ok(HOOK_SECRET.as_bytes().to_vec());
+    Arc::new(fennec_http::hooks::Hooks::read("stripe stripe s\n", read, 64 << 20).unwrap())
+}
+
+/// The orders, and the statement taking hook `stripe`'s payments that
+/// pays one, defined over `db`.
+fn hooked(db: &mut Database) {
+    db.allow_hooks();
+    for q in [
+        "create collection orders (ref text @hash, status text, intent text)",
+        "put orders {ref: 'o-1', status: 'open'}",
+        "put orders {ref: 'o-2', status: 'open'}",
+        "create statement paid($intent text from event.data.object.id, $order text from \
+         event.data.object.metadata.order) on hook stripe as set orders {status: 'paid', \
+         intent: $intent} where ref = $order require 1",
+    ] {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    }
+}
+
+/// Event `id` paying `order`: its body, and the header lines its delivery
+/// carries, signed now as Stripe signs one.
+fn stripe_event(id: &str, order: &str) -> (&'static str, String) {
+    let body = format!(
+        r#"{{"id":"{id}","type":"payment_intent.succeeded","data":{{"object":{{"id":"pi_{id}","metadata":{{"order":"{order}"}}}}}}}}"#
+    );
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mac =
+        fennec_http::crypto::hmac_sha256(HOOK_SECRET.as_bytes(), format!("{t}.{body}").as_bytes());
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    (
+        Box::leak(body.into_boxed_str()),
+        format!("Content-Type: application/json\r\nStripe-Signature: t={t},v1={hex}\r\n"),
+    )
+}
+
+/// A server over a slow disk taking hook `stripe`'s events, its other
+/// writes durable (`--sync always`) or buffered as `durable` says.
+fn slow_disk_hooked(durable: bool) -> SlowDiskServer {
+    let fsyncs = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new((Mutex::new(Gate::default()), Condvar::new()));
+    let mut db = Database::with_sink(Box::new(SlowDisk {
+        fail: false,
+        failed: Arc::new(AtomicBool::new(false)),
+        fsyncs: Arc::clone(&fsyncs),
+        appended: Arc::new(AtomicU64::new(0)),
+        synced: Arc::new(Mutex::new(0)),
+        gate: Arc::clone(&gate),
+    }));
+    hooked(&mut db);
+    let cfg = Config {
+        sync_on_write: durable,
+        hooks: Some(stripe_hooks()),
+        ..Config::default()
+    };
+    let h = start_with(cfg, db, false);
+    SlowDiskServer { h, fsyncs, gate }
+}
+
+impl SlowDiskServer {
+    /// Waits until `n` fsyncs in all reached the gate or an answer past
+    /// `replays` came, whichever first; whether one came.
+    fn reached_or_answered(&self, n: usize, replays: usize) -> bool {
+        let (lock, cv) = &*self.gate;
+        let (g, waited) = cv
+            .wait_timeout_while(lock.lock().unwrap(), GATE_LIMIT, |g| {
+                g.reached < n && g.replays <= replays
+            })
+            .unwrap();
+        assert!(!waited.timed_out(), "neither the fsync nor the answer came");
+        g.replays > replays
+    }
+}
+
+/// A webhook event is answered 2xx once its block is on disk, whatever
+/// `--sync` says: its sender never sends it again, so a crash after a
+/// buffered 2xx would lose a payment no one tells the server of. Held by
+/// order: the fsync is held at the gate, and the answer comes only once it
+/// is let go -- while a buffered write beside it asks no fsync at all.
+#[test]
+fn an_event_is_answered_once_on_disk_whatever_sync_says() {
+    for durable in [false, true] {
+        let s = slow_disk_hooked(durable);
+        if !durable {
+            let before = s.fsyncs.load(Ordering::SeqCst);
+            ok(Conn::open(s.h.port).query("put orders {ref: 'o-9', status: 'open'}"));
+            assert_eq!(
+                s.fsyncs.load(Ordering::SeqCst),
+                before,
+                "a buffered write synced"
+            );
+        }
+        let (body, extra) = stripe_event("evt_1", "o-1");
+        let reached = s.gate.0.lock().unwrap().reached;
+        let (_, replays) = s.counts();
+        s.hold_for(u64::MAX);
+        let answer = s.send("/_hooks/stripe", extra, body);
+        assert!(
+            !s.reached_or_answered(reached + 1, replays),
+            "durable {durable}: the event was answered before its fsync"
+        );
+        s.open();
+        let (status, replayed, said) = answer.join().unwrap();
+        assert_eq!(
+            (status, replayed, said.as_str()),
+            (200, false, r#"{"event":"evt_1","taken":1}"#)
+        );
+        assert!(!s.timed_out());
+    }
+}
+
+/// A duplicate of an event sent while the first taking's fsync runs --
+/// Stripe's retry after a slow answer, a duplicate delivery -- finds its
+/// key under the read lock and is answered once that fsync is done, never
+/// before, as the first is: answered at once, a power loss after took back
+/// a payment its sender held as delivered and never sent again. Whatever
+/// `--sync` says.
+#[test]
+fn a_duplicate_event_waits_for_its_first_takings_fsync() {
+    for durable in [false, true] {
+        let s = slow_disk_hooked(durable);
+        let (body, extra) = stripe_event("evt_2", "o-2");
+        let reached = s.gate.0.lock().unwrap().reached;
+        let (asked, replays) = s.counts();
+        s.hold_for(u64::MAX);
+        let first = s.send("/_hooks/stripe", extra.clone(), body);
+        s.reached(reached + 1);
+        let again = s.send("/_hooks/stripe", extra, body);
+        assert!(
+            !s.replayed_or_waiting(asked + 2, replays),
+            "durable {durable}: the duplicate was answered before the first's fsync"
+        );
+        s.open();
+        let taken = r#"{"event":"evt_2","taken":1}"#;
+        let (status, replayed, said) = first.join().unwrap();
+        assert_eq!((status, replayed, said.as_str()), (200, false, taken));
+        let (status, replayed, said) = again.join().unwrap();
+        assert_eq!((status, replayed, said.as_str()), (200, true, taken));
+        assert!(!s.timed_out());
+    }
+}
+
+/// The child of [`an_event_a_killed_process_landed_is_taken_once`]: the
+/// file it opens.
+const HOOK_KILLED: &str = "FENNEC_TEST_HOOK_KILLED_BEFORE_FSYNC";
+
+/// An event a process killed between its landing and its fsync took is
+/// answered nothing by it; sent again to a server opening the file, it is
+/// taken once -- answered from its key once the file's durability ran, the
+/// block being in the file the kill left -- never twice, and never before
+/// that durability. The test binary run again as the process killed,
+/// under `--sync 250`: an event is durable whatever `--sync` says.
+#[test]
+fn an_event_a_killed_process_landed_is_taken_once() {
+    fennec_ql::install();
+    let (body, _) = stripe_event("evt_k", "o-1");
+    if let Ok(p) = std::env::var(HOOK_KILLED) {
+        let db = fennec_core::fs::open_with(
+            &p,
+            true,
+            Box::new(
+                |inner| Ok(Box::new(DiesAtFsync(inner)) as Box<dyn fennec_core::engine::Sink>),
+            ),
+        )
+        .unwrap();
+        let cfg = Config {
+            hooks: Some(stripe_hooks()),
+            ..Config::default()
+        };
+        let h = start(cfg, db);
+        let (_, extra) = stripe_event("evt_k", "o-1");
+        let answer = Conn::open(h.port).sent("/_hooks/stripe", &extra, body);
+        panic!("answered before its fsync: {answer:?}");
+    }
+    let path = tmp("hook-killed.fennec");
+    {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        hooked(&mut db);
+        db.sync().unwrap();
+    }
+    let before = std::fs::metadata(&path).unwrap().len();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "server::an_event_a_killed_process_landed_is_taken_once",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(HOOK_KILLED, &path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(KILLED_CODE),
+        "the child was not killed at its fsync"
+    );
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > before,
+        "the killed process's block is not in the file"
+    );
+
+    let gate: ReopenedGate = Arc::default();
+    let held = Arc::clone(&gate);
+    let db = fennec_core::fs::open_serving(
+        &path,
+        true,
+        Box::new(move |inner| {
+            Ok(Box::new(Held { inner, gate: held }) as Box<dyn fennec_core::engine::Sink>)
+        }),
+    )
+    .unwrap();
+    let cfg = Config {
+        hooks: Some(stripe_hooks()),
+        ..Config::default()
+    };
+    let h = start(cfg, db);
+    let (port, told) = (h.port, Arc::clone(&gate));
+    let (_, extra) = stripe_event("evt_k", "o-1");
+    let resent = std::thread::spawn(move || {
+        let answer = Conn::open(port).sent("/_hooks/stripe", &extra, body);
+        told.0.lock().unwrap().events.push("answered");
+        told.1.notify_all();
+        answer
+    });
+    {
+        let (m, cv) = &*gate;
+        let (mut g, waited) = cv
+            .wait_timeout_while(m.lock().unwrap(), GATE_LIMIT, |g| g.events.is_empty())
+            .unwrap();
+        assert!(
+            !waited.timed_out(),
+            "the resent event asked for no durability"
+        );
+        assert_eq!(g.events, ["asked"], "answered before its durability");
+        g.open = true;
+        cv.notify_all();
+    }
+    let (status, replayed, said) = resent.join().unwrap();
+    assert_eq!(
+        (status, replayed, said.as_str()),
+        (200, true, r#"{"event":"evt_k","taken":1}"#)
+    );
+    assert_eq!(
+        gate.0.lock().unwrap().events,
+        ["asked", "durable", "answered"]
+    );
+    let mut c = Conn::open(h.port);
+    let (_, paid) = c.query("get orders count where status = 'paid'");
+    assert!(paid.contains(r#""count":1"#), "{paid}");
+    let (_, keys) = c.query("get _hook_events count");
+    assert!(keys.contains(r#""count":1"#), "{keys}");
+}

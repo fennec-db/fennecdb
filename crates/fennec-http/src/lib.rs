@@ -58,6 +58,7 @@ pub mod cors;
 pub mod crypto;
 pub mod dial;
 pub mod held;
+pub mod hooks;
 pub mod http;
 pub mod idempotent;
 pub mod instance;
@@ -188,6 +189,12 @@ pub struct Config {
     /// connection's handshake on its own thread ([`conn`]); `None`, plain
     /// HTTP.
     pub tls: Option<Arc<conn::Tls>>,
+    /// The webhook consumers' hooks and their secrets (`--hooks`), whose
+    /// events `POST /_hooks/<name>` takes ([`hooks`]); `None`, no such
+    /// route: `/_hooks/` asks for a token as every unknown path does. A
+    /// file's server's alone until F4's slice 4: a node of tenants holds
+    /// none.
+    pub hooks: Option<Arc<hooks::Hooks>>,
 }
 
 impl Config {
@@ -233,6 +240,7 @@ impl Default for Config {
             studio: None,
             mcp: None,
             tls: None,
+            hooks: None,
         }
     }
 }
@@ -284,6 +292,7 @@ impl Server {
                 let _ = guard.install_plugin(&access::CheckPlugin);
             }
             calls::log_unheld(cfg.access.as_deref(), &guard, None);
+            hooks::log_unheld(cfg.hooks.as_deref(), &guard);
         }
         Server {
             backend: Backend::Single {
@@ -302,6 +311,11 @@ impl Server {
     /// then this server's -- a collection named `_replication` is not
     /// reachable over HTTP while it is.
     pub fn with_replication(mut self, repl: Arc<Replication>) -> Server {
+        // A hook's 2xx waits for a replica a promotion could take its event
+        // from to have been sent it ([`hooks`]).
+        if let (Some(h), Some(feed)) = (&self.cfg.hooks, repl.feed()) {
+            h.send_from(feed);
+        }
         if let Backend::Single { repl: slot, .. } = &mut self.backend {
             *slot = Some(repl);
         }
@@ -320,6 +334,10 @@ impl Server {
         if cfg.router_mark.is_none() {
             cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
         }
+        // A tenant's hooks are its file's, which F4's slice 4 brings: a
+        // node takes no event, and `fennec-server` refuses `--hooks` with
+        // `--dir`.
+        cfg.hooks = None;
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
@@ -1587,6 +1605,7 @@ fn operation(req: &Request, shape: &str) -> &'static str {
     match (req.method, req.segments().as_slice()) {
         (Method::Post, ["batch"]) => "batch",
         (Method::Post, ["_call", _]) => "call",
+        (Method::Post, ["_hooks", ..]) => "hook",
         (Method::Post, ["query"]) => {
             let first = shape.split_whitespace().next().unwrap_or("");
             WORDS
@@ -2103,6 +2122,14 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // and answers in JSON-RPC, 404 on a server without `--mcp`.
     if is_mcp(req) {
         return mcp::http(db, cfg, req);
+    }
+    // A webhook event, judged before any token is asked for: its signature
+    // stands in for one, and nothing of it is read before that verifies
+    // ([`hooks`]). A server with no hooks file has no such route.
+    if let Some(h) = &cfg.hooks {
+        if hooks::is_hook(req) {
+            return hooks::handle(db, cfg, h, req);
+        }
     }
     // A scoped token's scope holds the database the runs of the statements
     // bound to its writes are charged in (`calls::Runs`).
@@ -3321,6 +3348,7 @@ fn run_query(
         }
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
+            hooks::after_change(cfg.hooks.as_deref(), &guard, std::iter::once(&*stmt));
         }
         let held = wait && held_run(&guard, (&stmt, &params), &r, (mark, before));
         seq = Some(At::of(&guard));
@@ -4000,6 +4028,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         None,
         stmts.iter().map(|(s, _)| s),
     );
+    hooks::after_change(cfg.hooks.as_deref(), &guard, stmts.iter().map(|(s, _)| s));
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),
@@ -5081,6 +5110,113 @@ mod tests {
             "the replay was answered before the node's stream was sent the key's block"
         );
         drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A webhook event's 2xx waits for a standby a promotion could take it
+    /// from (`docs/design/named-statements.md`, *What a sender is told*): a
+    /// replica's stream that has not sent the event's block within
+    /// `SENT_WAIT` makes its answer a 503 with `Retry-After`, the block
+    /// landed and its key kept, and the event sent again is answered from
+    /// its key once the standby holds it -- never a 2xx a failover to that
+    /// standby would make a lie -- the block that took the key, not the
+    /// database's latest change. An archiver's stream is no standby: no
+    /// promotion takes an event from it. Counted by the answers, never the
+    /// clock.
+    #[test]
+    fn an_events_2xx_waits_for_a_standby_to_hold_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-hook-standby-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.fennec");
+        fennec_ql::install();
+        let (mut db, feed) = replication::open(path.to_str().unwrap(), 1 << 20).unwrap();
+        db.allow_hooks();
+        for q in [
+            "create collection orders (ref text @hash, status text)",
+            "put orders {ref: 'o-1', status: 'open'}",
+            "put orders {ref: 'o-2', status: 'open'}",
+            "create statement paid($order text from event.order) on hook stripe as set orders \
+             {status: 'paid'} where ref = $order require 1",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        let db = Arc::new(RwLock::new(db));
+        const SECRET: &str = "whsec_standby_test";
+        let read = |_: &str| Ok(SECRET.as_bytes().to_vec());
+        let hooks = Arc::new(hooks::Hooks::read("stripe stripe s\n", read, 64 << 20).unwrap());
+        hooks.send_from(&feed);
+        let cfg = Config {
+            hooks: Some(hooks),
+            ..Config::default()
+        };
+        let send = |id: &str, order: &str| {
+            let body = format!(r#"{{"id":"{id}","order":"{order}"}}"#);
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mac = crypto::hmac_sha256(SECRET.as_bytes(), format!("{t}.{body}").as_bytes());
+            let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+            let req = Request {
+                method: Method::Post,
+                target: "/_hooks/stripe".into(),
+                path: "/_hooks/stripe".into(),
+                query: Vec::new(),
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Stripe-Signature".into(), format!("t={t},v1={hex}")),
+                ],
+                body: body.into_bytes(),
+                keep_alive: false,
+            };
+            metrics::begin_request();
+            let resp = handle(&db, &cfg, &req);
+            let replayed = resp.extra.iter().any(|(k, _)| k == "Idempotent-Replayed");
+            let retry = resp.extra.iter().any(|(k, _)| k == "Retry-After");
+            let body = String::from_utf8_lossy(&resp.body).into_owned();
+            (resp.status, replayed, retry, body)
+        };
+        // An archiver keeping up: no standby, so answered once the fsync
+        // and the streams keeping up are done.
+        feed.sending_standby(8, db.read().unwrap().change_seq(), false);
+        let (status, _, _, body) = send("evt_1", "o-1");
+        assert_eq!(status, 200, "{body}");
+        // A standby from before the next event's block, which it never
+        // sends.
+        feed.sending_standby(7, db.read().unwrap().change_seq(), true);
+        let (status, replayed, retry, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed, retry), (503, false, true), "{body}");
+        assert!(body.contains("retry_after"), "{body}");
+        let paid = db
+            .read()
+            .unwrap()
+            .query(
+                &fennec_ql::parse_one("get orders count where status = 'paid'").unwrap(),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            fennec_core::json::response_to_string(&paid).contains(r#"{"count":2}"#),
+            "the block landed, its key kept"
+        );
+        let seq = db.read().unwrap().change_seq();
+        feed.sent(7, seq, true);
+        let (status, replayed, retry, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed, retry), (200, true, false), "{body}");
+        assert_eq!(body, r#"{"event":"evt_2","taken":1}"#);
+        // A replay waits for the block that took its key, never the
+        // database's latest: a write since, which the standby was never
+        // sent, holds back no replay of an event the standby holds.
+        let later = fennec_ql::parse_one("put orders {ref: 'o-3', status: 'open'}").unwrap();
+        db.write().unwrap().execute(&later).unwrap();
+        assert!(db.read().unwrap().change_seq() > seq);
+        let (status, replayed, retry, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed, retry), (200, true, false), "{body}");
+        drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1181,16 +1181,16 @@ impl super::Database {
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
         use crate::named::{
-            GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_HOOKED, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT,
+            GRAMMAR_EPOCH, HOOKED_UNTAKEN, MAX_HOOKED, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT,
             SCHEDULED_UNRUN,
         };
-        // First of all: no server takes a hook's events yet, and one stored
-        // would be a hook no sender reaches, without a word -- here every
-        // way in (`/query`, `/batch`, the shell, the native library, a
-        // declared schema's apply) meets it, a test's aside
-        // ([`Self::allow_hooks`], F4's slice 2).
+        // First of all: where no server takes this database's events, one
+        // stored would be a hook no sender reaches, without a word -- here
+        // every way in (`/query`, `/batch`, the shell, the native library,
+        // a declared schema's apply) meets it. A file's server lets one be
+        // defined, its route taking the events ([`Self::allow_hooks`]).
         if def.hook.is_some() && !self.hooking {
-            return Err(Error::Query(HOOKED_NOT_BUILT.into()));
+            return Err(Error::Query(HOOKED_UNTAKEN.into()));
         }
         // Then, before a name held or the schema is asked: where no
         // scheduler runs this database's schedules, one stored would be a
@@ -1309,10 +1309,14 @@ impl super::Database {
             misread: None,
         };
         let after = stored.after.clone();
+        let hook = stored.hook.clone();
         self.statement_record(&stored.encode(), |t| t.put(stored))?;
         self.unmark(name);
         if let Some((c, events)) = &after {
             super::bound::note_changed(name, (c, *events));
+        }
+        if let Some(h) = &hook {
+            super::bound::note_changed(name, (h, 0));
         }
         Ok(crate::query::Response::Ok(match replaced {
             true => format!("statement `{name}` replaced"),
@@ -1334,11 +1338,15 @@ impl super::Database {
             };
         }
         let after = self.statements.get(name).and_then(|s| s.after.clone());
+        let hook = self.statements.get(name).and_then(|s| s.hook.clone());
         let body = dropped(name, (self.history.current(), self.next_change()));
         self.statement_record(&body, |t| drop(t.remove(name)))?;
         self.unmark(name);
         if let Some((c, events)) = &after {
             super::bound::note_changed(name, (c, *events));
+        }
+        if let Some(h) = &hook {
+            super::bound::note_changed(name, (h, 0));
         }
         Ok(crate::query::Response::Ok(format!(
             "statement `{name}` dropped"

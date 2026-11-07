@@ -224,6 +224,18 @@ impl ChangeLog {
         self.seq
     }
 
+    /// The change that last wrote document `id` of collection `cid`: its
+    /// mark's, where the ring holds it, else the horizon, which every
+    /// change the ring no longer holds is at or below -- a bound, never a
+    /// change before the write's. A hook's replay waits for a standby to
+    /// hold its key's block by it (`fennec_http::hooks`); walked from the
+    /// newest, a replay sent soon after its first try meets it early.
+    pub fn last_of(&self, cid: u32, id: DocId) -> u64 {
+        (self.ring.iter().rev())
+            .find(|m| m.cid == cid && m.id == id)
+            .map_or(self.horizon, |m| m.seq)
+    }
+
     /// Holds the ring back to the change it stands at, past its capacity,
     /// for as long as the hold lives: a stream's seed read beside the
     /// writers (`Database::pin`) is at that change, and the stream goes on
@@ -342,6 +354,27 @@ impl ChangeLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A document's last write is its newest mark, and past the ring a
+    /// change at or before the horizon -- never one before the write's --
+    /// as after a reset, which holds none.
+    #[test]
+    fn a_documents_last_write_is_its_mark_or_the_horizon() {
+        let mut log = ChangeLog::new(3);
+        log.record(1, 1);
+        log.record(2, 1);
+        log.record(1, 1);
+        assert_eq!(log.last_of(1, 1), 3);
+        assert_eq!(log.last_of(2, 1), 2);
+        log.record(1, 2);
+        log.record(1, 3);
+        log.record(1, 4);
+        assert_eq!(log.horizon(), 3);
+        assert_eq!(log.last_of(2, 1), 3, "past the ring: the horizon");
+        assert_eq!(log.last_of(1, 3), 5);
+        log.reset(9);
+        assert_eq!(log.last_of(1, 4), 9);
+    }
 
     /// A seed's hold keeps every mark after its change past the capacity
     /// until it is let go; then the next write drops what is past it.

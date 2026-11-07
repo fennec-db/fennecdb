@@ -292,6 +292,85 @@ fn a_put_of_many_documents_stopped_half_way_lands_none_of_them() {
     assert_eq!(answers(&db), before);
 }
 
+/// Gives a document titled `renumber` the id 50, as a hook with a bug
+/// would: a hook may change a document's fields, never its id.
+struct Renumber;
+impl Hook for Renumber {
+    fn name(&self) -> &str {
+        "renumber"
+    }
+    fn before_write(&self, _: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+        if doc.get("title") == Some(&Value::Text("renumber".into())) {
+            doc.id = 50;
+        }
+        Ok(())
+    }
+}
+impl Plugin for Renumber {
+    fn name(&self) -> &str {
+        "renumber"
+    }
+    fn init(&self, reg: &mut Registry) -> Result<()> {
+        reg.register_hook(Arc::new(Renumber));
+        Ok(())
+    }
+}
+
+/// A write remembers its id before the hooks, so that a block put back
+/// puts back what it wrote: a hook changing the id is refused, as a hook's
+/// refusal is, in a block and alone, by an insert, a `put` over a row and
+/// a `set`. Followed, the frame went into the store under the hook's id
+/// and the block put back the one it was handed: row 50 read
+/// `Corrupt("offset outside the segment")` till the next open.
+#[test]
+fn a_hook_changing_a_documents_id_is_refused() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    db.install_plugin(&Renumber).unwrap();
+    let before = answers(&db);
+    let seq = db.change_seq();
+    let refused = |r: Result<Response>, what: &str| match r {
+        Err(Error::Plugin(m)) => assert!(
+            m.contains("`renumber`") && m.contains("to 50"),
+            "{what}: {m}"
+        ),
+        other => panic!("{what}: {other:?}"),
+    };
+    let writes = [
+        r#"insert docs {title: "renumber", tag: "t9", n: 100}"#,
+        r#"put docs {id: 3, title: "renumber", tag: "t9", n: 100}"#,
+        r#"set docs {title: "renumber"} where tag = "t2""#,
+    ];
+    for sql in writes {
+        db.begin().unwrap();
+        exec(&mut db, r#"put notes {k: "b", body: "two"}"#, &[]);
+        refused(db.execute_with(&stmt(sql), &[]), sql);
+        db.rollback();
+        refused(db.execute_with(&stmt(sql), &[]), sql);
+        assert!(rows(&db, "get docs where id = 50", &[]).is_empty(), "{sql}");
+        assert_eq!(answers(&db), before, "{sql}");
+        assert_eq!(db.change_seq(), seq, "{sql}: the counter moved");
+        assert!(
+            tap.since(seq).is_empty(),
+            "{sql}: a record reached the file"
+        );
+    }
+    // The id the insert was handed is handed out again.
+    exec(
+        &mut db,
+        r#"insert docs {title: "kept", tag: "t0", n: 1}"#,
+        &[],
+    );
+    assert_eq!(
+        rows(&db, r#"get docs select id where title = "kept""#, &[])[0].0,
+        41
+    );
+    let mut back = Database::new();
+    back.load(&tap.bytes()).unwrap();
+    assert_eq!(answers(&back), answers(&db));
+}
+
 #[test]
 fn a_block_a_crash_cuts_short_is_cut_off_whole() {
     let tap = Tap::default();

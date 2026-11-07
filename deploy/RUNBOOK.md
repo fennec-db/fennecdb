@@ -846,6 +846,21 @@ that stopped and it goes on: nothing was misread or lost, and the slots
 that came meanwhile run once, the latest, on the primary that writes the
 file.
 
+**A webhook consumer moves the format again.** `create statement ... on
+hook <h>` -- a statement taking Stripe's or GitHub's events at
+`/_hooks/<h>` -- writes kind 13's op 6, which every binary from before the
+release that takes events refuses: the same order, every archiver, router
+and node upgraded before any primary defines one (a tenant node takes none
+in that release). An older replica stops following at the record and
+connects again (`could not apply a write: corrupt: a statement record this
+version does not read; connecting again` in its log); an older archiver
+takes no image of its own and its `fennec restore` fails; an older server
+refuses to open a file holding one. Upgrade the one that stopped and it
+goes on: nothing was misread or lost. An event the primary answered 503
+meanwhile -- an older replica connected and behind holding none of it --
+was taken and kept by its key, and its sender's retry is answered from
+that key.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is

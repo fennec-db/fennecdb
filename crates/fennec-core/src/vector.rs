@@ -3896,6 +3896,9 @@ impl VectorIndex {
         let Some((node, level)) = self.place(doc, raw) else {
             return;
         };
+        // Placed, and linked to nothing yet.
+        #[cfg(test)]
+        crate::engine::unwinding::panic_at("graph-link");
         let query = self.build_query(raw);
         self.link_node(node, level, None, query.as_deref());
     }
@@ -4446,6 +4449,9 @@ impl VectorIndex {
             if let Some((node, _)) = self.place(*doc, v) {
                 self.pending.push(node);
             }
+            // A node left waiting that the block has not counted.
+            #[cfg(test)]
+            crate::engine::unwinding::panic_at("graph-defer");
         }
         self.pending.len() - before
     }
@@ -4479,6 +4485,9 @@ impl VectorIndex {
         let mut scratch = Vec::new();
         let at = self.pending.len().saturating_sub(max.max(1));
         let taken = self.pending.split_off(at);
+        // Taken off the waiting, and linked to nothing yet.
+        #[cfg(test)]
+        crate::engine::unwinding::panic_at("graph-pending");
         let mut raw = Vec::new();
         let mut todo: Vec<(u32, usize, Option<Vec<f32>>)> = Vec::with_capacity(taken.len());
         for node in taken {
@@ -4615,6 +4624,21 @@ impl VectorIndex {
         if let Some(node) = self.node_of(doc) {
             self.detach(doc, node);
         }
+    }
+
+    /// Which of `ids` it holds, each with the vector its node holds and
+    /// whether that node is live, and how many documents it holds: the same
+    /// for two graphs holding the same rows, whatever nodes and links each
+    /// took to get there.
+    #[cfg(test)]
+    pub(crate) fn dump(&self, ids: impl Iterator<Item = DocId>) -> String {
+        let held: Vec<_> = ids
+            .filter_map(|id| {
+                self.node_of(id)
+                    .map(|n| (id, self.stored_of(n), !self.is_deleted(n)))
+            })
+            .collect();
+        format!("{held:?} of {}", self.len())
     }
 
     /// The node holding `doc`'s vector.

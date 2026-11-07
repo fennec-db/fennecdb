@@ -141,12 +141,15 @@ lock.
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica
 and a subscriber see all of it or none. A failed one is undone in memory,
-a schema change too (`Undo`, a variant each); whatever counts records
-counts their writes (`writes_in`), and what cannot be undone, a compact,
-is refused in a block (`Statement::fits_block`). A server takes a lock a
+a schema change too (`Undo`, a variant each), every write recording its
+undo before it changes anything (`Block::remember`) by the id it was
+handed, a hook changing that id refused natively (`ask_hooks`); whatever
+counts records counts their writes (`writes_in`), and what cannot be
+undone, a compact, is refused in a block (`Statement::fits_block`). A server takes a lock a
 panic poisoned as it stands: a panic before the sink call puts the block
 back whoever opened it (`Database::whole`, `Unlanded`, a server's or the
-native library's between statements by `held::Writing`); one from the
+native library's between statements by `held::Writing`), the write it
+stopped put back into every index whole (`put_back_torn`); one from the
 sink call through the notes to the block's end fails the database
 (`landing`), or the next block reuses the file's change numbers; nothing
 lent out around a write -- the registry, its hooks and `Check` (`Lent`), a
@@ -301,7 +304,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 - Named statements are records of their database, called with their own text's authority.
 - A write-bound statement runs in the block of the write that woke it, once a row.
 - A scheduled statement runs once a slot, by the primary that may write its file.
-- A webhook consumer's record is kept by every build, and no server takes its events yet.
+- A webhook consumer takes a verified event once, by its key.
 
 ### `crates/fennec-http/CLAUDE.md`
 
@@ -336,6 +339,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A request is a trace, sent over OTLP.
 - `/_metrics` counts at the edge, a shard per thread.
 - `/_stats/statements` counts by shape, a tenant's apart.
+- A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.

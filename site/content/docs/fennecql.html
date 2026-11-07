@@ -746,6 +746,66 @@ editor colours <code>every</code>, <code>slot</code> and the
 <code>at</code> before a cron text. The shell's <code>.help</code> gives the
 form, which a server defines and runs.</p>
 
+<h3 id="webhook-consumers">Webhook consumers</h3>
+
+<p>A named statement may take another service's events instead of being
+called: Stripe's payments, GitHub's pushes, the events of any sender
+signing as Standard Webhooks does, sent to <code>POST
+/_hooks/&lt;hook&gt;</code> on a file's server given a hooks file
+(<code>--hooks</code>). The server verifies each event's signature before
+it reads anything of it, binds its values to the statement's typed
+parameters, and takes it once by its key: the statements' writes and the
+key's row in <code>_hook_events</code> land as one block, and the sender is
+told 2xx once that block is on disk, whatever <code>--sync</code> says. <a
+href="/docs/webhooks">Webhooks from Stripe and GitHub</a> has the setup of
+each sender, the hooks file and every answer.</p>
+
+<pre data-lang="fennecql">create [or replace] statement &lt;name&gt;
+       ($p &lt;type&gt; from event.&lt;path&gt; | event | hook.id | hook.at | hook.event, ...)
+       on hook &lt;hook&gt; [where &lt;condition&gt;]
+       [comment '&lt;text&gt;'] [check &lt;expr&gt;] [scans]
+       as &lt;statement&gt; | as begin &lt;statement&gt;; ... end</pre>
+
+<pre data-lang="fennecql">create statement stripe_paid(
+    $intent text from event.data.object.id,
+    $order  text from event.data.object.metadata.order)
+  on hook stripe
+  where event.type = 'payment_intent.succeeded' and event.livemode = true
+as set orders {status: 'paid', intent: $intent}
+   where ref = $order and (status = 'open' or intent = $intent)
+   require 1 else 'no open order for this payment yet'</pre>
+
+<p>Every parameter names where it is read from: a path into the event's
+body (<code>from event.data.object.id</code>; a key that is no word quoted,
+<code>event.metadata."order-id"</code>; a key of digits a list's place,
+<code>event.items."0".sku</code>), the whole body for a <code>json</code>
+parameter (<code>from event</code>), or the delivery's own
+<code>hook.id</code> (its key), <code>hook.at</code> (the time its
+signature covers, a <code>timestamp</code>) and <code>hook.event</code>
+(GitHub's <code>X-GitHub-Event</code>). A value is typed with no cast: a
+string where an <code>int</code> is declared is refused 400, naming the
+parameter and its path, and a <code>timestamp</code> read from a number
+takes it as milliseconds — Stripe's <code>created</code>, in seconds, is
+read as an <code>int</code> and written <code>$created * 1000</code>. The
+condition reads the event, <code>hook.event</code> and literals alone; an
+event no condition takes is answered 200, <code>{"taken":0}</code>, and
+writes nothing. A hook's statements take an event together, in their
+names' order, in one block under one <code>--call-max-rows</code>,
+<code>now()</code> one instant for all; a refusal by any is the event's
+answer, its writes and the key put back.</p>
+
+<p>The server's token defines one, and may <code>call</code> one with an
+event as its argument to try it — run as an event would be, keeping no key.
+To a scoped token a hook's statement is the 404 a missing statement is,
+whatever its policy's <code>call</code> lines say, and an agent gets no MCP
+tool for it. A tenant node takes none yet, nor does a replica, a server
+under <code>--http-read-only</code>, a <a href="sync.html#limits">sync
+replica</a>, the shell, the native library or the browser module: each
+refuses the definition, and a file holding one keeps it. Before a primary
+defines the first one, every reader of its file runs a release that knows
+them: a binary from before refuses the record and stops there, in words (<a
+href="/docs/replication">Replication</a>).</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

@@ -624,7 +624,12 @@ shape after every add and remove, through runs that empty chunks first,
 last, between and all of them and split full ones, and a walk over it to
 one over a fresh build; `TextIndex`'s
 `the_words_kept_up_through_an_empty_index_are_a_fresh_build` holds the copy
-to a build from the index's words after every write. A prefix is a range
+to a build from the index's words after every write. A panic in the middle
+of a write lets the copy go (`TextIndex::forget_words`), the next loose
+`match` sorting it again: that panic left it half way, and the block's
+put-back, taking the block's other writes' words out of it, read the empty
+chunk and panicked again, which aborts the process
+([engine.md](engine.md#blocks)). A prefix is a range
 of it; the words within
 `k` edits are found walking it as the trie it is, a row of the table a
 character banded to `2k + 1` cells, a node's children by binary search --

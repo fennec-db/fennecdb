@@ -134,8 +134,9 @@ pub struct Runs {
     pub refusal: Option<(String, Error)>,
     /// The bound statements this thread defined, replaced or dropped, each
     /// with what it binds -- its collection and events -- which a drop's
-    /// text does not say: the audit's `schema` line names them. At most
-    /// [`RUNS_KEPT`].
+    /// text does not say: the audit's `schema` line names them. A webhook
+    /// consumer's is here too, its hook in the collection's place and no
+    /// event (`0`, which no binding is). At most [`RUNS_KEPT`].
     pub changed: Vec<(String, String, u8)>,
 }
 
@@ -158,7 +159,8 @@ pub struct Ran {
 pub const RUNS_KEPT: usize = 256;
 
 /// A bound statement defined, replaced or dropped on this thread, with the
-/// collection and events it binds ([`Runs::changed`]).
+/// collection and events it binds, or a webhook consumer with its hook and
+/// no event ([`Runs::changed`]).
 #[cold]
 pub(super) fn note_changed(name: &str, (collection, events): (&str, u8)) {
     NOTED.with(|n| n.set(true));

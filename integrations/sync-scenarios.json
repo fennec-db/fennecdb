@@ -710,7 +710,7 @@
     },
     {
       "name": "a named statement -- a call, a definition, a drop -- is the server's, refused on a replica",
-      "covers": "fennecql.html#named-statements, fennecql.html#scheduled-statements, sync.html#limits: a replica holds its shapes' rows, not its server's statements, so a call would run against the replica's part of the rows -- a transfer's credit finding no account the shape does not hold, its require counting the replica's rows -- and a definition would be one the server never had, a scheduled one a slot no one runs; refused before anything of the text runs or is queued, a write before the call in one text included. The app calls its server through its HTTP client, and what the call or a scheduled run wrote comes back through the shapes' streams",
+      "covers": "fennecql.html#named-statements, fennecql.html#scheduled-statements, fennecql.html#webhook-consumers, sync.html#limits: a replica holds its shapes' rows, not its server's statements, so a call would run against the replica's part of the rows -- a transfer's credit finding no account the shape does not hold, its require counting the replica's rows -- and a definition would be one the server never had, a scheduled one a slot no one runs, a webhook consumer a hook no sender reaches; refused before anything of the text runs or is queued, a write before the call in one text included. The app calls its server through its HTTP client, and what the call, a scheduled run or a hook's event wrote comes back through the shapes' streams",
       "steps": [
         {"do": "start"},
         {"do": "seed", "seq": 3, "rows": "@open"},
@@ -727,6 +727,9 @@
           "error": "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client", "requests": [], "pending": 0,
           "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
         {"do": "write", "write": {"text": "create statement tidy every 1h as del tasks where status = 'done'"}, "expect": {
+          "error": "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"text": "create statement closed($id int from event.data.task) on hook tracker where event.type = 'closed' as set tasks {status: 'done'} where id = $id"}, "expect": {
           "error": "a synced database runs no named statement: `call`, `create statement` and `drop statement` go to the server through its HTTP client", "requests": [], "pending": 0,
           "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
         {"do": "write", "write": {"text": "drop statement close_task"}, "expect": {

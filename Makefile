@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -248,6 +248,27 @@ statements-bench:
 ## (crates/fennec-http/examples/replays.rs).
 replay-bench:
 	$(CARGO) run --release -p fennec-http --example replays -- $(or $(MODE),replay)
+
+## What a webhook event costs through `handle` (crates/fennec-http/examples/
+## hook_events.rs), MODE one mode a process, N requests: event (a Stripe
+## event taken and fsynced), keyed (its `set` under an Idempotency-Key, --sync
+## always), put (that `set` plain, --sync always), buffered (--sync 250),
+## duplicate (answered from its key), forged (the one 401), verify4k and
+## verify64k (Hooks::verify alone; 9 000 each unless given), and beside0,
+## beside10 and beside100 (buffered writes' median and p99 beside 0, 10 and
+## 100 events a second; a million). Without MODE, every mode in turns and
+## replays.rs's put and keyed against BASE (origin/main) in pairs, PAIRS (7)
+## of each, each run once the 1-minute load is under QUIET (2.5), ONLY=paired,
+## hooks or beside for those: medians to OUT (target/hook-bench/results.txt),
+## progress to its .log; an hour or so on an idle machine
+## (crates/fennec-http/examples/hook_bench.py)
+hook-bench:
+ifneq ($(MODE),)
+	$(CARGO) run --release -p fennec-http --example hook_events -- $(MODE) $(N)
+else
+	python3 crates/fennec-http/examples/hook_bench.py --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  --pairs $(or $(PAIRS),7) --quiet $(or $(QUIET),2.5) $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
+endif
 
 ## The browser module's size with every feature, with none, with each alone
 ## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and
