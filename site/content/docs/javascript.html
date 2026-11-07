@@ -745,7 +745,10 @@ the replica takes its collections as the server declares them, as it
 always did. <code>connect(url, { schema })</code> compares the same way;
 with <code>migrate: true</code> and the server's token it runs the
 migrations and the additions on the server (<code>POST /_schema/apply</code>),
-as a deploy step runs drizzle-kit's <code>migrate</code>.</p>
+as a deploy step runs drizzle-kit's <code>migrate</code>. The server records
+them in <code>_migrations</code>, a <a href="/docs/http-access#own-collections">collection
+of its own</a> that no statement changes: a list starts over in a new file,
+or on a tenant node in a new tenant.</p>
 
 <p>Every SDK's declarations compile to one description, versioned JSON:
 <code>{"format": 1, "collections": [...], "migrations": [...]}</code>, a

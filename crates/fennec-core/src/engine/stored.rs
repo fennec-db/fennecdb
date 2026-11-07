@@ -22,13 +22,15 @@ use crate::error::{Error, Result};
 use crate::schema::{IndexKind, Schema};
 
 /// A named statement defined or dropped: `[13][0][length][op][history]
-/// [change][epoch][digest][name][depends][text]`, and a bound one's
+/// [change][epoch][digest][name][depends][text]`, a bound one's
 /// definition `[3][history][change][epoch][digest][name][depends]
-/// [collection][events][text]`. A write, which moves the change counter by
-/// one (`writes_in`) whatever its op, rides in a block, and is applied by a
-/// replica as a schema change is; an image writes each live definition
-/// again after the collections. A version before it refuses it ("unknown
-/// record kind 13") and a block holding one, never misreads it.
+/// [collection][events][text]`, a scheduled one's (op 4) and a hook's (op
+/// 6) with their tails after the text, and a slot's mark (op 5). A write,
+/// which moves the change counter by one (`writes_in`) whatever its op,
+/// rides in a block, and is applied by a replica as a schema change is; an
+/// image writes each live definition again after the collections. A
+/// version before it refuses it ("unknown record kind 13") and a block
+/// holding one, never misreads it.
 pub(super) const REC_STATEMENT: u8 = 13;
 const OP_DEFINE: u8 = 1;
 const OP_DROP: u8 = 2;
@@ -55,6 +57,15 @@ const OP_SCHEDULED: u8 = 4;
 /// replica, and a promoted copy would run the slot again -- but it takes
 /// no room a quota counts ([`super::Database::grows`]).
 pub(super) const OP_MARK: u8 = 5;
+/// A webhook consumer (F4): op 1's fields, its text, then the hook's name,
+/// the record's tail -- `[6][history][change][epoch][digest][name]
+/// [depends][text][hook]` -- so a build that cannot read the text still
+/// knows which hook's events to refuse, and a build that takes none -- the
+/// browser module -- keeps the tail as the bytes it is, as it keeps op 4's.
+/// A build before it refuses the op, never taking it for a callable
+/// statement whose text does not read: marked broken, and its hook's
+/// sender answered 404 for days (*A hook's record*).
+const OP_HOOKED: u8 = 6;
 /// A minute, the finest step of a schedule (`named::MIN_PERIOD`).
 #[cfg(feature = "statements")]
 const MINUTE: i64 = 60_000;
@@ -105,8 +116,16 @@ pub struct Stored {
     /// its text. `None` for one that is called or bound. Where it runs, the
     /// mark of the last slot it ran for is beside the table, not in it
     /// ([`super::Database::last_mark`]): a mark a slot changing the table
-    /// copied every statement in it, texts and all, a slot a tenant.
+    /// copied every statement in it, texts and all, a slot a tenant. In a
+    /// build that runs none, a hook's tail too (op 6): [`Timing`].
     pub schedule: Option<Timing>,
+    /// The hook whose events a webhook consumer takes, from its record (op
+    /// 6), never from its text: known where the text reads no tree, so an
+    /// unread one refuses its hook's events. `None` for every other kind.
+    /// A build taking no event keeps it as the record's tail
+    /// ([`Self::schedule`]'s [`Timing`]).
+    #[cfg(feature = "statements")]
+    pub hook: Option<String>,
     /// Where it runs not, the record body of the mark of the last slot it
     /// ran for, as it came, for an image to write after it: the module's,
     /// which takes a mark only as a file opens, the table its own, and
@@ -136,7 +155,9 @@ impl Stored {
     pub(super) fn encode(&self) -> Vec<u8> {
         let op = match (&self.after, &self.schedule) {
             (Some(_), _) => OP_BOUND,
-            (_, Some(_)) => OP_SCHEDULED,
+            (_, Some(t)) => t.op(),
+            #[cfg(feature = "statements")]
+            _ if self.hook.is_some() => OP_HOOKED,
             _ => OP_DEFINE,
         };
         let mut out = encode(
@@ -155,14 +176,23 @@ impl Stored {
         if let Some(t) = &self.schedule {
             t.encode(&mut out);
         }
+        #[cfg(feature = "statements")]
+        if let Some(h) = &self.hook {
+            encode_str(&mut out, h);
+        }
         out
     }
 
     /// Whether a token held to a policy may call it: neither bound to
     /// writes, which run it, nor scheduled, which the clock runs and only
-    /// the server's token calls by hand -- what a `call` line grants and
-    /// an MCP tool is made of.
+    /// the server's token calls by hand, nor a hook's, whose events run it
+    /// -- what a `call` line grants and an MCP tool is made of. In a build
+    /// taking no event a hook's tail is kept where a schedule's is.
     pub fn called(&self) -> bool {
+        #[cfg(feature = "statements")]
+        if self.hook.is_some() {
+            return false;
+        }
         self.after.is_none() && self.schedule.is_none()
     }
 }
@@ -181,11 +211,15 @@ pub struct Timing {
     pub since: i64,
 }
 
-/// A build that runs no schedule -- the browser module -- keeps one as the
-/// record's tail, from the schedule's tag to `since`, and writes it back as
-/// it came, reading none of it: read into [`Times`], a zone and `since`,
-/// and written again from them, it was much of the 2.2 KB reading op 4 and
-/// op 5 first cost the module (`take_statement`).
+/// A build that runs no schedule and takes no event -- the browser module
+/// -- keeps a schedule (op 4) and a hook (op 6) alike as the record's tail
+/// after the text, behind the op it came in, and writes it back as it
+/// came, reading none of it: read into [`Times`], a zone and `since`, and
+/// written again from them, a schedule was much of the 2.2 KB reading op 4
+/// and op 5 first cost the module (`take_statement`), and a hook's name in
+/// a field of its own would be one more for every statement's clone and
+/// drop. Nothing in the module tells the two apart but the op it writes
+/// back: it runs neither.
 #[cfg(not(feature = "statements"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timing(Vec<u8>);
@@ -250,6 +284,7 @@ impl Stored {
         match (&self.after, &self.schedule) {
             (Some((c, e)), _) => Kind::Bound(c, *e),
             (None, Some(_)) => Kind::Scheduled,
+            (None, None) if self.hook.is_some() => Kind::Hooked,
             (None, None) => Kind::Called,
         }
     }
@@ -257,6 +292,11 @@ impl Stored {
 
 #[cfg(feature = "statements")]
 impl Timing {
+    /// The op of the record holding it.
+    fn op(&self) -> u8 {
+        OP_SCHEDULED
+    }
+
     /// `[1][step][origin]`, `[2][months]` or `[3][five masks]`, then the
     /// zone and `since`.
     fn encode(&self, out: &mut Vec<u8>) {
@@ -307,21 +347,30 @@ impl Timing {
 
 #[cfg(not(feature = "statements"))]
 impl Timing {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.0);
+    /// The op of the record it came in: 4 or 6.
+    fn op(&self) -> u8 {
+        self.0.first().copied().unwrap_or(OP_SCHEDULED)
     }
 
-    /// The record's tail after the text, kept as it came: the tag, its
-    /// values, the zone and `since`, none of them read -- this build runs
-    /// none, and the server that next opens the file reads them, refusing
-    /// what it does not. A tail of nothing is a record cut short.
-    fn decode(body: &[u8], p: &mut usize) -> Result<Timing> {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.0.get(1..).unwrap_or_default());
+    }
+
+    /// The record's tail after the text, kept as it came behind `op`: a
+    /// schedule's tag, its values, the zone and `since`, or a hook's name,
+    /// none of them read -- this build runs none, and the server that next
+    /// opens the file reads them, refusing what it does not. A tail of
+    /// nothing is a record cut short.
+    fn decode(op: u8, body: &[u8], p: &mut usize) -> Result<Timing> {
         let tail = body.get(*p..).unwrap_or_default();
         if tail.is_empty() {
             return Err(cut());
         }
         *p = body.len();
-        Ok(Timing(tail.to_vec()))
+        let mut kept = Vec::with_capacity(1 + tail.len());
+        kept.push(op);
+        kept.extend_from_slice(tail);
+        Ok(Timing(kept))
     }
 }
 
@@ -468,12 +517,13 @@ fn encode(
 }
 
 /// A kind-13 record's body, read: a definition, a drop or a slot's mark.
-/// An operation, an event, a schedule or a byte past the text this version
-/// does not know is refused, never read as something else.
+/// An operation, an event, a schedule, a hook's name or a byte past the
+/// text this version does not know is refused, never read as something
+/// else.
 pub(super) fn decode(body: &[u8]) -> Result<Record> {
     let op = *body.first().ok_or_else(cut)?;
     match op {
-        OP_DEFINE | OP_DROP | OP_BOUND | OP_SCHEDULED => {}
+        OP_DEFINE | OP_DROP | OP_BOUND | OP_SCHEDULED | OP_HOOKED => {}
         #[cfg(feature = "statements")]
         OP_MARK => return decode_mark(body),
         _ => return Err(unread()),
@@ -505,8 +555,29 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
         _ => None,
     };
     let text = decode_str(body, &mut p)?;
+    #[cfg(feature = "statements")]
     let schedule = match op {
         OP_SCHEDULED => Some(Timing::decode(body, &mut p)?),
+        _ => None,
+    };
+    // A build taking no event keeps a hook's name as it keeps a schedule:
+    // the record's tail, unread.
+    #[cfg(not(feature = "statements"))]
+    let schedule = match op {
+        OP_SCHEDULED | OP_HOOKED => Some(Timing::decode(op, body, &mut p)?),
+        _ => None,
+    };
+    // A hook's name is a word, as a statement's is: any other is a later
+    // version's, refused, never taken for a hook no sender names.
+    #[cfg(feature = "statements")]
+    let hook = match op {
+        OP_HOOKED => {
+            let h = decode_str(body, &mut p)?;
+            if !crate::named::valid_name(&h) {
+                return Err(unread());
+            }
+            Some(h)
+        }
         _ => None,
     };
     if p != body.len() {
@@ -524,6 +595,8 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
         text,
         after,
         schedule,
+        #[cfg(feature = "statements")]
+        hook,
         #[cfg(not(feature = "statements"))]
         last: None,
         broken: None,
@@ -659,6 +732,10 @@ impl Statements {
 
     /// The module's: `body`, a mark of `name`'s definition at `version`,
     /// made its last mark, where that is the definition the table holds.
+    /// A hook's tail is kept where a schedule's is, so a mark naming a
+    /// hook's definition -- which no server writes -- is kept too: written
+    /// back as it came, and passed over by the server that next opens the
+    /// file, as one naming a definition replaced is.
     #[cfg(not(feature = "statements"))]
     fn mark(&mut self, name: &str, version: (u64, u64), body: &[u8]) {
         let i = self.at(name).unwrap_or(usize::MAX);
@@ -1013,13 +1090,15 @@ impl super::Database {
                 match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
                     // A definition's record (op 1) holds a callable
                     // statement, a bound one's (op 3) the collection and
-                    // events its text binds, and a scheduled one's (op 4)
-                    // the times it runs at: a text reading as another
-                    // kind, bound to other writes or run at other times,
-                    // digest and all, is none this build wrote -- never
-                    // loaded as callable, never bound to writes its record
-                    // does not name, which the collection's mask is read
-                    // from, and never run at times its record does not.
+                    // events its text binds, a scheduled one's (op 4) the
+                    // times it runs at and a hook's (op 6) the hook it
+                    // takes: a text reading as another kind, bound to
+                    // other writes, run at other times or taking another
+                    // hook, digest and all, is none this build wrote --
+                    // never loaded as callable, never bound to writes its
+                    // record does not name, which the collection's mask is
+                    // read from, never run at times its record does not,
+                    // and never taking events of a hook it does not name.
                     Ok((_, d)) if misread_kind(&d, s).is_some() => {
                         marks.push((i, misread_kind(&d, s).map(|how| misread(s, how))));
                         continue;
@@ -1102,14 +1181,15 @@ impl super::Database {
         def: &crate::named::Definition,
     ) -> Result<crate::query::Response> {
         use crate::named::{
-            GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT,
+            GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_HOOKED, MAX_SCHEDULED, MAX_STATEMENTS, MAX_TEXT,
             SCHEDULED_UNRUN,
         };
-        // First of all: nothing takes a hook's events yet, and one stored
+        // First of all: no server takes a hook's events yet, and one stored
         // would be a hook no sender reaches, without a word -- here every
         // way in (`/query`, `/batch`, the shell, the native library, a
-        // declared schema's apply) meets it (F4's slices 1 and 2).
-        if def.hook.is_some() {
+        // declared schema's apply) meets it, a test's aside
+        // ([`Self::allow_hooks`], F4's slice 2).
+        if def.hook.is_some() && !self.hooking {
             return Err(Error::Query(HOOKED_NOT_BUILT.into()));
         }
         // Then, before a name held or the schema is asked: where no
@@ -1174,6 +1254,19 @@ impl super::Database {
                 "a database schedules at most {MAX_SCHEDULED} statements"
             )));
         }
+        // A hook's statements, the replaced one's place among them taken
+        // again by its replacement.
+        if let Some(h) = &def.hook {
+            let others = (self.statements.iter())
+                .filter(|s| s.name != *name && s.hook.as_deref() == Some(&*h.name))
+                .count();
+            if others >= MAX_HOOKED {
+                return Err(Error::Query(format!(
+                    "a hook's events are taken by at most {MAX_HOOKED} statements, and `{}`'s are",
+                    h.name
+                )));
+            }
+        }
         if def.text.is_empty() || def.text.len() > MAX_TEXT {
             return Err(Error::Query(format!(
                 "a definition is its text, of 1 to {MAX_TEXT} bytes, as the parser read it"
@@ -1210,6 +1303,7 @@ impl super::Database {
             text: def.text.clone(),
             after: def.after.as_ref().map(|b| (b.collection.clone(), b.events)),
             schedule,
+            hook: def.hook.as_ref().map(|h| h.name.clone()),
             broken: None,
             tree,
             misread: None,
@@ -1479,16 +1573,23 @@ fn chained(t: &Statements, def: &crate::named::Definition, collection: &str) -> 
 }
 
 /// Where `d`, the tree `s`'s text reads to, is of another kind than its
-/// record -- called, bound or scheduled, or a webhook consumer, which no
-/// record holds yet -- bound to other writes or run at other times, how, in
-/// words.
+/// record -- called, bound, scheduled or a hook's -- bound to other writes,
+/// run at other times or taking another hook's events, how, in words.
 #[cfg(feature = "statements")]
 fn misread_kind(d: &crate::named::Definition, s: &Stored) -> Option<&'static str> {
-    // No record this build writes holds a hook (op 6 is F4's slice 2): a
-    // text reading as one, digest and all, is never loaded as a statement
-    // a call, a write or the clock runs.
-    if d.hook.is_some() {
-        return Some("reads as a webhook consumer");
+    // A hook's record (op 6) names the hook outside the text: a text there
+    // reading as another kind is never loaded as a statement a call, a
+    // write or the clock runs, nor one elsewhere reading as a hook's taken
+    // for one, the record naming no hook to refuse the events of.
+    match (&d.hook, &s.hook) {
+        (Some(h), Some(name)) => {
+            return (h.name != *name).then_some("takes another hook's events than its record")
+        }
+        (Some(_), None) => return Some("reads as a webhook consumer"),
+        (None, Some(_)) if d.schedule.is_some() => return Some("reads as a scheduled statement"),
+        (None, Some(_)) if d.after.is_some() => return Some("reads as a bound statement"),
+        (None, Some(_)) => return Some("reads as a callable statement"),
+        (None, None) => {}
     }
     match (&d.schedule, &s.schedule) {
         (Some(_), None) => return Some("reads as a scheduled statement"),

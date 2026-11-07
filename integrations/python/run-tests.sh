@@ -20,14 +20,25 @@ token=python-tests
 "$root/target/debug/fennec-server" --file "$dir/python.fennec" \
     --http 0.0.0.0:0 --http-token "$token" --cdc 2>"$dir/server.log" &
 server=$!
-trap 'kill $server 2>/dev/null; rm -rf "$dir"' EXIT INT TERM
-i=0
-until grep -q "listening on: http://.* " "$dir/server.log"; do
-    i=$((i + 1))
-    [ $i -gt 100 ] && { cat "$dir/server.log"; exit 1; }
-    sleep 0.1
-done
-port=$(sed -n 's/.*listening on: http:[^ ]*:\([0-9]*\) .*/\1/p' "$dir/server.log" | head -1)
+# The schema test's own: the migrations a schema ran are recorded in the
+# server's own `_migrations`, which no statement changes, so a list starts
+# over in a new file -- that test's, its record empty whatever ran before.
+"$root/target/debug/fennec-server" --file "$dir/schema.fennec" \
+    --http 0.0.0.0:0 --http-token "$token" 2>"$dir/schema.log" &
+schema=$!
+trap 'kill $server $schema 2>/dev/null; rm -rf "$dir"' EXIT INT TERM
+# The port a server's log says it listens on, once it does.
+port_of() {
+    i=0
+    until grep -q "listening on: http://.* " "$1"; do
+        i=$((i + 1))
+        [ $i -gt 100 ] && { cat "$1" >&2; return 1; }
+        sleep 0.1
+    done
+    sed -n 's/.*listening on: http:[^ ]*:\([0-9]*\) .*/\1/p' "$1" | head -1
+}
+port=$(port_of "$dir/server.log")
+schema_port=$(port_of "$dir/schema.log")
 
 # The source is copied inside, so the build and pytest's caches stay there.
 # host.docker.internal is Docker Desktop's name for the machine; a Linux
@@ -36,6 +47,7 @@ port=$(sed -n 's/.*listening on: http:[^ ]*:\([0-9]*\) .*/\1/p' "$dir/server.log
 docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway \
     -v "$root/integrations/builder-golden.json:/golden.json:ro" -e FENNEC_GOLDEN=/golden.json \
     -e FENNEC_URL="http://host.docker.internal:$port" -e FENNEC_TOKEN="$token" \
+    -e FENNEC_SCHEMA_URL="http://host.docker.internal:$schema_port" \
     python:3.13-slim sh -c \
     "cp -r /src /work && cd /work &&
      pip install -q --root-user-action=ignore --disable-pip-version-check '.[test]' &&

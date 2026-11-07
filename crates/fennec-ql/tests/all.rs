@@ -15,6 +15,8 @@ mod join;
 // Named statements' syntax, read where the parser reads it.
 #[cfg(feature = "statements")]
 mod named;
+// Numbers a statement writes, read whole or refused naming their range.
+mod numbers;
 // Scheduled statements' syntax, and their refusal where statements run.
 #[cfg(feature = "statements")]
 mod scheduled;

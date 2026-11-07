@@ -622,6 +622,53 @@ test('an insert if absent says whether it wrote, in the module', { skip: wasm ? 
   assert.equal((await locks.first()).owner, 'a');
 });
 
+// A number a statement writes is read as written or refused naming its
+// range, here as natively: the module's `usize` is 32 bits, and `as usize`
+// kept the low ones -- `fuse candidates 4294967297` was 1, past the 10 000 a
+// native build refuses, and `vector<4294967297>` a `vector<1>` that took
+// `[0.5]`.
+test('a number past 32 bits is refused in the module, never cut to its low bits', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection d (body text @text, e vector<2> @hnsw(cosine, m=2, ef_construction=8))');
+  db.run('put d [{body: "rust db", e: [1, 0]}, {body: "rust", e: [0, 1]}]');
+  const fuse = 'get d match body "rust" near e [1, 0] fuse';
+  for (const [sql, says] of [
+    ['create collection v (e vector<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
+    ['create collection v (e vector<1000000001>)', "a vector's dimension is 1 to 1000000000, not 1000000001"],
+    ['create collection v (s sparse<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
+    ['create table v (e vector(4294967297))', "`e`: a vector's dimension is 1 to 1000000000"],
+    ['create collection v (e vector<2> @hnsw(m=4294967298))', '`m` is 2 to 32767, not 4294967298'],
+    ['create collection v (e vector<2> @hnsw(ef_construction=4294967300))', '`ef_construction` is 4 to 4294967295, not 4294967300'],
+    [`${fuse} candidates 4294967297`, '`candidates` is 1 to 10000, not 4294967297'],
+    [`${fuse} candidates 4294967296`, '`candidates` is 1 to 10000, not 4294967296'],
+    [`${fuse} candidates 20000`, '`candidates` is 1 to 10000, not 20000'],
+    [`${fuse} k 99999999999`, '`k` is 0 to 1000000, not 99999999999'],
+    ['get d match body "rust" rerank e [1, 0] candidates 4294967297', '`candidates` is 1 to 10000, not 4294967297'],
+    ['get d select snippet(body, 4294967297) match body "rust"', "a snippet's length in words is 1 to 4294967295, not 4294967297"],
+    ['get d near e [1, 0] ef 4294967297', '`ef` is 1 to 4294967295, not 4294967297'],
+    ['select body from d order by 4294967297', 'the list holds 1'],
+  ]) {
+    assert.throws(() => db.run(sql), (e) => e.message.includes(says) || assert.fail(`${sql}: ${e.message}`));
+  }
+  // Nothing of the refused ones was made, and what was written is what is described.
+  assert.deepEqual(db.schemas().map((s) => s.name), ['d']);
+  assert.match(db.describe('fennecql').fennecql, /vector<2> @hnsw\(cosine, m=2, ef_construction=8, /);
+  assert.equal(db.rows(`${fuse} k 1000000 candidates 10000 limit 2`).length, 2);
+  assert.equal(db.rows('get d near e [1, 0] ef 4294967295 limit 1')[0].body, 'rust db');
+  // SQL's `with (..)` at pgvector's floor is described as an `@hnsw(..)`
+  // that reads back as it: one floor, 4, for both and a declaration.
+  db.run('create table p (e vector(2))');
+  db.run('create index on p using hnsw (e vector_l2_ops) with (m = 2, ef_construction = 4)');
+  const described = db.describe('fennecql').fennecql;
+  assert.match(described, /e vector<2> @hnsw\(l2, m=2, ef_construction=4, /);
+  const again = await Fennec.open(wasm);
+  for (const statement of described.split('\n').filter(Boolean)) again.run(statement);
+  assert.equal(again.describe('fennecql').fennecql, described);
+  const plan = again.checkSchema(db.describe('fennecql'));
+  assert.deepEqual([plan.statements, plan.refusals], [[], []]);
+});
+
 test('a text index beside a unique one, in the module: both answer, the unique one refusing every write', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
@@ -827,8 +874,10 @@ test('a file holding named statements opens in the module, which keeps them thro
   const { Fennec } = await import('./fennec.js');
   // Written by a server's build (fennec-core's `stored::` tests): two
   // definitions in its image, a third after it, a statement bound to the
-  // rows `entries` makes (op 3), and one run by the clock (op 4) with the
-  // mark of a slot it ran for (op 5), landed in the block of its write.
+  // rows `entries` makes (op 3), one run by the clock (op 4) with the mark
+  // of a slot it ran for (op 5), landed in the block of its write, and a
+  // webhook consumer (op 6) with an event it took, its write and its key
+  // one block.
   const file = readFileSync(new URL('../crates/fennec-core/tests/statements.fennec', import.meta.url));
   const db = await Fennec.open(wasm);
   db.load(new Uint8Array(file));
@@ -838,7 +887,25 @@ test('a file holding named statements opens in the module, which keeps them thro
     'create statement stale(',
     'create statement credit after insert entries',
     'create statement lapse every 15m',
+    'create statement stripe_paid(',
   ];
+  // The hook's record, whole: kind 13 of no collection, its length, op 6,
+  // and its body to the hook's name after the text -- the tail the module
+  // keeps unread and writes back as it came, behind the op it came in.
+  const hookRecord = (() => {
+    const name = Buffer.from([11, ...Buffer.from('stripe_paid')]);
+    const tail = Buffer.from([6, ...Buffer.from('stripe')]);
+    const nameAt = file.indexOf(name);
+    const end = file.indexOf(tail, nameAt) + tail.length;
+    for (let at = nameAt - 1; at > nameAt - 24; at--) {
+      if (file[at] !== 13 || file[at + 1] !== 0) continue;
+      let len = 0, shift = 0, p = at + 2;
+      for (; file[p] >= 128; p++, shift += 7) len += (file[p] & 127) * 2 ** shift;
+      len += file[p] * 2 ** shift;
+      if (p + 1 + len === end && file[p + 1] === 6) return Buffer.from(file.subarray(at, end));
+    }
+    throw new Error('no op-6 record in the fixture');
+  })();
   // The mark's record: kind 13 of no collection, op 5, its statement's
   // name, then its slot -- 2026-03-28T13:00Z, as a zigzag varint.
   const zigzag = (ms) => {
@@ -850,9 +917,10 @@ test('a file holding named statements opens in the module, which keeps them thro
     return out;
   };
   const mark = Buffer.from([5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13))]);
-  const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t)) && Buffer.from(image).includes(mark);
+  const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t)) &&
+    Buffer.from(image).includes(mark) && Buffer.from(image).includes(hookRecord);
   assert.ok(Buffer.from(file).includes(mark), 'the fixture holds the mark');
-  assert.ok(keeps(db.snapshot()), 'each text and the mark as they came');
+  assert.ok(keeps(db.snapshot()), 'each text, the mark and the hook as they came');
   // The module reads a mark's name and version alone, and keeps its bytes:
   // a later slot's mark of the same definition, its outcome (9) one no
   // version writes, is taken as the last and written back as it came, for
@@ -873,6 +941,17 @@ test('a file holding named statements opens in the module, which keeps them thro
   assert.equal(db.run('get holds count').rows[0].count, 1);
   db.run("set holds {state: 'held'} where state = 'lapsed'");
   assert.throws(() => db.run('call lapse'), /named statements are a server's/);
+  // A hook binds no write, and the module takes no event: the event's
+  // write and its key are rows as any, the key read until its own `until`
+  // (thirty days past its taking, 2026-03-28T12:00Z), and the call refused.
+  db.now = () => Date.UTC(2026, 2, 28, 12);
+  assert.deepEqual(db.run('get _hook_events select taken').rows, [{ taken: 1 }]);
+  assert.deepEqual(db.run("get orders select status where ref = 'o-1'").rows, [{ status: 'paid' }]);
+  db.now = () => Date.UTC(2026, 3, 28);
+  assert.equal(db.run('get _hook_events count').rows[0].count, 0, 'past its until');
+  db.now = Date.now;
+  db.run("set orders {status: 'open'} where ref = 'o-1'");
+  assert.throws(() => db.run('call stripe_paid'), /named statements are a server's/);
   // The module runs no binding: a write that may make a row of `entries`
   // is refused before it changes anything, in its own words; what the
   // binding does not bind writes as ever.

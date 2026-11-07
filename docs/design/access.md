@@ -1,13 +1,15 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fennec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement
--- the `where`, each `lookup` level, a subscription's shape -- so a new path
-that runs a statement must go through `scoped()` or it reads everything. Writes
+-- the `where`, each `lookup` level, a subscription's shape and every inner
+`get` in any of them (a subscription's through `Scope::subscribed`) -- so a
+new path that runs a statement must go through `scoped()` or it reads
+everything. Writes
 also get `WITH CHECK`: the `Check` write hook tests every document a put or a
 set writes against the filter, found through a thread-local set by `within()`
 around the execution -- a scoped write executed outside `within` goes
@@ -460,6 +462,176 @@ in process moved 1-1.5% either way as the bench's own functions were
 laid out (the server token's reaches nothing this changed, only
 `Database::query`), and nothing below fennec-http changed: the browser
 module is the same to the byte.
+
+## The server's own collections
+
+**A collection whose name starts with `_` is the server's, out of every
+rule's reach** (`access::covers`, `access::own_refused`, `path_refusal`,
+`own_declared`, `fennec_core::declared::own` and `OWN`). The server keeps
+its bookkeeping in collections of its file: `_idempotency` (each
+`Idempotency-Key` under its subject, with the answer kept for it),
+`_consumers` (`/_changes`' cursors), `_migrations` (the migrations a
+schema declared in code ran), `--follow`'s `_follow`, a webhook consumer's
+`_hook_events` (F4, an event's key a row, `Database::take_event`), and in a synced replica's
+own file `_sync_shapes`, `_sync_queue` and `_sync_temps`. Most surfaces
+held them out already by the name's `_` (`declared::own`): the description
+`/_schema` writes, `fennec types`, MCP's listing, a named statement's or a
+binding's body, the row quota. A rule did not: `*` matched every name
+(`r.collection.is_none_or(..)`, at eleven places), so a token whose policy
+held an unfiltered `* read` -- `for dashboard` in the docs' own example --
+read `get _idempotency`, every other subject's keys and the answers kept
+for them, and listed the collections in `collections` and `GET
+/collections`; one whose `*` granted `delete` took bob's key, and his
+resent payment ran again; one granting `insert` planted a key under
+another subject, whose request was then answered as done and never ran.
+The server's token was held to nothing there either: `create collection
+_idempotency (key int @hash, at timestamp @ttl(1d))`, its expiry the one
+`idempotent::ensure` asks for, was kept, and every keyed write after it
+failed on the key's type; `alter collection _idempotency alter field at
+@sorted` made `ensure` drop the collection and make it again, every key
+gone and every retry run twice; `/_schema/apply` did the same through a
+description declaring one or a migration naming one. And since the row
+quota counts the app's collections alone (`Database::documents`), a
+tenant's app storing rows in a `_`-named collection of its own escaped its
+quota.
+
+The set is the prefix, not a list. `declared::own` was the rule every
+other surface asked, the docs say `_` names are the database's own
+(`fennecql.html`), and a list in `access.rs` would have left `_follow` and
+`_migrations` -- made by fennec-import and fennec-abi, which fennec-http
+does not name -- in reach, and every collection added later a line to
+forget, which is how F4's design came to say `_hook_events` was held out
+of a `*` rule "as `_idempotency` is" while neither was. `declared::OWN`
+names the ones made today, each owner's constant pointing at it
+(`idempotent::KEYS`, `cdc::CONSUMERS`, `follow::MARKER`, `engine::HOOK_EVENTS`, the sync's), for
+the tests to walk and the docs to name; no check reads it. So:
+
+- *Rules.* Every place a rule is matched to a collection asks
+  `covers` -- `granted`, `filtered`, `readable`, `known`, `transitions`,
+  `overwrites`, `admits`, the field views, `returning`'s refusal text and
+  `ring` -- where `*` covers a name only if its first byte is not `_`. A
+  rule naming one, an inner `get` of a rule reading one at any depth, and
+  an `append-only` line naming one are refused at startup (`Access::with`),
+  so no rule grants anything there and a token's scope never names one: it
+  is a collection the token is granted nothing on, which does not exist
+  for it -- 404 with the text a collection no database holds is answered
+  with, `collection \`_idempotency\``, on `/query`, `/batch`, REST, a
+  subscription, a `lookup` level, a join's table, an inner `get` and MCP's
+  tools, and left out of `collections`, `GET /`, `/collections`, `/_schema`
+  (and `?as=fennecql`), a follow plan, which finds it missing, and MCP's
+  `schema`.
+- *A REST request's refusal* is its collections' (`path_refusal`, in
+  `handle`, `rest_write` and `sse::serve`): the route reads the schema of
+  each collection the request names -- its path's, and a `GET`'s every
+  `lookup` level, left to right -- before the token's rules are asked, and
+  a filter, a `select` or a level's `on`, `parent`, `select` or `order`
+  naming a field the collection lacks answered so -- `GET
+  /_follow?nosuch=eq.1` said `field \`nosuch\` in collection
+  \`_follow\``, where `_none` was `collection \`_none\``; `GET
+  /notes?lookup=_follow` asked for `_follow.on` (400) where `lookup=_none`
+  was 404, and `_follow.on=nosuch` named the field it lacked where `on=key`
+  was the plain 404, a field-name oracle, an ordinary collection the token
+  was granted nothing on leaking the same way. Where the route or the
+  rules refuse a request naming a collection the token is granted nothing
+  on, it is answered as one no database holds -- the first such in the
+  route's order (`rest_collections`), a function of the request and the
+  rules alone, whatever the database holds -- every such collection, not
+  the server's alone, as a `get` of it already was. A `where=`'s inner
+  `get` is read by no route, and the rules answer it; a subscription's was
+  not held to them at all -- its shape had the stream's own collection's
+  rules ANDed in, and `GET /notes/changes?where=t in (get secrets select
+  key)` read every row of `secrets` and streamed the notes it matched, a
+  collection the token was granted nothing on or rows its rules kept from
+  it -- and is now held as a statement's (`Scope::subscribed`, at the
+  stream's start and each rebinding). Asked of a refusal alone,
+  not before the route: a request the route takes meets the rules, which
+  answer the same, and asked of every request it cost a scoped REST read
+  some 240 instructions (0.5%) -- splitting the path and walking the rules
+  -- measured as below. It reads nothing the writes made, so under
+  `--sync always` it waits for no fsync (`refused_under`'s `read`).
+- *The server's token* reads them -- an operator debugging a replay reads
+  `_idempotency` -- and runs no statement making, changing or writing one:
+  `create`, `alter`, `drop`, `create index` or `compact` of one, an
+  `insert`, `put`, `set` or `del` (`own_written`), refused 403 by
+  `scoped()`, which every
+  statement passes, `run_query`'s shared parse for that token too, and a
+  REST write to one by its path where the route refused it first; a
+  `/batch` holding one runs none of its lines. `/_schema/plan` and
+  `/_schema/apply` (a tenant's schema the router makes among them) refuse a description declaring one or a
+  migration still to run reaching one (`own_declared`) before anything is
+  planned, since a migration runs as that token's statement. Still to
+  run: asked under the write lock the plan or apply takes, of the
+  migrations `_migrations` has not recorded (`fennec_abi::unrecorded`,
+  which a test holds to `fennec_abi::schema`'s own reading of the record),
+  and of none where the
+  database holds none of its own collections, which records the list
+  unrun. Asked of every one, as first built, a list holding one that ran
+  before this rule -- a `drop collection _old`, as the list only grows --
+  was refused at every plan after it. So the migration record starts over
+  in a new file, or a new tenant: no route resets it. A `compact` of the
+  whole file compacts them with the rest, as the file's own compaction
+  does; one naming one is held to the rule with the other statements. `--mcp-memory` naming one is
+  refused at the start, every `remember` otherwise refused.
+- *The server's own writes* go through the engine, never a client's
+  statement, and are untouched: `idempotent::keep` and `ensure`, cdc's
+  cursors, `fennec_abi::schema`'s `_migrations`, the mirror's `_follow`,
+  `@ttl`'s sweep. The refusal is in fennec-http, not the engine, for that:
+  each of those runs `execute` with FennecQL of its own, and the native
+  library and the browser module own their database whole, an app's code
+  the only writer of its `_sync_*` and `_migrations` -- an engine refusal
+  would want a second door for each, and the module would carry it.
+- *`/_changes`* passes over every one by its `_` (it named `_consumers`,
+  `_idempotency` and `_hook_events`): a migration's record and `_follow`'s
+  were sent. `unmoved` takes a commit past nothing but
+  their writes as moving nothing, as the stream reads nothing there.
+- *Statement counts* name every collection, and are read by the server's
+  or the admin token alone (`/_stats/statements`): a scoped token's
+  refused `get _idempotency` is counted under its shape there, which no
+  scoped token reads.
+
+Why 404 to a scoped token and 403 to the server's: a scoped token is told
+nothing of what it may not reach -- its answer is the one a name that is
+nowhere gets, byte for byte (`tests/own.rs` compares each route's answer
+with `_none`'s) -- while the server's token reads the collection and is
+told why it may not change it.
+
+Cost, in instructions retired in the loop (`proc_pid_rusage`, as
+examples/replays.rs counts them) over 200 000 requests through
+`fennec_http::handle` in process, the median of six runs a side taken in
+turns against main, `MallocNanoZone=0`, the machine's load under 3: a
+scoped `get` by id 45 258 -> 45 174 under rules naming their collections
+and 38 501 -> 38 469 under a `*` rule; a scoped `set` 55 212 -> 54 898 and
+54 573 -> 54 533; a scoped REST read by id 45 616 -> 45 462 and 39 192 ->
+39 009; the server token's `put` 28 656 -> 28 800, inside what a process's
+hash seeds move it -- in the same turns a build without the check retired
+28 787 beside main's 28 617 and this one's 28 721 -- cycles within 0.7%
+either way. The review's fixes run on refusals, a subscription's start
+and the schema routes alone, and add an arm to `own_written`'s match.
+Against main with #498, fennec-server's code grew 6.8 KB (`__text`
+4 484 800 -> 4 491 776 bytes, release, the review's fixes 3.6 KB of it)
+and its file 32 bytes (6 444 672 -> 6 444 704), the segment's slack
+taking the rest; the browser module is the same to the byte (837 802
+bytes, `cmp` identical), `fennec_abi::unrecorded` native alone -- read
+through `fennec_abi::schema` it grew the module 135 bytes, 62 inlined.
+
+`tests/own.rs` -- every verb by every route through an unfiltered `*`
+rule, a REST read's `lookup` levels and a `where=`'s and a subscription's
+inner `get` among them, each answer compared with a missing collection's
+and the rows held unread and unwritten, a resent keyed write still
+replayed; an ordinary collection a policy grants nothing on answered the
+same; a migration the database recorded not asked again; the listings
+and schemas; the startup refusals; the server's token's refusals by every
+route, a `/batch`, a description and a migration; keyed writes, their
+replays and their sweep under a `*` rule after the server's token tried to
+make `_idempotency` -- `tests/cdc.rs`' `the_servers_own_collections_are_left_out`,
+`tests/mcp.rs`' `the_servers_own_collections_are_no_agents` (each tool's
+answer, `search`'s among them, compared byte for byte with a missing
+collection's), `tests/access.rs`'
+`a_subscriptions_inner_get_reads_only_what_the_token_may`,
+fennec-server's `a_memory_collection_of_the_servers_own_is_refused_at_the_start`
+and `declared.rs`' test of `OWN` fail without it; the keyed writes' test
+holds the server's own path to working beside it, as `tests/idempotency.rs`
+does.
 
 ## Tenant binding
 

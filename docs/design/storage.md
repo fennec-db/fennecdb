@@ -325,8 +325,10 @@ appended records that are not writes; a block (kind 9) holds a record for
 each of its writes: a data record, or a create's, a drop's, an index's,
 an alter's (kind 12) or a named statement's (kind 13, defined or dropped,
 [named-statements.md](named-statements.md#what-is-built), or a scheduled
-one's slot marked, [F3](named-statements.md#what-f3-has-built)), which an
-image writes again after the collections, each schedule's last mark alone.
+one's slot marked, [F3](named-statements.md#what-f3-has-built); a webhook
+consumer's definition is op 6, its hook's name after its text,
+[F4](named-statements.md#what-f4-has-built)), which an image writes again
+after the collections, each schedule's last mark alone.
 A head is written in one place (`head`, the counter's `image_head` aside)
 and read in one (`record_at`), and a walk over a file's records is a
 `Walk` -- a load, a repoint and the search for the last graphs each wrote

@@ -92,7 +92,8 @@ const STATEMENTS: &[&str] = &[
 
 /// Whether a collection is the sync's own.
 fn own(name: &str) -> bool {
-    matches!(name, "_sync_shapes" | "_sync_queue" | "_sync_temps")
+    use fennec_core::declared::{SYNC_QUEUE, SYNC_SHAPES, SYNC_TEMPS};
+    matches!(name, SYNC_SHAPES | SYNC_QUEUE | SYNC_TEMPS)
 }
 
 struct Shape {

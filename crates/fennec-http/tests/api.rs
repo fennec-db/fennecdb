@@ -314,6 +314,22 @@ fn near_with_match_is_fused() {
             "{bad}"
         );
     }
+
+    // `fuse_k` is held to `fuse k`'s bound, as written, by the check every
+    // `Select` meets: clamped to `u32::MAX` here, it answered with a
+    // side's first ranks weighing alike.
+    let at = |k: u64| {
+        let body = format!(r#"{{"vector": [1.0, 0.0, 0.0], "match": "rust", "fuse_k": {k}}}"#);
+        call(h.port, "POST", "/notes/near", Some(&body))
+    };
+    for k in [1_000_001u64, 99_999_999_999] {
+        let r = at(k);
+        assert_eq!(r.status, 400, "{k}: {}", r.body);
+        let says = format!("`fuse`'s `k` is 0 to 1000000, not {k}");
+        assert!(r.body.contains(&says), "{k}: {}", r.body);
+    }
+    let r = at(1_000_000);
+    assert_eq!((r.status, rows(&r.body)), (200, 3), "{}", r.body);
 }
 
 #[test]

@@ -620,15 +620,15 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
             file.extend_from_slice(&body);
             file
         });
-        let file = crate::scheduled::with_schedule(with_binding(file));
+        let file = crate::hooked::with_hook(crate::scheduled::with_schedule(with_binding(file)));
         std::fs::write(FIXTURE, file).unwrap();
     }
     let db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
     let t = db.statements();
     assert_eq!(
         t.len(),
-        5,
-        "transfer, like, stale, the binding and the schedule"
+        6,
+        "transfer, like, stale, the binding, the schedule and the hook"
     );
     for (name, text) in [("transfer", TRANSFER), ("like", LIKE)] {
         let s = t.get(name).unwrap();
@@ -827,10 +827,22 @@ fn mask(db: &Database, collection: &str) -> u8 {
 /// A kind-13 record of op 3 written by hand: what a later build, or
 /// another, may have written.
 fn bound_record(name: &str, text: &str, collection: &str, events: u8, change: u64) -> Vec<u8> {
+    bound_record_at(GRAMMAR_EPOCH, name, text, collection, events, change)
+}
+
+/// [`bound_record`] as a build of grammar `epoch` wrote it.
+fn bound_record_at(
+    epoch: u32,
+    name: &str,
+    text: &str,
+    collection: &str,
+    events: u8,
+    change: u64,
+) -> Vec<u8> {
     let mut body = vec![3u8];
     put_uvarint(&mut body, 0);
     put_uvarint(&mut body, change);
-    put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+    put_uvarint(&mut body, epoch as u64);
     let digest = fennec_ql::definition(text)
         .ok()
         .and_then(|d| d.digest().ok());
@@ -1422,6 +1434,128 @@ fn a_bound_record_reading_otherwise_is_marked_broken() {
     assert!(matches!(&e, Error::Exists(m) if m.contains(says)), "{e}");
 }
 
+/// Grammar epoch 3: a number a statement writes is read as written within
+/// its range or refused (`Parser::int_in`), where epoch 2 clamped it or
+/// read it whole -- `fuse k 2000000` and `99999999999`, `ef 0` read as 1,
+/// `rerank ... candidates 0` read as 1. A definition an epoch-2 build
+/// stored holding one no longer reads: marked broken, told to define it
+/// again, its calls refused; a bound one refuses every write that would
+/// wake it -- never run as a tree its author did not write, nor its writes
+/// let land without its rows. Defined again within the range, it runs.
+#[test]
+fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(
+        &mut db,
+        "create collection a (body text @text, e vector<3> @hnsw);
+         create collection log (n int)",
+    )
+    .unwrap();
+    run(&mut db, "put a {body: \"rust\", e: [1, 0, 0]}").unwrap();
+    let mut file = db.snapshot();
+    // A callable definition's record (op 1) as epoch 2 wrote it; no tree of
+    // this grammar is its digest, so any stands for it.
+    let callable = |name: &str, text: &str, change: u64| {
+        let mut body = vec![1u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, change);
+        put_uvarint(&mut body, 2);
+        body.extend_from_slice(&7u64.to_le_bytes());
+        encode_str(&mut body, name);
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "a");
+        encode_str(&mut body, text);
+        let mut record = vec![13u8];
+        put_uvarint(&mut record, 0);
+        put_uvarint(&mut record, body.len() as u64);
+        record.extend_from_slice(&body);
+        record
+    };
+    let seq = db.change_seq();
+    let near = "get a select body match body \"rust\" near e [1, 0, 0]";
+    let texts = [
+        (
+            "s1",
+            format!("create statement s1() as {near} fuse k 2000000"),
+        ),
+        (
+            "s2",
+            format!("create statement s2() as {near} fuse k 99999999999"),
+        ),
+        (
+            "s3",
+            "create statement s3() as get a near e [1, 0, 0] ef 0".into(),
+        ),
+        (
+            "s4",
+            "create statement s4() as get a match body \"rust\" rerank e [1, 0, 0] candidates 0"
+                .into(),
+        ),
+    ];
+    for (i, (name, text)) in texts.iter().enumerate() {
+        file.extend(callable(name, text, seq + 1 + i as u64));
+    }
+    let bound = "create statement b2 after insert log scans as set a {body: \"seen\"} where id in \
+                 (get a select id near e [1, 0, 0] ef 0 limit 1)";
+    file.extend(bound_record_at(2, "b2", bound, "log", 1, seq + 5));
+    let mut db = opened(&file);
+    let why = |db: &Database, name: &str| {
+        let s = db.statements().get(name).unwrap();
+        assert!(s.tree.is_none(), "{name}");
+        s.broken.clone().unwrap_or_default()
+    };
+    for (name, says) in [
+        ("s1", "`k` is 0 to 1000000, not 2000000"),
+        ("s2", "`k` is 0 to 1000000, not 99999999999"),
+        ("s3", "`ef` is 1 to 4294967295, not 0"),
+        ("s4", "`candidates` is 1 to 10000, not 0"),
+        ("b2", "`ef` is 1 to 4294967295, not 0"),
+    ] {
+        let why = why(&db, name);
+        assert!(
+            why.starts_with("its text no longer reads: ")
+                && why.contains(says)
+                && why.ends_with(
+                    "under grammar epoch 3, where it was defined under 2: define it again"
+                ),
+            "{name}: {why}"
+        );
+    }
+    // A call is refused, as broken.
+    let e = run(&mut db, "call s1").unwrap_err();
+    assert!(
+        matches!(&e, Error::Exists(m) if m.contains("no longer reads")),
+        "{e}"
+    );
+    // The write the binding would wake is refused: its rows never land
+    // without it.
+    let e = run(&mut db, "insert log {n: 1}").unwrap_err();
+    let says = "the write would wake `b2`, which is broken: its text no longer reads";
+    assert!(matches!(&e, Error::Exists(m) if m.contains(says)), "{e}");
+    let count = |db: &mut Database| run(db, "get log").unwrap().rows().unwrap().rows.len();
+    assert_eq!(count(&mut db), 0);
+    // Defined again within the range, each runs.
+    run(
+        &mut db,
+        &format!("create or replace statement s1() as {near} fuse k 1000000"),
+    )
+    .unwrap();
+    assert!(db.statements().get("s1").unwrap().broken.is_none());
+    assert!(run(&mut db, "call s1").unwrap().rows().is_some());
+    let again = bound
+        .replace("statement b2", "or replace statement b2")
+        .replace("ef 0", "ef 1");
+    run(&mut db, &again).unwrap();
+    run(&mut db, "insert log {n: 1}").unwrap();
+    assert_eq!(count(&mut db), 1);
+    let r = run(&mut db, "get a select body").unwrap();
+    assert_eq!(
+        r.rows().unwrap().rows[0].values[0],
+        Value::Text("seen".into())
+    );
+}
+
 /// An op or an event this version does not know is refused, never read
 /// as something else -- what a build before op 3 does with op 3, which
 /// `make upgrade-check` holds an older binary to.
@@ -1455,10 +1589,8 @@ fn the_fixture_s_binding_is_read_and_runs() {
     let mut db = opened(&std::fs::read(FIXTURE).expect("the fixture"));
     let credit = db.statements().get("credit").expect("the binding");
     assert_eq!(credit.after, Some(("entries".to_string(), 1)));
-    assert_eq!(
-        (credit.epoch, credit.digest),
-        (GRAMMAR_EPOCH, digest(BINDING))
-    );
+    // Written under epoch 2, its digest the one every later grammar reads.
+    assert_eq!((credit.epoch, credit.digest), (2, digest(BINDING)));
     assert!(credit.tree.is_some() && credit.broken.is_none());
     assert_eq!(mask(&db, "entries"), 1);
     let again = opened(&db.snapshot());

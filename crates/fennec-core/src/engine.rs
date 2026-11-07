@@ -47,6 +47,10 @@ mod due;
 pub(crate) use due::slot_now;
 #[cfg(feature = "statements")]
 pub use due::{Due, HeldSlot};
+#[cfg(feature = "statements")]
+mod hooked;
+#[cfg(feature = "statements")]
+pub use hooked::{Event, HeldKey, Took, HOOK_EVENTS};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -116,7 +120,7 @@ pub const DEFAULT_FUSE_CANDIDATES: usize = 20;
 /// published with and the one most implementations keep. Measured on BEIR at
 /// 20 a side, anything from 10 to 120 moved nDCG@10 by at most 0.005 on
 /// either dataset, which is noise, so the published value stands.
-pub const DEFAULT_FUSE_K: u32 = 60;
+pub const DEFAULT_FUSE_K: usize = 60;
 
 const REC_CREATE: u8 = 1;
 const REC_DROP: u8 = 2;
@@ -3973,6 +3977,11 @@ pub struct Database {
     /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
+    /// Whether a webhook consumer may be defined: a test's alone until a
+    /// server takes events ([`Self::allow_hooks`], F4's slice 2), so no
+    /// hook is stored that no sender reaches.
+    #[cfg(feature = "statements")]
+    hooking: bool,
     /// What is told how many schedules the table holds -- a definition, an
     /// image adopted, a replica's apply, a promotion -- the scheduler it
     /// wakes or the server's word on those it runs none of, asked at a
@@ -4079,6 +4088,8 @@ impl Database {
             pending: None,
             #[cfg(feature = "statements")]
             scheduling: false,
+            #[cfg(feature = "statements")]
+            hooking: false,
             #[cfg(feature = "statements")]
             on_schedules: None,
             #[cfg(feature = "statements")]
@@ -7924,7 +7935,7 @@ impl Database {
                 fields.push(f.clone());
                 // A `String`, as the parser hands it one: a `&str` was a
                 // second copy of `Schema::new`, 0.6 KB of the browser module.
-                schema.fields = Schema::new(collection.to_string(), fields)?.fields;
+                schema.fields = altered(collection, &schema.fields, fields)?;
                 (FIELD_ADD, f.name.clone(), String::new())
             }
             Alter::DropField(name) => {
@@ -7950,7 +7961,7 @@ impl Database {
                 // A name taken or reserved, as `create collection` refuses.
                 let mut fields = schema.fields.clone();
                 fields[pos].name = to.clone();
-                schema.fields = Schema::new(collection.to_string(), fields)?.fields;
+                schema.fields = altered(collection, &schema.fields, fields)?;
                 // The paths into it are under its new name, and so are the
                 // parts of an index over several fields that read it.
                 let prefix = format!("{from}.");
@@ -10177,9 +10188,9 @@ impl Database {
         at.reserve(text.len() + vectors.len());
         let ids = text.iter().map(|h| h.0).chain(vectors.iter().map(|h| h.0));
         for (i, id) in ids.enumerate() {
-            // Rank within its own list, from 1.
+            // Rank within its own list.
             let rank = if i < text.len() { i } else { i - text.len() };
-            let w = 1.0 / (k + rank as f32 + 1.0);
+            let w = crate::query::fuse_weight(k, rank);
             match at.get(&id) {
                 Some(&slot) => fused[slot as usize].1 += w,
                 None => {
@@ -13722,7 +13733,7 @@ fn past_tombstones(
         return Short::Whole;
     }
     let dead = ix.dead();
-    let ef = near.ef.unwrap_or(ix.spec.ef_search).max(want) + dead;
+    let ef = wider(near.ef.unwrap_or(ix.spec.ef_search), want, dead);
     if !widened && dead > 0 && ef.saturating_mul(2 * ix.spec.m) < live {
         plan(|| {
             format!(
@@ -13735,6 +13746,57 @@ fn past_tombstones(
         format!("near: the ANN came up short past {dead} tombstones, every vector searched exactly")
     });
     Short::Exact
+}
+
+/// The fields an alter of `collection` leaves, `had` before it, checked as
+/// `Schema::new` checks a `create`'s: one copy for `add` and `rename`.
+///
+/// Where it refuses one of the fields `had`, not the one the alter changes,
+/// it says so: a field a build before the bounds made -- an `@hnsw` `m`
+/// past `MAX_M`, a `vector<N>` past `MAX_DIM` -- opens, reads and writes as
+/// it did, and every alter asks each field again, so `add field x int` was
+/// refused naming `e`. Refused all the same, as `create` would refuse the
+/// field, but saying so and the way out: a field's own index goes only with
+/// the field, which a drop asks nothing of the rest to take away. Not in
+/// the browser module, which asks no `m` (`IndexKind::check`): there it is
+/// a dimension past 10^9, of which no page holds a vector, and
+/// `Schema::new`'s refusal names the field and its range; this was 0.7 KB
+/// of the module.
+#[inline(never)]
+fn altered(
+    collection: &str,
+    had: &[crate::schema::Field],
+    fields: Vec<crate::schema::Field>,
+) -> Result<Vec<crate::schema::Field>> {
+    match Schema::new(collection.to_string(), fields) {
+        Ok(s) => Ok(s.fields),
+        Err(e) if cfg!(target_arch = "wasm32") => Err(e),
+        Err(e) => Err(held_over(collection, had).unwrap_or(e)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn held_over(collection: &str, had: &[crate::schema::Field]) -> Option<Error> {
+    had.iter()
+        .find_map(|f| match f.index.check(&f.name, &f.ty) {
+            Err(Error::Type(why)) => Some(Error::Query(format!(
+                "`{collection}` holds a field a version before this one made, which this one no \
+                 longer takes ({why}): drop it (`alter collection {collection} drop field {}`) \
+                 and add it again within the range, or copy the rows into a collection made so",
+                f.name
+            ))),
+            _ => None,
+        })
+}
+
+/// The beam [`past_tombstones`] widens to: `ef`, at least the page, and
+/// one more node for each tombstone it may pass. Saturating: `ef` may be
+/// `u32::MAX`, all a wasm32 `usize` holds, where adding the tombstones
+/// wrapped to a beam of a few.
+#[inline]
+fn wider(ef: usize, want: usize, dead: usize) -> usize {
+    ef.max(want).saturating_add(dead)
 }
 
 /// A filter bound to the collection it tests rows of, once a query: each
@@ -15116,4 +15178,23 @@ fn near_vector(v: Value) -> Result<Vec<f32>> {
             i.type_name()
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wider;
+
+    /// The beam widened past tombstones saturates at the most a `usize`
+    /// holds: `ef 4294967295` is all a wasm32 build's holds, and one
+    /// tombstone more wrapped the sum to a beam of none, or panicked in a
+    /// debug build.
+    #[test]
+    fn a_beam_widened_at_the_edge_saturates() {
+        assert_eq!(wider(usize::MAX, 10, 3), usize::MAX);
+        assert_eq!(wider(usize::MAX - 1, 10, 1), usize::MAX);
+        assert_eq!(wider(10, usize::MAX, 1), usize::MAX);
+        // Below the edge, the sum.
+        assert_eq!(wider(100, 10, 3), 103);
+        assert_eq!(wider(5, 10, 3), 13);
+    }
 }

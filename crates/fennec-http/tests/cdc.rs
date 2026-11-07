@@ -399,6 +399,49 @@ fn what_is_refused() {
     assert_eq!(n.call(None, "GET", "/_replication?since=0", "").status, 401);
 }
 
+/// The server's own collections are left out of the stream, every one by
+/// its `_` and the cursor past them: a migration's record in
+/// `_migrations`, a key's in `_idempotency` and a consumer's in
+/// `_consumers` are the server's bookkeeping, no app's row. On main the
+/// migrations' were sent, `_migrations` made and its row written.
+#[test]
+fn the_servers_own_collections_are_left_out() {
+    let n = start("own", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    let migrated = r#"{"format":1,"collections":[],"migrations":["create collection b (t text)"]}"#;
+    let a = n.call(Some(ROOT), "POST", "/_schema/apply", migrated);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let keyed = n.call_with(
+        Some(ROOT),
+        "POST",
+        "/query",
+        r#"{"query":"put a {t: \"x\"}"}"#,
+        "Idempotency-Key: k1\r\n",
+    );
+    assert_eq!(keyed.status, 200, "{}", keyed.body);
+    assert_eq!(n.make("c", "").status, 201);
+    n.run("put b {t: \"y\"}");
+    let db = n.db.read().unwrap();
+    for c in ["_migrations", "_idempotency", "_consumers"] {
+        assert!(db.collection(c).is_ok(), "{c} made");
+    }
+    drop(db);
+    let all = n.changes("since=0");
+    assert_eq!(all.status, 200, "{}", all.body);
+    let got: Vec<(String, String)> = events(&all.body).into_iter().map(|e| (e.1, e.2)).collect();
+    let named = |op: &str, c: &str| (op.to_string(), c.to_string());
+    assert_eq!(
+        got,
+        [
+            named("create", "a"),
+            named("create", "b"),
+            named("put", "a"),
+            named("put", "b"),
+        ]
+    );
+    assert_eq!(all.next, Some(n.seq()));
+}
+
 #[test]
 fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     let n = start("consumer", replication::DEFAULT_BUFFER);
@@ -873,4 +916,61 @@ fn a_row_past_its_time_waits_a_sweep_for_its_reaper() {
     assert_eq!(expired(&n), [fennec_core::value::Value::Int(5)]);
     assert_eq!(fennec_http::sweep::pass("test", &n.db), 1);
     assert!(expired(&n).is_empty());
+}
+
+/// An event's key (`_hook_events`), kept in the block of the writes its
+/// statements made, is the server's own: passed over as a write's
+/// `Idempotency-Key` is, the collection made for it too, and the event's
+/// writes told. The event is taken by the engine as a test drives it (F4's
+/// slice 2): no route takes one yet.
+#[test]
+fn an_event_s_key_is_passed_over_and_its_writes_told() {
+    let n = start("hooked", replication::DEFAULT_BUFFER);
+    n.run("create collection orders (ref text @hash, status text)");
+    n.run("put orders {ref: \"o-1\", status: \"open\"}");
+    {
+        let mut db = n.db.write().unwrap();
+        db.allow_hooks();
+        let def = fennec_ql::parse_one(
+            "create statement paid($o text from event.order) on hook stripe as set orders \
+             {status: 'paid'} where ref = $o",
+        )
+        .unwrap();
+        db.execute(&def).unwrap();
+        let body = fennec_core::json::parse_json(r#"{"order": "o-1"}"#).unwrap();
+        let event = fennec_core::engine::Event {
+            hook: "stripe",
+            key: "evt_1",
+            body: &body,
+            digest: 1,
+            at: None,
+            event: None,
+            keep: 86_400_000,
+        };
+        assert_eq!(
+            db.take_event(&event).unwrap(),
+            fennec_core::engine::Took::Ran(1)
+        );
+    }
+    // A write through the server, whose fsync covers the event's block.
+    n.run("put orders {ref: \"o-2\", status: \"open\"}");
+    let all = n.changes("since=0");
+    assert_eq!(all.status, 200, "{}", all.body);
+    let got: Vec<_> = events(&all.body)
+        .into_iter()
+        .map(|e| (e.0, e.1, e.2))
+        .collect();
+    let told = |seq: u64, op: &str| (seq, op.to_string(), "orders".to_string());
+    assert_eq!(
+        got,
+        [
+            told(1, "create"),
+            told(2, "put"),
+            // 3, the definition; 5 and 6, the keys' collection made and
+            // the key, in the event's block after its write.
+            told(4, "put"),
+            told(7, "put"),
+        ]
+    );
+    assert_eq!(all.next, Some(7));
 }

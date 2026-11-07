@@ -232,9 +232,10 @@ def test_a_write_names_its_change_and_a_read_can_wait_for_it(client):
         client.query(f"drop collection if exists {name}")
 
 
-def test_a_schema_is_compared_and_applied_only_when_asked(client):
+def test_a_schema_is_compared_and_applied_only_when_asked(schema_client):
     from fennecdb import SchemaError
 
+    client = schema_client
     name = fresh("schema")
     v1 = f"create collection {name} (title text required, n int @hash)"
     client.query(v1)
@@ -257,7 +258,6 @@ def test_a_schema_is_compared_and_applied_only_when_asked(client):
         assert client.schema(v3, moved, migrate=True)["migrations"] == []
     finally:
         client.query(f"drop collection if exists {name}")
-        client.query("drop collection if exists _migrations")
 
 
 def _server(plan):

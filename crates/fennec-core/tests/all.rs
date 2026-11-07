@@ -33,6 +33,7 @@ mod geo_docs;
 mod handover;
 mod having;
 mod highlight;
+mod hooked;
 mod in_param;
 mod insert;
 mod int_range;

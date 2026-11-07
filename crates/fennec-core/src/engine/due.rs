@@ -71,11 +71,12 @@ impl Drop for SlotRead {
     }
 }
 
-/// The database with its clock fixed to a run's start, given back as it is
-/// dropped: on a return and as a panic unwinds alike.
-struct Clocked<'a> {
-    db: &'a mut Database,
-    before: Option<i64>,
+/// The database with its clock fixed to a run's start -- a slot's, or an
+/// event's taking (`engine/hooked.rs`) -- given back as it is dropped: on a
+/// return and as a panic unwinds alike.
+pub(super) struct Clocked<'a> {
+    pub(super) db: &'a mut Database,
+    pub(super) before: Option<i64>,
 }
 
 impl Drop for Clocked<'_> {

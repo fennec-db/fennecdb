@@ -69,7 +69,20 @@ pub enum What {
 /// in $n)`, where they were a call of a function no build has, refused as
 /// it ran -- a definition holding one is marked broken, to be defined
 /// again.
-pub const GRAMMAR_EPOCH: u32 = 2;
+///
+/// 3: a number a statement writes is read as written within its range or
+/// refused naming it (`Parser::int_in`), where it was clamped or cut:
+/// `fuse k` past 1 000 000 (`k 99999999999` was `u32::MAX`); `near`'s
+/// `ef`, `fuse`'s and `rerank`'s `candidates` and a snippet's words under 1
+/// (read as 1, or refused as they ran) or past their range (natively `ef
+/// 5000000000` was read whole); a parameter's `vector<N>` past 10^9 -- a
+/// definition holding one no longer reads, and is marked broken ("its
+/// text no longer reads: ... under grammar epoch 3, where it was defined
+/// under 2: define it again"): its calls are refused, and a bound one
+/// refuses every write that would wake it, until it is defined again or
+/// dropped (`tests/stored.rs`). `@hnsw(ef_construction=4)` to `7`, built
+/// as 8 before, reads as written; no definition holds a `create`.
+pub const GRAMMAR_EPOCH: u32 = 3;
 
 /// What reads a named statement's stored text back into its tree: the
 /// parser's (`fennec_ql::definition`), which this crate does not hold.
@@ -634,8 +647,8 @@ fn cron_value(text: &str, k: usize) -> std::result::Result<u32, String> {
 /// *Webhook consumers (F4)*): the events another service sends to the hook
 /// `name`, each taken where its `condition` passes it, its parameters read
 /// from the event as its `sources` say, one a parameter in the signature's
-/// order. Nothing takes one yet: every way of defining one refuses it
-/// ([`HOOKED_NOT_BUILT`]).
+/// order (`Database::take_event`). No server takes one yet: every way of
+/// defining one refuses it ([`HOOKED_NOT_BUILT`]) but a test's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Webhook {
     /// The hook's name, a word as a statement's is ([`valid_name`]): the
@@ -671,9 +684,66 @@ pub enum Source {
 }
 
 /// What every way of defining a webhook consumer refuses it with until a
-/// server takes events (F4's slices 1 and 2): one stored would be a hook
-/// no sender reaches, without a word.
+/// server takes events (F4's slice 3), a test's aside
+/// (`Database::allow_hooks`): one stored would be a hook no sender
+/// reaches, without a word.
 pub const HOOKED_NOT_BUILT: &str = "webhook consumers are not built yet";
+
+/// The statements one hook's events are taken by, at most: every one whose
+/// condition passes an event takes it, in name order, in one block. Refused
+/// past it, never cut -- sixteen, the event destinations a Stripe account
+/// has, so an app reading a dozen of its event types through one endpoint
+/// is not out of statements first.
+pub const MAX_HOOKED: usize = 16;
+
+/// The value at `keys` -- a path's keys past `event`, joined by dots --
+/// inside an event's body, `null` where the path leads nowhere: what a
+/// webhook consumer's parameter and condition read (`Source::Event`). A
+/// key reads an object's member by its name, as [`Value::at_path`] does,
+/// and a list's element by its place where it is one RFC 6901 (JSON
+/// Pointer) writes -- `0`, or digits with no leading zero, from the first:
+/// `event.data.object.lines.data."0".price.id` reads the first line's
+/// price. A JSON value is an object or a list, never both, so a key of
+/// digits names one thing wherever it stands: `"0"` the member `0` of an
+/// object and the first element of a list. `01`, `-1` and a place past
+/// the end read nothing, as a missing member does. A body is read exactly
+/// (a list stays a list, never a vector's `f32`s), so only `List` is
+/// indexed.
+///
+/// No `json` field's path reads a list: FennecQL writes no key of digits
+/// but a hook's (the lexer refuses `.0`, and a quoted key is a hook's
+/// alone), so a field's path never meets one, and the reader a field's
+/// read goes through -- `Value::at_path`, and `codec::decode_path_into`
+/// off the stored bytes, which the module holds -- is left as it is. A
+/// field's key of digits, once written, would take this rule in both.
+#[cold]
+#[inline(never)]
+pub fn event_at<'v>(body: &'v Value, keys: &str) -> &'v Value {
+    let mut v = body;
+    for k in keys.split('.') {
+        let next = match v {
+            Value::List(items) => place(k).and_then(|i| items.get(i)),
+            _ => v.member(k),
+        };
+        match next {
+            Some(x) => v = x,
+            None => return &crate::value::NULL,
+        }
+    }
+    v
+}
+
+/// A list's place as RFC 6901 writes one -- `0`, or digits with no leading
+/// zero -- or `None`.
+fn place(k: &str) -> Option<usize> {
+    let b = k.as_bytes();
+    let canonical =
+        !b.is_empty() && b.iter().all(u8::is_ascii_digit) && (b.len() == 1 || b[0] != b'0');
+    if !canonical {
+        return None;
+    }
+    k.parse().ok()
+}
 
 /// What a claim, `$jwt` or `public` in a webhook consumer is refused with.
 pub const HOOKED_VALUES: &str = "a webhook consumer is called by no token: it reads no claim and \
@@ -1437,9 +1507,10 @@ impl Definition {
         if let Some(why) = kind_kept(&self.name, self.kind(), old.kind()) {
             return Some(why);
         }
-        // A scheduled statement is called by no one and woken by no write:
-        // no grant hangs on its schedule, zone or body.
-        if self.schedule.is_some() {
+        // A scheduled statement is called by no one and woken by no write,
+        // and neither is a hook's: no grant hangs on a schedule, a zone, a
+        // hook, a condition, the parameters an event fills or a body.
+        if self.schedule.is_some() || self.hook.is_some() {
             return None;
         }
         // A bound statement's contract is what a `wake` line grants: to
@@ -1493,6 +1564,7 @@ impl Definition {
         match (self.bound_as(), &self.schedule) {
             (Some((c, e)), _) => Kind::Bound(c, e),
             (None, Some(_)) => Kind::Scheduled,
+            (None, None) if self.hook.is_some() => Kind::Hooked,
             (None, None) => Kind::Called,
         }
     }
@@ -1575,22 +1647,26 @@ impl Definition {
 }
 
 /// What kind of statement a definition is, as its record says it: called,
-/// bound to a collection's writes (and which), or run by the clock.
+/// bound to a collection's writes (and which), run by the clock, or taking
+/// a hook's events.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind<'a> {
     Called,
     Bound(&'a str, u8),
     Scheduled,
+    /// Whichever hook: a replacement moves it freely.
+    Hooked,
 }
 
 /// Why a replacement is refused for its kind, if it is: a callable
-/// statement replaced by a bound or a scheduled one, or the other way, or
-/// a bound one by one bound to another collection or other events. A
-/// `call` or `wake` line naming it would name something else, so it is a
-/// new statement, written as `drop` and `create`. Asked from the record
-/// where the old text reads no tree: its op and its fields say both. A
-/// scheduled one changes its schedule, zone and body freely: no grant
-/// hangs on them.
+/// statement replaced by a bound, a scheduled or a hook's one, or the
+/// other way, or a bound one by one bound to another collection or other
+/// events. A `call` or `wake` line naming it would name something else, so
+/// it is a new statement, written as `drop` and `create`. Asked from the
+/// record where the old text reads no tree: its op and its fields say
+/// both. A scheduled one changes its schedule, zone and body freely, and a
+/// hook's its hook, condition, parameters and body: no grant hangs on
+/// them.
 pub fn kind_kept(name: &str, now: Kind, was: Kind) -> Option<String> {
     let what = match (now, was) {
         (a, b) if a == b => return None,
@@ -1603,11 +1679,13 @@ pub fn kind_kept(name: &str, now: Kind, was: Kind) -> Option<String> {
                 Kind::Called => "is called",
                 Kind::Bound(..) => "is bound to writes",
                 Kind::Scheduled => "runs by the clock",
+                Kind::Hooked => "takes a hook's events",
             };
             let was = match was {
                 Kind::Called => "it was called",
                 Kind::Bound(..) => "it was bound to writes",
                 Kind::Scheduled => "it ran by the clock",
+                Kind::Hooked => "it took a hook's events",
             };
             format!("{is}, where {was}")
         }
@@ -2701,7 +2779,7 @@ impl Canon {
         if let Some(Fuse { k, candidates }) = fuse {
             self.tag(16);
             self.node(1);
-            self.opt_num(1, k.map(u64::from));
+            self.opt_num(1, k.map(|n| n as u64));
             self.opt_num(2, candidates.map(|n| n as u64));
             self.end();
         }

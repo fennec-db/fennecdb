@@ -153,6 +153,113 @@ an insert of five int fields retired 20 042 instructions on main and
 20 018 with the test (medians of six, both ±100 run to run), five whole
 floats 20 618 and 20 582. Full table in `site/content/docs/limits.html`.
 
+A number a statement writes is read as written or refused naming its
+range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
+dimension, beam and count of candidates or words, `hi` a `u32` so the
+number fits every target's `usize`, refused "`k` is 0 to 1000000, not
+99999999999" at the position of the clause it is in. Before it, `as usize`
+kept a wasm32 build's low 32 bits -- `fuse candidates 4294967297` was 1 in
+the browser module, past the 10 000 a native build refuses,
+`snippet(body, 4294967297)` a snippet of one word and `vector<4294967297>`
+a `vector<1>` that took `[0.5]` -- and clamps made `fuse k 99999999999`
+4294967295, `@hnsw(m=1)` 2, `ef_construction=4` 8 and `ef 0` 1. The
+ranges: a `vector<N>` and a `sparse<N>` 1 to `MAX_DIM` (10^9: pgvector's
+`sparsevec`, and a round number whose `f32`s still fit a document's 4
+GiB); `@hnsw`'s `m` 2 to `MAX_M` (32 767: level 0 keeps `2m` links,
+counted in a `u16`, which `m` past it cut), `ef_search` and `near`'s `ef`
+from 1 -- the floors the clamps lifted to, refused under them -- and
+`ef_construction` from 4, pgvector's floor, each at most `u32::MAX` (a
+graph's node ids are `u32`s); `fuse k` 0 to `MAX_FUSE_K`
+([text.md](text.md#fuse)); `fuse` and `rerank` `candidates` 1 to 10 000,
+refused as they are read; a snippet's words 1 to `u32::MAX`. `fuse k` is
+held in `Select::check` too, the one place every `Select` meets -- the
+parser's, `/near`'s `fuse_k` and one built in Rust (`Fuse::k` a `usize`,
+so `/near` hands it as written and is refused naming it) -- and `/near`
+keeps no copy; natively, as in the browser module every `Select` is the
+parser's (asked there too, 98 bytes of it). A declared schema is held to
+the same ranges (`declared::index`, and `declared::type_named`, whose
+`dimension` reads the digits in a `u32`, checked at each: folded in a
+32-bit build's `usize` -- the native library's on a 32-bit device --
+`vector<4294967297>` wrapped to 1). What no parser reads -- SQL's
+`vector(n)`, `fennec import --vector`, a schema built in code -- meets
+`IndexKind::check`'s `MAX_DIM`, and natively its `MAX_M`: in the browser
+module every spec comes through the parser or SQL's `with (m = ..)`, which
+holds `m` to pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
+dimension or a parameter a file's schema holds is read whole or the file
+refused (`codec::get_usize`, through `get_within` at the target's width,
+which its test runs at a wasm32 build's); a graph record holds the same
+numbers and reads them as it did (checked there too, 88 bytes of the
+module). A beam wider than the walk found reserves no more than it found
+(`VectorIndex::search`, `nearest_docs`): `ef 4294967295` asked for 64 GiB
+for its answer, which macOS hands over unbacked and a wasm32 build cannot
+count (`a_beam_past_the_graph_reserves_only_what_it_found`, by the
+answer's capacity); `past_tombstones` widens such a beam by its
+tombstones saturating (`wider`). The counts a parameter may hold
+(`limit`, `offset`, `top`) saturate at `usize::MAX` instead
+(`query::as_count`): no more rows than memory holds can be asked for, so
+the answer is the one written. These are read once a parse, where a
+clause is written, so parsing is as it was.
+
+*One floor for `ef_construction`.* The parser's first floor was 8, the
+clamp's, so that no FennecQL text read as another tree; but SQL's `create
+index ... using hnsw ... with (m = 2, ef_construction = 4)` takes
+pgvector's 4, and the `@hnsw(l2, m=2, ef_construction=4, ..)` its schema
+is described as was refused by every reader of the description --
+`fennec types --fennecql` read back, `fennec_abi::schema` and `follow`
+over `describe`'s JSON and FennecQL, `GET /_schema` handed to
+`/_schema/plan`. One floor, 4, for FennecQL, a declaration and SQL
+(`pgvectors_floor_reads_back_as_it_was_made`, and the module's test). A
+FennecQL `ef_construction=4` to `7`, built as 8 before, now builds what it
+says: the one tree that moves (`make fennecql-corpus`), DDL, which no named
+statement's definition holds.
+
+*A collection a version before made out of range.* A file holds its
+schema as written; an open reads it without `Schema::new`, so a
+collection main made with an `@hnsw` `m` past 32 767 -- a graph whose
+nodes' counts of links were already cut to 16 bits -- or a `vector<N>`
+past 10^9 opens, reads and writes as it did. Every `alter collection`
+builds the schema anew, asking each field, so `add field x int` and
+`rename field` were refused naming `e`, a field neither touches. Refusing
+is right -- the collection holds what a `create` refuses, and letting an
+alter through where the field is untouched would keep it -- so the
+refusal says so (`held_over`): "`b` holds a field a version before this
+one made, which this one no longer takes (`e`: @hnsw's `m` is 2 to
+32767): drop it (`alter collection b drop field e`) and add it again
+within the range, or copy the rows into a collection made so". A field's
+own index goes only with the field (`drop index` takes one over several
+fields alone), and a drop asks nothing of the other fields; a field with
+an `m` past the bound was answering from a cut graph, and a `vector<N>`
+past 10^9 holds no vector past 2^30 dimensions, a document's 4 GiB, so its
+vectors are put again from where they came, or the rows copied
+(`a_field_made_out_of_range_before_is_named_at_any_alter`). Natively: the
+browser module asks no `m`, and a dimension past 10^9, of which no page
+holds a vector, is refused there in `Schema::new`'s words, which name the
+field and its range -- the message was 0.7 KB of the module.
+
+*Grammar epoch 3.* A named statement is stored as its text and read again
+at every open ([named-statements.md](named-statements.md#what-is-built),
+*Grammar epoch 3*):
+a definition main stored holding a number these ranges refuse -- `fuse k
+2000000` or `99999999999`, `near ... ef 0` (main read 1) and natively `ef
+5000000000`, `rerank ... candidates 0`, a parameter's `vector<N>` past
+10^9 -- no longer reads, and is marked broken, told to define it again; a
+bound one refuses every write that would wake it. So `GRAMMAR_EPOCH` is 3
+(`a_number_epoch_3_refuses_marks_a_stored_definition_broken`).
+
+One helper and one message: the browser module grew 431 bytes, 373 gzip
+and 388 brotli (`make size-report BASE=origin/main`) -- `int_in` 283,
+`codec::get_usize` 155, `hnsw_args` 131 and 24 of strings, less
+`data_type`'s two refusals of its own (110) and `IndexKind::check`'s one
+message for both kinds of vector (29); `altered`, one copy of
+`Schema::new`'s call for `add` and `rename`, is 160 bytes against the 155
+it took out of `execute_inner`. The review took 103 bytes off the branch
+as it was: the file's refusal in the varint's own words, one "a vector's
+dimension" in the parser, plain `` `k` `` and `` `candidates` `` for `fuse`
+and `rerank`, `fuse k` in `Select::check` and the alter's refusal natively
+alone (98 bytes and 0.7 KB of the module). Reading `@hnsw(..)`'s number
+once before its key was 33 bytes more, a function of its own for the
+range's test, and is not done.
+
 ## Profiles
 
 **Profiles differ on purpose.** `fennec-cli` uses the `cli` profile (`panic =

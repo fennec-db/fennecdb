@@ -378,7 +378,8 @@ counts each list's allocation past its bytes (`ALLOC`).
 
 **[`fuzzy` and `prefix` walk a sorted copy of the
 words.](../../docs/design/text.md#fuzzy-and-prefix)** Every write keeps it up
-once built, never in the file; a word reaching more than
+once built, never in the file, no chunk of it empty -- through its last word
+out and the next in (`Dictionary::sound`); a word reaching more than
 `MAX_EXPANSIONS` (10 000) words is refused, never cut.
 
 **[`rerank` deliberately uses no index.](../../docs/design/text.md#rerank)** It
@@ -386,7 +387,8 @@ reorders `match`'s candidates by exact distance over stored vectors.
 
 **[`fuse` adds ranks, not scores.](../../docs/design/text.md#fuse)** Each search
 runs `candidates` deep, filtered; a row scores `1 / (k + rank)` from
-each, `k` 60.
+each, `k` 60, at most `MAX_FUSE_K`, well short of where `f32` weighs
+neighbouring ranks alike.
 
 **[`highlight()` re-reads the text; `facet` counts beside the
 rows.](../../docs/design/text.md#highlight-and-facet)** Marks are the searched

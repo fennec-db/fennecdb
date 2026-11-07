@@ -115,7 +115,10 @@ ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
 `near`, `match` and `fuse` rankings cap at 10 000 rows, expressions at 512 levels,
 a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
 `get` 4 levels deep), each a query error, never a cut result; a new limit
-takes that shape.
+takes that shape. A number a statement or a declared schema writes -- a
+dimension, a beam, `fuse k`, a count -- is read as written or refused
+naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
+to a 32-bit `usize`.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -298,10 +301,11 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 - Named statements are records of their database, called with their own text's authority.
 - A write-bound statement runs in the block of the write that woke it, once a row.
 - A scheduled statement runs once a slot, by the primary that may write its file.
+- A webhook consumer's record is kept by every build, and no server takes its events yet.
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -314,6 +318,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A scoped token is held to its rules at every level, twice for writes.
 - A field a read rule withholds is held out of what a statement does.
 - A rule may read another collection, answered before each statement.
+- A collection whose name starts with `_` is the server's, out of every rule's reach.
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
 - An empty token is no token.

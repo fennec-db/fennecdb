@@ -44,7 +44,7 @@ use crate::error::{Error, Result};
 use crate::json;
 use crate::schema::{
     split_path, ttl_text, Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec,
-    VectorIndexSpec,
+    VectorIndexSpec, MAX_DIM, MAX_M,
 };
 use crate::value::{DataType, Value, VecPrec};
 
@@ -59,6 +59,39 @@ pub const MIGRATIONS: &str = "_migrations";
 /// The collection [`MIGRATIONS`] names, as it is made.
 pub const MIGRATIONS_DDL: &str =
     "create collection if not exists _migrations (n int @unique, text text, at timestamp)";
+
+/// A server's `Idempotency-Key`s, each with the answer kept for it
+/// (`fennec_http::idempotent`).
+pub const IDEMPOTENCY: &str = "_idempotency";
+/// `/_changes`' consumers' cursors (`fennec_http::cdc`).
+pub const CONSUMERS: &str = "_consumers";
+/// `--follow`'s record of which collection follows which slot
+/// (`fennec_import::follow`).
+pub const FOLLOW: &str = "_follow";
+/// A webhook consumer's keys, a row an event taken (F4,
+/// `engine::HOOK_EVENTS`).
+pub const HOOK_EVENTS: &str = "_hook_events";
+/// A synced replica's shapes, queue and optimistic rows
+/// (`fennec_abi::sync`), in the replica's own file.
+pub const SYNC_SHAPES: &str = "_sync_shapes";
+pub const SYNC_QUEUE: &str = "_sync_queue";
+pub const SYNC_TEMPS: &str = "_sync_temps";
+
+/// The collections the database's own code makes, writes and reads, named
+/// once here for every crate that keeps one. Every name starting with `_`
+/// is the database's ([`own`]), these and any added later, so a surface
+/// holding them out asks [`own`] and never this list: it is what the tests
+/// walk and the docs name, and a new one goes here beside its constant.
+pub const OWN: [&str; 8] = [
+    MIGRATIONS,
+    IDEMPOTENCY,
+    CONSUMERS,
+    FOLLOW,
+    HOOK_EVENTS,
+    SYNC_SHAPES,
+    SYNC_QUEUE,
+    SYNC_TEMPS,
+];
 
 /// A description read: the collections declared, and the migrations.
 #[derive(Debug, Clone, PartialEq)]
@@ -552,15 +585,29 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
                 }
                 Some(_) => return Err(bad(at, "has a metric there is not: cosine, l2 or dot")),
             }
-            // As the parser bounds them, so the declaration equals the index.
-            if let Some(m) = whole(o, "m", at)? {
-                spec.m = (m as usize).max(2);
-            }
-            if let Some(n) = whole(o, "ef_construction", at)? {
-                spec.ef_construction = (n as usize).max(8);
-            }
-            if let Some(n) = whole(o, "ef_search", at)? {
-                spec.ef_search = (n as usize).max(1);
+            // As the parser bounds them, refused past them, so the
+            // declaration equals the index and the `@hnsw(..)` its plan
+            // writes reads back as it: clamped, `m: 1` declared an index of
+            // 2, and on a 32-bit build `as usize` kept the low bits.
+            for (key, slot, lo, hi) in [
+                ("m", &mut spec.m, 2, MAX_M as u64),
+                // pgvector's floor, as the parser's and SQL's `with (..)`.
+                (
+                    "ef_construction",
+                    &mut spec.ef_construction,
+                    4,
+                    u32::MAX as u64,
+                ),
+                ("ef_search", &mut spec.ef_search, 1, u32::MAX as u64),
+            ] {
+                match whole(o, key, at)? {
+                    None => {}
+                    Some(n) if (lo..=hi).contains(&(n as u64)) => *slot = n as usize,
+                    Some(_) => {
+                        let range = format!("` that is not {lo} to {hi}");
+                        return Err(bad(at, &cat(&["has an `", key, &range])));
+                    }
+                }
             }
             match member(o, "quant") {
                 None => {}
@@ -581,15 +628,14 @@ pub fn type_named(s: &str) -> Option<DataType> {
         let inner = std::str::from_utf8(inner).ok()?;
         return Some(DataType::List(Box::new(type_named(inner)?)));
     }
+    // Up to ten digits read whole (`dimension`), and held to `MAX_DIM`.
     let dim = |head: &[u8], tail: &[u8]| -> Option<usize> {
         let rest = b.strip_prefix(head)?.strip_suffix(tail)?;
         if rest.is_empty() || rest.len() > 10 || !rest.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        let n = rest
-            .iter()
-            .fold(0usize, |n, d| n * 10 + (d - b'0') as usize);
-        (n > 0).then_some(n)
+        let n = dimension(rest)?;
+        (1..=MAX_DIM as u32).contains(&n).then_some(n as usize)
     };
     if let Some(n) = dim(b"vector<", b", f16>") {
         return Some(DataType::Vector(n, VecPrec::F16));
@@ -597,7 +643,7 @@ pub fn type_named(s: &str) -> Option<DataType> {
     if let Some(n) = dim(b"vector<", b">") {
         return Some(DataType::Vector(n, VecPrec::F32));
     }
-    if let Some(n) = dim(b"sparse<", b">").filter(|&n| n <= crate::sparse::MAX_DIM) {
+    if let Some(n) = dim(b"sparse<", b">") {
         return Some(DataType::Sparse(n));
     }
     Some(match s {
@@ -610,6 +656,17 @@ pub fn type_named(s: &str) -> Option<DataType> {
         "json" => DataType::Json,
         "geo" => DataType::Geo,
         _ => return None,
+    })
+}
+
+/// A dimension's digits as a `u32`, none past it: checked at each digit,
+/// on every target alike, where a fold in a `usize` wrapped a 32-bit
+/// build's `vector<4294967297>` and `sparse<4294967297>` -- the native
+/// library's on a 32-bit device -- to a dimension of one. `MAX_DIM` is
+/// within `u32`.
+fn dimension(digits: &[u8]) -> Option<u32> {
+    digits.iter().try_fold(0u32, |n, &d| {
+        n.checked_mul(10)?.checked_add(u32::from(d - b'0'))
     })
 }
 
@@ -873,7 +930,10 @@ pub fn fennecql<S: Borrow<Schema>>(schemas: &[S]) -> String {
     out
 }
 
-/// Whether a collection is the database's own, by its name.
+/// Whether a collection is the database's own, by its name: every one
+/// starting with `_` ([`OWN`] names those made today). Its own code makes
+/// and writes them; a server holds them out of every rule, listing and
+/// client statement (`docs/design/access.md#the-servers-own-collections`).
 pub fn own(name: &str) -> bool {
     name.starts_with('_')
 }
@@ -1697,6 +1757,82 @@ mod tests {
         }
     }
 
+    /// A dimension and an index's parameters are held to the parser's
+    /// bounds, refused past them, never clamped or cut: `m: 1` declared an
+    /// index of 2, and a 32-bit build folded `vector<4294967297>` and
+    /// `sparse<4294967297>` to a dimension of one -- what `dimension` and
+    /// `MAX_DIM` refuse on every target alike.
+    #[test]
+    fn a_number_past_the_parsers_bound_is_refused() {
+        for t in [
+            "vector<4294967297>",
+            "vector<4294967297, f16>",
+            "sparse<4294967297>",
+            "vector<1000000001>",
+            "sparse<9999999999>",
+            "vector<0>",
+            "vector<99999999999>",
+        ] {
+            assert_eq!(type_named(t), None, "{t}");
+        }
+        assert_eq!(
+            type_named("vector<1000000000>"),
+            Some(DataType::Vector(1_000_000_000, VecPrec::F32))
+        );
+        assert_eq!(
+            type_named("sparse<1000000000>"),
+            Some(DataType::Sparse(1_000_000_000))
+        );
+        let hnsw = |ix: &str| {
+            parse(&format!(
+                r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"vector<3>","index":{{"kind":"hnsw",{ix}}}}}]}}]}}"#
+            ))
+        };
+        for (ix, why) in [
+            (r#""m":1"#, "has an `m` that is not 2 to 32767"),
+            (r#""m":32768"#, "has an `m` that is not 2 to 32767"),
+            (r#""m":4294967298"#, "has an `m` that is not 2 to 32767"),
+            // pgvector's floor: 3 was declared as 8.
+            (
+                r#""ef_construction":3"#,
+                "has an `ef_construction` that is not 4 to 4294967295",
+            ),
+            (
+                r#""ef_construction":4294967296"#,
+                "has an `ef_construction` that is not 4 to 4294967295",
+            ),
+            (
+                r#""ef_search":0"#,
+                "has an `ef_search` that is not 1 to 4294967295",
+            ),
+        ] {
+            let e = hnsw(ix).unwrap_err().to_string();
+            assert!(e.contains(why), "{e} / {ix}");
+        }
+        // Within them, as written.
+        let d = hnsw(r#""m":32767,"ef_construction":4,"ef_search":4294967295"#).unwrap();
+        let IndexKind::Vector(s) = d.collections[0].fields[0].index else {
+            panic!("{:?}", d.collections[0].fields[0].index)
+        };
+        assert_eq!(
+            (s.m, s.ef_construction, s.ef_search),
+            (32767, 4, 4294967295)
+        );
+    }
+
+    /// A dimension's digits are read whole in a `u32` or not at all, on
+    /// every target: folded in a 32-bit build's `usize`, `4294967297`
+    /// wrapped to 1, a dimension `type_named` then took.
+    #[test]
+    fn a_dimension_past_32_bits_is_none_not_wrapped() {
+        assert_eq!(dimension(b"4294967297"), None);
+        assert_eq!(dimension(b"4294967296"), None);
+        assert_eq!(dimension(b"9999999999"), None);
+        assert_eq!(dimension(b"4294967295"), Some(u32::MAX));
+        assert_eq!(dimension(b"1000000000"), Some(1_000_000_000));
+        assert_eq!(dimension(b"0000000003"), Some(3));
+    }
+
     fn schemas(src: &str) -> Vec<Schema> {
         declared(&format!(r#"{{"format":1,"collections":{src}}}"#)).collections
     }
@@ -1788,5 +1924,18 @@ mod tests {
         assert!(applied(&[(1, "x".into())], &texts).is_err());
         assert!(applied(&[(1, "a".into()), (2, "b".into()), (3, "c".into())], &texts).is_err());
         assert!(applied(&[(2, "a".into())], &texts).is_err());
+    }
+
+    /// Every collection the database's code keeps is one [`own`] holds out,
+    /// named once: a surface holding them out asks the name's `_`, and a
+    /// name here without it would be reachable by every rule and statement.
+    #[test]
+    fn the_own_collections_are_each_named_once_with_their_underscore() {
+        for (i, c) in OWN.iter().enumerate() {
+            assert!(own(c), "{c}");
+            assert!(!OWN[i + 1..].contains(c), "{c} twice");
+        }
+        assert!(MIGRATIONS_DDL.contains(&format!(" {MIGRATIONS} (")));
+        assert!(!own("notes") && !own("a_b") && !own(""));
     }
 }

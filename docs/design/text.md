@@ -612,7 +612,20 @@ start of one too. The words are a `Dictionary`: the index's terms but the
 each (1.3 MB for 60 000 words, where a `Box<str>` a word was twice that and
 25% slower to walk), sorted by the first loose `match` -- a `OnceLock`, a
 `OnceCell` in the browser, as `Derived` is -- and kept up by every write
-after it, never in the file. A prefix is a range of it; the words within
+after it, never in the file. No chunk of it is empty, since finding a
+word's chunk, a range's ends and the walk each read a chunk's first word: a
+chunk its last word leaves goes, and a dictionary holding none -- sorted
+over no words, or every word deleted since -- takes its next word as a
+chunk of one. Pushed empty first, as it was, that chunk was asked its first
+word and the write panicked: a loose `match`, a `del` of the last row and
+an `insert` closed the connection, every later word new to the field
+panicking the same way. `a_dictionary_kept_up_is_the_one_built` holds its
+shape after every add and remove, through runs that empty chunks first,
+last, between and all of them and split full ones, and a walk over it to
+one over a fresh build; `TextIndex`'s
+`the_words_kept_up_through_an_empty_index_are_a_fresh_build` holds the copy
+to a build from the index's words after every write. A prefix is a range
+of it; the words within
 `k` edits are found walking it as the trie it is, a row of the table a
 character banded to `2k + 1` cells, a node's children by binary search --
 only the query's characters near the depth where any other would end the
@@ -672,6 +685,17 @@ both scores fall (0.688, 0.359). It is built from what the engine already
 had -- both searches, the `HashMap<DocId, u32>` a `DocMap` keeps sparse ids
 in, the text index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
+
+**`k` is 0 to `MAX_FUSE_K`, 1 000 000.** A weight is `1 / (k + rank)` in
+`f32` (`query::fuse_weight`): while `k + rank` stays under 2^23 two
+neighbouring ranks' weights are more than an `f32` apart, so each of a
+side's 10 000 ranks weighs more than the next; past it neighbours may weigh
+the same, and past 2^24 `k` itself rounds. The parser clamped `k
+99999999999` to `u32::MAX`, where a side's first 256 ranks weigh alike;
+it refuses it now, naming the range (`fuse_k_keeps_every_rank_apart`),
+and natively `Select::check` holds every `Select` to it -- the `/near`
+body's `fuse_k`, read as written, and one built in Rust. `candidates` is 1 to
+10 000, refused as it is read.
 
 **`fuse` cannot tell a list that found something from one that found
 chance**, so a caller whose words match nothing but prefixes leaves them out.

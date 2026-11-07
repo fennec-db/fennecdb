@@ -2751,4 +2751,77 @@ mod tests {
             }
         }
     }
+
+    /// Documents in and out of a few words, the index emptied of them over
+    /// and over and filled again, a loose read between every two writes:
+    /// after each, the sorted words are what a build from the index's own
+    /// words sorts, and a `fuzzy`, a `prefix` and both find the words and
+    /// rows an index built from the documents finds. Sorted first over no
+    /// words, or once the first is in. The first word in once every one
+    /// had gone panicked (`fuzzy::Dictionary::add`).
+    #[test]
+    fn the_words_kept_up_through_an_empty_index_are_a_fresh_build() {
+        let mut emptied = 0;
+        for seed in 1..=30u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let n = 1 + rng.upto(12);
+            let vocab = near_words(&mut rng, n);
+            let text = |rng: &mut Rng| {
+                (0..1 + rng.upto(3))
+                    .map(|_| vocab[rng.upto(vocab.len())].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let mut ix = TextIndex::new(spec());
+            if seed % 2 == 0 {
+                ix.loose_words("abcde", fuzzy(), None).unwrap();
+                assert!(ix.words.get().is_some_and(Dictionary::is_empty));
+            }
+            let mut docs: Vec<(DocId, String)> = Vec::new();
+            let prefix = Loose {
+                fuzzy: 0,
+                prefix: true,
+            };
+            let both = Loose {
+                fuzzy: 1,
+                prefix: true,
+            };
+            for step in 0..150u64 {
+                // Out more often than in once one is: emptied often.
+                if !docs.is_empty() && rng.upto(5) < 2 + docs.len().min(2) {
+                    let (id, old) = docs.swap_remove(rng.upto(docs.len()));
+                    ix.remove(id, &old);
+                } else {
+                    let t = text(&mut rng);
+                    ix.insert(step, &t);
+                    docs.push((step, t));
+                }
+                let at = format!("seed {seed} step {step}");
+                if let Some(kept) = ix.words.get() {
+                    let built = Dictionary::of_bytes(ix.postings.words());
+                    assert_eq!(kept.sound(), built.sound(), "{at}");
+                    emptied += usize::from(kept.is_empty());
+                }
+                let mut fresh = TextIndex::new(spec());
+                for (id, t) in &docs {
+                    fresh.insert(*id, t);
+                }
+                let w = &vocab[rng.upto(vocab.len())];
+                let typo = misspelt(&mut rng, w);
+                let begun = w.get(..1 + rng.upto(w.len())).unwrap();
+                for (q, loose) in [(&typo[..], fuzzy()), (begun, prefix), (begun, both)] {
+                    let mut a = ix.loose_words(q, loose, None).unwrap();
+                    let mut b = fresh.loose_words(q, loose, None).unwrap();
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    assert_eq!(a, b, "{at} {q:?}");
+                    let rows = ix.scored(q, loose, None).unwrap();
+                    assert_eq!(rows, fresh.scored(q, loose, None).unwrap(), "{at} {q:?}");
+                }
+            }
+        }
+        // Not a test of nothing: the sorted words were emptied, and then
+        // written to, many times.
+        assert!(emptied > 100, "emptied {emptied}");
+    }
 }

@@ -621,6 +621,23 @@ pub fn follow(db: &Database, request: &str) -> Result<Outcome> {
     })
 }
 
+/// The migrations of `texts` that `db` has not recorded, from the first,
+/// and whether [`schema`] runs them: not on a database holding none of its
+/// own collections yet, made from the description, where they are
+/// recorded unrun -- `schema`'s own `pending` and `!fresh`, which a test
+/// holds this to. A server asks it under the lock its plan or apply takes,
+/// to refuse a migration still to run that writes a collection of its own
+/// before anything runs, and none it ran before. Native alone, and apart
+/// from `schema`: read through it, the browser module grew 135 bytes, 62
+/// with it inlined, for a check the module never makes; and here, below
+/// every function the module holds, so their panics' lines stay the same.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn unrecorded(db: &mut Database, texts: &[String]) -> Result<(std::ops::Range<usize>, bool)> {
+    let done = declared::applied(&recorded(db)?, texts)?;
+    let fresh = done == 0 && db.collection_names().iter().all(|n| declared::own(n));
+    Ok((done..texts.len(), !fresh))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,6 +1191,55 @@ mod tests {
         let mut plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
         declared::plan_statements(&mut plan, db.statements(), &d, declared::Mode::Apply);
         plan
+    }
+
+    /// [`unrecorded`] is [`schema`]'s own reading of the record: the
+    /// migrations it runs (or records unrun) and whether it runs them, on
+    /// a database holding none of its own collections, one holding some
+    /// and nothing recorded, and one with a migration recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unrecorded_is_what_schema_runs() {
+        // The first `n` migrations, and the collections they lead to.
+        let described = |n: usize| {
+            let all = [
+                "alter collection t add field b int",
+                "create collection u (x int)",
+            ];
+            let made = [
+                "create collection t (a int, b int)",
+                "create collection u (x int)",
+            ];
+            let texts: Vec<String> = all[..n].iter().map(|t| format!("{t:?}")).collect();
+            format!(
+                r#"{{"format":1,"fennecql":"{}","migrations":[{}]}}"#,
+                made[..n].join("; "),
+                texts.join(",")
+            )
+        };
+        let mut fresh = Database::new();
+        let mut held = Database::new();
+        run(&mut held, "create collection t (a int)", "", &[]);
+        let mut moved = Database::new();
+        run(&mut moved, "create collection t (a int)", "", &[]);
+        assert!(
+            schema(&mut moved, &described(1), true, None)
+                .unwrap()
+                .applied
+        );
+        for (db, want) in [
+            (&mut fresh, (0..2, false)),
+            (&mut held, (0..2, true)),
+            (&mut moved, (1..2, true)),
+        ] {
+            let d = read(&described(2)).unwrap();
+            let texts = declared::migration_texts(&d).unwrap();
+            let (pending, runs) = unrecorded(db, &texts).unwrap();
+            assert_eq!((pending.clone(), runs), want);
+            let o = schema(db, &described(2), false, None).unwrap();
+            let numbers: Vec<usize> = pending.map(|i| i + 1).collect();
+            assert_eq!((o.migrations, o.ran), (numbers, runs));
+        }
     }
 }
 // No files in the browser: compiled out of the module rather than left
