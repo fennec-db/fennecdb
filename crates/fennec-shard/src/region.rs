@@ -572,7 +572,10 @@ impl Router {
                         && region.is_none_or(|r| r == own)
                         && to.is_none_or(|n| dir.node(n).is_some())
                 }
-                (_, ["tenants", t]) | (_, ["tenants", t, "quota"]) => dir.placement(t).is_some(),
+                (_, ["tenants", t])
+                | (_, ["tenants", t, "quota"])
+                | (_, ["tenants", t, "hooks"])
+                | (_, ["tenants", t, "hooks", _]) => dir.placement(t).is_some(),
                 // A node of this region, unless the global directory holds
                 // one of that name: a second would be another node under it.
                 (Method::Put, ["nodes", n]) => {
@@ -662,9 +665,10 @@ impl Router {
                         Some(Do::Across(from, into, to.map(str::to_string)))
                     }
                 }
-                (_, ["tenants", t]) | (_, ["tenants", t, "quota"]) => {
-                    dir.home(t).map(|r| Do::Relay(r.to_string()))
-                }
+                (_, ["tenants", t])
+                | (_, ["tenants", t, "quota"])
+                | (_, ["tenants", t, "hooks"])
+                | (_, ["tenants", t, "hooks", _]) => dir.home(t).map(|r| Do::Relay(r.to_string())),
                 // A read replica in a region keeping its own directory is
                 // that region's router's to place, whatever region its
                 // tenant lives in; their list is every directory's.
@@ -941,7 +945,7 @@ impl Router {
         let _claim = self.claim(tenant)?;
         match rest {
             [_, _, "export"] => {
-                let (image, quota, node) = self.export_held(tenant)?;
+                let (image, quota, node, hooks) = self.export_held(tenant)?;
                 let mut resp = Response {
                     status: 200,
                     body: image,
@@ -954,6 +958,11 @@ impl Router {
                 resp = resp.header("Fennec-Node", &node);
                 if let Some(q) = quota {
                     resp = resp.header("Fennec-Quota", &q);
+                }
+                // Its hook secrets, from router to router in the move's
+                // admin exchange alone, in their memory only as they pass.
+                if let Some(h) = hooks {
+                    resp = resp.header(HOOKS_HEADER, &fennec_http::crypto::b64_encode(&h));
                 }
                 Ok(resp)
             }
@@ -981,7 +990,9 @@ impl Router {
                     .find(|(k, _)| k == "to")
                     .map(|(_, v)| v.as_str());
                 let quota = req.header("fennec-quota");
-                let (node, own) = self.import_held(tenant, to, &req.body, quota)?;
+                let hooks = hooks_in(req.header(HOOKS_HEADER), 400)?;
+                let (node, own) =
+                    self.import_held(tenant, to, &req.body, quota, hooks.as_deref())?;
                 let region = self.read_dir().region_of(&node).to_string();
                 Ok(Response::json(
                     201,
@@ -998,9 +1009,9 @@ impl Router {
     }
 
     /// Freezes `tenant` on its node and takes its image, marked moving
-    /// here: the image, its quota, and its node. Thawed again where it
-    /// fails.
-    fn export_held(&self, tenant: &str) -> Outcome<(Vec<u8>, Option<String>, String)> {
+    /// here: the image, its quota, its node and its hook secrets, whole,
+    /// where it holds any. Thawed again where it fails.
+    fn export_held(&self, tenant: &str) -> Outcome<Exported> {
         let from = self
             .read_dir()
             .placement(tenant)
@@ -1034,7 +1045,10 @@ impl Router {
         )
         .map_err(thaw)?;
         let quota = self.read_dir().quota(tenant).map(str::to_string);
-        Ok((image, quota, from))
+        let hooks = self
+            .hook_secrets(tenant, &from)
+            .map_err(|w| thaw(Fail(502, format!("tenant `{tenant}`'s hook secrets: {w}"))))?;
+        Ok((image, quota, from, hooks))
     }
 
     /// Undoes [`Self::export_held`]: the tenant takes writes on its node
@@ -1057,14 +1071,16 @@ impl Router {
             .map_err(internal)
     }
 
-    /// Installs `image` as `tenant` on the node `to` and gives it `quota`:
-    /// nothing recorded. Taken back off where its quota is refused.
+    /// Installs `image` as `tenant` on the node `to` and gives it `quota`
+    /// and its hook secrets, `hooks`: nothing recorded. Taken back off
+    /// where either is refused.
     fn install(
         &self,
         tenant: &str,
         to: &str,
         image: &[u8],
         quota: Option<&str>,
+        hooks: Option<&[u8]>,
     ) -> Outcome<Option<String>> {
         let dst = self.node(to)?;
         let base = format!("/_admin/tenants/{tenant}");
@@ -1084,6 +1100,10 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(Fail(502, w));
         }
+        if let Some(w) = hooks.and_then(|h| self.install_hook_set(tenant, to, Some(h))) {
+            let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
+            return Err(Fail(502, format!("its hook secrets: {w}")));
+        }
         // The lineage its image is of, which the move keeps.
         Ok(crate::lineage_in(&answer))
     }
@@ -1097,6 +1117,7 @@ impl Router {
         to: Option<&str>,
         image: &[u8],
         quota: Option<&str>,
+        hooks: Option<&[u8]>,
     ) -> Outcome<(String, Option<std::result::Result<String, String>>)> {
         if self.read_dir().exists(tenant) {
             return Err(Fail(409, format!("tenant `{tenant}` already exists here")));
@@ -1115,13 +1136,14 @@ impl Router {
                 format!("`{to}` is a standby: its tenants follow another node's"),
             ));
         }
-        let lineage = self.install(tenant, &to, image, quota)?;
+        let lineage = self.install(tenant, &to, image, quota, hooks)?;
         let base = format!("/_admin/tenants/{tenant}");
         let recorded = {
             let mut dir = self.write_dir();
             dir.place(tenant, &to, State::Active)
                 .and_then(|_| dir.set_quota(tenant, quota))
                 .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
+                .and_then(|_| dir.set_hook_set(tenant, hook_set(hooks).as_ref()))
         };
         if let Err(e) = recorded {
             if let Ok(n) = self.node(&to) {
@@ -1135,12 +1157,13 @@ impl Router {
         Ok((to.clone(), self.replicate(tenant, &to)))
     }
 
-    /// A tenant newly on `to`: its copy on `to`'s standby, with its quota.
+    /// A tenant newly on `to`: its copy on `to`'s standby, with its quota
+    /// and its hook secrets.
     fn after_arrival(&self, tenant: &str, to: &str) {
         let base = format!("/_admin/tenants/{tenant}");
         if let Some(w) = self
             .on_standby(to, "PUT", &base)
-            .or_else(|| self.quota_on_standby(tenant, to))
+            .or_else(|| self.sidecars_on_standby(tenant, to))
         {
             fennec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
         }
@@ -1220,8 +1243,9 @@ impl Router {
             let dir = self.read_dir();
             (dir.routers(from).is_some(), dir.routers(into).is_some())
         };
-        // Out of `from`: frozen there, its image taken.
-        let (image, quota, source) = match keeps_from {
+        // Out of `from`: frozen there, its image taken, and its hook
+        // secrets, in this router's memory only until `into` took them.
+        let (image, quota, source, hooks) = match keeps_from {
             false => self.export_held(tenant)?,
             true => {
                 let (_, hs, image) = self
@@ -1238,10 +1262,12 @@ impl Router {
                         .find(|(k, _)| k.eq_ignore_ascii_case(name))
                         .map(|(_, v)| v.clone())
                 };
+                let hooks = hooks_in(header(HOOKS_HEADER).as_deref(), 502)?;
                 (
                     image,
                     header("fennec-quota"),
                     header("fennec-node").unwrap_or_default(),
+                    hooks,
                 )
             }
         };
@@ -1283,7 +1309,8 @@ impl Router {
                     return Err(Fail(409, format!("`{to}` is a standby")));
                 }
                 drop(dir);
-                let lineage = self.install(tenant, &to, &image, quota.as_deref())?;
+                let lineage =
+                    self.install(tenant, &to, &image, quota.as_deref(), hooks.as_deref())?;
                 Ok((to, String::new(), lineage))
             })(),
             true => (|| {
@@ -1294,6 +1321,10 @@ impl Router {
                 let mut extra = vec![("Content-Type", "application/octet-stream")];
                 if let Some(q) = &quota {
                     extra.push(("Fennec-Quota", q.as_str()));
+                }
+                let sealed = hooks.as_deref().map(fennec_http::crypto::b64_encode);
+                if let Some(h) = &sealed {
+                    extra.push((HOOKS_HEADER, h.as_str()));
                 }
                 let (_, _, body) = self
                     .ask_region(into, "PUT", &target, &extra, &image)
@@ -1399,6 +1430,10 @@ impl Router {
                         fennec_http::log!("tenant `{tenant}`'s quota stayed unrecorded: {e}");
                     }
                 }
+                let recorded = hook_set(hooks.as_deref());
+                if let Err(e) = self.write_dir().set_hook_set(tenant, recorded.as_ref()) {
+                    fennec_http::log!("tenant `{tenant}`'s hook secrets stayed unrecorded: {e}");
+                }
                 self.lease_now(&to);
                 self.after_arrival(tenant, &to);
                 replica_field(&self.replicate(tenant, &to))
@@ -1414,6 +1449,7 @@ impl Router {
                 {
                     let mut dir = self.write_dir();
                     let _ = dir.set_quota(tenant, None);
+                    let _ = dir.set_hook_set(tenant, None);
                     let _ = dir.set_replica(tenant, None);
                 }
                 self.lease_now(&source);
@@ -1434,6 +1470,36 @@ impl Router {
             ),
         ))
     }
+}
+
+/// The header a move across regions carries a tenant's hook secrets in,
+/// router to router: the set whole, base64, as `hook-secrets` answers it.
+pub(crate) const HOOKS_HEADER: &str = "Fennec-Hook-Secrets";
+
+/// The set of hook secrets [`HOOKS_HEADER`] carries, decoded: one that
+/// does not read refused with `status` -- 400 to the router sending it,
+/// 502 from the router answering it.
+fn hooks_in(header: Option<&str>, status: u16) -> Outcome<Option<Vec<u8>>> {
+    let decoded = header.map(|h| {
+        fennec_http::crypto::b64_decode(h.trim())
+            .ok_or_else(|| Fail(status, format!("{HOOKS_HEADER} holds no set in base64")))
+    });
+    decoded.transpose()
+}
+
+/// What a move's export takes off the source: its image, its quota, its
+/// node and its hook secrets.
+type Exported = (Vec<u8>, Option<String>, String, Option<Vec<u8>>);
+
+/// What a directory records of a set of hook secrets a copy took whole:
+/// its names and version, no copy behind.
+fn hook_set(hooks: Option<&[u8]>) -> Option<crate::directory::HookSet> {
+    let (names, version) = crate::names_and_version(hooks?);
+    Some(crate::directory::HookSet {
+        names,
+        version,
+        behind: Vec::new(),
+    })
 }
 
 /// A call's answer, where its status is `want`; its failure otherwise.

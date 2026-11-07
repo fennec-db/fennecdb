@@ -209,7 +209,9 @@ usage: fennec-server [options]
                             key by the statements defined `on hook <name>`,
                             and answered 2xx once it is on disk whatever
                             --sync says. Read at the start: a change needs a
-                            restart
+                            restart. A node's tenants (--dir) take theirs at
+                            /t/<tenant>/_hooks/<name>, each tenant's secrets
+                            set with PUT /_admin/tenants/<tenant>/hooks/<name>
       --studio              serve fennec studio, the admin pages, at
                             /_studio/: collections, rows and edits in a
                             browser, with the token pasted into the page and
@@ -1081,13 +1083,14 @@ fn main() {
     }
     // The hooks and their secrets, read once, each refusal naming its line
     // and never a secret: a file's server's alone, since a 2xx means the
-    // event is on disk, and a node's tenants keep theirs beside their files
-    // once F4's slice 4 brings them.
+    // event is on disk, and a node's tenants keep theirs beside their files,
+    // set through its admin routes (`fennec_http::tenant_hooks`).
     if let Some(path) = &hooks_file {
         if dir.is_some() {
             fail(
-                "--hooks takes a file's events: a node's tenants take none yet (give --file, \
-                 not --dir)",
+                "--hooks takes a file's events: a node's tenants keep their own beside their \
+                 files, set with PUT /_admin/tenants/<tenant>/hooks/<name> (give --file, not \
+                 --dir)",
             );
         }
         if file.is_none() {
@@ -1611,6 +1614,7 @@ fn serve_dir(
         if matches!(sync, SyncPolicy::Interval(_)) {
             tenants.sync_dirty();
         }
+        tenants.rebind_hooks();
         if !idle_close.is_zero() {
             tenants.close_idle(idle_close);
         }

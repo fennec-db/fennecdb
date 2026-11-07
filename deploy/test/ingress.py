@@ -33,6 +33,10 @@ CASES = [
     ("/t/acme/notes/changes", ROUTER),
     ("//t//acme/notes", ROUTER),
     ("/t/a_b-9/_schema", ROUTER),
+    # A tenant's webhook events: Stripe, GitHub and Svix are told this URL,
+    # and the node verifies each by its signature.
+    ("/t/acme/_hooks/stripe", ROUTER),
+    ("/t/acme/%5Fhooks/stripe", ROUTER),
     # A tenant's replication stream, however it is spelled.
     ("/t/acme/_replication", REFUSED),
     ("/t/acme/_replication?since=0&history=0", REFUSED),

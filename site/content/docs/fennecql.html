@@ -798,10 +798,12 @@ answer, its writes and the key put back.</p>
 event as its argument to try it — run as an event would be, keeping no key.
 To a scoped token a hook's statement is the 404 a missing statement is,
 whatever its policy's <code>call</code> lines say, and an agent gets no MCP
-tool for it. A tenant node takes none yet, nor does a replica, a server
+tool for it. Each tenant of a node takes its own at
+<code>/t/&lt;tenant&gt;/_hooks/&lt;name&gt;</code>, its secrets set through
+the <a href="/docs/webhooks#tenants">admin routes</a>. A replica, a server
 under <code>--http-read-only</code>, a <a href="sync.html#limits">sync
-replica</a>, the shell, the native library or the browser module: each
-refuses the definition, and a file holding one keeps it. Before a primary
+replica</a>, the shell, the native library and the browser module take
+none: each refuses the definition, and a file holding one keeps it. Before a primary
 defines the first one, every reader of its file runs a release that knows
 them: a binary from before refuses the record and stops there, in words (<a
 href="/docs/replication">Replication</a>).</p>

@@ -908,3 +908,189 @@ fn a_promoted_region_router_fences_the_one_before_it_at_its_nodes() {
     let (status, body) = query(b_port, "acme", r#"put notes {title: "two"}"#);
     assert_eq!(status, 200, "{body}");
 }
+
+/// Event `id` for order `order` to `tenant`'s hook `stripe` through the
+/// router at `port`, signed as Stripe signs one under `secret`: its status,
+/// body and whether it was answered from its key.
+fn hook_event(port: u16, tenant: &str, secret: &str, id: &str, order: &str) -> (u16, String, bool) {
+    let body = format!(r#"{{"id":"{id}","order":"{order}"}}"#);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mac = fennec_http::crypto::hmac_sha256(secret.as_bytes(), format!("{t}.{body}").as_bytes());
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    write!(
+        s,
+        "POST /t/{tenant}/_hooks/stripe HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+         Stripe-Signature: t={t},v1={hex}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+    (
+        out[9..12].parse().unwrap(),
+        body.to_string(),
+        head.contains("Idempotent-Replayed: true"),
+    )
+}
+
+/// The version of the hook secrets a node at `dir` keeps for `tenant`,
+/// read from the line its sidecar names it on: none where it keeps none.
+fn hooks_version(dir: &Path, tenant: &str) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(format!("{tenant}.hooks"))).ok()?;
+    let line = text.lines().nth(1)?;
+    Some(line.strip_prefix("version ")?.to_string())
+}
+
+/// A tenant of a region keeping its own directory: its hook secrets set
+/// through the global router, relayed to its region's router, which sends
+/// them to its primary and its replica; an event to it through the global
+/// router taken once; and a move across regions carrying the set to its
+/// target before the flip, router to router -- the keys of its events
+/// with its image, so an event sent again is answered from its key there.
+#[test]
+fn a_tenants_hook_secrets_go_with_it_across_regions() {
+    let w = World::new("hooks");
+    until("us's copy of the global directory arrives", || {
+        shard(w.us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    let body =
+        r#"{"region":"us","schema":"create collection orders (ref text @hash, status text)"}"#;
+    let (status, answer) = shard(w.global, "PUT", "/_shard/tenants/acme", body);
+    assert_eq!(status, 201, "{answer}");
+    for q in [
+        "put orders {ref: 'o-1', status: 'open'}",
+        "put orders {ref: 'o-2', status: 'open'}",
+        "create statement paid($order text from event.order) on hook stripe as set orders \
+         {status: 'paid'} where ref = $order require 1",
+    ] {
+        let (status, answer) = query(w.global, "acme", q);
+        assert_eq!(status, 200, "{q}: {answer}");
+    }
+    let set = r#"{"scheme":"stripe","secrets":["whsec_across"]}"#;
+    let (status, answer) = shard(w.global, "PUT", "/_shard/tenants/acme/hooks/stripe", set);
+    assert_eq!(status, 200, "{answer}");
+    assert!(answer.contains(r#""behind":[]"#), "{answer}");
+    let held = hooks_version(&w.us_nodes[0].dir, "acme");
+    assert!(held.is_some());
+    assert_eq!(
+        hooks_version(&w.us_nodes[1].dir, "acme"),
+        held,
+        "its replica holds it"
+    );
+    let (status, listing) = shard(w.global, "GET", "/_shard/tenants/acme/hooks", "");
+    assert_eq!(status, 200, "{listing}");
+    assert!(listing.contains(r#""name":"stripe""#), "{listing}");
+    assert!(!listing.contains("whsec_across"), "{listing}");
+
+    let (status, body, replayed) = hook_event(w.global, "acme", "whsec_across", "evt_1", "o-1");
+    assert_eq!((status, replayed), (200, false), "{body}");
+    let (status, body, _) = hook_event(w.global, "acme", "whsec_other", "evt_2", "o-2");
+    assert_eq!(status, 401, "{body}");
+
+    let (status, body) = shard(
+        w.global,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"region":"eu"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        hooks_version(&w.eu1.dir, "acme"),
+        held,
+        "the target holds the set"
+    );
+    for nd in &w.us_nodes {
+        assert_eq!(
+            hooks_version(&nd.dir, "acme"),
+            None,
+            "gone with the source's copies"
+        );
+    }
+    let (status, body, replayed) = hook_event(w.global, "acme", "whsec_across", "evt_1", "o-1");
+    assert_eq!((status, replayed), (200, true), "{body}");
+    let (status, body, replayed) = hook_event(w.global, "acme", "whsec_across", "evt_2", "o-2");
+    assert_eq!((status, replayed), (200, false), "{body}");
+}
+
+/// A move across regions holds the source region router's claim only for
+/// its export, the tenant marked moving in that router's directory until
+/// the flip: a hook's or a quota's change relayed home meanwhile -- through
+/// the global router or to the home router itself -- is refused (409),
+/// never taken by the frozen source and lost with it. The target holds the
+/// set the export carried.
+#[test]
+fn a_hook_set_while_its_tenant_moves_across_regions_is_refused() {
+    let w = World::new("hooksmoving");
+    until("us's copy of the global directory arrives", || {
+        shard(w.us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    let body =
+        r#"{"region":"us","schema":"create collection orders (ref text @hash, status text)"}"#;
+    let (status, answer) = shard(w.global, "PUT", "/_shard/tenants/acme", body);
+    assert_eq!(status, 201, "{answer}");
+    for q in [
+        "put orders {ref: 'o-1', status: 'open'}",
+        "put orders {ref: 'o-2', status: 'open'}",
+        "create statement paid($order text from event.order) on hook stripe as set orders \
+         {status: 'paid'} where ref = $order require 1",
+    ] {
+        let (status, answer) = query(w.global, "acme", q);
+        assert_eq!(status, 200, "{q}: {answer}");
+    }
+    let set = r#"{"scheme":"stripe","secrets":["whsec_before"]}"#;
+    let (status, answer) = shard(w.global, "PUT", "/_shard/tenants/acme/hooks/stripe", set);
+    assert_eq!(status, 200, "{answer}");
+    let held = hooks_version(&w.us_nodes[0].dir, "acme")
+        .or_else(|| hooks_version(&w.us_nodes[1].dir, "acme"));
+    assert!(held.is_some());
+
+    // eu2, reached through a gate holding the move at its install.
+    let eu2 = node("hooksmoving-eu2");
+    let gate = crate::hooks::Gate::to(&format!("127.0.0.1:{}", eu2.port));
+    let body = format!(
+        r#"{{"addr":"{}","token":"adm-hooksmoving-eu2","region":"eu","zone":"eu-b"}}"#,
+        gate.addr
+    );
+    let (status, answer) = shard(w.global, "PUT", "/_shard/nodes/eu2", &body);
+    assert_eq!(status, 201, "{answer}");
+    gate.close("/_admin/tenants/acme/file ");
+    let global = w.global;
+    let moving = std::thread::spawn(move || {
+        shard(
+            global,
+            "POST",
+            "/_shard/tenants/acme/move",
+            r#"{"region":"eu","to":"eu2"}"#,
+        )
+    });
+    gate.held();
+    let during = r#"{"scheme":"stripe","secrets":["whsec_during"]}"#;
+    for port in [w.global, w.us] {
+        let (status, answer) = shard(port, "PUT", "/_shard/tenants/acme/hooks/stripe", during);
+        assert_eq!(status, 409, "{answer}");
+        let (status, answer) = shard(port, "PUT", "/_shard/tenants/acme/quota", r#"{"rows":5}"#);
+        assert_eq!(status, 409, "{answer}");
+    }
+    gate.open();
+    let (status, answer) = moving.join().unwrap();
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        hooks_version(&eu2.dir, "acme"),
+        held,
+        "the set the export carried"
+    );
+    let (status, body, _) = hook_event(w.global, "acme", "whsec_before", "evt_1", "o-1");
+    assert_eq!(status, 200, "{body}");
+    let (status, body, _) = hook_event(w.global, "acme", "whsec_during", "evt_2", "o-2");
+    assert_eq!(status, 401, "{body}");
+}

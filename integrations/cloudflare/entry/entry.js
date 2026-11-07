@@ -128,15 +128,30 @@ export function marked(request) {
 }
 
 /**
+ * Whether `request` is an event sent to a tenant's hook, `POST
+ * /t/<tenant>/_hooks/...`, its path read as the router and the node read
+ * it: keyed by the event its sender signed, which the node takes once,
+ * answering a second try from the key (fennec-shard's `replayable`).
+ */
+export function hooked(request) {
+  return request.method === 'POST' && segments(new URL(request.url).pathname)[2] === '_hooks';
+}
+
+/**
  * Whether `request` may reach a router twice: a method that reads, a key
  * that makes a write once, or -- to a tenant's path, `tenant` -- a read
- * marked for a replica, which runs read-only on every route there. Not to
- * `/_shard/`: the mark is a tenant's read's, and a change of the global
- * router's sent with it ran as any, so one a router may have run was sent
- * to its standby again.
+ * marked for a replica, which runs read-only on every route there, or an
+ * event to one of its hooks, keyed by the event. Not to `/_shard/`: the
+ * mark is a tenant's read's, and a change of the global router's sent with
+ * it ran as any, so one a router may have run was sent to its standby
+ * again.
  */
 function repeatable(request, tenant) {
-  return REPEATABLE.has(request.method) || request.headers.has('idempotency-key') || (tenant && marked(request));
+  return (
+    REPEATABLE.has(request.method) ||
+    request.headers.has('idempotency-key') ||
+    (tenant && (marked(request) || hooked(request)))
+  );
 }
 
 /**

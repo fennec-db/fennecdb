@@ -69,6 +69,7 @@ curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
      -d '{"schema":"create collection notes (title text)","quota":{"bytes":104857600,"rows":50000}}'
 
 # ... or changed later: the whole set, 0 for none, left out for the node's
+# (refused, 409, while the tenant moves)
 curl -X PUT localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root' \
      -d '{"bytes":1073741824,"rows":0,"writes":100}'
 
@@ -199,6 +200,64 @@ restore</code> into a directory it serves, is learned as something first
 opens it. A node under <code>--http-read-only</code> runs none, takes no
 definition and no image holding one, and says in its log how many a
 tenant holds unrun as it opens.</p>
+
+<h2 id="webhooks">Webhooks</h2>
+
+<p>Each tenant takes its own <a href="/docs/webhooks">webhook events</a> —
+Stripe's payments, GitHub's pushes, any Standard Webhooks sender's — at
+<code>/t/&lt;tenant&gt;/_hooks/&lt;name&gt;</code>, the statements taking
+them defined in its schema as any other. Its secrets are set through the
+router, one hook a <code>PUT</code>; the sender is told the tenant's URL
+behind the global entry.</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema": "create collection orders (ref text @hash, paid bool); create statement paid($order text from event.data.object.metadata.order) on hook stripe where event.type = \"payment_intent.succeeded\" as set orders {paid: true} where ref = $order and paid = false require 1"}'
+curl -X PUT localhost:8090/_shard/tenants/acme/hooks/stripe -H 'Authorization: Bearer root' \
+     -d '{"scheme": "stripe", "secrets": ["whsec_..."]}'
+# Stripe is told https://&lt;entry&gt;/t/acme/_hooks/stripe</pre>
+
+<ul>
+  <li><b>Verified by the tenant's own secrets, before the tenant is
+    opened.</b> A node keeps each tenant's set beside its file
+    (<code>acme.hooks</code>, readable by the node's user alone) and in its
+    memory: one tenant's secret signs no event another takes, and a forged
+    event opens no tenant.</li>
+  <li><b>Never in the database, and never the router's.</b> The router's
+    directory keeps the hooks' names and a version of the set; the secrets
+    go node to node through it as a copy needs them, held in its memory only
+    while they pass. An archive, a backup and the directory hold none: a
+    restored tenant's hooks answer 401 until their secrets are set
+    again — a file put in its place under a running node too, whose set in
+    memory goes as the tenant next opens.</li>
+  <li><b>On every copy a failover could promote before the
+    <code>PUT</code> is answered.</b> The tenant's node takes the hook, then
+    each copy a failover could promote — its pair's standby, its
+    <code>--replicas</code> copy — is sent the set. A copy that did not take
+    it is named in the answer's <code>behind</code> and counted in
+    <code>fennec_router_tenants_hooks_behind</code> until a repair copies it;
+    a repair also asks each copy the version it holds, so one that lost its
+    set unseen is found. A read replica takes none: it answers marked reads
+    alone. A tenant holds 64 hooks at most, its set 32 KiB written
+    out.</li>
+  <li><b>It goes with the tenant.</b> A move installs the set on its target
+    before the tenant goes there, across regions too; the source's goes with
+    its file. A failover's promoted copy holds it already, and the keys of
+    the events it was sent, so an event sent again there is answered from
+    its key. A <code>PUT</code> while the tenant moves is refused (409), as
+    a quota's is: it would land on the frozen source. Across regions the
+    set goes router to router in a header, as plainly as the link between
+    them carries it: give region routers <code>https://</code> URLs
+    (<a href="sharding-regions.html#regions">Regions</a>).</li>
+  <li><b>An event's 2xx waits for the tenant's standby</b>, as on a file's
+    server: its block on disk and sent to the copy a failover would promote.
+    It is held to the tenant's quota (507, nothing kept) and to the node's
+    lease: an event whose lease lapsed after it landed is answered 500
+    <code>outcome: unknown</code>, and the sender's retry is answered from
+    its key or taken once.</li>
+  <li><b>Sent again only where that is safe.</b> The router and the global
+    entry send an event cut after it went whole to another connection or
+    router, as they send a keyed write: the node takes it once by its key.</li>
+</ul>
 
 <h2 id="archive">Archiving a node</h2>
 

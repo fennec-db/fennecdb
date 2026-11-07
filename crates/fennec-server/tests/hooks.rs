@@ -726,7 +726,7 @@ fn a_hooks_file_is_refused_at_the_start() {
     for (args, says) in [
         (
             vec!["--dir", dir.to_str().unwrap(), "--hooks", &hooks],
-            "a node's tenants take none yet",
+            "a node's tenants keep their own beside their files",
         ),
         (vec!["--hooks", &hooks], "give --file"),
     ] {

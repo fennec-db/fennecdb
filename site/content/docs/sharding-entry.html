@@ -237,8 +237,11 @@ refused and of one reset after the request was written; Cloudflare's 520,
 time-outs) and 524; and any other 5xx without the router's request id, such
 as <a href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/common-errors/">a
 tunnel's connector answering 502</a> for a router it cannot reach — goes on only
-for a <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> or a request
-carrying an <code>Idempotency-Key</code>, as the router's own rule towards a
+for a <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>, a request
+carrying an <code>Idempotency-Key</code> or an event sent to a tenant's <a
+href="/docs/webhooks#tenants">webhook</a>
+(<code>POST /t/&lt;tenant&gt;/_hooks/&lt;name&gt;</code>), which the node
+takes once by the event's key, as the router's own rule towards a
 node; any other is a <code>502</code> saying it may have run, and the
 region's next request goes to the next router. A router's own answer for
 a node it could not reach names the home and is its answer, passed on, no

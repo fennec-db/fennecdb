@@ -1076,11 +1076,11 @@ fn a_schedule_is_refused_where_no_scheduler_runs_it() {
     assert!(!node.ok(ROOT, "statements").contains("tidy"));
 }
 
-/// A webhook consumer is refused on a tenant node until its secrets and
-/// routes come there (F4's slice 4): the server's token is told so (400),
-/// alone and in a `/batch` behind a write, which lands nothing; a scoped
-/// token meets the schema change it is. Never a hook stored that no sender
-/// reaches.
+/// A webhook consumer is refused by a file's server not told `--hooks`:
+/// the server's token is told where one is taken (400) -- a file's server
+/// under `--hooks`, or a tenant of a node -- alone and in a `/batch` behind
+/// a write, which lands nothing; a scoped token meets the schema change it
+/// is. Never a hook stored that no sender reaches.
 #[test]
 fn a_hook_is_refused_until_hooks_are_taken() {
     let node = start(|_| {});
@@ -1096,7 +1096,7 @@ fn a_hook_is_refused_until_hooks_are_taken() {
     let batch = [line("insert journal {what: 'x'}"), line(hooked)].join("\n");
     let (status, body) = node.post(ROOT, "/batch", &batch);
     assert_eq!(status, 400, "{body}");
-    assert!(body.contains("a tenant node takes none yet"), "{body}");
+    assert!(body.contains("/t/<tenant>/_hooks/<hook>"), "{body}");
     assert_eq!(node.number("get journal count"), before);
     let (status, body) = node.query(&node.customer("u0"), hooked);
     assert_eq!(status, 403, "{body}");

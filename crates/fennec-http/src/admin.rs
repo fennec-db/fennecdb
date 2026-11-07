@@ -42,6 +42,22 @@
 //!                                      node's); the whole set, replaced
 //! GET    /_admin/tenants/<t>/quota     {tenant, open, set, quota, usage}
 //! GET    /_admin/quotas                every tenant's, an array; none opened
+//! GET    /_admin/tenants/<t>/hooks     {tenant, version, hooks: [{name, scheme,
+//!                                      secrets, keep_ms, tolerance_ms, key,
+//!                                      max_body, set}]}: never a secret
+//! PUT    /_admin/tenants/<t>/hooks/<h> {scheme, secrets, keep, tolerance, key,
+//!                                      max_body}: hook `h`'s secrets, kept
+//!                                      beside the tenant's file, refused
+//!                                      (400) as a hooks file's line is:
+//!                                      {tenant, hook, version}
+//! DELETE /_admin/tenants/<t>/hooks/<h> {tenant, hook, version}: 404 where
+//!                                      the tenant holds no secret for it
+//! GET    /_admin/tenants/<t>/hook-secrets  {version, hooks: {<h>: {scheme,
+//!                                      secrets, ..., set}}}: the set whole,
+//!                                      the one answer holding a secret, for a
+//!                                      router copying it onto a copy
+//! PUT    /_admin/tenants/<t>/hook-secrets  the same, installed whole, its
+//!                                      version kept: {tenant, version}
 //! POST   /_admin/lease                 {ms, epoch, primaries?, authority?,
 //!                                      term?, history?, grant?, acked?}: the
 //!                                      router's lease, on a node started to
@@ -98,6 +114,34 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Get, ["tenants", t, "quota"]) => tenants
             .quota_report(t)
             .map(|report| Response::json(200, report)),
+        // A tenant's webhook secrets, the router's to set as its quota is
+        // (`crate::tenant_hooks`): never in a log line, a span or an answer
+        // but `hook-secrets`', whose read is an audit event of its own.
+        (Method::Get, ["tenants", t, "hooks"]) => tenants
+            .with_hooks(t, false, &mut |s, _| Ok(s.listing(t)))
+            .map(|listing| Response::json(200, listing)),
+        (Method::Put, ["tenants", t, "hooks", h]) => tenants
+            .with_hooks(t, true, &mut |s, open| {
+                s.put_hook(t, h, &req.body, open)
+                    .map(|v| hooked(t, Some(h), Some(v)))
+            })
+            .map(|body| Response::json(200, body)),
+        (Method::Delete, ["tenants", t, "hooks", h]) => tenants
+            .with_hooks(t, true, &mut |s, open| {
+                s.drop_hook(t, h, open).map(|v| hooked(t, Some(h), v))
+            })
+            .map(|body| Response::json(200, body)),
+        (Method::Get, ["tenants", t, "hook-secrets"]) => tenants
+            .with_hooks(t, false, &mut |s, _| Ok(s.export(t)))
+            .map(|set| {
+                crate::audit::event("hook_secrets", &[("tenant", crate::audit::Field::Text(t))]);
+                Response::json(200, set).header("Cache-Control", "no-store")
+            }),
+        (Method::Put, ["tenants", t, "hook-secrets"]) => tenants
+            .with_hooks(t, true, &mut |s, open| {
+                s.install(t, &req.body, open).map(|v| hooked(t, None, v))
+            })
+            .map(|body| Response::json(200, body)),
         // The lineage the tenant's history is of, which a router binds its
         // read replicas to.
         (Method::Put, ["tenants", t]) => {
@@ -232,8 +276,9 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 .and_then(|_| from(&req.body))
                 .and_then(|f| proposed(req).map(|id| (f, id)))
             {
-                Ok(((from, lineage, named), id)) => {
-                    match tenants.follow_as(t, from.as_deref(), lineage, id, named.as_deref()) {
+                Ok(((from, lineage, named, reader), id)) => {
+                    let named = named.as_deref();
+                    match tenants.follow_as(t, from.as_deref(), lineage, id, named, reader) {
                         Ok(id) => Ok(Response::json(
                             200,
                             format!(
@@ -306,20 +351,40 @@ fn judged(t: &str, kept: Kept) -> Result<Response, Refused> {
     }
 }
 
+/// A hook's `PUT` or `DELETE` answered, or a set's installed whole: the
+/// tenant, the hook and the set's version after it, `null` where no hook
+/// is left.
+fn hooked(t: &str, h: Option<&str>, v: Option<u64>) -> String {
+    let mut out = String::from("{\"tenant\":");
+    fennec_core::json::escape_into(&mut out, t);
+    if let Some(h) = h {
+        out.push_str(",\"hook\":");
+        fennec_core::json::escape_into(&mut out, h);
+    }
+    out.push_str(",\"version\":");
+    match v {
+        Some(v) => out.push_str(&format!("\"{v:016x}\"")),
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
+}
+
 /// A follow's body: the node to follow, the lineage its tenant must be of
 /// (`"lineage": "<8 hex>"`), a router's read replica told which tenant it
-/// copies, and the identities the file must carry (`"instances"`), a
-/// router's word on a file it placed and finds there.
-type FollowBody = (Option<String>, Option<u32>, Option<Vec<u64>>);
+/// copies, the identities the file must carry (`"instances"`), a router's
+/// word on a file it placed and finds there, and `"reader": true`, a read
+/// replica's copy, which no hook's answer at its primary waits for.
+type FollowBody = (Option<String>, Option<u32>, Option<Vec<u64>>, bool);
 
 fn from(body: &[u8]) -> Result<FollowBody, Refused> {
     let text = String::from_utf8_lossy(body);
     if text.trim().is_empty() {
-        return Ok((None, None, None));
+        return Ok((None, None, None, false));
     }
     let fields = fennec_core::json::parse_object(&text)
         .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
-    let (mut from, mut lineage, mut named) = (None, None, None);
+    let (mut from, mut lineage, mut named, mut reader) = (None, None, None, false);
     for (k, v) in fields {
         match (k.as_str(), v) {
             ("from", fennec_core::prelude::Value::Text(url)) => from = Some(url),
@@ -330,10 +395,11 @@ fn from(body: &[u8]) -> Result<FollowBody, Refused> {
                 )
             }
             ("instances", v) => named = Some(instance::ids_of(v).map_err(|e| Refused(400, e))?),
+            ("reader", fennec_core::prelude::Value::Bool(b)) => reader = b,
             _ => {}
         }
     }
-    Ok((from, lineage, named))
+    Ok((from, lineage, named, reader))
 }
 
 /// A promotion's body: the lineage the tenant is of (`"lineage": "<8

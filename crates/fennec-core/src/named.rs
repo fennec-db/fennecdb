@@ -647,8 +647,8 @@ fn cron_value(text: &str, k: usize) -> std::result::Result<u32, String> {
 /// *Webhook consumers (F4)*): the events another service sends to the hook
 /// `name`, each taken where its `condition` passes it, its parameters read
 /// from the event as its `sources` say, one a parameter in the signature's
-/// order (`Database::take_event`). A file's server takes them
-/// (`fennec_http::hooks`); every other way of defining one refuses it
+/// order (`Database::take_event`). A file's server and a tenant node take
+/// them (`fennec_http::hooks`); every other way of defining one refuses it
 /// ([`HOOKED_UNTAKEN`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Webhook {
@@ -685,15 +685,16 @@ pub enum Source {
 }
 
 /// What defining a webhook consumer is refused with where no server takes
-/// the database's events -- a tenant node until F4's slice 4, the shell,
-/// the native library, a server's database its route does not serve: one
-/// stored there would be a hook no sender reaches, without a word. A
-/// file's server lets one be defined (`Database::allow_hooks`), its route
-/// taking the events (`fennec_http::hooks`).
+/// the database's events -- the shell, the native library, a server's
+/// database its route does not serve: one stored there would be a hook no
+/// sender reaches, without a word. A file's server and a tenant node let
+/// one be defined (`Database::allow_hooks`), their routes taking the
+/// events (`fennec_http::hooks`, `fennec_http::tenant_hooks`).
 pub const HOOKED_UNTAKEN: &str = "no server takes this database's webhook events, so no \
                                   webhook consumer is defined here: one is defined on a \
                                   file's server (`fennec-server --file <path>`), which takes \
-                                  its events at `/_hooks/<hook>`; a tenant node takes none yet";
+                                  its events at `/_hooks/<hook>`, or in a tenant of a node, \
+                                  at `/t/<tenant>/_hooks/<hook>`";
 
 /// The statements one hook's events are taken by, at most: every one whose
 /// condition passes an event takes it, in name order, in one block. Refused

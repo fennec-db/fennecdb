@@ -724,12 +724,13 @@ impl Router {
         // a directory refusing writes, its disk failing, held the router.
         let recorded = self
             .write_dir()
-            .set_reader(tenant, &node, &url, lineage.as_deref());
+            .set_reader(tenant, &node, &url, lineage.as_deref(), true);
         if let Err(e) = recorded {
             let r = Reader {
                 node,
                 follows: url,
                 lineage,
+                marked: true,
             };
             let _ = self.delete_copy(tenant, &r);
             self.untrace_if_none(tenant);
@@ -739,6 +740,7 @@ impl Router {
             node,
             follows: url,
             lineage,
+            marked: true,
         };
         Ok(Response::json(201, reader_item(region, &reader)))
     }
@@ -799,9 +801,13 @@ impl Router {
             .map_err(|e| message(&e))?;
         self.standbys_sent();
         if let Err(w) = self.delete_copy(tenant, r) {
-            let put_back =
-                self.write_dir()
-                    .set_reader(tenant, &r.node, &r.follows, r.lineage.as_deref());
+            let put_back = self.write_dir().set_reader(
+                tenant,
+                &r.node,
+                &r.follows,
+                r.lineage.as_deref(),
+                r.marked,
+            );
             if let Err(e) = put_back {
                 fennec_http::log!(
                     "tenant `{tenant}`'s read replica on `{}` stayed on its node, unrecorded: {e}",
@@ -1471,9 +1477,15 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no node `{node}`"))?;
         let base = format!("/_admin/tenants/{tenant}");
+        // Marked a reader's: its stream says so, and no hook's answer at the
+        // primary waits for a copy no failover promotes.
         let body = match lineage {
-            Some(l) => format!("{{\"from\":{},\"lineage\":{}}}", quote(url), quote(l)),
-            None => format!("{{\"from\":{}}}", quote(url)),
+            Some(l) => format!(
+                "{{\"from\":{},\"lineage\":{},\"reader\":true}}",
+                quote(url),
+                quote(l)
+            ),
+            None => format!("{{\"from\":{},\"reader\":true}}", quote(url)),
         };
         // Named, so a node a newer term leases refuses to follow at the
         // word of a router it superseded.
@@ -2039,6 +2051,7 @@ impl Router {
                 let dir = self.read_dir();
                 let n = dir.node(&r.node);
                 another_lineage(r, lineage.as_deref(), was)
+                    || !r.marked
                     || (r.lineage.is_none() && lineage.is_some())
                     || bound_before(r, was)
                     || node.as_deref() == Some(r.node.as_str())
@@ -2150,15 +2163,16 @@ impl Router {
             );
             return Bound::Unknown;
         }
-        let recorded = self
-            .write_dir()
-            .set_reader(tenant, &r.node, &r.follows, Some(lineage));
+        let recorded =
+            self.write_dir()
+                .set_reader(tenant, &r.node, &r.follows, Some(lineage), true);
         if let Err(e) = recorded {
             fennec_http::log!("tenant `{tenant}`'s read replica's lineage stayed unrecorded: {e}");
             return Bound::Unknown;
         }
         Bound::Kept(Reader {
             lineage: Some(lineage.to_string()),
+            marked: true,
             ..r.clone()
         })
     }
@@ -2520,12 +2534,16 @@ impl Router {
                         false => r.lineage.as_deref(),
                     };
                     let mut failed = None;
-                    if r.follows != url || lost || rebound {
+                    // Unmarked -- placed by a router from before readers
+                    // were told so -- its stream counted a standby at the
+                    // primary, whose hooks' answers waited for a copy no
+                    // failover promotes: told again, once.
+                    if r.follows != url || lost || rebound || !r.marked {
                         let told = self
                             .tell_follow(tenant, &r.node, &url, false, bind)
                             .and_then(|_| {
                                 self.write_dir()
-                                    .set_reader(tenant, &r.node, &url, bind)
+                                    .set_reader(tenant, &r.node, &url, bind, true)
                                     .map_err(|e| message(&e))
                             });
                         match told {
@@ -2826,7 +2844,7 @@ mod tests {
                 };
                 dir.set_node(name, node).unwrap();
             }
-            dir.set_reader("acme", "us1", "http://127.0.0.1:1", None)
+            dir.set_reader("acme", "us1", "http://127.0.0.1:1", None, true)
                 .unwrap();
         }
         assert!(router.reader_near("acme").is_none(), "a tenant gone");
@@ -2994,5 +3012,79 @@ mod tests {
         assert!(!third, "and the first change's hold is still in place");
         assert!(elsewhere, "another region's copy is a change of its own");
         assert!(after, "the copy is free once the first change is over");
+    }
+
+    /// A read replica a router from before placed, unmarked, is due at a
+    /// look though nothing else changed, and told to follow again with
+    /// `"reader": true`, once: recorded marked, it is due no more. The node
+    /// is the test's, and answers the one follow it is sent.
+    #[test]
+    fn an_unmarked_read_replica_is_told_it_is_one_once() {
+        use super::{Primary, Reader};
+        use std::io::{BufRead, BufReader, Read, Write};
+        let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let router = Router::new(Directory::in_memory(), Config::default());
+        let primary = "127.0.0.1:1";
+        let url = fennec_http::dial::url_of(primary);
+        {
+            let mut dir = router.write_dir();
+            for (name, region, addr) in [
+                ("eu1", "eu", primary.to_string()),
+                ("us1", "us", node.local_addr().unwrap().to_string()),
+            ] {
+                let n = Node {
+                    addr,
+                    token: "t".into(),
+                    region: region.into(),
+                    ..Node::default()
+                };
+                dir.set_node(name, n).unwrap();
+            }
+            dir.place("acme", "eu1", State::Active).unwrap();
+            dir.set_reader("acme", "us1", &url, Some("aaaaaaaa"), false)
+                .unwrap();
+        }
+        let at = Primary::At {
+            region: "eu".into(),
+            addr: primary.into(),
+            node: Some("eu1".into()),
+            quota: None,
+            lineage: Some("aaaaaaaa".into()),
+            was: Vec::new(),
+        };
+        let reader = |router: &Router| -> Reader { router.read_dir().readers("acme")[0].clone() };
+        assert!(router.due("acme", &reader(&router), &at), "unmarked");
+        let r = std::sync::Arc::clone(&router);
+        let (r0, at0) = (reader(&router), at.clone());
+        let told = std::thread::spawn(move || r.keep_following("acme", &r0, &at0));
+        let (s, _) = node.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut rd = BufReader::new(s.try_clone().unwrap());
+        let (mut first, mut len) = (String::new(), 0);
+        rd.read_line(&mut first).unwrap();
+        loop {
+            let mut line = String::new();
+            rd.read_line(&mut line).unwrap();
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut body = vec![0; len];
+        rd.read_exact(&mut body).unwrap();
+        (&s).write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .unwrap();
+        told.join().unwrap();
+        assert!(
+            first.starts_with("POST /_admin/tenants/acme/follow "),
+            "{first}"
+        );
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains(r#""reader":true"#), "{body}");
+        assert!(body.contains(r#""lineage":"aaaaaaaa""#), "{body}");
+        assert!(reader(&router).marked);
+        assert!(!router.due("acme", &reader(&router), &at), "told once");
     }
 }

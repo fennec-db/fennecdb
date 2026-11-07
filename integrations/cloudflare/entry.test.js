@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { running, serve } from './dev.mjs';
 import * as cluster from './entry/cluster.mjs';
-import { BUFFER_AT, State, clientMark, configure, corsHeaders, entry, judged, markKey, passed, percentDecode, segments, sentHeaders } from './entry/entry.js';
+import { BUFFER_AT, State, clientMark, configure, corsHeaders, entry, hooked, judged, markKey, passed, percentDecode, segments, sentHeaders } from './entry/entry.js';
 
 const { DATA, ORIGIN, ROOT, query, request, shard, until } = cluster;
 
@@ -766,6 +766,52 @@ test('a change of the global router marked for a replica that may have run is no
   } finally {
     dying.close();
     standby.close();
+  }
+});
+
+test("an event to a tenant's hook is one the node takes once by its key: a POST there, however the path is spelled", () => {
+  const at = (path, method = 'POST') => hooked(new Request(`http://entry.test${path}`, { method, body: method === 'POST' ? '{}' : undefined }));
+  assert.equal(at('/t/acme/_hooks/stripe'), true);
+  assert.equal(at('/t/acme/%5Fhooks/stripe'), true);
+  assert.equal(at('//t//acme//_hooks//stripe'), true);
+  assert.equal(at('/t/acme/_hooks/stripe', 'PUT'), false);
+  assert.equal(at('/t/acme/query'), false);
+  assert.equal(at('/t/acme/notes/_hooks'), false);
+});
+
+test("an event to a tenant's hook goes on to the next router where one may have run it, its bytes as they came; a write with no key does not", async () => {
+  // The router reads it whole and is gone before it answers.
+  const dying = await standIn((req, res) => res.socket.destroy());
+  const next = await standIn((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fennec-Shard': '1' });
+    res.end('{"event":"evt_1","taken":1}');
+  });
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ eu: [dying.url, next.url] }), HOMES_CACHE: 'off' });
+    // A signature over the raw bytes: neither they nor the header the
+    // scheme reads may change on the way.
+    const body = '{"id": "evt_1",\n "type":"payment_intent.succeeded"}';
+    const signature = `t=1700000000,v1=${'ab'.repeat(32)}`;
+    const event = { method: 'POST', body, headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature } };
+    const r = await fetchOf('/t/acme/_hooks/stripe', event);
+    assert.equal(r.status, 200, await r.text());
+    assert.equal(dying.seen.length, 1);
+    assert.equal(next.seen.length, 1, 'sent again: the node answers a second try from its key');
+    assert.equal(next.seen[0].url, '/t/acme/_hooks/stripe');
+    assert.equal(next.seen[0].body, body);
+    assert.equal(next.seen[0].headers['stripe-signature'], signature);
+    assert.equal((await fetchOf('/t/acme/%5Fhooks/stripe', event)).status, 200);
+    assert.equal(next.seen.length, 2);
+    // Any other write to the tenant, keyed by nothing, may have run: told
+    // so by an entry that has not yet passed the router gone over.
+    const fresh = inNode({ REGIONS: JSON.stringify({ eu: [dying.url, next.url] }), HOMES_CACHE: 'off' });
+    const write = await fresh('/t/acme/query', { method: 'POST', body: '{"query":"put notes {}"}' });
+    assert.equal(write.status, 502);
+    assert.match(await write.text(), /may have run/);
+    assert.equal(next.seen.length, 2, 'not sent again');
+  } finally {
+    dying.close();
+    next.close();
   }
 });
 

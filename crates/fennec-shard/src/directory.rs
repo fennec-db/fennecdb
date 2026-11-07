@@ -145,6 +145,27 @@ const SCHEMA: [&str; 13] = [
 const FILES: &str =
     "create collection if not exists files (key text @hash, tenant text, node text, instance text)";
 
+/// A tenant's webhook secrets as the directory knows them
+/// ([`HookSet`]): the names of its hooks and the version of the set its
+/// primary holds, and the copies -- its pair's standby, its `--replicas`
+/// copy -- known to lack that version, which the router's repair copies it
+/// to. Never a secret: those are its nodes' alone, beside each copy's file
+/// (`fennec_http::tenant_hooks`), and this directory is replicated and
+/// archived. Made by the first hook set, read where asked, never mapped; a
+/// router from before it neither reads nor writes it.
+const HOOK_SETS: &str = "create collection if not exists hook_sets \
+     (tenant text @hash, names text, version text, behind text)";
+
+/// What [`HOOK_SETS`] holds of a tenant: its hooks' names, the version of
+/// the set its primary holds (16 hex digits, empty where it holds none),
+/// and the copies lacking it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HookSet {
+    pub names: Vec<String>,
+    pub version: String,
+    pub behind: Vec<String>,
+}
+
 const LEFTOVERS: &str = "create collection if not exists leftovers \
      (key text @hash, tenant text, node text, why text, noted int, instances text)";
 
@@ -176,12 +197,14 @@ const NODE_FIELDS: [&str; 2] = ["region", "zone"];
 /// nothing, as before.
 const TENANT_FIELDS: [&str; 1] = ["failed_from"];
 
-/// The fields `readers` took after it was first written: `lineage`, added
-/// to one written before it as `NODE_FIELDS` are. Selected only where the
-/// collection has it ([`reader_fields`]): asked of one without it, the
-/// select failed with the field not found, which read as an empty
-/// directory -- every read replica record forgotten.
-const READER_FIELDS: [&str; 1] = ["lineage"];
+/// The fields `readers` took after it was first written: `lineage`, and
+/// `marked` -- the copy was told it is a read replica's, which no hook's
+/// answer at its primary waits for -- added to one written before them as
+/// `NODE_FIELDS` are. Selected only where the collection has them
+/// ([`reader_fields`]): asked of one without it, the select failed with
+/// the field not found, which read as an empty directory -- every read
+/// replica record forgotten.
+const READER_FIELDS: [&str; 2] = ["lineage", "marked"];
 
 /// The fields `lineages` took after it was first written: `history`,
 /// added and selected as `READER_FIELDS` are. A router from before it
@@ -275,6 +298,11 @@ pub struct Reader {
     /// The lineage of the tenant it copies, where it was known as it was
     /// placed (`lineages`).
     pub lineage: Option<String>,
+    /// Whether its copy was told it is a read replica's (`"reader": true`):
+    /// its stream says so, and no hook's answer at the primary waits for
+    /// it. One placed by a router from before was not, and is told again
+    /// once, at the next look.
+    pub marked: bool,
 }
 
 /// A tenant's file a router may have left on a node, placed by nothing
@@ -977,13 +1005,14 @@ impl Directory {
     }
 
     /// Records a tenant's read replica on `node`, following `follows`, a
-    /// copy of the tenant of `lineage`.
+    /// copy of the tenant of `lineage`, told it is one where `marked`.
     pub fn set_reader(
         &mut self,
         tenant: &str,
         node: &str,
         follows: &str,
         lineage: Option<&str>,
+        marked: bool,
     ) -> Result<()> {
         let params = [
             Value::Text(format!("{tenant}/{node}")),
@@ -991,15 +1020,20 @@ impl Directory {
             Value::Text(node.into()),
             Value::Text(follows.into()),
             lineage.map_or(Value::Null, |l| Value::Text(l.into())),
+            match marked {
+                true => Value::Text("1".into()),
+                false => Value::Null,
+            },
         ];
         if self.readers(tenant).iter().any(|r| r.node == node) {
             self.run(
-                "set readers {follows: $4, lineage: $5} where key = $1",
+                "set readers {follows: $4, lineage: $5, marked: $6} where key = $1",
                 &params,
             )?;
         } else {
             self.run(
-                "put readers {key: $1, tenant: $2, node: $3, follows: $4, lineage: $5}",
+                "put readers {key: $1, tenant: $2, node: $3, follows: $4, lineage: $5, \
+                 marked: $6}",
                 &params,
             )?;
         }
@@ -1268,6 +1302,75 @@ impl Directory {
             ],
             false,
         )
+    }
+
+    /// What the directory knows of `tenant`'s webhook secrets: `None` where
+    /// it sets none, or the directory -- a standby's following a primary
+    /// from before it -- keeps no such record.
+    pub fn hook_set(&self, tenant: &str) -> Option<HookSet> {
+        self.hook_sets(Some(tenant)).pop().map(|(_, s)| s)
+    }
+
+    /// The [`HookSet`]s the directory keeps, `tenant`'s alone where named:
+    /// read where asked, the one reader of them.
+    pub fn hook_sets(&self, tenant: Option<&str>) -> Vec<(String, HookSet)> {
+        let g = read(&self.db);
+        if g.collection("hook_sets").is_err() {
+            return Vec::new();
+        }
+        let (sql, params) = match tenant {
+            Some(t) => (" where tenant = $1", vec![Value::Text(t.into())]),
+            None => ("", Vec::new()),
+        };
+        let sql = format!("get hook_sets select tenant, names, version, behind{sql}");
+        let rows = fennec_ql::parse_one(&sql)
+            .ok()
+            .and_then(|stmt| match g.query(&stmt, &params) {
+                Ok(Response::Rows(rs)) => Some(rs.rows),
+                _ => None,
+            });
+        (rows.unwrap_or_default().iter())
+            .map(|r| (text(&r.values[0]), hook_set_of(&r.values[1..])))
+            .collect()
+    }
+
+    /// How many tenants have a copy lacking their set's version:
+    /// `fennec_router_tenants_hooks_behind`.
+    pub fn hooks_behind(&self) -> usize {
+        self.hook_sets(None)
+            .iter()
+            .filter(|(_, s)| !s.behind.is_empty())
+            .count()
+    }
+
+    /// Records what `tenant`'s webhook secrets are -- or forgets them,
+    /// `None`, and where its set has no hook and no copy lacks it.
+    pub fn set_hook_set(&mut self, tenant: &str, set: Option<&HookSet>) -> Result<()> {
+        let set = set.filter(|s| !s.names.is_empty() || !s.behind.is_empty());
+        let made = read(&self.db).collection("hook_sets").is_ok();
+        if !made {
+            if set.is_none() {
+                return Ok(());
+            }
+            self.run(HOOK_SETS, &[])?;
+        }
+        let key = Value::Text(tenant.into());
+        let Some(s) = set else {
+            return self.run("del hook_sets where tenant = $1", &[key]);
+        };
+        let row = vec![
+            key.clone(),
+            Value::Text(s.names.join(" ")),
+            Value::Text(s.version.clone()),
+            Value::Text(s.behind.join(" ")),
+        ];
+        self.write_block(&[
+            ("del hook_sets where tenant = $1", vec![key]),
+            (
+                "put hook_sets {tenant: $1, names: $2, version: $3, behind: $4}",
+                row,
+            ),
+        ])
     }
 
     /// `tenant`'s file on `node`, where it is noted as left there.
@@ -1608,6 +1711,7 @@ impl Directory {
         self.homes.remove(tenant);
         self.set_lineage(tenant, None)?;
         self.set_quota(tenant, None)?;
+        self.set_hook_set(tenant, None)?;
         self.set_replica(tenant, None)
     }
 
@@ -1793,6 +1897,7 @@ fn put_reader(readers: &mut HashMap<String, Vec<Reader>>, row: &[Value]) {
             Some(Value::Text(l)) => Some(l.clone()),
             _ => None,
         },
+        marked: matches!(row.get(5), Some(Value::Text(_))),
     });
     list.sort_by(|a, b| a.node.cmp(&b.node));
 }
@@ -1866,6 +1971,22 @@ fn text(v: &Value) -> String {
     }
 }
 
+/// A [`HookSet`] from its row's `names`, `version` and `behind`.
+fn hook_set_of(values: &[Value]) -> HookSet {
+    let words = |v: Option<&Value>| -> Vec<String> {
+        v.map(text)
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    HookSet {
+        names: words(values.first()),
+        version: values.get(1).map(text).unwrap_or_default(),
+        behind: words(values.get(2)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1894,10 +2015,15 @@ mod tests {
         let mut d = Directory::load(Arc::new(RwLock::new(old_readers()))).unwrap();
         assert_eq!(d.readers("acme").len(), 1, "the record kept");
         assert_eq!(d.readers("acme")[0].lineage, None);
-        d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"))
+        assert!(
+            !d.readers("acme")[0].marked,
+            "placed by a router from before"
+        );
+        d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"), true)
             .unwrap();
         d.reload().unwrap();
         assert_eq!(d.readers("acme")[0].lineage.as_deref(), Some("aaaaaaaa"));
+        assert!(d.readers("acme")[0].marked, "marked as it was told again");
 
         let mut db = old_readers();
         db.follow(Vec::new()).unwrap();
@@ -2595,11 +2721,11 @@ mod tests {
             }
             d.place("acme", "e1", State::Active).unwrap();
             d.place("beta", "e1", State::Active).unwrap();
-            d.set_reader("acme", "u1", "http://e1", Some("aaaaaaaa"))
+            d.set_reader("acme", "u1", "http://e1", Some("aaaaaaaa"), true)
                 .unwrap();
-            d.set_reader("acme", "a1", "http://e1", None).unwrap();
-            d.set_reader("beta", "u1", "http://e1", None).unwrap();
-            d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"))
+            d.set_reader("acme", "a1", "http://e1", None, true).unwrap();
+            d.set_reader("beta", "u1", "http://e1", None, true).unwrap();
+            d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"), true)
                 .unwrap();
             assert!(d.holds("u1") && d.holds("a1"));
         }
@@ -2610,6 +2736,7 @@ mod tests {
                 node: "u1".into(),
                 follows: "http://e2".into(),
                 lineage: Some("aaaaaaaa".into()),
+                marked: true,
             })
         );
         assert_eq!(d.readers("acme").len(), 2);

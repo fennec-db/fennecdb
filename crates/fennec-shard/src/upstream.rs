@@ -1201,7 +1201,7 @@ impl Pool {
         ) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
-            Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
+            Err(Failure(Stage::Unanswered, e)) if replay.allows(method, target, headers) => {
                 Err(Tried::Again(e))
             }
             Err(Failure(Stage::Retried, e)) => Err(Tried::Again(e)),
@@ -1354,7 +1354,7 @@ impl Pool {
             body.len()
         ));
         let request = (req.as_bytes(), body);
-        let asked = (method, headers);
+        let asked = (method, target, headers);
         match taken {
             Taken::Plain(first) => self.tries(
                 addr, host, first, request, asked, times, replay, client, flying,
@@ -1368,8 +1368,8 @@ impl Pool {
     /// [`Self::send_staged`]'s tries of `request`, over the transport of
     /// its node's address: on `first`, the connection taken with it
     /// ([`Pool::first`]), and each pooled one after it, then on a fresh one
-    /// to `host`. `asked` is the method and headers, which say whether one
-    /// sent whole may go again.
+    /// to `host`. `asked` is the method, the target and the headers, which
+    /// say whether one sent whole may go again.
     #[allow(clippy::too_many_arguments)]
     fn tries<S: Wire>(
         &self,
@@ -1377,7 +1377,7 @@ impl Pool {
         host: &str,
         first: Option<Idle<S>>,
         (head, body): (&[u8], &[u8]),
-        (method, headers): (&str, &[(&str, &str)]),
+        (method, target, headers): (&str, &str, &[(&str, &str)]),
         times: (Duration, Duration, Duration),
         replay: Replay,
         client: Option<&Client>,
@@ -1399,7 +1399,7 @@ impl Pool {
             match self.exchange(addr, idle.conn, set, (head, body), want, client, flying) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
-                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => {
+                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, target, headers) => {
                     whole = true;
                     break;
                 }
@@ -1678,10 +1678,10 @@ enum Replay {
 }
 
 impl Replay {
-    fn allows(self, method: &str, headers: &[(&str, &str)]) -> bool {
+    fn allows(self, method: &str, target: &str, headers: &[(&str, &str)]) -> bool {
         match self {
             Replay::Always => true,
-            Replay::AsAsked => replayable(method, headers),
+            Replay::AsAsked => replayable(method, target, headers),
         }
     }
 }
@@ -1693,12 +1693,21 @@ impl Replay {
 /// which every node runs read-only on every route, a `POST /query` among
 /// them: the value [`fennec_http::read_marked`] takes, and no other, which
 /// a node refuses unrun.
-pub(crate) fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
+///
+/// An event sent to a tenant's hook, `POST /t/<tenant>/_hooks/...`, is
+/// keyed too, by the event its sender signed: the node takes it once by
+/// that key, its row landing in the event's block, and answers a second
+/// try from it (`docs/design/named-statements.md`, *Hooks on tenant nodes,
+/// the router and the global entry*). Told by the path the router reads
+/// the tenant from already, decoded as the node decodes it; no body is
+/// parsed.
+pub(crate) fn replayable(method: &str, target: &str, headers: &[(&str, &str)]) -> bool {
     matches!(method, "GET" | "HEAD" | "OPTIONS")
         || headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("idempotency-key")
                 || (k.eq_ignore_ascii_case(fennec_http::READ_HEADER) && fennec_http::marks_read(v))
         })
+        || (method == "POST" && fennec_http::hooks::keyed_path(target))
 }
 
 /// A connection to `addr`, its name looked up within `within` and each
@@ -2387,6 +2396,37 @@ impl Pool {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    /// An event to a tenant's hook goes again as a keyed write does, its
+    /// path read as the node reads it -- encoded, doubled slashes, a query
+    /// string -- and nothing else gains a resend: another `POST` of the
+    /// tenant, a `PUT` to the hook, a `_hooks` segment not the tenant's
+    /// first.
+    #[test]
+    fn an_event_to_a_tenants_hook_is_replayable_and_nothing_else_new() {
+        let keyed = [("idempotency-key", "k")];
+        for target in [
+            "/t/acme/_hooks/stripe",
+            "/t/acme/%5Fhooks/stripe",
+            "//t//acme//_hooks//stripe",
+            "/t/acme/_hooks/stripe?x=1",
+            "/t/acme/_hooks/",
+        ] {
+            assert!(replayable("POST", target, &[]), "{target}");
+        }
+        for (method, target) in [
+            ("POST", "/t/acme/query"),
+            ("POST", "/t/acme/notes/_hooks"),
+            ("POST", "/_hooks/stripe"),
+            ("POST", "/t/_hooks/x"),
+            ("PUT", "/t/acme/_hooks/stripe"),
+            ("DELETE", "/t/acme/_hooks/stripe"),
+        ] {
+            assert!(!replayable(method, target, &[]), "{method} {target}");
+        }
+        assert!(replayable("POST", "/t/acme/query", &keyed));
+        assert!(replayable("GET", "/t/acme/notes", &[]));
+    }
 
     /// `s` as the pool's connection holds it, plain: the same socket.
     fn plain(s: &TcpStream) -> TcpStream {

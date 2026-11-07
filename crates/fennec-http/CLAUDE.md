@@ -100,8 +100,10 @@ writes its own through the engine, never a statement; a new one is
 
 **[A token is bound to the tenant it
 names.](../../docs/design/access.md#tenant-binding)** `route_tenant` asks it,
-and no route below `/t/<t>/` may skip it; every tenant's database installs
-the `Check` hook (`Tenants::check_scoped_writes`).
+and no route below `/t/<t>/` may skip it -- a hook's event alone, whose
+signature it asks in the token's place, against that tenant's secrets,
+before the tenant is looked up; every tenant's database installs the
+`Check` hook (`Tenants::check_scoped_writes`).
 
 **[A token is taken only from the issuers, for the audiences and clients,
 a server was told.](../../docs/design/access.md#whom-a-token-is-for)**
@@ -198,30 +200,38 @@ alone.
 
 **[A webhook is verified by its signature before anything of it is read,
 and every refusal before is one 401.](../../docs/design/named-statements.md#verifying-an-event)**
-`POST /_hooks/<name>`, on a file's server under `--hooks` (a tenant node's
-are F4's slice 4), is the one route running a statement without a token,
-judged before `authenticate`: `hooks::verify` reads the scheme from the
-headers present (each once, one `t`, `webhook-*` or Svix's `svix-*`, never
-both) and checks two HMAC-SHA256s always (`crypto::HmacKey`, `ct_eq` with
+`POST /_hooks/<name>`, on a file's server under `--hooks`, and a node's
+`/t/<t>/_hooks/<name>`, asked in `route_tenant` before the tenant is looked
+up against its secrets in the node's memory (`tenant_hooks::Store`) and held
+after its open to the set it holds then (`Store::is_current`), is the
+one route running a statement without a token, judged before
+`authenticate`: `hooks::verified` reads the scheme from the headers
+present (each once, one `t`, `webhook-*` or Svix's `svix-*`, never both)
+and checks two HMAC-SHA256s always (`crypto::HmacKey`, `ct_eq` with
 every signature through `compared`, `v1` alone, the process's random key
 for a secret missing, never verifying) over the raw body, as far as the
 widest hook's ceiling, and the timestamp it signs, within the hook's
-tolerance and ceiling, before the body is parsed or a lock taken. Every
-failure before -- headers, scheme, tolerance, ceiling, no such hook, the
-signature -- is one 401 after the same work, its check named in the log,
-the audit's `refused` line and `fennec_hook_unverified_total` alone; it
-waits by the hooks' own count, by the address and the name the decoded
-path names (`hooks::failed`, `hooks::named`), and a verified event never
-calls `audit::verified`. A secret is the hooks file's, never the
-database's, an archive's, a log's, a trace's or an answer's. An event's key is a value its signature covers, or
-`X-GitHub-Delivery` where its hook says `key delivery`, kept more than
-twice the tolerance and `SKEW_MS`. A sender is told 2xx only once its event
+tolerance and ceiling, before the body is parsed, a tenant opened or a
+lock taken. Every failure before -- headers, scheme, tolerance, ceiling, no
+such tenant or hook, the signature -- is one 401 after the same work, its
+check named in the log, the audit's `refused` line and
+`fennec_hook_unverified_total` alone; it waits by the hooks' own count, by
+the address and the name the decoded path names (`hooks::failed`, `hooks::named`) -- a router forwarding the
+node's 401 with no `WWW-Authenticate` too (`audit::hook_forwarded`) -- and
+a verified event never calls `audit::verified`. A secret is a hooks file's
+or a tenant's `<t>.hooks` (fennec-shard's rule), never the database's, an
+archive's, a log's, a trace's or an answer's but `hook-secrets`'. An
+event's key is a value its signature covers, or `X-GitHub-Delivery` where
+its hook says `key delivery`, kept more than twice the tolerance and
+`SKEW_MS`. A sender is told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's
-stream none; else 503), or where resending changes nothing, a replay no
-sooner than its first try, a standby holding its key's block
-(`HeldKey::seq`); any other answer is the refusal's status, told as a
-scoped caller is (`hooks::told`), never a 410 or a 3xx.
+or a read replica's stream none, each saying so on its request; else 503),
+or where resending changes nothing, a replay no sooner than its first try,
+a standby holding its key's block (`HeldKey::seq`); a tenant's asked of its
+lease after (`answered_under_lease`, 500 `outcome: unknown`). Any other
+answer is the refusal's status, told as a scoped caller is
+(`hooks::told`), never a 410 or a 3xx.
 
 **[A statement is parsed once, and an answer goes out in one
 write.](../../docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a

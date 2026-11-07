@@ -2830,8 +2830,14 @@ fn a_tenant_and_its_read_replica_from_before_lineages_are_bound_to_one() {
     }
     dir.place("acme", "eu1", fennec_shard::directory::State::Active)
         .unwrap();
-    dir.set_reader("acme", "us1", &format!("http://127.0.0.1:{eu1}"), None)
-        .unwrap();
+    dir.set_reader(
+        "acme",
+        "us1",
+        &format!("http://127.0.0.1:{eu1}"),
+        None,
+        false,
+    )
+    .unwrap();
     let router = serve(Router::replicated(
         dir,
         config(Some("eu"), None, None),
@@ -2857,6 +2863,88 @@ fn a_tenant_and_its_read_replica_from_before_lineages_are_bound_to_one() {
     });
     let follows = std::fs::read_to_string(nodes[1].dir.join("acme.follows")).unwrap();
     assert!(follows.contains(&format!("lineage {lineage}")), "{follows}");
+    assert!(
+        follows.lines().any(|l| l == "reader"),
+        "told it is a read replica's as it was bound: {follows}"
+    );
+}
+
+/// A read replica placed by a router from before readers were marked --
+/// its tenant's lineage known, its copy told to follow without `reader` --
+/// counted as a standby at its primary, whose hooks' answers then waited
+/// for a copy in another region no failover promotes. The router's next
+/// look tells it again, once: its copy keeps `reader` in `.follows`, its
+/// stream says so, and the primary's feed counts no standby.
+#[test]
+fn a_read_replica_placed_before_readers_were_marked_is_told_so() {
+    let tag = "unmarked";
+    let files = files(tag);
+    let nodes = ["eu1", "us1"].map(|n| node(&format!("{tag}-{n}")));
+    let (eu1, us1) = (nodes[0].port, nodes[1].port);
+    let (status, body) = admin(eu1, "unmarked-eu1", "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(status, 201, "{body}");
+    let (status, _, body) = request(
+        eu1,
+        "POST",
+        "/t/acme/query",
+        &query_body("create collection notes (body text)"),
+        &[],
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = admin(
+        eu1,
+        "unmarked-eu1",
+        "GET",
+        "/_admin/tenants/acme/lineage",
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    let lineage = text_of(&body, "lineage").expect("a lineage");
+    let (status, body) = admin(us1, "unmarked-us1", "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(status, 201, "{body}");
+    let follow = format!(r#"{{"from":"http://127.0.0.1:{eu1}","lineage":"{lineage}"}}"#);
+    let (status, body) = admin(
+        us1,
+        "unmarked-us1",
+        "POST",
+        "/_admin/tenants/acme/follow",
+        &follow,
+    );
+    assert_eq!(status, 200, "{body}");
+    let standbys = || {
+        let t = nodes[0].tenants.get("acme").unwrap();
+        let feed = Arc::clone(t.repl.as_ref().unwrap().feed().unwrap());
+        !feed.standby_sent(u64::MAX, Duration::ZERO)
+    };
+    until("the unmarked copy's stream is counted a standby", standbys);
+
+    let (db, repl) = directory(&files.0.join("global.fennec"), None);
+    let mut dir = Directory::load(Arc::clone(&db)).unwrap();
+    for (name, region, port) in [("eu1", "eu", eu1), ("us1", "us", us1)] {
+        let n = fennec_shard::directory::Node {
+            addr: format!("127.0.0.1:{port}"),
+            token: format!("adm-{tag}-{name}"),
+            region: region.into(),
+            ..Default::default()
+        };
+        dir.set_node(name, n).unwrap();
+    }
+    dir.place("acme", "eu1", fennec_shard::directory::State::Active)
+        .unwrap();
+    dir.set_lineage("acme", Some(&lineage)).unwrap();
+    let url = format!("http://127.0.0.1:{eu1}");
+    dir.set_reader("acme", "us1", &url, Some(&lineage), false)
+        .unwrap();
+    let _router = serve(Router::replicated(
+        dir,
+        config(Some("eu"), None, None),
+        repl,
+    ));
+    until("the copy is told it is a read replica's", || {
+        std::fs::read_to_string(nodes[1].dir.join("acme.follows"))
+            .is_ok_and(|f| f.lines().any(|l| l == "reader"))
+    });
+    until("its stream counts no standby", || !standbys());
 }
 
 /// A tenant's node and the router of a single directory near `us`, eu1
@@ -3895,4 +3983,35 @@ fn a_copy_told_to_follow_again_answers_once_its_primary_has_said_hello() {
         let (status, body) = marked(us1, "acme", "get notes select body", None);
         status == 200 && body.contains("new") && !body.contains("old")
     });
+}
+
+/// The router tells a read replica's copy it is one (`"reader": true`),
+/// which it keeps in `.follows` -- its stream saying so, and no hook's
+/// answer at the primary waiting for it -- and a tenant's hook secrets set
+/// through the router reach its primary and its replica, never its read
+/// replica, which answers marked reads alone and is promoted by no
+/// failover.
+#[test]
+fn a_read_replica_is_told_it_is_one_and_holds_no_hook_secrets() {
+    let w = OneDirectory::new("rrhooks");
+    w.tenant("acme");
+    let [eu1, eu2, us1] = &w._nodes;
+    let follows = std::fs::read_to_string(us1.dir.join("acme.follows")).unwrap();
+    assert!(follows.lines().any(|l| l == "reader"), "{follows}");
+    let follows = std::fs::read_to_string(eu2.dir.join("acme.follows")).unwrap();
+    assert!(!follows.lines().any(|l| l == "reader"), "{follows}");
+
+    let set = r#"{"scheme":"stripe","secrets":["whsec_rrhooks"]}"#;
+    let (status, body) = shard(w.primary, "PUT", "/_shard/tenants/acme/hooks/stripe", set);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""behind":[]"#), "{body}");
+    let held = eu1.tenants.hooks().version("acme");
+    assert!(held.is_some());
+    assert_eq!(eu2.tenants.hooks().version("acme"), held, "its replica");
+    assert_eq!(
+        us1.tenants.hooks().version("acme"),
+        None,
+        "its read replica"
+    );
+    assert!(!us1.dir.join("acme.hooks").exists());
 }

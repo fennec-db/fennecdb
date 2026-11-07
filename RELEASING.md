@@ -190,10 +190,14 @@ it does not read and refuses it, never taking a hook's statement for a
 callable one whose text it cannot read. Its notes name `on hook` as the
 clause that moves the format, under the same upgrade heading and in the
 same order: every archiver, router and node upgraded before any primary
-defines one. A tenant node takes none in that release (F4's slice 4 brings
-them), so a tenant defines none. Where the order is not kept, each older
-binary stops in words ("a statement record this version does not read"):
-a replica stops following at the record and connects again, taking no
+defines one. From F4's slice 4 a tenant node takes them too, in the same
+order: every router before every node -- a router from before sends a read
+replica's follow unmarked, so a new primary waits for it as for a standby
+before an event's 2xx -- and every node before a tenant defines one, a
+node from before refusing the definition, the install of an image holding
+one and the router's `hook-secrets` (404, read as no set). Where the order
+is not kept, each older binary stops in words ("a statement record this
+version does not read"): a replica stops following at the record and connects again, taking no
 write past it; an archiver keeps the stream and takes no image of its own,
 and its `fennec restore` refuses the archive this tree's restores; the
 server refuses to open the file that restore wrote. `make upgrade-check`
