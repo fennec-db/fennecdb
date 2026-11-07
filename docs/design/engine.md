@@ -661,10 +661,18 @@ the batch waits with them, and lands with the records before it as the
 batch is linked, each handed to the sink in turn (`handing`) and its
 writes noted -- linked a record at a time, a stream of single `put`s
 would lose the batch's candidates found on every core. An error puts back
-every record not landed, the last write whole, as an error may come part
-way into a schema change's indexes; a panic before a record's sink call
-does too (`put_back_torn`, `apply_unwound` under `unwinding`, as `whole`
-is a block's). The records landed before stay.
+every record not landed; a panic before a record's sink call does too, the
+last write whole (`put_back_torn`, `apply_unwound` under `unwinding`, as
+`whole` is a block's). The records landed before stay. An error's
+put-back asks for the last write whole too, though none is torn today:
+`torn` reaches only the last entry, and acts on a frame's alone, which is
+read whole before its entry with nothing after it that can fail, and a
+schema change's entry puts back all it built whatever `torn` says. It is
+kept so that a step that can fail, added after a frame's entry, puts its
+row back whole rather than index it twice, at the cost of an error's
+put-back alone (its last frame taken out of every index and put in
+again). As #512 first had it, its reason was an error part way into a
+schema change's indexes, which `torn` never reached.
 
 Each record's entries are a stretch of the log of their own, its stores
 marked anew before its first write to each (`Applied`, a store marked
@@ -682,7 +690,15 @@ waiting together -- stayed in memory, in no record and on no feed, served
 by the failed replica until it was opened again. A record landed is the
 replica's like any other: a panic before the next one's sink call puts
 back that one and those after it, and the replica goes on, failing
-nothing (`landing` is let go of as each record's notes end).
+nothing (`landing` is let go of as each record's notes end). The watcher
+is told of the records landed however `apply` ends (`Waking`, a guard
+that drops as it returns and on the unwind, once the records not landed
+are put back): told as it returned alone, a panic after a record landed
+-- before the next one's sink call, in a later batch's linking -- woke no
+one for the records landed before it, noted and counted, and a reader
+waiting on the replica for one of them (`Fennec-After`, a subscriber)
+waited on, the next `apply` beginning past them. Still once an `apply`:
+a record's cost is the same.
 
 A frame is read whole before it changes anything -- the row it writes
 over from where the store holds it, its own from its payload, its op a
@@ -753,8 +769,24 @@ after it put back, the file opened again holding what the sink took (32
 cases: 16 failed as #512 was first written, every one on main);
 `a_refused_record_is_put_back_with_every_record_after_it` refuses each
 record in turn (8 cases, each failing as first written and on main);
+`records_making_and_dropping_a_collection_are_put_back_from_any_one_on`
+does the same over eight records in one `apply` landing in three groups
+-- a `put` to `u` and one to `t`, `x` made with a graph and `@text`, a
+block writing `x`, `u` and `x`, a `put` to `u` and one to `x`, `x` dropped
+and a `put` to `u` -- each refused, panicking before its sink call and in
+it (24 cases): the records before it as they landed, it whole where the
+sink had it, a collection made after it taken off and one dropped back,
+the replica failed but before the sink call, the log empty, the watcher
+told of the records landed, and the rest applied again the primary's
+state; `a_panic_after_a_record_landed_wakes_whoever_waits_for_it` the
+first of two records landed and the second's panic before its sink call
+(it and 14 of the 24 failed without `Waking`);
 `a_frame_that_does_not_read_changes_nothing` a payload that is no document
-and an op of neither, alone and after a frame that read;
+and an op of neither, alone and after a frame that read, and alone `t`'s
+graph counting no change: read after the frame went into the store, the
+payload's frame was put back as a torn write, the rows and indexes as
+before but its row placed in the graph again, so that the rest of the
+test failed only with the reading first and `torn` both undone;
 `a_record_refused_part_way_is_put_back_whole` a block's write to a
 collection the replica does not hold; and `tests/replication.rs`'s
 `a_panic_applying_a_write_ends_the_follower_and_never_its_halt` the

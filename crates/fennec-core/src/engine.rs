@@ -4257,6 +4257,37 @@ impl Drop for Handing<'_> {
     }
 }
 
+/// The watcher told of the records [`Database::apply`] landed, from the
+/// change at `before` on, as it ends however it ends: dropped as it
+/// returns, and on a panic's unwind, once the records not landed are put
+/// back. Told as it returned alone, a panic after a record landed -- in
+/// the next one's upkeep, before its sink call, in a later batch's
+/// linking -- woke no one for the records landed before it, noted and
+/// counted: a reader waiting for one of them on the replica
+/// (`Fennec-After`, a subscriber) waited on, and the next `apply` began
+/// past them. Once an `apply`, as before: the cost of a record is the
+/// same.
+struct Waking<'a> {
+    db: &'a mut Database,
+    before: u64,
+}
+
+impl Drop for Waking<'_> {
+    fn drop(&mut self) {
+        let db = &*self.db;
+        let after = db.changes.seq();
+        if after == self.before {
+            return;
+        }
+        if let Some(w) = &db.watcher {
+            #[cfg(not(target_arch = "wasm32"))]
+            w.landed(db, self.before);
+            #[cfg(target_arch = "wasm32")]
+            w.notify(after);
+        }
+    }
+}
+
 pub struct Database {
     collections: Names<Collection>,
     order: Vec<String>,
@@ -6458,7 +6489,8 @@ impl Database {
     /// refusal of one puts back it and every record after it, and stops
     /// writes; from the sink call on a panic fails the database
     /// ([`Self::apply_unwound`]), the record in the sink's hands whole in
-    /// memory and those after it put back ([`Handing`]).
+    /// memory and those after it put back ([`Handing`]). The watcher hears
+    /// of the records landed however it ends ([`Waking`]).
     pub fn apply(&mut self, records: &[u8]) -> Result<usize> {
         self.refuse_if_failed()?;
         // A block open is its opener's, whose lock this is: the primary's
@@ -6468,28 +6500,30 @@ impl Database {
                 "a block is open: a primary's writes wait for it".into(),
             ));
         }
-        let before = self.changes.seq();
-        let applied = self.unwinding(|db| db.apply_records(records), Self::apply_unwound);
-        // Every record not landed, the last write whole: an error may come
-        // part way into a schema change's upkeep of its indexes.
+        let g = Waking {
+            before: self.changes.seq(),
+            db: self,
+        };
+        let db = &mut *g.db;
+        let applied = db.unwinding(|db| db.apply_records(records), Self::apply_unwound);
+        // Every record not landed put back. `torn` reaches the last entry
+        // alone, and acts on a frame's alone: a frame is read whole before
+        // its entry, nothing after which can fail, and a schema change's
+        // entry puts back what it built whatever `torn` says, so no error
+        // leaves a write part way today. Kept for a step that can fail
+        // added after a frame's entry -- its row put back whole, never
+        // indexed twice -- at the cost of an error's put-back alone: its
+        // last frame taken out of every index and put back in whole.
         if applied.is_err() {
-            self.put_back_applied((0, 0), true);
+            db.put_back_applied((0, 0), true);
         }
         // A large one's log let go of, as a large block's buffers are.
-        if self.spare.was.capacity() > 1 << 10 || self.spare.marks.capacity() > 1 << 10 {
-            self.spare = Block::default();
+        if db.spare.was.capacity() > 1 << 10 || db.spare.marks.capacity() > 1 << 10 {
+            db.spare = Block::default();
         }
         #[cfg(not(target_arch = "wasm32"))]
-        self.hand_over_when_due();
-        let after = self.changes.seq();
-        if after != before {
-            if let Some(w) = &self.watcher {
-                #[cfg(not(target_arch = "wasm32"))]
-                w.landed(self, before);
-                #[cfg(target_arch = "wasm32")]
-                w.notify(after);
-            }
-        }
+        db.hand_over_when_due();
+        drop(g);
         applied
     }
 

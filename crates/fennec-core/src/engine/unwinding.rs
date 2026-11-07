@@ -1161,13 +1161,201 @@ mod torn {
         );
     }
 
+    /// A watcher keeping each change it is told the counter reached: what
+    /// wakes a server's readers waiting for a write (`Hub`).
+    #[derive(Clone, Default)]
+    struct Heard(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl Watcher for Heard {
+        fn notify(&self, seq: u64) {
+            self.0.lock().unwrap().push(seq);
+        }
+    }
+
+    /// A replica in memory over [`made_on`]'s rows, following, its sink
+    /// refusing what the test says and its watcher heard.
+    fn heard_replica() -> (Database, Refusing, Heard) {
+        let sink = Refusing::default();
+        let mut db = made_on(Database::with_sink(Box::new(sink.clone())));
+        db.follow(vec![(7, 0)]).expect("follow");
+        let heard = Heard::default();
+        db.set_watcher(std::sync::Arc::new(heard.clone()));
+        (db, sink, heard)
+    }
+
+    /// A panic before a record's sink call puts back that one and those
+    /// after it, and keeps those landed before it in the same `apply`,
+    /// noted and counted: whoever waits for one of them is woken. Told
+    /// only as `apply` returned, the watcher heard nothing, and a reader
+    /// waiting on the replica for the first record's change waited on --
+    /// the next `apply` began past it.
+    #[test]
+    fn a_panic_after_a_record_landed_wakes_whoever_waits_for_it() {
+        let (records, _) = shaped(Write::Insert, Shape::After);
+        let each = each_record(&records);
+        let steps = steps(&each);
+        let (mut db, _, heard) = heard_replica();
+        arm("before", 1);
+        let r = catch_unwind(AssertUnwindSafe(|| db.apply(&records)));
+        assert!(r.is_err(), "no panic");
+        assert!(db.failure().is_none(), "the replica failed");
+        assert_eq!(
+            state(&db),
+            steps[1],
+            "the first landed, the second put back"
+        );
+        assert_eq!(
+            *heard.0.lock().unwrap(),
+            [steps[1].seq],
+            "the first's waiters"
+        );
+    }
+
+    /// `x`: a vector in a graph of its own and words under `@text`, made
+    /// and dropped among a replica's records.
+    fn x_schema() -> Schema {
+        let vector = VectorIndexSpec::default().resolved();
+        Schema::new(
+            "x",
+            vec![
+                Field::new("w", DataType::Vector(4, VecPrec::F32))
+                    .indexed(IndexKind::Vector(vector)),
+                Field::new("words", DataType::Text)
+                    .indexed(IndexKind::Text(TextIndexSpec::default())),
+            ],
+        )
+        .expect("x")
+    }
+
+    fn put_x(k: i64) -> Statement {
+        let doc = [
+            ("w", Value::Vector(vec![k as f32, 0.25, 1.0, 0.5])),
+            ("words", text(&format!("ember{k} quartz"))),
+        ];
+        Statement::Put {
+            collection: "x".into(),
+            docs: vec![(doc.into_iter())
+                .map(|(f, v)| (f.to_string(), Expr::Lit(v)))
+                .collect()],
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        }
+    }
+
+    /// Eight records in one `apply`, schema changes among them and writes
+    /// to three collections, landing in three groups as their vectors wait
+    /// together: a `put` to `u`, one to `t`, `x` made (the first group,
+    /// linked as `x` is made), a block of a `put` to `x`, one to `u` and
+    /// another to `x`, a `put` to `u`, one to `x`, `x` dropped (the second,
+    /// linked as `x` goes), and a `put` to `u`. Each record refused, a
+    /// panic before its sink call and one in it: the records before it
+    /// landed and kept, it whole in memory where the sink had it, those
+    /// after it put back -- a collection made taken off, one dropped back
+    /// with its rows and indexes -- the replica failed but before the sink
+    /// call, nothing of the log left behind, and the watcher told of the
+    /// records landed. Put back before the sink call, the rest applied
+    /// again give the primary's state.
+    #[test]
+    fn records_making_and_dropping_a_collection_are_put_back_from_any_one_on() {
+        let (records, primary) = landed(|p| {
+            p.execute(&put_u(3))?;
+            p.execute(&write(Write::Insert))?;
+            p.execute(&Statement::CreateCollection {
+                schema: x_schema(),
+                if_not_exists: false,
+            })?;
+            p.begin()?;
+            p.execute(&put_x(1))?;
+            p.execute(&put_u(4))?;
+            p.execute(&put_x(2))?;
+            p.commit()?;
+            p.execute(&put_u(5))?;
+            p.execute(&put_x(3))?;
+            p.execute(&Statement::DropCollection {
+                name: "x".into(),
+                if_exists: false,
+            })?;
+            p.execute(&put_u(6)).map(drop)
+        });
+        let each = each_record(&records);
+        assert_eq!(each.len(), 8, "the records");
+        let steps = steps(&each);
+        assert_eq!(steps[8], primary, "the replica's state is the primary's");
+        let (mut cases, mut failed) = (0, Vec::new());
+        for k in 0..each.len() {
+            for how in ["refused", "before", "sink"] {
+                let tag = format!("record {k}, {how}");
+                cases += 1;
+                let case = || {
+                    let (mut db, sink, heard) = heard_replica();
+                    assert_eq!(state(&db), steps[0], "{tag}: made");
+                    match how {
+                        "refused" => *sink.0.lock().unwrap() = Some(k),
+                        at => arm(at, k),
+                    }
+                    let r = catch_unwind(AssertUnwindSafe(|| db.apply(&records)));
+                    match r {
+                        Ok(r) if how == "refused" => {
+                            assert!(matches!(r, Err(Error::Io(_))), "{tag}: {r:?}")
+                        }
+                        Ok(r) => panic!("{tag}: no panic but {r:?}"),
+                        Err(_) => assert!(how != "refused", "{tag}: a panic"),
+                    }
+                    let fails = how != "before";
+                    assert_eq!(db.failure().is_some(), fails, "{tag}: failed");
+                    assert!(!db.in_block(), "{tag}: a block left open");
+                    assert!(!db.landing, "{tag}: the landing left marked");
+                    assert!(db.spare.was.is_empty(), "{tag}: entries left in the log");
+                    assert!(db.spare.marks.is_empty(), "{tag}: marks left in the log");
+                    let held = match how {
+                        "sink" => State {
+                            seq: steps[k].seq,
+                            ..steps[k + 1].clone()
+                        },
+                        _ => steps[k].clone(),
+                    };
+                    assert_eq!(state(&db), held, "{tag}: in memory");
+                    unfed(&db, steps[k].seq, &tag);
+                    let woken = (k > 0).then_some(steps[k].seq);
+                    assert_eq!(
+                        *heard.0.lock().unwrap(),
+                        Vec::from_iter(woken),
+                        "{tag}: woken"
+                    );
+                    if !fails {
+                        db.apply(&each[k..].concat()).expect("the rest");
+                        assert_eq!(state(&db), primary, "{tag}: the rest applied");
+                    }
+                };
+                if catch_unwind(AssertUnwindSafe(case)).is_err() {
+                    failed.push(tag);
+                }
+                PANIC_AT.with(|p| p.set(None));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "{} of {cases} failed: {failed:#?}",
+            failed.len()
+        );
+        assert_eq!(cases, 24);
+    }
+
     /// A frame that does not read -- a payload no document, an op neither
     /// a put nor a del -- is refused as corrupt before it changes anything,
     /// alone and after a frame that read, which is put back. Read from the
     /// store after the frame went in, a payload that did not read was put
     /// back by difference into indexes it had never left, `t`'s row 1 in
     /// its text indexes twice; and an op of neither was taken, the row out
-    /// of its indexes and the store still holding it.
+    /// of its indexes and the store still holding it. Alone, nothing of it
+    /// is touched: `t`'s graph counts no change. Taken into the store and
+    /// refused after, a payload's frame was put back as a torn write --
+    /// what an error's put-back asks, which held the rows and indexes as
+    /// before -- its row taken out of the graph and placed in it again.
     #[test]
     fn a_frame_that_does_not_read_changes_nothing() {
         let (records, after) = landed(|p| p.execute(&write(Write::Over)).map(drop));
@@ -1177,6 +1365,11 @@ mod torn {
         let path = scratch.0.join("unread.fennec");
         let mut db = replica(&path);
         let before = state(&db);
+        let graphs = |db: &Database| -> Vec<u64> {
+            (db.collections["t"].vectors.iter())
+                .map(|(_, g)| g.changes())
+                .collect()
+        };
         let bad = [
             ("a payload no document", Store::frame(OP_PUT, 1, &[0xfe; 4])),
             ("an op of neither", Store::frame(7, 1, &[])),
@@ -1189,9 +1382,13 @@ mod torn {
                     false => Vec::new(),
                 };
                 body.extend_from_slice(frame);
+                let graphed = graphs(&db);
                 let r = db.apply(&framed(REC_DATA, one.cid, &body));
                 assert!(matches!(r, Err(Error::Corrupt(_))), "{tag}: {r:?}");
                 assert!(db.failure().is_none(), "{tag}: the replica failed");
+                if !first {
+                    assert_eq!(graphs(&db), graphed, "{tag}: the graph touched");
+                }
                 assert_eq!(state(&db), before, "{tag}: put back");
                 unfed(&db, before.seq, &tag);
             }

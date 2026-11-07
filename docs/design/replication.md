@@ -409,7 +409,9 @@ allocation -- and a request sent with `Fennec-After: <n>` is served once
 the database holds change `n`, or answered 504 with where it stands after
 `Fennec-Wait` (5 s, 30 at most): never from before the write. A replica's
 applied records reach the hub through `Database::apply`'s watcher, so the
-wait is the subscriptions' `Condvar`. Held back, a replica answered a read
+wait is the subscriptions' `Condvar`, told of the records landed however
+`apply` ends -- a panic after one landed too (`Waking`,
+[engine.md](engine.md#blocks)). Held back, a replica answered a read
 without the header from before the write and with it after 300 ms, as the
 test holds it. It costs the server nothing measurable -- 37 500 puts a
 second against 37 700 from a client that does not parse headers -- while
