@@ -477,7 +477,7 @@ fn looking() {
     }
 }
 
-fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
     (p.downcast_ref::<&str>().map(|s| s.to_string()))
         .or_else(|| p.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "a panic".into())

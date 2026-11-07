@@ -12,7 +12,12 @@ primary back from a crash holds every write any replica was sent. A replica
 applies them with `Database::apply`, which does the write path's index upkeep
 and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
-where it stopped. So every write goes through `wal`, and a record moves the
+where it stopped. A record is handed on as a block lands, whole in memory
+first, and one that fails or a panic stops part way is put back whole,
+with every record after it not landed, never half of it served; the follower catches the panic with the lock
+held, as a write it could not apply, and connects again for an image --
+or stops, where the panic came from the sink call on and failed the copy
+([engine.md](engine.md#blocks)). So every write goes through `wal`, and a record moves the
 counter by the writes it holds (a block's, `writes_in`); a record that moved
 no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
@@ -404,7 +409,9 @@ allocation -- and a request sent with `Fennec-After: <n>` is served once
 the database holds change `n`, or answered 504 with where it stands after
 `Fennec-Wait` (5 s, 30 at most): never from before the write. A replica's
 applied records reach the hub through `Database::apply`'s watcher, so the
-wait is the subscriptions' `Condvar`. Held back, a replica answered a read
+wait is the subscriptions' `Condvar`, told of the records landed however
+`apply` ends -- a panic after one landed too (`Waking`,
+[engine.md](engine.md#blocks)). Held back, a replica answered a read
 without the header from before the write and with it after 300 ms, as the
 test holds it. It costs the server nothing measurable -- 37 500 puts a
 second against 37 700 from a client that does not parse headers -- while
