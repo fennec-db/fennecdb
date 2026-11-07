@@ -1,14 +1,16 @@
 //! End to end: FennecQL -> engine -> result.
 
 use fennec_core::prelude::*;
-use fennec_ql::{parse, parse_one};
+use fennec_ql::{parse, parse_for, parse_one};
 
 fn run(db: &mut Database, sql: &str) -> Response {
     run_with(db, sql, &[])
 }
 
+/// `sql` read as a server reads it: a list a field keeps as written read so
+/// (`parse_for`).
 fn run_with(db: &mut Database, sql: &str, params: &[Value]) -> Response {
-    let stmts = parse(sql).expect("parse");
+    let stmts = parse_for(db, sql).expect("parse");
     let mut last = Response::Affected(0);
     for s in &stmts {
         last = db.execute_with(s, params).expect("execute");
@@ -18,7 +20,7 @@ fn run_with(db: &mut Database, sql: &str, params: &[Value]) -> Response {
 
 /// A `run` that does not swallow the error: for the negative cases.
 fn try_run(db: &mut Database, sql: &str) -> fennec_core::error::Result<Response> {
-    let stmts = parse(sql).expect("parse");
+    let stmts = parse_for(db, sql).expect("parse");
     let mut last = Response::Affected(0);
     for s in &stmts {
         last = db.execute_with(s, &[])?;
@@ -656,10 +658,12 @@ fn mismatched_types_are_not_equal() {
     assert_eq!(r.rows().unwrap().rows.len(), 0);
 }
 
-/// An all-numeric array coming from the JSON side is parsed as a vector (for
-/// embedding transfer). When the target field is a list it has to be
-/// converted back; otherwise `[int]`/`[float]` fields could not be filled
-/// from the browser and fennec-server paths.
+/// An all-numeric array coming from the JSON side, one number no integer,
+/// is parsed as a vector (for embedding transfer); integers alone are the
+/// list of them. An `[int]` or a `[float]` keeps its numbers as written, so
+/// a statement handing one such a vector is refused, and its parameters are
+/// read again as written: as `f32`s, 16777217 was 16777216 and 0.1
+/// 0.10000000149011612.
 #[test]
 fn json_number_array_fills_list_fields() {
     let mut db = Database::new();
@@ -668,19 +672,27 @@ fn json_number_array_fills_list_fields() {
         "create collection j (numbers [int], ratios [float])",
     );
 
-    let params = fennec_core::json::parse_params("[[1,2,3]]").expect("json params");
-    assert_eq!(params[0].type_name(), "vector");
-    run_with(&mut db, "put j {numbers: $1}", &params);
+    let src = "[[1,2,16777217], [0.1]]";
+    let quick = fennec_core::json::parse_params(src).expect("json params");
+    assert_eq!(quick[0].type_name(), "list");
+    assert_eq!(quick[1].type_name(), "vector");
+    let stmts = fennec_ql::parse("put j {numbers: $1, ratios: $2}").unwrap();
+    assert_eq!(db.exactly(&stmts[0]).params, [0, 1]);
+    let e = db.execute_with(&stmts[0], &quick).unwrap_err();
+    assert!(e.to_string().contains("an [int], a [float]"), "{e}");
+    let exact = fennec_core::json::parse_params_exact(src).expect("json params");
+    db.execute_with(&stmts[0], &exact).unwrap();
 
-    let r = run(&mut db, "get j select numbers");
+    let r = run(&mut db, "get j select numbers, ratios");
+    let row = &r.rows().unwrap().rows[0].values;
     assert_eq!(
-        r.rows().unwrap().rows[0].values[0],
-        Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        row[0],
+        Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(16_777_217)])
     );
+    assert_eq!(row[1], Value::List(vec![Value::Float(0.1)]));
 
     // A non-integer value cannot be written into an `[int]` field.
-    let stmts = fennec_ql::parse("put j {numbers: $1}").unwrap();
-    let bad = fennec_core::json::parse_params("[[1.5]]").unwrap();
+    let bad = fennec_core::json::parse_params_exact("[[1.5], null]").unwrap();
     assert!(db.execute_with(&stmts[0], &bad).is_err());
 }
 

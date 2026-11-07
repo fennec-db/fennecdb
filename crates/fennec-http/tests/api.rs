@@ -1427,6 +1427,103 @@ fn numeric_params_keep_their_values() {
     assert_eq!(r.body.trim(), r#"[{"n":987654321,"price":0.1}]"#);
 }
 
+/// A number past an int's range is refused naming its field -- a REST
+/// insert's, a PATCH's and a `/query` parameter's alike, 400 -- never
+/// clamped to the nearest int; the ends are taken as written.
+#[test]
+fn an_int_past_its_range_is_refused_naming_the_field() {
+    let h = start(Config::default());
+    let refused = |r: Res, n: &str| {
+        assert_eq!(r.status, 400, "{n}: {}", r.body);
+        assert!(
+            r.body.contains("field `year`")
+                && r.body
+                    .contains("from -9223372036854775808 to 9223372036854775807"),
+            "{n}: {}",
+            r.body
+        );
+    };
+    for n in [
+        "1e300",
+        "-1e300",
+        "9223372036854775808",
+        "-9223372036854775809",
+    ] {
+        let body = format!(r#"{{"title":"far","year":{n}}}"#);
+        refused(call(h.port, "POST", "/articles", Some(&body)), n);
+        let body = format!(r#"{{"year":{n}}}"#);
+        refused(
+            call(h.port, "PATCH", "/articles?year=eq.2024", Some(&body)),
+            n,
+        );
+        let body =
+            format!(r#"{{"query":"put articles {{title: $1, year: $2}}","params":["far", {n}]}}"#);
+        refused(call(h.port, "POST", "/query", Some(&body)), n);
+    }
+    assert_eq!(get(h.port, "/articles?count").body.trim(), "{\"count\":3}");
+    assert_eq!(
+        get(h.port, "/articles?year=eq.2024&count").body.trim(),
+        "{\"count\":1}"
+    );
+    let r = call(
+        h.port,
+        "POST",
+        "/articles",
+        Some(
+            r#"[{"title":"max","year":9223372036854775807},
+                {"title":"min","year":-9223372036854775808}]"#,
+        ),
+    );
+    assert_eq!(r.status, 201, "{}", r.body);
+    for (title, year) in [
+        ("max", "9223372036854775807"),
+        ("min", "-9223372036854775808"),
+    ] {
+        let r = get(h.port, &format!("/articles?select=year&title=eq.{title}"));
+        assert_eq!(r.body.trim(), format!(r#"[{{"year":{year}}}]"#));
+    }
+}
+
+/// An `[int]` and a `[float]` keep a list's numbers as written -- a REST
+/// insert's, a PATCH's, a `/query` text's and parameter's alike: read into
+/// a vector's `f32`s, as a list of numbers alone is read, i64::MIN was
+/// -2^63 and refused, 16777217 was 16777216 and 0.1 0.10000000149011612.
+#[test]
+fn an_int_or_float_list_keeps_its_numbers() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection lists (k int, xs [int], fs [float])"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let (xs, fs) = (
+        "[-9223372036854775808,9223372036854775807,16777217]",
+        "[0.1,16777217.5]",
+    );
+    let doc = |k: u8| format!(r#"{{"k":{k},"xs":{xs},"fs":{fs}}}"#);
+    let r = call(h.port, "POST", "/lists", Some(&doc(1)));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 2, xs: {xs}, fs: {fs}}}"}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 3, xs: $1, fs: $2}}","params":[{xs},{fs}]}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(q(r#"{"query":"put lists {k: 4}"}"#).status, 200);
+    let body = format!(r#"{{"xs":{xs},"fs":{fs}}}"#);
+    let r = call(h.port, "PATCH", "/lists?k=eq.4", Some(&body));
+    assert_eq!(r.body.trim(), r#"{"updated":1}"#);
+    let r = get(h.port, "/lists?select=xs,fs&order=k.asc");
+    assert_eq!(r.body.trim(), format!("[{body},{body},{body},{body}]"));
+    let near = "[-9223372036854775808,9223372036854775807,16777216]";
+    for (list, n) in [(near, 0), (xs, 4)] {
+        let r = q(&format!(
+            r#"{{"query":"get lists where xs = $1 count","params":[{list}]}}"#
+        ));
+        assert_eq!(r.body.trim(), format!(r#"[{{"count":{n}}}]"#), "{list}");
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

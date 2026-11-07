@@ -3405,7 +3405,7 @@ impl<'a> Tuple<'a> {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
             };
-            vals.push(v.coerce(ty).unwrap_or(Value::Null));
+            vals.push(v.coerce_key(ty).unwrap_or(Value::Null));
         }
         Ok(self.laid(&vals))
     }
@@ -3415,7 +3415,7 @@ impl<'a> Tuple<'a> {
     fn prefix_of(&self, row: &[Value]) -> Option<crate::composite::KeyBytes> {
         let mut vals = Vec::with_capacity(self.parts.len());
         for (pos, ty) in &self.parts {
-            vals.push(column(row, *pos).coerce(ty).unwrap_or(Value::Null));
+            vals.push(column(row, *pos).coerce_key(ty).unwrap_or(Value::Null));
         }
         self.laid(&vals)
     }
@@ -3547,7 +3547,7 @@ impl<'a> Probe<'a> {
                 Ok(false)
             }
             Probe::Hash(map, ty) => {
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_key(ty) else {
                     return Ok(false);
                 };
                 // The child's index decides how its key compares: a
@@ -3595,7 +3595,7 @@ impl<'a> Probe<'a> {
                 // an `int` key has to become `10.0` before it can find
                 // `price = 10.0`. Skipping it lets the mere presence of an
                 // index change the answer.
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_key(ty) else {
                     return;
                 };
                 let Some(ids) = map.get(&map.key(&k)) else {
@@ -12702,8 +12702,8 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
-                 and this one was read into a vector's f32s: read the text with \
+                "a json field, a point, an [int], a [float] or an `in $n` list keeps a list of \
+                 numbers as written, and this one was read into a vector's f32s: read the text with \
                  fennec_ql::parse_for, a parameter as JSON"
                     .into(),
             )),
@@ -12733,9 +12733,9 @@ impl Database {
 /// What [`exactly_for`]'s walk knows of a collection a statement reads.
 #[derive(Clone, Copy)]
 enum Known<'a> {
-    /// Its schema, and whether a field of it keeps a list of numbers as
+    /// Its schema, and which of its fields keep a list of numbers as
     /// written: a collection with none is asked of no comparison.
-    Schema(&'a Schema, bool),
+    Schema(&'a Schema, Keeps<'a>),
     /// Another collection than the one [`exactly_for`] was handed: every
     /// field is taken to keep numbers, so its lists are read as written --
     /// slower for a vector, never wrong.
@@ -12744,15 +12744,42 @@ enum Known<'a> {
     Missing,
 }
 
+/// The fields of a schema keeping a list of numbers as written: none, the
+/// one -- a vector's name, put beside an `[int]`, is compared with that
+/// field's alone, where a look through the schema's was 140 of the 410
+/// instructions `exactly` took -- or several.
+#[derive(Clone, Copy)]
+enum Keeps<'a> {
+    None,
+    One(&'a str),
+    Many,
+}
+
 impl<'a> Known<'a> {
     fn of(schema: &'a Schema) -> Known<'a> {
-        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+        let mut keeps = Keeps::None;
+        for f in &schema.fields {
+            if f.ty.keeps_numbers() {
+                keeps = match keeps {
+                    Keeps::None => Keeps::One(&f.name),
+                    _ => Keeps::Many,
+                };
+            }
+        }
+        Known::Schema(schema, keeps)
     }
 
     /// Whether `name` keeps a list of numbers as written ([`names_json`]).
     fn keeps(self, name: &str) -> bool {
         match self {
-            Known::Schema(schema, true) => names_json(schema, name),
+            // A path's field is a json one, or the path is refused where it
+            // is read.
+            Known::Schema(_, Keeps::One(field)) => {
+                let (name, field) = (name.as_bytes(), field.as_bytes());
+                name.get(..field.len()) == Some(field)
+                    && matches!(name.get(field.len()), None | Some(b'.'))
+            }
+            Known::Schema(schema, Keeps::Many) => names_json(schema, name),
             Known::Unknown => true,
             _ => false,
         }
@@ -12810,12 +12837,23 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     }
     // The value given first: a key is looked up only for a list of numbers
     // or a parameter, so a `put` of 1 000 rows looks up the vector field's
-    // name and none of the others.
-    // A collection with no json field or point is asked nothing of its
-    // values (`Known::Schema(_, false)`), checked once.
-    let any = !matches!(k, Known::Schema(_, false));
+    // name and none of the others -- but where one field keeps its numbers,
+    // whose name is a compare, which goes first.
+    // A collection with no field keeping its numbers -- json, a point, an
+    // `[int]`, a `[float]` -- is asked nothing of its values
+    // (`Keeps::None`), checked once.
+    let (any, one) = match k {
+        Known::Schema(_, Keeps::None) => (false, false),
+        Known::Schema(_, Keeps::One(_)) => (true, true),
+        _ => (true, false),
+    };
     let mut pair = |(key, e): &(String, Expr)| {
-        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
+        let listed = |e: &Expr| matches!(e, Expr::Param(_)) || e.reads_vectors();
+        let asked = match one {
+            true => k.keeps(key) && listed(e),
+            false => any && listed(e) && k.keeps(key),
+        };
+        if asked {
             given(e, out);
         }
         // A literal or a parameter holds no call and no inner `get`: a
@@ -12933,8 +12971,9 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
     e.each_child(&mut |c| expr_needs(of, k, c, out));
 }
 
-/// Whether `name` is a json field of `schema` or a path into one, or a
-/// point -- a field that keeps a list of numbers as written.
+/// Whether `name` is a json field of `schema` or a path into one, a
+/// point, an `[int]` or a `[float]` -- a field that keeps a list of
+/// numbers as written ([`DataType::keeps_numbers`]).
 fn names_json(schema: &Schema, name: &str) -> bool {
     // A path's field is a json one, or the path is refused where it is read.
     let field = name.split_once('.').map_or(name, |(f, _)| f);
@@ -13010,18 +13049,39 @@ fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
 }
 
 fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
-    if let Some((pos, keys)) = schema.path_of(k)? {
-        let f = &schema.fields[pos];
-        let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
-        whole.set_path(&f.name, keys, v)?;
-        doc.set(&f.name, whole.coerce(&f.ty)?);
-        return Ok(());
-    }
-    let f = schema
-        .field(k)
-        .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
-    doc.set(k, v.coerce(&f.ty)?);
+    // A field and a path into one meet one `coerce`: a site each, its
+    // refusal named in both, was 153 bytes more of the browser module.
+    let (f, v) = match schema.path_of(k)? {
+        Some((pos, keys)) => {
+            let f = &schema.fields[pos];
+            let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
+            whole.set_path(&f.name, keys, v)?;
+            (f, whole)
+        }
+        None => {
+            let f = schema.field(k).ok_or_else(|| {
+                Error::NotFound(format!("field `{k}` in collection `{}`", schema.name))
+            })?;
+            (f, v)
+        }
+    };
+    doc.set(&f.name, v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?);
     Ok(())
+}
+
+/// A value a field's type refused, the field named: of a document of
+/// several fields, `expected int, found text` or an int's range left its
+/// writer to find which, where the importer names a row's field
+/// (`fennec_import::load`) and a call its argument. Out of line, on the
+/// refusal alone: a value taken goes by as it did. Joined by `cat`, 132
+/// bytes of the browser module, where a `format!` was 148.
+#[cold]
+#[inline(never)]
+fn in_field(name: &str, e: Error) -> Error {
+    match e {
+        Error::Type(m) => Error::Type(crate::declared::cat(&["field `", name, "`: ", &m])),
+        e => e,
+    }
 }
 
 /// Whether the row `id` of `c` is past its time: its `@ttl` field, at
@@ -13182,10 +13242,11 @@ fn updated(
         let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
             Some(p) => {
-                if schema.fields[p].required && matches!(v, Value::Null) {
-                    return Err(not_null(&schema.fields[p].name));
+                let f = &schema.fields[p];
+                if f.required && matches!(v, Value::Null) {
+                    return Err(not_null(&f.name));
                 }
-                doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?
+                doc.fields[p].1 = v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?
             }
             None => set_field(schema, &mut doc, a.key, v)?,
         }

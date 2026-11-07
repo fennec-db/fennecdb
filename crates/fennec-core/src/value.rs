@@ -70,13 +70,17 @@ impl DataType {
     }
 
     /// Whether a field of the type keeps a list of numbers as written: a
-    /// json field, and a point, whose degrees are `f64`s -- where a reader
-    /// with no schema reads such a list into a vector's `f32`s, which would
-    /// move a point by up to 1.7 m (`Database::exactly`).
+    /// json field, a point, whose degrees are `f64`s, and an `[int]` or a
+    /// `[float]` -- where a reader with no schema reads such a list into a
+    /// vector's `f32`s, which would move a point by up to 1.7 m, store
+    /// 16777217 as 16777216 and `0.1` as 0.10000000149011612, and refuse
+    /// `i64::MIN`, an `f32` of -2^63 (`Database::exactly`).
     pub fn keeps_numbers(&self) -> bool {
         match self {
             DataType::Json | DataType::Geo => true,
-            DataType::List(t) => t.keeps_numbers(),
+            DataType::List(t) => {
+                matches!(**t, DataType::Int | DataType::Float) || t.keeps_numbers()
+            }
             _ => false,
         }
     }
@@ -293,7 +297,14 @@ impl Value {
         match (ty, self) {
             (DataType::Bool, Value::Bool(b)) => Ok(Value::Bool(b)),
             (DataType::Int, Value::Int(i)) => Ok(Value::Int(i)),
-            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => Ok(Value::Int(f as i64)),
+            // `as` saturates: `1e300` was filed as 9223372036854775807. A
+            // whole float under 2^63 either side is the int it says, and
+            // only a float takes this arm -- an integer written as one is
+            // read as an `i64` and never meets the test.
+            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => match f.abs() < I64_END {
+                true => Ok(Value::Int(f as i64)),
+                false => Err(past_int()),
+            },
             (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
             (DataType::Float, Value::Int(i)) => Ok(Value::Float(i as f64)),
             (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
@@ -354,11 +365,12 @@ impl Value {
             }
             // On the JSON side an all-numeric array is parsed as a vector
             // (json.rs), because `near $1` is evaluated without schema
-            // context. If the target field is a list it is converted back
-            // here; without this arm `[int]`/`[float]` fields could not be
-            // filled from the browser and fennec-server paths. Values drop to f32
-            // at that stage, so `[float]` loses precision one way; `[int]`
-            // stays lossless for whole numbers.
+            // context. An `[int]` or a `[float]` keeps its numbers as
+            // written (`DataType::keeps_numbers`): a statement handing one
+            // a vector is read again, or refused, before it comes here
+            // (`Database::exactly`), and this arm takes what `f32`s reach
+            // it otherwise, into an `[int]` where each is whole and short
+            // of 2^63.
             (DataType::List(inner), Value::Vector(v)) => {
                 let mut out = Vec::with_capacity(v.len());
                 for f in v {
@@ -366,12 +378,13 @@ impl Value {
                 }
                 Ok(Value::List(out))
             }
-            (DataType::List(inner), Value::List(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(it.coerce(inner)?);
+            // In place: a list of integers alone is read as one, and a
+            // second `Vec` a list was an allocation an `[int]`'s insert paid.
+            (DataType::List(inner), Value::List(mut items)) => {
+                for it in items.iter_mut() {
+                    *it = std::mem::replace(it, Value::Null).coerce(inner)?;
                 }
-                Ok(Value::List(out))
+                Ok(Value::List(items))
             }
             (DataType::Json, v) => json_value(v, 0),
             // A point is `[lon, lat]` once read, a list of two floats: a
@@ -386,6 +399,19 @@ impl Value {
                 v.type_name()
             ))),
         }
+    }
+
+    /// [`Value::coerce`] for a key looked up by, never written: -2^63 is
+    /// `i64::MIN` exactly, which only a write refuses, since its text may
+    /// have been past it ([`I64_END`]). A `lookup`'s parent holding the
+    /// float -2^63 finds the child holding `i64::MIN`, as `=` finds it.
+    pub(crate) fn coerce_key(self, ty: &DataType) -> Result<Value> {
+        if let (DataType::Int, Value::Float(f)) = (ty, &self) {
+            if *f == -I64_END {
+                return Ok(Value::Int(i64::MIN));
+            }
+        }
+        self.coerce(ty)
     }
 
     /// Backstop of the total ordering for types that cannot be compared.
@@ -559,6 +585,24 @@ fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
 
 fn not_bytes() -> Error {
     Error::Type("bytes are numbers from 0 to 255".into())
+}
+
+/// 2^63: the first `f64` past `i64::MAX`, and `i64::MIN`'s magnitude.
+/// -2^63 is `i64::MIN`, yet a float of it is refused too when written: a
+/// JSON integer past `i64::MIN` is read as the float it rounds to
+/// (`-9223372036854775809` is -2^63 exactly), and there the text that
+/// said it is gone. `i64::MIN` written as an integer is an `i64` and taken,
+/// and a key looked up by -2^63 is `i64::MIN` ([`Value::coerce_key`]).
+const I64_END: f64 = 9_223_372_036_854_775_808.0;
+
+/// The refusal of a whole float at or past [`I64_END`] going into an `int`,
+/// which a document's write names the field of (`engine::in_field`). Out of
+/// line: the range is a limit, and a limit is an error, never the nearest
+/// int it would have been cut to.
+#[cold]
+#[inline(never)]
+fn past_int() -> Error {
+    Error::Type("an int is from -9223372036854775808 to 9223372036854775807".into())
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

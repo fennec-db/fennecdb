@@ -501,10 +501,12 @@ brought `Debug` for `usize` and `Option<usize>`). The tree holds the place, neve
 the values: the parse cache's statement serves every list
 (`the_parsed_tree_holds_no_value`).
 
-Its numbers are read as written. `expr_needs` names an `in $n`'s
-parameter whatever its left side, a json field's or not (`Exactly`):
-read the quick way, `[16777217]` is a vector's `f32`s, 16777216, another
-row's id, and `[0.1]` 0.100000001. The server reads the body again as
+Its numbers are read as written. A list of integers alone is the list
+of them to every reader (`num::int_at`), so `[16777217]` is that id; one
+holding a fraction is a vector's `f32`s read the quick way, and
+`expr_needs` names an `in $n`'s parameter whatever its left side, a json
+field's or not (`Exactly`): `[0.1]` is 0.100000001 as an `f32`, and
+`[16777217, 0.5]` holds 16777216, another row's id. The server reads the body again as
 written (`api::exactly`, `/batch`'s lines and `/_call` alike); the
 browser module, handed the array apart as a vector (`vectorsApart`),
 answers `exact` and the page sends that parameter as JSON (`#run`'s
@@ -659,9 +661,10 @@ list, an object, an int past 2^53 -- answering nothing while it holds one
 row for row. Nesting is 64 levels and a path 64 keys, refused past either
 (`MAX_JSON_DEPTH`, `MAX_PATH_KEYS`), the JSON reader's recursion bounded
 with them. A json field keeps a number as written, and a list of numbers
-alone is read the quick way, into a vector's `f32`s, by every reader that
-has no schema -- the lexer (`Tok::Vector`), a query's parameters, the
-browser module's vectors handed apart -- so a vector given to one, or
+holding a fraction is read the quick way, into a vector's `f32`s, by every
+reader that has no schema -- the lexer (`Tok::Vector`), a query's
+parameters, the browser module's vectors handed apart; integers alone are
+the list of them (`Tok::Ints`, `num::int_at`) -- so a vector given to one, or
 compared with a path into one, is refused (`json_value`,
 `Database::refuse_inexact`) and the caller reads that part again as
 written: `Database::exactly` names it (the text, or parameters by place),

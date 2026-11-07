@@ -24,9 +24,11 @@ as begin
     returning id, amount
 end";
 
+/// `text` read as a server reads it: a list an `[int]` claim is given
+/// read as written (`fennec_ql::parse_for`).
 fn run(db: &mut Database, text: &str) -> Result<Response> {
     let mut last = Response::Affected(0);
-    for s in fennec_ql::parse(text).expect("parse") {
+    for s in fennec_ql::parse_for(db, text).expect("parse") {
         last = db.execute(&s)?;
     }
     Ok(last)

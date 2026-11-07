@@ -36,6 +36,7 @@ mod highlight;
 mod hooked;
 mod in_param;
 mod insert;
+mod int_range;
 mod json;
 mod language_file;
 mod limit;

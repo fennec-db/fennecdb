@@ -571,6 +571,46 @@ test('an update works out its values over the row, in the module', { skip: wasm 
   assert.equal(db.run('set hits {n: 0} where key = $1 and n = $2', ['a', 3]).count, 0);
 });
 
+test('a number past an int\'s range is refused naming its field, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, xs [int])');
+  const past = (field) => new RegExp(`field \`${field}\`: an int is from -9223372036854775808 to 9223372036854775807`);
+  // JavaScript writes 2 ** 63 as 9223372036854775808, past the range, and
+  // -(2 ** 63) as -9223372036854776000: an int past 2 ** 53 goes as text.
+  for (const n of [1e300, -1e300, 2 ** 63, -(2 ** 63)]) {
+    assert.throws(() => db.run('put t {n: $1}', [n]), past('n'), `${n}`);
+    await assert.rejects(db.from('t').insert({ n }), past('n'), `${n}`);
+  }
+  assert.throws(() => db.run('put t {n: -1e300}'), past('n'));
+  assert.throws(() => db.run('put t {n: 9223372036854775808}'), /invalid integer/);
+  // An array of integers alone goes in the JSON, read as written; one
+  // past 2 ** 53 is a float there, refused past an int all the same.
+  assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs'));
+  assert.equal(db.rows('get t count')[0].count, 0);
+  db.run('put t [{n: 9223372036854775807}, {n: -9223372036854775808}]');
+  assert.equal(db.rows('get t where n = 9223372036854775807 or n = -9223372036854775808 count')[0].count, 2);
+  db.close();
+});
+
+test('an [int] or a [float] keeps its list\'s numbers as written, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (k int, xs [int], fs [float])');
+  // As f32s, 16777217 was 16777216, 0.1 0.10000000149011612, and
+  // -9223372036854775808 the float -2 ** 63, refused past an int.
+  db.run('put t {k: 1, xs: [-9223372036854775808, 9223372036854775807, 16777217], fs: [0.1]}');
+  db.run('put t {k: 2, xs: $1, fs: $2}', [[16777217], [0.1]]);
+  db.run('put t {k: 3, xs: $1, fs: $2}', [new Float64Array([16777217]), new Float64Array([0.1])]);
+  await db.from('t').insert({ k: 4, xs: [16777217], fs: [0.1] });
+  assert.deepEqual(db.rows('get t select fs order k').map((r) => r.fs), [[0.1], [0.1], [0.1], [0.1]]);
+  assert.deepEqual(db.rows('get t where k > 1 select xs order k').map((r) => r.xs), [[16777217], [16777217], [16777217]]);
+  assert.equal(db.rows('get t where xs = [-9223372036854775808, 9223372036854775807, 16777217] count')[0].count, 1);
+  assert.equal(db.rows('get t where xs = $1 count', [[16777216]])[0].count, 0);
+  assert.equal(db.rows('get t where xs = $1 count', [[16777217]])[0].count, 3);
+  db.close();
+});
+
 test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
@@ -688,28 +728,33 @@ test('a text whose list the module asked for as JSON sends it so at once after',
   } finally {
     WebAssembly.instantiate = instantiate;
   }
-  db.run('create collection p (n int, meta json)');
-  db.run('put p {id: 16777217, n: 1}');
+  db.run('create collection p (n int, x float, meta json)');
+  db.run('put p {id: 16777217, n: 1, x: 0.1}');
   const ids = (sql, params) => db.rows(sql, params).map((r) => r.id);
-  const sql = 'get p select id where id in $1';
+  const sql = 'get p select id where x in $1';
   // The first run: sent apart as f32s, refused, sent again as JSON.
   calls = 0;
-  assert.deepEqual(ids(sql, [[16777217]]), [16777217]);
+  assert.deepEqual(ids(sql, [[0.1, 7.5]]), [16777217]);
   assert.equal(calls, 2);
   // After, the text sends its list as JSON at once, typed or not.
-  for (const list of [[16777217, 5], new Float64Array([16777217])]) {
+  for (const list of [[0.1, 5.5], new Float64Array([0.1])]) {
     calls = 0;
     assert.deepEqual(ids(sql, [list]), [16777217]);
     assert.equal(calls, 1);
   }
-  // A place the module names beside those sent as JSON already is added.
-  const two = 'get p select id where id in $1 and meta not in [$2]';
-  ids(two, [[1], 'x']);
+  // An array of integers alone goes as JSON from the start, the integers
+  // it holds: never asked for again.
   calls = 0;
-  ids(two, [[16777217], [3]]);
+  assert.deepEqual(ids('get p select id where id in $1', [[16777217]]), [16777217]);
+  assert.equal(calls, 1);
+  // A place the module names beside those sent as JSON already is added.
+  const two = 'get p select id where x in $1 and meta not in [$2]';
+  ids(two, [[0.5], 'x']);
+  calls = 0;
+  ids(two, [[0.1], [3.5]]);
   assert.equal(calls, 2);
   calls = 0;
-  ids(two, [[16777217], [3]]);
+  ids(two, [[0.1], [3.5]]);
   assert.equal(calls, 1);
   // A run with no list asks once, as it did.
   calls = 0;
