@@ -350,6 +350,7 @@ pub unsafe extern "C" fn fennec_query(
 /// Reads, runs and answers, through the code the native library answers
 /// with as well (`fennec-abi`).
 fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
+    let wide = json::wide::count();
     let mut p = match fennec_abi::prepare(sql, params_src, vectors) {
         Ok(p) => p,
         Err(e) => return json::error_to_string(&e),
@@ -358,6 +359,10 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
     collate::take_missing();
     let res = with_db(handle, |db| {
         fennec_abi::exact(db, &mut p, sql, params_src, vectors)?;
+        // Natively, where nothing is counted, every parameter is looked at.
+        if json::wide::count() != wide || cfg!(not(target_arch = "wasm32")) {
+            p.params.iter_mut().for_each(as_double);
+        }
         fennec_abi::execute(db, &p)
     });
     match res {
@@ -717,9 +722,77 @@ pub extern "C" fn fennec_stats(handle: u32) -> *mut u8 {
     boxed(out.as_bytes())
 }
 
+/// A parameter is a JavaScript value, which `JSON.stringify` wrote: a
+/// double from 1e16 up as the shortest digits reading back as it, 2^60 as
+/// `1152921504606847000` -- an int no double holds, another number than the
+/// one the page held, and as an int and a float compare by their true
+/// values, one finding none of 2^60's rows. No JavaScript value is an int
+/// no double holds, so such an int is read as the double it rounds to, the
+/// int that double is. None rounds to 2^63: `JSON.stringify` writes 2^63
+/// and past as digits past an `i64`, read as the float, and the double
+/// below it, 2^63 - 1024, as `9223372036854775000`, which rounds back to
+/// it; changing the value's kind there cost the module 126 bytes of drop
+/// glue for none of the page's values. Looked for in the page
+/// instead, before its `JSON.stringify` -- a walk of its values -- a `run`
+/// putting 1 000 documents took 2.3% longer, and after it, a match for 16
+/// digits in a row, 30%, every long fraction a match; here only a text
+/// whose reading met an int past 2^53 is looked through
+/// (`json::wide::count`).
+fn as_double(v: &mut Value) {
+    const PAST: f64 = 9_223_372_036_854_775_808.0;
+    match v {
+        Value::Int(i) => {
+            let d = *i as f64;
+            if d < PAST {
+                *i = d as i64;
+            }
+        }
+        Value::List(items) => items.iter_mut().for_each(as_double),
+        Value::Object(members) => members.iter_mut().for_each(|(_, v)| as_double(v)),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An int no double holds is the double JavaScript wrote it from; any
+    /// other is itself, inside lists and objects too. `9223372036854775000`,
+    /// what `JSON.stringify` writes of 2^63 - 1024, the greatest double short
+    /// of 2^63, is that double.
+    #[test]
+    fn a_parameter_is_the_double_javascript_held() {
+        let p60 = 1i64 << 60;
+        let mut v = Value::List(vec![
+            Value::Int(1_152_921_504_606_847_000),
+            Value::Int(p60 + 1),
+            Value::Int(p60),
+            Value::Int((1 << 53) + 1),
+            Value::Int((1 << 53) + 3),
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN),
+            Value::Int(-1_152_921_504_606_847_000),
+            Value::Object(vec![("a".into(), Value::Int(1_152_921_504_606_847_000))]),
+            Value::Float(0.5),
+            Value::Int(9_223_372_036_854_775_000),
+        ]);
+        as_double(&mut v);
+        let want = Value::List(vec![
+            Value::Int(p60),
+            Value::Int(p60),
+            Value::Int(p60),
+            Value::Int(1 << 53),
+            Value::Int((1 << 53) + 4),
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN),
+            Value::Int(-p60),
+            Value::Object(vec![("a".into(), Value::Int(p60))]),
+            Value::Float(0.5),
+            Value::Int(9_223_372_036_854_774_784),
+        ]);
+        assert_eq!(v, want);
+    }
 
     #[test]
     fn text_that_is_not_utf8_reads_as_from_utf8_lossy_reads_it() {

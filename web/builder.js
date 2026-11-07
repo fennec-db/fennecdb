@@ -246,10 +246,7 @@ export function normalize(v, what = 'value') {
   if (v === undefined) {
     throw new FennecError(`${what} is undefined -- did you mean 'null'?`);
   }
-  if (v === null || typeof v !== 'object') {
-    if (typeof v === 'number' && wide(v)) met++;
-    return v;
-  }
+  if (v === null || typeof v !== 'object') return v;
   // A param is bound where a whole value stands, never from inside a list
   // or a json value, where it would go as its own object; every builder
   // refuses it in these words (builder-golden.json).
@@ -270,23 +267,51 @@ export function normalize(v, what = 'value') {
 }
 
 /**
- * `params`, each value normalized, and known to `jsonOf` as holding no
- * number `wide` takes where none was met.
+ * `params`, each value as `normalize` makes it, and whether a number `wide`
+ * takes is among them, noted as they are made: a request's (`FennecHttp`),
+ * which `jsonOf` then writes by `JSON.stringify` alone where none is. Its
+ * own copy of `normalize`'s walk (`counted`), which the module's builder
+ * does not take: a note kept by `normalize` itself cost the module's insert
+ * of 1 000 documents 0.2% of its instructions, and a walk of the values
+ * afterwards the body of a request putting them 8.7% of its making, where
+ * this costs it 1%.
  */
 export function normalizeAll(params, what) {
-  const before = met;
-  const out = params.map((p) => normalize(p, what));
-  made.set(out, met !== before);
+  const seen = { wide: false };
+  const out = params.map((p) => counted(p, what, seen));
+  made.set(out, seen.wide);
   return out;
 }
 
-/** How many numbers `wide` takes `normalize` has met, ever. */
-let met = 0;
 /**
- * The parameters `normalize` made -- a builder's text's (`binder`), a
- * request's (`normalizeAll`) -- and whether it met a number `wide` takes
- * among them: `jsonOf` writes a value holding ones that met none, and
- * nothing else, by `JSON.stringify` alone.
+ * `normalize`'s value, a number `wide` takes noted in `seen`: a list and a
+ * plain object walked as `normalize` walks them, everything else handed to
+ * it -- a typed array coming back as its numbers.
+ */
+function counted(v, what, seen) {
+  if (typeof v === 'number') {
+    if (wide(v)) seen.wide = true;
+    return v;
+  }
+  if (Array.isArray(v)) return v.map((x) => counted(x, what, seen));
+  if (v !== null && typeof v === 'object') {
+    const proto = Object.getPrototypeOf(v);
+    if (proto === Object.prototype || proto === null) {
+      const out = {};
+      for (const [k, x] of Object.entries(v)) {
+        if (x !== undefined) out[k] = counted(x, what, seen);
+      }
+      return out;
+    }
+  }
+  const out = normalize(v, what);
+  return Array.isArray(out) ? counted(out, what, seen) : out;
+}
+
+/**
+ * The parameters `normalizeAll` made, and whether a number `wide` takes is
+ * among them: `jsonOf` writes a value holding ones without, and nothing
+ * else, by `JSON.stringify` alone.
  */
 const made = new WeakMap();
 
@@ -320,21 +345,24 @@ const MARKED = /"\\u0000fennec-int:(-?\d+)"/g;
 /**
  * `v` as JSON, as `JSON.stringify` writes it, but for a number from 2^53
  * up to 2^63 either side, every one of them whole, which goes out as every
- * digit of the int it is. `JSON.stringify(2 ** 60)` writes the shortest
+ * digit of the int it is: what a server is sent (`FennecHttp`'s bodies,
+ * the sync layer's lines). `JSON.stringify(2 ** 60)` writes the shortest
  * digits reading back as it, `1152921504606847000`, which fennecdb reads as
  * that int -- another number than 2^60, as an int and a float compare by
  * their true values -- and found none of 2^60's rows; written
  * `1152921504606846976`, it is 2^60, and JavaScript reads it back as the
  * same number. `JSON.stringify` cannot write a number's text from a
- * replacer, so such a number is marked, then the mark replaced -- only
- * where the value holds one. `params`, the parameters `v` holds, made by
- * `normalize` and found holding none -- a builder's query, a request's --
- * spare it the look: any other value -- a `run`'s own parameters -- pays
- * a walk of its numbers beside the one `JSON.stringify`, which also
- * refuses a cycle before the walk could meet one: 2.3% of a `run` putting
- * 1 000 documents in the module, nothing of a builder's insert of them. A
- * key or a text starting with the mark -- written by no one but on
- * purpose -- leaves `JSON.stringify`'s text as it is.
+ * replacer, so such a number is marked, then the mark replaced, only where
+ * the value holds one: `params`, a request's parameters `normalizeAll` made
+ * and found holding none, spare it the look; any other value -- the sync
+ * layer's lines -- is walked, its numbers looked at beside the one
+ * `JSON.stringify`, which also refuses a cycle before the walk could meet
+ * one. Looked for in the text instead -- 16 digits in a row -- every long
+ * fraction was a match, and the look a quarter of `JSON.stringify`'s time
+ * where none was. A key or a text starting with the mark -- written by no
+ * one but on purpose -- leaves `JSON.stringify`'s text as it is. The
+ * module's parameters go by `JSON.stringify`: it reads an int no double
+ * holds as the double it rounds to (`fennec-wasm`'s `as_double`).
  */
 export function jsonOf(v, params = null) {
   const text = JSON.stringify(v);
@@ -1698,23 +1726,17 @@ function binder(params) {
   // A `param()` takes its `$n` at its first use, and every use after
   // writes that one.
   const once = new Map();
-  made.set(params, false);
-  const push = (v, what) => {
-    const before = met;
-    params.push(normalize(v, what));
-    if (met !== before) made.set(params, true);
-  };
   return (v, what) => {
     if (v instanceof Param) {
       let at = once.get(v);
       if (at === undefined) {
-        push(v.value, what);
+        params.push(normalize(v.value, what));
         at = `$${params.length}`;
         once.set(v, at);
       }
       return at;
     }
-    push(v, what);
+    params.push(normalize(v, what));
     return `$${params.length}`;
   };
 }

@@ -629,7 +629,7 @@ test('an int and a float compare by their true values, through every index, in t
   db.close();
 });
 
-test('a number from 2^53 on goes to the module as every digit, and finds its rows', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+test('a number from 2^53 on is read by the module as the double it is, and finds its rows', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
   db.run('create collection f (x float, xh float @hash, xs float @sorted, m json)');
@@ -641,7 +641,7 @@ test('a number from 2^53 on goes to the module as every digit, and finds its row
   await db.from('f').insert({ x: -(2 ** 60), xh: -(2 ** 60), xs: -(2 ** 60), m: { h: -(2 ** 60), s: -(2 ** 60) } });
   for (const field of ['x', 'xh', 'xs', 'm.h', 'm.s']) {
     // `JSON.stringify(2 ** 60)` is `1152921504606847000`: read as that
-    // int, it found neither row.
+    // int, it found neither row; the module reads it as the double.
     assert.equal(db.rows(`get f where ${field} = $1 count`, [2 ** 60])[0].count, 2, field);
     assert.equal(db.rows(`get f where ${field} = $1 count`, [-(2 ** 60)])[0].count, 1, field);
     assert.equal(await db.from('f').where(field, 2 ** 60).count(), 2, field);

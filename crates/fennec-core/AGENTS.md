@@ -234,7 +234,9 @@ is.](../../docs/design/indexes.md#sorted)** JSON writes one short of 2^63
 either side so (`json::num_into`), never its shortest digits, which past
 2^53 read back as another int: a value read back finds its row
 (`a_number_read_back_through_json_finds_its_row`), the router's order check
-with it.
+with it. The browser module reads an int no double holds in a parameter as
+the double JavaScript wrote, where its reader met one (`json::wide`,
+`fennec-wasm`'s `as_double`).
 
 **[An index over several fields is its parts' bytes laid end to
 end](../../docs/design/indexes.md#composite-indexes)** (`composite.rs`), a part's

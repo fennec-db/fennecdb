@@ -119,6 +119,31 @@ fn num_into(out: &mut String, f: f64) {
     }
 }
 
+/// How many ints past 2^53 the browser module's reader has met: a page's
+/// parameters are JavaScript values, and `fennec-wasm` looks through those
+/// of a text whose reading met none no further (`as_double`), where a look
+/// through every one cost a `run` putting 1 000 documents 1.5%. Natively
+/// none is counted, and none asked for.
+pub mod wide {
+    #[cfg(target_arch = "wasm32")]
+    static MET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    pub(crate) fn met() {
+        use std::sync::atomic::Ordering::Relaxed;
+        MET.store(MET.load(Relaxed).wrapping_add(1), Relaxed);
+    }
+
+    /// The count so far: a reading that met one moved it.
+    pub fn count() -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        return MET.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        0
+    }
+}
+
 /// `7.038531e-26`, the one `f32` whose shortest text an `f64` reader rounds
 /// to another: read as an `f64`, it lands exactly between it and the `f32`
 /// above, and a tie goes to the even one.
@@ -603,7 +628,13 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
                 // writer writes a float that large without an exponent:
                 // refused, `1e300` written out did not read back.
                 match crate::num::parse_i64(text) {
-                    Some(n) => Ok(Value::Int(n)),
+                    Some(n) => {
+                        #[cfg(target_arch = "wasm32")]
+                        if n.unsigned_abs() > 1 << 53 {
+                            wide::met();
+                        }
+                        Ok(Value::Int(n))
+                    }
                     None => crate::num::parse_f64(text)
                         .map(Value::Float)
                         .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),

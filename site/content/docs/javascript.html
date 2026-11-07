@@ -1320,7 +1320,7 @@ one.</p>
 <table>
 <thead><tr><th>Schema</th><th>TypeScript</th></tr></thead>
 <tbody>
-<tr><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code></td><td><code>boolean</code> <code>number</code> <code>number</code> <code>string</code> — a whole number of 2<sup>53</sup> or more goes out as every digit of it (<code>2 ** 60</code> as <code>1152921504606846976</code>, where <code>JSON.stringify</code> writes <code>1152921504606847000</code>, another int to the server); an int past 2<sup>53</sup> reads back rounded, as any JavaScript number does</td></tr>
+<tr><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code></td><td><code>boolean</code> <code>number</code> <code>number</code> <code>string</code> — a whole number of 2<sup>53</sup> or more is the number it is: <code>FennecHttp</code> sends every digit of it (<code>2 ** 60</code> as <code>1152921504606846976</code>, where <code>JSON.stringify</code> writes <code>1152921504606847000</code>, another int to the server), and the module reads <code>JSON.stringify</code>'s digits as the double they came from; an int past 2<sup>53</sup> reads back rounded, as any JavaScript number does</td></tr>
 <tr><td><code>timestamp</code></td><td><code>Timestamp</code> — ISO text on read; a <code>Date</code> or number works on write</td></tr>
 <tr><td><code>vector&lt;N&gt;</code> / <code>bytes</code></td><td><code>Vector</code> / <code>Bytes</code> — <code>number[]</code> on read, each component the shortest decimal that reads back as its <code>f32</code> (<code>0.1</code> as written, not <code>0.10000000149011612</code>); <code>Float32Array</code> also accepted on write</td></tr>
 <tr><td><code>[type]</code></td><td><code>type[]</code></td></tr>

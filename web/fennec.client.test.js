@@ -260,16 +260,14 @@ test('a whole number from 2^53 to 2^63 goes out as every digit of it, anything e
     cycle.push(cycle);
     jsonOf(cycle);
   }, TypeError);
-  // A query's parameters, and a request's, are looked through as they are
-  // made: those holding no such number are written as JSON.stringify
-  // writes them, and the others with every digit.
+  // A request's parameters are looked through as they are made, and a
+  // builder's text's walked: those holding no such number are written as
+  // JSON.stringify writes them, and the others with every digit.
   for (const [n, text] of [[7, '7'], [2 ** 60, '1152921504606846976']]) {
     const [, params] = from('t').toInsert({ m: { a: [n] } });
-    assert.equal(jsonOf({ params }, params), `{"params":[{"a":[${text}]}]}`);
-    const [, where] = from('t').where('n', n).toFennecQL();
-    assert.equal(jsonOf(where, where), `[${text}]`);
-    const values = normalizeAll([n]);
-    assert.equal(jsonOf({ params: values }, values), `{"params":[${text}]}`);
+    assert.equal(jsonOf({ params }), `{"params":[{"a":[${text}]}]}`);
+    const values = normalizeAll([{ a: [n] }]);
+    assert.equal(jsonOf({ params: values }, values), `{"params":[{"a":[${text}]}]}`);
   }
 });
 

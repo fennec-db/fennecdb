@@ -240,7 +240,10 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
-    const [pp, pl] = this.#write(jsonOf(json, json));
+    // JSON.stringify's, a double from 1e16 up as its shortest digits: the
+    // module reads an int no double holds as the double it rounds to
+    // (`as_double`), where a look here for such a number cost a `run`.
+    const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
     let out;
     try {
@@ -2914,7 +2917,7 @@ function wire(op) {
 
 /** A batch line: each line is exactly a `POST /query` body. */
 function ndjson([sql, params]) {
-  return jsonOf({ query: sql, params }, params);
+  return jsonOf({ query: sql, params });
 }
 
 function normalizeShape(raw, url) {

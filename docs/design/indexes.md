@@ -435,20 +435,37 @@ the int 2^60 + 1 out of order. From 2^63 on the shortest digits are past an
 `i64`, so a reader takes them back as the float itself
 (`a_whole_float_reads_back_as_itself`). The shell prints such a float so
 too. The clients follow: JavaScript's `JSON.stringify` and Go's
-`encoding/json` write a whole number from 2^53 on as its shortest digits, so
-`web/builder.js`'s `jsonOf` (the module's parameters, `FennecHttp`'s bodies,
-the sync layer's batch lines) and Go's `exactly` write every digit of it
-instead. `JSON.stringify` cannot write a number's text from a replacer, so
-`jsonOf` marks such a number with a text and replaces the mark, and only
-where the value holds one. Parameters `normalize` made -- a builder's text
-(`binder`), a request's (`normalizeAll`) -- are looked through as they are
-made, counted as `normalize` meets such a number, so `JSON.stringify` alone
-writes them where it met none; a `run`'s own parameters are walked, their
-numbers looked at beside the one `JSON.stringify`. Measured in Node over the
-module, seven alternating runs each, the 1-minute load under 3: a small
-`get` 39.6 -> 39.0 us (noise), the builder's insert of 1 000 documents 3.83
--> 3.59 ms, a `run` putting the same 1 000 documents itself 2.448 -> 2.504
-ms, +2.3%, the walk. Natively (`fennec_http::handle`, in-loop
+`encoding/json` write a whole number from 2^53 on as its shortest digits.
+What a server is sent goes through `web/builder.js`'s `jsonOf`
+(`FennecHttp`'s bodies, the sync layer's batch lines) and Go's `exactly`,
+which write every digit of it instead. `JSON.stringify` cannot write a
+number's text from a replacer, so `jsonOf` marks such a number and replaces
+the mark, only where the value holds one: a request's parameters, every
+`FennecHttp` body's, are noted as they are normalized (`normalizeAll`, its
+own copy of `normalize`'s walk), and the sync layer's lines walked. The
+module's parameters go by `JSON.stringify` as they always did: a parameter
+there is a JavaScript value, and no JavaScript value is an int no double
+holds, so `fennec-wasm` reads such an int as the double it rounds to, the
+int that double is (`as_double`), and only for a text whose reading met an
+int past 2^53 (`json::wide`). Measured in Node over the module, a `run`
+putting 1 000 documents took a look at the page's values first 2.3% longer
+(a walk of them), a look for 16 digits in a row in its text 30% longer
+(every long fraction, `i / 3`, a match, and the text a quarter of
+`JSON.stringify`'s time to scan where none was), and `as_double` over
+every parameter 1.5% longer. Counted by the reader, against main
+(whole-process instructions, `/usr/bin/time -l`, seven alternating runs,
+the 1-minute load under 3): that `run` 40.42M -> 40.44M instructions a put
+(+0.06%), its cycles +0.3% (paired -0.4% to +1.2%, as much as without the
+reader's count) and its time -1.0% (inside its runs' 2%), the builder's
+insert of the documents 72.92M -> 72.95M (+0.03%), a small `get` 780 482
+-> 780 548. A note kept by `normalize` itself had cost that insert 0.2%, so
+the builder's own parameters are not noted; a request's body of 1 000
+documents takes 1% longer to make (`normalizeAll`), where a walk of it
+after had taken 8.7%. `as_double` is 159 bytes of the module, which with
+it grew 638 bytes in all, 312 gzip, 338 brotli; it leaves an int an int --
+changing the kind cost 126 bytes of drop glue -- as no text
+`JSON.stringify` writes is an int rounding to 2^63. Natively
+(`fennec_http::handle`, in-loop
 instructions, seven alternating runs, `MallocNanoZone=0`, load under 6): a
 `get` answering 1 000 rows of four float columns, half of them whole floats
 past 1e15, 3.631M -> 3.556M instructions and 705k -> 569k cycles, as such
