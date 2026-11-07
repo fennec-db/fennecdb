@@ -483,6 +483,10 @@ Covers `crates/fennec-bench/`.
   asserts the event, the count or the order (`audit::would_wait`,
   `Router::grants_waiting`, `Router::round_grants`). A timeout given a
   test's servers or clients bounds every request they make.
+- [Two builds' instruction counts](docs/design/benchmarks.md#instruction-counts)
+  differing by under ~500 a request are read over re-signed copies'
+  UUIDs or a trace (`make instr-compare`), never from plain pairs: on
+  macOS the allocator draws its path from a binary's identity.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
   listens on port 0, never a fixed or found-free port, found by its
   `listening on: http://<address>` stderr line, a router told its nodes by

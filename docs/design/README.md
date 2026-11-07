@@ -18,7 +18,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
 - [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
-- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how
+- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
