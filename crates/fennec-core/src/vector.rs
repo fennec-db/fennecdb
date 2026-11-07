@@ -4672,7 +4672,9 @@ impl VectorIndex {
             found.sort();
         }
 
-        let mut out = Vec::with_capacity(k);
+        // No more than the walk found: `k` is the beam a caller widened
+        // it to, and `ef 4294967295` asked for 32 GB here.
+        let mut out = Vec::with_capacity(k.min(found.len()));
         let mut docs = Vec::new();
         'found: for c in found {
             if self.is_deleted(c.node) {
@@ -4719,7 +4721,7 @@ impl VectorIndex {
     fn nearest_docs(&self, q: &[f32], pairs: &[(u32, DocId)], k: usize) -> Vec<(DocId, f32)> {
         let mut nodes: Vec<u32> = pairs.iter().map(|p| p.0).collect();
         nodes.dedup();
-        let mut out = Vec::with_capacity(k);
+        let mut out = Vec::with_capacity(k.min(pairs.len()));
         for c in self.nearest_of(q, &nodes, k) {
             let score = score_from_distance(self.spec.metric, c.dist);
             let at = pairs.partition_point(|p| p.0 < c.node);
@@ -5088,6 +5090,11 @@ impl VectorIndex {
             return None;
         }
         pos += 1;
+        // `as usize`, where a 32-bit build keeps the low bits: the graph was
+        // written with its field's dimension and spec, which the schema
+        // read whole (`codec::get_usize`) or refused the file, so a cut one
+        // is no file there is. Checked here as well, it was 88 bytes of the
+        // browser module.
         let dim = get_uvarint(bytes, &mut pos).ok()? as usize;
         if dim != expect_dim {
             return None;

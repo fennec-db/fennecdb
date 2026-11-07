@@ -155,14 +155,29 @@ fn what_fuse_does_not_combine_with_is_refused() {
             r#"get d match body "x" near v $1 fuse order kind"#,
             "`fuse` cannot be combined with `order`",
         ),
+        // A side's depth, refused as it is read, naming its range.
         (
             r#"get d match body "x" near v $1 fuse candidates 0"#,
-            "at least one",
+            "`fuse`'s `candidates` is 1 to 10000, not 0",
         ),
         // Past the ceiling, a side or the page: refused rather than cut.
         (
             r#"get d match body "x" near v $1 fuse candidates 20000"#,
-            "at most 10000 candidates a side",
+            "`fuse`'s `candidates` is 1 to 10000, not 20000",
+        ),
+        // Past 32 bits: a wasm32 build read it as 1.
+        (
+            r#"get d match body "x" near v $1 fuse candidates 4294967297"#,
+            "`fuse`'s `candidates` is 1 to 10000, not 4294967297",
+        ),
+        // `k` past its bound was clamped to `u32::MAX`.
+        (
+            r#"get d match body "x" near v $1 fuse k 99999999999"#,
+            "`fuse`'s `k` is 0 to 1000000, not 99999999999",
+        ),
+        (
+            r#"get d match body "x" near v $1 fuse k 1000001"#,
+            "`fuse`'s `k` is 0 to 1000000, not 1000001",
         ),
         (
             r#"get d match body "x" near v $1 fuse limit 20000"#,

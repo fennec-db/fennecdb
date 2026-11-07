@@ -385,7 +385,8 @@ reorders `match`'s candidates by exact distance over stored vectors.
 
 **[`fuse` adds ranks, not scores.](../../docs/design/text.md#fuse)** Each search
 runs `candidates` deep, filtered; a row scores `1 / (k + rank)` from
-each, `k` 60.
+each, `k` 60, at most `MAX_FUSE_K`, well short of where `f32` weighs
+neighbouring ranks alike.
 
 **[`highlight()` re-reads the text; `facet` counts beside the
 rows.](../../docs/design/text.md#highlight-and-facet)** Marks are the searched
