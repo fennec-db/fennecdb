@@ -501,3 +501,118 @@ rather than a swap, 0.1 KB; `catch_unwind` around each write, 0.4 KB as
 connection's panic stop every write until a restart; and a poisoned lock
 put right by the next to take it, which a reader taking it first would
 read past.
+
+**A write records what undoes it before it changes anything, and a panic
+part way puts it back whole.** The block's log is what a put-back reads, so
+each write writes its entry (`Block::remember`: the collection's mark, once
+a block, and where the id's record was) before it changes anything that
+entry puts back. A `put` remembers each document as its id is decided --
+before the hooks, which may panic, so an id handed out is handed out again
+with the mark, and before the row it writes over leaves the indexes -- and
+forgets the entry again where the document is passed over: kept, an `if
+absent` passing over many rows left one each. A refusal -- a hook's,
+`@unique`'s -- keeps its entry, which puts back nothing: it ends the
+statement, whose block is put back. A hook may change a document's fields,
+never its id (`Hook::before_write`): the entry holds the id the write was
+handed, and a write whose id a hook changed is refused (`Error::Plugin`,
+`ask_hooks`, a comparison a hook), a `set`'s too, in a native build: the
+browser module registers no hook -- `fennec-wasm` installs no plugin, and
+a page reaches none -- and leaves the check and its words out, 305 bytes
+of it. Followed, as it was, a
+`put`'s frame went into the store under the hook's id while its block
+put back the other, so that row read `Corrupt` past the store's mark till
+the next open, and a `set` put its row into the indexes under the hook's
+id (`tests/blocks.rs`, `a_hook_changing_a_documents_id_is_refused`). Then
+the row written over leaves the indexes whose field changes (`unindex_doc`), the
+frame is appended, the document goes into the scalar indexes
+(`index_scalar`), and after the statement's documents their vectors go into
+the graph in a batch or are left waiting (`index_written`). A `set` -- an
+upsert's too -- reads its row, asks the hooks and `@unique`, remembers,
+then the same: the row out, the frame, the document in, its vector first
+(`index_doc`). A `del` -- a sweep's, a `put`'s over an expired row --
+remembers as it reads the row, before the hooks, its entry putting back
+nothing where a refusal ends the statement: no second look at the row is
+paid for it. Up to this, `put` and `set` appended, indexed, then remembered,
+and `del` took the row out of the indexes and appended before it did:
+a panic in `index_scalar` -- the sorted words', in #501's report -- left
+the block holding neither the mark nor the document, so the put-back undid
+nothing. The row stayed in memory, read by `get` and in its `@hash`
+bucket, in no record and gone at the next open, the counter not moved and
+the `@text` index never holding it, and every later write panicking the
+same way left another; a panic taking the row written over out of the
+indexes left those of its entries already taken out, out. The put-back is
+by difference -- the document out of the indexes its field changed in, the
+version before back into those -- which holds only for a write that ended.
+So while a panic unwinds (`std::thread::panicking()`, in a build whose
+panics unwind: the browser module aborts on one and holds none of it),
+the block's last write is put back whole (`Collection::put_back_torn`): the
+row the store held at the panic -- the one written over where the frame
+was not yet appended -- taken out of every index, the row before it too,
+then that row put back in. Each removal passes over an entry that is not
+there: a bucket's, the ordered chunks', the text index's `drop_doc` and
+its lengths, the graph's `remove` did already; the sparse index's count of
+documents fell by one at every removal, held or not, and falls now only
+where a list held the document, which is counted as the first of its lists
+takes it in -- in a build whose panics unwind alone (`sparse::TORN`): no
+other removal meets a document a list does not hold, so the browser module
+counts as it did. The writes before it in the block ended, and are put back by
+difference as before. The sorted words are let go of first, sorted again
+by the next loose `match` ([text.md](text.md#fuzzy-and-prefix)): #501's
+panic left a chunk holding no word, and the put-back of the block's
+earlier writes, taking their words out of the copy, read that chunk and
+panicked again. A second panic while one unwinds aborts the process, the
+server's too, whose profile unwinds: accepted, as Rust gives no other
+choice, and made rare -- what the put-back reads, it reads in a shape no
+panic between two entries leaves unreadable. An index's own structure a
+panic leaves inconsistent inside one of its operations -- a shard of the
+text table resizing, a bucket's run splitting -- is put back as far as its
+removal can read it. In the graph, a node placed or taken off the waiting
+and not yet linked is a tombstone after the put-back, linked by nothing and
+measured by no search, `link_pending` passing over a waiting one; the
+row's vector is placed again, as an id written twice in a block is.
+`sweep` opens its block under `whole` now, as a statement does: a panic in
+it was put back only by the server's `held::Writing`. `engine/unwinding.rs`'s
+`a_panic_anywhere_in_a_write_puts_its_block_back_whole` panics at 28 points
+-- as each index takes the row in or out (`@unique` with `@text` beside it,
+`@hash`, `@sorted`, `@ttl`, `@text`, the graph, `@inverted`, `@geo`, one
+over two fields), part way into the text index's terms, its sorted words
+(leaving #501's empty chunk) and the sparse index's dimensions, and as the
+graph places a vector, leaves one waiting and links the waiting -- in an
+insert, a `put` over a row, a `set`, a `del` and an upsert, each alone and
+after a write that went well in a block: the rows, every index's entries
+and the answers each gives, the next id, the counter, the feed and the file
+opened again are what they were before the block, each index's entries
+those an open builds, and the write is taken again. On main 170 of its 280
+cases failed and the sorted words' aborted the test binary; remembered
+first but put back by difference, the 76 a panic stopped as the row
+written over left the indexes failed, and the words' aborted. A write
+pays nothing for it: the entry is the one it made before, made sooner, and
+`set` and `del` take the store's mark only where a block is open. Counted
+in process over a database in a file -- `insert`, `set` by id and `del` by
+id, 50 000 each into a collection under `@unique`, `@hash`, `@sorted` and
+`@text`, a run the median of nine rounds and its loop's instructions an op
+(`proc_pid_rusage`, `MallocNanoZone=0`), main's build and this one's in
+turns, seven pairs, each run started under a 1-minute load of 6, which
+stood at 3.8-5.4 throughout: `insert` 22 257.7 instructions an op against
+22 382.4 (-0.56%), `set` by id 44 416.5 against 44 434.3 (-0.04%), `del`
+by id 359 994.0 against 360 100.9 (-0.03%), every pair of each lower; the
+time 1 581 ns against 1 606, 3 137 against 3 175 and 42.0 us against 42.5
+(a `del` here is its text index's lists, every row sharing their words).
+The browser module, which aborts on a panic and holds no put-back, grew
+211 bytes (gzip and brotli within their noise): 198 the entry made before
+the hooks and forgotten where a document is passed over (`execute_inner`
++194, the two `remember`s -20, `set_row` and `erase` +24), and 13
+`ask_hooks`, the one loop of the hooks a `put` and a `set` share, without
+the id's check: with it, and its refusal's words, the module took 305
+bytes more. The sparse index's count is kept by what its lists held only
+where panics unwind (`sparse::TORN`), which in the module took 52 bytes
+more; `fennec-server` 1.6 KB of code, the put-back of a write a panic
+stopped.
+Rejected: the collection's derived indexes let go of on a panic, rebuilt
+from the rows by the next read -- whole whatever the panic left inside an
+index, but a text index of a million rows is rebuilt at 16 us a row by the
+next `match`, a `@unique` one under the next write's lock, and #501's
+panic, met by every write bringing a word new to the field, would have
+rebuilt them for each; how far a write got kept as it goes, an instruction
+or more an index on every write for the put-back of a panic alone; and
+every write of the block put back whole, each re-linking its vector.

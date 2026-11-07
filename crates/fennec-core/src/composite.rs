@@ -502,6 +502,14 @@ impl CompositeIndex {
         }
     }
 
+    /// Its entries in order, and the rows held apart: the same for two
+    /// indexes holding the same rows.
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        let keys: Vec<_> = self.keys.iter().map(|(k, id)| (&**k, *id)).collect();
+        format!("{keys:?} apart {:?}", self.apart)
+    }
+
     /// Takes out the entry [`Self::insert`] put in for the same key.
     pub fn remove(&mut self, id: DocId, k: RowKey) {
         let len = k.bytes.heap();

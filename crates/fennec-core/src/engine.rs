@@ -66,7 +66,9 @@ mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared::{Prepared, PREPARE_AT};
 #[cfg(test)]
-mod unwinding;
+pub(crate) mod unwinding;
+#[cfg(test)]
+use unwinding::panic_in;
 #[cfg(not(target_arch = "wasm32"))]
 mod wake;
 #[cfg(not(target_arch = "wasm32"))]
@@ -830,6 +832,30 @@ impl Block {
             self.grew = false;
         }
         self
+    }
+
+    /// Remembers, for a block that does not land, where `id`'s record was
+    /// before this write -- and where its collection's store stood before
+    /// the block's first write to it. Asked before the write changes
+    /// anything -- an id handed out, the row it writes over taken out of
+    /// the indexes, its frame appended, it put into them -- so that a panic
+    /// anywhere in it, an index's upkeep too, finds it here to put back
+    /// ([`Database::rewind`]). Asked after them, a panic in `index_scalar`
+    /// left the row in memory, read by `get` and in its `@hash` bucket, in
+    /// no record, and gone at the next open. The block's own, rather than
+    /// the database's, so that a write asks it while it holds its
+    /// collection: looked up again, it was a search of the names a write.
+    fn remember(
+        &mut self,
+        cid: u32,
+        id: DocId,
+        was: Option<crate::store::Loc>,
+        mark: crate::store::Mark,
+    ) {
+        if !self.marks.iter().any(|(c, _)| *c == cid) {
+            self.marks.push((cid, mark));
+        }
+        self.was.push(Undo::Doc(cid, id, was));
     }
 
     /// The records of the writes from `from` on, as a block record's body
@@ -2222,10 +2248,54 @@ impl Collection {
     fn index_doc(&mut self, doc: &Document, old: Option<&Document>) {
         for (name, ix) in self.vectors.iter_mut() {
             if let Some(Value::Vector(v)) = doc.get(name) {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.insert(doc.id, v);
             }
         }
         self.index_scalar(doc, old);
+    }
+
+    /// Every index it keeps, by name, each as it dumps -- built first where
+    /// it was not, so from the rows -- for the documents of ids below 64:
+    /// what a test holds a database's indexes to another's with.
+    #[cfg(all(test, feature = "std-fs", feature = "indexes", feature = "geo"))]
+    pub(crate) fn dump_indexes(&self) -> Vec<(String, String)> {
+        let ids = || 0..64;
+        let mut out = Vec::new();
+        for (name, ix) in self.vectors.iter() {
+            out.push((format!("{name}@vector"), ix.dump(ids())));
+        }
+        for name in self.hashes.keys() {
+            let ix = self.hash(name).expect("built").expect("held");
+            let mut all: Vec<_> = ix
+                .iter()
+                .map(|(k, b)| (k.clone(), b.iter().collect::<Vec<_>>()))
+                .collect();
+            all.sort();
+            out.push((format!("{name}@hash"), format!("{all:?}")));
+        }
+        for name in self.texts.keys() {
+            let ix = self.text(name).expect("built").expect("held");
+            out.push((format!("{name}@text"), ix.dump(ids())));
+        }
+        for (name, _) in &self.sorted {
+            let ix = self.sorted_index(name).expect("built").expect("held");
+            out.push((format!("{name}@sorted"), ix.dump()));
+        }
+        for (name, _) in &self.sparse {
+            let ix = self.sparse_index(name).expect("built").expect("held");
+            out.push((format!("{name}@sparse"), ix.dump()));
+        }
+        for (name, _) in &self.geo {
+            let ix = self.geo_index(name).expect("built").expect("held");
+            out.push((format!("{name}@geo"), ix.dump()));
+        }
+        for (i, (c, _)) in self.composites.iter().enumerate() {
+            let ix = self.composite(i).expect("built").expect("held");
+            out.push((c.name(), ix.dump()));
+        }
+        out
     }
 
     /// Hash, text, ordered and sparse indexes; vectors are left to the batch
@@ -2236,36 +2306,48 @@ impl Collection {
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.add(ix.key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('+', &format!("{name}@text"));
                 ix.insert(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.insert(doc.id, doc.at(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.insert(doc.id, e);
             }
         }
         for (name, ix) in self.geo.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.insert(doc.id, doc.get(name));
             }
         }
         for (c, ix) in self.composites.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !c.keys.iter().all(|(k, _)| kept(k)) {
+                #[cfg(test)]
+                panic_in('+', &c.name());
                 ix.insert(doc.id, composite_key(ix, c, doc));
             }
         }
@@ -2280,6 +2362,8 @@ impl Collection {
         for (name, ix) in self.vectors.iter_mut() {
             let items = vectors_of(docs, name);
             if !items.is_empty() {
+                #[cfg(test)]
+                panic_in('+', name);
                 ix.insert_batch(&items);
             }
         }
@@ -2291,6 +2375,10 @@ impl Collection {
     fn defer_vectors_batch(&mut self, docs: &[Document], waiting: &mut Vec<(u32, String, usize)>) {
         for (name, ix) in self.vectors.iter_mut() {
             let items = vectors_of(docs, name);
+            #[cfg(test)]
+            if !items.is_empty() {
+                panic_in('+', name);
+            }
             let n = match items.is_empty() {
                 true => 0,
                 false => ix.defer_batch(&items),
@@ -2319,12 +2407,16 @@ impl Collection {
         for (name, ix) in self.vectors.iter_mut() {
             let replaced = new.is_some_and(|n| matches!(n.get(name), Some(Value::Vector(_))));
             if doc.get(name).is_some() && !replaced {
+                #[cfg(test)]
+                panic_in('-', name);
                 ix.remove(doc.id);
             }
         }
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('-', name);
                 ix.remove(&ix.key(v), doc.id);
             }
         }
@@ -2333,32 +2425,74 @@ impl Collection {
         for (name, ix) in self.texts.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('-', &format!("{name}@text"));
                 ix.remove(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
+                #[cfg(test)]
+                panic_in('-', name);
                 ix.remove(doc.id, doc.at(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
+                #[cfg(test)]
+                panic_in('-', name);
                 ix.remove(doc.id, e);
             }
         }
         for (name, ix) in self.geo.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
+                #[cfg(test)]
+                panic_in('-', name);
                 ix.remove(doc.id, doc.get(name));
             }
         }
         for (c, ix) in self.composites.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !c.keys.iter().all(|(k, _)| kept(k)) {
+                #[cfg(test)]
+                panic_in('-', &c.name());
                 ix.remove(doc.id, composite_key(ix, c, doc));
             }
+        }
+    }
+
+    /// Puts `before` -- the row a write stopped by a panic was writing
+    /// over, `None` where it made the row -- back into every index whole,
+    /// wherever between it and `now` the write stopped: `now`, what the
+    /// store held at the panic, is taken out of every index and `before`
+    /// too, each removal passing over an entry that is not there, then
+    /// `before` goes in. Put back by what the write changed, as a write
+    /// that ended is, the entries of the row written over that it had
+    /// taken out before it stopped stayed out, and those of the row it had
+    /// put in stayed in. The sorted words are let go of first, sorted again
+    /// by the next loose `match`: a panic in them leaves them as no one can
+    /// tell (#501 left a chunk holding no word, which a removal reading
+    /// them panicked on again -- and a second panic aborts the process).
+    /// A write that ended pays nothing for this: the panic's put-back
+    /// alone runs it, once, for the last write of its block.
+    #[cfg(panic = "unwind")]
+    #[cold]
+    #[inline(never)]
+    fn put_back_torn(&mut self, now: Option<&Document>, before: Option<&Document>) {
+        for ix in self.texts.values_mut() {
+            if let Some(ix) = ix.get_mut() {
+                ix.forget_words();
+            }
+        }
+        if let Some(now) = now {
+            self.unindex_doc(now, None);
+        }
+        if let Some(before) = before {
+            self.unindex_doc(before, None);
+            self.index_doc(before, None);
         }
     }
 
@@ -6256,24 +6390,6 @@ impl Database {
 
     // ---------------------------------------------------------------- blocks
 
-    /// Remembers, for a block that does not land, where `id`'s record was
-    /// before this write -- and where its collection's store stood before
-    /// the block's first write to it.
-    fn remember(
-        &mut self,
-        cid: u32,
-        id: DocId,
-        was: Option<crate::store::Loc>,
-        mark: crate::store::Mark,
-    ) {
-        if let Some(b) = &mut self.block {
-            if !b.marks.iter().any(|(c, _)| *c == cid) {
-                b.marks.push((cid, mark));
-            }
-            b.was.push(Undo::Doc(cid, id, was));
-        }
-    }
-
     /// What decides whether a write may land: a router's lease the node
     /// holds, on a node that takes one. `None` takes every write.
     #[cfg(not(target_arch = "wasm32"))]
@@ -6542,7 +6658,15 @@ impl Database {
 
     fn undo(&mut self, mut b: Block) {
         let marks = std::mem::take(&mut b.marks);
-        self.rewind(&marks, &mut b.was);
+        // Put back while a panic unwinds -- by `unwound`, `Unlanded`, or
+        // the server's and the native library's `Writing` -- the last
+        // write may have stopped anywhere in its upkeep of the indexes. A
+        // build that aborts on a panic, the browser module's, never asks.
+        #[cfg(panic = "unwind")]
+        let torn = std::thread::panicking();
+        #[cfg(not(panic = "unwind"))]
+        let torn = false;
+        self.rewind(&marks, &mut b.was, torn);
         if DEFERS {
             let mut waiting = std::mem::take(&mut b.waiting);
             self.forget_waiting(&mut waiting);
@@ -6563,13 +6687,26 @@ impl Database {
 
     /// Puts back the writes `undo` holds, the last first, and takes each
     /// store `marks` names back to its mark: what a block wrote. Taken off the end one at a time: a
-    /// drain of the log was 0.5 KB of the browser module.
-    fn rewind(&mut self, marks: &[(u32, crate::store::Mark)], undo: &mut Vec<Undo>) {
+    /// drain of the log was 0.5 KB of the browser module. `torn`: a panic
+    /// may have stopped the last write part way, which is put back whole
+    /// rather than by what it changed ([`Collection::put_back_torn`]).
+    fn rewind(
+        &mut self,
+        marks: &[(u32, crate::store::Mark)],
+        undo: &mut Vec<Undo>,
+        #[cfg_attr(not(panic = "unwind"), allow(unused_mut))] mut torn: bool,
+    ) {
         // The collection the last document was of: a block's writes come in
         // runs of one collection.
         let mut of: Option<(u32, String)> = None;
         let mut rebound = false;
         while let Some(u) = undo.pop() {
+            // Only the last write can have been stopped: every write before
+            // it in the block ended.
+            #[cfg(panic = "unwind")]
+            let last = std::mem::take(&mut torn);
+            #[cfg(not(panic = "unwind"))]
+            let _ = torn;
             match u {
                 // Each write on its own, the last first: its document out of
                 // the indexes, and the one it replaced pointed at and put
@@ -6590,6 +6727,11 @@ impl Database {
                     let now = c.store.read(&c.schema, id).ok().flatten();
                     c.store.point(id, loc);
                     let before = c.store.read(&c.schema, id).ok().flatten();
+                    #[cfg(panic = "unwind")]
+                    if last {
+                        c.put_back_torn(now.as_ref(), before.as_ref());
+                        continue;
+                    }
                     if let Some(now) = &now {
                         c.unindex_doc(now, before.as_ref());
                     }
@@ -7807,9 +7949,17 @@ impl Database {
     /// of ordinary deletes, so a replica, `/_changes`, an archive and a
     /// subscriber see each as any delete. Not through a statement: a
     /// `del` leaves out the rows past their time, as every read of the
-    /// collection does, and would find none of them.
+    /// collection does, and would find none of them. The block it opens is
+    /// put back as a statement's is where a panic unwinds out of it
+    /// ([`Self::whole`]): left open, only the server's lock guard
+    /// (`held::Writing`) put it back.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sweep(&mut self, collection: &str, now: i64, ids: &[DocId]) -> Result<usize> {
+        self.whole(|db| db.sweep_open(collection, now, ids))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sweep_open(&mut self, collection: &str, now: i64, ids: &[DocId]) -> Result<usize> {
         let Some((field, ttl)) = self.ttl_of(collection) else {
             return Ok(0);
         };
@@ -8422,6 +8572,15 @@ impl Database {
                 WriteOp::Insert
             };
             if held.is_none() {
+                // Remembered before the hooks, which may panic -- the id
+                // handed out above is handed out again with the block's
+                // mark -- and before the row written over leaves the
+                // indexes: a panic from here to the document's last index
+                // finds it to put back. Passed over below, it is forgotten.
+                // The hooks keep the id it is remembered by ([`ask_hooks`]).
+                if let Some(b) = &mut self.block {
+                    b.remember(cid, doc.id, c.store.loc(doc.id), mark);
+                }
                 // Before anything is written, as a taken id is refused above
                 // -- and the id handed out above handed out again, as a block
                 // put back hands its ids out again: nothing of this document
@@ -8432,9 +8591,7 @@ impl Database {
                     WriteOp::Update => c.store.read(&schema, doc.id)?,
                     _ => None,
                 };
-                let checked = hooks
-                    .iter()
-                    .try_for_each(|h| h.before_write(&schema, op, &mut doc))
+                let checked = ask_hooks(hooks, &schema, op, &mut doc)
                     .and_then(|_| match &old {
                         Some(old) => hooks
                             .iter()
@@ -8456,12 +8613,25 @@ impl Database {
                     Ok(true) => {}
                     Ok(false) => {
                         c.store.rewind(mark);
+                        // The row holding the first `@unique` value it
+                        // holds, in the order the fields are declared.
+                        if assigns.is_some() {
+                            held = c.unique_holders(&doc)?.first().map(|(_, d)| *d);
+                        }
+                        // Passed over, or the row holding it set instead,
+                        // it writes nothing for the block to put back, and
+                        // its entry goes: kept, an `if absent` passing over
+                        // many rows left one for each. A refusal keeps its
+                        // entry, which puts back nothing: it ends the
+                        // statement, and the statement's block is put back.
+                        if let (Some(b), true) =
+                            (&mut self.block, held.is_some() || assigns.is_none())
+                        {
+                            b.was.pop();
+                        }
                         if assigns.is_none() {
                             continue;
                         }
-                        // The row holding the first `@unique` value it
-                        // holds, in the order the fields are declared.
-                        held = c.unique_holders(&doc)?.first().map(|(_, d)| *d);
                         if !named {
                             doc.id = 0;
                         }
@@ -8491,7 +8661,6 @@ impl Database {
                     };
                     #[cfg(target_arch = "wasm32")]
                     let payload = Store::encode_doc(&schema, &doc);
-                    let was = c.store.loc(doc.id);
                     // In a block, the frame made where the block keeps it.
                     #[cfg(not(target_arch = "wasm32"))]
                     let frame = match self.block.as_mut() {
@@ -8505,7 +8674,6 @@ impl Database {
                     #[cfg(target_arch = "wasm32")]
                     let frame = c.store.append(OP_PUT, doc.id, &payload);
                     c.index_scalar(&doc, old.as_ref());
-                    self.remember(cid, doc.id, was, mark);
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(frame) = frame {
                         self.wal(REC_DATA, cid, &frame)?;
@@ -12031,21 +12199,21 @@ impl Database {
             return Ok(false);
         };
         let mut doc = updated(schema, &old, assigns, ctx, new)?;
-        for h in hooks {
-            h.before_write(schema, WriteOp::Update, &mut doc)?;
-        }
+        ask_hooks(hooks, schema, WriteOp::Update, &mut doc)?;
         for h in hooks {
             h.before_overwrite(schema, &old, &doc)?;
         }
         // An update makes a duplicate as a put does: `set email = "a"`
         // over two documents is refused at the second.
         c.unique_clash(&doc)?;
+        // Remembered before the row leaves the indexes ([`Block::remember`]).
+        if let Some(b) = &mut self.block {
+            b.remember(cid, id, c.store.loc(id), c.store.mark());
+        }
         c.unindex_doc(&old, Some(&doc));
         let payload = Store::encode_doc(schema, &doc);
-        let (mark, was) = (c.store.mark(), c.store.loc(id));
         let frame = c.store.append(OP_PUT, id, &payload);
         c.index_doc(&doc, Some(&old));
-        self.remember(cid, id, was, mark);
         self.wal(REC_DATA, cid, &frame)?;
         self.note(cid, id);
         for h in hooks {
@@ -12123,6 +12291,12 @@ impl Database {
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
         let gone = c.store.read(schema, id)?;
+        // Remembered before the row leaves the indexes ([`Block::remember`]),
+        // and before the hooks, beside which it costs no second look at the
+        // row: a refusal ends the statement, and its entry puts back nothing.
+        if let Some(b) = &mut self.block {
+            b.remember(cid, id, c.store.loc(id), c.store.mark());
+        }
         if let Some(doc) = &gone {
             for h in hooks {
                 h.after_write(collection, WriteOp::Delete, doc)?;
@@ -12143,9 +12317,7 @@ impl Database {
         drop(gone);
         #[cfg(not(feature = "statements"))]
         let _ = wake;
-        let (mark, was) = (c.store.mark(), c.store.loc(id));
         let frame = c.store.append(OP_DEL, id, &[]);
-        self.remember(cid, id, was, mark);
         self.wal(REC_DATA, cid, &frame)?;
         self.note(cid, id);
         Ok(())
@@ -13200,6 +13372,49 @@ fn updated(
 fn not_null(name: &str) -> Error {
     Error::Type(format!(
         "field `{name}` is required: it holds a value, never null"
+    ))
+}
+
+/// Asks each hook whether a `put` or a `set` may write `doc`
+/// ([`crate::plugin::Hook::before_write`]), each handed it as the hooks
+/// before it left it: its fields changed, never its id, which a hook
+/// changing is refused. The write was remembered by that id before the
+/// hooks ([`Block::remember`]), so that a block put back puts back what it
+/// wrote: followed, a `put`'s frame went into the store under the hook's
+/// id while the block put back the other -- that row read past the
+/// store's mark, `Corrupt`, till the next open -- and a `set` put its row
+/// into the indexes under the hook's id. One comparison a hook, natively
+/// in its callers, where the loop was. The browser module registers no
+/// hook -- `fennec-wasm` installs no plugin, and a page reaches none -- so
+/// it asks no question no hook can make true: the check and its words were
+/// 305 bytes of it, for a bug only a native embedder's hook could have.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn ask_hooks(
+    hooks: &[Arc<dyn crate::plugin::Hook>],
+    schema: &Schema,
+    op: WriteOp,
+    doc: &mut Document,
+) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let id = doc.id;
+    for h in hooks {
+        h.before_write(schema, op, doc)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if doc.id != id {
+            return Err(id_changed(&**h, id, doc.id));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cold]
+#[inline(never)]
+fn id_changed(hook: &dyn crate::plugin::Hook, id: DocId, to: DocId) -> Error {
+    Error::Plugin(format!(
+        "hook `{}` changed a document's id from {id} to {to}: a hook may change its fields, \
+         never its id",
+        hook.name()
     ))
 }
 

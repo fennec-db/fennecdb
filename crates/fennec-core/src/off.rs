@@ -110,6 +110,10 @@ impl VectorIndex {
     pub fn remove(&mut self, doc: DocId) {
         match self.never {}
     }
+    #[cfg(test)]
+    pub(crate) fn dump(&self, ids: impl Iterator<Item = DocId>) -> String {
+        match self.never {}
+    }
     pub fn search<F>(
         &self,
         query: &[f32],
@@ -180,6 +184,14 @@ impl TextIndex {
         match self.never {}
     }
     pub fn remove(&mut self, doc: DocId, text: &str) {
+        match self.never {}
+    }
+    #[cfg(panic = "unwind")]
+    pub(crate) fn forget_words(&mut self) {
+        match self.never {}
+    }
+    #[cfg(test)]
+    pub(crate) fn dump(&self, ids: impl Iterator<Item = DocId>) -> String {
         match self.never {}
     }
     pub fn shrink_to_fit(&mut self) {
@@ -273,6 +285,10 @@ impl SparseIndex {
     pub fn remove(&mut self, doc: DocId, entries: &[(u32, f32)]) {
         match self.never {}
     }
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        match self.never {}
+    }
     pub fn shrink_to_fit(&mut self) {
         match self.never {}
     }
@@ -306,6 +322,10 @@ impl GeoIndex {
         match *self {}
     }
     pub fn remove(&mut self, id: DocId, v: Option<&Value>) {
+        match *self {}
+    }
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
         match *self {}
     }
     pub fn memory_bytes(&self) -> usize {
@@ -354,6 +374,10 @@ impl SortedIndex {
         match *self {}
     }
     pub fn remove(&mut self, id: DocId, v: Option<&Value>) {
+        match *self {}
+    }
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
         match *self {}
     }
     pub fn has_nan(&self) -> bool {
@@ -417,6 +441,10 @@ impl CompositeIndex {
         match *self {}
     }
     pub fn remove(&mut self, id: DocId, k: crate::composite::RowKey) {
+        match *self {}
+    }
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
         match *self {}
     }
     pub fn apart(&self) -> &[DocId] {

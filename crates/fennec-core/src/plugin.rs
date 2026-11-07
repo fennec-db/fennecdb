@@ -48,7 +48,11 @@ pub enum WriteOp {
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
     /// Called before a write into the collection `schema` describes. The
-    /// document may be modified (embedding generation, for instance).
+    /// document's fields may be modified (embedding generation, for
+    /// instance), never its id: the write is remembered by the id it was
+    /// handed before the hooks, which its block puts back by, and one a
+    /// hook changes is refused (`Error::Plugin`), the block put back -- in
+    /// a native build: the browser module registers no hook and asks not.
     /// Returning `Err` aborts the write. The schema rather than the name:
     /// a filter evaluated over the document has to compare a field in its
     /// collation, as the same filter does when it reads.
