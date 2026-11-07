@@ -366,7 +366,10 @@ end
     name tried says nothing. On a tenant node the lines are the node's and
     the statements the tenant's: a tenant holding none by that name answers
     404. The server's token calls every statement. <code>/_whoami</code>
-    lists the statements a token may call as <code>calls</code>;
+    lists the statements a token can call as <code>calls</code>: those its
+    lines grant that the database holds, never one bound to writes,
+    scheduled or a webhook consumer, which run by themselves — at a tenant
+    node's root, which asks no tenant, the names its lines grant;
     <code>statements</code> is refused it (403) and <code>describe
     statement</code> answers 404.</li>
   <li><b>The body runs with its statement's authority.</b> The caller's

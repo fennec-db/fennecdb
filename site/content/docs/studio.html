@@ -77,9 +77,10 @@ Web Token, with each rule of the policy that applies to it — the
 collection, the grants, the fields an update may change, the fields a read
 shows (<code>read_fields</code>, <code>null</code> for every one) and the
 rows, as the policy writes the filter. <code>calls</code> lists the named
-statements it may call. A token is shown its own rules and no
-other's: a rule for a role it does not hold is not among them. It grants
-nothing; a token the server refuses gets the same 401 here as anywhere.</p>
+statements it can call: those the policy grants it that the database holds,
+never one run by writes, a schedule or a webhook. A token is shown its own
+rules and no other's: a rule for a role it does not hold is not among them.
+It grants nothing; a token the server refuses gets the same 401 here as anywhere.</p>
 <pre data-lang="bash">curl -H "Authorization: Bearer $ALICE" http://127.0.0.1:8080/_whoami
 # {"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice",
 #  "roles":["analyst"],"tenants":null,"unbound":false,"append_only":[],
@@ -248,17 +249,20 @@ or drop a field, and drop the collection.</p>
     hook's secret: <i>armed</i>, or <i>not armed</i> — no line of the hooks
     file names it, or a tenant's secrets were never set — when every event a
     sender sends it is answered 401. <b>Test event</b> opens the event as
-    JSON, begun from the paths its parameters read and the values its
-    condition compares (<code>{"type": "payment_intent.succeeded", "data":
+    JSON, begun from the paths its parameters read — an empty value of each
+    type, <code>[]</code> for a list — and the values its condition
+    compares (<code>{"type": "payment_intent.succeeded", "data":
     {...}}</code>), shows the statement it sends, <code>call stripe_paid
     $1</code> with the event as <code>$1</code>, and runs it in the query
     editor as the server's token's call: its condition asked and its
     parameters read as a delivery's are, with no signature and no key kept.
     It holds no <code>hook.id</code>, <code>hook.at</code> or
     <code>hook.event</code>, so a parameter reading one is refused unless it
-    has a default. Its definition says which events it takes and opens
-    in the query editor as <code>create or replace statement
-    ...</code>.</li>
+    has a default, and a condition asking <code>hook.event = '…'</code>
+    passes it over: the dialog says so before anything is sent, and sends
+    nothing where a parameter would be refused. Its definition says which
+    events it takes and opens in the query editor as <code>create or
+    replace statement ...</code>.</li>
   <li><b>A call form</b> gives each argument an input typed as the
     signature types it (a scoped token, which is not shown signatures, types
     the arguments as a JSON object), and shows the statement it sends,

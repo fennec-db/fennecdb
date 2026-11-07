@@ -377,18 +377,45 @@ fn an_append_only_delete_is_refused_to_a_scoped_caller() {
     assert_eq!(node.number("get journal count"), 0);
 }
 
-/// `/_whoami` names the statements a token may call; `statements` and
-/// `describe statement` are the server's token's.
+/// `/_whoami` names the statements a token can call: those its `call`
+/// lines grant that the database holds and a caller calls -- never a name
+/// it lacks, nor one bound to writes, scheduled or a hook's, each the 404
+/// a missing statement is to the token. `statements` and `describe
+/// statement` are the server's token's.
 #[test]
 fn a_token_is_told_what_it_may_call() {
     let node = start(|_| {});
     let u0 = node.customer("u0");
-    let (status, _, body) = node.send(&u0, "/_whoami", "", "");
+    let calls = || {
+        let (status, _, body) = node.send(&u0, "/_whoami", "", "");
+        assert_eq!(status, 200, "{body}");
+        let at = body.find(r#""calls":"#).expect(&body) + 8;
+        body[at..=at + body[at..].find(']').expect(&body)].to_string()
+    };
+    // `ghost`, granted every token, names no statement the database holds.
+    let callable = r#"["transfer","history","signup","note"]"#;
+    assert_eq!(calls(), callable);
+    {
+        let mut db = node.db.write().unwrap();
+        db.allow_schedules();
+        db.allow_hooks();
+    }
+    for text in [
+        "create statement ghost after insert journal as insert entries {amount: 0, by: 'ghost'}",
+        "create statement ghost every 1h as del journal where what = 'ghost'",
+        "create statement ghost($id text from event.id) on hook stripe as insert entries {by: $id}",
+    ] {
+        node.ok(ROOT, text);
+        assert_eq!(calls(), callable, "{text}");
+        let (status, body) = node.query(&u0, "call ghost");
+        assert_eq!(status, 404, "{text}: {body}");
+        node.ok(ROOT, "drop statement ghost");
+    }
+    // Defined as a caller calls it, the grant names it.
+    node.ok(ROOT, "create statement ghost() as get journal count");
+    assert_eq!(calls(), r#"["transfer","history","signup","note","ghost"]"#);
+    let (status, body) = node.query(&u0, "call ghost");
     assert_eq!(status, 200, "{body}");
-    assert!(
-        body.contains(r#""calls":["transfer","history","signup","note","ghost"]"#),
-        "{body}"
-    );
     let (status, _) = node.query(&u0, "statements");
     assert_eq!(status, 403);
     let (status, _) = node.query(&u0, "describe statement transfer");

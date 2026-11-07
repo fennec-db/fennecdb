@@ -532,8 +532,9 @@ no signature asked and no key kept, so it can be sent again. It holds no
 <code>hook.id</code>, <code>hook.at</code> or <code>hook.event</code>: a
 parameter reading one is refused (400, naming it) unless it has a default —
 <code>stripe_paid</code> above, whose <code>$paid</code> reads
-<code>hook.at</code>, takes no test event — and a condition reading
-<code>hook.event</code> passes none. An event the condition passes over is
+<code>hook.at</code>, takes no test event — and a condition asking
+<code>hook.event = '…'</code> passes none; the studio's dialog says both
+before anything is sent. An event the condition passes over is
 refused in words (400), as is one missing a path a parameter reads.</p>
 
 <p>Every SDK's <code>statements()</code> reads the two columns into its

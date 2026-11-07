@@ -430,13 +430,6 @@ export function callStatement(n, args = {}) {
 
 export const runNow = (n) => ({ text: `call ${statementName(n)}`, params: [] });
 
-/** A webhook consumer called with an event, `call <name> $1`: run as a delivery is, unsigned and keeping no key. */
-export function testEvent(n, event) {
-  statementName(n);
-  if (event === null || typeof event !== 'object' || Array.isArray(event)) throw new StatementError('an event is a JSON object: {"type": "..."}');
-  return { text: `call ${n} $1`, params: [event] };
-}
-
 /**
  * The parameters of a signature as `statements` writes it -- `($from int,
  * $to int = ..., $tags [text]) claims (sub text)`, a webhook consumer's

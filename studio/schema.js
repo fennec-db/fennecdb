@@ -31,26 +31,6 @@ export function clockText({ next, last, held }) {
   return `${next ? `next ${next}` : 'no next slot'}; ${ran}${passed}${held ? `; ${held.slot} held (${held.status}) since ${held.since}` : ''}`;
 }
 
-const BLANK = { int: 0, float: 0, bool: false, text: '', timestamp: 0 };
-
-/**
- * A test event to begin from: each path a parameter reads holding a value of
- * its type, each `event.<path> = <literal>` of the condition its literal.
- * Objects of no prototype, so a key `__proto__` is a key.
- */
-export function eventSkeleton(signature, condition) {
-  const event = Object.create(null);
-  const put = (path, v) => {
-    const keys = path.split('.');
-    let o = event;
-    for (const k of keys.slice(0, -1)) o = o[k] = typeof o[k] === 'object' && o[k] ? o[k] : Object.create(null);
-    o[keys.at(-1)] = v;
-  };
-  for (const p of S.signatureParams(signature).params) if (p.from?.startsWith('event.')) put(p.from.slice(6), BLANK[p.type] ?? (p.type === 'json' ? Object.create(null) : null));
-  for (const [, path, v] of String(condition ?? '').matchAll(/\bevent\.([\w.]+)\s*=\s*('[^']*'|true|false|-?\d+(?:\.\d+)?)/g)) put(path, v[0] === "'" ? v.slice(1, -1) : JSON.parse(v));
-  return event;
-}
-
 /** A call form's title and its button's word: run now, a test event or a call. */
 const labels = (n, mode) => (mode === 'run' ? [`Run ${n} now`, 'Run now'] : mode ? [`Send ${n} a test event`, 'Test event'] : [`Call ${n}`, 'Call']);
 
@@ -129,11 +109,19 @@ export function mount(host, ctx) {
     if (!named) return null;
     if (named.note) return hint(named.note);
     if (named.error) return [head, h('p', { class: 'ed-error' }, named.error)];
-    // A webhook consumer's test event begins from its condition, which its description reads.
+    // A webhook consumer's test event begins from its condition, which its
+    // description reads, and is written by a module fetched then.
     const callBtn = (n, signature, broken = false, mode = '') =>
       h('button', { type: 'button', class: 'btn ghost small', 'aria-label': labels(n, mode)[0], disabled: broken, onclick: async () => {
-        const d = mode === 'event' ? await describe(n) : { signature };
-        if (d) callForm(n, d.signature, mode, d.condition);
+        let d = { signature }, E;
+        if (mode === 'event') {
+          try {
+            [d, E] = await Promise.all([describe(n), import('./statements-event.js')]);
+          } catch (e) {
+            return ctx.say(ctx.explain(e), 'error');
+          }
+        }
+        if (d) callForm(n, d.signature, mode, d.condition, E);
       } }, labels(n, mode)[1]);
     let rows;
     if (named.names) {
@@ -206,14 +194,17 @@ export function mount(host, ctx) {
   /**
    * The call form: an input for each argument the signature names, typed
    * as it is, or -- to a token not shown the signature -- the arguments as
-   * a JSON object, as a test event is; the statement it sends written out
-   * below them. It runs in the query editor, its answer in the grid, under
-   * an `Idempotency-Key` as the studio's writes are.
+   * a JSON object, as a test event is (`E`, `statements-event.js`); the
+   * statement it sends written out below them. It runs in the query editor,
+   * its answer in the grid, under an `Idempotency-Key` as the studio's
+   * writes are. What keeps a test event from running is said first, and
+   * one that can never run is not sent.
    */
-  function callForm(n, signature, mode, condition) {
+  function callForm(n, signature, mode, condition, E) {
     const run = mode === 'run';
     const event = mode === 'event';
     const params = signature === null || event ? null : S.signatureParams(signature).params;
+    const told = event ? E.notes(signature, condition) : {};
     const inputs = new Map();
     const statement = h('div');
     const problem = h('p', { class: 'form-error', role: 'alert' });
@@ -221,7 +212,7 @@ export function mount(host, ctx) {
     const fields = (params ?? [{ name: null, type: 'json' }]).map((p) => {
       const id = `sc-arg-${p.name ?? 'all'}`;
       const multi = multiline(p.type);
-      const input = h(multi ? 'textarea' : 'input', { id, class: 'mono', rows: event ? 8 : multi ? 3 : undefined, autocomplete: 'off', placeholder: p.name ? (p.optional ? 'its default when empty' : '') : '{"from": 1}', value: event && JSON.stringify(eventSkeleton(signature, condition), null, 2) });
+      const input = h(multi ? 'textarea' : 'input', { id, class: 'mono', rows: event ? 8 : multi ? 3 : undefined, autocomplete: 'off', placeholder: p.name ? (p.optional ? 'its default when empty' : '') : '{"from": 1}', value: event && JSON.stringify(E.eventSkeleton(signature, condition), null, 2) });
       inputs.set(p.name, input);
       const label = p.name ? [h('span', { class: 'form-name' }, `$${p.name}`), h('span', { class: 'form-type' }, p.optional ? `${p.type}, optional` : p.type)] : [h('span', { class: 'form-name' }, event ? 'Event' : 'Arguments'), h('span', { class: 'form-type' }, 'a JSON object')];
       return h('div', { class: 'form-row' }, h('label', { for: id }, ...label), input);
@@ -242,7 +233,7 @@ export function mount(host, ctx) {
             throw new S.StatementError(event ? 'an event is a JSON object: {"type": "..."}' : 'the arguments are a JSON object: {"from": 1}');
           }
         }
-        current = run ? S.runNow(n) : event ? S.testEvent(n, args) : S.callStatement(n, args);
+        current = run ? S.runNow(n) : event ? E.testEvent(n, args) : S.callStatement(n, args);
         fill(statement, statementsBlock([current.text]), run ? null : h('pre', { class: 'statement' }, `$1 = ${JSON.stringify(current.params[0])}`));
         fill(problem);
       } catch (e) {
@@ -250,7 +241,7 @@ export function mount(host, ctx) {
         fill(statement);
         fill(problem, ctx.explain(e));
       }
-      go.disabled = !current;
+      go.disabled = !current || !!told.never;
     };
     const go = h('button', { type: 'submit', class: 'btn primary' }, event ? 'Send' : labels(n, mode)[1]);
     const form = h(
@@ -265,11 +256,12 @@ export function mount(host, ctx) {
           ctx.query(current.text, JSON.stringify(current.params), true, crypto.randomUUID());
         },
       },
+      told.said && h('p', { class: 'hint' }, told.said),
+      told.never && h('p', { class: 'form-error' }, told.never),
       fields,
       h('h3', {}, 'The statement'),
       statement,
       run ? h('p', { class: 'hint' }, 'It runs once, now. No slot is marked: the server’s clock still runs the slot due.') : null,
-      event ? h('p', { class: 'hint' }, 'It runs as a delivery would, unsigned and keeping no key: hook.id, hook.at and hook.event are null.') : null,
       problem,
       h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', onclick: () => d.close() }, 'Cancel'), go),
     );

@@ -23,7 +23,8 @@ registerHooks({
   },
 });
 const S = { ...(await import('../statements.js')), ...(await import('../statements-views.js')) };
-const { clockText, eventSkeleton } = await import('../schema.js');
+const { clockText } = await import('../schema.js');
+const E = await import('../statements-event.js');
 const { readInput, vectorSummary } = await import('../values.js');
 const { parseMetrics, claimsOf } = await import('../connect.js');
 
@@ -292,10 +293,10 @@ test('a scheduled statement is run now by its name alone, and its clock read in 
 
 test('a webhook consumer is sent a test event as one parameter, begun from what it reads', () => {
   const event = { type: 'payment_intent.succeeded', data: { object: { id: 'pi_1' } } };
-  assert.deepEqual(S.testEvent('stripe_paid', event), { text: 'call stripe_paid $1', params: [event] });
-  for (const v of NASTY) assert.equal(S.testEvent('t', { v }).text, 'call t $1');
-  for (const bad of ['stripe paid', 'x;drop', '', 'a'.repeat(60)]) assert.throws(() => S.testEvent(bad, {}), S.StatementError, bad);
-  for (const bad of [null, [event], 'evt_1', 7]) assert.throws(() => S.testEvent('t', bad), /an event is a JSON object/);
+  assert.deepEqual(E.testEvent('stripe_paid', event), { text: 'call stripe_paid $1', params: [event] });
+  for (const v of NASTY) assert.equal(E.testEvent('t', { v }).text, 'call t $1');
+  for (const bad of ['stripe paid', 'x;drop', '', 'a'.repeat(60)]) assert.throws(() => E.testEvent(bad, {}), S.StatementError, bad);
+  for (const bad of [null, [event], 'evt_1', 7]) assert.throws(() => E.testEvent('t', bad), /an event is a JSON object/);
   // The signature `statements` writes for a webhook consumer: what each
   // parameter reads of the event, a default after it.
   const signature = '($intent text from event.data.object.id, $order text from event.data.object.metadata.order-id, $amount int from event.data.object.amount, $live bool from event.livemode = ..., $at timestamp from hook.at, $e json from event)';
@@ -313,19 +314,68 @@ test('a webhook consumer is sent a test event as one parameter, begun from what 
   // The test event begins with each path a parameter reads, a value of its
   // type there, and each `event.<path> = <literal>` its condition compares.
   const json = (v) => JSON.parse(JSON.stringify(v));
-  assert.deepEqual(json(eventSkeleton(signature, "event.type = 'payment_intent.succeeded' and event.livemode = true and event.data.object.amount=-2.5")), {
+  assert.deepEqual(json(E.eventSkeleton(signature, "event.type = 'payment_intent.succeeded' and event.livemode = true and event.data.object.amount=-2.5")), {
     data: { object: { id: '', metadata: { 'order-id': '' }, amount: -2.5 } },
     livemode: true,
     type: 'payment_intent.succeeded',
   });
-  assert.deepEqual(json(eventSkeleton('($n int from event.a.b, $j json from event.a.c, $at timestamp from event.at)', null)), { a: { b: 0, c: {} }, at: 0 });
+  // A list begins empty, where `null` is a missing value the call refuses;
+  // a bytes value as a text. A point or a vector, which no empty value
+  // fits, begins `null` and is refused naming its path.
+  assert.deepEqual(
+    json(E.eventSkeleton('($n int from event.a.b, $j json from event.a.c, $at timestamp from event.at, $tags [text] from event.tags, $ns [int] from event.ns, $raw bytes from event.raw, $v vector<3> from event.v)', null)),
+    { a: { b: 0, c: {} }, at: 0, tags: [], ns: [], raw: '', v: null },
+  );
+  // A literal as FennecQL's lexer reads it: double-quoted too, `\` escaping
+  // the character after it, `''` one quote in single quotes alone, `_`
+  // between digits; a quoted key a key.
+  const literals = [
+    [`event.type = "charge.refunded"`, { type: 'charge.refunded' }],
+    [String.raw`event.a = 'it\'s'`, { a: "it's" }],
+    [`event.a = 'it''s'`, { a: "it's" }],
+    [String.raw`event.a = "say \"hi\"\n"`, { a: 'say "hi"\n' }],
+    [String.raw`event.a = 'back\\slash'`, { a: 'back\\slash' }],
+    [`event.a = "it''s"`, { a: "it''s" }],
+    [`event.n = 1_000 and event.f = 0.5`, { n: 1000, f: 0.5 }],
+    [`event.data.metadata."order-id" = 'o-1' and event."2fa" = false`, { data: { metadata: { 'order-id': 'o-1' } }, '2fa': false }],
+    [`event.ölçü = 'x'`, { ölçü: 'x' }],
+  ];
+  for (const [condition, want] of literals) assert.deepEqual(json(E.eventSkeleton('()', condition)), want, condition);
+  // A path through a key named `event` is no path into the event, and a
+  // comparison inside a text is no comparison.
+  assert.deepEqual(json(E.eventSkeleton('()', "event.data.event.type = 'x' and event.b = 'event.c = 1'")), { data: { event: { type: 'x' } }, b: 'event.c = 1' });
+  assert.deepEqual(json(E.eventSkeleton('()', "event.a > 1 and xevent.b = 2 and data.event.c = 3")), {});
   // A key `__proto__` is a key of the event, never the page's prototypes.
-  const odd = eventSkeleton('($x text from event.__proto__.polluted)', "event.constructor.prototype.polluted = 'yes'");
+  const odd = E.eventSkeleton('($x text from event.__proto__.polluted)', "event.constructor.prototype.polluted = 'yes'");
   assert.equal({}.polluted, undefined);
   assert.equal(JSON.stringify(odd), '{"__proto__":{"polluted":""},"constructor":{"prototype":{"polluted":"yes"}}}');
   // A callable statement's signature, or none, begins from nothing.
-  assert.deepEqual(json(eventSkeleton('($from int)', null)), {});
-  assert.deepEqual(json(eventSkeleton(null, undefined)), {});
+  assert.deepEqual(json(E.eventSkeleton('($from int)', null)), {});
+  assert.deepEqual(json(E.eventSkeleton(null, undefined)), {});
+});
+
+// A test event holds no `hook.id`, `hook.at` or `hook.event`: a parameter
+// reading one with no default is refused whatever the event holds, which
+// the dialog says before it is sent, and sends nothing; a condition reading
+// `hook.event` is named, since `hook.event = '...'` passes it over.
+test('the test event dialog says first what keeps it from running', () => {
+  const runs = /^It runs as a delivery would, unsigned and keeping no key/;
+  const plain = E.notes('($id text from event.data.id, $e json from event)', "event.type = 'x'");
+  assert.match(plain.said, runs);
+  assert.ok(!plain.said.includes('Its condition'), plain.said);
+  assert.equal(plain.never, null);
+  const held = E.notes('($paid timestamp from hook.at, $key text from hook.id = ..., $kind text from hook.event, $id text from event.id)', null);
+  assert.equal(held.never, 'A test event never runs it: $paid reads hook.at, $kind reads hook.event, with no default.');
+  for (const condition of ["hook.event = 'push'", "event.ref = 'main' and (hook.event = 'push')", "hook.event\n= 'push'"]) {
+    const n = E.notes('($r text from event.ref)', condition);
+    assert.match(n.said, /Its condition reads hook\.event, so hook\.event = '\.\.\.' passes it over\.$/, condition);
+    assert.equal(n.never, null);
+  }
+  // Read outside texts, and as the path it begins: `event.hook.event` is a
+  // path into the event.
+  for (const condition of ["event.note = 'hook.event'", 'event.hook.event = 1', "event.a = \"x hook.event\"", null]) {
+    assert.ok(!E.notes('()', condition).said.includes('Its condition'), condition);
+  }
 });
 
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {
@@ -468,19 +518,26 @@ test('an answer\'s columns are read off its rows; the metrics off their text', a
 // Each view is a module of its own, fetched when it opens: what it adds,
 // with the stylesheet and the modules the views share, gzipped. The schema
 // view, the largest, passed 24 KB with the scheduled statements' clock and
-// run now, and 25 KB with the webhook consumers' rows and test event, and
-// is held to 26 KB alone.
+// run now, and is held to 25 KB alone; a webhook consumer's test event,
+// which took it past that, is a module of its own fetched when Test event
+// is clicked, held to 2.5 KB.
 test('each view past the rows loads apart from the first load, and small', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const gz = (f) => gzipSync(readFileSync(join(here, '..', f)), { level: 9 }).length;
+  const read = (f) => readFileSync(join(here, '..', f));
+  const gz = (f) => gzipSync(read(f), { level: 9 }).length;
   const shared = gz('views.css') + gz('kit.js') + gz('highlight.js') + gz('statements-views.js');
-  const page = readFileSync(join(here, '..', 'index.html'), 'utf8');
-  for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js', 'kit.js', 'highlight.js', 'views.css', 'statements-views.js']) {
+  const page = read('index.html').toString();
+  for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js', 'kit.js', 'highlight.js', 'views.css', 'statements-views.js', 'statements-event.js']) {
     assert.ok(!page.includes(view), `${view} is on the first load`);
   }
-  for (const [view, most] of [['editor.js', 24_000], ['schema.js', 26_000], ['live.js', 24_000], ['admin.js', 24_000]]) {
+  for (const [view, most] of [['editor.js', 24_000], ['schema.js', 25_000], ['live.js', 24_000], ['admin.js', 24_000]]) {
     assert.ok(shared + gz(view) < most, `${view}: ${shared + gz(view)} bytes gzipped`);
   }
+  // Fetched by `import()` alone, and served as the views are.
+  assert.ok(!/^import[^;]*statements-event/m.test(read('schema.js')), 'schema.js imports statements-event.js as it loads');
+  assert.match(read('schema.js').toString(), /import\('\.\/statements-event\.js'\)/);
+  assert.ok(gz('statements-event.js') < 2_500, `statements-event.js: ${gz('statements-event.js')} bytes gzipped`);
+  assert.ok(read('../crates/fennec-http/src/studio.rs').includes('"studio/statements-event.js"'), 'fennec-http embeds statements-event.js');
 });
 
 // The first load: every script and style the page fetches, gzipped, under
