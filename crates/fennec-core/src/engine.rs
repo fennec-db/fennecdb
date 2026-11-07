@@ -4363,6 +4363,22 @@ impl Database {
         }))
     }
 
+    /// `filter`, a stream's shape, with each `in (get ...)` in it answered
+    /// as the `in` list it is now -- the inner `get` run as [`Self::query`]
+    /// runs a statement's ([`Self::answered`]), held to the same bound and
+    /// depth -- for [`Self::changes_since`], whose `eval` of each changed
+    /// row refuses an inner `get`: a stream of `msg in (get notes select
+    /// title)` sent its seed and ended at the first write to its
+    /// collection. Asked under the lock the changes are read under, so the
+    /// list and the rows are one moment; the stream answers it again where
+    /// the inner `get`s' collections were written (fennec-http's
+    /// `sse::Reach`). A server's alone: the browser module answers a live
+    /// query by running it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn answer_subqueries(&self, filter: &mut Expr) -> Result<()> {
+        filter.each_subquery_mut(&mut |e| self.answer_subquery(e, &[], 0))
+    }
+
     pub fn registry(&self) -> &Registry {
         &self.registry
     }

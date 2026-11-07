@@ -57,7 +57,7 @@ it.
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
 stray read reruns under the lock. A stream's seed is one (`sse::seed`), its
-scope bound under the pin's lock, the ring held back to it till the first look (`hold_changes`);
+scope bound and its inner `get`s answered under the pin's lock, the ring held back to it till the first look (`hold_changes`);
 it reads again under the lock where the ring passed it or an image was
 adopted (`Database::adoptions`), as every look reseeds.
 

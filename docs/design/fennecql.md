@@ -426,9 +426,51 @@ row tested): 2 000 codes over a scan of 200 000 rows took 2 302 ms
 compared a value at a time and take 16. One country's 2 000 customers'
 orders by `@hash` take 0.83 ms against 0.72 written out; customers with
 a rare order 0.20 against `lookup ... required`'s 0.44 (`make
-subquery-bench`). A subscription's REST shape cannot hold one, and the
-JS builder's `{ f: { in: query } }` renders one with the outer query's
-parameters.
+subquery-bench`). The JS builder's `{ f: { in: query } }` renders one
+with the outer query's parameters.
+
+A subscription's `where=` may hold one (`GET
+/board/changes?where=msg in (get notes select title)`). Its seed is a
+`get` and was answered so; each later look reads the changes with
+`Database::changes_since`, whose `eval` of a changed row met the
+`InSelect` and refused it, so such a stream sent its seed and ended in
+`event: error` at the first write to `board`, under any token. Now
+`sse::Reach` answers the shape's inner `get`s with
+`Database::answer_subqueries` -- `answer_subquery`, the path `answered`
+takes, so the bound, the depth and `check_subquery` are a query's --
+under the seed's lock and then under a look's, where one of the
+collections they read (at any depth, a scoped token's rules ANDed into
+them among them) was written since the stream's change, or at every
+look where an inner `get` reads the time or rows that expire, which
+leave its list with no write. A write to the inner collection can move
+the board's rows with no write to them: where the list moved, the shape
+runs again and its rows are diffed by id against those the stream was
+sent (`enter_and_leave`, as a scoped token's rule reading another
+collection is), a row let in sent and one shut out a deletion -- so a
+stream whose shape reads another collection keeps the ids it sent,
+unscoped too, and is seeded when it resumes. A reseed at each such write
+was the other way, and costs a client every row of the shape where the
+diff sends the rows that moved; both run the shape once. A stream whose
+filter holds no inner `get` has no `Reach` and runs nothing more at a
+look. A poll's `ETag` counts the inner `get`s' collections among what a
+read reads (`access::statement_reads`), so a read holding one, untagged
+before and run at every round, is tagged and answered 304 until a write
+to either.
+
+Measured against main in instructions retired in the loop
+(`proc_pid_rusage`, as examples/replays.rs counts them), eight turns a
+side alternating which went first, `MallocNanoZone=0`, each run gated on
+a 1-minute load under 6 and no other build or benchmark running: a write
+by id through `handle` and a plain subscription's look at it, its change
+read by a client before the next write (`GET /t/changes?n=gte.0`, 60 000
+of them), 119 554 -> 119 627 instructions at the median (118 816-119 959
+against 118 323-120 149) and 42 788 -> 42 711 cycles; a scoped REST read
+by id (`GET /t?id=eq.<k>` under `t read where owner = $jwt.sub`, 600 000)
+40 532 -> 40 331 and 7 751 -> 7 709. fennec-server's `__text` grew 1 600
+bytes (4 492 032 -> 4 493 632, release) and its file 16; the browser
+module, which has no `answer_subqueries`, is the same size (837 830
+bytes), its bytes differing only in 190 bytes of panic locations' line
+numbers, engine.rs's lines after the new function moved 16 down.
 
 ## List parameters
 

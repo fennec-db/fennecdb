@@ -435,10 +435,16 @@ values only when it fills them -- grouped every time, a `set` under such
 a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
 (`sse::Reach`) binds them again under each look's lock where a collection
 they read was written since its change (every look where an inner `get`
-reads the time), runs the shape where the list moved and diffs by id
+reads the time or rows that expire), runs the shape where the list moved and diffs by id
 against what it sent (`enter_and_leave`), a row leaving a deletion only of
 a row it was sent: a customer's stream gains the courier as the order is
 claimed and loses them at the delivery, no write to `positions` between.
+The subscriber's own inner `get`s take the same path, any token's: held
+to the rules (`Scope::subscribed`), then answered with the rules of the
+collections they read (`bound_over`) and by the engine
+(`Database::answer_subqueries`), a write to an inner collection a reason
+to look again -- on main a stream holding one ended at its first change,
+`eval` refusing the `InSelect` ([fennecql.md](fennecql.md#inner-gets)).
 It costs one inner `get` a statement -- `make policy-bench`, a crew's
 bucket of two: a `set` 2.1 us over a plain rule in process, 4.1 against
 2.0, a read by id 1.7 (3.9 against 2.2), over HTTP 4.7 and 4.3 us of 32.0

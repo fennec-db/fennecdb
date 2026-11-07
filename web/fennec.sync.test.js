@@ -1172,6 +1172,52 @@ test('a polled live query over HTTP runs again only after a write to what it rea
   }
 });
 
+// A shape holding an inner `get`, its subscription, a live query and a
+// polled one of it: a write to the inner collection moves the rows as one
+// to the board does. On main the stream ended in an error at its first
+// change and was seeded again on each reopening, and the poll, untagged,
+// ran at every round.
+test('a shape holding an inner get follows writes to both collections over HTTP', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  await s.run('create collection notes (title text @hash)');
+  await s.run('create collection board (msg text)');
+  await s.run('put notes {title: "a1"}');
+  await s.run('put board [{msg: "a1"}, {msg: "b1"}]');
+  const statuses = [];
+  const db = client.connect(s.url, { fetch: (url, init) => fetch(url, init).then((r) => (statuses.push(r.status), r)) });
+  const events = [];
+  const errors = [];
+  const lived = [];
+  const polled = [];
+  const q = db.from('board').select('msg').where({ msg: { in: db.from('notes').select('title') } }).order('msg');
+  const changed = (test) => events.some((e) => e.type === 'change' && test(e));
+  const stops = [
+    db.subscribe('board', { where: 'msg in (get notes select title)' }, (ev) => events.push(ev), { onError: (e) => errors.push(e) }),
+    db.live(q, (rows) => lived.push(rows.map((r) => r.msg)), { onError: (e) => errors.push(e) }),
+    db.live(q, (rows) => polled.push(rows.map((r) => r.msg)), { poll: 100, onError: (e) => errors.push(e) }),
+  ];
+  try {
+    await until(() => events.length === 1 && lived.length === 1 && polled.length === 1, 'the seed and the first rows');
+    assert.deepEqual(events[0].rows.map((r) => r.msg), ['a1']);
+    assert.deepEqual(polled[0], ['a1']);
+    await until(() => statuses.filter((x) => x === 304).length >= 2, 'polls answered 304 while nothing was written');
+    await s.run('put board {msg: "a1"}');
+    await until(() => changed((e) => e.puts.some((r) => r.id === 3)), 'a write to the board');
+    await s.run('put notes {title: "b1"}');
+    await until(() => changed((e) => e.puts.some((r) => r.id === 2 && r.msg === 'b1')), 'b1 let in by a note');
+    await until(() => lived.at(-1)?.includes('b1') && polled.at(-1)?.includes('b1'), 'both queries again');
+    await s.run('del notes where title = "b1"');
+    await until(() => changed((e) => e.dels.includes(2)), 'b1 shut out with its note');
+    await until(() => !lived.at(-1)?.includes('b1') && !polled.at(-1)?.includes('b1'), 'both queries again');
+    assert.deepEqual(polled.at(-1), ['a1', 'a1']);
+    assert.equal(events.filter((e) => e.type === 'seed').length, 1, 'seeded once');
+    assert.deepEqual(errors, []);
+  } finally {
+    for (const stop of stops) stop();
+    s.close();
+  }
+});
+
 /** An HS256 token for `claims`, signed with `secret`. */
 async function jwt(secret, claims) {
   const { createHmac } = await import('node:crypto');

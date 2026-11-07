@@ -32,7 +32,9 @@ refused as its literal is (`Select::check_counts`).
 
 **[`in (get ...)` is answered before the query, as the list it
 is.](../../docs/design/fennecql.md#inner-gets)** `Database::answered` puts an
-`Expr::In` in its place on every path, so `eval` never meets one.
+`Expr::In` in its place on every path -- a stream's shape
+`Database::answer_subqueries`, under each look's lock, again once what it
+reads was written (`sse::Reach`) -- so `eval` never meets one.
 [`in $n`](../../docs/design/fennecql.md#list-parameters) is its list written
 out (`Expr::in_list`), held to it before the plan (`Statement::lists_held`)
 and read exactly (`Database::exactly`).

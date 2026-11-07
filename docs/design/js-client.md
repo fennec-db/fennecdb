@@ -37,8 +37,8 @@ takes `connect()` as it takes `sync()`. A stream is a server thread
 holds none: the query is sent with `If-None-Match` and the server answers
 304 without running it while no collection it reads was written (`etag`,
 `unchanged` in `fennec-http`, the change ring's
-`changed_collections_since`; a read of rows that expire, calling `now()`
-or holding an inner `get` is never tagged), 54 us against 95 for a page
+`changed_collections_since`, an inner `get`'s collections among those it
+reads; a read of rows that expire or calling `now()` is never tagged), 54 us against 95 for a page
 of 24 run. On a client reading near (`reads: 'nearest'`) the streams stay
 home, unmarked, and every run -- the first rows too -- is a read near, sent
 after the furthest of the client's position and the live query's own

@@ -285,7 +285,9 @@ pub fn serve(
     // rules admitting it (`mask`).
     //
     // A token whose rules read other collections has them bound under each
-    // look's lock ([`Reach`]), from the shape as the subscriber sent it.
+    // look's lock ([`Reach`]), from the shape as the subscriber sent it;
+    // an inner `get` of the shape, the token's or anyone's, is answered
+    // there too, as the list it then is.
     //
     // Where the database stands is read under the same lock, for the head
     // (`Fennec-Seq`, `Fennec-History`): a client running reads of its own
@@ -299,14 +301,16 @@ pub fn serve(
         let sub = api::subscription(&guard, req).and_then(|mut sub| {
             let mut quiet = false;
             let mut view = None;
-            let mut reach = None;
+            let mut own = None;
             if let Who::Scoped(scope) = who {
                 quiet = matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
                 let shape = if quiet { None } else { sub.filter.take() };
                 if quiet {
                     sub.project = Some(vec!["id".to_string()]);
                 }
-                reach = Reach::of(scope, &sub.collection, &shape, &sub.project);
+                if who.reaches_out() {
+                    own = Some((shape.clone(), sub.project.clone()));
+                }
                 let (shape, mask) = scope.shaped(&sub.collection, shape, &mut sub.project)?;
                 view = Some(View {
                     scope: Arc::clone(scope),
@@ -314,6 +318,7 @@ pub fn serve(
                 });
                 sub.filter = scope.subscribed(&sub.collection, shape)?;
             }
+            let reach = Reach::of(&guard, who, &sub, own);
             Ok((sub, quiet, view, reach))
         });
         (sub, at)
@@ -324,18 +329,16 @@ pub fn serve(
             // Over a collection the token is granted nothing on, the shape
             // read against its schema told nothing of it.
             let e = crate::path_refusal(who, req).unwrap_or(e);
-            let _ = write_head(
-                out,
-                cfg,
-                api::status_of(&e),
-                "application/json; charset=utf-8",
-                None,
-                None,
-            );
-            let mut body = String::from("{\"error\":");
-            fennec_core::json::escape_into(&mut body, &e.to_string());
-            body.push('}');
-            let _ = out.write_all(body.as_bytes());
+            // The body `/query` answers the same refusal with: the message
+            // alone, its class in the status. `Display`'s `denied: ` and
+            // `query error: ` made a stream's 403 and 400 read apart from
+            // every other route's.
+            let refused = crate::error_response(&e);
+            let retry = (refused.extra.iter())
+                .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+                .and_then(|(_, v)| v.parse().ok());
+            let _ = write_head(out, cfg, refused.status, refused.content_type, retry, None);
+            let _ = out.write_all(&refused.body);
             return;
         }
     };
@@ -351,14 +354,16 @@ pub fn serve(
     // row. The shape's rule -- a changed id that does not match is a
     // deletion -- would otherwise hand every user the ids everyone else
     // writes. It costs the ids of the rows sent; an unscoped subscription
-    // keeps the rule and holds nothing.
+    // keeps the rule and holds nothing -- but one whose shape reads another
+    // collection ([`Reach`]), whose rows come and go with no write to them
+    // ([`enter_and_leave`]), which only the rows it was sent can tell.
     //
     // Masked, each id keeps a digest of the row as it was sent, and a row
     // written again that shows the same is not sent: a write to a field
     // the token does not see would otherwise tell it when that field
     // changed, which a scoped poll's content tag (`same_answer`) keeps
     // from it as well.
-    let mut seen: Option<Seen> = who.scope().map(|_| Seen {
+    let mut seen: Option<Seen> = (who.scope().is_some() || reach.is_some()).then(|| Seen {
         ids: Default::default(),
         digests: shows(&view).is_some(),
     });
@@ -381,7 +386,8 @@ pub fn serve(
     let mut cursor = match sub.since {
         // Resuming, a scoped subscriber is seeded all the same: the rows it
         // holds are not known here, and without them no deletion could be
-        // told apart from someone else's write.
+        // told apart from someone else's write. So is one whose shape reads
+        // another collection: nor is what that held at its cursor.
         Some(n) if seen.is_none() => n,
         _ => match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
             Ok((seq, hold, images)) => {
@@ -431,9 +437,10 @@ pub fn serve(
         let (step, members) = {
             let guard = crate::held::read(db);
             let replaced = guard.adoptions() != adopted;
-            // Rules reading another collection, bound again where it was
-            // written: rows may enter and leave the shape, and show other
-            // fields, with no write to its own collection.
+            // Rules and inner `get`s reading another collection, bound and
+            // answered again where it was written: rows may enter and leave
+            // the shape, and show other fields, with no write to its own
+            // collection.
             let moved = match &reach {
                 Some(r) if !replaced => r.rebind(&guard, cursor, &mut sub, &mut view),
                 _ => Ok(false),
@@ -710,62 +717,105 @@ fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
     Some((&*v.scope, v.mask.as_ref()?))
 }
 
-/// A scoped stream of a collection whose rules, for its token, read other
-/// collections ([`crate::access::Scope::bound`]): its shape is the rules
-/// as they answer, made again under each look's lock where one of those
-/// collections was written since the stream's change -- or at every look
-/// where an inner `get` reads the time -- and run again where the answer
-/// moved, its rows diffed by id against those the stream was sent
-/// ([`enter_and_leave`]). A customer following the courier carrying their
-/// order hears the courier once the order is claimed and nothing of them
-/// once it is delivered, with no write to `positions` between. The cost
-/// is an inner `get` a stream at each write to what its rules read: a
-/// bucket's read for a customer's orders.
+/// A stream whose filter reads other collections: through the token's
+/// rules of its collection ([`crate::access::Scope::bound`]), through an
+/// inner `get` of the subscriber's shape (`where=msg in (get notes select
+/// title)`), or through a rule ANDed into that `get`. Its filter is the
+/// rules and the inner `get`s as they answer -- each `in (get ...)` the
+/// `in` list it is ([`Database::answer_subqueries`]), where `eval`, which
+/// judges each changed row, refuses one: such a stream sent its seed and
+/// ended at the first write to its collection. Made again under each
+/// look's lock where one of those collections was written since the
+/// stream's change -- or at every look where an inner `get` reads the
+/// time, or reads rows that expire, which leave its list with no write --
+/// and run again where the answer moved, its rows diffed by id against
+/// those the stream was sent ([`enter_and_leave`]): a row the write to the
+/// other collection let in enters, one it shut out leaves, a deletion of a
+/// row the stream was sent, its own collection unwritten. A customer
+/// following the courier carrying their order hears the courier once the
+/// order is claimed and nothing of them once it is delivered, with no
+/// write to `positions` between; a board following `msg in (get notes
+/// select title)` hears the message a note's title names once the note is
+/// written and its deletion once the note is gone. The cost is an inner
+/// `get` a stream at each write to what it reads, and the shape run again
+/// where its list moved -- the diff alone sent, where a reseed would send
+/// every row the shape holds at each such write. A stream whose filter
+/// reads no other collection has none, and runs nothing more at a look.
 struct Reach {
-    scope: Arc<Scope>,
+    /// The token's scope, where a rule of it reads another collection:
+    /// bound again at each answer.
+    rules: Option<Arc<Scope>>,
     collection: String,
-    /// The subscriber's own filter and list, which the rules are held to.
+    /// Under `rules`, the subscriber's own filter and list, which the
+    /// rules are held to; else the stream's filter as its token holds it
+    /// ([`Scope::subscribed`]), its inner `get`s unanswered, and its list.
     shape: Option<Expr>,
     project: Option<Vec<String>>,
-    /// The collections the rules read, at any depth.
+    /// The collections the inner `get`s read, at any depth.
     reads: Vec<String>,
-    /// An inner `get` reads the time.
+    /// An inner `get` reads the time, or rows that expire.
     clock: bool,
 }
 
+/// A stream's filter, list and view as [`Reach::bind`] answers them.
+type Answered = (Option<Expr>, Option<Vec<String>>, Option<View>);
+
 impl Reach {
+    /// What `sub`, its filter as its token holds it, reads beside its
+    /// collection, over `db`; `own` the subscriber's shape and list where
+    /// the token's rules read other collections. `None` where its filter
+    /// holds no inner `get`.
     fn of(
-        scope: &Arc<Scope>,
-        collection: &str,
-        shape: &Option<Expr>,
-        project: &Option<Vec<String>>,
+        db: &Database,
+        who: &Who,
+        sub: &api::Subscription,
+        own: Option<(Option<Expr>, Option<Vec<String>>)>,
     ) -> Option<Reach> {
-        let (reads, clock) = scope.reached_from(collection)?;
+        let f = sub.filter.as_ref().filter(|f| f.has_subquery())?;
+        let (reads, mut clock) = crate::access::inner_reads(f);
+        let expiring = db.expiring();
+        clock = clock || reads.iter().any(|c| expiring.contains(c));
+        let (rules, (shape, project)) = match (who, own) {
+            (Who::Scoped(scope), Some(own)) => (Some(Arc::clone(scope)), own),
+            _ => (None, (sub.filter.clone(), sub.project.clone())),
+        };
         Some(Reach {
-            scope: Arc::clone(scope),
-            collection: collection.to_string(),
-            shape: shape.clone(),
-            project: project.clone(),
+            rules,
+            collection: sub.collection.clone(),
+            shape,
+            project,
             reads,
             clock,
         })
     }
 
-    /// The stream's filter, list and view as the rules answer over `db`
-    /// now.
-    fn bind(
-        &self,
-        db: &Database,
-    ) -> fennec_core::error::Result<(Option<Expr>, Option<Vec<String>>, View)> {
-        let bound = Arc::new(self.scope.bound_over(db, &[&self.collection])?);
-        let mut project = self.project.clone();
-        let (shape, mask) = bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
-        let filter = bound.subscribed(&self.collection, shape)?;
-        Ok((filter, project, View { scope: bound, mask }))
+    /// The stream's filter, list and view as the rules and the inner
+    /// `get`s answer over `db` now; no view where the rules are not bound
+    /// here, the stream's own standing.
+    fn bind(&self, db: &Database) -> fennec_core::error::Result<Answered> {
+        let (mut filter, project, view) = match &self.rules {
+            Some(scope) => {
+                // The rules of the collections the inner `get`s read
+                // answered as a statement's are ([`Scope::bound`]).
+                let mut over = vec![self.collection.as_str()];
+                over.extend(self.reads.iter().map(String::as_str));
+                let bound = Arc::new(scope.bound_over(db, &over)?);
+                let mut project = self.project.clone();
+                let (shape, mask) =
+                    bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
+                let filter = bound.subscribed(&self.collection, shape)?;
+                (filter, project, Some(View { scope: bound, mask }))
+            }
+            None => (self.shape.clone(), self.project.clone(), None),
+        };
+        if let Some(f) = &mut filter {
+            db.answer_subqueries(f)?;
+        }
+        Ok((filter, project, view))
     }
 
-    /// The stream bound again where what its rules read was written after
-    /// `since`; whether its filter moved.
+    /// The stream bound and answered again where what it reads was written
+    /// after `since`; whether its filter moved.
     fn rebind(
         &self,
         db: &Database,
@@ -785,7 +835,9 @@ impl Reach {
             return Ok(false);
         }
         (sub.filter, sub.project) = (filter, project);
-        *view = Some(v);
+        if v.is_some() {
+            *view = v;
+        }
         Ok(true)
     }
 }
@@ -882,8 +934,10 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// under the lock ([`Database::pin`]) and read with none held, at the
 /// change the pin took: writes go on beside it, and the stream tells each
 /// as a change after that one, none twice and none missed. Under the same
-/// lock a rule reading another collection is bound, so the scope is the
-/// pin's moment too, and the change ring is held back to that change
+/// lock a rule reading another collection is bound and an inner `get`
+/// answered ([`Reach::bind`]), so the scope and the lists are the pin's
+/// moment too -- what the first look's changes are judged by, where no
+/// write came to what they read -- and the change ring is held back to that change
 /// ([`Database::hold_changes`]): the writes beside a long seed would
 /// otherwise leave the stream behind the ring's horizon, to be seeded
 /// again, pinned again, for as long as they outran the scan. What the pin
@@ -906,7 +960,9 @@ fn seed(
         let bound = match reach {
             Some(r) => r.bind(&guard).map(|(filter, project, v)| {
                 (sub.filter, sub.project) = (filter, project);
-                *view = Some(v);
+                if v.is_some() {
+                    *view = v;
+                }
             }),
             None => Ok(()),
         };

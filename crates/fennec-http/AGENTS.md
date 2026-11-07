@@ -81,7 +81,10 @@ Its `in` lists are answered under each lock (`Scope::bound`), the scope
 `Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
 refused, never cut, and rules reading each other's collections, a `*` rule
 reading one, or `new.` or `expired()` in one are refused at startup
-(`ring`).
+(`ring`). A stream's filter reading another collection -- a rule's, or the
+shape's own inner `get`, any token's -- is answered again at each look
+after a write to what it reads (`sse::Reach`), the rows that moved sent as
+a diff against those it was sent (`enter_and_leave`).
 
 **[A collection whose name starts with `_` is the server's, out of every
 rule's reach.](../../docs/design/access.md#the-servers-own-collections)**

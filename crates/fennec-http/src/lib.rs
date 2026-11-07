@@ -2877,17 +2877,26 @@ fn own_declared(db: &mut Database, body: &str) -> Option<fennec_core::error::Err
 /// what only adds, one block under the write lock, synced as a write is.
 /// 409 with the plan's refusals, which write nothing.
 pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str) -> Response {
-    metrics::wrote();
-    if let Err(refused) = quota::writing() {
-        return refused;
-    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     let mut guard = held::write(db);
+    // A description reaching the server's own collections is refused
+    // before it is a write, as `/query` refuses the server token's own
+    // statement (`own_answer`): asked after them, its 403 was counted a
+    // write's (`metrics::wrote`), and a tenant past its write rate was
+    // told the quota's 429 in its place. Asked under this lock, the
+    // migrations still to run being the record's (`own_declared`); the
+    // rate after it is a bucket's count, no wait.
     let r = match own_declared(&mut guard, body) {
         Some(e) => Err(e),
-        None => fennec_abi::schema(&mut guard, body, true, Some(now)),
+        None => {
+            metrics::wrote();
+            if let Err(refused) = quota::writing() {
+                return refused;
+            }
+            fennec_abi::schema(&mut guard, body, true, Some(now))
+        }
     };
     let durability = match &r {
         Ok(o) if o.applied => flush_for(cfg, &mut guard),
@@ -3360,31 +3369,25 @@ fn held_run(
 }
 
 /// A read's tag: the change the database stands at as it answers, `"42"`
-/// -- or none for a read whose answer can change with no write: one of a
-/// collection whose rows expire, one calling `now()`, one holding an inner
-/// `get` (its collections are not counted here). Sent back as
-/// `If-None-Match`, it is answered 304 while no write has touched what the
-/// read reads ([`unchanged`]): a page polling a query asks the server to
-/// run it only once something it reads was written, rather than each
+/// -- or none for a read whose answer can change with no write: one
+/// reading a collection whose rows expire, or calling `now()`. Sent back
+/// as `If-None-Match`, it is answered 304 while no write has touched what
+/// the read reads ([`unchanged`]): a page polling a query asks the server
+/// to run it only once something it reads was written, rather than each
 /// viewer holding a stream -- a thread each and a wake-up each at every
-/// write (`FennecHttp.live`'s `poll`).
+/// write (`FennecHttp.live`'s `poll`). An inner `get`'s collection is
+/// among what it reads, at any depth (`access::statement_reads`): a write
+/// there moves the list, as it moves a stream's ([`sse`]'s `Reach`).
+/// Untagged before, such a read ran at every round.
 fn etag(db: &Database, stmt: &Statement, text: &str) -> Option<String> {
-    let Statement::Select(sel) = stmt else {
-        return None;
-    };
-    if sel.has_subquery() || text.contains("now(") {
+    if !matches!(stmt, Statement::Select(_)) || text.contains("now(") {
         return None;
     }
     let expiring = db.expiring();
-    let reads = std::iter::once(sel.collection.as_str()).chain(
-        sel.lookup
-            .iter()
-            .flat_map(|l| l.chain().map(|s| s.collection.as_str())),
-    );
-    for c in reads {
-        if expiring.iter().any(|e| e == c) {
-            return None;
-        }
+    let mut reads = Vec::new();
+    access::statement_reads(stmt, &mut reads);
+    if reads.iter().any(|c| expiring.iter().any(|e| e == c)) {
+        return None;
     }
     Some(format!("\"{}\"", db.change_seq()))
 }
@@ -3425,9 +3428,9 @@ fn same_answer(resp: Response, asked: Option<&str>) -> Response {
 /// gave -- touched a collection `stmt` reads. A tag the change ring no
 /// longer reaches, or a collection dropped since, is a change.
 fn unchanged(db: &Database, stmt: &Statement, asked: &str) -> bool {
-    let Statement::Select(sel) = stmt else {
+    if !matches!(stmt, Statement::Select(_)) {
         return false;
-    };
+    }
     let Some(since) = asked.trim().trim_matches('"').parse::<u64>().ok() else {
         return false;
     };
@@ -3437,11 +3440,8 @@ fn unchanged(db: &Database, stmt: &Statement, asked: &str) -> bool {
     let Some(written) = db.changed_collections_since(since) else {
         return false;
     };
-    let reads = std::iter::once(sel.collection.as_str()).chain(
-        sel.lookup
-            .iter()
-            .flat_map(|l| l.chain().map(|s| s.collection.as_str())),
-    );
+    let mut reads = Vec::new();
+    access::statement_reads(stmt, &mut reads);
     let hit = reads.into_iter().any(|c| written.iter().any(|w| w == c));
     !hit
 }

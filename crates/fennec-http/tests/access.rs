@@ -651,6 +651,116 @@ fn a_subscriptions_inner_get_reads_only_what_the_token_may() {
     assert!(secret.contains("collection `secrets`"), "{secret}");
 }
 
+/// The change events heard, in order.
+fn changes(heard: &str) -> Vec<&str> {
+    heard
+        .split("event: change\ndata: ")
+        .skip(1)
+        .map(|e| e.split("\n\n").next().unwrap_or(""))
+        .collect()
+}
+
+/// A scoped stream whose shape holds an inner `get` goes on past its
+/// seed, its list answered at each look over the rows the token may read
+/// alone: on main its first change was `event: error`. A board message
+/// enters as alice writes a note naming it and leaves as she deletes it;
+/// bob's notes, which she may not read, let nothing in -- a write of his
+/// to `notes` is a write to what the stream reads, and tells her nothing.
+#[test]
+fn a_scoped_streams_inner_get_follows_the_rows_the_token_may_read() {
+    let n = start_with(
+        POLICY,
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection board (msg text)",
+            r#"put notes [{owner: "alice", title: "a1"}, {owner: "bob", title: "b1"}]"#,
+            r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "b2"}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    write!(
+        s,
+        "GET /board/changes?where=msg+in+(get+notes+select+title) HTTP/1.1\r\nHost: x\r\n\
+         Authorization: Bearer {alice}\r\n\r\n"
+    )
+    .unwrap();
+    let mut heard = String::new();
+    let wait = Duration::from_secs(10);
+    listen(&mut s, &mut heard, &|h| h.contains("event: seed"), wait);
+    assert!(
+        heard.contains("\"rows\":[{\"id\":1,\"msg\":\"a1\"}]"),
+        "{heard}"
+    );
+    let ok = |sql: &str| {
+        let (status, body) = n.query(ROOT, sql);
+        assert_eq!(status, 200, "{sql}: {body}");
+    };
+    // Writes to the board, past the first: hers told, bob's message not --
+    // the next change is the next of hers.
+    ok(r#"put board {msg: "a1"}"#);
+    listen(&mut s, &mut heard, &|h| changes(h).len() == 1, wait);
+    assert!(
+        changes(&heard)[0].contains(r#"{"id":4,"msg":"a1"}"#),
+        "{heard}"
+    );
+    ok(r#"put board {msg: "b1"}"#);
+    ok(r#"put board {msg: "a1"}"#);
+    listen(&mut s, &mut heard, &|h| changes(h).len() == 2, wait);
+    assert!(
+        changes(&heard)[1].contains(r#""puts":[{"id":6,"msg":"a1"}]"#),
+        "{heard}"
+    );
+    // A note of bob's naming `b2`: not in her list.
+    ok(r#"put notes {owner: "bob", title: "b2"}"#);
+    // One of hers naming it: `b2` enters, no write to the board.
+    ok(r#"put notes {owner: "alice", title: "b2"}"#);
+    listen(&mut s, &mut heard, &|h| changes(h).len() == 3, wait);
+    assert!(
+        changes(&heard)[2].contains(r#""puts":[{"id":3,"msg":"b2"}]"#),
+        "{heard}"
+    );
+    // Hers gone, `b2` leaves -- bob's still naming it.
+    ok(r#"del notes where owner = "alice" and title = "b2""#);
+    listen(&mut s, &mut heard, &|h| changes(h).len() == 4, wait);
+    assert!(
+        changes(&heard)[3].contains(r#""puts":[],"dels":[3]"#),
+        "{heard}"
+    );
+    let told = changes(&heard).concat();
+    assert!(
+        !told.contains("\"b1\"") && !told.contains("\"id\":5"),
+        "{heard}"
+    );
+}
+
+/// A stream refused is told what `/query` tells the same refusal, byte for
+/// byte: the message alone, its class in the status. The stream's body
+/// read `denied: ...` and `not found: ...` where every other route's did
+/// not.
+#[test]
+fn a_refused_stream_is_answered_as_a_refused_query() {
+    let n = start_with(
+        "notes  read,write  where owner = $jwt.sub\ninbox  insert\n",
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection inbox (msg text)",
+            "create collection secrets (x int)",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    for (stream, query, status) in [
+        ("/inbox/changes", "get inbox", 403),
+        ("/secrets/changes", "get secrets", 404),
+    ] {
+        let streamed = n.call(Some(&alice), "GET", stream, "");
+        assert_eq!(streamed, n.query(&alice, query), "{stream}");
+        assert_eq!(streamed.0, status, "{}", streamed.1);
+    }
+}
+
 /// A disjunctive facet leaves the query's own conditions on its field out,
 /// and never the token's: `facet owner disjunctive` split after the rules
 /// were ANDed in would have counted every user's rows. By `/query` and by
@@ -1636,6 +1746,64 @@ fn a_scoped_poll_learns_nothing_of_writes_it_may_not_read() {
     assert_eq!(status, 200);
     assert!(!root.starts_with("\"c"), "{root}");
     assert_eq!(ask(ROOT, &root).0, 304);
+}
+
+/// A scoped poll of a read whose inner `get` reads another collection is
+/// tagged by its answer, the list held to the token's rows: a note of
+/// bob's naming a message moves nothing of alice's and is answered 304,
+/// one of hers lets the message in. The server's token's tag is the
+/// counter's, which a write to the inner collection moves.
+#[test]
+fn a_scoped_poll_of_an_inner_get_moves_with_the_rows_the_token_may_read() {
+    let n = start_with(
+        POLICY,
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection board (msg text)",
+            r#"put notes [{owner: "alice", title: "a1"}, {owner: "bob", title: "b1"}]"#,
+            r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "b2"}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let ask = |token: &str, tag: &str| -> (u16, String, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body =
+            r#"{"query":"get board select msg where msg in (get notes select title) order msg"}"#;
+        write!(
+            s,
+            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+             If-None-Match: {tag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let tag = out.lines().find_map(|l| l.strip_prefix("ETag: "));
+        let answer = out.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+        (
+            out[9..12].parse().unwrap(),
+            tag.unwrap_or_default().to_string(),
+            answer.to_string(),
+        )
+    };
+    let (status, tag, rows) = ask(&alice, "\"0\"");
+    assert_eq!((status, rows.as_str()), (200, r#"[{"msg":"a1"}]"#));
+    assert!(tag.starts_with("\"c"), "{tag}");
+    let (status, root, _) = ask(ROOT, "\"0\"");
+    assert_eq!(status, 200);
+    assert_eq!(ask(ROOT, &root).0, 304);
+    let ok = |sql: &str| assert_eq!(n.query(ROOT, sql).0, 200, "{sql}");
+    ok(r#"put notes {owner: "bob", title: "b2"}"#);
+    assert_eq!(ask(&alice, &tag).0, 304);
+    assert_eq!(ask(ROOT, &root).0, 200);
+    ok(r#"put notes {owner: "alice", title: "b2"}"#);
+    let (status, again, rows) = ask(&alice, &tag);
+    assert_eq!(
+        (status, rows.as_str()),
+        (200, r#"[{"msg":"a1"},{"msg":"b2"}]"#)
+    );
+    assert_ne!(again, tag);
 }
 
 const COUNTS: &str = "\

@@ -1103,3 +1103,191 @@ fn a_stream_lets_the_ring_go_at_its_first_look() {
     let (name, _) = s.next().expect("the writes");
     assert_eq!(name, "seed");
 }
+
+// ------------------------------------------------------------ inner gets
+
+/// A board whose messages a subscription follows by the titles of the
+/// notes: `where=msg in (get notes select title)`.
+fn board() -> Database {
+    let mut db = Database::new();
+    for sql in [
+        "create collection notes (title text @hash)",
+        "create collection board (msg text)",
+        r#"put notes [{title: "a1"}, {title: "b1"}]"#,
+        r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "c1"}]"#,
+    ] {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    db
+}
+
+const INNER: &str = "/board/changes?where=msg+in+(get+notes+select+title)";
+
+/// The rows of the array `key` in an event's data, by id, each its `msg`.
+fn msgs(data: &str, key: &str) -> Vec<(i64, String)> {
+    let msg = |r: &str| {
+        let m = r.split("\"msg\":\"").nth(1).unwrap_or("");
+        m.split('"').next().unwrap_or("").to_string()
+    };
+    let mut rows: Vec<(i64, String)> = (rows_of(data, key).into_iter())
+        .map(|(id, r)| (id, msg(&r)))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// The ids a change event names as deleted, in order.
+fn gone(data: &str) -> Vec<i64> {
+    let mut ids = dels(data);
+    ids.sort();
+    ids
+}
+
+/// A shape holding an inner `get` is judged against the list as it is at
+/// each look: on main the first write to `board` ended the stream with
+/// `event: error` (`eval` refuses an `in (get ...)`), its seed the only
+/// thing it ever sent. Writes inside and outside the shape, one after
+/// another, each told or not as a shape of a list written out would be.
+#[test]
+fn a_shapes_inner_get_is_answered_at_every_look() {
+    let h = start_over(board(), Config::default());
+    let mut s = Sub::open(h.port, INNER);
+    assert_eq!(s.status, 200, "{}", s.head_line());
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(
+        msgs(&data, "rows"),
+        [(1, "a1".into()), (2, "b1".into())],
+        "{data}"
+    );
+    let mut id = 3;
+    for (msg, told) in [("a1", true), ("zz", false), ("b1", true), ("c1", false)] {
+        let (st, body) = post(h.port, "/board", &format!(r#"{{"msg":"{msg}"}}"#));
+        assert_eq!(st, 201, "{body}");
+        id += 1;
+        // A write outside the shape is told nothing: the next event is the
+        // next write's inside it.
+        if told {
+            let (name, data) = s.next().expect("a change");
+            assert_eq!(name, "change", "{data}");
+            assert_eq!(msgs(&data, "puts"), [(id, msg.into())], "{data}");
+        }
+    }
+    // A message moved out of the list: deletions of the rows it was sent.
+    let (st, body) = call(
+        h.port,
+        "PATCH",
+        "/board?msg=eq.a1",
+        Some(r#"{"msg":"a2"}"#),
+        &[],
+    );
+    assert_eq!(st, 200, "{body}");
+    let (name, data) = s.next().expect("a change");
+    assert_eq!(name, "change", "{data}");
+    assert_eq!(gone(&data), [1, 4], "{data}");
+    assert_eq!(count(&data, "puts"), 0, "{data}");
+}
+
+/// A write to the inner `get`'s collection moves which rows the shape
+/// holds with no write to them: a note titled `c1` lets the board's two
+/// `c1`s in, and its deletion takes them out again, deletions of the rows
+/// the stream was sent. A note naming no message, and a message outside
+/// the list, are told nothing.
+#[test]
+fn a_write_to_the_inner_collection_moves_rows_in_and_out() {
+    let h = start_over(board(), Config::default());
+    let mut s = Sub::open(h.port, INNER);
+    assert_eq!(s.next().expect("seed").0, "seed");
+    for (path, body) in [
+        ("/board", r#"{"msg":"c1"}"#),
+        ("/notes", r#"{"title":"nothing"}"#),
+        ("/notes", r#"{"title":"c1"}"#),
+    ] {
+        let (st, answer) = post(h.port, path, body);
+        assert_eq!(st, 201, "{answer}");
+    }
+    let (name, data) = s.next().expect("a change");
+    assert_eq!(name, "change", "{data}");
+    assert_eq!(
+        msgs(&data, "puts"),
+        [(3, "c1".into()), (4, "c1".into())],
+        "{data}"
+    );
+    assert!(dels(&data).is_empty(), "{data}");
+
+    let (st, body) = call(h.port, "DELETE", "/notes?title=eq.c1", None, &[]);
+    assert_eq!(st, 200, "{body}");
+    let (name, data) = s.next().expect("a change");
+    assert_eq!(name, "change", "{data}");
+    assert_eq!(gone(&data), [3, 4], "{data}");
+    assert_eq!(count(&data, "puts"), 0, "{data}");
+    // Gone, they are not told gone again at the next write.
+    let (st, body) = post(h.port, "/board", r#"{"msg":"b1"}"#);
+    assert_eq!(st, 201, "{body}");
+    let (name, data) = s.next().expect("a change");
+    assert_eq!(name, "change", "{data}");
+    assert!(dels(&data).is_empty(), "{data}");
+    assert_eq!(msgs(&data, "puts"), [(5, "b1".into())], "{data}");
+}
+
+/// Resumed with `since`, a stream whose shape reads another collection is
+/// seeded all the same: neither what that collection held at its cursor
+/// nor which rows it was sent is known here.
+#[test]
+fn a_resumed_stream_reading_another_collection_is_seeded() {
+    let h = start_over(board(), Config::default());
+    let cursor = h.db.read().unwrap().change_seq();
+    let mut s = Sub::open(h.port, &format!("{INNER}&since={cursor}"));
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(
+        msgs(&data, "rows"),
+        [(1, "a1".into()), (2, "b1".into())],
+        "{data}"
+    );
+}
+
+/// A poll of a read holding an inner `get` is tagged by the change
+/// counter, as any read: 304 while neither collection was written, and
+/// run again once the inner one was. On main it was never tagged, and ran
+/// at every round however long nothing moved.
+#[test]
+fn a_poll_of_an_inner_get_is_answered_304_until_what_it_reads_is_written() {
+    let h = start_over(board(), Config::default());
+    let q = r#"{"query":"get board select msg where msg in (get notes select title) order msg"}"#;
+    let poll = |tag: &str| {
+        let mut sock = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(
+            sock,
+            "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
+             Content-Length: {}\r\n\r\n{q}",
+            q.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        sock.read_to_string(&mut out).unwrap();
+        let status: u16 = out[9..12].parse().unwrap();
+        let etag = out.lines().find_map(|l| l.strip_prefix("ETag: "));
+        let body = out.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+        (status, etag.map(str::to_string), body.to_string())
+    };
+    let (status, tag, body) = poll("\"0\"");
+    assert_eq!(status, 200, "{body}");
+    let tag = tag.expect("a read holding an inner get is tagged");
+    assert_eq!(poll(&tag).0, 304);
+    // A write to neither collection is no change.
+    let (st, body) = post(
+        h.port,
+        "/query",
+        r#"{"query":"create collection other (n int)"}"#,
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(post(h.port, "/other", r#"{"n":1}"#).0, 201);
+    assert_eq!(poll(&tag).0, 304);
+    // The inner collection written: the answer moved, and is sent.
+    assert_eq!(post(h.port, "/notes", r#"{"title":"c1"}"#).0, 201);
+    let (status, _, body) = poll(&tag);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("c1"), "{body}");
+}

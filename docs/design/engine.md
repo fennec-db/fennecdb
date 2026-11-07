@@ -359,8 +359,10 @@ when each was due, each stream kept through its first look and 100 ms
 after, three turns against the build before, the load under 2.5) took
 212-231 ms at p99 and 242-261 at most, half of them past 50 ms, against
 0.55-0.59 ms alone. The seed's `get` is pinned under the lock
-its rules are bound under -- a scoped token's lists answered there, so the
-scope is the pin's moment -- its rows masked through the pin's schemas and
+its rules are bound under -- a scoped token's lists answered there, and
+the shape's own inner `get`s (`Database::answer_subqueries`), so the
+scope and the lists the first look judges its changes by are the pin's
+moment -- its rows masked through the pin's schemas and
 `Seen` told of them after, and the seed names the pin's change: the
 stream's first look reads the changes after it, so a write landing during
 the read is in no seed and in the next change, once
