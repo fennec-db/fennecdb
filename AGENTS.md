@@ -239,6 +239,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - Only an `and` chain reaches an index.
 - A filter is bound to its collection once a query.
 - `@sorted` must give the scan's answer, row for row.
+- A whole float goes out as every digit of the int it is.
 - An index over several fields is its parts' bytes laid end to end
 - An open builds no hash, text, ordered or sparse index.
 - A server warms what an open left for the first read
@@ -414,6 +415,7 @@ Covers `web/`.
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A number from 2^53 on goes out as every digit.
 
 ### `studio/CLAUDE.md`
 

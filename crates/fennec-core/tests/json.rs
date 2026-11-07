@@ -597,8 +597,9 @@ fn the_indexes_answer_where_they_can_and_the_scan_where_they_cannot() {
         p.contains("walked the ordered index on meta.source.rank"),
         "{p}"
     );
-    // An int past 2^53 has a bucket of its own, the float that is it filed
-    // there too; a list has none, and the scan answers.
+    // An int past 2^53 has a bucket of its own -- where a whole float is
+    // filed too when it is that int, which 2^53 + 1 no float is; a list
+    // has none, and the scan answers.
     let p = plan("get c where meta.lang = 9007199254740993 count");
     assert!(p.contains("hash index on meta.lang"), "{p}");
     let p = plan("get c where meta.lang = [1, 2] count");

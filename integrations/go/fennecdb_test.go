@@ -219,6 +219,27 @@ func TestParamsOfEveryType(t *testing.T) {
 	}
 }
 
+// The float64 2^60 goes as every digit of the int it is, and finds the
+// rows holding it: encoding/json's 1152921504606847000 is another number
+// to the server, which compares an int and a float by their true values.
+func TestAWholeFloat64From2To53FindsItsRows(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("wide")
+	must(db.Exec(ctx, "create collection "+name+" (x float, xh float @hash, xs float @sorted, m json)")).of(t)
+	must(db.Exec(ctx, "create index on "+name+" (m.h) @hash")).of(t)
+	p60 := math.Ldexp(1, 60)
+	must(db.Exec(ctx, "put "+name+" {x: 1152921504606846976.0, xh: 1152921504606846976.0, xs: 1152921504606846976.0, "+
+		"m: {h: 1152921504606846976.0}}")).of(t)
+	must(db.Exec(ctx, "put "+name+" {x: $1, xh: $1, xs: $1, m: $2}", p60, map[string]any{"h": p60})).of(t)
+	for _, field := range []string{"x", "xh", "xs", "m.h"} {
+		rows := must(db.Query(ctx, "get "+name+" where "+field+" = $1 count", p60)).of(t)
+		if rows[0]["count"] != 2.0 {
+			t.Fatalf("%s = 2^60 counted %v", field, rows)
+		}
+	}
+}
+
 func TestRefusalsAreTypedErrors(t *testing.T) {
 	ctx := context.Background()
 	db := root()

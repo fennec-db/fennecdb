@@ -697,6 +697,29 @@ pub(crate) fn exact_float(i: i64) -> Option<f64> {
     (f < I64_END && f as i64 == i).then_some(f)
 }
 
+/// The two floats `i` lies between, an int no float holds ([`exact_float`]
+/// none), with no float between them: an ordered index keying floats says
+/// `x > i` as `x > below` and `x >= i` as `x >= above`, where no key says
+/// `i`. `i as f64` is the nearer one, either side; `i64::MAX`'s is 2^63.
+/// The other is a step in its bits -- toward zero or away, the bits
+/// holding the magnitude -- as every float past 2^53 is whole and
+/// finite: `next_up` and `next_down`, which mind the rest, were 249
+/// bytes of the browser module.
+#[cfg(feature = "sorted")]
+pub(crate) fn floats_beside(i: i64) -> (f64, f64) {
+    let f = i as f64;
+    let above = f >= I64_END || f as i64 > i;
+    let bits = f.to_bits();
+    let g = f64::from_bits(match above == (f > 0.0) {
+        true => bits - 1,
+        false => bits + 1,
+    });
+    match above {
+        true => (g, f),
+        false => (f, g),
+    }
+}
+
 /// The refusal of a whole float at or past [`I64_END`] going into an `int`,
 /// which a document's write names the field of (`engine::in_field`). Out of
 /// line: the range is a limit, and a limit is an error, never the nearest
@@ -877,6 +900,13 @@ mod tests {
         assert_eq!(key(Value::Int(i64::MAX), &float), None);
         // A write rounds an int into a float field, and refuses -2^63 into
         // an int one, whose text may have been past it.
+        #[cfg(feature = "sorted")]
+        for i in ints().into_iter().filter(|&i| exact_float(i).is_none()) {
+            let (below, above) = floats_beside(i);
+            assert_eq!(by_i128(i, below), Greater, "{i}");
+            assert_eq!(by_i128(i, above), Less, "{i}");
+            assert_eq!(below.next_up(), above, "{i}");
+        }
         let rounded = Value::Int((1 << 53) + 1).coerce(&float).unwrap();
         assert_eq!(rounded, Value::Float(9_007_199_254_740_992.0));
         assert!(Value::Float(-I64_END).coerce(&int).is_err());

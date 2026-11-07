@@ -350,10 +350,14 @@ than gathering and sorting that many ids.</p>
 <div class="note">
   <p><b>A comparison reaches the index only when its literal says exactly
   what the scan would compare.</b> <code>price &lt; 12.5</code> on an
-  <code>int</code> field, or an integer no float holds (2<sup>53</sup> + 1)
-  against a <code>float</code>, is evaluated row by row — the index narrows with the
+  <code>int</code> field is evaluated row by row — the index narrows with the
   comparisons it can express and the rest are tested — because an answer that
-  differs from the scan's is a wrong answer, not a fast one. Ties come out in
+  differs from the scan's is a wrong answer, not a fast one. An integer no
+  float holds (2<sup>53</sup> + 1) against a <code>float</code> field or a
+  json path lies between two floats with none between them, and the index
+  answers it by those: <code>x &gt; 9007199254740993</code> is
+  <code>x &gt; 9007199254740992.0</code>, <code>x &gt;= 9007199254740993</code>
+  is <code>x &gt;= 9007199254740994.0</code>. Ties come out in
   ascending <code>id</code> either way, as the scan leaves them.</p>
   <p>The cost is paid on write and in memory: about 20 bytes a row for a
   number, plus the text for <code>text</code>, and an insert into a sorted

@@ -475,23 +475,42 @@ fn literal(r: &mut Rng, i: i64) -> Value {
     }
 }
 
+/// What a random run's json path holds: the int or the float nearest it
+/// (`Mixed`), ints no float holds among them, which its ordered index and
+/// the index over several fields hold apart and answer nothing while they
+/// do; or numbers a float holds alone (`Exact`) -- the int the nearest
+/// float is, or that float -- so they answer, and are held to the scan.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Json {
+    Mixed,
+    Exact,
+}
+
+/// The plan `explain` gives for `text`.
+fn plan(db: &Database, text: &str, params: &[Value]) -> String {
+    format!("{:?}", answer(db, &format!("explain {text}"), params).rows)
+}
+
 /// Random ints near the powers of two and random literals near them: every
-/// index answers every comparison and `in` list as the scan does, and a
-/// json path holding ints and floats is ordered as the unindexed one is.
-#[test]
-fn random_numbers_near_the_edges_get_the_scans_answer_through_every_index() {
+/// index -- over ints, timestamps, floats (one descending part among them),
+/// json paths, an index over several fields with a json part -- answers
+/// every comparison and `in` list as the scan does, `NaN` rows among the
+/// floats, and a json path holding ints and floats is ordered as the
+/// unindexed one is.
+fn random_edges(seed: u64, json: Json) {
     fennec_ql::install();
     let mut db = Database::new();
     run(
         &mut db,
         "create collection t (n int, h int @hash, u int @unique, s int @sorted, a int, z int,
-                              m json, @sorted(a, z));
+                              tn timestamp, ts timestamp @sorted, th timestamp @hash,
+                              m json, @sorted(a, z), @sorted(m.c, z));
          create index on t (m.h) @hash;
          create index on t (m.s) @sorted;
-         create collection f (x float, xh float @hash, xs float @sorted, a float, z int,
-                              @sorted(a, z))",
+         create collection f (x float, xh float @hash, xs float @sorted, a float, b float,
+                              y float, z int, @sorted(a, z), @sorted(b desc, z))",
     );
-    let mut r = Rng(0x9E37_79B9_7F4A_7C15);
+    let mut r = Rng(seed);
     let mut held: Vec<i64> = Vec::new();
     while held.len() < 160 {
         let i = near(&mut r);
@@ -499,34 +518,60 @@ fn random_numbers_near_the_edges_get_the_scans_answer_through_every_index() {
             continue;
         }
         held.push(i);
-        // The json path holds the int or the float nearest it.
-        let j = match r.below(2) {
-            0 => Value::Int(i),
-            _ => Value::Float(i as f64),
+        let f = i as f64;
+        let j = match (json, r.below(2)) {
+            (Json::Mixed, 0) => Value::Int(i),
+            (Json::Exact, 0) if f < END => Value::Int(f as i64),
+            _ => Value::Float(f),
         };
-        let text = "put t {n: $1, h: $1, u: $1, s: $1, a: $1, z: 0, m: $2}";
-        with(&mut db, text, &[Value::Int(i), three(&j)]).unwrap();
-        let text = "put f {x: $1, xh: $1, xs: $1, a: $1, z: 0}";
-        with(&mut db, text, &[Value::Float(i as f64)]).unwrap();
+        let m = obj(&[("c", &j), ("h", &j), ("s", &j), ("v", &j)]);
+        let text = "put t {n: $1, h: $1, u: $1, s: $1, a: $1, z: 0, tn: $1, ts: $1, th: $1, m: $2}";
+        with(&mut db, text, &[Value::Int(i), m]).unwrap();
+        let text = "put f {x: $1, xh: $1, xs: $1, a: $1, b: $1, y: $1, z: 0}";
+        with(&mut db, text, &[Value::Float(f)]).unwrap();
     }
+    // `NaN`, equal to every value: an inclusive comparison takes it, a
+    // strict one does not, through the ordered indexes as through the scan.
+    // A `@hash` keeps it in the bucket of its bits, where `= 5.0` does not
+    // look: `xh` holds none, held to `y`, which holds none either.
+    for _ in 0..3 {
+        let text = "put f {x: $1, xs: $1, a: $1, b: $1, z: 0}";
+        with(&mut db, text, &[Value::Float(f64::NAN)]).unwrap();
+    }
+    if json == Json::Exact {
+        let some = Value::Int(held[0]);
+        let text = "get t where m.s > $1";
+        assert!(
+            plan(&db, text, one(&some)).contains("ordered index on m.s"),
+            "{text}"
+        );
+        let text = "get t where m.c > $1";
+        assert!(
+            plan(&db, text, one(&some)).contains("a range on m.c"),
+            "{text}"
+        );
+    }
+    let fields = [
+        ("t", "n", &["h", "u", "s", "a"][..]),
+        ("t", "tn", &["ts", "th"][..]),
+        ("t", "m.v", &["m.h", "m.s", "m.c"][..]),
+        ("f", "x", &["xs", "a", "b"][..]),
+        ("f", "y", &["xh"][..]),
+    ];
     for _ in 0..400 {
         let i = held[r.below(held.len() as u64) as usize];
         let v = literal(&mut r, i);
         for op in OPS {
-            let want = ids(&db, &format!("get t where n {op} $1"), one(&v));
-            for field in ["h", "u", "s", "a"] {
-                let text = format!("get t where {field} {op} $1");
-                assert_eq!(ids(&db, &text, one(&v)), want, "{text} with {v:?}");
-            }
-            let want = ids(&db, &format!("get t where m.v {op} $1"), one(&v));
-            for field in ["m.h", "m.s"] {
-                let text = format!("get t where {field} {op} $1");
-                assert_eq!(ids(&db, &text, one(&v)), want, "{text} with {v:?}");
-            }
-            let want = ids(&db, &format!("get f where x {op} $1"), one(&v));
-            for field in ["xh", "xs", "a"] {
-                let text = format!("get f where {field} {op} $1");
-                assert_eq!(ids(&db, &text, one(&v)), want, "{text} with {v:?}");
+            for (c, scan, indexed) in fields {
+                let want = ids(&db, &format!("get {c} where {scan} {op} $1"), one(&v));
+                for field in indexed {
+                    let text = format!("get {c} where {field} {op} $1");
+                    assert_eq!(
+                        ids(&db, &text, one(&v)),
+                        want,
+                        "{json:?}: {text} with {v:?}"
+                    );
+                }
             }
         }
         let list = Value::List(
@@ -537,27 +582,23 @@ fn random_numbers_near_the_edges_get_the_scans_answer_through_every_index() {
                 })
                 .collect(),
         );
-        let want = ids(&db, "get t where n in $1", one(&list));
-        for field in ["h", "u", "s", "a"] {
-            let text = format!("get t where {field} in $1");
-            assert_eq!(ids(&db, &text, one(&list)), want, "{text} with {list:?}");
+        for (c, scan, indexed) in fields {
+            let want = ids(&db, &format!("get {c} where {scan} in $1"), one(&list));
+            for field in indexed {
+                let text = format!("get {c} where {field} in $1");
+                assert_eq!(
+                    ids(&db, &text, one(&list)),
+                    want,
+                    "{json:?}: {text} with {list:?}"
+                );
+            }
         }
-        let want = ids(&db, "get t where m.v in $1", one(&list));
-        for field in ["m.h", "m.s"] {
-            let text = format!("get t where {field} in $1");
-            assert_eq!(ids(&db, &text, one(&list)), want, "{text} with {list:?}");
-        }
-        let want = ids(&db, "get f where x in $1", one(&list));
-        assert_eq!(
-            ids(&db, "get f where xh in $1", one(&list)),
-            want,
-            "{list:?}"
-        );
     }
     // The json path in order, its ints and floats together, and every row
     // against every other by the true values.
     let order = ids(&db, "get t order m.v", &[]);
     assert_eq!(ids(&db, "get t order m.s", &[]), order);
+    assert_eq!(ids(&db, "get t order m.c, z", &[]), order);
     let r = answer(&db, "get t select m.v order m.v", &[]);
     for w in r.rows.windows(2) {
         let (a, b) = (&w[0].values[0], &w[1].values[0]);
@@ -566,4 +607,234 @@ fn random_numbers_near_the_edges_get_the_scans_answer_through_every_index() {
             assert!(w[0].id < w[1].id, "{a:?} and {b:?} tie in id order");
         }
     }
+    let order = ids(&db, "get t order tn", &[]);
+    assert_eq!(ids(&db, "get t order ts", &[]), order);
+    if json == Json::Exact {
+        let text = "get t order m.s limit 5";
+        assert!(plan(&db, text, &[]).contains("walked"), "{text}");
+    }
+}
+
+#[test]
+fn random_numbers_near_the_edges_get_the_scans_answer_through_every_index() {
+    random_edges(0x9E37_79B9_7F4A_7C15, Json::Mixed);
+}
+
+#[test]
+fn random_numbers_a_float_holds_get_the_scans_answer_through_an_answering_json_index() {
+    random_edges(0xD1B5_4A32_D192_ED03, Json::Exact);
+}
+
+/// A float field's ordered index, and an index over several fields with a
+/// float part, answer a comparison with an int no float holds: it lies
+/// between two floats with none between them, which bound it -- tested row
+/// by row, `xs > 9007199254740993` read every row.
+#[test]
+fn an_int_no_float_holds_is_bounded_by_the_floats_beside_it() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection f (x float, xs float @sorted, a float, b float, z int,
+                              @sorted(a, z), @sorted(b desc, z), m json);
+         create index on f (m.s) @sorted",
+    );
+    let mut fs = Vec::new();
+    for e in [53, 54, 60, 62] {
+        for sign in [1.0, -1.0] {
+            let p = sign * 2f64.powi(e);
+            for d in 0..4u64 {
+                fs.push(f64::from_bits(p.to_bits() + d));
+                fs.push(f64::from_bits(p.to_bits() - d));
+            }
+        }
+    }
+    fs.extend([END, -END, 0.0]);
+    fs.sort_by(f64::total_cmp);
+    fs.dedup();
+    for f in &fs {
+        let m = obj(&[("s", &Value::Float(*f)), ("v", &Value::Float(*f))]);
+        let text = "put f {x: $1, xs: $1, a: $1, b: $1, z: 0, m: $2}";
+        with(&mut db, text, &[Value::Float(*f), m]).unwrap();
+    }
+    let nan = "put f {x: $1, xs: $1, a: $1, b: $1, z: 0}";
+    with(&mut db, nan, &[Value::Float(f64::NAN)]).unwrap();
+    let mut literals = Vec::new();
+    for e in [53, 54, 60, 62] {
+        for d in [1i64, 3, 5, 7, -1, -3] {
+            for sign in [1i64, -1] {
+                // Short of 2^53 every int is a float.
+                let i = sign * ((1i64 << e) + d);
+                if (i as f64) as i64 != i {
+                    literals.push(Value::Int(i));
+                }
+            }
+        }
+    }
+    assert_eq!(literals.len(), 44);
+    literals.extend([Value::Int(i64::MAX), Value::Int(i64::MIN + 1)]);
+    for v in &literals {
+        for op in OPS {
+            let want = ids(&db, &format!("get f where x {op} $1"), one(v));
+            for field in ["xs", "a", "b"] {
+                let text = format!("get f where {field} {op} $1");
+                assert_eq!(ids(&db, &text, one(v)), want, "{text} with {v:?}");
+            }
+            // The json path holds no `NaN`: its index answers alone.
+            let want = ids(&db, &format!("get f where m.v {op} $1"), one(v));
+            let text = format!("get f where m.s {op} $1");
+            assert_eq!(ids(&db, &text, one(v)), want, "{text} with {v:?}");
+        }
+    }
+    let p = plan(&db, "get f where xs > 9007199254740993", &[]);
+    assert!(
+        p.contains("ordered index on xs") && p.contains("which is the answer"),
+        "{p}"
+    );
+    let p = plan(&db, "get f where m.s <= -1152921504606846977", &[]);
+    assert!(
+        p.contains("ordered index on m.s") && p.contains("which is the answer"),
+        "{p}"
+    );
+    for field in ["a", "b"] {
+        let p = plan(
+            &db,
+            &format!("get f where {field} >= 9007199254740993"),
+            &[],
+        );
+        assert!(p.contains(&format!("a range on {field}")), "{p}");
+    }
+    // `=` is a range of no key: the `NaN` row alone, as the scan has it.
+    let text = "get f where xs = 9007199254740993";
+    assert_eq!(
+        ids(&db, text, &[]),
+        ids(&db, "get f where x = 9007199254740993", &[])
+    );
+    assert_eq!(ids(&db, text, &[]).len(), 1);
+    // A facet's ranges by such ints count what the scan counts.
+    let text = "get f facet xs ranges [9007199254740993, 1152921504606846977] limit 0";
+    let r = answer(&db, text, &[]);
+    let scan = answer(
+        &db,
+        "get f facet x ranges [9007199254740993, 1152921504606846977] limit 0",
+        &[],
+    );
+    assert_eq!(r.facets[0].values, scan.facets[0].values);
+    assert!(r.facets[0].values[0].1 > 0, "{:?}", r.facets);
+}
+
+/// A number read back through JSON -- a row as a server writes it, sent
+/// back as a parameter, or its digits written into a statement -- finds
+/// the row it was read from, through the scan and every index, in every
+/// kind of field a number goes in. The float 2^60 went out as its shortest
+/// digits, `1152921504606847000`, which read back as another int and found
+/// none of its rows.
+#[test]
+fn a_number_read_back_through_json_finds_its_row() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection f (x float, xh float @hash, xs float @sorted, a float,
+                              n int, nh int @hash, ns int @sorted,
+                              t timestamp, th timestamp @hash, ts timestamp @sorted,
+                              m json, z int, @sorted(a, z));
+         create index on f (m.h) @hash;
+         create index on f (m.s) @sorted",
+    );
+    let floats = [
+        P60 as f64,
+        -(P60 as f64),
+        (P53 + 2) as f64,
+        (P60 + 256) as f64,
+        END - 1024.0,
+        END,
+        -END,
+        1e300,
+        1e15 + 1.0,
+        3.0,
+        0.5,
+        -0.0,
+    ];
+    for f in floats {
+        let v = Value::Float(f);
+        let m = obj(&[("h", &v), ("s", &v), ("v", &v)]);
+        for _ in 0..2 {
+            let text = "put f {x: $1, xh: $1, xs: $1, a: $1, z: 0, m: $2}";
+            with(&mut db, text, &[v.clone(), m.clone()]).unwrap();
+        }
+    }
+    for i in [P60, P60 + 1, P53 + 1, i64::MAX, i64::MIN, -P60 - 1, 3] {
+        let v = Value::Int(i);
+        let m = obj(&[("h", &v), ("s", &v), ("v", &v)]);
+        for _ in 0..2 {
+            let text = "put f {n: $1, nh: $1, ns: $1, z: 0, m: $2}";
+            with(&mut db, text, &[v.clone(), m.clone()]).unwrap();
+        }
+    }
+    // A time goes out as its ISO text, which reads back as it from year
+    // -9999 to 9999.
+    for ms in [0, -1, 1_700_000_000_123, 253_402_300_799_999] {
+        for _ in 0..2 {
+            let text = "put f {t: $1, th: $1, ts: $1, z: 0}";
+            with(&mut db, text, &[Value::Int(ms)]).unwrap();
+        }
+    }
+    // The rows as `get` answers them over HTTP, read off the stored
+    // documents, and as `query` answers them: the same text.
+    let get = fennec_ql::parse_one("get f").unwrap();
+    let mut text = String::new();
+    assert!(db.query_json(&get, &[], &mut text).unwrap().is_some());
+    let mut answered = String::new();
+    fennec_core::json::rows_array_into(&mut answered, &answer(&db, "get f", &[]));
+    assert_eq!(text, answered);
+    let docs = fennec_core::json::parse_documents(&text).unwrap();
+    let mut checked = 0;
+    for doc in &docs {
+        let id = match doc.iter().find(|(k, _)| k == "id") {
+            Some((_, Value::Int(id))) => *id as u64,
+            other => panic!("{other:?}"),
+        };
+        let mut found = Vec::new();
+        for (k, v) in doc {
+            match (k.as_str(), v) {
+                ("id" | "z", _) | (_, Value::Null) => {}
+                ("m", Value::Object(members)) => {
+                    found.extend(members.iter().map(|(p, v)| (format!("m.{p}"), v.clone())))
+                }
+                (k, v) => found.push((k.to_string(), v.clone())),
+            }
+        }
+        for (field, v) in found {
+            let digits = fennec_core::json::to_string(&v);
+            // Sent back as a client sends a parameter, read as a server
+            // reads one, and the value read back itself.
+            let sent = fennec_core::json::parse_params_exact(&format!("[{digits}]")).unwrap();
+            for p in [v.clone(), sent[0].clone()] {
+                let q = format!("get f where {field} = $1");
+                let got = ids(&db, &q, one(&p));
+                assert!(
+                    got.contains(&id) && got.len() >= 2,
+                    "{q} with {digits}: {got:?}"
+                );
+            }
+            // Written into a statement: an int past an `i64` is refused
+            // there, never read as another number.
+            let q = format!("get f where {field} = {digits}");
+            if let Ok(s) = fennec_ql::parse_one(&q) {
+                let got: Vec<u64> = db
+                    .query(&s, &[])
+                    .unwrap()
+                    .rows()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|r| r.id)
+                    .collect();
+                assert!(got.contains(&id) && got.len() >= 2, "{q}: {got:?}");
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "{checked}");
 }

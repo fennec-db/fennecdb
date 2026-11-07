@@ -35,6 +35,7 @@ import {
   from,
   ident,
   isSpec,
+  jsonOf,
   nameOf,
   rowsOf,
   statementOf,
@@ -239,7 +240,7 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
-    const [pp, pl] = this.#write(JSON.stringify(json));
+    const [pp, pl] = this.#write(jsonOf(json, json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
     let out;
     try {
@@ -2913,7 +2914,7 @@ function wire(op) {
 
 /** A batch line: each line is exactly a `POST /query` body. */
 function ndjson([sql, params]) {
-  return JSON.stringify({ query: sql, params });
+  return jsonOf({ query: sql, params }, params);
 }
 
 function normalizeShape(raw, url) {

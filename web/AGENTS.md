@@ -31,3 +31,10 @@ refusing `restore`.
 **[A live query learns what changed from the change
 ring.](../docs/design/js-client.md#live-queries)** `Query.reads` names each
 collection read (`Lives`), `fennec_changes` those written.
+
+**[A number from 2^53 on goes out as every
+digit.](../docs/design/indexes.md#sorted)** Whatever sends values as JSON --
+the module's parameters, `FennecHttp`'s bodies, the sync layer's lines --
+writes them through `jsonOf`, never `JSON.stringify`, whose shortest digits
+the server reads as another int; parameters `normalize` made (`binder`,
+`normalizeAll`) go as its second argument, which spares them the walk.

@@ -324,8 +324,10 @@ sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
 `0.0`), `null` is held apart below every key, and `NaN` apart from both: it
 compares equal to everything, so it matches every inclusive comparison and no
 strict one, and an index holding one is never walked for `order`. A literal the
-key space cannot express exactly (`12.5` against an `int`, 2^53 + 1 against a
-`float`) is left out of the range and evaluated per row. One of
+key space cannot express exactly (`12.5` against an `int`) is left out of the
+range and evaluated per row; an int no float holds against a `float` or a json
+path (2^53 + 1) lies between two keys with none between them, and is said by
+them (`SortedIndex::beside`, below). One of
 another kind than a typed field's, which `cmp_value` orders the field's values
 against by kind alone (`level > true`, `level < ""`, `t >= ""` where `""` reads
 as no time), is true of every value or of none (`SortedIndex::by_kind`), so it
@@ -392,10 +394,75 @@ scan by an int 0.2% fewer with an int parameter and 0.3% more with a float
 one -- the mixed comparison -- a float field's scan 0.5% fewer with a float
 parameter and 0.4% more with an int one, an `@sorted` range the same; the
 orders' paired cycles moved +0.2%, inside their runs' spread. The browser
-module grew 288 bytes, 48 brotli, `tie` 317 of them. `tests/mixed_numbers.rs`
+module grew 330 bytes, 141 gzip and 55 brotli at `-q 11` -- inside the 0.3
+KB brotli moves by with the layout alone -- `tie` 317 of them. `tests/mixed_numbers.rs`
 holds every index, `lookup`, `in`, `order`, `min`, `max`, `having` and a
 json `@unique` to the scan near 2^53 to 2^63, random ints and literals among
 them, and `value::tests` the comparison to one worked out in `i128`.
+
+An int no float holds -- 2^53 + 1 -- has no key in a float's key space, so
+the first version of this rule left `xs > 9007199254740993` to be tested row
+by row over every row, where `as` had made it 2^53's key before. It lies
+between two adjacent floats (`value::floats_beside`), and every comparison
+with it is said by one of them as strict or inclusive as it was -- `>` and
+`<=` by the one below, `>=` and `<` by the one above, `=` by both, a range
+of no key (`Range::narrow_beside`) -- so a `NaN` row, equal to every value,
+is taken or left as the literal would take it. A float field's `@sorted`, a
+json path's (whose numbers are keyed as floats) and an index over several
+fields with a float or json part (`CompositeIndex::beside`, through its
+`literal` of each float) answer it so, natively: the browser module tests
+such a comparison row by row, as it did, as it does a literal of another
+kind (`by_kind`) -- with the bounds it grew 960 bytes more. A facet's
+ranges by such an int are counted row by row, as they were: the key above
+it would have answered them, for 160 bytes of the module no one asked for.
+A `lookup` whose parent key is `NaN` finds no child: it is no key
+(`Value::key_as`), where it had looked in the bucket of `NaN`'s bits and
+found children holding the same bits, though the scan's `=` finds every
+row equal to `NaN`. A `@hash` over a float field still files a `NaN` row in
+the bucket of its bits, where `x = 5.0` does not look, though the scan's `=`
+takes it -- as it did before; the random test holds `@hash` to a twin
+holding no `NaN`.
+
+**A value read back through JSON is the value it was.** `json::num_into`
+writes a whole float short of 2^63 either side as every digit of the int it
+is, which reads back as that int -- equal to the float -- and JavaScript as
+the same double; it wrote the shortest digits from 1e15 up, and 2^60 went
+out as `1152921504606847000`, read back as that int: `get` printed digits a
+statement or a parameter could not find the row by, and the router, which
+reads its tenants' rows back from their JSON and checks their order with
+`cmp_value` (`fanout::value_of`), named a tenant holding the float 2^60 and
+the int 2^60 + 1 out of order. From 2^63 on the shortest digits are past an
+`i64`, so a reader takes them back as the float itself
+(`a_whole_float_reads_back_as_itself`). The shell prints such a float so
+too. The clients follow: JavaScript's `JSON.stringify` and Go's
+`encoding/json` write a whole number from 2^53 on as its shortest digits, so
+`web/builder.js`'s `jsonOf` (the module's parameters, `FennecHttp`'s bodies,
+the sync layer's batch lines) and Go's `exactly` write every digit of it
+instead. `JSON.stringify` cannot write a number's text from a replacer, so
+`jsonOf` marks such a number with a text and replaces the mark, and only
+where the value holds one. Parameters `normalize` made -- a builder's text
+(`binder`), a request's (`normalizeAll`) -- are looked through as they are
+made, counted as `normalize` meets such a number, so `JSON.stringify` alone
+writes them where it met none; a `run`'s own parameters are walked, their
+numbers looked at beside the one `JSON.stringify`. Measured in Node over the
+module, seven alternating runs each, the 1-minute load under 3: a small
+`get` 39.6 -> 39.0 us (noise), the builder's insert of 1 000 documents 3.83
+-> 3.59 ms, a `run` putting the same 1 000 documents itself 2.448 -> 2.504
+ms, +2.3%, the walk. Natively (`fennec_http::handle`, in-loop
+instructions, seven alternating runs, `MallocNanoZone=0`, load under 6): a
+`get` answering 1 000 rows of four float columns, half of them whole floats
+past 1e15, 3.631M -> 3.556M instructions and 705k -> 569k cycles, as such
+a float now takes `int_into` rather than the shortest digits' search; a
+plain `/query` put 21 289 -> 21 295, flat. Python, .NET, Swift, Kotlin and Dart
+write such a double with a point or an exponent, which the server reads as
+the float it is; a Go struct document goes through `encoding/json` whole,
+so there such a number belongs in an `int64`, as the languages page says.
+`tests/mixed_numbers.rs` (`a_number_read_back_through_json_finds_its_row`)
+reads every kind of field's numbers back from the JSON a server answers and
+finds each row by them, the router's `a_json_column_of_large_numbers_merges_in_their_true_order`
+merges two tenants' engine-written rows, and `web/fennec.test.js`,
+`web/fennec.sync.test.js` and Go's `TestAWholeFloat64From2To53FindsItsRows`
+find 2^60's rows by the number each language holds.
 
 ## Composite indexes
 

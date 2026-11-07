@@ -607,6 +607,25 @@ impl CompositeIndex {
         Some(out)
     }
 
+    /// The bytes of the floats either side of `v` on part `part`, where `v`
+    /// is an int no float holds and the part keys its numbers as floats (a
+    /// `float` part, a json one): what `narrow` says a comparison with it
+    /// by, where `literal` has no key (`SortedIndex::beside`). Natively
+    /// alone, as `SortedIndex::beside` is reached.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn beside(&self, part: usize, v: &Value) -> Option<(Vec<u8>, Vec<u8>)> {
+        let Value::Int(i) = v else { return None };
+        crate::value::exact_float(*i).is_none().then_some(())?;
+        let (below, above) = crate::value::floats_beside(*i);
+        let key = |f: f64| self.literal(part, &Value::Float(f));
+        Some((key(below)?, key(above)?))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn beside(&self, _: usize, _: &Value) -> Option<(Vec<u8>, Vec<u8>)> {
+        None
+    }
+
     /// Part `part`'s type as `SortedIndex::by_kind` reads it: a json part,
     /// whose values are of every kind -- and a part of a type the parts key
     /// as json -- says nothing of them.
@@ -631,18 +650,28 @@ impl CompositeIndex {
         v: &Value,
     ) -> bool {
         use crate::query::CmpOp::*;
-        let Some(x) = self.literal(part, v) else {
-            return false;
+        let (low, high) = match (self.literal(part, v), op) {
+            (Some(x), Eq) => (Some(Bound::Included(x.clone())), Some(Bound::Included(x))),
+            (Some(x), Ge) => (Some(Bound::Included(x)), None),
+            (Some(x), Gt) => (Some(Bound::Excluded(x)), None),
+            (Some(x), Le) => (None, Some(Bound::Included(x))),
+            (Some(x), Lt) => (None, Some(Bound::Excluded(x))),
+            (Some(_), Ne) => return false,
+            // An int no float holds, between two floats' keys: `>` and
+            // `<=` said by the one below, `>=` and `<` by the one above,
+            // `=` by both, a range of none.
+            (None, op) => match (self.beside(part, v), op) {
+                (Some((below, above)), Eq) => {
+                    (Some(Bound::Included(above)), Some(Bound::Included(below)))
+                }
+                (Some((_, above)), Ge) => (Some(Bound::Included(above)), None),
+                (Some((below, _)), Gt) => (Some(Bound::Excluded(below)), None),
+                (Some((below, _)), Le) => (None, Some(Bound::Included(below))),
+                (Some((_, above)), Lt) => (None, Some(Bound::Excluded(above))),
+                _ => return false,
+            },
         };
         let desc = self.parts[part].desc;
-        let (low, high) = match op {
-            Eq => (Some(Bound::Included(x.clone())), Some(Bound::Included(x))),
-            Ge => (Some(Bound::Included(x)), None),
-            Gt => (Some(Bound::Excluded(x)), None),
-            Le => (None, Some(Bound::Included(x))),
-            Lt => (None, Some(Bound::Excluded(x))),
-            Ne => return false,
-        };
         // A descending part's bytes stand the other way round: a lower
         // bound on its values is an upper one on its bytes.
         let (to_lo, to_hi) = match desc {

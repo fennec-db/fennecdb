@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fennecdb/web/client`).
 
-import { FennecError, Query, call, checked, declared, ident, nameOf, normalize, rowsOf, statementOf, whole } from './builder.js';
+import { FennecError, Query, call, checked, declared, ident, jsonOf, nameOf, normalizeAll, rowsOf, statementOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -103,7 +103,7 @@ export class FennecHttp {
     const { body, seq, replayed } = await this.#send(
       '/query',
       'application/json',
-      JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) }),
+      bodyOf(sql, params),
       opts.idempotencyKey ?? this.#key,
       [],
       opts,
@@ -172,7 +172,7 @@ export class FennecHttp {
     }
     const lines = items.map((item, i) => {
       const [sql, params] = statementOf(item, i);
-      return JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) });
+      return bodyOf(sql, params);
     });
     const read = opts.read ?? items.every((item) => item instanceof Query);
     const { body, seq, replayed } = await this.#send(
@@ -540,7 +540,7 @@ export class FennecHttp {
     const stop = new AbortController();
     const headers = { 'content-type': 'application/json' };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
-    const body = JSON.stringify({ query: sql, params: (params ?? []).map((p) => normalize(p)) });
+    const body = bodyOf(sql, params ?? []);
     let tag = '"0"';
     const round = async () => {
       try {
@@ -726,4 +726,10 @@ export async function* sseEvents(res) {
       /* already closed */
     }
   }
+}
+
+/** A `/query` body, or a `/batch` line: the text and its parameters, normalized. */
+function bodyOf(sql, params) {
+  const values = normalizeAll(params);
+  return jsonOf({ query: sql, params: values }, values);
 }

@@ -246,7 +246,10 @@ export function normalize(v, what = 'value') {
   if (v === undefined) {
     throw new FennecError(`${what} is undefined -- did you mean 'null'?`);
   }
-  if (v === null || typeof v !== 'object') return v;
+  if (v === null || typeof v !== 'object') {
+    if (typeof v === 'number' && wide(v)) met++;
+    return v;
+  }
   // A param is bound where a whole value stands, never from inside a list
   // or a json value, where it would go as its own object; every builder
   // refuses it in these words (builder-golden.json).
@@ -264,6 +267,86 @@ export function normalize(v, what = 'value') {
     return out;
   }
   throw new FennecError(`this object cannot be used as a fennecdb value (${what})`);
+}
+
+/**
+ * `params`, each value normalized, and known to `jsonOf` as holding no
+ * number `wide` takes where none was met.
+ */
+export function normalizeAll(params, what) {
+  const before = met;
+  const out = params.map((p) => normalize(p, what));
+  made.set(out, met !== before);
+  return out;
+}
+
+/** How many numbers `wide` takes `normalize` has met, ever. */
+let met = 0;
+/**
+ * The parameters `normalize` made -- a builder's text's (`binder`), a
+ * request's (`normalizeAll`) -- and whether it met a number `wide` takes
+ * among them: `jsonOf` writes a value holding ones that met none, and
+ * nothing else, by `JSON.stringify` alone.
+ */
+const made = new WeakMap();
+
+/** From 2^53 on, a number's shortest digits are not every digit of it. */
+const EXACT = 2 ** 53;
+/** From 2^63 on, fennecdb reads a number's digits as the float they say. */
+const PAST = 2 ** 63;
+/** Whether `x` is a number `jsonOf` writes every digit of. */
+const wide = (x) => (x >= EXACT ? x < PAST : x <= -EXACT && x > -PAST);
+
+/** Whether `v`, an array or an object, holds a number `wide` takes. */
+function holdsWide(v) {
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      const x = v[i];
+      if (typeof x === 'number' ? wide(x) : x !== null && typeof x === 'object' && holdsWide(x)) return true;
+    }
+    return false;
+  }
+  for (const k in v) {
+    const x = v[k];
+    if (typeof x === 'number' ? wide(x) : x !== null && typeof x === 'object' && holdsWide(x)) return true;
+  }
+  return false;
+}
+
+/** What a number `wide` takes is first written as, a text no value holds. */
+const MARK = '\u0000fennec-int:';
+const MARKED = /"\\u0000fennec-int:(-?\d+)"/g;
+
+/**
+ * `v` as JSON, as `JSON.stringify` writes it, but for a number from 2^53
+ * up to 2^63 either side, every one of them whole, which goes out as every
+ * digit of the int it is. `JSON.stringify(2 ** 60)` writes the shortest
+ * digits reading back as it, `1152921504606847000`, which fennecdb reads as
+ * that int -- another number than 2^60, as an int and a float compare by
+ * their true values -- and found none of 2^60's rows; written
+ * `1152921504606846976`, it is 2^60, and JavaScript reads it back as the
+ * same number. `JSON.stringify` cannot write a number's text from a
+ * replacer, so such a number is marked, then the mark replaced -- only
+ * where the value holds one. `params`, the parameters `v` holds, made by
+ * `normalize` and found holding none -- a builder's query, a request's --
+ * spare it the look: any other value -- a `run`'s own parameters -- pays
+ * a walk of its numbers beside the one `JSON.stringify`, which also
+ * refuses a cycle before the walk could meet one: 2.3% of a `run` putting
+ * 1 000 documents in the module, nothing of a builder's insert of them. A
+ * key or a text starting with the mark -- written by no one but on
+ * purpose -- leaves `JSON.stringify`'s text as it is.
+ */
+export function jsonOf(v, params = null) {
+  const text = JSON.stringify(v);
+  if (params !== null && made.get(params) === false) return text;
+  const holds = v !== null && typeof v === 'object' ? holdsWide(v) : typeof v === 'number' && wide(v);
+  if (!holds) return text;
+  let clash = false;
+  const marked = JSON.stringify(v, (k, x) => {
+    if (k.startsWith(MARK) || (typeof x === 'string' && x.startsWith(MARK))) clash = true;
+    return typeof x === 'number' && wide(x) ? MARK + BigInt(x) : x;
+  });
+  return clash ? text : marked.replace(MARKED, '$1');
 }
 
 export function isSpec(v) {
@@ -1615,17 +1698,23 @@ function binder(params) {
   // A `param()` takes its `$n` at its first use, and every use after
   // writes that one.
   const once = new Map();
+  made.set(params, false);
+  const push = (v, what) => {
+    const before = met;
+    params.push(normalize(v, what));
+    if (met !== before) made.set(params, true);
+  };
   return (v, what) => {
     if (v instanceof Param) {
       let at = once.get(v);
       if (at === undefined) {
-        params.push(normalize(v.value, what));
+        push(v.value, what);
         at = `$${params.length}`;
         once.set(v, at);
       }
       return at;
     }
-    params.push(normalize(v, what));
+    push(v, what);
     return `$${params.length}`;
   };
 }

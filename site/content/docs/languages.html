@@ -160,7 +160,15 @@ endpoint</a> and its <a href="http-reference.html">reference</a> (<a href="https
 a refusal is an <code>*fennecdb.Error</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
 A <code>[]float32</code> goes out as the decimals that read back as each
-<code>f32</code>, so a vector round-trips to the bit.</p>
+<code>f32</code>, so a vector round-trips to the bit. A whole
+<code>float64</code> from 2<sup>53</sup> on, a parameter or in a map or a
+list, goes out as every digit of the int it is (2<sup>60</sup> as
+<code>1152921504606846976</code>): <code>encoding/json</code> writes the
+shortest digits, <code>1152921504606847000</code>, which the server reads
+as another number, since an int and a float compare by their true values. A
+struct document is written by <code>encoding/json</code>, so there such a
+number belongs in an <code>int64</code> field; so does it without the
+SDK.</p>
 <p>Without the SDK, <code>net/http</code> and <code>encoding/json</code>:</p>
 <pre data-lang="go" data-label="main.go">// query runs one FennecQL statement and decodes its answer into out.
 func query(out any, q string, params ...any) error {

@@ -392,8 +392,9 @@ what you might expect.</p>
     hashed list or vector holding one can miss what the scan finds.</li>
   <li>A comparison reaches an ordered index only when its literal compares
     exactly as the scan would: <code>price &lt; 12.5</code> on an
-    <code>int</code> field, or an integer no float holds (2<sup>53</sup> + 1)
-    against a <code>float</code>, is tested row by row. A range wider than half the
+    <code>int</code> field is tested row by row; an integer no float holds
+    (2<sup>53</sup> + 1) against a <code>float</code> is said by the floats
+    either side of it. A range wider than half the
     collection is scanned rather than read from the index.</li>
   <li>An <code>in</code> list reaches the index only when <b>every</b> element
     resolves to a value the field's type can express. One element it cannot —

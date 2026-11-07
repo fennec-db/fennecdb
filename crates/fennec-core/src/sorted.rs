@@ -676,6 +676,24 @@ impl SortedIndex {
         }
     }
 
+    /// The keys either side of an int no float holds -- 2^53 + 1 -- where
+    /// [`Self::bound`] has none: against a `float` field, or a json path
+    /// whose numbers are keyed as floats, it lies between two keys with no
+    /// key between them, which a comparison with it is said by
+    /// ([`Range::narrow_beside`]). Tested row by row, `xs > 9007199254740993`
+    /// read every row.
+    pub fn beside(ty: &DataType, v: &Value) -> Option<(Key, Key)> {
+        match (ty, v) {
+            (DataType::Float | DataType::Json, Value::Int(i))
+                if crate::value::exact_float(*i).is_none() =>
+            {
+                let (below, above) = crate::value::floats_beside(*i);
+                Some((Key::Num(float_key(below)), Key::Num(float_key(above))))
+            }
+            _ => None,
+        }
+    }
+
     /// What `field <op> v` is of every value a field of type `ty` holds --
     /// `null` aside, which lies in no range -- where `v` is of a kind
     /// `cmp_value` orders the field's against by kind alone: `Some(true)`
@@ -1175,6 +1193,25 @@ impl Range {
             Lt => {
                 self.strict = true;
                 self.tighten_hi(Bound::Excluded(key));
+            }
+            Ne => {}
+        }
+    }
+
+    /// Narrows the range by `field <op> v`, a value lying between the keys
+    /// `below` and `above` with no key between them
+    /// ([`SortedIndex::beside`]): `>` and `<=` said by the key below, `>=`
+    /// and `<` by the one above, as strict or inclusive as they were, so a
+    /// `NaN` row -- equal to every value -- is taken as `v` would take it;
+    /// `=` by both, a range of no key.
+    pub fn narrow_beside(&mut self, op: crate::query::CmpOp, below: Key, above: Key) {
+        use crate::query::CmpOp::*;
+        match op {
+            Gt | Le => self.narrow(op, below),
+            Ge | Lt => self.narrow(op, above),
+            Eq => {
+                self.narrow(Ge, above);
+                self.narrow(Le, below);
             }
             Ne => {}
         }

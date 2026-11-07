@@ -98,9 +98,18 @@ pub fn int_into(out: &mut String, n: i64) {
     }
 }
 
+/// A float: a whole one short of 2^63 either side as the int it is, every
+/// digit, which a reader takes back as that int -- equal to the float, as
+/// `cmp_value` compares an int and a float by their true values -- and
+/// JavaScript as the same double. The shortest digits reading back as the
+/// float, which it wrote from 1e15 up, are another number past 2^53: 2^60
+/// went out as `1152921504606847000`, read back as that int, which neither
+/// equals 2^60 nor finds it through an index. From 2^63 on (and at -2^63)
+/// the shortest digits are past an `i64`, so a reader takes them back as
+/// the float itself (`a_whole_float_reads_back_as_itself`).
 fn num_into(out: &mut String, f: f64) {
     if f.is_finite() {
-        if f.fract() == 0.0 && f.abs() < 1e15 {
+        if f.fract() == 0.0 && f.abs() < 9_223_372_036_854_775_808.0 {
             int_into(out, f as i64);
         } else {
             crate::num::f64_into(out, f);
@@ -1304,6 +1313,80 @@ mod tests {
         assert_eq!(
             parse_object_listing_exact(body, "params").unwrap()[1].1,
             Value::List(vec![Value::List(vec![Value::Float(19.99), Value::Int(1)])])
+        );
+    }
+
+    /// Every whole float written out reads back as a number `cmp_value`
+    /// finds equal to it -- the int it is, every digit, short of 2^63
+    /// either side, the float itself from there on -- and a float with a
+    /// fraction as itself, whichever reader reads it.
+    #[test]
+    fn a_whole_float_reads_back_as_itself() {
+        use std::cmp::Ordering::Equal;
+        let end = 9_223_372_036_854_775_808.0f64;
+        let mut floats = vec![
+            0.0,
+            -0.0,
+            1e15,
+            1e300,
+            -1e300,
+            f64::MAX,
+            f64::MIN,
+            end,
+            -end,
+        ];
+        for e in 50..=66 {
+            let p = 2f64.powi(e);
+            for f in [p, -p] {
+                let bits = f.to_bits();
+                for d in 0..40u64 {
+                    floats.extend([
+                        f64::from_bits(bits + d),
+                        f64::from_bits(bits.saturating_sub(d)),
+                    ]);
+                }
+            }
+        }
+        // Whole floats of every size, from a fixed generator.
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..20_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let f = f64::from_bits(s).trunc();
+            if f.is_finite() {
+                floats.push(f);
+            }
+        }
+        for f in floats {
+            let (v, text) = (Value::Float(f), to_string(&Value::Float(f)));
+            for back in [parse(&text).unwrap(), parse_json(&text).unwrap()] {
+                assert_eq!(back.cmp_value(&v), Equal, "{f:e} wrote {text}");
+                match (back, f.fract() == 0.0 && f.abs() < end) {
+                    (Value::Int(i), true) => assert_eq!(i as f64, f, "{text}"),
+                    (Value::Float(g), false) => assert_eq!(g.to_bits(), (f + 0.0).to_bits()),
+                    (b, _) => panic!("{f:e} wrote {text}, read back as {b:?}"),
+                }
+            }
+            // A member of a json field's object, and a document's.
+            let object = Value::object(vec![("x".into(), v.clone())]).unwrap();
+            let back = parse_json(&to_string(&object)).unwrap();
+            assert_eq!(back.cmp_value(&object), Equal, "{f:e} wrote {text}");
+            let doc = parse_documents(&format!("[{{\"x\": {text}}}]")).unwrap();
+            assert_eq!(doc[0][0].1.cmp_value(&v), Equal, "{f:e} wrote {text}");
+        }
+        // 2^60, as fennecdb wrote it and as JavaScript's `JSON.stringify`
+        // writes it: the shortest digits are another int.
+        let p60 = Value::Float(2f64.powi(60));
+        assert_eq!(to_string(&p60), "1152921504606846976");
+        let shortest = parse_json("1152921504606847000").unwrap();
+        assert_ne!(shortest.cmp_value(&p60), Equal);
+        // From 2^63 on the shortest digits, past an `i64`: the float again.
+        assert_eq!(to_string(&Value::Float(end)), "9223372036854776000");
+        assert_eq!(to_string(&Value::Float(-end)), "-9223372036854776000");
+        assert_eq!(
+            parse_json("-9223372036854776000").unwrap(),
+            Value::Float(-end)
         );
     }
 

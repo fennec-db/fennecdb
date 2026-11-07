@@ -236,6 +236,43 @@ test('sseEvents reads the events of a stream cut anywhere', async () => {
   ]);
 });
 
+test('a whole number from 2^53 to 2^63 goes out as every digit of it, anything else as JSON.stringify writes it', async () => {
+  const { jsonOf, from, normalizeAll } = await import('./builder.js');
+  assert.equal(JSON.stringify(2 ** 60), '1152921504606847000');
+  assert.equal(jsonOf(2 ** 60), '1152921504606846976');
+  assert.equal(jsonOf(-(2 ** 60)), '-1152921504606846976');
+  assert.equal(jsonOf(2 ** 53), '9007199254740992');
+  assert.equal(jsonOf(2 ** 63 - 1024), '9223372036854774784');
+  // From 2^63 on the server reads the digits as the float they say.
+  for (const v of [2 ** 63, -(2 ** 63), 1e21, 1e300, 2 ** 53 - 1, 1.5, 0, -0, NaN, 'x', null, true, [], {}]) {
+    assert.equal(jsonOf(v), JSON.stringify(v), String(v));
+  }
+  const v = { a: [1, 2 ** 60, { b: -(2 ** 54), c: 'text', d: new Date(0) }], e: 0.1, f: undefined };
+  assert.equal(jsonOf(v), '{"a":[1,1152921504606846976,{"b":-18014398509481984,"c":"text","d":"1970-01-01T00:00:00.000Z"}],"e":0.1}');
+  assert.deepEqual(JSON.parse(jsonOf(v)), JSON.parse(JSON.stringify(v)));
+  // A text or a key that starts as the mark does leaves the text as
+  // JSON.stringify writes it.
+  for (const odd of [['\u0000fennec-int:5', 2 ** 60], { '\u0000fennec-int:5': 2 ** 60 }]) {
+    assert.equal(jsonOf(odd), JSON.stringify(odd));
+  }
+  assert.throws(() => {
+    const cycle = [2 ** 60];
+    cycle.push(cycle);
+    jsonOf(cycle);
+  }, TypeError);
+  // A query's parameters, and a request's, are looked through as they are
+  // made: those holding no such number are written as JSON.stringify
+  // writes them, and the others with every digit.
+  for (const [n, text] of [[7, '7'], [2 ** 60, '1152921504606846976']]) {
+    const [, params] = from('t').toInsert({ m: { a: [n] } });
+    assert.equal(jsonOf({ params }, params), `{"params":[{"a":[${text}]}]}`);
+    const [, where] = from('t').where('n', n).toFennecQL();
+    assert.equal(jsonOf(where, where), `[${text}]`);
+    const values = normalizeAll([n]);
+    assert.equal(jsonOf({ params: values }, values), `{"params":[${text}]}`);
+  }
+});
+
 test('a text says what it reads, or a live query over HTTP is refused', () => {
   const db = client.connect('http://db.test', { fetch: scripted(() => []).fetch });
   assert.throws(() => db.live('get docs', () => {}), /name the collections a text reads/);

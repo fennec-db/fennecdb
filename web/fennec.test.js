@@ -629,6 +629,30 @@ test('an int and a float compare by their true values, through every index, in t
   db.close();
 });
 
+test('a number from 2^53 on goes to the module as every digit, and finds its rows', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection f (x float, xh float @hash, xs float @sorted, m json)');
+  db.run('create index on f (m.h) @hash');
+  db.run('create index on f (m.s) @sorted');
+  // The float 2^60, twice: written as a float, and through a parameter.
+  db.run('put f {x: 1152921504606846976.0, xh: 1152921504606846976.0, xs: 1152921504606846976.0, m: {h: 1152921504606846976.0, s: 1152921504606846976.0}}');
+  db.run('put f {x: $1, xh: $1, xs: $1, m: $2}', [2 ** 60, { h: 2 ** 60, s: 2 ** 60 }]);
+  await db.from('f').insert({ x: -(2 ** 60), xh: -(2 ** 60), xs: -(2 ** 60), m: { h: -(2 ** 60), s: -(2 ** 60) } });
+  for (const field of ['x', 'xh', 'xs', 'm.h', 'm.s']) {
+    // `JSON.stringify(2 ** 60)` is `1152921504606847000`: read as that
+    // int, it found neither row.
+    assert.equal(db.rows(`get f where ${field} = $1 count`, [2 ** 60])[0].count, 2, field);
+    assert.equal(db.rows(`get f where ${field} = $1 count`, [-(2 ** 60)])[0].count, 1, field);
+    assert.equal(await db.from('f').where(field, 2 ** 60).count(), 2, field);
+    // A row read back finds itself.
+    for (const row of db.rows(`get f select ${field} as v`)) {
+      assert.ok(db.rows(`get f where ${field} = $1 count`, [row.v])[0].count >= 1, `${field} ${row.v}`);
+    }
+  }
+  db.close();
+});
+
 test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

@@ -30,11 +30,25 @@ func writeBody(buf *bytes.Buffer, text string, params []any) error {
 }
 
 // exactly hands float32s to encoding/json as values that write themselves
-// exactly, inside lists too; everything else goes as encoding/json writes
+// exactly, and a float64 from 2^53 on as every digit of the int it is,
+// inside lists and maps too; everything else goes as encoding/json writes
 // it -- a string, a number, a bool, nil as null, a slice as a list, a map
 // as a json field's object.
 func exactly(v any) any {
 	switch v := v.(type) {
+	case float64:
+		if wide(v) {
+			return digits(v)
+		}
+	case map[string]any:
+		// Copied only where it holds one: a document goes as a map.
+		if holdsWide(v) {
+			out := make(map[string]any, len(v))
+			for k, x := range v {
+				out[k] = exactly(x)
+			}
+			return out
+		}
 	case float32:
 		return f32(v)
 	case []float32:
@@ -54,6 +68,42 @@ func exactly(v any) any {
 	}
 	return v
 }
+
+// wide is a float64 from 2^53 up to 2^63 either side, every one whole:
+// encoding/json writes its shortest digits, 2^60 as 1152921504606847000,
+// which the server reads as that int -- another number than 2^60, as an
+// int and a float compare by their true values -- and found none of
+// 2^60's rows. From 2^63 on the server reads the digits as a float again.
+func wide(f float64) bool {
+	a := math.Abs(f)
+	return a >= 1<<53 && a < 1<<63
+}
+
+// holdsWide says whether a map, or a list in it, holds a float64 wide takes.
+func holdsWide(v any) bool {
+	switch v := v.(type) {
+	case float64:
+		return wide(v)
+	case map[string]any:
+		for _, x := range v {
+			if holdsWide(x) {
+				return true
+			}
+		}
+	case []any:
+		for _, x := range v {
+			if holdsWide(x) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// digits is a float64 wide takes, written as every digit of the int it is.
+type digits float64
+
+func (f digits) MarshalJSON() ([]byte, error) { return strconv.AppendInt(nil, int64(f), 10), nil }
 
 type f32 float32
 

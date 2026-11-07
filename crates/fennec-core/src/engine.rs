@@ -15572,17 +15572,39 @@ fn sorted_range(
                 range.narrow(op, key);
                 any = true;
             }
-            None => match by_kind(ty, op, v) {
-                Some(true) => {}
-                Some(false) => {
-                    range.close(ty);
+            // An int no float holds, against floats: between two keys.
+            None => match beside(ty, v) {
+                Some((below, above)) => {
+                    range.narrow_beside(op, below, above);
                     any = true;
                 }
-                None => exact = false,
+                None => match by_kind(ty, op, v) {
+                    Some(true) => {}
+                    Some(false) => {
+                        range.close(ty);
+                        any = true;
+                    }
+                    None => exact = false,
+                },
             },
         }
     }
     any.then_some((range, exact))
+}
+
+/// The keys either side of an int no float holds, against a `float` field
+/// or a json path ([`SortedIndex::beside`]). Natively alone, as `by_kind`:
+/// the browser module tests such a comparison row by row, as it did; with
+/// these and the composite's (`CompositeIndex::beside`) it was 960 bytes
+/// larger.
+#[cfg(not(target_arch = "wasm32"))]
+fn beside(ty: &DataType, v: &Value) -> Option<(crate::sorted::Key, crate::sorted::Key)> {
+    SortedIndex::beside(ty, v)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn beside(_: &DataType, _: &Value) -> Option<(crate::sorted::Key, crate::sorted::Key)> {
+    None
 }
 
 /// What a comparison of a typed field with a value of another kind is of

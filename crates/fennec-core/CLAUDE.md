@@ -229,6 +229,13 @@ never as two `f64`s alone, every index's keys and `Value::key_as` with it;
 typed field's -- or part's -- is no bound or none (`SortedIndex::by_kind`),
 and a time claim's `or` edge is folded by the field's type (`fold_kinds`).
 
+**[A whole float goes out as every digit of the int it
+is.](../../docs/design/indexes.md#sorted)** JSON writes one short of 2^63
+either side so (`json::num_into`), never its shortest digits, which past
+2^53 read back as another int: a value read back finds its row
+(`a_number_read_back_through_json_finds_its_row`), the router's order check
+with it.
+
 **[An index over several fields is its parts' bytes laid end to
 end](../../docs/design/indexes.md#composite-indexes)** (`composite.rs`), a part's
 bytes ordering as `cmp_value` orders its values or held apart.

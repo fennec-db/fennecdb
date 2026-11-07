@@ -1110,6 +1110,36 @@ test('connect compares, and migrates only when asked', opts, async () => {
   }
 });
 
+// A number from 2^53 on goes over HTTP as every digit of it: written by
+// `JSON.stringify`, 2^60 was `1152921504606847000`, which the server reads
+// as that int and found none of 2^60's rows.
+test('a number from 2^53 on goes to the server as every digit, and finds its rows', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  try {
+    const db = client.connect(s.url);
+    await db.run('create collection f (x float, xh float @hash, xs float @sorted, m json)');
+    await db.run('create index on f (m.h) @hash');
+    await db.run('create index on f (m.s) @sorted');
+    await s.run('put f {x: 1152921504606846976.0, xh: 1152921504606846976.0, xs: 1152921504606846976.0, m: {h: 1152921504606846976.0, s: 1152921504606846976.0}}');
+    await db.run('put f {x: $1, xh: $1, xs: $1, m: $2}', [2 ** 60, { h: 2 ** 60, s: 2 ** 60 }]);
+    await db.from('f').insert({ x: -(2 ** 60), xh: -(2 ** 60), xs: -(2 ** 60), m: { h: -(2 ** 60), s: -(2 ** 60) } });
+    const count = async (text, params) => (await db.run(text, params)).rows[0].count;
+    for (const field of ['x', 'xh', 'xs', 'm.h', 'm.s']) {
+      assert.equal(await count(`get f where ${field} = $1 count`, [2 ** 60]), 2, field);
+      assert.equal(await count(`get f where ${field} = $1 count`, [-(2 ** 60)]), 1, field);
+      assert.equal((await db.from('f').where(field, 2 ** 60).count()), 2, field);
+      const [batched] = (await db.batch([[`get f where ${field} = $1 count`, [2 ** 60]]])).results;
+      assert.equal(batched.rows[0].count, 2, field);
+      // A row read back finds itself.
+      for (const row of (await db.run(`get f select ${field} as v`)).rows) {
+        assert.ok((await count(`get f where ${field} = $1 count`, [row.v])) >= 1, `${field} ${row.v}`);
+      }
+    }
+  } finally {
+    s.close();
+  }
+});
+
 // `@fennecdb/web/client`: no module at all, the queries run on the server
 // and a live query follows its subscriptions.
 test("a live query over HTTP follows the server's writes, with no module", { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
