@@ -13383,9 +13383,11 @@ fn not_null(name: &str) -> Error {
 /// wrote: followed, a `put`'s frame went into the store under the hook's
 /// id while the block put back the other -- that row read past the
 /// store's mark, `Corrupt`, till the next open -- and a `set` put its row
-/// into the indexes under the hook's id. One comparison a hook. Natively
-/// in its callers, where the loop was; one function in the browser module,
-/// where a loop and a check at each took 128 bytes more.
+/// into the indexes under the hook's id. One comparison a hook, natively
+/// in its callers, where the loop was. The browser module registers no
+/// hook -- `fennec-wasm` installs no plugin, and a page reaches none -- so
+/// it asks no question no hook can make true: the check and its words were
+/// 305 bytes of it, for a bug only a native embedder's hook could have.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 fn ask_hooks(
     hooks: &[Arc<dyn crate::plugin::Hook>],
@@ -13393,9 +13395,11 @@ fn ask_hooks(
     op: WriteOp,
     doc: &mut Document,
 ) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
     let id = doc.id;
     for h in hooks {
         h.before_write(schema, op, doc)?;
+        #[cfg(not(target_arch = "wasm32"))]
         if doc.id != id {
             return Err(id_changed(&**h, id, doc.id));
         }
@@ -13403,6 +13407,7 @@ fn ask_hooks(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cold]
 #[inline(never)]
 fn id_changed(hook: &dyn crate::plugin::Hook, id: DocId, to: DocId) -> Error {

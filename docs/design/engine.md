@@ -515,7 +515,10 @@ absent` passing over many rows left one each. A refusal -- a hook's,
 statement, whose block is put back. A hook may change a document's fields,
 never its id (`Hook::before_write`): the entry holds the id the write was
 handed, and a write whose id a hook changed is refused (`Error::Plugin`,
-`ask_hooks`, a comparison a hook), a `set`'s too. Followed, as it was, a
+`ask_hooks`, a comparison a hook), a `set`'s too, in a native build: the
+browser module registers no hook -- `fennec-wasm` installs no plugin, and
+a page reaches none -- and leaves the check and its words out, 305 bytes
+of it. Followed, as it was, a
 `put`'s frame went into the store under the hook's id while its block
 put back the other, so that row read `Corrupt` past the store's mark till
 the next open, and a `set` put its row into the indexes under the hook's
@@ -596,15 +599,15 @@ by id 359 994.0 against 360 100.9 (-0.03%), every pair of each lower; the
 time 1 581 ns against 1 606, 3 137 against 3 175 and 42.0 us against 42.5
 (a `del` here is its text index's lists, every row sharing their words).
 The browser module, which aborts on a panic and holds no put-back, grew
-503 bytes (gzip and brotli within their noise): 198 the entry made before
+211 bytes (gzip and brotli within their noise): 198 the entry made before
 the hooks and forgotten where a document is passed over (`execute_inner`
-+194, the two `remember`s -20, `set_row` and `erase` +24), and 305 a hook
-changing a document's id refused -- `ask_hooks`, the one loop of the hooks
-a `put` and a `set` share, +66 (a loop and a check at each took 194), its
-refusal +137 and its words 96 bytes of data. The sparse index's count is
-kept by what its lists held only where panics unwind (`sparse::TORN`),
-which in the module took 52 bytes more; `fennec-server` 1.6 KB of code,
-the put-back of a write a panic stopped.
++194, the two `remember`s -20, `set_row` and `erase` +24), and 13
+`ask_hooks`, the one loop of the hooks a `put` and a `set` share, without
+the id's check: with it, and its refusal's words, the module took 305
+bytes more. The sparse index's count is kept by what its lists held only
+where panics unwind (`sparse::TORN`), which in the module took 52 bytes
+more; `fennec-server` 1.6 KB of code, the put-back of a write a panic
+stopped.
 Rejected: the collection's derived indexes let go of on a panic, rebuilt
 from the rows by the next read -- whole whatever the panic left inside an
 index, but a text index of a million rows is rebuilt at 16 us a row by the
