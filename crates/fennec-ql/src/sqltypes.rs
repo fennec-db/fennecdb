@@ -63,7 +63,14 @@ pub fn postgres(name: &str, args: &[i64]) -> Option<Mapped> {
     let group = POSTGRES
         .split(';')
         .position(|g| g.split('|').any(|n| n == name))?;
-    let dim = args.first().copied().filter(|&d| d > 0).map(|d| d as usize);
+    // Past what `usize` holds, the most it holds, which the schema's
+    // `MAX_DIM` refuses (`IndexKind::check`): `as` made a 32-bit build's
+    // `vector(4294967297)` a vector of one.
+    let dim = args
+        .first()
+        .copied()
+        .filter(|&d| d > 0)
+        .map(|d| usize::try_from(d).unwrap_or(usize::MAX));
     let ty = [Bool, Int, Float, Text, Text, Bytes, Timestamp, Json, Geo];
     Some(match (group, dim) {
         (0..=8, _) => Mapped::Type(ty[group].clone(), group == 4),

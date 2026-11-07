@@ -421,7 +421,12 @@ fn what_has_no_terms_to_mark_is_refused() {
         ),
         (
             "get d select snippet(body, 0) match body \"x\"",
-            "at least one word",
+            "a snippet's length in words is 1 to 4294967295, not 0",
+        ),
+        // Past 32 bits: a wasm32 build read 4294967297 words as 1.
+        (
+            "get d select snippet(body, 4294967297) match body \"x\"",
+            "a snippet's length in words is 1 to 4294967295, not 4294967297",
         ),
         ("get d select snippet(body) match body \"x\"", "expected"),
         ("get d select highlight(n) match body \"x\"", "marks text"),

@@ -117,7 +117,7 @@ pub fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> 
         return Err(format!("invalid --index: `{s}`"));
     }
     // The index is read by FennecQL's own parser, as `--where` is: a copy of
-    // it here had drifted -- no clamping of `m` and `ef`, no `ef` and `ef_c`,
+    // it here had drifted -- no bounds on `m` and `ef`, no `ef` and `ef_c`,
     // a `quant` spelt one way, no `@text`.
     match fennec_ql::parse_one(&format!("create index on imported ({name}) @{spec}")) {
         Ok(Statement::CreateIndex { field, kind, .. }) => Ok((field, kind)),

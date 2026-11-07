@@ -1394,10 +1394,29 @@ pub struct Rerank {
 /// that costs is the graph `near` walks, which `rerank` does without.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fuse {
-    /// The rank offset; 60 unless given, the value the method was published with.
-    pub k: Option<u32>,
+    /// The rank offset; 60 unless given, the value the method was published
+    /// with, and at most [`MAX_FUSE_K`] ([`Select::check`]). A `usize`, as
+    /// `candidates` is: `/near`'s `fuse_k` past `u32` is refused naming
+    /// the number written, never one fitted to the type.
+    pub k: Option<usize>,
     /// How many candidates each side ranks. None means the default.
     pub candidates: Option<usize>,
+}
+
+/// The largest `fuse k` a statement takes. A weight is `1 / (k + rank)` in
+/// `f32`: while `k + rank` stays under 2^23 two neighbouring ranks' weights
+/// are more than an `f32` apart, so each of a side's 10 000 ranks weighs
+/// more than the next; past it neighbours may weigh the same, and past 2^24
+/// `k` itself rounds. A round number well inside: the parser clamped `k
+/// 99999999999` to `u32::MAX`, where a side's first 256 ranks weigh alike
+/// (`fuse_k_keeps_every_rank_apart`).
+pub const MAX_FUSE_K: u32 = 1_000_000;
+
+/// What a row ranked `rank`, from 0, on one side of `fuse` adds to its
+/// score: `1 / (k + rank)`, the rank counted from 1.
+#[inline]
+pub(crate) fn fuse_weight(k: f32, rank: usize) -> f32 {
+    1.0 / (k + rank as f32 + 1.0)
 }
 
 /// A count a statement is paged or cut by -- a `limit`, an `offset`, a
@@ -1886,7 +1905,12 @@ impl Interval {
                         unit = t.get(i..).unwrap_or("");
                         break;
                     }
-                    n = n.saturating_mul(10).saturating_add((b - b'0') as i64);
+                    // Past `i64` no interval, refused: saturated, a text
+                    // of twenty digits was `i64::MAX` of its unit.
+                    n = n
+                        .checked_mul(10)
+                        .and_then(|n| n.checked_add((b - b'0') as i64))
+                        .unwrap_or(i64::MIN);
                 }
             }
             _ => {}
@@ -2495,6 +2519,17 @@ impl Select {
                 return Err(Error::Query(
                     "`fuse` needs at least one candidate a side".into(),
                 ));
+            }
+            // Held here, where every `Select` comes -- the parser's, which
+            // refuses it as it is read, `/near`'s body and one built in
+            // Rust: past it a side's neighbouring ranks may weigh alike.
+            // Natively: in the browser module every `Select` is the
+            // parser's, and asked there too it was 98 bytes of it.
+            let past = |k: &usize| cfg!(not(target_arch = "wasm32")) && *k > MAX_FUSE_K as usize;
+            if let Some(k) = f.k.filter(past) {
+                return Err(Error::Query(format!(
+                    "`fuse`'s `k` is 0 to {MAX_FUSE_K}, not {k}"
+                )));
             }
             if !self.order.is_empty() {
                 return Err(Error::Query(
@@ -4122,5 +4157,38 @@ mod tests {
         assert!(like_match("Straße", "STRASSE") == folding("Straße", "STRASSE"));
         assert!(like_match("ÇALIŞMA raporu", "çalişma"));
         assert!(!like_match("ÉCOLE", "schule"));
+    }
+
+    /// What `MAX_FUSE_K` is for: at every `k` up to it each of a side's
+    /// ranks -- 10 000 at most, and one past -- weighs more than the next,
+    /// up to 2^23 too, and at the `u32::MAX` the parser clamped to the
+    /// first ranks weigh alike.
+    #[test]
+    fn fuse_k_keeps_every_rank_apart() {
+        let apart = |k: u32| {
+            (0..=crate::engine::MAX_MATCH_ROWS)
+                .all(|r| fuse_weight(k as f32, r) > fuse_weight(k as f32, r + 1))
+        };
+        for k in [0, 1, 60, 999_999, MAX_FUSE_K, (1 << 23) - 10_002] {
+            assert!(apart(k), "{k}");
+        }
+        let k = u32::MAX as f32;
+        assert_eq!(fuse_weight(k, 0), fuse_weight(k, 255));
+        assert!(!apart(u32::MAX));
+    }
+
+    /// `bucket`'s interval as text: past `i64` refused, never saturated to
+    /// `i64::MAX` of its unit.
+    #[test]
+    fn an_interval_past_i64_is_refused() {
+        for t in [
+            "99999999999999999999ms",
+            "9223372036854775808ms",
+            "99999999999999999999mo",
+        ] {
+            assert!(Interval::of(&Value::Text(t.into())).is_err(), "{t}");
+        }
+        let most = Interval::of(&Value::Text("9223372036854775807ms".into()));
+        assert_eq!(most.unwrap(), Interval::Ms(i64::MAX, 0));
     }
 }

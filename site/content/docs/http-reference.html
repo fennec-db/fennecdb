@@ -200,7 +200,8 @@ fused by reciprocal rank (<a href="fennecql-search.html#hybrid">fuse</a>).
 <code>match_prefix</code> read its words as <a
 href="fennecql-search.html#typos"><code>match ... fuzzy</code> and
 <code>prefix</code></a> do; <code>fuse_k</code> and <code>candidates</code>
-are the rank offset and how many candidates each side ranks.</p>
+are the rank offset (0 to 1 000 000) and how many candidates each side
+ranks (1 to 10 000).</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/articles/near -d '{
   "vector": [0.1, 0.2, 0.3],
