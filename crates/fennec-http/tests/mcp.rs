@@ -1989,9 +1989,9 @@ fn tool_calls_are_counted_by_tool_in_the_metrics() {
 }
 
 /// The server's own collections are no agent's: under an unfiltered `*`
-/// rule a scoped agent is told one is not there by every tool, as a
-/// collection no database holds, and the server's token reads it and
-/// writes it by none.
+/// rule a scoped agent is told one is not there by every tool, byte for
+/// byte as a collection no database holds, and the server's token reads
+/// it and writes it by none.
 #[test]
 fn the_servers_own_collections_are_no_agents() {
     let access = Arc::new(Access::new(SECRET, "*  read,write\n").unwrap());
@@ -2006,27 +2006,66 @@ fn the_servers_own_collections_are_no_agents() {
             ..Config::default()
         },
         &[
-            "create collection _consumers (key text @hash, n int)",
-            "put _consumers {key: \"k\", n: 1}",
+            "create collection _consumers (key text @text, n int, v vector<3> @hnsw(cosine))",
+            "put _consumers {key: \"k\", n: 1, v: [1, 0, 0]}",
             "create collection docs (t text)",
         ],
     );
     let alice = n.token(r#"{"sub":"alice"}"#);
     let (_, s) = n.call(Some(&alice), "schema", "{}");
     assert!(!format!("{s:?}").contains("_consumers"), "{s:?}");
-    for (tool, args) in [
-        ("schema", r#"{"collection":"_consumers"}"#),
-        ("query", r#"{"query":"get _consumers"}"#),
-        ("get", r#"{"collection":"_consumers","ids":[1]}"#),
-        ("write", r#"{"statement":"del _consumers where n = 1"}"#),
-        ("write", r#"{"statement":"insert _consumers {key: 'x'}"}"#),
-    ] {
-        let (err, s) = n.call(Some(&alice), tool, args);
-        assert!(err, "{tool} {args}: {s:?}");
-        let said = text(at(&s, &["error"]));
-        assert!(
-            said.contains("_consumers") && !said.contains("own"),
-            "{said}"
+    let tools = |c: &str| {
+        [
+            ("schema", format!(r#"{{"collection":"{c}"}}"#)),
+            ("search", format!(r#"{{"collection":"{c}","text":"k"}}"#)),
+            (
+                "search",
+                format!(
+                    r#"{{"collection":"{c}","vector":[1,0,0],"filter":"n = $1","params":[1]}}"#
+                ),
+            ),
+            (
+                "search",
+                format!(r#"{{"collection":"{c}","text":"k","fields":["nosuch"]}}"#),
+            ),
+            ("query", format!(r#"{{"query":"get {c}"}}"#)),
+            (
+                "query",
+                format!(r#"{{"query":"get {c} where nosuch = 1"}}"#),
+            ),
+            ("query", format!(r#"{{"query":"describe {c}"}}"#)),
+            (
+                "query",
+                format!(r#"{{"query":"get docs lookup {c} on key = t"}}"#),
+            ),
+            ("get", format!(r#"{{"collection":"{c}","ids":[1]}}"#)),
+            ("write", format!(r#"{{"statement":"del {c} where n = 1"}}"#)),
+            (
+                "write",
+                format!(r#"{{"statement":"insert {c} {{key: 'x'}}"}}"#),
+            ),
+            (
+                "write",
+                format!(r#"{{"statement":"set {c} {{n: 2}} where n = 1"}}"#),
+            ),
+        ]
+    };
+    let call = |tool: &str, args: &str| {
+        let a = n.modern(
+            Some(&alice),
+            7,
+            "tools/call",
+            &format!(r#"{{"name":"{tool}","arguments":{args}}}"#),
+        );
+        (a.status, a.body)
+    };
+    for ((tool, args), (_, none)) in tools("_consumers").iter().zip(&tools("_none")) {
+        let (status, body) = call(tool, args);
+        assert!(body.contains(r#""isError":true"#), "{tool} {args}: {body}");
+        assert_eq!(
+            (status, body.replace("_consumers", "_none")),
+            call(tool, none),
+            "{tool} {args}: told apart from a missing collection"
         );
     }
     let (err, s) = n.call(Some(ROOT), "query", r#"{"query":"get _consumers count"}"#);

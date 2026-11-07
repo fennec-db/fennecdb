@@ -63,7 +63,13 @@ declares and the server lacks, which a scoped token may ask of the
 collections it reads. An apply takes the server's token, runs the
 migrations not yet recorded and the additions under the write lock as one
 block, and answers 409 with the refusals when anything is refused, having
-written nothing.</p>
+written nothing. The record is <code>_migrations</code>, one of the
+<a href="/docs/http-access#own-collections">server's own collections</a>:
+no statement changes it, the server's token's either, so a list starts
+over in a new file, or on a tenant node in a new tenant. A description
+declaring one of those collections, or a migration still to run that makes,
+changes or writes one, is refused (403) before anything runs; one the
+server recorded is never run again, and is not asked.</p>
 
 <p>To the server's token alone, each collection's object in
 <code>GET /_schema</code> carries the <a

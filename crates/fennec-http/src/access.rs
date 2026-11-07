@@ -640,15 +640,18 @@ fn covers(rule: Option<&str>, collection: &str) -> bool {
 }
 
 /// The collection of the server's own (`_`-named) `stmt` would make,
-/// change or write, if any: refused to every token, the server's own
-/// among them, which reads them alone ([`crate::scoped`]). They are made
-/// with their own shape by the code that keeps them -- `_idempotency`'s by
-/// `idempotent::keep`, under the write lock beside the write it keys -- and
-/// written through the engine there, never by a client's statement: a
-/// `create collection _idempotency (key int)` of the server's token broke
-/// every keyed write after it, and a statement deleting a key made its
-/// write run twice. A scoped token never gets here with one: its rules
-/// reach none, and the rewrite answered it as a missing collection.
+/// change, compact or write, if any: refused to every token, the server's
+/// own among them, which reads them alone ([`crate::scoped`]). A compact
+/// of the whole file compacts them with the rest, as the file's own
+/// compaction does; one naming one is held to the rule with the others.
+/// They are made with their own shape by the code that keeps them --
+/// `_idempotency`'s by `idempotent::keep`, under the write lock beside the
+/// write it keys -- and written through the engine there, never by a
+/// client's statement: a `create collection _idempotency (key int)` of the
+/// server's token broke every keyed write after it, and a statement
+/// deleting a key made its write run twice. A scoped token never gets here
+/// with one: its rules reach none, and the rewrite answered it as a
+/// missing collection.
 #[inline]
 pub fn own_written(stmt: &Statement) -> Option<&str> {
     let name = match stmt {
@@ -661,6 +664,7 @@ pub fn own_written(stmt: &Statement) -> Option<&str> {
         | Statement::AlterCollection { collection, .. } => collection,
         Statement::CreateCollection { schema, .. } => &schema.name,
         Statement::DropCollection { name, .. } => name,
+        Statement::Compact(Some(name)) => name,
         _ => return None,
     };
     fennec_core::declared::own(name).then_some(name.as_str())
@@ -2844,6 +2848,20 @@ impl Scope {
             .filter(collection, READ)
             .ok_or_else(|| self.refused(collection, "read"))?;
         Ok(and(filter, f))
+    }
+
+    /// A subscription's filter as its stream reads it: each inner `get` of
+    /// the subscriber's `shape` held to the read rules as a statement's is
+    /// ([`Self::select`]), then the collection's read filter ANDed in
+    /// ([`Self::restrict`]). Held to `restrict` alone, `GET
+    /// /notes/changes?where=t in (get secrets select key)` read every row
+    /// of `secrets` -- a collection the token is granted nothing on, the
+    /// server's own, or rows its rules keep from it -- and streamed the
+    /// notes whatever was there matched, where `/query`'s `get` of the same
+    /// was refused as a missing collection.
+    pub fn subscribed(&self, collection: &str, mut shape: Option<Expr>) -> Result<Option<Expr>> {
+        self.inner(&mut shape, &[])?;
+        self.restrict(collection, shape)
     }
 
     /// Every level of the query held to the token's read rules: its own

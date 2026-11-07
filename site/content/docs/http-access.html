@@ -310,13 +310,18 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     of them, and a rule naming one, or reading one through <code>in (get
     …)</code>, stops the server at startup. A JSON Web Token is answered
     404 for each, by every route, word for word as for a collection no
-    database holds, and none is listed to it — a REST path or a
-    subscription naming any collection the token is granted nothing on is
-    answered so before its filter is read. The server's own token reads
-    them, and no statement of its creates, alters, drops, indexes or
-    writes one (403), nor does a description or a migration sent to
+    database holds, and none is listed to it — a REST request or a
+    subscription naming any collection the token is granted nothing on, by
+    its path or a <code>lookup</code> level, is answered so whatever its
+    filter, <code>select</code> or the level's <code>on</code> names, and a
+    subscription's <code>in (get …)</code> reads only what the token may,
+    as a query's does. The server's own token reads them, and no statement
+    of its creates, alters, drops, indexes, compacts or writes one (403),
+    nor does a description or a migration still to run sent to
     <code>/_schema/apply</code>: the server makes and writes them itself,
-    in their own shape. The change stream leaves them out.</li>
+    in their own shape. So the migrations a schema ran, recorded in
+    <code>_migrations</code>, start over in a new file, or a new tenant.
+    The change stream leaves them out.</li>
   <li id="calls"><b>Calling a named statement.</b> A line grants calling by
     name, to a role or to every token. <code>call</code> stands alone on it:
 <pre data-lang="text"># statements       access  role

@@ -28,23 +28,43 @@ struct Node {
     db: Arc<RwLock<Database>>,
 }
 
+/// The migration `_migrations` records in [`start`]'s database.
+const FIRST: &str = "alter collection notes add field u int";
+
 /// A server keeping keys for `ttl`, holding `notes` and each collection of
-/// [`OWN`] but `_idempotency`, which its first keyed write makes, as the
-/// code keeping each would have made it, a row in each; `setup` run after.
+/// [`OWN`] but `_idempotency`, which its first keyed write makes, a row in
+/// each -- `_migrations` as a schema's apply makes it, recording [`FIRST`],
+/// which a plan reads; `setup` run after.
 fn start(ttl: Duration, setup: &[&str]) -> Node {
-    fennec_http::audit::set_delay(0);
-    let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
-    let mut db = Database::new();
+    start_with(POLICY, ttl, setup)
+}
+
+/// [`start`] under `policy`.
+fn start_with(policy: &str, ttl: Duration, setup: &[&str]) -> Node {
     let mut sql = vec!["create collection notes (owner text, t text)".to_string()];
     for c in OWN
         .iter()
         .filter(|c| **c != fennec_core::declared::IDEMPOTENCY)
     {
+        if *c == fennec_core::declared::MIGRATIONS {
+            sql.push(fennec_core::declared::MIGRATIONS_DDL.into());
+            sql.push(format!("put {c} {{n: 1, text: \"{FIRST}\"}}"));
+            continue;
+        }
         sql.push(format!("create collection {c} (key text @hash, n int)"));
         sql.push(format!("put {c} {{key: \"k\", n: 1}}"));
     }
     sql.extend(setup.iter().map(|s| s.to_string()));
-    for s in &sql {
+    serve(policy, ttl, &sql)
+}
+
+/// A server under `policy` keeping keys for `ttl`, over a database `sql`
+/// makes.
+fn serve(policy: &str, ttl: Duration, sql: &[String]) -> Node {
+    fennec_http::audit::set_delay(0);
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
+    let mut db = Database::new();
+    for s in sql {
         db.execute(&fennec_ql::parse_one(s).unwrap()).unwrap();
     }
     let cfg = Config {
@@ -123,8 +143,11 @@ fn body(sql: &str) -> String {
     out
 }
 
-/// What a scoped token sends at a collection of the server's own, by every
-/// route and verb: each must be answered as a collection no database holds.
+/// What a scoped token sends at a collection of the server's own, or any
+/// it is granted nothing on, by every route and verb -- a REST read
+/// reaching it by a `lookup` level too, the level's `on`, `parent`,
+/// `select`, `order` and conditions naming its fields or not: each must be
+/// answered as a collection no database holds.
 fn attempts(c: &str) -> Vec<(&'static str, String, String)> {
     let q = |s: String| ("POST", "/query".to_string(), body(&s));
     vec![
@@ -158,7 +181,83 @@ fn attempts(c: &str) -> Vec<(&'static str, String, String)> {
         ("DELETE", format!("/{c}/all"), String::new()),
         ("GET", format!("/{c}/changes"), String::new()),
         ("GET", format!("/{c}/changes?select=nosuch"), String::new()),
+        ("GET", format!("/notes?lookup={c}"), String::new()),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=nosuch"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key&{c}.parent=t"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key&{c}.parent=t&{c}.select=nosuch"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key&{c}.select=n&{c}.order=nosuch"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key&{c}.nosuch=eq.1"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup={c}&{c}.on=key&{c}.n=eq.1&nosuch=eq.1"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup=notes,{c}&notes.on=owner&{c}.on=key"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?lookup=notes,{c}&notes.on=owner&{c}.on=nosuch"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/{c}?lookup=notes&notes.on=t"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes?where=t+in+(get+{c}+select+key)"),
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/notes/changes?where=t+in+(get+{c}+select+key)"),
+            String::new(),
+        ),
     ]
+}
+
+/// Each of [`attempts`] at `c` answered as at `none`, a collection no
+/// database holds, byte for byte but for the name: a 404.
+fn as_missing(n: &Node, token: &str, c: &str, none: &str) {
+    for ((method, target, sent), (_, gone, unsent)) in attempts(c).iter().zip(&attempts(none)) {
+        let a = n.call(token, None, method, target, sent);
+        let b = n.call(token, None, method, gone, unsent);
+        assert_eq!(a.status, 404, "{method} {target} {sent}: {}", a.body);
+        assert_eq!(
+            (a.status, a.body.replace(c, none)),
+            (b.status, b.body),
+            "{method} {target} {sent}: told apart from a missing collection"
+        );
+    }
 }
 
 /// An unfiltered `*` rule granting every verb reaches none of them: each
@@ -181,18 +280,8 @@ fn a_star_rule_reaches_none_of_the_servers_collections() {
     assert_eq!((paid.status, paid.replayed), (200, false), "{}", paid.body);
     let held: Vec<(String, usize)> = OWN.iter().map(|c| (c.to_string(), n.rows(c))).collect();
     assert_eq!(n.rows(fennec_core::declared::IDEMPOTENCY), 1);
-    let missing = attempts("_none");
     for c in OWN {
-        for ((method, target, sent), (_, none, gone)) in attempts(c).iter().zip(&missing) {
-            let a = n.call(&alice, None, method, target, sent);
-            let b = n.call(&alice, None, method, none, gone);
-            assert_eq!(a.status, 404, "{method} {target} {sent}: {}", a.body);
-            assert_eq!(
-                (a.status, a.body.replace(c, "_none")),
-                (b.status, b.body),
-                "{method} {target} {sent}: told apart from a missing collection"
-            );
-        }
+        as_missing(&n, &alice, c, "_none");
     }
     // Nothing was read into an answer, written or taken.
     let after: Vec<(String, usize)> = OWN.iter().map(|c| (c.to_string(), n.rows(c))).collect();
@@ -209,6 +298,29 @@ fn a_star_rule_reaches_none_of_the_servers_collections() {
         (200, true, paid.body.as_str())
     );
     assert_eq!(n.rows("notes"), 1);
+}
+
+/// A collection a token's rules grant nothing on is answered as one no
+/// database holds by every route, an ordinary one as the server's own are:
+/// on main `GET /notes?lookup=secrets` asked for `secrets.on` where
+/// `lookup=nonesuch` was 404, and `secrets.on=nosuch` named the field it
+/// lacked where `on=key` was the plain 404 -- its fields, one by one.
+#[test]
+fn a_collection_granted_nothing_on_is_missing_by_every_route() {
+    let n = start_with(
+        "notes  read,write  where owner = $jwt.sub\n",
+        Duration::from_secs(3600),
+        &[
+            "create collection secrets (key text @hash, n int)",
+            "put secrets {key: \"k\", n: 1}",
+        ],
+    );
+    let alice = n.token("alice");
+    as_missing(&n, &alice, "secrets", "nonesuch");
+    for c in OWN {
+        as_missing(&n, &alice, c, "nonesuch");
+    }
+    assert_eq!(n.rows("secrets"), 1);
 }
 
 /// No listing, schema or plan names one to a scoped token, `*` or not.
@@ -291,6 +403,7 @@ fn the_servers_token_reads_them_and_changes_none() {
             q(format!("create index on {c} (key, n) @sorted")),
             q(format!("drop collection {c}")),
             q(format!("drop collection if exists {c}")),
+            q(format!("compact {c}")),
             q(format!("insert {c} {{key: \"x\"}}")),
             q(format!("put {c} {{key: \"x\"}}")),
             q(format!("set {c} {{n: 2}} where n = 1")),
@@ -319,8 +432,10 @@ fn the_servers_token_reads_them_and_changes_none() {
     // A description declaring one, or a migration reaching one, is refused
     // as a plan and as an apply.
     let declares = r#"{"format":1,"collections":[{"name":"_idempotency","fields":[{"name":"key","type":"int"}]}]}"#;
-    let migrates = r#"{"format":1,"collections":[],"migrations":["create collection b (t text)","drop collection _idempotency"]}"#;
-    for sent in [declares, migrates] {
+    let migrates = format!(
+        r#"{{"format":1,"collections":[],"migrations":["{FIRST}","create collection b (t text)","drop collection _idempotency"]}}"#
+    );
+    for sent in [declares, &migrates] {
         for path in ["/_schema/plan", "/_schema/apply"] {
             let a = n.call(ROOT, None, "POST", path, sent);
             assert_eq!(a.status, 403, "{path} {sent}: {}", a.body);
@@ -331,6 +446,59 @@ fn the_servers_token_reads_them_and_changes_none() {
     assert_eq!(n.rows("notes"), 1);
     assert!(n.db.read().unwrap().collection("_new").is_err());
     assert!(n.db.read().unwrap().collection("b").is_err());
+}
+
+/// Only a migration still to run is held to the rule: one the database
+/// recorded ran before the server's collections were its own -- a `drop
+/// collection _old` an app's list keeps, as the list only grows -- and
+/// runs never again, and a database holding none of its own collections
+/// records the list unrun. On the first review every plan and apply of
+/// such a list was refused for good.
+#[test]
+fn a_migration_the_database_recorded_is_not_refused_again() {
+    let n = start(
+        Duration::from_secs(3600),
+        &["put _migrations {n: 2, text: \"drop collection _old\"}"],
+    );
+    let b = r#"{"name":"b","fields":[{"name":"t","type":"text"}]}"#;
+    let description = |more: &str| {
+        format!(
+            r#"{{"format":1,"collections":[{b}],"migrations":["{FIRST}","drop collection _old"{more}]}}"#
+        )
+    };
+    // What the database recorded, and one migration more: it runs alone.
+    let grown = description(r#","create collection b (t text)""#);
+    let a = n.call(ROOT, None, "POST", "/_schema/plan", &grown);
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert!(a.body.contains(r#""migrations":[3]"#), "{}", a.body);
+    let a = n.call(ROOT, None, "POST", "/_schema/apply", &grown);
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert!(n.db.read().unwrap().collection("b").is_ok());
+    // A migration still to run reaching one is refused, by the plan and
+    // the apply, before anything runs.
+    let reaching = description(
+        r#","create collection b (t text)","alter collection b add field v int","del _consumers""#,
+    );
+    for path in ["/_schema/plan", "/_schema/apply"] {
+        let a = n.call(ROOT, None, "POST", path, &reaching);
+        assert_eq!(a.status, 403, "{path}: {}", a.body);
+        assert!(
+            a.body.contains("`_consumers` is the server's own"),
+            "{}",
+            a.body
+        );
+    }
+    let b = n.db.read().unwrap().collection("b").unwrap().schema.clone();
+    assert!(b.field("v").is_none());
+    assert_eq!(n.rows("_consumers"), 1);
+    // A database holding none of its own collections is made from the
+    // description, its migrations recorded and none run: the list holding
+    // one is taken.
+    let empty = serve(POLICY, Duration::from_secs(3600), &[]);
+    let a = empty.call(ROOT, None, "POST", "/_schema/apply", &grown);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let a = empty.query(ROOT, None, "get _migrations count");
+    assert_eq!(a.body, "[{\"count\":3}]");
 }
 
 /// The keys go on being kept, replayed and swept: the server writes its own

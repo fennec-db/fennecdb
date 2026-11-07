@@ -598,6 +598,59 @@ fn an_inner_get_reads_only_what_the_token_may() {
     // A rule's own inner `get`s: tests/reach.rs.
 }
 
+/// A subscription's inner `get` is held to the read rules as a statement's
+/// is: its list made of the rows the token may read, and a collection it
+/// may not read not there for it. Held to the stream's own collection's
+/// rules alone, alice's stream of the board by bob's titles seeded the
+/// messages his notes named, and one by `secrets` the message `42`.
+#[test]
+fn a_subscriptions_inner_get_reads_only_what_the_token_may() {
+    let n = start_with(
+        POLICY,
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection board (msg text)",
+            "create collection secrets (x int)",
+            "put secrets {x: 42}",
+            r#"put notes [{owner: "alice", title: "a1"}, {owner: "bob", title: "b1"}]"#,
+            r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "42"}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let seed = |shape: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        write!(
+            s,
+            "GET /board/changes?where={shape} HTTP/1.1\r\nHost: x\r\n\
+             Authorization: Bearer {alice}\r\n\r\n"
+        )
+        .unwrap();
+        let mut heard = String::new();
+        listen(
+            &mut s,
+            &mut heard,
+            &|h| h.contains("event: seed") || h.contains("\"error\""),
+            Duration::from_secs(5),
+        );
+        heard
+    };
+    let mine = seed("msg+in+(get+notes+select+title)");
+    assert!(
+        mine.contains("\"a1\"") && !mine.contains("\"b1\""),
+        "{mine}"
+    );
+    let bobs = seed("msg+in+(get+notes+select+title+where+owner+%3D+%22bob%22)");
+    assert!(
+        bobs.contains("event: seed") && !bobs.contains("\"b1\""),
+        "{bobs}"
+    );
+    let secret = seed("msg+in+(get+secrets+select+x)");
+    assert!(secret.starts_with("HTTP/1.1 404"), "{secret}");
+    assert!(secret.contains("collection `secrets`"), "{secret}");
+}
+
 /// A disjunctive facet leaves the query's own conditions on its field out,
 /// and never the token's: `facet owner disjunctive` split after the rules
 /// were ANDed in would have counted every user's rows. By `/query` and by
