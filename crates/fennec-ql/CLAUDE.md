@@ -190,4 +190,10 @@ key (`hooked_callee`); a run is the definition's, waking bindings. A file's
 server and a tenant node take definitions (`Database::allow_hooks`);
 every other way in refuses one (`HOOKED_UNTAKEN`).
 `MAX_HOOKED` bounds a hook's statements; `/_changes` passes over
-`_hook_events`.
+`_hook_events`. What an event ran is noted on its thread, statement by
+statement (`Runs::taking`, `HookRuns`), each refused where the event then
+failed to land (`unlanded`), for `/_stats/statements`' `hook
+<name>`, the slow line's `hook` and a span each, never its key or body; its
+hook and whether the server holds its secret (`armed`, asked of the server
+as listed, `Database::arm_hooks`, never the file) are described
+(`statements`, `GET /_schema`'s `hooks`) to the server's token alone.

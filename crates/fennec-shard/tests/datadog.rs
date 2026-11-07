@@ -169,12 +169,23 @@ fn scrape() -> (BTreeMap<String, String>, String) {
     }
     db.sync().unwrap();
     let db = Arc::new(RwLock::new(db));
+    // Taking webhooks, as `--hooks` has it: a process's hooks' families are
+    // in its every scrape once a hooks file was read, and in none before.
+    let hooks = fennec_http::hooks::Hooks::read(
+        "stripe stripe stripe.whsec\n",
+        |_| Ok(b"whsec_a_secret".to_vec()),
+        1 << 20,
+    )
+    .unwrap();
     let primary = serve(
-        fennec_http::Server::new(Arc::clone(&db), cfg()).with_replication(Replication::new(
-            Some(REPL.into()),
-            Some(feed),
-            None,
-        )),
+        fennec_http::Server::new(
+            Arc::clone(&db),
+            fennec_http::Config {
+                hooks: Some(Arc::new(hooks)),
+                ..cfg()
+            },
+        )
+        .with_replication(Replication::new(Some(REPL.into()), Some(feed), None)),
     );
 
     // Its replica, as `--replica-of` starts one.
@@ -367,6 +378,9 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
         "fennecdb.tenants",
         "fennecdb.refused.count",
         "fennecdb.router_requests.count",
+        "fennecdb.hook_events.count",
+        "fennecdb.hook_unverified.count",
+        "fennecdb.router_tenants_hooks_behind",
     ] {
         assert!(
             names.iter().any(|n| n == want),
@@ -404,7 +418,9 @@ fn scopes(query: &str) -> Vec<(String, Vec<(String, String)>)> {
 /// each tag they match a label a scrape carries -- a monitor over a name
 /// no server sends, or a value none has, never fires -- and they watch
 /// scheduled statements' refused, held and unknown runs, a mark ahead of
-/// the clock and how late runs begin.
+/// the clock and how late runs begin; webhook events refused before their
+/// signature verified, refused by a statement and held back by the state;
+/// and tenants a copy of which lacks its hook secrets.
 #[test]
 fn the_datadog_monitors_watch_what_the_servers_send() {
     let (exposed, text) = scrape();
@@ -415,7 +431,7 @@ fn the_datadog_monitors_watch_what_the_servers_send() {
     let Value::List(monitors) = fennec_core::json::parse_json(&file).expect("monitors.json") else {
         panic!("monitors.json is not a list");
     };
-    assert!(monitors.len() >= 5, "{monitors:?}");
+    assert!(monitors.len() >= 9, "{monitors:?}");
     let mut watched: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for m in &monitors {
         let Value::Object(m) = m else {
@@ -469,6 +485,10 @@ fn the_datadog_monitors_watch_what_the_servers_send() {
         ),
         ("fennecdb.scheduled_mark_ahead.count", None),
         ("fennecdb.scheduled_lateness_seconds.bucket", None),
+        ("fennecdb.hook_unverified.count", None),
+        ("fennecdb.hook_events.count", Some(("outcome", "refused"))),
+        ("fennecdb.hook_events.count", Some(("outcome", "deferred"))),
+        ("fennecdb.router_tenants_hooks_behind", None),
     ] {
         assert!(watches(metric, tag), "no monitor watches {metric} {tag:?}");
     }

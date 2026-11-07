@@ -1149,3 +1149,170 @@ fn the_reference_pages_statements_take_their_events() {
     let row = http.run("get users select email");
     assert_eq!(column(&row, "email"), ["a@example.com"]);
 }
+
+/// `statements`' row of `name` as `/query` answers it: each column by its
+/// name, as JSON writes its value.
+fn listed(http: &mut Http, text: &str, name: &str) -> Vec<(String, String)> {
+    let body = http.run(text);
+    let Ok(fennec_core::prelude::Value::List(rows)) = fennec_core::json::parse_json(&body) else {
+        panic!("{body}");
+    };
+    let row = rows
+        .iter()
+        .find(|r| r.member("name") == Some(&fennec_core::prelude::Value::Text(name.into())))
+        .unwrap_or_else(|| panic!("no {name} in {body}"));
+    let fennec_core::prelude::Value::Object(members) = row else {
+        panic!("{body}");
+    };
+    members
+        .iter()
+        .map(|(k, v)| (k.clone(), fennec_core::json::to_string(v)))
+        .collect()
+}
+
+fn at<'a>(row: &'a [(String, String)], c: &str) -> &'a str {
+    &row.iter()
+        .find(|(k, _)| k == c)
+        .unwrap_or_else(|| panic!("no {c} in {row:?}"))
+        .1
+}
+
+/// What watches a file's server's hooks (`docs/design/named-statements.md`,
+/// *Watching hooks*): `statements`, `describe statement` and `GET
+/// /_schema` show each webhook consumer's hook and whether the hooks file
+/// arms it, a description of them read back as a plan of nothing;
+/// `/_stats/statements` counts each statement an event ran as the shape
+/// `hook <name>`, an error where it refused the event; and an event past
+/// `--slow-ms` writes the slow line's `hook` -- the hook, each statement,
+/// its version and rows, never the event's key or its body.
+#[test]
+fn what_watches_a_hook_lists_counts_logs_and_describes_it() {
+    let (server, _) = serve("watched", &["--slow-ms", "0"]);
+    let mut http = server.http().with_token(ROOT);
+    // A statement taking a hook the hooks file does not name: unarmed.
+    http.run(
+        "create statement stray($id text from event.id) on hook nowhere as insert orders {ref: \
+         $id}",
+    );
+    let row = listed(&mut http, "statements", "stripe_paid");
+    assert_eq!(at(&row, "hook"), "\"stripe\"");
+    assert_eq!(at(&row, "armed"), "true");
+    let row = listed(&mut http, "statements", "stray");
+    assert_eq!(at(&row, "hook"), "\"nowhere\"");
+    assert_eq!(at(&row, "armed"), "false");
+    let row = listed(&mut http, "describe statement stripe_paid", "stripe_paid");
+    assert_eq!(at(&row, "armed"), "true");
+    assert_eq!(
+        at(&row, "condition"),
+        "\"event.type = 'payment_intent.succeeded' and event.livemode = true\""
+    );
+    assert!(
+        at(&row, "signature").contains("$amount int from event.data.object.amount_received"),
+        "{row:?}"
+    );
+
+    // The schema to the server's token, read back as a plan of nothing in
+    // either form.
+    let schema = http.ask("GET", "/_schema", "");
+    assert_eq!(schema.status, 200, "{}", schema.body);
+    assert!(
+        schema
+            .body
+            .contains(r#""hooks":[{"name":"stray","hook":"nowhere","#),
+        "{}",
+        schema.body
+    );
+    assert!(
+        schema
+            .body
+            .contains(r#"{"name":"stripe_paid","hook":"stripe","text":"#)
+            && schema.body.contains(r#"","armed":true}]"#),
+        "{}",
+        schema.body
+    );
+    assert!(!schema.body.contains(STRIPE_SECRET), "{}", schema.body);
+    let fennecql = http.ask("GET", "/_schema?as=fennecql", "");
+    assert!(
+        fennecql.body.contains("on hook stripe") && fennecql.body.contains("on hook nowhere"),
+        "{}",
+        fennecql.body
+    );
+    for described in [&schema.body, &fennecql.body] {
+        let plan = http.ask("POST", "/_schema/plan", described);
+        assert_eq!(plan.status, 200, "{}", plan.body);
+        assert!(
+            plan.body.contains(r#""statements":[]"#) && plan.body.contains(r#""refusals":[]"#),
+            "{}",
+            plan.body
+        );
+    }
+    // A description claiming another hook than its text's is refused.
+    let claimed = schema
+        .body
+        .replace(r#""hook":"stripe""#, r#""hook":"github""#);
+    let refused = http.ask("POST", "/_schema/plan", &claimed);
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(
+        refused.body.contains("takes `stripe`'s events"),
+        "{}",
+        refused.body
+    );
+
+    // Taken, then refused by its guard: two calls of `hook stripe_paid`,
+    // one an error, its rows the one it set.
+    let a = stripe(
+        &server,
+        "stripe",
+        &paid("evt_w1", "pi_w1", "o-1", 2000, "eur"),
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    let b = stripe(&server, "stripe", &paid("evt_w2", "pi_w2", "o-2", 1, "usd"));
+    assert_eq!(b.status, 412, "{}", b.body);
+    let stats = http.ask("GET", "/_stats/statements", "");
+    let v = fennec_core::json::parse_json(&stats.body).unwrap();
+    let Some(fennec_core::prelude::Value::List(shapes)) = v.member("statements") else {
+        panic!("{}", stats.body);
+    };
+    let shape = shapes
+        .iter()
+        .find(|s| {
+            s.member("query")
+                == Some(&fennec_core::prelude::Value::Text(
+                    "hook stripe_paid".into(),
+                ))
+        })
+        .unwrap_or_else(|| panic!("no `hook stripe_paid` in {}", stats.body));
+    let n = |k: &str| fennec_core::json::to_string(shape.member(k).unwrap());
+    assert_eq!(
+        (n("calls"), n("errors"), n("rows")),
+        ("2".into(), "1".into(), "1".into())
+    );
+    assert!(
+        stats.body.contains(r#""query":"POST /_hooks/stripe""#),
+        "the request's own shape: {}",
+        stats.body
+    );
+    assert!(
+        !stats.body.contains("hook stray"),
+        "it never ran: {}",
+        stats.body
+    );
+
+    // The slow line: the hook and its statement, never the event's key.
+    assert!(server.logged(
+        r#""hook":["stripe",[["stripe_paid",["#,
+        Duration::from_secs(10)
+    ));
+    let (_, log) = server.terminate();
+    let slow: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(r#""event":"slow""#) && l.contains(r#""hook":["#))
+        .collect();
+    assert_eq!(slow.len(), 2, "{log}");
+    for l in &slow {
+        assert!(l.contains(r#""statement":"POST /_hooks/stripe""#), "{l}");
+        assert!(!l.contains("evt_w") && !l.contains("pi_w"), "{l}");
+    }
+    assert!(slow[0].contains(r#"],1]]]"#), "{}", slow[0]);
+    assert!(slow[1].contains(r#"],0]]]"#), "{}", slow[1]);
+}

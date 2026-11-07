@@ -498,7 +498,7 @@ pub struct Tenants {
     /// Each tenant's webhook secrets, its `<tenant>.hooks` read as the
     /// node starts and as each is set: an event is verified against them
     /// before its tenant is looked up ([`crate::tenant_hooks`]).
-    hooks: crate::tenant_hooks::Store,
+    hooks: Arc<crate::tenant_hooks::Store>,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -572,7 +572,7 @@ impl Tenants {
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Tenants> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        let hooks = crate::tenant_hooks::Store::open(&dir)?;
+        let hooks = Arc::new(crate::tenant_hooks::Store::open(&dir)?);
         Ok(Tenants {
             dir,
             slots: Mutex::new(HashMap::new()),
@@ -1649,6 +1649,11 @@ impl Tenants {
         // statement taking a hook the tenant holds none for is said.
         self.hooks.opened(name, bound, opened);
         db.allow_hooks();
+        // The listings' `armed`: whether the tenant's set holds a hook's
+        // secret as a listing is written -- the router sets and takes them
+        // away while the tenant is open.
+        let (store, tenant) = (Arc::clone(&self.hooks), name.to_string());
+        db.arm_hooks(Arc::new(move |h| store.armed(&tenant, h)));
         self.hooks.log_unarmed(name, &db);
         // Its bytes and rows are asked of each block as it lands, where
         // they are bounded: a tenant with neither has nothing asked.

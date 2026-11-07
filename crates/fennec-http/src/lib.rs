@@ -299,6 +299,13 @@ impl Server {
             }
             calls::log_unheld(cfg.access.as_deref(), &guard, None);
             hooks::log_unheld(cfg.hooks.as_deref(), &guard);
+            // The listings' `armed`: whether the hooks file names a hook,
+            // and so holds its secret -- read once, at the start, as the
+            // file is. With none, every hook is unarmed, as told nothing.
+            if let Some(hooks) = &cfg.hooks {
+                let hooks = Arc::clone(hooks);
+                guard.arm_hooks(Arc::new(move |h| hooks.get(h).is_some()));
+            }
         }
         Server {
             backend: Backend::Single {
@@ -1300,6 +1307,13 @@ fn bound_noted(tenant: Option<&str>, took: std::time::Duration) {
     statements::bound(tenant, &r);
     trace::bound_runs(&r);
     audit::bound(&r);
+    // The statements a webhook event's taking ran (`hooks.rs`): each its
+    // shape, `hook <name>`, its span, and the slow line's `hook`.
+    if let Some(t) = &r.taking {
+        metrics::hooked(t, took);
+        statements::hooked(tenant, t);
+        trace::hooked(t);
+    }
 }
 
 /// A request's answer, run again while `Fennec-Wait` holds it ([`waits`]):
@@ -2654,17 +2668,23 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             };
             // The scheduled statements, to the server's token alone too, as
             // `statements` lists them, written here under the lock.
-            let scheduled = match full && guard.holds_schedules() {
+            let mut scheduled = match full && guard.holds_schedules() {
                 true => scheduled_into(&guard, fennecql),
                 false => String::new(),
             };
+            // The webhook consumers after them, to the server's token alone
+            // as well, each with its hook and whether this server holds a
+            // secret for it.
+            if full && guard.statements().iter().any(|s| s.hook.is_some()) {
+                hooked_into(&guard, fennecql, &mut scheduled);
+            }
             drop(guard);
             // `?as=fennecql`: the same description with its collections as
             // the statements that make them -- what the studio shows a
             // collection as, written by the engine rather than again in
             // the page, and a body `/_schema/plan` takes back as it is --
             // the bindings after them, each after the collections it names,
-            // and the scheduled ones last.
+            // and the scheduled ones and the webhook consumers last.
             if fennecql {
                 let mut text = with_id_note(&schemas);
                 for (.., def, broken) in &bound {
@@ -2700,7 +2720,8 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
                     out.push(']');
                 }
             });
-            // The scheduled statements after the collections.
+            // The scheduled statements and the webhook consumers after the
+            // collections.
             if !scheduled.is_empty() {
                 described.pop();
                 described.push_str(&scheduled);
@@ -2800,6 +2821,49 @@ fn scheduled_into(db: &Database, fennecql: bool) -> String {
         out.push(']');
     }
     out
+}
+
+/// The webhook consumers `db` holds as `GET /_schema` describes them,
+/// written onto `out` after its scheduled statements: as `?as=fennecql`'s
+/// definitions, or as the description's `,"hooks":[{"name","hook","text",
+/// "armed"}]`, `"broken"` after the text of one that is -- what
+/// `/_schema/plan` reads back as their definitions (`fennec_ql::bound_into`),
+/// held to the hook each is listed with; `armed`, whether this server holds
+/// a secret for it, is the server's to tell. Never a secret. Out of line, as
+/// a schema holding none never comes here.
+#[cold]
+#[inline(never)]
+fn hooked_into(db: &Database, fennecql: bool, out: &mut String) {
+    use fennec_core::json::escape_into;
+    let mut first = true;
+    for s in db.statements().iter() {
+        let Some(hook) = &s.hook else {
+            continue;
+        };
+        if fennecql {
+            definition_into(out, &s.text, s.broken.as_deref());
+            continue;
+        }
+        out.push_str(if first { ",\"hooks\":[" } else { "," });
+        first = false;
+        out.push_str("{\"name\":");
+        escape_into(out, &s.name);
+        out.push_str(",\"hook\":");
+        escape_into(out, hook);
+        out.push_str(",\"text\":");
+        escape_into(out, &s.text);
+        if let Some(why) = &s.broken {
+            out.push_str(",\"broken\":");
+            escape_into(out, why);
+        }
+        out.push_str(match db.hook_armed(hook) {
+            true => ",\"armed\":true}",
+            false => ",\"armed\":false}",
+        });
+    }
+    if !first {
+        out.push(']');
+    }
 }
 
 /// A definition as `GET /_schema?as=fennecql` writes it after the

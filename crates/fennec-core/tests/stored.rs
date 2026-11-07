@@ -488,6 +488,7 @@ fn a_broken_statement_is_replaced_only_within_its_contract() {
         migrations: Vec::new(),
         bound: Vec::new(),
         scheduled: Vec::new(),
+        hooked: Vec::new(),
         broken: Vec::new(),
     };
     let text = format!("create collection accounts (owner text @hash, balance int); {reads}");

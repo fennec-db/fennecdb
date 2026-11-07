@@ -109,6 +109,8 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 /// scheduled definition of the name it is listed by, run at the schedule
 /// it is listed with where it is -- as the text writes it, the clause
 /// `GET /_schema` lists, so a description claiming another is refused.
+/// And its webhook consumers (`Declared::hooked`) alike, each held to the
+/// hook it is listed with where it is.
 /// One listed `broken` (`Declared::broken`) is held to no dependency: the
 /// server describes what it holds, a statement whose collection or field
 /// the schema lost among it, and its description plans nothing for it. A
@@ -118,7 +120,10 @@ pub fn schema_into(d: &mut fennec_core::declared::Declared, text: &str) -> Resul
 pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
     use fennec_core::declared::bad;
     #[cfg(not(feature = "statements"))]
-    if let Some(name) = (d.bound.first().map(|b| &b.1)).or(d.scheduled.first().map(|s| &s.0)) {
+    if let Some(name) = (d.bound.first().map(|b| &b.1))
+        .or(d.scheduled.first().map(|s| &s.0))
+        .or(d.hooked.first().map(|s| &s.0))
+    {
         return Err(bad(
             name,
             "is a named statement, which this build does not read",
@@ -178,6 +183,31 @@ pub fn bound_into(d: &mut fennec_core::declared::Declared) -> Result<()> {
                     "`, and its text runs `",
                     written.unwrap_or_default(),
                     "`",
+                ]),
+            ));
+        }
+        held_to(d, def)?;
+    }
+    #[cfg(feature = "statements")]
+    for (name, hook, text) in std::mem::take(&mut d.hooked) {
+        let def = declared_def(&name, &text)?;
+        let takes = def.hook.as_ref().map(|h| h.name.clone());
+        if def.name != name || takes.is_none() {
+            return Err(bad(
+                &name,
+                "is listed among the hooks with the text of another statement than a webhook \
+                 consumer of its name",
+            ));
+        }
+        if let Some(listed) = hook.filter(|l| Some(l) != takes.as_ref()) {
+            return Err(bad(
+                &name,
+                &fennec_core::declared::cat(&[
+                    "is listed with the hook `",
+                    &listed,
+                    "`, and its text takes `",
+                    takes.as_deref().unwrap_or_default(),
+                    "`'s events",
                 ]),
             ));
         }

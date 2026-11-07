@@ -1963,19 +1963,22 @@ pub fn check_refused(e: &Expr) -> Option<String> {
 
 /// A bound statement's condition as its text writes it -- what follows the
 /// `where` after its collection, up to its `comment`, `scans` or `as` --
-/// for `describe statement` to show beside the text: the tree holds the
-/// condition as read, and no build writes an expression back as text. Read
-/// from the stored text, so a binding this process holds no tree for shows
-/// it too; strings, comments and brackets are stepped over, and a word with
-/// a dot in it (`new.as`) is a field. `None` for a binding with no
-/// condition, or a text that is not one.
+/// and a webhook consumer's, after its hook's name, for `describe
+/// statement` to show beside the text: the tree holds the condition as
+/// read, and no build writes an expression back as text. Read from the
+/// stored text, so a statement this process holds no tree for shows it
+/// too; strings, comments and brackets are stepped over -- a parameter's
+/// `from` among them -- and a word with a dot in it (`new.as`,
+/// `hook.event`) is a field. `None` for one with no condition, or a text
+/// that is not one.
 #[cfg(feature = "statements")]
 pub fn condition_text(text: &str) -> Option<&str> {
-    // 0 before `after`, 1 between it and `where`, 2 in the condition.
+    // 0 before `after` or `hook`, 1 between it and `where`, 2 in the
+    // condition.
     let (mut state, mut start) = (0u8, 0);
     for (w, from) in TopWords::of(text) {
         match state {
-            0 if w.eq_ignore_ascii_case("after") => state = 1,
+            0 if w.eq_ignore_ascii_case("after") || w.eq_ignore_ascii_case("hook") => state = 1,
             1 if w.eq_ignore_ascii_case("where") => (state, start) = (2, from + w.len()),
             1 if clause_ends(w) => return None,
             2 if clause_ends(w) => return text.get(start..from).map(str::trim),

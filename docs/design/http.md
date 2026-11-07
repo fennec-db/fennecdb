@@ -544,6 +544,17 @@ kinds share one start (`start`: the id, the sampling, the reset) and one
 finish (`finish`, the root's last attributes a closure): the run's copies
 of them were a kilobyte of the server.
 
+A webhook event is its request's trace
+([named-statements.md](named-statements.md#webhook-consumers-f4), slice 5):
+its span names the hook (`fennec.hook`) and what the event came to
+(`fennec.outcome`, the metrics' outcomes), and each statement the event ran
+is a child, `hook <name>`, timed by the engine as a binding's runs are
+(`Database::take_runs`' `taking`) -- the same writer as a binding's spans
+(`trace::ran_spans`), so the two kinds are one code, the refusing one failed
+with its status and its `else` reason. Never the event's key or a value of
+its body. `http.route` templates the hook's name as it does a call's,
+`/_hooks/{name}` whatever word the name is.
+
 ## Metrics
 
 **`/_metrics` counts at the edge, a shard per thread.** A statement is timed
@@ -610,7 +621,10 @@ tenant's, named, to the admin alone. The shapes the server counts of its own
 keyed apart from every text a client sends (`statements::own_key`, the
 shape's hash taken on over `0xfe`, a byte no UTF-8 text holds): keyed by the
 shape alone, a client's `schedule purge`, a parse error, added to the
-runs' errors.
+runs' errors. A webhook event's statements are `hook <name>` alike, a call
+each event a statement ran, its rows its last statement's and an error
+where it refused the event; the request's own shape, `POST /_hooks/<hook>`,
+holds their time too, as a writer's holds its bindings'.
 
 ## Parse cache
 
