@@ -2854,14 +2854,22 @@ fn writes(db: &RwLock<Database>, body: &[u8]) -> Option<String> {
 /// A description `GET /_schema` writes declares none, leaving them out. A
 /// body that does not read is left to the plan, which says why.
 fn own_declared(db: &mut Database, body: &str) -> Option<fennec_core::error::Error> {
+    own_described(body).or_else(|| own_migrations(db, body))
+}
+
+/// [`own_declared`]'s first half, which reads the description alone and
+/// takes no lock: a collection of the server's own it declares.
+fn own_described(body: &str) -> Option<fennec_core::error::Error> {
     let d = fennec_abi::read(body).ok()?;
-    if let Some(s) = d
-        .collections
-        .iter()
+    (d.collections.iter())
         .find(|s| fennec_core::declared::own(&s.name))
-    {
-        return Some(access::own_refusal(&s.name));
-    }
+        .map(|s| access::own_refusal(&s.name))
+}
+
+/// [`own_declared`]'s second half, under the write lock: a migration still
+/// to run that reaches one.
+fn own_migrations(db: &mut Database, body: &str) -> Option<fennec_core::error::Error> {
+    let d = fennec_abi::read(body).ok()?;
     let texts = fennec_core::declared::migration_texts(&d).ok()?;
     let (pending, runs) = fennec_abi::unrecorded(db, &texts).ok()?;
     texts[pending]
@@ -2877,24 +2885,31 @@ fn own_declared(db: &mut Database, body: &str) -> Option<fennec_core::error::Err
 /// what only adds, one block under the write lock, synced as a write is.
 /// 409 with the plan's refusals, which write nothing.
 pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str) -> Response {
+    // A description reaching the server's own collections is refused
+    // before it is a write, as `/query` refuses the server token's own
+    // statement (`own_answer`): never counted a write's (`metrics::wrote`),
+    // and one declaring such a collection is told its 403 whatever the
+    // tenant's write rate, which it reads off the body alone.
+    if let Some(e) = own_described(body) {
+        return error_response(&e);
+    }
+    // The rate before the lock, as every write's: a tenant past it is
+    // told the 429 at once, counted a write as `/query`'s is, and takes no
+    // lock it would only let go. A migration still to run reaching the
+    // server's own is the record's to tell, under the lock, so a tenant
+    // past its rate sending one hears the 429 first.
+    if let Err(refused) = quota::writing() {
+        metrics::wrote();
+        return refused;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     let mut guard = held::write(db);
-    // A description reaching the server's own collections is refused
-    // before it is a write, as `/query` refuses the server token's own
-    // statement (`own_answer`): asked after them, its 403 was counted a
-    // write's (`metrics::wrote`), and a tenant past its write rate was
-    // told the quota's 429 in its place. Asked under this lock, the
-    // migrations still to run being the record's (`own_declared`); the
-    // rate after it is a bucket's count, no wait.
-    let r = match own_declared(&mut guard, body) {
+    let r = match own_migrations(&mut guard, body) {
         Some(e) => Err(e),
         None => {
             metrics::wrote();
-            if let Err(refused) = quota::writing() {
-                return refused;
-            }
             fennec_abi::schema(&mut guard, body, true, Some(now))
         }
     };
@@ -3369,8 +3384,10 @@ fn held_run(
 }
 
 /// A read's tag: the change the database stands at as it answers, `"42"`
-/// -- or none for a read whose answer can change with no write: one
-/// reading a collection whose rows expire, or calling `now()`. Sent back
+/// -- `"42.1"` on a database that adopted an image, the images it adopted
+/// after the dot ([`unchanged`]) -- or none for a read whose answer can
+/// change with no write: one reading a collection whose rows expire, or
+/// calling `now()`. Sent back
 /// as `If-None-Match`, it is answered 304 while no write has touched what
 /// the read reads ([`unchanged`]): a page polling a query asks the server
 /// to run it only once something it reads was written, rather than each
@@ -3389,7 +3406,10 @@ fn etag(db: &Database, stmt: &Statement, text: &str) -> Option<String> {
     if reads.iter().any(|c| expiring.iter().any(|e| e == c)) {
         return None;
     }
-    Some(format!("\"{}\"", db.change_seq()))
+    Some(match db.adoptions() {
+        0 => format!("\"{}\"", db.change_seq()),
+        n => format!("\"{}.{n}\"", db.change_seq()),
+    })
 }
 
 /// A scoped read's tag: a digest of its answer, so that it says nothing a
@@ -3426,14 +3446,23 @@ fn same_answer(resp: Response, asked: Option<&str>) -> Response {
 
 /// Whether no write since the change `asked` names -- an `ETag` [`etag`]
 /// gave -- touched a collection `stmt` reads. A tag the change ring no
-/// longer reaches, or a collection dropped since, is a change.
+/// longer reaches, or a collection dropped since, is a change; so is one
+/// naming other images adopted than the database's: an image replaces
+/// what was read, and can land on the very change the tag names, where
+/// the ring shows no write -- a replica's poll was answered 304 over the
+/// rows it no longer held.
 fn unchanged(db: &Database, stmt: &Statement, asked: &str) -> bool {
     if !matches!(stmt, Statement::Select(_)) {
         return false;
     }
-    let Some(since) = asked.trim().trim_matches('"').parse::<u64>().ok() else {
+    let tag = asked.trim().trim_matches('"');
+    let (since, images) = tag.split_once('.').unwrap_or((tag, "0"));
+    let (Ok(since), Ok(images)) = (since.parse::<u64>(), images.parse::<u64>()) else {
         return false;
     };
+    if images != db.adoptions() {
+        return false;
+    }
     if since > db.change_seq() {
         return false;
     }

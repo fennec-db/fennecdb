@@ -38,9 +38,15 @@ fn start(cfg: Config) -> Harness {
 }
 
 fn start_over(db: Database, mut cfg: Config) -> Harness {
-    cfg.addr = "127.0.0.1:0".into();
     // We do not want to wait for a keep-alive line in the tests.
     cfg.stream_keepalive = Duration::from_millis(80);
+    serve(db, cfg)
+}
+
+/// [`start_over`] keeping the keep-alive `cfg` names: a stream that looks
+/// at a keep-alive every 80 ms would hide one that never wakes otherwise.
+fn serve(db: Database, mut cfg: Config) -> Harness {
+    cfg.addr = "127.0.0.1:0".into();
     let db = Arc::new(RwLock::new(db));
     let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().expect("bind");
@@ -449,6 +455,13 @@ fn stream_cap_is_separate_from_connection_cap() {
     // reads the wait from.
     assert!(
         second.head_line().contains("Retry-After: 1"),
+        "{}",
+        second.head
+    );
+    // Answered whole, as every route's refusal: its length said, every
+    // header it carries written.
+    assert!(
+        second.head_line().contains("Content-Length: "),
         "{}",
         second.head
     );
@@ -1144,7 +1157,7 @@ fn gone(data: &str) -> Vec<i64> {
 }
 
 /// A shape holding an inner `get` is judged against the list as it is at
-/// each look: on main the first write to `board` ended the stream with
+/// each look: the first write to `board` used to end the stream with
 /// `event: error` (`eval` refuses an `in (get ...)`), its seed the only
 /// thing it ever sent. Writes inside and outside the shape, one after
 /// another, each told or not as a shape of a list written out would be.
@@ -1195,7 +1208,36 @@ fn a_shapes_inner_get_is_answered_at_every_look() {
 /// the list, are told nothing.
 #[test]
 fn a_write_to_the_inner_collection_moves_rows_in_and_out() {
-    let h = start_over(board(), Config::default());
+    for (pinned, indexed) in [(false, true), (true, true), (true, false), (false, false)] {
+        moves_rows_in_and_out(pinned, indexed);
+    }
+}
+
+/// [`a_write_to_the_inner_collection_moves_rows_in_and_out`], every read
+/// pinned or none (`set_pin_at`): the lists answered on a pin and the
+/// changes judged there -- or under the lock where the inner `get` reaches
+/// for `notes`' hash index, which a pin does not hold -- tell what the
+/// lock tells.
+fn moves_rows_in_and_out(pinned: bool, indexed: bool) {
+    let mut db = match indexed {
+        true => board(),
+        false => {
+            let mut db = Database::new();
+            for sql in [
+                "create collection notes (title text)",
+                "create collection board (msg text)",
+                r#"put notes [{title: "a1"}, {title: "b1"}]"#,
+                r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "c1"}]"#,
+            ] {
+                db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+            }
+            db
+        }
+    };
+    if pinned {
+        db.set_pin_at(0);
+    }
+    let h = start_over(db, Config::default());
     let mut s = Sub::open(h.port, INNER);
     assert_eq!(s.next().expect("seed").0, "seed");
     for (path, body) in [
@@ -1249,7 +1291,7 @@ fn a_resumed_stream_reading_another_collection_is_seeded() {
 
 /// A poll of a read holding an inner `get` is tagged by the change
 /// counter, as any read: 304 while neither collection was written, and
-/// run again once the inner one was. On main it was never tagged, and ran
+/// run again once the inner one was. It used to be tagged never, and ran
 /// at every round however long nothing moved.
 #[test]
 fn a_poll_of_an_inner_get_is_answered_304_until_what_it_reads_is_written() {
@@ -1290,4 +1332,117 @@ fn a_poll_of_an_inner_get_is_answered_304_until_what_it_reads_is_written() {
     let (status, _, body) = poll(&tag);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("c1"), "{body}");
+}
+
+/// A stream of the board whose notes expire (`@ttl`), one at a minute's
+/// keep-alive: only the time can wake it.
+fn expiring_board(ttl: &str, b1_at: i64) -> Harness {
+    let mut db = Database::new();
+    let far = now_ms() + 3_600_000;
+    for sql in [
+        format!("create collection notes (title text, at timestamp{ttl})"),
+        "create collection board (msg text)".to_string(),
+        format!(r#"put notes [{{title: "a1", at: {far}}}, {{title: "b1", at: {b1_at}}}]"#),
+        r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "c1"}]"#.to_string(),
+    ] {
+        db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    serve(
+        db,
+        Config {
+            stream_keepalive: Duration::from_secs(60),
+            ..Config::default()
+        },
+    )
+}
+
+/// A note reaching its time (`@ttl`) leaves the list with no write: the
+/// stream wakes for it, as for a row of its own reaching its time
+/// (`Reach::next`), and tells its rows gone then -- not at its next
+/// keep-alive, a minute here, nor at the next write to anything.
+#[test]
+fn a_note_reaching_its_time_takes_its_rows_out_then() {
+    // b1's note lives a second past two from now.
+    let h = expiring_board(" @ttl(1s)", now_ms() + 2_000);
+    let mut s = Sub::open(h.port, INNER);
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(
+        msgs(&data, "rows"),
+        [(1, "a1".into()), (2, "b1".into())],
+        "{data}"
+    );
+    let (name, data) = s
+        .next_within(Duration::from_secs(15))
+        .expect("b1's rows leave at its note's time");
+    assert_eq!(name, "change", "{data}");
+    assert_eq!(gone(&data), [2], "{data}");
+    assert_eq!(count(&data, "puts"), 0, "{data}");
+}
+
+/// A `@ttl` given the inner collection after the stream opened is
+/// followed: the change of schema is a write to what the stream reads,
+/// which answers the lists again and asks when their rows reach their
+/// time. Worked out once as the stream opened, from the collections that
+/// expired then, it was never asked again.
+#[test]
+fn a_ttl_given_the_inner_collection_later_is_followed() {
+    let h = expiring_board("", now_ms() + 1_000);
+    let mut s = Sub::open(h.port, INNER);
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(msgs(&data, "rows").len(), 2, "{data}");
+    let (st, body) = post(
+        h.port,
+        "/query",
+        r#"{"query":"create index on notes (at) @ttl(1s)"}"#,
+    );
+    assert_eq!(st, 200, "{body}");
+    // b1's note goes a second after its `at`, a second from the stream's
+    // start: told at its time, whatever the index's look saw.
+    let mut told = Vec::new();
+    while let Some((name, data)) = s.next_within(Duration::from_secs(15)) {
+        assert_eq!(name, "change", "{data}");
+        told.extend(gone(&data));
+        if !told.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(told, [2]);
+}
+
+/// A poll's tag names the images the database adopted: one adopted at
+/// the very change a tag names replaced what the read answered, with no
+/// write the change ring shows, and the tag sent back is answered again,
+/// not 304.
+#[test]
+fn a_poll_tag_names_the_images_adopted() {
+    let h = start(Config::default());
+    let poll = |tag: &str| {
+        let mut sock = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let q = r#"{"query":"get tasks order id"}"#;
+        write!(
+            sock,
+            "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
+             Content-Length: {}\r\n\r\n{q}",
+            q.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        sock.read_to_string(&mut out).unwrap();
+        let status: u16 = out[9..12].parse().unwrap();
+        let etag = out.lines().find_map(|l| l.strip_prefix("ETag: "));
+        (status, etag.map(str::to_string))
+    };
+    let (status, tag) = poll("\"0\"");
+    assert_eq!(status, 200);
+    let tag = tag.expect("tagged");
+    assert_eq!(poll(&tag).0, 304);
+    adopt_at_the_same_change(&h);
+    let (status, fresh) = poll(&tag);
+    assert_eq!(status, 200, "an image adopted at the tag's change");
+    let fresh = fresh.expect("tagged");
+    assert_ne!(fresh, tag);
+    assert_eq!(poll(&fresh).0, 304);
 }

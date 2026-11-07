@@ -33,6 +33,7 @@ use crate::api;
 use crate::http::Request;
 use crate::Config;
 use fennec_core::changes::Hold;
+use fennec_core::engine::{Lists, Written};
 use fennec_core::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -242,8 +243,7 @@ pub fn serve(
     // the wait from the body, where plain text left it at its own backoff.
     let Some(_slot) = hub.reserve(cfg.max_streams) else {
         let refused = crate::http::Response::retry_after(503, "too many subscriptions", 1);
-        let _ = write_head(out, cfg, 503, refused.content_type, Some(1), None);
-        let _ = out.write_all(&refused.body);
+        let _ = crate::cors(refused, cfg).write(out, false, false);
         return;
     };
 
@@ -318,32 +318,29 @@ pub fn serve(
                 });
                 sub.filter = scope.subscribed(&sub.collection, shape)?;
             }
-            let reach = Reach::of(&guard, who, &sub, own);
+            let reach = Reach::of(who, &sub, own);
             Ok((sub, quiet, view, reach))
         });
         (sub, at)
     };
-    let (mut sub, quiet, mut view, reach) = match sub {
+    let (mut sub, quiet, mut view, mut reach) = match sub {
         Ok(s) => s,
         Err(e) => {
             // Over a collection the token is granted nothing on, the shape
             // read against its schema told nothing of it.
             let e = crate::path_refusal(who, req).unwrap_or(e);
-            // The body `/query` answers the same refusal with: the message
-            // alone, its class in the status. `Display`'s `denied: ` and
-            // `query error: ` made a stream's 403 and 400 read apart from
-            // every other route's.
-            let refused = crate::error_response(&e);
-            let retry = (refused.extra.iter())
-                .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
-                .and_then(|(_, v)| v.parse().ok());
-            let _ = write_head(out, cfg, refused.status, refused.content_type, retry, None);
-            let _ = out.write_all(&refused.body);
+            // The answer `/query` gives the same refusal, whole: the
+            // message alone in the body, its class in the status, and
+            // every header it carries -- `Retry-After`, a quota's
+            // `Fennec-Quota`. `Display`'s `denied: ` and `query error: `
+            // made a stream's 403 and 400 read apart from every other
+            // route's, and a head of its own told only the wait.
+            let _ = crate::cors(crate::error_response(&e), cfg).write(out, false, false);
             return;
         }
     };
 
-    if write_head(out, cfg, 200, "text/event-stream", None, Some(at)).is_err() {
+    if write_head(out, cfg, at).is_err() {
         return;
     }
     // A client stalled during the stream must not hold the thread forever:
@@ -381,15 +378,25 @@ pub fn serve(
     };
     let began = now_ms() as i64;
     // The change ring held back to the seed's change until the first look
-    // after it ([`seed`]).
+    // after it ([`seed`]), and to a pinned look's until the next ([`look`]).
     let mut held = None;
+    // The stream's long `in` lists as its last look bound them -- an inner
+    // `get`'s answer, kept from one look to the next ([`Lists`]) -- where
+    // its filter holds one.
+    let mut lists = Lists::of(sub.filter.as_ref());
     let mut cursor = match sub.since {
         // Resuming, a scoped subscriber is seeded all the same: the rows it
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write. So is one whose shape reads
         // another collection: nor is what that held at its cursor.
         Some(n) if seen.is_none() => n,
-        _ => match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
+        _ => match seed(
+            out,
+            db,
+            (&mut sub, &mut reach, &mut view, &mut lists),
+            &mut seen,
+            quiet,
+        ) {
             Ok((seq, hold, images)) => {
                 (held, adopted) = (Some(hold), images);
                 // The seed left out every row past its time by then.
@@ -434,59 +441,21 @@ pub fn serve(
             );
             return;
         }
-        let (step, members) = {
-            let guard = crate::held::read(db);
-            let replaced = guard.adoptions() != adopted;
-            // Rules and inner `get`s reading another collection, bound and
-            // answered again where it was written: rows may enter and leave
-            // the shape, and show other fields, with no write to its own
-            // collection.
-            let moved = match &reach {
-                Some(r) if !replaced => r.rebind(&guard, cursor, &mut sub, &mut view),
-                _ => Ok(false),
-            };
-            let shown = shows(&view);
-            let step = moved.and_then(|moved| {
-                if replaced {
-                    return Ok((Changes::Reseed, None));
-                }
-                let mut step = guard.changes_since(
-                    &sub.collection,
-                    cursor,
-                    sub.filter.as_ref(),
-                    sub.project.as_deref(),
-                    &[],
-                )?;
-                if let (Changes::Batch(b), Some((scope, mask))) = (&mut step, shown) {
-                    scope.shown_rows(mask, &guard, &mut b.puts);
-                }
-                // The rows the shape holds now, read under the same lock,
-                // where the rules' answer moved.
-                let members = match (&step, moved) {
-                    (Changes::Batch(_), true) => {
-                        let stmt = Statement::Select(api::seed_select(&sub));
-                        match guard.query(&stmt, &[])? {
-                            Response::Rows(mut rs) => {
-                                if let Some((scope, mask)) = shown {
-                                    scope.shown_rows(mask, &guard, &mut rs);
-                                }
-                                Some(rs)
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                Ok((step, members))
-            });
-            match step {
-                Ok((step, members)) => (Ok(step), members),
-                Err(e) => (Err(e), None),
-            }
-        };
+        let looked = look(
+            db,
+            (cursor, adopted),
+            (&mut sub, &mut reach, &mut view, &mut lists),
+        );
         // Looked past the seed's change: the ring goes back to its
-        // capacity.
+        // capacity, or to a pinned look's change, held till the next.
         drop(held.take());
+        let (step, members) = match looked {
+            Ok(l) => {
+                held = l.hold;
+                (Ok(l.step), l.members)
+            }
+            Err(e) => (Err(e), None),
+        };
         match step {
             Err(e) => {
                 // The collection may have been dropped: write the reason and
@@ -496,7 +465,13 @@ pub fn serve(
             }
             Ok(Changes::Reseed) => {
                 let began = now_ms() as i64;
-                match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
+                match seed(
+                    out,
+                    db,
+                    (&mut sub, &mut reach, &mut view, &mut lists),
+                    &mut seen,
+                    quiet,
+                ) {
                     Ok((seq, hold, images)) => (cursor, held, adopted) = (seq, Some(hold), images),
                     Err(_) => return,
                 }
@@ -570,6 +545,11 @@ pub fn serve(
                 }
             }
             until = x.next_at(&guard);
+        }
+        // A row of a collection the inner `get`s read reaching its time
+        // leaves their lists with no write: the stream looks then.
+        if let Some(at) = reach.as_ref().and_then(|r| r.next) {
+            until = Some(until.map_or(at, |u| u.min(at)));
         }
 
         // Keep-alive: proxies and NAT tables drop silent connections. A
@@ -724,23 +704,25 @@ fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
 /// rules and the inner `get`s as they answer -- each `in (get ...)` the
 /// `in` list it is ([`Database::answer_subqueries`]), where `eval`, which
 /// judges each changed row, refuses one: such a stream sent its seed and
-/// ended at the first write to its collection. Made again under each
-/// look's lock where one of those collections was written since the
-/// stream's change -- or at every look where an inner `get` reads the
-/// time, or reads rows that expire, which leave its list with no write --
-/// and run again where the answer moved, its rows diffed by id against
-/// those the stream was sent ([`enter_and_leave`]): a row the write to the
-/// other collection let in enters, one it shut out leaves, a deletion of a
-/// row the stream was sent, its own collection unwritten. A customer
-/// following the courier carrying their order hears the courier once the
-/// order is claimed and nothing of them once it is delivered, with no
-/// write to `positions` between; a board following `msg in (get notes
-/// select title)` hears the message a note's title names once the note is
-/// written and its deletion once the note is gone. The cost is an inner
-/// `get` a stream at each write to what it reads, and the shape run again
-/// where its list moved -- the diff alone sent, where a reseed would send
-/// every row the shape holds at each such write. A stream whose filter
-/// reads no other collection has none, and runs nothing more at a look.
+/// ended at the first write to its collection. Made again at a look
+/// ([`look`]) where one of those collections was written since the
+/// stream's change, where a row of one reached its time since they were
+/// last answered -- the stream wakes for it ([`Reach::next`]) -- or at
+/// every look where an inner `get` reads the time; and run again where the
+/// answer moved, its rows diffed by id against those the stream was sent
+/// ([`enter_and_leave`]): a row the write to the other collection let in
+/// enters, one it shut out leaves, a deletion of a row the stream was
+/// sent, its own collection unwritten. A customer following the courier
+/// carrying their order hears the courier once the order is claimed and
+/// nothing of them once it is delivered, with no write to `positions`
+/// between; a board following `msg in (get notes select title)` hears the
+/// message a note's title names once the note is written and its deletion
+/// once the note is gone. The cost is an inner `get` a stream at each
+/// write to what it reads -- answered on a pin where a query's would be,
+/// beside the writers -- and the shape run again where its list moved:
+/// the diff alone sent, where a reseed would send every row the shape
+/// holds at each such write. A stream whose filter reads no other
+/// collection has none, and runs nothing more at a look.
 struct Reach {
     /// The token's scope, where a rule of it reads another collection:
     /// bound again at each answer.
@@ -753,28 +735,31 @@ struct Reach {
     project: Option<Vec<String>>,
     /// The collections the inner `get`s read, at any depth.
     reads: Vec<String>,
-    /// An inner `get` reads the time, or rows that expire.
+    /// An inner `get` reads the time: its filter, an `order` key, an item
+    /// of its list (`access::reads_time`).
     clock: bool,
+    /// The next moment a row of `reads` reaches its `@ttl`, worked out as
+    /// the lists were last answered: one leaving them with no write. Asked
+    /// of the collections then (`Database::wakes_at`), so a `@ttl` given
+    /// one later -- a write to it, which answers them again -- is followed.
+    next: Option<i64>,
 }
 
-/// A stream's filter, list and view as [`Reach::bind`] answers them.
+/// A stream's filter, list and view as [`Reach::rules`] binds them.
 type Answered = (Option<Expr>, Option<Vec<String>>, Option<View>);
 
 impl Reach {
     /// What `sub`, its filter as its token holds it, reads beside its
-    /// collection, over `db`; `own` the subscriber's shape and list where
-    /// the token's rules read other collections. `None` where its filter
-    /// holds no inner `get`.
+    /// collection; `own` the subscriber's shape and list where the token's
+    /// rules read other collections. `None` where its filter holds no
+    /// inner `get`.
     fn of(
-        db: &Database,
         who: &Who,
         sub: &api::Subscription,
         own: Option<(Option<Expr>, Option<Vec<String>>)>,
     ) -> Option<Reach> {
         let f = sub.filter.as_ref().filter(|f| f.has_subquery())?;
-        let (reads, mut clock) = crate::access::inner_reads(f);
-        let expiring = db.expiring();
-        clock = clock || reads.iter().any(|c| expiring.contains(c));
+        let (reads, clock) = crate::access::inner_reads(f);
         let (rules, (shape, project)) = match (who, own) {
             (Who::Scoped(scope), Some(own)) => (Some(Arc::clone(scope)), own),
             _ => (None, (sub.filter.clone(), sub.project.clone())),
@@ -786,60 +771,351 @@ impl Reach {
             project,
             reads,
             clock,
+            next: None,
         })
     }
 
-    /// The stream's filter, list and view as the rules and the inner
-    /// `get`s answer over `db` now; no view where the rules are not bound
-    /// here, the stream's own standing.
-    fn bind(&self, db: &Database) -> fennec_core::error::Result<Answered> {
-        let (mut filter, project, view) = match &self.rules {
-            Some(scope) => {
-                // The rules of the collections the inner `get`s read
-                // answered as a statement's are ([`Scope::bound`]).
-                let mut over = vec![self.collection.as_str()];
-                over.extend(self.reads.iter().map(String::as_str));
-                let bound = Arc::new(scope.bound_over(db, &over)?);
-                let mut project = self.project.clone();
-                let (shape, mask) =
-                    bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
-                let filter = bound.subscribed(&self.collection, shape)?;
-                (filter, project, Some(View { scope: bound, mask }))
-            }
-            None => (self.shape.clone(), self.project.clone(), None),
+    /// The stream's filter, list and view as the rules bind them over
+    /// `db` now, the inner `get`s left in it for the caller to answer --
+    /// on a pin, or under this lock where the pin declines. No view where
+    /// no rule is bound here, the stream's own standing.
+    fn rules(&self, db: &Database) -> fennec_core::error::Result<Answered> {
+        let Some(scope) = &self.rules else {
+            return Ok((self.shape.clone(), self.project.clone(), None));
         };
-        if let Some(f) = &mut filter {
-            db.answer_subqueries(f)?;
-        }
-        Ok((filter, project, view))
+        // The rules of the collections the inner `get`s read answered as a
+        // statement's are ([`Scope::bound`]): a rule's lists, held to
+        // `MAX_CLAIM_VALUES`, under the lock as a statement's.
+        let mut over = vec![self.collection.as_str()];
+        over.extend(self.reads.iter().map(String::as_str));
+        let bound = Arc::new(scope.bound_over(db, &over)?);
+        let mut project = self.project.clone();
+        let (shape, mask) = bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
+        let filter = bound.subscribed(&self.collection, shape)?;
+        Ok((filter, project, Some(View { scope: bound, mask })))
     }
 
-    /// The stream bound and answered again where what it reads was written
-    /// after `since`; whether its filter moved.
-    fn rebind(
-        &self,
-        db: &Database,
-        since: u64,
-        sub: &mut api::Subscription,
-        view: &mut Option<View>,
-    ) -> fennec_core::error::Result<bool> {
-        let written = self.clock
+    /// Whether the lists are to be answered again at a look after `since`:
+    /// a collection they read was written, a row of one reached its time,
+    /// or they read the time.
+    fn due(&self, db: &Database, since: u64, now: i64) -> bool {
+        self.clock
+            || self.next.is_some_and(|at| at <= now)
             || db
                 .changed_collections_since(since)
-                .is_none_or(|w| w.iter().any(|c| self.reads.contains(c)));
-        if !written {
-            return Ok(false);
+                .is_none_or(|w| w.iter().any(|c| self.reads.contains(c)))
+    }
+
+    /// The next moment a row of a collection the lists read reaches its
+    /// time, past `now`: under the lock, a pin holding no index.
+    fn next_after(&self, db: &Database, now: i64) -> Option<i64> {
+        (self.reads.iter())
+            .filter_map(|c| db.wakes_at(c, None, &[], now).ok().flatten())
+            .min()
+    }
+}
+
+/// What a look read: the changes after the stream's cursor, the rows its
+/// shape holds now where its filter moved, and the change ring held back
+/// to a pinned look's change, till the next.
+struct Looked {
+    step: Changes,
+    members: Option<ResultSet>,
+    hold: Option<Hold>,
+}
+
+/// A stream's look after `cursor`, the database still on the images it
+/// had `adopted`. Where its filter reads another collection that was
+/// written ([`Reach::due`]), the rules are bound under the lock and the
+/// inner `get`s answered where a query's would be: on a pin taken under it
+/// ([`Database::pin`]), beside the writers -- a list read off a million
+/// rows held every writer for its scan otherwise, where the query of it
+/// pins -- the changes' ids read under the lock and judged on the pin, as
+/// the rows stood ([`Database::written_after`],
+/// [`Pinned::changes_held`]), the shape run there too where it moved, and
+/// the ring held back to that change till the next look. Under the lock
+/// where the pin declines it, or reached for an index.
+fn look(
+    db: &Arc<RwLock<Database>>,
+    (cursor, adopted): (u64, u64),
+    (sub, reach, view, lists): (
+        &mut api::Subscription,
+        &mut Option<Reach>,
+        &mut Option<View>,
+        &mut Option<Lists>,
+    ),
+) -> fennec_core::error::Result<Looked> {
+    let mut pin = true;
+    loop {
+        let guard = crate::held::read(db);
+        let looked = |step| Looked {
+            step,
+            members: None,
+            hold: None,
+        };
+        if guard.adoptions() != adopted {
+            return Ok(looked(Changes::Reseed));
         }
-        let (filter, project, v) = self.bind(db)?;
-        if filter == sub.filter {
-            return Ok(false);
+        // The time asked only of a stream that reads another collection:
+        // a plain one's look reads what it read.
+        let now = match reach {
+            Some(_) => now_ms() as i64,
+            None => 0,
+        };
+        let Some(r) = reach.as_mut().filter(|r| r.due(&guard, cursor, now)) else {
+            let mut step = changes(&guard, cursor, sub, lists.as_mut())?;
+            if let (Changes::Batch(b), Some((scope, mask))) = (&mut step, shows(view)) {
+                scope.shown_rows(mask, &guard, &mut b.puts);
+            }
+            return Ok(looked(step));
+        };
+        let answered = r.rules(&guard)?;
+        let pinned = match pin {
+            true => {
+                let (filter, project, _) = &answered;
+                let stmt = Statement::Select(shape_select(&sub.collection, filter, project));
+                guard.pin(&[(&stmt, &[][..])])
+            }
+            false => None,
+        };
+        let next = r.next_after(&guard, now);
+        let Some(written) = guard.written_after(&sub.collection, cursor)? else {
+            return Ok(looked(Changes::Reseed));
+        };
+        let read = match &pinned {
+            Some(p) => {
+                let hold = guard.hold_changes();
+                drop(guard);
+                judge(On::Pin(p), written, answered, (sub, view, lists)).map(|r| {
+                    r.map(|l| Looked {
+                        hold: Some(hold),
+                        ..l
+                    })
+                })
+            }
+            None => judge(On::Lock(&guard), written, answered, (sub, view, lists)),
+        };
+        match read {
+            Some(read) => {
+                if read.is_ok() {
+                    r.next = next;
+                }
+                return read;
+            }
+            // The pin reached for an index: under the lock, all of it.
+            None => pin = false,
         }
+    }
+}
+
+/// The changes after `cursor` by the stream's filter, its long lists bound
+/// as its last look bound them where it holds one.
+fn changes(
+    db: &Database,
+    cursor: u64,
+    sub: &api::Subscription,
+    lists: Option<&mut Lists>,
+) -> fennec_core::error::Result<Changes> {
+    let (filter, project) = (sub.filter.as_ref(), sub.project.as_deref());
+    let Some(lists) = lists else {
+        return db.changes_since(&sub.collection, cursor, filter, project, &[]);
+    };
+    match db.written_after(&sub.collection, cursor)? {
+        Some(w) => db.changes_held(&sub.collection, w, filter, project, Some(lists)),
+        None => Ok(Changes::Reseed),
+    }
+}
+
+/// Where a look whose lists are due reads: the database under the lock,
+/// or a pin taken under it, whose reads answer `None` where they reached
+/// for an index it does not hold.
+enum On<'a> {
+    Lock(&'a Database),
+    Pin(&'a Pinned),
+}
+
+impl On<'_> {
+    fn database(&self) -> &Database {
+        match self {
+            On::Lock(db) => db,
+            On::Pin(p) => p.database(),
+        }
+    }
+
+    fn answer(&self, f: &mut Expr) -> Option<fennec_core::error::Result<()>> {
+        match self {
+            On::Lock(db) => Some(db.answer_subqueries(f)),
+            On::Pin(p) => p.answer_subqueries(f),
+        }
+    }
+
+    fn changes(
+        &self,
+        collection: &str,
+        written: Written,
+        (filter, project): (Option<&Expr>, Option<&[String]>),
+        lists: Option<&mut Lists>,
+    ) -> Option<fennec_core::error::Result<Changes>> {
+        match self {
+            On::Lock(db) => Some(db.changes_held(collection, written, filter, project, lists)),
+            On::Pin(p) => p.changes_held(collection, written, filter, project, lists),
+        }
+    }
+
+    fn query(&self, stmt: &Statement) -> Option<fennec_core::error::Result<Response>> {
+        match self {
+            On::Lock(db) => Some(db.query(stmt, &[])),
+            On::Pin(p) => p.query(stmt, &[]),
+        }
+    }
+}
+
+/// A due look read on `on`: the inner `get`s of the stream's filter as
+/// the rules bound it (`answered`) answered, the changes `written` names
+/// judged by it, and where the lists moved, the rows the shape holds now
+/// -- the stream's filter, list, view and lists moved to it once every
+/// read came back. `None` where the pin reached for an index, the stream
+/// as it was.
+fn judge(
+    on: On,
+    written: Written,
+    (mut filter, project, v): Answered,
+    (sub, view, lists): (
+        &mut api::Subscription,
+        &mut Option<View>,
+        &mut Option<Lists>,
+    ),
+) -> Option<fennec_core::error::Result<Looked>> {
+    if let Some(f) = &mut filter {
+        if let Err(e) = on.answer(f)? {
+            return Some(Err(e));
+        }
+    }
+    let moved = !same_answer(&sub.filter, &filter);
+    let mut fresh = match moved {
+        true => Lists::of(filter.as_ref()),
+        false => None,
+    };
+    let (f, pr, l, vw) = match moved {
+        true => (
+            &filter,
+            &project,
+            fresh.as_mut(),
+            v.as_ref().map_or(&*view, |_| &v),
+        ),
+        false => (&sub.filter, &sub.project, lists.as_mut(), &*view),
+    };
+    let shown = shows(vw);
+    let mut step = match on.changes(&sub.collection, written, (f.as_ref(), pr.as_deref()), l)? {
+        Ok(s) => s,
+        Err(e) => return Some(Err(e)),
+    };
+    if let (Changes::Batch(b), Some((scope, mask))) = (&mut step, shown) {
+        scope.shown_rows(mask, on.database(), &mut b.puts);
+    }
+    // The rows the shape holds now, read as the changes were, where the
+    // lists moved.
+    let members = match (&step, moved) {
+        (Changes::Batch(_), true) => {
+            let stmt = Statement::Select(shape_select(&sub.collection, f, pr));
+            match on.query(&stmt)? {
+                Ok(Response::Rows(mut rs)) => {
+                    if let Some((scope, mask)) = shown {
+                        scope.shown_rows(mask, on.database(), &mut rs);
+                    }
+                    Some(rs)
+                }
+                Ok(_) => None,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        _ => None,
+    };
+    if moved {
         (sub.filter, sub.project) = (filter, project);
         if v.is_some() {
             *view = v;
         }
-        Ok(true)
+        *lists = fresh;
     }
+    Some(Ok(Looked {
+        step,
+        members,
+        hold: None,
+    }))
+}
+
+/// The `get` of a stream's whole shape -- `filter` and `project` over its
+/// collection -- as [`api::seed_select`] makes it of a subscription.
+fn shape_select(collection: &str, filter: &Option<Expr>, project: &Option<Vec<String>>) -> Select {
+    Select {
+        collection: collection.to_string(),
+        filter: filter.clone(),
+        project: project.clone(),
+        ..Default::default()
+    }
+}
+
+/// Whether `new`, a stream's filter answered again, holds what `old`
+/// does: the same tree, each `in` list the same values in any order. An
+/// inner `get` with no `order` answers in the order it reads, which a
+/// write moving a row, or a compact, changes with no value changed: by
+/// position, the shape ran again for a list that had not moved.
+fn same_answer(old: &Option<Expr>, new: &Option<Expr>) -> bool {
+    match (old, new) {
+        (Some(a), Some(b)) => a == b || same_expr(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `a` and `b` alike but for the order of an `in` list's values.
+fn same_expr(a: &Expr, b: &Expr) -> bool {
+    use Expr::*;
+    let same = |x: &Expr, y: &Expr| same_expr(x, y);
+    match (a, b) {
+        (In(x, xs), In(y, ys)) => same(x, y) && (xs == ys || same_values(xs, ys)),
+        (And(a1, a2), And(b1, b2))
+        | (Or(a1, a2), Or(b1, b2))
+        | (Like(a1, a2), Like(b1, b2))
+        | (Has(a1, a2), Has(b1, b2)) => same(a1, b1) && same(a2, b2),
+        (Cmp(o, a1, a2), Cmp(p, b1, b2)) => o == p && same(a1, b1) && same(a2, b2),
+        (Arith(o, a1, a2), Arith(p, b1, b2)) => o == p && same(a1, b1) && same(a2, b2),
+        (Not(x), Not(y)) | (IsNull(x), IsNull(y)) => same(x, y),
+        (Call(n, xs), Call(m, ys)) => {
+            n == m && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same(x, y))
+        }
+        _ => a == b,
+    }
+}
+
+/// Two lists of values, the same ones in any order: their encodings
+/// sorted -- a total order, as `NaN` is not -- and compared. Sorted as
+/// byte slices, whose sort the binary holds already.
+fn same_values(xs: &[Expr], ys: &[Expr]) -> bool {
+    let keys = |items: &[Expr]| -> Option<Vec<Vec<u8>>> {
+        (items.iter())
+            .map(|it| match it {
+                Expr::Lit(v) => {
+                    let mut key = Vec::new();
+                    fennec_core::codec::encode_value(&mut key, v);
+                    Some(key)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    if xs.len() != ys.len() {
+        return false;
+    }
+    let (Some(a), Some(b)) = (keys(xs), keys(ys)) else {
+        return false;
+    };
+    let mut a: Vec<&[u8]> = a.iter().map(Vec::as_slice).collect();
+    let mut b: Vec<&[u8]> = b.iter().map(Vec::as_slice).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
 }
 
 /// The rows the shape holds `now`, as a change to a stream that was sent
@@ -934,53 +1210,113 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// under the lock ([`Database::pin`]) and read with none held, at the
 /// change the pin took: writes go on beside it, and the stream tells each
 /// as a change after that one, none twice and none missed. Under the same
-/// lock a rule reading another collection is bound and an inner `get`
-/// answered ([`Reach::bind`]), so the scope and the lists are the pin's
-/// moment too -- what the first look's changes are judged by, where no
-/// write came to what they read -- and the change ring is held back to that change
-/// ([`Database::hold_changes`]): the writes beside a long seed would
-/// otherwise leave the stream behind the ring's horizon, to be seeded
-/// again, pinned again, for as long as they outran the scan. What the pin
-/// declines -- a shape an index answers, one too short to be worth it -- is
-/// read under the lock as before, as is a pinned read that reached for an
-/// index (`None`), one the ring no longer reaches back to by its end, the
-/// hold's bound passed, and one an image adopted meanwhile made stale: an
-/// image can land on the pin's own change, where neither the ring nor the
-/// counter shows it, and the pin read what it replaced.
+/// lock a rule reading another collection is bound ([`Reach::rules`]), and
+/// the shape's inner `get`s are answered on the pin, beside the writers,
+/// as a query's are ([`Pinned::answer_subqueries`]) -- so the scope and
+/// the lists are the pin's moment too, what the first look's changes are
+/// judged by where no write came to what they read -- and the change ring
+/// is held back to that change ([`Database::hold_changes`]): the writes
+/// beside a long seed would otherwise leave the stream behind the ring's
+/// horizon, to be seeded again, pinned again, for as long as they outran
+/// the scan. What the pin declines -- a shape an index answers, one too
+/// short to be worth it -- is read under the lock as before, its lists
+/// answered there, as is a pinned read that reached for an index (`None`),
+/// one the ring no longer reaches back to by its end, the hold's bound
+/// passed, and one an image adopted meanwhile made stale: an image can land
+/// on the pin's own change, where neither the ring nor the counter shows
+/// it, and the pin read what it replaced. Lists the pin answered before its
+/// read reached for an index are kept where the database has not moved
+/// since, rather than answered again under the lock.
 fn seed(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
-    (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
+    (sub, reach, view, lists): (
+        &mut api::Subscription,
+        &mut Option<Reach>,
+        &mut Option<View>,
+        &mut Option<Lists>,
+    ),
     seen: &mut Option<Seen>,
     quiet: bool,
 ) -> std::io::Result<(u64, Hold, u64)> {
     let mut pin = true;
+    // Lists the pin answered at its change, and the images adopted then.
+    let mut kept: Option<(u64, u64, Answered)> = None;
     let read = loop {
         let guard = crate::held::read(db);
-        let bound = match reach {
-            Some(r) => r.bind(&guard).map(|(filter, project, v)| {
-                (sub.filter, sub.project) = (filter, project);
-                if v.is_some() {
-                    *view = v;
-                }
-            }),
-            None => Ok(()),
-        };
-        let stmt = Statement::Select(api::seed_select(sub));
+        let now = now_ms() as i64;
         let (hold, adopted) = (guard.hold_changes(), guard.adoptions());
-        let pinned = match (pin, &bound) {
-            (true, Ok(())) => guard.pin(&[(&stmt, &[][..])]),
-            _ => None,
+        // The rules bound under the lock; the inner `get`s answered below.
+        let ruled = match (reach.as_mut(), kept.take()) {
+            (Some(_), Some((at, images, a))) if at == hold.seq() && images == adopted => {
+                Ok(Some((a, true)))
+            }
+            (Some(r), _) => r.rules(&guard).map(|a| Some((a, false))),
+            (None, _) => Ok(None),
+        };
+        let ruled = match ruled {
+            Ok(r) => r,
+            Err(e) => {
+                break seed_rows(&guard, Err(e), view, seen, quiet).map(|r| (r, hold, adopted))
+            }
+        };
+        if let Some(r) = reach.as_mut() {
+            r.next = r.next_after(&guard, now);
+        }
+        let stmt = Statement::Select(match &ruled {
+            Some(((filter, project, _), _)) => shape_select(&sub.collection, filter, project),
+            None => api::seed_select(sub),
+        });
+        let pinned = match (pin, &ruled) {
+            // Answered already: the lock reads it, as it did.
+            (_, Some((_, true))) | (false, _) => None,
+            _ => guard.pin(&[(&stmt, &[][..])]),
         };
         let Some(p) = pinned else {
-            let rows = bound.and_then(|_| guard.query(&stmt, &[]));
+            let rows = match ruled {
+                Some(((mut filter, project, v), done)) => {
+                    let answered = match (&mut filter, done) {
+                        (Some(f), false) => guard.answer_subqueries(f),
+                        _ => Ok(()),
+                    };
+                    answered.and_then(|()| {
+                        settle(sub, view, lists, (filter, project, v));
+                        guard.query(&Statement::Select(api::seed_select(sub)), &[])
+                    })
+                }
+                None => guard.query(&stmt, &[]),
+            };
             break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold, adopted));
         };
         drop(guard);
-        let Some(rows) = p.query(&stmt, &[]) else {
+        let (rows, answer) = match ruled {
+            Some(((mut filter, project, v), _)) => {
+                if let Some(f) = &mut filter {
+                    match p.answer_subqueries(f) {
+                        // An inner `get` reached for an index: the lock's.
+                        None => {
+                            pin = false;
+                            continue;
+                        }
+                        Some(Err(e)) => break Err(e),
+                        Some(Ok(())) => {}
+                    }
+                }
+                let stmt = Statement::Select(shape_select(&sub.collection, &filter, &project));
+                (p.query(&stmt, &[]), Some((filter, project, v)))
+            }
+            None => (p.query(&stmt, &[]), None),
+        };
+        let Some(rows) = rows else {
+            // Answered at the pin's change: kept, for the lock to find
+            // there still.
+            kept = answer.map(|a| (p.change_seq(), adopted, a));
             pin = false;
             continue;
         };
+        if let Some(a) = answer {
+            settle(sub, view, lists, a);
+        }
         let read = seed_rows(p.database(), rows, view, seen, quiet);
         drop(p);
         let guard = crate::held::read(db);
@@ -1002,6 +1338,21 @@ fn seed(
     let seq = hold.seq();
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
     Ok((seq, hold, adopted))
+}
+
+/// The stream's filter, list and view as a seed answered them, and its
+/// long lists to bind at its first look ([`Lists::of`]).
+fn settle(
+    sub: &mut api::Subscription,
+    view: &mut Option<View>,
+    lists: &mut Option<Lists>,
+    (filter, project, v): Answered,
+) {
+    (sub.filter, sub.project) = (filter, project);
+    if v.is_some() {
+        *view = v;
+    }
+    *lists = Lists::of(sub.filter.as_ref());
 }
 
 /// The seed's rows as their event sends them, read on `db` -- the database
@@ -1069,44 +1420,29 @@ fn event(out: &mut &crate::conn::Conn, name: &str, data: &str) -> std::io::Resul
     out.flush()
 }
 
-/// A stream's head, or a refusal's in its place; `at` where the database
-/// stood as the stream opened, which its head names: the change its seed is
-/// at or after, and the history every event's `seq` is a change of.
-fn write_head(
-    out: &mut &crate::conn::Conn,
-    cfg: &Config,
-    status: u16,
-    content_type: &str,
-    retry_after: Option<u64>,
-    at: Option<crate::At>,
-) -> std::io::Result<()> {
-    let mut head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\n\
-         Cache-Control: no-cache, no-transform\r\nConnection: close\r\n",
-        crate::http::reason(status)
+/// A stream's head; `at` where the database stood as the stream opened,
+/// which its head names: the change its seed is at or after, and the
+/// history every event's `seq` is a change of. A refusal is answered whole
+/// in its place, as every route's is (`Response::write`).
+fn write_head(out: &mut &crate::conn::Conn, cfg: &Config, at: crate::At) -> std::io::Result<()> {
+    // `X-Accel-Buffering: no` turns off proxy buffering (nginx); otherwise
+    // events pile up, arrive in bulk, and the stream stops being "live".
+    let mut head = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+         Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\
+         X-Accel-Buffering: no\r\nFennec-Seq: ",
     );
-    if let Some(secs) = retry_after {
-        head.push_str(&format!("Retry-After: {secs}\r\n"));
-    }
-    // Turns off proxy buffering (nginx); otherwise events pile up, arrive in
-    // bulk, and the stream stops being "live".
-    if status == 200 {
-        head.push_str("X-Accel-Buffering: no\r\n");
-    }
-    if let Some(at) = at {
-        head.push_str("Fennec-Seq: ");
-        crate::http::push_number(&mut head, at.seq);
+    crate::http::push_number(&mut head, at.seq);
+    head.push_str("\r\n");
+    // The root's history names nothing, as every answer's does.
+    if let Some(h) = at.history {
+        head.push_str("Fennec-History: ");
+        crate::http::push_history(&mut head, h);
         head.push_str("\r\n");
-        // The root's history names nothing, as every answer's does.
-        if let Some(h) = at.history {
-            head.push_str("Fennec-History: ");
-            crate::http::push_history(&mut head, h);
-            head.push_str("\r\n");
-        }
     }
     // Every answer's CORS headers, not the origin alone: without
     // `Access-Control-Expose-Headers` a page on another origin could not
-    // read the head's `Fennec-History`, nor a refusal's `Retry-After`.
+    // read the head's `Fennec-History`.
     if let Some(origin) = &cfg.cors {
         crate::cors::push_into(&mut head, origin);
     }
@@ -1124,6 +1460,33 @@ fn write_head(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A list answered again holds what it held when its values are the
+    /// same in any order: by position, an inner `get` reading its rows in
+    /// another order ran the shape again for nothing.
+    #[test]
+    fn a_list_answered_in_another_order_has_not_moved() {
+        let filter = |w: &str| match fennec_ql::parse_one(&format!("get t where {w}")).unwrap() {
+            Statement::Select(s) => s.filter,
+            _ => unreachable!(),
+        };
+        let a = filter(r#"msg in ["a", "b", "c"] and n > 1"#);
+        assert!(same_answer(&a, &a));
+        assert!(same_answer(
+            &a,
+            &filter(r#"msg in ["c", "a", "b"] and n > 1"#)
+        ));
+        for other in [
+            r#"msg in ["a", "b", "d"] and n > 1"#,
+            r#"msg in ["a", "b"] and n > 1"#,
+            r#"msg in ["c", "a", "b"] and n > 2"#,
+            r#"tag in ["c", "a", "b"] and n > 1"#,
+        ] {
+            assert!(!same_answer(&a, &filter(other)), "{other}");
+        }
+        assert!(!same_answer(&a, &None));
+        assert!(same_answer(&None, &None));
+    }
 
     /// A replica that takes an image can land on a lower change than it
     /// held. The hub has to follow it down: kept at the old high mark, it

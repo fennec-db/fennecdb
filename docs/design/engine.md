@@ -360,9 +360,11 @@ after, three turns against the build before, the load under 2.5) took
 212-231 ms at p99 and 242-261 at most, half of them past 50 ms, against
 0.55-0.59 ms alone. The seed's `get` is pinned under the lock
 its rules are bound under -- a scoped token's lists answered there, and
-the shape's own inner `get`s (`Database::answer_subqueries`), so the
-scope and the lists the first look judges its changes by are the pin's
-moment -- its rows masked through the pin's schemas and
+the shape's own inner `get`s left in the statement `pin` judges, which
+walks them as it walks a query's, and answered on the pin
+(`Pinned::answer_subqueries`), so the scope and the lists the first look
+judges its changes by are the pin's moment, and an inner `get` scanning
+a million rows holds no writer for its scan -- its rows masked through the pin's schemas and
 `Seen` told of them after, and the seed names the pin's change: the
 stream's first look reads the changes after it, so a write landing during
 the read is in no seed and in the next change, once
@@ -404,8 +406,14 @@ the writes then went on beside the seeds at 46 500-49 300 a second, the
 longest 12-29 ms, against 4 600-10 100 and 550-1 284 ms under the lock, and
 a seed took 716-863 ms at its median against 531-1 346: it shares the cores
 with eight times the writes. A shape an index answers, or one of fewer than `PIN_AT` rows, is
-read under the lock as before, as is the shape read again where the rules
-of a stream reading another collection moved (`enter_and_leave`). The
+read under the lock as before. A look whose inner `get`s or rules reading
+another collection are due again (`sse::look`) is pinned as the seed is:
+the rules bound, the ids written since the stream's cursor read
+(`Database::written_after`) and the ring held back to that change till
+the next look, under the lock; the lists answered, the changes judged as
+the rows stood (`Pinned::changes_held`) and the shape run where it moved
+(`enter_and_leave`), on the pin. Where the pin declines, or reached for
+an index, all of it runs under the lock, as a query's does. The
 browser module's code is the same to the byte: the hold is native, and its
 `record` drops a mark as it did.
 

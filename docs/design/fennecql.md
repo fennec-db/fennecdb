@@ -431,46 +431,115 @@ with the outer query's parameters.
 
 A subscription's `where=` may hold one (`GET
 /board/changes?where=msg in (get notes select title)`). Its seed is a
-`get` and was answered so; each later look reads the changes with
-`Database::changes_since`, whose `eval` of a changed row met the
-`InSelect` and refused it, so such a stream sent its seed and ended in
-`event: error` at the first write to `board`, under any token. Now
-`sse::Reach` answers the shape's inner `get`s with
-`Database::answer_subqueries` -- `answer_subquery`, the path `answered`
-takes, so the bound, the depth and `check_subquery` are a query's --
-under the seed's lock and then under a look's, where one of the
-collections they read (at any depth, a scoped token's rules ANDed into
-them among them) was written since the stream's change, or at every
-look where an inner `get` reads the time or rows that expire, which
-leave its list with no write. A write to the inner collection can move
-the board's rows with no write to them: where the list moved, the shape
-runs again and its rows are diffed by id against those the stream was
-sent (`enter_and_leave`, as a scoped token's rule reading another
-collection is), a row let in sent and one shut out a deletion -- so a
-stream whose shape reads another collection keeps the ids it sent,
-unscoped too, and is seeded when it resumes. A reseed at each such write
-was the other way, and costs a client every row of the shape where the
-diff sends the rows that moved; both run the shape once. A stream whose
-filter holds no inner `get` has no `Reach` and runs nothing more at a
-look. A poll's `ETag` counts the inner `get`s' collections among what a
-read reads (`access::statement_reads`), so a read holding one, untagged
-before and run at every round, is tagged and answered 304 until a write
-to either.
+`get`, answered as one; each later look tests the rows written since its
+cursor by the filter, and `eval` refuses an `InSelect`: before #504 such
+a stream sent its seed and ended in `event: error` at the first write to
+`board`, under any token. `sse::Reach` answers the shape's inner `get`s
+with `Database::answer_subqueries` -- `answer_subquery`, the path
+`answered` takes, so the bound, the depth and `check_subquery` are a
+query's -- at the seed, and again at a look where one of the collections
+they read (at any depth, a scoped token's rules ANDed into them among
+them) was written since the stream's change, where a row of one reached
+its `@ttl` since they were answered, or at every look where an inner
+`get` reads the time anywhere it makes its list -- its filter, an `order`
+key, an item, a group key, `having` (`access::reads_time`; the filter's
+`now()` alone was asked, and `order now() - at limit 5` moved its list
+unseen). The moment the next row of those collections reaches its time
+is asked as the lists are answered (`Database::wakes_at`), and the stream
+sleeps to it as to a row of its own: a note reaching its time takes its
+message's rows out then, where it waited for the stream's next keep-alive
+(20 s) or the next write -- and asked there, a `@ttl` given the inner
+collection later, a write to it, is followed, where the collections that
+expired as the stream opened were all it ever followed.
 
-Measured against main in instructions retired in the loop
-(`proc_pid_rusage`, as examples/replays.rs counts them), eight turns a
-side alternating which went first, `MallocNanoZone=0`, each run gated on
-a 1-minute load under 6 and no other build or benchmark running: a write
-by id through `handle` and a plain subscription's look at it, its change
-read by a client before the next write (`GET /t/changes?n=gte.0`, 60 000
-of them), 119 554 -> 119 627 instructions at the median (118 816-119 959
-against 118 323-120 149) and 42 788 -> 42 711 cycles; a scoped REST read
-by id (`GET /t?id=eq.<k>` under `t read where owner = $jwt.sub`, 600 000)
-40 532 -> 40 331 and 7 751 -> 7 709. fennec-server's `__text` grew 1 600
-bytes (4 492 032 -> 4 493 632, release) and its file 16; the browser
-module, which has no `answer_subqueries`, is the same size (837 830
-bytes), its bytes differing only in 190 bytes of panic locations' line
-numbers, engine.rs's lines after the new function moved 16 down.
+**Where the lists are answered: where a query's would be.** Under the
+seed's lock the rules are bound (a scoped token's lists, held to
+`MAX_CLAIM_VALUES`) and the shape pinned with its inner `get`s still in
+it, so `pin` judges them as it judges a query's (`pinnable` walks them);
+on the pin they are answered (`Pinned::answer_subqueries`) and the seed
+read, and a pin that reached for an index reruns under the lock, keeping
+the lists the pin answered where the database has not moved since. A
+look whose lists are due does the same (`sse::look`): the rules bound,
+the ids written since the cursor read (`Database::written_after`) and the
+ring held to that change till the next look, under the lock; the lists
+answered, the changes judged as the rows stood (`Pinned::changes_held`)
+and the shape run where they moved, on the pin. Answered under the lock
+before the pin, an inner `get` scanning a million notes held every writer
+for its scan at the seed and at every write to `notes`: beside a stream
+of `msg in (get notes select title where n < 10)` over a million notes,
+and writes to `board` 200 us apart, the longest write took 25.4-28.5 ms
+while the seed was read (the seed itself 25-29 ms) and 25.7-29.3 ms
+while a look answered the list again after a note moved it, against
+0.06-0.77 and 0.14-1.62 ms answered on the pin (25 rounds a side over
+five runs, the two builds in turns, a load under 5).
+
+**A look tests its rows through a bound filter.** `changes_since`
+evaluates the filter a row at a time, and `eval`'s `in` walks its list:
+100 000 titles answered, a look over 1 000 changed rows took 2.41-2.46 s
+where the filter as a query takes 18 ms, the planner binding a long list
+to a set (`Test::InSet`). A stream whose
+filter holds a long list (`Lists::of`, `IN_SET_AT`) reads its changes
+through `Database::changes_held`, which binds the filter once a look
+(`Filter`) and keeps its long lists -- each one's values and set, by the
+ordinal of its `in` among the long ones, with the schema they were bound
+against, a change of it binding them again -- from one look to the next
+(`Lists`), so a write's look looks its row up rather than copying and
+hashing 100 000 values again: a write to `board` and its look took 3.15
+ms at the median a value at a time and 1.7 us held, a look over 1 000
+written rows 0.14-0.17 ms. The first look after the list is answered
+binds it, 10.5-12.8 ms, beside the inner `get`'s 5.5 (in process, 2 000
+writes a side, each side twice in two runs). A stream whose filter holds
+none reads through `changes_since` as it did. A list answered again is
+compared with the last by its values, sorted where the lengths agree
+(`sse::same_answer`): an inner `get` with no `order` answers in the order
+it reads, which a row moved or a compact changes, and by position the
+shape ran again for a list that had not moved.
+
+A write to the inner collection can move the board's rows with no write
+to them: where the list moved, the shape runs again and its rows are
+diffed by id against those the stream was sent (`enter_and_leave`, as a
+scoped token's rule reading another collection is), a row let in sent
+and one shut out a deletion -- so a stream whose shape reads another
+collection keeps the ids it sent, unscoped too, and is seeded when it
+resumes. A reseed at each such write was the other way, and costs a
+client every row of the shape where the diff sends the rows that moved;
+both run the shape once. A stream whose filter holds no inner `get` has
+no `Reach` and runs nothing more at a look. A poll's `ETag` counts the
+inner `get`s' collections among what a read reads
+(`access::statement_reads`), so a read holding one, untagged before #504
+and run at every round, is tagged and answered 304 until a write to
+either. A tag names the images the database adopted too (`"48211.1"`, a
+replica's): an image can land on the very change a tag names, where the
+ring shows no write, and the poll was answered 304 over rows its copy no
+longer held.
+
+Measured against main (#503) in instructions retired in the loop
+(`proc_pid_rusage`), eight turns a side alternating which went first,
+`MallocNanoZone=0`, each run started under a 1-minute load of 6 and
+dropped where it ended over it: a write by id through `handle` and a
+plain subscription's look at it, its change read by a client before the
+next write (`GET /t/changes?n=gte.0`, 240 000 a run), 98 326 -> 99 298
+instructions at the median (91 812-100 210 against 93 072-100 386; the
+turns' differences -640 to +1 060, +334 at their median), both builds'
+runs sitting near 92 000 or near 100 000 together, by when they ran; a
+scoped REST read by id (`GET /t?id=eq.<k>` under `t read where owner =
+$jwt.sub`, 600 000 a run) 35 669 -> 35 720 (35 471-35 763 against 35
+601-35 925; differences -162 to +247, +84 at their median). A pass ten
+turns long before the last changes, which touched neither path but for
+one call a changed row, found 94 827 -> 91 963 and 35 605 -> 35 656,
+the differences' medians +85 and -11. fennec-server's `__text` grew 23
+424 bytes against main (4 492 288 -> 4 515 712, release; its file 33 104):
+by a build keeping its symbols, the looks and the seed answering on a
+pin (`judge`, `Reach`, `seed`, 7.1 KB), the lists a look keeps
+(`changes_held`, `changed_rows`, `Lists`, `Taking`, their drops, 12.6 KB),
+the lists compared as sets (`same_answer`, 2.7 KB, sorting byte slices
+as the binary already did: `sort_by_cached_key` was 5.4 KB of a sort of
+its own), the inner `get`s' reads and wake 1 KB. A 100 000-value list's
+look is 1.7 us where it was 3.15 ms, and a scan the lists answer holds
+no writer: worth the 0.5%. The browser module
+is the same size (838 261 bytes), its functions of the same sizes laid
+out in another order: a query's bind hands down `None` where a look
+hands its lists, which it never holds there.
 
 ## List parameters
 
@@ -531,8 +600,9 @@ request with no list pays nothing it shows: `= $1` by id 0.38 us in
 process and 16-23 us over HTTP (140-145k requests a second, eight
 clients) before and after, a 1 000-id `in $1` 40.5 us and 177-181 us
 alike (`make lists-bench`, the two builds in turns, twice). `has_subquery` is the inner `get`'s alone,
-so a poll's tag (`etag`) and the pin, which ask whether another collection
-is read, see an `in $n` as reading none. **Put in its place first, as an
+so the pin, which asks whether another collection is read, sees an `in
+$n` as reading none, as a poll's tag (`etag`) does, counting the
+collections a read names (`access::statement_reads`). **Put in its place first, as an
 inner `get`'s list is, it cost a copy of the statement:** 10 ids by `id`
 took 1 353 ns in process against 1 052 written out, and `query_json`, a
 server's plain `get`, 397 against 149 -- the `Select`'s clone alone 157;

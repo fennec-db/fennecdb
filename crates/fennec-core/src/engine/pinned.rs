@@ -102,6 +102,30 @@ impl Pinned {
         held(self.db.query(stmt, params))
     }
 
+    /// [`Database::answer_subqueries`] as at the pin: a stream's inner
+    /// `get`s answered beside the writers, `None` where one would use an
+    /// index, for the caller to answer them under the lock.
+    pub fn answer_subqueries(&self, filter: &mut Expr) -> Option<Result<()>> {
+        held(self.db.answer_subqueries(filter))
+    }
+
+    /// [`Database::changes_held`] as at the pin: the ids `written` names,
+    /// read under the lock the pin was taken under, judged and read as the
+    /// rows stood then. `None` as [`Self::query`].
+    pub fn changes_held(
+        &self,
+        collection: &str,
+        written: Written,
+        filter: Option<&Expr>,
+        project: Option<&[String]>,
+        lists: Option<&mut Lists>,
+    ) -> Option<Result<Changes>> {
+        held(
+            self.db
+                .changes_held(collection, written, filter, project, lists),
+        )
+    }
+
     /// [`Database::query_json`] as at the pin, `None` as [`Self::query`].
     pub fn query_json(
         &self,

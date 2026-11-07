@@ -2402,12 +2402,26 @@ fn reached(e: &Expr, reads: &mut Vec<String>, clock: &mut bool) {
         if !reads.contains(&sel.collection) {
             reads.push(sel.collection.clone());
         }
+        *clock = *clock || reads_time(sel);
         if let Some(f) = &sel.filter {
-            *clock = *clock || f.calls_now();
             reached(f, reads, clock);
         }
     }
     e.each_child(&mut |c| reached(c, reads, clock));
+}
+
+/// Whether an inner `get` reads the time anywhere its list is made: its
+/// filter, an `order` key, an item of its list, a group key or `having`.
+/// Each moves the list with no write -- `order now() - at limit 5` the
+/// rows it keeps, `select bucket(now(), 1d)` the values -- where the
+/// filter's `now()` alone was asked.
+fn reads_time(sel: &Select) -> bool {
+    let now = |e: &Expr| e.calls_now();
+    sel.calls_now()
+        || sel.order.iter().filter_map(|s| s.expr.as_ref()).any(now)
+        || (sel.computed.iter().chain(&sel.aggregate)).any(|c| now(&c.expr))
+        || sel.group.iter().any(now)
+        || sel.having.as_ref().is_some_and(now)
 }
 
 /// The fields a filter pins to one value: the `field = value` terms of its
@@ -3929,6 +3943,42 @@ mod tests {
 
     fn access(policy: &str) -> Access {
         Access::new(SECRET, policy).unwrap()
+    }
+
+    /// An inner `get` reads the time wherever it makes its list -- its
+    /// filter, an `order` key, an item of its list, a group key, `having`,
+    /// at any depth -- and a stream answers it again at every look then;
+    /// the filter's `now()` alone was asked.
+    #[test]
+    fn an_inner_get_reads_the_time_wherever_it_makes_its_list() {
+        let reads = |inner: &str| {
+            let stmt =
+                fennec_ql::parse_one(&format!("get board where msg in (get {inner})")).unwrap();
+            let Statement::Select(sel) = stmt else {
+                unreachable!()
+            };
+            inner_reads(sel.filter.as_ref().unwrap())
+        };
+        for inner in [
+            "notes select title where at > now() - 1000",
+            "notes select title order now() - at limit 5",
+            "notes select bucket(now(), 1d) as day",
+            "notes select title group title having max(at) > now() - 1000",
+            "notes select title where k in (get keys select k where at < now())",
+        ] {
+            assert!(reads(inner).1, "{inner}");
+        }
+        for inner in [
+            "notes select title",
+            "notes select title order at desc limit 5",
+            "notes select title where k in (get keys select k)",
+        ] {
+            assert!(!reads(inner).1, "{inner}");
+        }
+        assert_eq!(
+            reads("notes select title where k in (get keys select k)").0,
+            ["notes", "keys"]
+        );
     }
 
     /// A binding's refusal tells a scoped writer its status and nothing it

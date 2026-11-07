@@ -565,10 +565,13 @@ the rows matching your filter, then each change to them as it happens.</p>
     to what the stream reads: a note whose title names a message lets that
     message's rows in, sent as a <code>change</code>, and one deleted or
     renamed takes them out, deletions of the rows the stream was sent — no
-    write to <code>board</code> needed. Under a <a
+    write to <code>board</code> needed. A note reaching its
+    <code>@ttl</code> takes its message's rows out at its time. Under a <a
     href="http-access.html#scoped-access">scoped token</a> the list holds
     the notes the token may read, and no other. Such a stream is seeded
-    again when it resumes with <code>since</code>.</li>
+    again when it resumes with <code>since</code>. Its list is answered as
+    a query's is, beside the writers where the query would be, and a long
+    one is looked up rather than walked at each change.</li>
   <li><b>Sent after a write</b> (<code>Fennec-After</code>, and
     <code>Fennec-History</code> as the write's answer named it), a stream
     waits for it before its head, as a read does: its seed holds the write,
@@ -644,9 +647,11 @@ stream would hand the token the moments of other users' writes.</p>
 <h2 id="polling">Polling a read</h2>
 
 <p>Send <code>If-None-Match</code> with a <code>/query</code> read and the
-answer carries an <code>ETag</code>: the change the database stood at. Sent
-back, the tag is answered <code>304</code>, with no body and the query not
-run, while no write has touched a collection the read reads.</p>
+answer carries an <code>ETag</code>: the change the database stood at --
+on a replica that took its primary's image, the images it took after a dot
+(<code>"48211.1"</code>). Sent back, the tag is answered <code>304</code>,
+with no body and the query not run, while no write has touched a
+collection the read reads and no image was taken.</p>
 
 <pre data-lang="bash">curl -si http://127.0.0.1:8080/query -H 'If-None-Match: "0"' \
   -d '{"query":"get inventory select available where sku = $1","params":["TENT-1"]}'
