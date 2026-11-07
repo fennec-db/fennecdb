@@ -38,7 +38,7 @@ use fennec_core::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The point that announces writes to waiting subscribers.
 ///
@@ -410,6 +410,10 @@ pub fn serve(
             Err(_) => return,
         },
     };
+    // The last write to the client, which the keep-alive is counted from,
+    // and whether a round wrote since: stamped as the round waits, the
+    // clock read once a round.
+    let (mut wrote, mut sent) = (Instant::now(), false);
 
     // A token is checked as the stream opens, and a stream is held for as
     // long as its client stays: past the token's `exp` it is ended, as the
@@ -477,6 +481,7 @@ pub fn serve(
                     Ok((seq, hold, images)) => (cursor, held, adopted) = (seq, Some(hold), images),
                     Err(_) => return,
                 }
+                sent = true;
                 if let Some(x) = &mut expiry {
                     x.told = Some(began);
                     x.stale = true;
@@ -507,8 +512,11 @@ pub fn serve(
                     b.puts.rows.clear();
                     b.dels.clear();
                 }
-                if !empty && event(out, "change", &change_json(&b)).is_err() {
-                    return;
+                if !empty {
+                    if event(out, "change", &change_json(&b)).is_err() {
+                        return;
+                    }
+                    sent = true;
                 }
                 cursor = b.seq;
             }
@@ -541,6 +549,7 @@ pub fn serve(
                             if event(out, "change", &expired_json(cursor, &dels)).is_err() {
                                 return;
                             }
+                            sent = true;
                             continue;
                         }
                     }
@@ -554,29 +563,37 @@ pub fn serve(
             until = Some(until.map_or(at, |u| u.min(at)));
         }
 
-        // Keep-alive: proxies and NAT tables drop silent connections. A
-        // comment line is valid in SSE and produces no event on the client
-        // side.
-        let keepalive = left().map_or(cfg.stream_keepalive, |l| l.min(cfg.stream_keepalive));
-        let wait = match until {
-            Some(at) => {
-                let left = at.saturating_sub(now_ms() as i64).max(1) as u64;
-                keepalive.min(Duration::from_millis(left))
+        // Keep-alive: proxies and NAT tables drop silent connections, and a
+        // write is how a stream learns its client went. A comment line --
+        // valid in SSE, no event on the client's side -- once
+        // `stream_keepalive` passed with nothing written, whatever woke the
+        // stream. Written only where a wait ran its whole length, a stream
+        // woken sooner each time -- by a row of its collection, or of one
+        // its inner `get`s read, reaching its time, by lists reading the
+        // time each second, by writes to other collections -- wrote none:
+        // its proxy cut it, and one whose client had gone held its
+        // `--max-streams` slot till its next change.
+        let now = Instant::now();
+        if !sent && now.saturating_duration_since(wrote) >= cfg.stream_keepalive {
+            let alive = out.write_all(b": keepalive\n\n").and_then(|()| out.flush());
+            if alive.is_err() {
+                return;
             }
-            None => keepalive,
-        };
-        // Woken for a row's time rather than the keep-alive's, it looks
-        // and writes no keep-alive line.
-        let expiring = wait < keepalive;
-        if hub.wait(cursor, wait) <= cursor
-            && !expiring
-            && out.write_all(b": keepalive\n\n").is_err()
-        {
-            return;
+            sent = true;
         }
-        if out.flush().is_err() {
-            return;
+        if std::mem::take(&mut sent) {
+            wrote = now;
         }
+        let idle = now.saturating_duration_since(wrote);
+        let mut wait = cfg.stream_keepalive.saturating_sub(idle);
+        if let Some(l) = left() {
+            wait = wait.min(l);
+        }
+        if let Some(at) = until {
+            let left = at.saturating_sub(now_ms() as i64).max(1) as u64;
+            wait = wait.min(Duration::from_millis(left));
+        }
+        hub.wait(cursor, wait);
     }
 }
 
@@ -710,7 +727,8 @@ fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
 /// ([`look`]) where one of those collections was written since the
 /// stream's change, where a row of one reached its time since they were
 /// last answered, or where an inner `get` reads the time, once
-/// [`CLOCK_EVERY`] passed since -- the stream wakes for either
+/// [`CLOCK_EVERY`] passed since the read answering them ended -- the
+/// stream wakes for either
 /// ([`Reach::next`]); and the shape run again where the answer moved, its
 /// rows diffed by id against those the stream was sent
 /// ([`enter_and_leave`]): a row the write to the other collection let in
@@ -744,17 +762,22 @@ struct Reach {
     /// When the lists are due by the time, worked out as they were last
     /// answered ([`Reach::next_after`]): the next moment a row of `reads`
     /// reaches its `@ttl`, one leaving them with no write, or where they
-    /// read the time, [`CLOCK_EVERY`] after. Asked of the collections then
+    /// read the time, [`CLOCK_EVERY`] after the read answering them ended.
+    /// Asked of the collections then
     /// (`Database::wakes_at`), so a `@ttl` given one later -- a write to
     /// it, which answers them again -- is followed.
     next: Option<i64>,
 }
 
 /// How long lists an inner `get` reading the time makes are taken to hold,
-/// ms: such a stream answers them again once this passed since, waking for
-/// it, as it does at a write to what they read. Answered again at every
-/// look, they were answered at every write anywhere, which wakes every
-/// stream: an inner `get` a stream a write, whatever the write moved.
+/// ms: such a stream answers them again once this passed since the read
+/// answering them ended, waking for it, as it does at a write to what they
+/// read. Answered again at every look, they were answered at every write
+/// anywhere, which wakes every stream: an inner `get` a stream a write,
+/// whatever the write moved. Counted from when the read began -- the lock's
+/// time, before the answer -- an inner `get` taking a second was due again
+/// as it ended, and an idle stream answered it back to back, its thread
+/// never let go.
 const CLOCK_EVERY: i64 = 1_000;
 
 /// A stream's filter, list and view as [`Reach::rules`] binds them.
@@ -817,27 +840,41 @@ impl Reach {
                 .is_none_or(|w| w.iter().any(|c| self.reads.contains(c)))
     }
 
-    /// When lists answered at `now` are due by the time: the next moment a
-    /// row of a collection they read reaches its time past it -- under the
-    /// lock, a pin holding no index -- or [`CLOCK_EVERY`] after it where
-    /// they read the time.
-    fn next_after(&self, db: &Database, now: i64) -> Option<i64> {
+    /// When lists answered at `now`, by a read that ended at `ended`, are
+    /// due by the time: the next moment a row of a collection they read
+    /// reaches its time past `now` -- under the lock, a pin holding no
+    /// index -- or [`CLOCK_EVERY`] after `ended` where they read the time.
+    fn next_after(&self, db: &Database, now: i64, ended: i64) -> Option<i64> {
+        self.due_at(self.reaches(db, now), ended)
+    }
+
+    /// The next moment a row of a collection the lists read reaches its
+    /// time past `now`: asked under the lock, a pin holding no index.
+    fn reaches(&self, db: &Database, now: i64) -> Option<i64> {
         (self.reads.iter())
             .filter_map(|c| db.wakes_at(c, None, &[], now).ok().flatten())
-            .chain(self.clock.then_some(now.saturating_add(CLOCK_EVERY)))
+            .min()
+    }
+
+    /// `reaches`, or [`CLOCK_EVERY`] after `ended` where the lists read the
+    /// time, whichever comes first.
+    fn due_at(&self, reaches: Option<i64>, ended: i64) -> Option<i64> {
+        (reaches.into_iter())
+            .chain(self.clock.then_some(ended.saturating_add(CLOCK_EVERY)))
             .min()
     }
 }
 
 /// Lists a pin answered, kept for a lock taken after it to run the shape
 /// by where they still hold ([`Kept::holds`]): the change and the images
-/// they were answered at, and the time. A seed's pin that reached for an
-/// index keeps them for the lock to read by, and a look's whose lists
-/// moved, for the lock to run the shape by.
+/// they were answered at, the time, and when the pin's read ended. A
+/// seed's pin that reached for an index keeps them for the lock to read
+/// by, and a look's whose lists moved, for the lock to run the shape by.
 struct Kept {
     at: u64,
     images: u64,
     now: i64,
+    ended: i64,
     answered: Answered,
 }
 
@@ -845,12 +882,13 @@ impl Kept {
     /// Whether the lists hold under `db` at `now` as they did answered:
     /// the same images, nothing they read written since, and no row of it
     /// reaching its time since they were answered -- nor, reading the
-    /// time, [`CLOCK_EVERY`] passed. The time is theirs: worked out from
-    /// when the lock found them, a note reaching its time between left
-    /// them holding it with no wake.
+    /// time, [`CLOCK_EVERY`] passed since the pin's read ended. The time is
+    /// theirs: worked out from when the lock found them, a note reaching
+    /// its time between left them holding it with no wake.
     fn holds(&self, db: &Database, r: &Reach, now: i64) -> bool {
         db.adoptions() == self.images
-            && r.next_after(db, self.now).is_none_or(|at| at > now)
+            && r.next_after(db, self.now, self.ended)
+                .is_none_or(|at| at > now)
             && (db.changed_collections_since(self.at))
                 .is_some_and(|w| !w.iter().any(|c| r.reads.contains(c)))
     }
@@ -938,11 +976,13 @@ fn look(
         };
         // The lists kept where they hold under this lock, answered already;
         // else the rules bound, and the inner `get`s answered below.
-        let (mut answered, at, mut done) = match kept.take() {
-            Some(k) if k.holds(&guard, r, now) => (k.answered, k.now, true),
-            _ => (r.rules(&guard)?, now, false),
+        // `ended` when the read answering the lists ended, which a kept
+        // copy of them is due by the time from.
+        let (mut answered, at, mut ended, mut done) = match kept.take() {
+            Some(k) if k.holds(&guard, r, now) => (k.answered, k.now, k.ended, true),
+            _ => (r.rules(&guard)?, now, now, false),
         };
-        let (next, seq) = (r.next_after(&guard, at), guard.change_seq());
+        let (reaches, seq) = (r.reaches(&guard, at), guard.change_seq());
         let mut pinned = match (done, answer, &answered.0) {
             (false, Answer::Apart, Some(f)) => guard.pin_lists(f, &sub.collection, &written),
             (false, Answer::Whole, _) => pin_shape(&guard, &sub.collection, &answered),
@@ -952,7 +992,7 @@ fn look(
             if let Some(Err(e)) = On::Lock(&guard).answer(&mut answered.0) {
                 return Err(e);
             }
-            done = true;
+            (done, ended) = (true, now_ms() as i64);
         }
         // Answered at this lock's moment and moved, the shape runs by them,
         // pinned where a query of it would be.
@@ -980,6 +1020,7 @@ fn look(
                 continue;
             };
             read?;
+            ended = now_ms() as i64;
             moved = !same_answer(&sub.filter, &answered.0);
             // Apart, the pin holds the shape's written rows alone: the
             // lists are kept for a lock to run the shape by.
@@ -988,6 +1029,7 @@ fn look(
                     at: seq,
                     images: adopted,
                     now: at,
+                    ended,
                     answered,
                 });
                 answer = Answer::Whole;
@@ -1004,6 +1046,7 @@ fn look(
                         at: seq,
                         images: adopted,
                         now: at,
+                        ended,
                         answered,
                     });
                 }
@@ -1011,8 +1054,10 @@ fn look(
             }
             continue;
         };
+        // Due by the time from when this look's read ended: from its
+        // start, lists taking a second to answer were due as it ended.
         if read.is_ok() {
-            r.next = next;
+            r.next = r.due_at(reaches, now_ms() as i64);
         }
         return read.map(|l| Looked { hold, ..l });
     }
@@ -1361,6 +1406,9 @@ fn seed(
     let mut pin = true;
     // Lists the pin answered, for the lock to read by where they hold.
     let mut kept: Option<Kept> = None;
+    // When a row the lists read reaches its time past when they were
+    // answered: the stream's `Reach::next` once the seed's read ended.
+    let mut reaches = None;
     let read = loop {
         let guard = crate::held::read(db);
         let now = now_ms() as i64;
@@ -1378,8 +1426,8 @@ fn seed(
                 break seed_rows(&guard, Err(e), view, seen, quiet).map(|r| (r, hold, adopted))
             }
         };
-        if let Some(r) = reach.as_mut() {
-            r.next = r.next_after(&guard, at);
+        if let Some(r) = reach.as_ref() {
+            reaches = r.reaches(&guard, at);
         }
         let stmt = Statement::Select(match &ruled {
             Some(((filter, project, _), _)) => shape_select(&sub.collection, filter, project),
@@ -1407,7 +1455,7 @@ fn seed(
             break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold, adopted));
         };
         drop(guard);
-        let (rows, answer) = match ruled {
+        let (rows, answer, ended) = match ruled {
             Some(((mut filter, project, v), _)) => {
                 if let Some(f) = &mut filter {
                     match p.answer_subqueries(f) {
@@ -1420,10 +1468,11 @@ fn seed(
                         Some(Ok(())) => {}
                     }
                 }
+                let ended = now_ms() as i64;
                 let stmt = Statement::Select(shape_select(&sub.collection, &filter, &project));
-                (p.query(&stmt, &[]), Some((filter, project, v)))
+                (p.query(&stmt, &[]), Some((filter, project, v)), ended)
             }
-            None => (p.query(&stmt, &[]), None),
+            None => (p.query(&stmt, &[]), None, now),
         };
         let Some(rows) = rows else {
             // Answered at the pin's change: kept, for the lock to read by
@@ -1432,6 +1481,7 @@ fn seed(
                 at: p.change_seq(),
                 images: adopted,
                 now,
+                ended,
                 answered,
             });
             pin = false;
@@ -1458,6 +1508,9 @@ fn seed(
             return Err(std::io::Error::other("seeding failed"));
         }
     };
+    if let Some(r) = reach.as_mut() {
+        r.next = r.due_at(reaches, now_ms() as i64);
+    }
     let seq = hold.seq();
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
     Ok((seq, hold, adopted))
@@ -1507,6 +1560,11 @@ fn seed_rows(
 /// request says, and its status, for a client to fetch a fresh token on.
 pub const EXPIRED: &str = r#"{"error":"the token has expired","status":401}"#;
 
+/// Out of line: a stream reads the time at a dozen places, and with the
+/// reads that count a list's second from its answer's end, inlined at each,
+/// they were 1.6 KB of fennec-server's code (`__text` +1 984 bytes against
+/// +384).
+#[inline(never)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1613,10 +1671,13 @@ mod tests {
 
     /// Lists a pin answered hold under a later lock while nothing they
     /// read was written and no row of it reached its time since they were
-    /// answered, or, reading the time, [`CLOCK_EVERY`] passed: their time
-    /// is when they were answered. Worked out from when the lock found
-    /// them, a note reaching its time between left the seed's lists
-    /// holding it, and the stream no wake for it.
+    /// answered, or, reading the time, [`CLOCK_EVERY`] passed since the
+    /// read answering them ended: their time is when they were answered.
+    /// Worked out from when the lock found them, a note reaching its time
+    /// between left the seed's lists holding it, and the stream no wake
+    /// for it. Counted from when they were answered, lists taking a second
+    /// to answer were due as their read ended, an idle stream answering
+    /// them back to back.
     #[test]
     fn kept_lists_hold_while_what_they_read_stands() {
         let mut db = Database::new();
@@ -1642,14 +1703,18 @@ mod tests {
             clock: false,
             next: None,
         };
-        let kept = |db: &Database| Kept {
+        let kept = |db: &Database, ended: i64| Kept {
             at: db.change_seq(),
             images: db.adoptions(),
             now: t1,
+            ended,
             answered: (None, None, None),
         };
-        let k = kept(&db);
-        assert_eq!(r.next_after(&db, t1), Some(t1 + 1_500));
+        let k = kept(&db, t1);
+        assert_eq!(r.next_after(&db, t1, t1), Some(t1 + 1_500));
+        // A row's time is counted from when the lists were answered, not
+        // from when their read ended.
+        assert_eq!(r.next_after(&db, t1, t1 + 1_200), Some(t1 + 1_500));
         assert!(k.holds(&db, &r, t1 + 1_000));
         assert!(!k.holds(&db, &r, t1 + 1_500), "b1 reached its time");
         // A write to what the stream reads alone, the lists moved.
@@ -1659,16 +1724,23 @@ mod tests {
         db.execute(&fennec_ql::parse_one(r#"put notes {title: "c1"}"#).unwrap())
             .unwrap();
         assert!(!k.holds(&db, &r, t1 + 1_000));
-        // Reading the time, a second.
-        let k = kept(&db);
+        // Reading the time, a second from when their read ended.
+        let k = kept(&db, t1);
         r.clock = true;
-        assert_eq!(r.next_after(&db, t1), Some(t1 + CLOCK_EVERY));
+        assert_eq!(r.next_after(&db, t1, t1), Some(t1 + CLOCK_EVERY));
         assert!(k.holds(&db, &r, t1 + CLOCK_EVERY - 1));
         assert!(!k.holds(&db, &r, t1 + CLOCK_EVERY));
+        // Their read ending 300 ms after they were answered, a second from
+        // then, before b1's note reaches its time.
+        let slow = t1 + 300;
+        assert_eq!(r.next_after(&db, t1, slow), Some(slow + CLOCK_EVERY));
+        let k = kept(&db, slow);
+        assert!(k.holds(&db, &r, slow + CLOCK_EVERY - 1));
+        assert!(!k.holds(&db, &r, slow + CLOCK_EVERY));
         // Due by a write to what they read, or by the time: reading the
         // time, a write to anything else does not answer them again.
         let since = db.change_seq();
-        r.next = r.next_after(&db, t1);
+        r.next = r.next_after(&db, t1, t1);
         db.execute(&fennec_ql::parse_one(r#"put board {msg: "y"}"#).unwrap())
             .unwrap();
         assert!(!r.due(&db, since, t1 + 10));

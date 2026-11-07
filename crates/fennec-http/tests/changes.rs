@@ -31,6 +31,7 @@ fn seeded() -> Database {
 struct Harness {
     port: u16,
     db: Arc<RwLock<Database>>,
+    server: Arc<Server>,
 }
 
 fn start(cfg: Config) -> Harness {
@@ -48,13 +49,14 @@ fn start_over(db: Database, mut cfg: Config) -> Harness {
 fn serve(db: Database, mut cfg: Config) -> Harness {
     cfg.addr = "127.0.0.1:0".into();
     let db = Arc::new(RwLock::new(db));
-    let server = Server::new(Arc::clone(&db), cfg);
+    let server = Arc::new(Server::new(Arc::clone(&db), cfg));
     let listener = server.bind().expect("bind");
     let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&server);
     std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
-    Harness { port, db }
+    Harness { port, db, server }
 }
 
 // ------------------------------------------------------------------- SSE
@@ -122,6 +124,23 @@ impl Sub {
                 Err(_) => continue, // read timeout: keep trying until the budget runs out
             }
         }
+    }
+
+    /// The keep-alive comments heard within `budget`, `n` at most; events
+    /// between them are passed over.
+    fn keepalives(&mut self, n: usize, budget: Duration) -> usize {
+        let deadline = Instant::now() + budget;
+        let mut heard = 0;
+        while heard < n {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Some(block) = self.read_until("\n\n", left) else {
+                break;
+            };
+            if block.trim_start_matches(['\r', '\n']).starts_with(':') {
+                heard += 1;
+            }
+        }
+        heard
     }
 
     /// The next event; keep-alive comments are skipped.
@@ -1409,6 +1428,150 @@ fn a_ttl_given_the_inner_collection_later_is_followed() {
         }
     }
     assert_eq!(told, [2]);
+}
+
+// ------------------------------------------------------------ keep-alives
+
+/// A stream woken more often than its keep-alive by something other than
+/// a write it tells writes a keep-alive all the same once one passed with
+/// nothing written, and a client gone frees its slot by the next ones.
+/// Written only where a wait ran its whole length, such a stream wrote
+/// none: a proxy cut it, and one whose client had gone held its
+/// `--max-streams` slot till its next change, which may never come. Two
+/// keep-alives are asked for within ten seconds, and the slot back within
+/// ten more.
+fn keeps_alive_and_lets_go(h: &Harness, target: &str) {
+    let mut s = Sub::open(h.port, target);
+    assert_eq!(s.status, 200, "{}", s.head_line());
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(s.keepalives(2, Duration::from_secs(10)), 2, "{target}");
+    assert_eq!(h.server.live_streams(), 1);
+    drop(s);
+    let by = Instant::now() + Duration::from_secs(10);
+    while h.server.live_streams() > 0 {
+        assert!(
+            Instant::now() < by,
+            "{target}: the stream outlived its client"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A stream whose inner `get` reads the time answers it again each
+/// second, waking for it: a keep-alive longer than that, 1.2 s here, still
+/// goes out.
+#[test]
+fn a_stream_reading_the_time_writes_its_keep_alives() {
+    let mut db = Database::new();
+    let far = now_ms() + 3_600_000;
+    for sql in [
+        "create collection notes (title text, at timestamp)".to_string(),
+        "create collection board (msg text)".to_string(),
+        format!(r#"put notes [{{title: "a1", at: {far}}}]"#),
+        r#"put board [{msg: "a1"}, {msg: "c1"}]"#.to_string(),
+    ] {
+        db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    let h = serve(
+        db,
+        Config {
+            stream_keepalive: Duration::from_millis(1_200),
+            ..Config::default()
+        },
+    );
+    keeps_alive_and_lets_go(
+        &h,
+        "/board/changes?where=msg+in+(get+notes+select+title+where+at+%3E+now())",
+    );
+}
+
+/// A stream whose own collection's rows reach their `@ttl` every 100 ms,
+/// none of them in its shape: woken for each, it tells nothing, and
+/// writes its keep-alives, 300 ms here, all the same.
+#[test]
+fn a_stream_woken_by_rows_reaching_their_time_writes_its_keep_alives() {
+    let mut db = Database::new();
+    let now = now_ms();
+    // A row reaching its time every 100 ms for a minute, from 100 ms on.
+    let rows: Vec<String> = (0..600)
+        .map(|i| format!(r#"{{courier: "other", seen: {}}}"#, now - 900 + i * 100))
+        .collect();
+    for sql in [
+        "create collection positions (courier text, seen timestamp @ttl(1000ms))".to_string(),
+        format!("put positions [{}]", rows.join(", ")),
+    ] {
+        db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    let h = serve(
+        db,
+        Config {
+            stream_keepalive: Duration::from_millis(300),
+            ..Config::default()
+        },
+    );
+    keeps_alive_and_lets_go(&h, "/positions/changes?where=courier+%3D+%22mine%22");
+}
+
+/// Lists reading the time are answered again a second after the read
+/// answering them ended. Counted from when it began -- the lock's time,
+/// before the answer -- an inner `get` taking longer than a second was
+/// due again as it ended, and an idle stream answered it back to back, its
+/// thread never let go. Each answer is timed by the function its filter
+/// calls (`slow`, over a collection of one row), and the next is asserted
+/// to begin a second or more after the last one ended.
+#[test]
+fn lists_reading_the_time_are_due_a_second_after_their_answer_ended() {
+    let answers: Arc<Mutex<Vec<(Instant, Instant)>>> = Default::default();
+    let mut db = Database::new();
+    let far = now_ms() + 3_600_000;
+    for sql in [
+        "create collection notes (title text, at timestamp)".to_string(),
+        "create collection board (msg text)".to_string(),
+        format!(r#"put notes [{{title: "a1", at: {far}}}]"#),
+        r#"put board [{msg: "a1"}, {msg: "c1"}]"#.to_string(),
+    ] {
+        db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    let timed = Arc::clone(&answers);
+    let slow = move |args: &[Value]| {
+        let began = Instant::now();
+        std::thread::sleep(Duration::from_millis(1_200));
+        timed.lock().unwrap().push((began, Instant::now()));
+        Ok(args[0].clone())
+    };
+    db.registry_mut()
+        .register_fn("slow", Arc::new(slow))
+        .unwrap();
+    let h = serve(
+        db,
+        Config {
+            stream_keepalive: Duration::from_secs(60),
+            ..Config::default()
+        },
+    );
+    let mut s = Sub::open(
+        h.port,
+        "/board/changes?where=msg+in+(get+notes+select+title+where+slow(title)+%3D+title+and+at+%3E+now())",
+    );
+    let (name, data) = s.next_within(Duration::from_secs(10)).expect("seed");
+    assert_eq!(name, "seed", "{data}");
+    assert_eq!(msgs(&data, "rows"), [(1, "a1".into())], "{data}");
+    // The seed's answer and two looks'.
+    let by = Instant::now() + Duration::from_secs(30);
+    while answers.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < by, "the lists were not answered again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let answers = answers.lock().unwrap().clone();
+    for w in answers.windows(2) {
+        let gap = w[1].0.saturating_duration_since(w[0].1);
+        // A millisecond's rounding of the server's clock spared.
+        assert!(
+            gap >= Duration::from_millis(990),
+            "answered again {gap:?} after the last answer ended"
+        );
+    }
 }
 
 /// A poll's tag names the images the database adopted: one adopted at

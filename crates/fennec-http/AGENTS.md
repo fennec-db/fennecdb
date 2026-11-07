@@ -84,10 +84,11 @@ reading one, or `new.` or `expired()` in one are refused at startup
 (`ring`). A stream's filter reading another collection -- a rule's, or the
 shape's own inner `get`, any token's -- is answered again at each look
 after a write to what it reads, once a row of it reached its `@ttl`, or
-a second after it was answered where it reads the time -- the stream
-wakes for both (`sse::Reach`) -- on a pin where a query of it would be
-(`sse::look`); the shape runs again only where it moved, its rows sent as
-a diff against those it was sent (`enter_and_leave`).
+a second after the read answering it ended where it reads the time -- the
+stream wakes for both (`sse::Reach`), and writes its keep-alive once one
+passed with nothing written, whatever woke it -- on a pin where a query of
+it would be (`sse::look`); the shape runs again only where it moved, its
+rows sent as a diff against those it was sent (`enter_and_leave`).
 
 **[A collection whose name starts with `_` is the server's, out of every
 rule's reach.](../../docs/design/access.md#the-servers-own-collections)**

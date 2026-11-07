@@ -436,8 +436,8 @@ a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach ou
 (`sse::Reach`) binds them again under a look's lock where a collection
 they read was written since its change, where a row of one reached its
 `@ttl` since they were answered -- the stream wakes for it, as for a row
-of its own (`Reach::next`) -- or a second after they were answered
-(`CLOCK_EVERY`, woken for too) where an inner `get` reads the time
+of its own (`Reach::next`) -- or a second after the read answering them
+ended (`CLOCK_EVERY`, woken for too) where an inner `get` reads the time
 anywhere it makes its list (`access::reads_time`); runs the
 shape where the list moved and diffs by id
 against what it sent (`enter_and_leave`), a row leaving a deletion only of

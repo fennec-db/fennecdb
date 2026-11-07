@@ -569,7 +569,7 @@ the rows matching your filter, then each change to them as it happens.</p>
     write to <code>board</code> needed. A note reaching its
     <code>@ttl</code> takes its message's rows out at its time, and a list
     that reads the time (<code>now()</code>) is answered again a second after
-    it was. Under a <a
+    its last answer ended. Under a <a
     href="http-access.html#scoped-access">scoped token</a> the list holds
     the notes the token may read, and no other. Such a stream is seeded
     again when it resumes with <code>since</code>. Its list is answered as

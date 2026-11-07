@@ -444,9 +444,18 @@ its `@ttl` since they were answered, or, where an inner `get` reads the
 time anywhere it makes its list -- its filter, an `order` key, an item, a
 group key, `having` (`access::reads_time`; the filter's `now()` alone was
 asked, and `order now() - at limit 5` moved its list unseen) -- a second
-after they were answered (`sse::CLOCK_EVERY`). Such lists were answered
-at every look as first built, and every write anywhere wakes every
-stream: a write to any collection ran them again. The moment the next
+after the read answering them ended (`sse::CLOCK_EVERY`). Such lists were
+answered at every look as first built, and every write anywhere wakes
+every stream: a write to any collection ran them again. The second was
+first counted from the lock's time, before the answer, so an inner `get`
+taking a second or more was due again as it ended, and an idle stream
+answered it back to back, its thread never let go; it is counted from
+the read's end, a seed's or a look's -- a kept copy's from its pin's
+(`Kept::ended`) -- and the row times from when the lists were answered,
+as before (`Reach::reaches`, `Reach::due_at`;
+`lists_reading_the_time_are_due_a_second_after_their_answer_ended` times
+each answer of a one-row inner `get` taking 1.2 s, the next starting a
+second or more after the last ended). The moment the next
 row of those collections reaches its time is asked as the lists are
 answered (`Database::wakes_at`), and the stream sleeps to it, or to the
 second's end, as to a row of its own: a note reaching its time takes its
@@ -454,6 +463,31 @@ message's rows out then, where it waited for the stream's next keep-alive
 (20 s) or the next write -- and asked there, a `@ttl` given the inner
 collection later, a write to it, is followed, where the collections that
 expired as the stream opened were all it ever followed.
+
+**A stream woken for the time still writes its keep-alive.** The
+keep-alive line (`--http-keepalive`, 20 s) was written only where the
+stream's wait ran its whole length, and the second those lists hold
+makes every wait shorter: a stream whose inner `get` read the time wrote
+none (keep-alive 1.5 s, 5 s idle: a plain inner-`get` stream wrote 3, a
+clock stream 0), its proxy cut it, and with its client gone its slot
+stayed live (`Server::live_streams`) -- it learned of the client only at
+its next real change or its token's `exp`, so dead clients held
+`--max-streams` slots. A stream woken by its own collection's `@ttl`
+more often than the keep-alive, its shape holding none of those rows, or
+by writes to other collections, did the same before #504. The stream
+keeps the time of its last write to the client (`wrote` in
+`sse::serve`, stamped as a round waits, so the clock is read once a
+round: the old loop read none for a plain stream, and a round costs one
+`Instant::now()` more) and writes the keep-alive, flushed, once
+`stream_keepalive` passed since it, whatever woke it; held by
+`a_stream_reading_the_time_writes_its_keep_alives` and
+`a_stream_woken_by_rows_reaching_their_time_writes_its_keep_alives`,
+each hearing two keep-alives and then its slot let go once its client
+went, both failing on the code before. Both fixes cost fennec-server 384
+bytes of `__text` (4 577 920 -> 4 578 304, release) with `sse::now_ms`
+out of line; inlined at each of the stream's dozen reads of the time,
+the ones counting a list's second from its answer's end among them, they
+cost 1 984.
 
 **Where the lists are answered: where a query's would be.** Under the
 seed's lock the rules are bound (a scoped token's lists, held to
@@ -464,10 +498,11 @@ read, and a pin that reached for an index reruns under the lock, keeping
 the lists the pin answered where they still hold (`sse::Kept`: nothing
 they read written since, no row of it past its time since they were
 answered -- that time theirs, not the lock's, or a note reaching its time
-between stayed with no wake -- and a second not passed where they read
-the time). A look whose lists are due answers them first, where a query
-of them would be (`sse::look`): under the lock the rules are bound, the
-ids written since the cursor read (`Database::written_after`), and what
+between stayed with no wake -- and a second not passed since the pin's
+read ended where they read the time). A look whose lists are due answers
+them first, where a query of them would be (`sse::look`): under the
+lock the rules are bound, the ids written since the cursor read
+(`Database::written_after`), and what
 the inner `get`s read pinned as a query of them alone would be, with
 only those rows of the stream's collection beside them
 (`Database::pin_lists`, `Store::pinned_rows`), the ring held to that
