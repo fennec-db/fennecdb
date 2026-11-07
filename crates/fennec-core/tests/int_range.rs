@@ -176,10 +176,10 @@ fn a_lists_element_past_it_is_refused() {
 
 /// An `[int]` and a `[float]` keep a list's numbers as written: read into a
 /// vector's `f32`s, as a reader with no schema reads a list of numbers
-/// alone, -9223372036854775808 was -2^63 and refused, 16777217 was stored
-/// as 16777216 and 0.1 as 0.10000000149011612. A literal, a parameter, a
-/// document, a `set` and a comparison alike; a text read the quick way is
-/// refused rather than stored in `f32`s.
+/// holding a fraction, -9223372036854775808 was -2^63 and refused,
+/// 16777217 was stored as 16777216 and 0.1 as 0.10000000149011612. A
+/// literal, a parameter, a document, a `set` and a comparison alike; a
+/// fraction read the quick way is refused rather than stored in `f32`s.
 #[test]
 fn a_lists_numbers_are_read_as_written() {
     let mut db = db();
@@ -216,13 +216,51 @@ fn a_lists_numbers_are_read_as_written() {
         assert_eq!(rows.len(), 1, "{text}");
         assert_eq!(rows[0].values[0], Value::Int(2), "{text}");
     }
-    let quick = fennec_ql::parse_one(&format!("put t {{xs: {ints}}}")).unwrap();
+    // Whole floats past 2^24 into an `[int]`: as `f32`s, 16777217.0 was
+    // 16777216.
+    run(&mut db, "put t {n: 4, xs: [16777217.0, 1e18]}").unwrap();
+    let r = run(&mut db, "get t where n = 4 select xs").unwrap();
+    let want = Value::List(vec![
+        Value::Int(16_777_217),
+        Value::Int(1_000_000_000_000_000_000),
+    ]);
+    assert_eq!(r.rows().unwrap().rows[0].values[0], want);
+    let quick = fennec_ql::parse_one("put t {fs: [0.1]}").unwrap();
     let e = db.execute(&quick).unwrap_err();
     assert!(e.to_string().contains("an [int], a [float]"), "{e}");
     let s = fennec_ql::parse_one("put t {fs: $1}").unwrap();
     let params = fennec_core::json::parse_params("[[0.1]]").unwrap();
     let e = db.execute_with(&s, &params).unwrap_err();
     assert!(e.to_string().contains("an [int], a [float]"), "{e}");
+}
+
+/// A list of integers alone is read once: the quick reader, the text's and
+/// the parameters' JSON's alike, reads it into the integers it holds
+/// rather than a vector's `f32`s, so nothing asks for it again -- an
+/// `[int]`'s, a `[float]`'s, a json field's or an id list's. A list holding
+/// a fraction is a vector's `f32`s, read again where a field keeps its
+/// numbers.
+#[test]
+fn a_list_of_integers_is_read_once() {
+    let mut db = db();
+    let text = "put t {xs: [1, -2, 16777217, 9223372036854775807], fs: [3, 4]}";
+    let s = fennec_ql::parse_one(text).unwrap();
+    assert!(!s.reads_vectors(), "{s:?}");
+    assert_eq!(db.exactly(&s), fennec_core::engine::Exactly::default());
+    db.execute(&s).unwrap();
+    let params = fennec_core::json::parse_params("[[1, -2, 16777217], [3, 4]]").unwrap();
+    assert!(
+        !params.iter().any(fennec_core::query::holds_vector),
+        "{params:?}"
+    );
+    let s = fennec_ql::parse_one("put t {xs: $1, fs: $2}").unwrap();
+    db.execute_with(&s, &params).unwrap();
+    let want = Value::List(vec![Value::Float(3.0), Value::Float(4.0)]);
+    assert_eq!(column(&db, "fs"), vec![want.clone(), want]);
+    // A fraction makes it a vector, which a `[float]` asks to read again.
+    let s = fennec_ql::parse_one("put t {fs: [3, 4.5]}").unwrap();
+    assert!(s.reads_vectors());
+    assert!(db.exactly(&s).text);
 }
 
 /// A key looked up by is the int -2^63 is, where only a write refuses the

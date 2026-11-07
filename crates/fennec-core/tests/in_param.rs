@@ -226,13 +226,18 @@ fn numbers_in_the_list_are_read_as_written() {
     ] {
         let stmt = fennec_ql::parse_one(sql).unwrap();
         let mut params = json::parse_params(list).unwrap();
-        // Read the quick way, the list is a vector's f32s, refused rather
-        // than answered with another row's id.
-        let e = db.query(&stmt, &params).unwrap_err().to_string();
-        assert!(
-            e.contains("`in $n` list keeps a list of numbers as written"),
-            "{sql}: {e}"
-        );
+        // Read the quick way, a list holding a fraction is a vector's f32s,
+        // refused rather than answered with another row's id; integers
+        // alone are the list of them, as written already.
+        if list.contains('.') {
+            let e = db.query(&stmt, &params).unwrap_err().to_string();
+            assert!(
+                e.contains("`in $n` list keeps a list of numbers as written"),
+                "{sql}: {e}"
+            );
+        } else {
+            assert!(!fennec_core::query::holds_vector(&params[0]), "{list}");
+        }
         if !db.exactly(&stmt).params.is_empty() {
             params = json::parse_params_exact(list).unwrap();
         }

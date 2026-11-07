@@ -629,11 +629,12 @@ the same way (`answer_out`, `http::write_parts`): its added p50 went 23.6
 into the session as one plaintext, so an answer under 16 KiB is one record,
 and the records out in one `writev` ([TLS](#tls)). FennecQL's lexer walks a text's bytes,
 reading a character whole only outside ASCII and a number where it stands,
-and a list of numbers alone becomes its vector without an expression each
-(`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
-and takes 6.2, a row by id 1.1 and takes 0.9. Natively the lexer reads a
-list of numbers alone at once, into the vector the parser would make of it
-(`Tok::Vector`, `tokenize_vectors`), each number in the one pass that finds
+and a list of numbers holding a fraction becomes its vector without an
+expression each (`numbers_in_brackets`): a query holding a 128-dim vector
+parsed in 16.9 us and takes 6.2, a row by id 1.1 and takes 0.9. Natively the
+lexer reads a list of numbers alone at once -- integers alone into the list
+of them (`Tok::Ints`), any other into the vector the parser would make of it
+(`Tok::Vector`, `tokenize_vectors`) -- each number in the one pass that finds
 its end (`num::clinger`, the JSON reader's), and not after `in`, whose list
 keeps its integers and `f64`s: a token a number and a comma, and each
 number's text read for its end, for a `_` and for its value, a `put` of

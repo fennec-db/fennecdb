@@ -584,8 +584,8 @@ test('a number past an int\'s range is refused naming its field, in the module',
   }
   assert.throws(() => db.run('put t {n: -1e300}'), past('n'));
   assert.throws(() => db.run('put t {n: 9223372036854775808}'), /invalid integer/);
-  // A list of numbers goes in as a vector's f32s, beside the JSON; the
-  // module asks an [int]'s back as JSON, and reads it as written.
+  // An array of integers alone goes in the JSON, read as written; one
+  // past 2 ** 53 is a float there, refused past an int all the same.
   assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs'));
   assert.equal(db.rows('get t count')[0].count, 0);
   db.run('put t [{n: 9223372036854775807}, {n: -9223372036854775808}]');
@@ -728,28 +728,33 @@ test('a text whose list the module asked for as JSON sends it so at once after',
   } finally {
     WebAssembly.instantiate = instantiate;
   }
-  db.run('create collection p (n int, meta json)');
-  db.run('put p {id: 16777217, n: 1}');
+  db.run('create collection p (n int, x float, meta json)');
+  db.run('put p {id: 16777217, n: 1, x: 0.1}');
   const ids = (sql, params) => db.rows(sql, params).map((r) => r.id);
-  const sql = 'get p select id where id in $1';
+  const sql = 'get p select id where x in $1';
   // The first run: sent apart as f32s, refused, sent again as JSON.
   calls = 0;
-  assert.deepEqual(ids(sql, [[16777217]]), [16777217]);
+  assert.deepEqual(ids(sql, [[0.1, 7.5]]), [16777217]);
   assert.equal(calls, 2);
   // After, the text sends its list as JSON at once, typed or not.
-  for (const list of [[16777217, 5], new Float64Array([16777217])]) {
+  for (const list of [[0.1, 5.5], new Float64Array([0.1])]) {
     calls = 0;
     assert.deepEqual(ids(sql, [list]), [16777217]);
     assert.equal(calls, 1);
   }
-  // A place the module names beside those sent as JSON already is added.
-  const two = 'get p select id where id in $1 and meta not in [$2]';
-  ids(two, [[1], 'x']);
+  // An array of integers alone goes as JSON from the start, the integers
+  // it holds: never asked for again.
   calls = 0;
-  ids(two, [[16777217], [3]]);
+  assert.deepEqual(ids('get p select id where id in $1', [[16777217]]), [16777217]);
+  assert.equal(calls, 1);
+  // A place the module names beside those sent as JSON already is added.
+  const two = 'get p select id where x in $1 and meta not in [$2]';
+  ids(two, [[0.5], 'x']);
+  calls = 0;
+  ids(two, [[0.1], [3.5]]);
   assert.equal(calls, 2);
   calls = 0;
-  ids(two, [[16777217], [3]]);
+  ids(two, [[0.1], [3.5]]);
   assert.equal(calls, 1);
   // A run with no list asks once, as it did.
   calls = 0;

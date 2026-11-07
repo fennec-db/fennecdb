@@ -86,7 +86,7 @@ with the JSON reader walking the text's bytes rather than collecting it
 into `char`s first, 23.7; read where the page left it rather than copied
 (`str_from`), 21.9. 10 000 128-dim vectors went in with their graph in
 1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
-Natively an array of numbers alone is read straight into a vector's `f32`s,
+Natively an array of numbers holding a fraction is read straight into a vector's `f32`s,
 each number in the one pass that finds its end where Clinger's path takes
 it (`num::clinger`) and handed to the readers above otherwise: read a
 `Value` at a time, each number's text found and then read twice over, a
@@ -96,27 +96,38 @@ index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
 
-**A list a field keeps as written is read so.** A json field, a point, an
-`[int]` and a `[float]` keep a list's numbers as written
-(`DataType::keeps_numbers`), and where one is handed a list of numbers --
-or compared with one -- `Database::exactly` names it: the text is read
-again by `fennec_ql::parse_exact`, the parameters by
-`json::parse_params_exact`, a REST body's member by `parse_exact_at`, a
-replica's seed and changes alike, and the browser module and the native
-library ask for a parameter handed over as `f32`s as JSON
-(`Refused::Exact`), which the page sends so from then on. Read as a
-vector's `f32`s, an `[int]` stored 16777217 as 16777216 and refused
--9223372036854775808 (-2^63 as a float, past an int: a replica's seed of
-such a row failed on every retry), and a `[float]` stored 0.1 as
-0.10000000149011612. A statement handing no such field a list pays
-nothing more: an insert of five ints retired 32 117 instructions before
-and 32 078 after, five int parameters 33 763 and 33 726 (`proc_pid_rusage`
-over 20 000 in a loop, medians of six, ±100 run to run). One that does
-pays the second read: an `[int]` of eight in the text 22 636 -> 44 076,
-as a parameter 24 916 -> 30 284; a vector put into a collection beside
-an `[int]` 21 422 -> 21 860, its field's name looked up. In the browser
-module the page sends such a parameter as JSON once it was asked to, and
-`keeps_numbers` grew 30 bytes.
+**Integers alone are the list of them; a vector a field keeps as written
+is read again.** Every reader with no schema reads a list of numbers
+holding a fraction into a vector's `f32`s, and a list of integers alone
+into the integers it holds: natively in a pass of its own
+(`num::int_at`; the lexer's `Tok::Ints`, the JSON reader's `ints`), which
+an embedding leaves at its first `.`; in the browser module through the
+tokens and the general JSON path -- a reader and a token of its own were
+1.7 KB of the module -- and the page keeps an array of integers alone in
+the JSON (`vectorsApart`). An `[int]`, a `[float]`, a json field or an id
+list given integers is read once. A json field, a point, an `[int]` and a
+`[float]` keep a list's numbers as written (`DataType::keeps_numbers`):
+where one is handed a vector, `Database::exactly` names it -- the text is
+read again (`fennec_ql::parse_exact`), the parameters too
+(`json::parse_params_exact`), a REST body's member and a replica's seed
+and changes are read as written in their one pass (`parse_exact_at`), and
+the browser module and the native library ask for a parameter handed over
+as `f32`s as JSON (`Refused::Exact`). As `f32`s an `[int]` stored 16777217
+as 16777216 and refused -9223372036854775808 (-2^63 as a float: a
+replica's seed of such a row failed on every retry), and a `[float]` 0.1
+as 0.10000000149011612. A `[float]` given fractions, `[0.5]` as well as
+`[0.1]`, still takes the second read: telling the two apart is a check on
+every number of every embedding and a flag no `Value::Vector` has room for.
+Read again for every `[int]` given a list, an insert of an `[int]` of eight
+retired 44 219 instructions in the text and 30 297 as a parameter; read
+once, 22 824 and 24 574, against 22 572 and 24 764 on main (20 000 inserts
+in a loop, `proc_pid_rusage`, `MallocNanoZone=0`, medians of six under a
+load of 3; a build moves the inserts this reaches not at all by up to 250
+of their 31 500). Where a collection has one field keeping its numbers,
+`exactly` compares a value's name with that field's before asking whether
+it is a list (`Keeps::One`): a vector put beside a json field looked its
+name up, `exactly` 464 instructions against 319 now (262 with no such
+field), for 122 bytes of the module.
 
 ## Vector parameters
 
@@ -126,7 +137,10 @@ numbers -- which the module reads as a vector either way -- out of the
 JSON, where it leaves `null`, and hands it over beside it: its place, its
 length and its values (`vectorsApart`; `fennec_query`'s two arguments
 before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
-so the file is the same either way (`web/fennec.test.js`). 200 768-dim
+so the file is the same either way (`web/fennec.test.js`). An array of
+integers alone stays in the JSON, read as the integers it holds
+([numbers in](#numbers-in)): handed over as `f32`s, an `[int]`'s was asked
+for again as JSON. 200 768-dim
 vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
 builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
 

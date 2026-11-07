@@ -658,11 +658,12 @@ fn mismatched_types_are_not_equal() {
     assert_eq!(r.rows().unwrap().rows.len(), 0);
 }
 
-/// An all-numeric array coming from the JSON side is parsed as a vector (for
-/// embedding transfer). An `[int]` or a `[float]` keeps its numbers as
-/// written, so a statement handing one such a vector is refused, and its
-/// parameters are read again as written: as `f32`s, 16777217 was 16777216
-/// and 0.1 0.10000000149011612.
+/// An all-numeric array coming from the JSON side, one number no integer,
+/// is parsed as a vector (for embedding transfer); integers alone are the
+/// list of them. An `[int]` or a `[float]` keeps its numbers as written, so
+/// a statement handing one such a vector is refused, and its parameters are
+/// read again as written: as `f32`s, 16777217 was 16777216 and 0.1
+/// 0.10000000149011612.
 #[test]
 fn json_number_array_fills_list_fields() {
     let mut db = Database::new();
@@ -673,7 +674,8 @@ fn json_number_array_fills_list_fields() {
 
     let src = "[[1,2,16777217], [0.1]]";
     let quick = fennec_core::json::parse_params(src).expect("json params");
-    assert_eq!(quick[0].type_name(), "vector");
+    assert_eq!(quick[0].type_name(), "list");
+    assert_eq!(quick[1].type_name(), "vector");
     let stmts = fennec_ql::parse("put j {numbers: $1, ratios: $2}").unwrap();
     assert_eq!(db.exactly(&stmts[0]).params, [0, 1]);
     let e = db.execute_with(&stmts[0], &quick).unwrap_err();

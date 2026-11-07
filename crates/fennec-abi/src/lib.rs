@@ -722,6 +722,58 @@ mod tests {
         );
     }
 
+    /// A list of integers alone is read once, the text's and the
+    /// parameters' alike -- the module's and the native library's path --
+    /// and an `[int]` or a `[float]` takes it as written; one holding a
+    /// fraction is read again ([`exact_noting`]'s `anew`), or asked for as
+    /// JSON where it came over as `f32`s.
+    #[test]
+    fn a_list_of_integers_is_read_once() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection t (xs [int], fs [float])",
+            "",
+            &[],
+        );
+        let once = |db: &mut Database, sql: &str, params: &str, vectors: &[u8]| {
+            let mut p = prepare(sql, params, vectors).unwrap();
+            let mut anew = false;
+            let r = exact_noting(db, &mut p, sql, params, vectors, &mut anew);
+            if r.is_ok() {
+                execute(db, &p).map_err(|_| ()).unwrap();
+            }
+            (r.is_ok(), anew)
+        };
+        let xs = "[1, -2, 16777217, 9223372036854775807]";
+        let read = |db: &mut Database, sql: &str, params: &str| once(db, sql, params, &[]);
+        assert_eq!(
+            read(&mut db, &format!("put t {{xs: {xs}, fs: [3]}}"), ""),
+            (true, false)
+        );
+        let both = format!("[{xs}, [3]]");
+        assert_eq!(
+            read(&mut db, "put t {xs: $1, fs: $2}", &both),
+            (true, false)
+        );
+        assert_eq!(read(&mut db, "put t {fs: [0.1]}", ""), (true, true));
+        assert_eq!(read(&mut db, "put t {fs: $1}", "[[0.1]]"), (true, true));
+        let mut apart = [0u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+        apart.extend(0.5f32.to_le_bytes());
+        assert_eq!(
+            once(&mut db, "put t {fs: $1}", "[null]", &apart),
+            (false, false)
+        );
+        let r = run(&mut db, "get t where xs != null select xs", "", &[]);
+        let want = format!(r#"[{{"xs":{xs}}},{{"xs":{xs}}}]"#).replace(", ", ",");
+        assert!(r.contains(&want), "{r}");
+        let r = run(&mut db, "get t where fs != null select fs", "", &[]);
+        assert!(
+            r.contains(r#"[{"fs":[3]},{"fs":[3]},{"fs":[0.1]},{"fs":[0.1]}]"#),
+            "{r}"
+        );
+    }
+
     /// A `require` that says why: the answer's `reason`, beside `at` for a
     /// text of several, as a server's 412 says it; none where it said none.
     /// The module's and the native library's answer alike.

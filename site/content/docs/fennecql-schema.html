@@ -113,8 +113,9 @@ keep one of them, since which one a reader keeps differs from reader to
 reader. Its numbers are kept as written, an integer an integer and
 <code>19.99</code> the decimal it is, everywhere one comes in: FennecQL, a
 parameter over HTTP and in the browser, a JSON body, a row
-<code>fennec import</code> reads. A list of numbers alone is read the quick way, into the
-<code>f32</code>s of the vector it nearly always is; where it is given a
+<code>fennec import</code> reads. A list of integers alone is read as the
+integers it holds; a list of numbers holding a fraction is read the quick
+way, into the <code>f32</code>s of the vector it nearly always is; where it is given a
 <code>json</code> field, an <code>[int]</code> or a <code>[float]</code>, or
 compared with one or a path into one, the statement's text or the
 parameter's JSON is read again as written, so

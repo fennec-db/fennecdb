@@ -12722,9 +12722,9 @@ impl Database {
 /// What [`exactly_for`]'s walk knows of a collection a statement reads.
 #[derive(Clone, Copy)]
 enum Known<'a> {
-    /// Its schema, and whether a field of it keeps a list of numbers as
+    /// Its schema, and which of its fields keep a list of numbers as
     /// written: a collection with none is asked of no comparison.
-    Schema(&'a Schema, bool),
+    Schema(&'a Schema, Keeps<'a>),
     /// Another collection than the one [`exactly_for`] was handed: every
     /// field is taken to keep numbers, so its lists are read as written --
     /// slower for a vector, never wrong.
@@ -12733,15 +12733,42 @@ enum Known<'a> {
     Missing,
 }
 
+/// The fields of a schema keeping a list of numbers as written: none, the
+/// one -- a vector's name, put beside an `[int]`, is compared with that
+/// field's alone, where a look through the schema's was 140 of the 410
+/// instructions `exactly` took -- or several.
+#[derive(Clone, Copy)]
+enum Keeps<'a> {
+    None,
+    One(&'a str),
+    Many,
+}
+
 impl<'a> Known<'a> {
     fn of(schema: &'a Schema) -> Known<'a> {
-        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+        let mut keeps = Keeps::None;
+        for f in &schema.fields {
+            if f.ty.keeps_numbers() {
+                keeps = match keeps {
+                    Keeps::None => Keeps::One(&f.name),
+                    _ => Keeps::Many,
+                };
+            }
+        }
+        Known::Schema(schema, keeps)
     }
 
     /// Whether `name` keeps a list of numbers as written ([`names_json`]).
     fn keeps(self, name: &str) -> bool {
         match self {
-            Known::Schema(schema, true) => names_json(schema, name),
+            // A path's field is a json one, or the path is refused where it
+            // is read.
+            Known::Schema(_, Keeps::One(field)) => {
+                let (name, field) = (name.as_bytes(), field.as_bytes());
+                name.get(..field.len()) == Some(field)
+                    && matches!(name.get(field.len()), None | Some(b'.'))
+            }
+            Known::Schema(schema, Keeps::Many) => names_json(schema, name),
             Known::Unknown => true,
             _ => false,
         }
@@ -12799,13 +12826,23 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     }
     // The value given first: a key is looked up only for a list of numbers
     // or a parameter, so a `put` of 1 000 rows looks up the vector field's
-    // name and none of the others.
+    // name and none of the others -- but where one field keeps its numbers,
+    // whose name is a compare, which goes first.
     // A collection with no field keeping its numbers -- json, a point, an
     // `[int]`, a `[float]` -- is asked nothing of its values
-    // (`Known::Schema(_, false)`), checked once.
-    let any = !matches!(k, Known::Schema(_, false));
+    // (`Keeps::None`), checked once.
+    let (any, one) = match k {
+        Known::Schema(_, Keeps::None) => (false, false),
+        Known::Schema(_, Keeps::One(_)) => (true, true),
+        _ => (true, false),
+    };
     let mut pair = |(key, e): &(String, Expr)| {
-        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
+        let listed = |e: &Expr| matches!(e, Expr::Param(_)) || e.reads_vectors();
+        let asked = match one {
+            true => k.keeps(key) && listed(e),
+            false => any && listed(e) && k.keeps(key),
+        };
+        if asked {
             given(e, out);
         }
         // A literal or a parameter holds no call and no inner `get`: a
