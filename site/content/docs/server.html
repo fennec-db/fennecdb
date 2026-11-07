@@ -328,7 +328,7 @@ scheme says so; <code>http://</code> works as it did.</p>
 <thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
 <tbody>
 <tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most that much.</td></tr>
-<tr><td><code>always</code></td><td>Each write is answered once it is on disk.</td></tr>
+<tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk.</td></tr>
 <tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
 </tbody>
 </table>
@@ -349,6 +349,20 @@ still gets one write per <code>fsync</code>. The sync of <code>250</code>
 takes the same path, for a single database and for each tenant of a
 <code>--dir</code> node: held through the <code>fsync</code>, a tenant's lock
 had its reads and writes wait up to 27 ms once an interval.</p>
+
+<p>A write another write landed is read from the moment it lands, before its
+<code>fsync</code> has run. Under <code>always</code> a write refused by it —
+an <code>insert</code> of the id it took (409), a <code>@unique</code> value, a
+collection or statement it made, a <code>require</code> its <code>del</code>
+left unmet (412), a <code>/_changes</code> consumer it made — is answered once
+that write is on disk too, as its success would be: answered at once, a power
+loss could take back the row the client was told was there. So is a
+<code>/_schema/apply</code> that finds nothing to apply, a quota's 507 as a
+block lands, and a <code>/batch</code> stopped after some of its statements were
+made, which answers once those are on disk. An <code>fsync</code> that covered
+it already costs the refusal nothing; one that failed is its answer (500). A
+refusal of the request alone — a body that is not JSON, a path no route
+takes — waits for nothing.</p>
 
 <p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
 and a final sync runs before exit. The exclusive lock is <b>held</b> until

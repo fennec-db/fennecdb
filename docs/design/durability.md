@@ -54,6 +54,106 @@ touching nothing. After `Database::fail` a durability is refused as every
 write is, and a replay with it, under either `--sync`: the write it
 answers may be among what the disk lost.
 
+So is a write's refusal: it is read from what other writes left, from the
+moment they land. Under `--sync always` an `insert` of an id another
+`insert` had just landed was answered 409 while that one's fsync ran --
+the #495 review held the first at `SlowDisk`'s gate and the second was told
+"holds a document 7 already" -- and a power loss then took back the row
+the client acted on: an insert it never sent again, an id it took for
+another's. As were a `@unique` clash, a `create collection`, `create
+statement` or `create index` that exists (409), a `require` another's
+`del` left unmet (412), a REST write to a collection another dropped (404)
+and a `/_changes` consumer's `POST` ahead of one another made (409). A
+write refused under its write lock now asks the durability a success would
+have waited for (fennec-http's `refusal_durability`: `flush` under the
+write lock it holds, `settled` where no error says what it read) and runs
+it after the lock (`refused_after`, `refused_under`). An fsync that covered
+those writes already runs none, one under way is waited out at the disk,
+and a failed one is the answer, a 500, as it is a write's. Under
+`--sync <ms>` nothing waits, as no answer does.
+
+Which refusals wait, exactly. An engine error a write meets under its lock
+waits unless it is a storage error's (`Io`: its own answer, a durability
+after it refused) or a replica's (`ReadOnly`, which says nothing of what a
+write left) (`read_from_writes`): on `/query` and `/_call`, keyed or not
+(the run's error and a key's failed keep), a REST write as it runs,
+`/batch` as one block (a line's stop, and its land's -- a quota's 507), a
+`create index` beside the database (its 409), a consumer's write (its
+refusal and its error). Besides those: a REST write's refusal as it is
+routed under the lock where the schema decided it -- a collection another
+dropped (404), a field or a type -- and where the token's rules read
+another collection (`scoped_under` with `reaches_out`); an MCP call tool's
+403 for a statement made to write since its tool was listed, its 413 past
+`--mcp-max-rows` or `--mcp-max-bytes`, and its block's refusal as it lands
+(`mcp::open`, `mcp::land`: a quota's 507), on `/query`'s path and the
+keyed one alike; a `/_schema/apply` that applies nothing, its plan refused
+(409) or finding everything there as declared (`applied: false`, 200),
+and its error but a storage error's; a `/batch` run statement by statement,
+stopped after a statement was made -- its `completed` statements made
+durable before the stop is answered, a failed fsync the 500 in its place --
+or before any, waiting as a block's line does. And a held write's answer
+at its wait's end, or at a shutdown ending the wait before it began
+(`held_answered`, below). What waits for nothing: the memory ceiling's 507
+(`over_ceiling`), the server's memory and not what a write left; and a
+refusal of the request alone, which no write changes -- a REST write sent
+to a path no route takes (404), a body that is no UTF-8 or no JSON (400)
+(`api::refusal_read`, which asks the body again on the refusal's path and
+counts what it cannot place as read), a token's own rules (a field a rule
+withholds, 403), the one refusal of `begin` (a block left open), a `/batch`
+holding a compact sent with a key (400). The 422 of a key sent with another
+request, found under the lock, waits for none either: it says nothing of
+the write (`idempotent::replay`, `http.md`). Refusals asked before the
+lock -- a rate's 429, a write `Fennec-Wait` cannot hold -- take none to
+begin with. Nor does `fennec mcp --file`'s write tool, whose one caller's
+every write was on disk before it was answered. The #497 review found the
+second half: a REST write's `{not
+json` and an unknown route's 404 had waited out another client's fsync,
+and of the first half an MCP call tool's quota at land, its 413 and 403, a
+keyed 413, and an apply finding nothing to do -- a second identical apply
+answered `applied: false` while the first's fsync was held -- answered at
+once. Chosen by error kind for the engine's errors rather than for the few
+named, a refusal reading a field another `alter` dropped, a row a scoped
+token's rule reads or a quota's bytes waits as well, and none is a path
+that succeeds. A rule judged by the answer's status at the edge was the
+other way: it could not tell a refusal from a 429 or the 422 of a key sent
+with another request, which say nothing of what a write left, and would
+have asked the lock again for each.
+
+A held write (`Fennec-Wait`) whose run wrote nothing is answered at its
+wait's end with that run's answer, `affected 0` or a `require`'s 412, read
+from what other writes left as that run saw it; the wait's end asks its
+durability under the read lock (`held_answered`, `Database::durability`), a
+sink's error then going to `Database::fail` as a replay's does. A run that
+leaves a plan to be held -- `waits::plan` says whether it did -- asks
+none: its answer is kept back, and asked at each run a `/query`'s 412
+waited at the disk on every look of its group, which held the group's
+other requests behind it (the #497 review). One that leaves none, nothing
+to look for, is answered at once, as a refusal under the lock is: a keyed
+run's and a `/batch`'s went out with no wait before. A shutdown that ends
+a wait before it began answers as the wait's end does: returned as it
+was, a keyed run's or a `/batch`'s kept-back 412 went out with no
+durability. The end's wait is the request's own time, as a write's fsync
+is (`waits.md`).
+
+The paths that succeed run nothing new; a refusal asks the sink, the
+replay's cost where its bytes are covered (`http.md`, *Idempotency keys*),
+and is rare. `tests/server.rs`'s
+`a_refusal_is_answered_once_what_it_read_is_on_disk` holds seventeen
+refusals, each through its path, to the held fsync -- each answered before
+it with the change taken out, the held writes' with the wait's end's
+alone -- an apply's refused plan and one applying nothing among them;
+`a_quota_refused_at_land_is_answered_once_what_it_read_is_on_disk` a
+`/batch`'s and an MCP call tool's quota at land;
+`a_refusal_of_the_request_alone_waits_for_no_fsync` a REST write's `{not
+json` and an unknown route, answered while the fsync is held;
+`a_held_run_asks_no_durability_its_wait_end_does` a held `require`'s two
+durabilities, the first write's and its end's, never a third;
+`a_batch_stop_after_a_statement_made_is_its_fsync_failure` a stop after a
+statement made, on a failing disk, to the 500; and
+`a_refusal_read_from_a_write_whose_fsync_failed_is_no_refusal` an
+`insert`'s 409 whose reading fsync failed to the 500, with no fsync of its
+own. Each fails with its fix taken out.
+
 A file's sink fsyncs, too, what it inherited once (`Disk::inherited`): the
 bytes an earlier process left in the file, maybe in the page cache alone
 after its crash, are on disk once no fsync of this sink has run, and a
@@ -127,7 +227,10 @@ and wipes the header, so a file cut below the log's end after that open
 is not written over at the next. Everything that renames a file into a
 database's place removes the log first and makes the removal durable --
 `swap_in` after syncing the file it replaces, a restore, a backup
-unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
+unsealed, a tenant's import (`fs::forget_sync_log`) -- and syncs the
+directory after the rename (`fs::sync_dir`), which a tenant's import
+missed until the #495 review, as a tenant's create missed fsyncing the
+file its open made (`tenants.md`); a clean close syncs
 the file and removes it, so a node keeps none beside a closed tenant, and
 `Tenants::stats` counts it; a log that cannot be made is not tried again
 until the next open, each try being 260 KB of writes. `open_read_only`
