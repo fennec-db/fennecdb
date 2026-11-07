@@ -712,14 +712,17 @@ echo "ok: the binaries from before stop in words at a schedule (op 4) and its ma
 # 13's op 6, its hook's name after its text. A binary from before it --
 # OP6_BASE, the last main before the op -- refuses an op it does not read,
 # never taking a hook's statement for a callable one whose text does not
-# read, marked broken, its sender answered 404 for days. No server defines
-# one yet (F4's slice 3 takes events): fennec-core's fixture holds one and
-# an event it took, its write and its key one block, written by its tests
+# read, marked broken, its sender answered 404 for days. A file's server
+# defines one from F4's slice 3, whose route takes its events: the upgrade
+# order -- every reader before the first hook -- keeps a reader from
+# meeting one it stops at. fennec-core's fixture holds one and an event it
+# took, its write and its key one block, written by its tests
 # (`tests/statements.fennec`), and
 #
 #   - the old server refuses to open it, in words;
-#   - this tree's server opens it, answers its reads, takes its writes and
-#     refuses a call of the hook's statement, which its events run;
+#   - this tree's server opens it, answers its reads, takes its writes,
+#     refuses a call of the hook's statement that carries no event and
+#     defines another over `/query`, as a primary may from slice 3;
 #   - an old replica of that server refuses the image holding op 6, and an
 #     old archiver takes no image of its own;
 #   - the old `fennec types` refuses it.
@@ -754,8 +757,10 @@ PIDS+=($!)
 HOOKED=$(address "$WORK/hooked-primary.log")
 query "$HOOKED" "get orders select status where ref = 'o-1'" | grep -q 'paid' ||
     fail "this tree's server answered no read of the file holding op 6"
-query "$HOOKED" "call stripe_paid" | grep -q 'takes the events of hook' ||
-    fail "this tree's server ran a hook's statement by a call"
+query "$HOOKED" "call stripe_paid" | grep -q "takes a hook's events" ||
+    fail "this tree's server ran a hook's statement by a call with no event"
+query "$HOOKED" "create statement stripe_refunded(\$order text from event.data.object.metadata.order) on hook stripe as set orders {status: 'refunded'} where ref = \$order" |
+    grep -q '"error"' && fail "this tree's server refused a hook's definition over /query"
 
 # The old archiver keeps the primary's image as it came; the image of its
 # own it takes once a write follows reads op 6.

@@ -113,6 +113,10 @@ thread_local! {
     // -- an issuer, an audience, an expiry -- and never a value of the
     // token, every reason being a text of the server's own.
     static REASON: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    // The request this thread serves is a webhook event refused before its
+    // signature verified ([`hook_refused`]): its 401 waits by the hooks'
+    // own count, never the tokens'.
+    static HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // The statement bound to writes that the request this thread serves
     // was refused for waking, and why ([`unwoken`]): its `unwoken` line
     // names it for the operator writing the grant, where the token is told
@@ -144,6 +148,29 @@ const HELD: u8 = 2;
 /// begins, so a line never names a reason of the request before.
 pub fn refusal(why: &'static str) {
     REASON.with(|r| r.set(Some(why)));
+}
+
+/// The webhook event the request this thread serves sent was refused
+/// before its signature verified, for `why`, the check that failed in the
+/// server's words: its `refused` line names it, and its 401 waits by the
+/// hooks' own count -- by the sender's address and the hook's path
+/// (`hooks::failed`) -- never the tokens', which a signature neither
+/// raises nor clears (`docs/design/named-statements.md`, *Verifying an
+/// event*). Let go by [`http`], as it writes the line.
+pub fn hook_refused(why: &'static str) {
+    REASON.with(|r| r.set(Some(why)));
+    HOOK.with(|h| h.set(true));
+}
+
+/// The wait after a first failure, in milliseconds (`--auth-delay`): the
+/// hooks' count waits as the tokens' does.
+pub(crate) fn delay_ms() -> u64 {
+    DELAY_MS.load(Ordering::Relaxed)
+}
+
+/// The wait after the `n`th failure in a row, `base` after the first.
+pub(crate) fn wait_after(base: u64, n: u32) -> Duration {
+    wait(base, n)
 }
 
 /// A scoped token's write or call refused (403) for waking the statement
@@ -306,6 +333,7 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     // connection to many clients -- verified nothing of this one's.
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
+    HOOK.with(|h| h.set(false));
     UNWOKEN.with(|u| u.borrow_mut().take());
     if BOUND.with(|b| b.replace(0)) & HELD != 0 {
         let_go_held();
@@ -631,10 +659,17 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         // it (`Runs::changed`).
         let bound =
             statement_named(one).and_then(|n| changed.iter().rev().find(|(name, ..)| name == n));
+        // A webhook consumer names its hook, noted with no event: a drop's
+        // text says nothing of it.
+        let hook = bound.filter(|(_, _, e)| *e == 0);
+        let bound = bound.filter(|(_, _, e)| *e != 0);
         let events = bound.map(|(_, _, e)| fennec_core::named::Binding::events_named(*e));
         if let (Some((_, c, _)), Some(e)) = (bound, &events) {
             fields.push(("bound_collection", Field::Text(c)));
             fields.push(("bound_events", Field::Text(e)));
+        }
+        if let Some((_, h, _)) = hook {
+            fields.push(("hook", Field::Text(h)));
         }
         if let Some(sched) = schedule {
             fields.push(("schedule", Field::Text(sched)));
@@ -699,6 +734,10 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     use crate::http::Method;
     let ip = peer.map(|p| p.ip());
     let path = req.target.split('?').next().unwrap_or("");
+    if HOOK.with(|h| h.replace(false)) && status == 401 {
+        hook_line(req, path, named().or(ip));
+        return;
+    }
     if status == 401 {
         REFUSED.fetch_add(1, Ordering::Relaxed);
         let mut fields = vec![
@@ -754,6 +793,25 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
                 ("http_status", Field::Int(status as u64)),
             ],
         );
+    }
+}
+
+/// A webhook event's 401 ([`hook_refused`]): its `refused` line, naming
+/// the check, and its wait by the hooks' count -- no token's, and no
+/// `fennec_refused_total`, which counts tokens refused; the hooks' own
+/// family counts it. Behind a router, the router waits it out.
+#[cold]
+fn hook_line(req: &crate::http::Request, path: &str, ip: Option<IpAddr>) {
+    let mut fields = vec![
+        ("method", Field::Text(req.method.name())),
+        ("path", Field::Text(path)),
+    ];
+    if let Some(why) = REASON.with(|r| r.take()) {
+        fields.push(("reason", Field::Text(why)));
+    }
+    event("refused", &fields);
+    if ROUTED.with(|r| r.get()).is_none() {
+        std::thread::sleep(crate::hooks::failed(ip, path));
     }
 }
 

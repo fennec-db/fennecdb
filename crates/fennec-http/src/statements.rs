@@ -460,6 +460,17 @@ pub(crate) fn shape_to(text: &str, out: &mut String, max: usize) {
             }
             continue;
         }
+        // A webhook consumer's quoted key, `event.metadata."order-id"`: a
+        // name of the event's JSON, never a value, kept as written -- a `$n`
+        // there named no path in an audit line or a shape. Only a `"` right
+        // after a name's dot opens one, which the lexer read as no text
+        // before hooks ("unexpected character `.`").
+        if c == b'"' && quoted_key_at(b, i) {
+            let end = key_end(b, i);
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
         if c == b'\'' || c == b'"' {
             i = string_end(b, i);
             hole(out);
@@ -537,6 +548,30 @@ fn utf8_len(first: u8) -> usize {
 
 /// Past the string that starts at `at`: `"..."` with backslash escapes,
 /// `'...'` with a doubled quote for one.
+/// Whether the `"` at `at` opens a quoted key: right after a dot that
+/// follows a name, or a key closed before it.
+fn quoted_key_at(b: &[u8], at: usize) -> bool {
+    at >= 2
+        && b[at - 1] == b'.'
+        && (b[at - 2].is_ascii_alphanumeric() || b[at - 2] == b'_' || b[at - 2] == b'"')
+}
+
+/// Where the quoted key opened at `at` ends: past its closing `"`, or at a
+/// control character, where the lexer closes one left open.
+fn key_end(b: &[u8], at: usize) -> usize {
+    let mut i = at + 1;
+    while i < b.len() {
+        if b[i] == b'"' {
+            return i + 1;
+        }
+        if b[i].is_ascii_control() {
+            return i;
+        }
+        i += 1;
+    }
+    b.len()
+}
+
 fn string_end(b: &[u8], at: usize) -> usize {
     let q = b[at];
     let mut i = at + 1;
@@ -647,6 +682,27 @@ mod tests {
         let mut out = String::new();
         shape(text, &mut out);
         out
+    }
+
+    /// A webhook consumer's quoted key is a name of the event's JSON, kept
+    /// as written -- slice 1's review found it holed as a `$n`, so an audit
+    /// line named no path -- while a string anywhere else is a value.
+    #[test]
+    fn a_quoted_key_is_kept_and_a_string_is_a_value() {
+        assert_eq!(
+            of(
+                "create statement s($o text from event.metadata.\"order-id\") on hook stripe \
+                where event.\"type\" = 'x' as del t where ref = $o"
+            ),
+            "create statement s($o text from event.metadata.\"order-id\") on hook stripe \
+             where event.\"type\" = $1 as del t where ref = $o"
+        );
+        assert_eq!(
+            of("get t where a.\"b\".\"c\" = \"d\""),
+            "get t where a.\"b\".\"c\" = $1"
+        );
+        assert_eq!(of("get t where a = \"b.c\""), "get t where a = $1");
+        assert_eq!(of("get t where a. \"b\" = 1"), "get t where a. $1 = $2");
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! A webhook consumer's events taken (`docs/design/named-statements.md`,
 //! *Webhook consumers (F4)*, *Where an event is taken, and once*): an
 //! event its sender signed, verified and parsed by the server
-//! (`fennec_http`'s hooks, F4's slice 3), is taken by every statement of
-//! its hook whose condition passes it, in name order, their writes and the
-//! event's key one block -- so a sender's retry, a duplicate delivery and a
-//! failover between a write and its answer take an event once in the
-//! history that survives.
+//! (`fennec_http::hooks`), is taken by every statement of its hook whose
+//! condition passes it, in name order, their writes and the event's key one
+//! block -- so a sender's retry, a duplicate delivery and a failover
+//! between a write and its answer take an event once in the history that
+//! survives.
 //!
 //! The key is the `Idempotency-Key`'s machinery in a collection of its
 //! own, [`HOOK_EVENTS`]: a row a key, `<hook>`, `U+001F` and the key, kept
@@ -14,27 +14,31 @@
 //! every `@ttl` row is. A key held answers the event as its first taking
 //! did and runs nothing, a second body under it too (decision 7).
 //!
-//! No server takes one yet: every way in refuses a hook's definition but a
-//! test's ([`Database::allow_hooks`]). The browser module and the native
-//! library keep the record and take no event.
+//! A file's server takes events (`fennec_http::hooks`): its database lets
+//! a hook be defined ([`Database::allow_hooks`]), its route judges an event
+//! before the write lock ([`Database::judge_event`]) and takes it under it
+//! ([`Database::take_judged`]). Every other way in refuses a definition --
+//! a tenant node's until F4's slice 4, the shell, the native library -- and
+//! the browser module and the native library keep the record and take no
+//! event. The server's token calls one with an event as its argument
+//! (`call <name> $1`, [`Database::callee`]), its condition asked and its
+//! parameters read as a delivery's, no key kept.
 
 use std::sync::Arc;
 
 use super::due::Clocked;
-use super::{Callee, Database, NoRow};
+use super::{Callee, Database, NoRow, Statements, Stored};
 use crate::error::{Error, Result};
-use crate::named::{event_at, Definition, Source};
+use crate::named::{event_at, Args, Call, Definition, Source};
 use crate::query::{eval, truthy, CmpOp, EvalCtx, Expr, Response, RowAccess, Select, Statement};
 use crate::schema::{Field, IndexKind, Schema};
 use crate::value::{DataType, DocId, Value};
 
 /// The collection an event's key is kept in: the server's own
-/// (`declared::own`), held by its `_` out of a body and of the tenant's
-/// rows a quota counts (`Database::app_writes`) and, by its name, out of
-/// `/_changes` (`fennec_http::cdc`). The listings, `/_schema` and a `*`
-/// rule hold it out only once the owed system-collections fix lands, as
-/// they hold `_idempotency` out only then: F4's slice 3 depends on it
-/// before any route takes an event. Made by the first event taken, never
+/// (`declared::own`), held by its `_` out of a body, of the tenant's rows a
+/// quota counts (`Database::app_writes`), of the listings, `/_schema` and
+/// a `*` rule, as every system collection is, and, by its name, out of
+/// `/_changes` (`fennec_http::cdc`). Made by the first event taken, never
 /// before.
 pub const HOOK_EVENTS: &str = "_hook_events";
 
@@ -46,7 +50,9 @@ pub struct Event<'a> {
     pub hook: &'a str,
     /// Its key (`hook.id`): a value its signature covers, or the one
     /// header its hook was told to trust -- 1 to 255 bytes, no control
-    /// character.
+    /// character. Empty in an event the server's token calls a statement
+    /// with ([`Database::callee`]), which keeps no key: `hook.id` reads
+    /// `null` there.
     pub key: &'a str,
     /// Its body, parsed exactly: an object.
     pub body: &'a Value,
@@ -106,12 +112,39 @@ impl RowAccess for EventRow<'_, '_> {
     }
 }
 
+/// An event judged before the write lock ([`Database::judge_event`]): the
+/// statements of its hook that take it, each with the values its
+/// parameters read and its `check` asked, at the instant the event is then
+/// taken at, and the statements' table it was judged by -- held, so the
+/// write lock takes the judgment where the table is still that one
+/// (`Arc::ptr_eq`) and judges again otherwise ([`Database::take_judged`]).
+pub struct Judged {
+    table: Arc<Statements>,
+    takers: Vec<Callee>,
+    now: i64,
+}
+
+impl Judged {
+    /// Whether a statement takes the event: none, and it is answered as
+    /// taken by none, nothing written and nothing waited for.
+    pub fn takes(&self) -> bool {
+        !self.takers.is_empty()
+    }
+
+    /// The statements its takers' bodies run, in order: what `--max-memory`
+    /// holds an event to, as it holds a call's body.
+    pub fn bodies(&self) -> impl Iterator<Item = &Statement> {
+        self.takers.iter().flat_map(|t| t.def.body.iter())
+    }
+}
+
 impl Database {
-    /// Lets a webhook consumer be defined, which every way in refuses
-    /// until a server takes events (`named::HOOKED_NOT_BUILT`): a test's,
-    /// to hold a hook's record and drive its events, until F4's slice 3
-    /// brings the server that takes them.
-    #[doc(hidden)]
+    /// Lets a webhook consumer be defined: a file's server, whose route
+    /// takes its hooks' events (`fennec_http::hooks`), and a test. Every
+    /// other way in refuses one ([`crate::named::HOOKED_UNTAKEN`]) -- a
+    /// tenant node until F4's slice 4 brings its secrets and routes, the
+    /// shell, the native library -- since one stored where no sender
+    /// reaches it would be a hook taking nothing, without a word.
     pub fn allow_hooks(&mut self) {
         self.hooking = true;
     }
@@ -126,6 +159,41 @@ impl Database {
     pub fn event_kept(&self, e: &Event) -> Result<Option<HeldKey>> {
         let key = kept_key(e)?;
         self.kept(&key, e.digest)
+    }
+
+    /// `e` judged as [`Self::take_event`] judges it, before the write lock
+    /// -- under the read lock, beside the readers: its hook's statements in
+    /// name order, each condition asked, each taking statement's
+    /// parameters typed and its `check` asked at the instant the event is
+    /// then taken at, read here once. Refused as `take_event` refuses (400,
+    /// 409); a judgment taking nothing is the event no condition passes,
+    /// answered with nothing written and no lock taken. Its key is not
+    /// looked up: [`Self::event_kept`] is, before it.
+    pub fn judge_event(&self, e: &Event) -> Result<Judged> {
+        kept_key(e)?;
+        let now = self.now()?;
+        let takers = self.judged(e, now)?;
+        Ok(Judged {
+            table: Arc::clone(&self.statements),
+            takers,
+            now,
+        })
+    }
+
+    /// Takes `e` as [`Self::take_event`] does, under the write lock, with
+    /// what [`Self::judge_event`] judged before it: the key looked up again
+    /// -- a first try running when a retry overlapped it has landed by now
+    /// -- and the judgment taken where the statements' table is the one it
+    /// was judged by, judged again otherwise (a definition, a drop or a
+    /// mark landed between the two). `now()` is the judgment's instant: its
+    /// `check`s were asked at it, and the bodies and the key's `until` read
+    /// it as well.
+    pub fn take_judged(&mut self, e: &Event, judged: Judged) -> Result<Took> {
+        let key = kept_key(e)?;
+        let now = judged.now;
+        let before = self.clock.replace(now);
+        let c = Clocked { db: self, before };
+        c.db.take_at(e, &key, now, Some(judged))
     }
 
     /// Takes `e`: under the write lock, its key looked up again -- a first
@@ -153,7 +221,7 @@ impl Database {
     /// it. Each refusal of a statement's -- a guard, a clash, a binding's,
     /// `--call-max-rows` -- refuses the event whole, its block put back.
     /// A caller makes the block durable before it answers the sender, and
-    /// a duplicate's answer waits for that as well (F4's slice 3).
+    /// a duplicate's answer waits for that as well (`fennec_http::hooks`).
     pub fn take_event(&mut self, e: &Event) -> Result<Took> {
         let key = kept_key(e)?;
         // The clock fixed before anything reads it, as a scheduled run's
@@ -163,15 +231,19 @@ impl Database {
         let now = self.now()?;
         let before = self.clock.replace(now);
         let c = Clocked { db: self, before };
-        c.db.take_at(e, &key, now)
+        c.db.take_at(e, &key, now, None)
     }
 
-    /// [`Self::take_event`] with the clock fixed to `now`.
-    fn take_at(&mut self, e: &Event, key: &str, now: i64) -> Result<Took> {
+    /// [`Self::take_event`] with the clock fixed to `now`, taking `judged`
+    /// where the statements' table is still the one it was judged by.
+    fn take_at(&mut self, e: &Event, key: &str, now: i64, judged: Option<Judged>) -> Result<Took> {
         if let Some(k) = self.kept(key, e.digest)? {
             return Ok(Took::Held(k));
         }
-        let takers = self.judged(e, now)?;
+        let takers = match judged {
+            Some(j) if Arc::ptr_eq(&j.table, &self.statements) => j.takers,
+            _ => self.judged(e, now)?,
+        };
         if takers.is_empty() {
             return Ok(Took::Passed);
         }
@@ -190,6 +262,77 @@ impl Database {
                     Err(err)
                 }
             }
+        })
+    }
+
+    /// The server's token's call of webhook consumer `s` with an event --
+    /// `call stripe_paid $1`, `$1` the event's object, or its members by
+    /// name -- judged as [`Self::callee`] judges a call, in its order: its
+    /// condition asked of the event, whether it is broken, its parameters
+    /// read from the event as a delivery's are and its `check` asked. No
+    /// signature is asked and no key kept: `hook.id`, `hook.at` and
+    /// `hook.event` read `null`. A test event, the studio's and an
+    /// operator's; a token held to a policy meets the 404 a missing
+    /// statement is, never reaching here (`fennec_http::access`).
+    pub(super) fn hooked_callee(
+        &self,
+        s: &Stored,
+        call: &Call,
+        params: &[Value],
+    ) -> Result<Callee> {
+        let name = &call.name;
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+            clock: self.clock,
+        };
+        let body = event_argument(name, &call.args, &ctx)?;
+        // Judged by the tree it runs; a text this build reads otherwise, or
+        // as nothing, is refused as broken -- its condition unknown.
+        let (Some(def), Some(h)) = (&s.tree, s.tree.as_ref().and_then(|d| d.hook.as_ref())) else {
+            return Err(super::call::broken(name, s.broken.as_deref()));
+        };
+        let e = Event {
+            hook: &h.name,
+            key: "",
+            body: &body,
+            digest: 0,
+            at: None,
+            event: None,
+            keep: 0,
+        };
+        let ctx = EvalCtx {
+            params: &[],
+            clock: Some(self.now()?),
+            ..ctx
+        };
+        if let Some(c) = &h.condition {
+            if !truthy(&eval(c, &mut EventRow(&e), &ctx)?) {
+                return Err(Error::Query(format!(
+                    "statement `{name}`: its condition passes this event over, so nothing \
+                     runs: a delivery of it would be taken by none"
+                )));
+            }
+        }
+        if let Some(why) = &s.broken {
+            return Err(super::call::broken(name, Some(why)));
+        }
+        let values = typed(def, &h.sources, &e)?;
+        if let Some(check) = &def.check {
+            let ctx = EvalCtx {
+                params: &values,
+                ..ctx
+            };
+            if eval(check, &mut NoRow, &ctx)? != Value::Bool(true) {
+                return Err(Error::Query(format!(
+                    "statement `{name}`: its `check` does not hold for this event"
+                )));
+            }
+        }
+        Ok(Callee {
+            def: Arc::clone(def),
+            values,
+            slot: None,
         })
     }
 
@@ -412,6 +555,7 @@ fn typed(def: &Definition, sources: &[Source], e: &Event) -> Result<Vec<Value>> 
         let v = match src {
             Source::Event(keys) if keys.is_empty() => e.body.clone(),
             Source::Event(keys) => event_at(e.body, keys).clone(),
+            Source::HookId if e.key.is_empty() => Value::Null,
             Source::HookId => Value::Text(e.key.into()),
             Source::HookAt => e.at.map_or(Value::Null, Value::Timestamp),
             Source::HookEvent => e.event.map_or(Value::Null, |t| Value::Text(t.into())),
@@ -452,4 +596,29 @@ fn typed(def: &Definition, sources: &[Source], e: &Event) -> Result<Vec<Value>> 
         })?);
     }
     Ok(out)
+}
+
+/// The event a webhook consumer is called with: `$n` holding an object
+/// (`call stripe_paid $1`, as `POST /_call/<name>` sends its body), the
+/// object its members by name make (`call stripe_paid {id: 'evt_1', ...}`),
+/// or one value by place that is one (`CALL stripe_paid($1)`).
+fn event_argument(name: &str, args: &Args, ctx: &EvalCtx) -> Result<Value> {
+    let v = match args {
+        Args::Param(i) => ctx.params.get(*i).cloned().unwrap_or(Value::Null),
+        Args::Named(pairs) => Value::Object(
+            pairs
+                .iter()
+                .map(|(k, e)| Ok((k.clone(), eval(e, &mut NoRow, ctx)?)))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Args::Placed(p, n) if p.len() == 1 && n.is_empty() => eval(&p[0], &mut NoRow, ctx)?,
+        _ => Value::Null,
+    };
+    match v {
+        Value::Object(_) => Ok(v),
+        _ => Err(Error::Query(format!(
+            "statement `{name}` takes a hook's events: it is called with one, `call {name} $1`, \
+             `$1` the event's JSON object"
+        ))),
+    }
 }

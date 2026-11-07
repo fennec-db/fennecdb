@@ -169,15 +169,40 @@ before the answer is written; no label names a tenant or its collections,
 and `--metrics` attaches no watcher. The scheduler's families are written
 only once a look was made (`schedule::LOOKED`), a server holding no
 schedule scraping the bytes it did, and are one set of atomics: one thread
-a process counts them.
+a process counts them; the hooks' once a hooks file was read
+(`hooks::SERVING`).
 
 **[`/_stats/statements` counts by shape, a tenant's
 apart.](../../docs/design/http.md#statement-counts)** Literals are `$n`
-(`statements::shape`); a shape the server counts of its own -- `schedule
-<name>`, `after <name>` -- is keyed where no client's text is
-(`statements::own_key`). A shape names every collection, so they take what
+(`statements::shape`), a quoted key kept as written; a shape the server
+counts of its own -- `schedule <name>`, `after <name>` -- is keyed where no
+client's text is (`statements::own_key`). A shape names every collection, so they take what
 reads the data unscoped or the admin token; on a tenant node a tenant
 reads its own, and every tenant's, named, are the admin's alone.
+
+**[A webhook is verified by its signature before anything of it is read,
+and every refusal before is one 401.](../../docs/design/named-statements.md#verifying-an-event)**
+`POST /_hooks/<name>`, on a file's server under `--hooks` (a tenant node's
+are F4's slice 4), is the one route running a statement without a token,
+judged before `authenticate`: `hooks::verify` reads the scheme from the
+headers present (each once, one `t`) and checks two HMAC-SHA256s always
+(`crypto::HmacKey`, `ct_eq` with every signature, `v1` alone, the process's
+key for a secret missing) over the raw body and the timestamp it signs,
+within the hook's tolerance and ceiling, before the body is parsed or a
+lock taken. Every failure before -- headers, scheme, tolerance, ceiling,
+no such hook, the signature -- is one 401 after the same work, its check
+named in the log, the audit's `refused` line and
+`fennec_hook_unverified_total` alone; it waits by the hooks' own count
+(`hooks::failed`), and a verified event never calls `audit::verified`. A
+secret is the hooks file's, never the database's, an archive's, a log's, a
+trace's or an answer's. An event's key is a value its signature covers, or
+`X-GitHub-Delivery` where its hook says `key delivery`, kept more than
+twice the tolerance and `SKEW_MS`. A sender is told 2xx only once its event
+is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
+always` does), and a standby holds it (`Feed::standby_sent`, an archiver's
+stream none; else 503), or where resending changes nothing, a replay no
+sooner than its first try; any other answer is the refusal's status, told
+as a scoped caller is (`hooks::told`), never a 410 or a 3xx.
 
 **[A statement is parsed once, and an answer goes out in one
 write.](../../docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a

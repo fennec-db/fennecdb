@@ -31,6 +31,7 @@ GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental
 POST   /query                   body: {"query":"&lt;FennecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
 POST   /_call/&lt;name&gt;            body: {"params":{...}} -- the named statement, answered as /query answers it
+POST   /_hooks/&lt;hook&gt;           another service's event, verified by its signature, no token (--hooks; <a href="/docs/webhooks">Webhooks</a>)
 GET    /_metrics               counters and gauges, Prometheus's text format
 GET    /_changes?since=N        every write on disk after N, a JSON line each (--cdc)
 GET    /_changes?consumer=C     from where consumer C committed

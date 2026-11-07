@@ -257,7 +257,7 @@ fn a_hook_over_lines_reads_as_one_statement() {
     let errors: Vec<&str> = err.lines().filter(|l| l.starts_with("error:")).collect();
     assert_eq!(errors.len(), 1, "{err}");
     assert!(
-        errors[0].contains("webhook consumers are not built yet"),
+        errors[0].contains("no server takes this database's webhook events"),
         "{err}"
     );
     assert!(!err.contains("begins no statement"), "{err}");
