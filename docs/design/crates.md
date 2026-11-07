@@ -136,7 +136,15 @@ an `in $n` parameter's list at the inner `get`'s 100 000 values
 silently cut result is a wrong answer believed right. A `match` beside
 `order`, `count` or an aggregate ranks nothing and keeps no ceiling of its
 own: a count answers no rows, and a page put in order is held to what an
-ordered `get` is ([text.md](text.md#match-as-a-filter)). Full table in `site/content/docs/limits.html`.
+ordered `get` is ([text.md](text.md#match-as-a-filter)). A value past
+its type's range is refused the same way: a whole float going into an
+`int` at or past 2^63 either side -- `1e300`, a JSON integer past 64 bits
+(read as the float it rounds to, `-9223372036854775809` exactly -2^63), a
+`set`'s float result -- is a type error naming the field (`Value::coerce`,
+`engine::in_field`), where `as` saturated it to `i64::MAX` and an `@hash`
+lookup then found a row the scan does not, while a key looked up by the
+float ±2^63 is the int's end, as `=` finds it (`Value::coerce_ends`). Full
+table in `site/content/docs/limits.html`.
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
