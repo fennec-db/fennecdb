@@ -44,7 +44,7 @@ use crate::error::{Error, Result};
 use crate::json;
 use crate::schema::{
     split_path, ttl_text, Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec,
-    VectorIndexSpec,
+    VectorIndexSpec, MAX_DIM, MAX_M,
 };
 use crate::value::{DataType, Value, VecPrec};
 
@@ -552,15 +552,28 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
                 }
                 Some(_) => return Err(bad(at, "has a metric there is not: cosine, l2 or dot")),
             }
-            // As the parser bounds them, so the declaration equals the index.
-            if let Some(m) = whole(o, "m", at)? {
-                spec.m = (m as usize).max(2);
-            }
-            if let Some(n) = whole(o, "ef_construction", at)? {
-                spec.ef_construction = (n as usize).max(8);
-            }
-            if let Some(n) = whole(o, "ef_search", at)? {
-                spec.ef_search = (n as usize).max(1);
+            // As the parser bounds them, refused past them, so the
+            // declaration equals the index and the `@hnsw(..)` its plan
+            // writes reads back as it: clamped, `m: 1` declared an index of
+            // 2, and on a 32-bit build `as usize` kept the low bits.
+            for (key, slot, lo, hi) in [
+                ("m", &mut spec.m, 2, MAX_M as u64),
+                (
+                    "ef_construction",
+                    &mut spec.ef_construction,
+                    8,
+                    u32::MAX as u64,
+                ),
+                ("ef_search", &mut spec.ef_search, 1, u32::MAX as u64),
+            ] {
+                match whole(o, key, at)? {
+                    None => {}
+                    Some(n) if (lo..=hi).contains(&(n as u64)) => *slot = n as usize,
+                    Some(_) => {
+                        let range = format!("` that is not {lo} to {hi}");
+                        return Err(bad(at, &cat(&["has an `", key, &range])));
+                    }
+                }
             }
             match member(o, "quant") {
                 None => {}
@@ -581,15 +594,16 @@ pub fn type_named(s: &str) -> Option<DataType> {
         let inner = std::str::from_utf8(inner).ok()?;
         return Some(DataType::List(Box::new(type_named(inner)?)));
     }
+    // Ten digits folded in a `u64`, and held to `MAX_DIM` before they are
+    // a `usize`: folded in one, a 32-bit build wrapped `vector<4294967297>`
+    // and `sparse<4294967297>` to a dimension of one.
     let dim = |head: &[u8], tail: &[u8]| -> Option<usize> {
         let rest = b.strip_prefix(head)?.strip_suffix(tail)?;
         if rest.is_empty() || rest.len() > 10 || !rest.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        let n = rest
-            .iter()
-            .fold(0usize, |n, d| n * 10 + (d - b'0') as usize);
-        (n > 0).then_some(n)
+        let n = rest.iter().fold(0u64, |n, d| n * 10 + u64::from(d - b'0'));
+        (1..=MAX_DIM as u64).contains(&n).then_some(n as usize)
     };
     if let Some(n) = dim(b"vector<", b", f16>") {
         return Some(DataType::Vector(n, VecPrec::F16));
@@ -597,7 +611,7 @@ pub fn type_named(s: &str) -> Option<DataType> {
     if let Some(n) = dim(b"vector<", b">") {
         return Some(DataType::Vector(n, VecPrec::F32));
     }
-    if let Some(n) = dim(b"sparse<", b">").filter(|&n| n <= crate::sparse::MAX_DIM) {
+    if let Some(n) = dim(b"sparse<", b">") {
         return Some(DataType::Sparse(n));
     }
     Some(match s {
@@ -1695,6 +1709,69 @@ mod tests {
             let e = parse(src).unwrap_err().to_string();
             assert!(e.contains(why), "{e} / {src}");
         }
+    }
+
+    /// A dimension and an index's parameters are held to the parser's
+    /// bounds, refused past them, never clamped or cut: `m: 1` declared an
+    /// index of 2, and a 32-bit build folded `vector<4294967297>` and
+    /// `sparse<4294967297>` to a dimension of one -- what the `u64` fold
+    /// and `MAX_DIM` refuse on every target alike.
+    #[test]
+    fn a_number_past_the_parsers_bound_is_refused() {
+        for t in [
+            "vector<4294967297>",
+            "vector<4294967297, f16>",
+            "sparse<4294967297>",
+            "vector<1000000001>",
+            "sparse<9999999999>",
+            "vector<0>",
+            "vector<99999999999>",
+        ] {
+            assert_eq!(type_named(t), None, "{t}");
+        }
+        assert_eq!(
+            type_named("vector<1000000000>"),
+            Some(DataType::Vector(1_000_000_000, VecPrec::F32))
+        );
+        assert_eq!(
+            type_named("sparse<1000000000>"),
+            Some(DataType::Sparse(1_000_000_000))
+        );
+        let hnsw = |ix: &str| {
+            parse(&format!(
+                r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"vector<3>","index":{{"kind":"hnsw",{ix}}}}}]}}]}}"#
+            ))
+        };
+        for (ix, why) in [
+            (r#""m":1"#, "has an `m` that is not 2 to 32767"),
+            (r#""m":32768"#, "has an `m` that is not 2 to 32767"),
+            (r#""m":4294967298"#, "has an `m` that is not 2 to 32767"),
+            // 7 was declared as 8.
+            (
+                r#""ef_construction":7"#,
+                "has an `ef_construction` that is not 8 to 4294967295",
+            ),
+            (
+                r#""ef_construction":4294967296"#,
+                "has an `ef_construction` that is not 8 to 4294967295",
+            ),
+            (
+                r#""ef_search":0"#,
+                "has an `ef_search` that is not 1 to 4294967295",
+            ),
+        ] {
+            let e = hnsw(ix).unwrap_err().to_string();
+            assert!(e.contains(why), "{e} / {ix}");
+        }
+        // Within them, as written.
+        let d = hnsw(r#""m":32767,"ef_construction":8,"ef_search":4294967295"#).unwrap();
+        let IndexKind::Vector(s) = d.collections[0].fields[0].index else {
+            panic!("{:?}", d.collections[0].fields[0].index)
+        };
+        assert_eq!(
+            (s.m, s.ef_construction, s.ef_search),
+            (32767, 8, 4294967295)
+        );
     }
 
     fn schemas(src: &str) -> Vec<Schema> {

@@ -138,6 +138,45 @@ silently cut result is a wrong answer believed right. A `match` beside
 own: a count answers no rows, and a page put in order is held to what an
 ordered `get` is ([text.md](text.md#match-as-a-filter)). Full table in `site/content/docs/limits.html`.
 
+A number a statement writes is read as written or refused naming its
+range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
+dimension, beam and count of candidates or words, `hi` a `u32` so the
+number fits every target's `usize`, refused "`fuse`'s `k` is 0 to 1000000,
+not 99999999999". Before it, `as usize` kept a wasm32 build's low 32 bits
+-- `fuse candidates 4294967297` was 1 in the browser module, past the 10 000
+a native build refuses, `snippet(body, 4294967297)` a snippet of one word
+and `vector<4294967297>` a `vector<1>` that took `[0.5]` -- and clamps made
+`fuse k 99999999999` 4294967295, `@hnsw(m=1)` 2, `ef_construction=4` 8 and
+`ef 0` 1. The ranges: a `vector<N>` and a `sparse<N>` 1 to `MAX_DIM`
+(10^9: pgvector's `sparsevec`, and a round number whose `f32`s still fit a
+document's 4 GiB); `@hnsw`'s `m` 2 to `MAX_M` (32 767: level 0 keeps `2m`
+links, counted in a `u16`, which `m` past it cut), `ef_construction` from
+8 and `ef_search` and `near`'s `ef` from 1 -- the floors the clamps lifted
+to, refused under them, so no text that parsed reads as another tree --
+each at most `u32::MAX` (a graph's node ids are `u32`s); `fuse k` 0 to
+`MAX_FUSE_K` ([text.md](text.md#fuse)); `fuse` and `rerank` `candidates` 1
+to 10 000, refused as they are read; a snippet's words 1 to `u32::MAX`. A
+declared schema is held to the same ranges (`declared::index`,
+`declared::type_named`, which folds ten digits in a `u64`). What no parser
+reads -- SQL's `vector(n)`, `fennec import --vector`, a schema built in
+code -- meets `IndexKind::check`'s `MAX_DIM`, and natively its `MAX_M`: in
+the browser module every spec comes through the parser or SQL's `with (m =
+..)`, which holds `m` to pgvector's 2 to 100 (and `ef_construction` to 4 to
+1000, which a declaration then cannot name: the clamp read it as 8 before).
+A dimension or a parameter a file's schema holds is read whole or the file
+refused (`codec::get_usize`); a graph record holds the same numbers and
+reads them as it did (checked there too, 88 bytes of the module). A beam
+wider than the walk found reserves no more than it found
+(`VectorIndex::search`, `nearest_docs`): `ef 4294967295` asked for 32 GB for
+its answer, and a native build took any `ef` an `i64` holds before. The
+counts a parameter may hold (`limit`, `offset`, `top`) saturate at
+`usize::MAX` instead (`query::as_count`): no more rows than memory holds can
+be asked for, so the answer is the one written. One helper and one message:
+the browser module grew 534 bytes, 355 gzip (`make size-report`) --
+`int_in` 283, `codec::get_usize` 161, `hnsw_args` 124 and the messages 136,
+less `data_type`'s two refusals of its own (110). These are read once a
+parse, where a clause is written, so parsing is as it was.
+
 ## Profiles
 
 **Profiles differ on purpose.** `fennec-cli` uses the `cli` profile (`panic =

@@ -903,8 +903,17 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
                 fuzzy,
                 prefix,
             });
+            // Held to the bound `fuse k` is, never clamped: `u32::MAX`
+            // weighed a side's first ranks alike.
+            let most = fennec_core::query::MAX_FUSE_K;
+            let k = match as_usize("fuse_k")? {
+                Some(k) if k > most as usize => {
+                    return Err(Error::Query(format!("`fuse_k` is 0 to {most}, not {k}")))
+                }
+                k => k.map(|k| k as u32),
+            };
             sel.fuse = Some(Fuse {
-                k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
+                k,
                 candidates: as_usize("candidates")?,
             });
         }

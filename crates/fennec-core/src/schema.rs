@@ -111,6 +111,19 @@ pub const BIT_EF_SEARCH: usize = 200;
 /// accuracy is worth the trade.
 pub const DEFAULT_EF_SEARCH: usize = 100;
 
+/// The most links an HNSW node keeps on a layer above 0, `@hnsw(m=..)`:
+/// layer 0 keeps twice as many, counted in a `u16` (the graph's `l0_len`
+/// and its records), so past it a node's count of links was cut to its low
+/// 16 bits.
+pub const MAX_M: usize = 32_767;
+
+/// The largest dimension a `vector<N>` or a `sparse<N>` declares:
+/// pgvector's for `sparsevec` ([`crate::sparse::MAX_DIM`]), and a round
+/// number whose `f32`s still fit the 4 GiB a document's location holds.
+/// Within `u32`, so a dimension reads alike on every target: a wasm32 build
+/// cut `vector<4294967297>` to `vector<1>`.
+pub const MAX_DIM: usize = crate::sparse::MAX_DIM;
+
 /// HNSW parameters. The defaults were picked targeting ~95% recall /
 /// a few hundred microseconds on 1M-scale collections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,15 +449,32 @@ impl IndexKind {
             }
             _ => {}
         }
-        if let DataType::Sparse(d) = ty {
-            if *d == 0 || *d > crate::sparse::MAX_DIM {
-                return Err(Error::Type(format!(
-                    "`{field}`: a sparse vector's dimension is 1 to {}",
-                    crate::sparse::MAX_DIM
-                )));
-            }
+        // What a statement and a declaration are held to as they are read,
+        // held here where no parser read it -- SQL's `vector(n)`, `fennec
+        // import`, a schema built in code: a dimension of either kind,
+        // whatever the index, and an `@hnsw`'s `m`. In the browser module
+        // every spec comes through the parser or SQL's `with (m = ..)`,
+        // which bound `m` (2 to 100) already: asked there too, it was 0.2 KB
+        // of it. A sparse vector is a vector here, as a word of the message
+        // naming its kind was another 0.1 KB.
+        let (DataType::Sparse(d) | DataType::Vector(d, _)) = ty else {
+            return Ok(());
+        };
+        if *d == 0 || *d > MAX_DIM {
+            return Err(Error::Type(format!(
+                "`{field}`: a vector's dimension is 1 to {MAX_DIM}"
+            )));
         }
-        Ok(())
+        match self {
+            IndexKind::Vector(s)
+                if cfg!(not(target_arch = "wasm32")) && !(2..=MAX_M).contains(&s.m) =>
+            {
+                Err(Error::Type(format!(
+                    "`{field}`: @hnsw's `m` is 2 to {MAX_M}"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1378,9 +1408,9 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
             *pos += 1;
             let mut spec = VectorIndexSpec {
                 metric,
-                m: get_uvarint(buf, pos)? as usize,
-                ef_construction: get_uvarint(buf, pos)? as usize,
-                ef_search: get_uvarint(buf, pos)? as usize,
+                m: get_usize(buf, pos)?,
+                ef_construction: get_usize(buf, pos)?,
+                ef_search: get_usize(buf, pos)?,
                 quant: Quant::None,
             };
             if kind == 5 {

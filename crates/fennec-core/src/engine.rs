@@ -10188,9 +10188,9 @@ impl Database {
         at.reserve(text.len() + vectors.len());
         let ids = text.iter().map(|h| h.0).chain(vectors.iter().map(|h| h.0));
         for (i, id) in ids.enumerate() {
-            // Rank within its own list, from 1.
+            // Rank within its own list.
             let rank = if i < text.len() { i } else { i - text.len() };
-            let w = 1.0 / (k + rank as f32 + 1.0);
+            let w = crate::query::fuse_weight(k, rank);
             match at.get(&id) {
                 Some(&slot) => fused[slot as usize].1 += w,
                 None => {
@@ -13709,7 +13709,12 @@ fn past_tombstones(
         return Short::Whole;
     }
     let dead = ix.dead();
-    let ef = near.ef.unwrap_or(ix.spec.ef_search).max(want) + dead;
+    // Saturating: `ef` may be `u32::MAX`, all a wasm32 `usize` holds.
+    let ef = near
+        .ef
+        .unwrap_or(ix.spec.ef_search)
+        .max(want)
+        .saturating_add(dead);
     if !widened && dead > 0 && ef.saturating_mul(2 * ix.spec.m) < live {
         plan(|| {
             format!(
