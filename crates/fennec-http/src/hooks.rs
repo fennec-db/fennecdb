@@ -97,7 +97,7 @@ pub enum Scheme {
 }
 
 impl Scheme {
-    fn read(word: &str) -> Option<Scheme> {
+    pub(crate) fn read(word: &str) -> Option<Scheme> {
         match word {
             "stripe" => Some(Scheme::Stripe),
             "github" => Some(Scheme::Github),
@@ -233,7 +233,7 @@ const OPTIONS: [&str; 4] = ["keep", "tolerance", "key", "max-body"];
 /// What a refused line says, past its number: the server's own words,
 /// never a word of the line -- a secret pasted where its file's path goes
 /// is no path to echo -- one format site for them all.
-type Why = &'static str;
+pub(crate) type Why = &'static str;
 
 // The name's refusal says 59 bytes.
 const _: () = assert!(fennec_core::named::MAX_NAME == 59);
@@ -254,11 +254,7 @@ impl Hooks {
         secret: impl Fn(&str) -> std::io::Result<Vec<u8>>,
         max_body: usize,
     ) -> std::result::Result<Hooks, String> {
-        let seed = crate::crypto::system_random(32).ok_or(
-            "the hooks' stand-in key needs the system's randomness (/dev/urandom), which could \
-             not be read",
-        )?;
-        let stand_in = HmacKey::new(&seed);
+        let stand_in = stand_in()?;
         let mut hooks: Vec<Hook> = Vec::new();
         for (n, line) in text.lines().enumerate() {
             let words: Vec<&str> = line
@@ -308,81 +304,111 @@ impl Hooks {
         req: &Request,
         now_ms: i64,
     ) -> std::result::Result<Verified<'_>, Check> {
-        let mut failed = None;
-        let mut fail = |c: Check| {
-            failed.get_or_insert(c);
-        };
-        let signed = signed(req);
-        if signed.is_none() {
-            fail(Check::Header);
-        }
         let hook = self.get(name);
-        // A second secret's match counts only where the hook names one: a
-        // stand-in's slot never verifies, whatever key made it.
-        let (keys, tolerance, ceiling, second) = match hook {
-            Some(h) => (&h.keys, h.tolerance_ms, h.ceiling, h.secrets == 2),
-            None => {
-                fail(Check::Hook);
-                (&self.stand_in, TOLERANCE_MS, CEILING, false)
-            }
-        };
-        let scheme = signed.as_ref().map(|s| s.scheme);
-        if let (Some(h), Some(s)) = (hook, scheme) {
-            if h.scheme != s {
-                fail(Check::Scheme);
-            }
-        }
-        let t = signed.as_ref().map_or(&b""[..], |s| s.t);
-        let at = seconds(t).and_then(|s| s.checked_mul(1000));
-        if scheme.is_some_and(Scheme::timed)
-            && !at.is_some_and(|at| now_ms.abs_diff(at) <= tolerance as u64)
-        {
-            fail(Check::Stale);
-        }
-        // The hook's own ceiling decides the failure; the HMACs cover the
-        // body up to the widest, so a hook whose ceiling was raised or
-        // lowered takes the time any other name takes.
-        if req.body.len() > ceiling {
-            fail(Check::Size);
-        }
-        let body = &req.body[..req.body.len().min(self.widest)];
-        let id = signed.as_ref().map_or(&b""[..], |s| s.id);
-        let parts: [&[u8]; 5] = match scheme {
-            Some(Scheme::Stripe) => [t, b".", body, b"", b""],
-            Some(Scheme::Standard) => [id, b".", t, b".", body],
-            Some(Scheme::Github) | None => [body, b"", b"", b"", b""],
-        };
-        let macs = [keys[0].mac(&parts), keys[1].mac(&parts)];
-        #[cfg(test)]
-        tests::counted(body.len());
-        // Every signature against both, no `||` and no early way out: the
-        // work is the same whichever matched, or none.
-        let mut matched = false;
-        if let Some(s) = &signed {
-            for sig in &s.sigs[..s.n] {
-                matched |= compared(&macs[0], sig) | (compared(&macs[1], sig) & second);
-            }
-        }
-        if !matched {
-            fail(Check::Signature);
-        }
-        match (failed, hook) {
-            (None, Some(hook)) => Ok(Verified {
-                hook,
-                at: at.filter(|_| hook.scheme.timed()),
-            }),
-            (Some(c), _) => Err(c),
-            (None, None) => Err(Check::Hook),
+        let at = verified(hook, &self.stand_in, self.widest, req, now_ms)?;
+        match hook {
+            Some(hook) => Ok(Verified { hook, at }),
+            None => Err(Check::Hook),
         }
     }
+}
 
-    /// Waits for a standby to hold write `upto`, where the server feeds
-    /// one a promotion could take it from: `false` past `SENT_WAIT`.
-    fn standby_holds(&self, upto: u64) -> bool {
-        self.feed
-            .get()
-            .is_none_or(|f| f.standby_sent(upto, SENT_WAIT))
+/// Whether `req` verifies as an event of `hook` -- `None`, no such hook,
+/// the defaults and `stand_in` taking its place -- at `now_ms`, its HMACs
+/// over the body up to `widest`: `hook.at` where it does, else the first
+/// check it failed. Every check runs whatever fails before it, so an event
+/// refused for its headers, its scheme, its time, its size, its hook or
+/// its signature costs one work: a file's server's hooks and a tenant
+/// node's alike ([`Hooks::verify`], `tenant_hooks`).
+pub(crate) fn verified(
+    hook: Option<&Hook>,
+    stand_in: &[HmacKey; 2],
+    widest: usize,
+    req: &Request,
+    now_ms: i64,
+) -> std::result::Result<Option<i64>, Check> {
+    let mut failed = None;
+    let mut fail = |c: Check| {
+        failed.get_or_insert(c);
+    };
+    let signed = signed(req);
+    if signed.is_none() {
+        fail(Check::Header);
     }
+    // A second secret's match counts only where the hook names one: a
+    // stand-in's slot never verifies, whatever key made it.
+    let (keys, tolerance, ceiling, second) = match hook {
+        Some(h) => (&h.keys, h.tolerance_ms, h.ceiling, h.secrets == 2),
+        None => {
+            fail(Check::Hook);
+            (stand_in, TOLERANCE_MS, CEILING, false)
+        }
+    };
+    let scheme = signed.as_ref().map(|s| s.scheme);
+    if let (Some(h), Some(s)) = (hook, scheme) {
+        if h.scheme != s {
+            fail(Check::Scheme);
+        }
+    }
+    let t = signed.as_ref().map_or(&b""[..], |s| s.t);
+    let at = seconds(t).and_then(|s| s.checked_mul(1000));
+    if scheme.is_some_and(Scheme::timed)
+        && !at.is_some_and(|at| now_ms.abs_diff(at) <= tolerance as u64)
+    {
+        fail(Check::Stale);
+    }
+    // The hook's own ceiling decides the failure; the HMACs cover the
+    // body up to the widest, so a hook whose ceiling was raised or
+    // lowered takes the time any other name takes.
+    if req.body.len() > ceiling {
+        fail(Check::Size);
+    }
+    let body = &req.body[..req.body.len().min(widest)];
+    let id = signed.as_ref().map_or(&b""[..], |s| s.id);
+    let parts: [&[u8]; 5] = match scheme {
+        Some(Scheme::Stripe) => [t, b".", body, b"", b""],
+        Some(Scheme::Standard) => [id, b".", t, b".", body],
+        Some(Scheme::Github) | None => [body, b"", b"", b"", b""],
+    };
+    let macs = [keys[0].mac(&parts), keys[1].mac(&parts)];
+    #[cfg(test)]
+    tests::counted(body.len());
+    // Every signature against both, no `||` and no early way out: the
+    // work is the same whichever matched, or none.
+    let mut matched = false;
+    if let Some(s) = &signed {
+        for sig in &s.sigs[..s.n] {
+            matched |= compared(&macs[0], sig) | (compared(&macs[1], sig) & second);
+        }
+    }
+    if !matched {
+        fail(Check::Signature);
+    }
+    match (failed, hook) {
+        (None, Some(hook)) => Ok(at.filter(|_| hook.scheme.timed())),
+        (Some(c), _) => Err(c),
+        (None, None) => Err(Check::Hook),
+    }
+}
+
+/// Waits for a standby to hold write `upto`, where the server feeds one a
+/// promotion could take it from -- a file's server's replica, a tenant's
+/// pair standby or `--replicas` copy, never an archiver nor a read replica,
+/// which mark their streams -- `false` past `SENT_WAIT`.
+fn standby_holds(feed: Option<&Feed>, upto: u64) -> bool {
+    feed.is_none_or(|f| f.standby_sent(upto, SENT_WAIT))
+}
+
+/// A key of the process's own for a secret that is not there, made from
+/// the system's randomness -- never the clock's, which `random_bytes` falls
+/// back to: no signature anyone sent can match it. Refused where the
+/// randomness cannot be read, and the server with it.
+pub(crate) fn stand_in() -> std::result::Result<HmacKey, String> {
+    let seed = crate::crypto::system_random(32).ok_or(
+        "the hooks' stand-in key needs the system's randomness (/dev/urandom), which could not \
+         be read",
+    )?;
+    Ok(HmacKey::new(&seed))
 }
 
 /// A MAC against a signature sent, in constant time: every comparison
@@ -398,7 +424,7 @@ fn compared(mac: &[u8; 32], sig: &[u8; 32]) -> bool {
 
 /// The hook a hooks file's line `words` makes, beside the `hooks` read
 /// before it, or what is wrong with it.
-fn hook_of(
+pub(crate) fn hook_of(
     words: &[&str],
     hooks: &[Hook],
     secret: &impl Fn(&str) -> std::io::Result<Vec<u8>>,
@@ -487,13 +513,13 @@ fn hook_of(
 /// A secret file's bytes as its scheme reads them: Stripe's `whsec_` text
 /// and GitHub's chosen secret as written, a `standard` one's base64 after
 /// `whsec_` decoded. Its file's last line end is no part of it.
-fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
+pub(crate) fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
     let mut s = raw;
     while let [rest @ .., b'\n' | b'\r'] = s {
         s = rest;
     }
     if s.is_empty() {
-        return Err("a secret file is empty: an empty secret verifies any signature");
+        return Err("a secret is empty: an empty secret verifies any signature");
     }
     if scheme != Scheme::Standard {
         return Ok(s.to_vec());
@@ -502,7 +528,9 @@ fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
         .and_then(|t| t.strip_prefix("whsec_"))
         .and_then(b64_decode)
         .filter(|k| !k.is_empty());
-    key.ok_or("a secret file holds no Standard Webhooks secret: `whsec_` and base64, as its sender shows it")
+    key.ok_or(
+        "a secret is no Standard Webhooks secret: `whsec_` and base64, as its sender shows it",
+    )
 }
 
 /// A duration of a hooks file: a number and `s`, `m`, `h` or `d`.
@@ -677,7 +705,7 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -717,9 +745,47 @@ pub(crate) fn handle(
     let hook = v.hook;
     // A verified event of this hook from this address starts its count
     // again, and nothing else does: never a token's (`audit::verified`).
-    cleared(crate::audit::client_ip(), &hook.name);
+    cleared(crate::audit::client_ip(), None, &hook.name);
     let delivery = req.header("x-github-delivery");
-    let taken = take(db, cfg, hooks, hook, &v, req);
+    let taken = take(db, cfg, hooks.feed.get().map(|f| &**f), hook, v.at, req);
+    noted(hook, delivery, taken)
+}
+
+/// A tenant's event, `POST /t/<tenant>/_hooks/<name>` on a node: verified
+/// in `route_tenant` against the tenant's secrets before the tenant was
+/// looked up ([`crate::tenant_hooks`]), and taken in its database as a
+/// file's server takes one -- inside the tenant's gate, quota and lease,
+/// as every request to it is -- its 2xx waiting for a standby of the
+/// tenant's to hold it: its pair's or its `--replicas` copy, never a read
+/// replica nor the node's archive, which mark their streams. Out of line
+/// and cold, as [`handle`] is.
+#[cold]
+#[inline(never)]
+pub(crate) fn handle_tenant(
+    t: &crate::tenants::Tenant,
+    cfg: &Config,
+    v: &crate::tenant_hooks::Verified,
+    req: &Request,
+) -> Response {
+    let hook = v.hook();
+    cleared(crate::audit::client_ip(), Some(t.name()), &hook.name);
+    let delivery = req.header("x-github-delivery");
+    let feed = t.repl.as_ref().and_then(|r| r.feed());
+    let mut taken = take(&t.db, cfg, feed.map(|f| &**f), hook, v.at_ms, req);
+    // A frozen tenant's, or one whose lease is out, comes back: told 503
+    // by the tenant's handling, a state's refusal and no event's.
+    if cfg.come_back && taken.resp.status == 403 {
+        taken.outcome = Outcome::Deferred;
+    }
+    // Its lease asked again as its answer is ready, as every write's is: a
+    // block that landed past the lease's lapse may be lost to a failover
+    // that took the tenant meanwhile, and is told so, `outcome: unknown`.
+    let before = taken.resp.status;
+    taken.resp = crate::answered_under_lease(t, req, taken.resp);
+    if taken.resp.status == 500 && before != 500 {
+        taken.outcome = Outcome::Unknown;
+        taken.why = Some("landed, and the tenant's lease lapsed before its answer".into());
+    }
     noted(hook, delivery, taken)
 }
 
@@ -729,18 +795,65 @@ pub(crate) fn handle(
 /// refusal is counted, logged and audited by it alone: a path is up to the
 /// head's 64 KiB, and a forger's, kept or written, filled memory and the
 /// log by the megabyte.
-pub(crate) fn named(req: &Request) -> Option<&str> {
-    (req.path.strip_prefix("/_hooks/")).filter(|n| fennec_core::named::valid_name(n))
+pub(crate) fn named(req: &Request) -> Option<Named<'_>> {
+    if let Some(hook) = req.path.strip_prefix("/_hooks/") {
+        return fennec_core::named::valid_name(hook).then_some(Named { tenant: None, hook });
+    }
+    // A tenant's, as `route_tenant` reads it before its prefix is cut --
+    // and as a router reads the path it forwards.
+    let (tenant, rest) = req.path.strip_prefix("/t/")?.split_once('/')?;
+    let hook = rest.strip_prefix("_hooks/")?;
+    let ok = crate::tenants::check_name(tenant).is_ok() && fennec_core::named::valid_name(hook);
+    ok.then_some(Named {
+        tenant: Some(tenant),
+        hook,
+    })
+}
+
+/// The hook a path names: its name, and on a tenant node its tenant's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Named<'r> {
+    pub tenant: Option<&'r str>,
+    pub hook: &'r str,
+}
+
+impl std::fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.tenant {
+            Some(t) => write!(f, "tenant `{t}`'s hook `{}`", self.hook),
+            None => write!(f, "hook `{}`", self.hook),
+        }
+    }
+}
+
+/// Whether a request `target`, as sent -- percent-encoded, a query string
+/// after it -- names a tenant's hook, `/t/<tenant>/_hooks/...`, decoded and
+/// cut at its slashes as a node routes it: an event its node takes once by
+/// its key, which a router and the global entry send again where its
+/// connection ended before its answer (`fennec-shard`'s `replayable`).
+pub fn keyed_path(target: &str) -> bool {
+    let path = target.split('?').next().unwrap_or("");
+    let path = crate::http::percent_decode(path);
+    let mut segs = path.split('/').filter(|s| !s.is_empty());
+    segs.next() == Some("t") && segs.next().is_some() && segs.next() == Some("_hooks")
+}
+
+/// Whether `req` is an event sent to a tenant's hook, `POST
+/// /t/<tenant>/_hooks/...`, whatever it names: what a router forwarding a
+/// node's 401 to it waits out by the hooks' count rather than the tokens'
+/// (`audit::http`). Asked of a 401 alone.
+pub(crate) fn to_tenant(req: &Request) -> bool {
+    req.method == Method::Post && matches!(req.segments().as_slice(), ["t", _, "_hooks", ..])
 }
 
 /// The one 401, its check named where an operator reads it alone.
 #[cold]
-fn unverified(req: &Request, check: Check) -> Response {
+pub(crate) fn unverified(req: &Request, check: Check) -> Response {
     UNVERIFIED_COUNT[check as usize].fetch_add(1, Ordering::Relaxed);
     crate::audit::hook_refused(check.reason());
     crate::log!(
-        "hook `{}`: an event from {} did not verify ({}): answered 401",
-        named(req).unwrap_or("?"),
+        "{}: an event from {} did not verify ({}): answered 401",
+        named(req).map_or_else(|| "hook `?`".to_string(), |n| n.to_string()),
         crate::audit::client_ip().map_or_else(|| "?".to_string(), |ip| ip.to_string()),
         check.name()
     );
@@ -836,9 +949,9 @@ fn noted(hook: &Hook, delivery: Option<&str>, t: Taken) -> Response {
 fn take(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
-    hooks: &Hooks,
+    feed: Option<&Feed>,
     hook: &Hook,
-    v: &Verified,
+    at: Option<i64>,
     req: &Request,
 ) -> Taken {
     let refused = |resp: Response, why: &str| Taken {
@@ -917,14 +1030,14 @@ fn take(
         key: &key,
         body: &body,
         digest: digest(&req.body),
-        at: v.at,
+        at,
         event: match hook.scheme {
             Scheme::Github => req.header("x-github-event").map(str::trim),
             _ => None,
         },
         keep: hook.keep_ms,
     };
-    let mut t = taken(db, cfg, hooks, &e);
+    let mut t = taken(db, cfg, feed, &e);
     t.key = Some(key);
     t
 }
@@ -932,7 +1045,7 @@ fn take(
 /// The event `e`, its key looked up and its statements judged under a
 /// short read lock, then taken under the write lock and answered once
 /// durable -- or answered from its key once the first taking's block is.
-fn taken(db: &Arc<RwLock<Database>>, cfg: &Config, hooks: &Hooks, e: &Event) -> Taken {
+fn taken(db: &Arc<RwLock<Database>>, cfg: &Config, feed: Option<&Feed>, e: &Event) -> Taken {
     let refusal = |e: &Error, hook: &str| Taken {
         resp: told(e, hook),
         outcome: Outcome::of(crate::api::status_of(e)),
@@ -964,7 +1077,7 @@ fn taken(db: &Arc<RwLock<Database>>, cfg: &Config, hooks: &Hooks, e: &Event) -> 
         }
         match g.event_kept(e) {
             Err(err) => return refusal(&err, e.hook),
-            Ok(Some(k)) => return replayed(db, hooks, g, e, k),
+            Ok(Some(k)) => return replayed(db, feed, g, e, k),
             Ok(None) => {}
         }
         match g.judge_event(e) {
@@ -1023,7 +1136,7 @@ fn taken(db: &Arc<RwLock<Database>>, cfg: &Config, hooks: &Hooks, e: &Event) -> 
             let durability = guard.flush();
             let at = crate::At::of(&guard);
             drop(guard);
-            return held_answer(db, hooks, e, k, durability, at);
+            return held_answer(db, feed, e, k, durability, at);
         }
         Ok(Took::Ran(n)) => n,
     };
@@ -1033,7 +1146,7 @@ fn taken(db: &Arc<RwLock<Database>>, cfg: &Config, hooks: &Hooks, e: &Event) -> 
     let durability = guard.flush();
     drop(guard);
     let resp = Response::json(200, answer(e.key, n));
-    match durable(db, hooks, durability, at.seq) {
+    match durable(db, feed, durability, at.seq) {
         Err(resp) => Taken {
             outcome: Outcome::of(resp.status),
             resp,
@@ -1078,7 +1191,7 @@ fn answer(key: &str, taken: u32) -> String {
 /// disk kept the first taking, no one here knows.
 fn replayed(
     db: &Arc<RwLock<Database>>,
-    hooks: &Hooks,
+    feed: Option<&Feed>,
     g: std::sync::RwLockReadGuard<'_, Database>,
     e: &Event,
     k: fennec_core::engine::HeldKey,
@@ -1101,7 +1214,7 @@ fn replayed(
             Err(err)
         }
     };
-    held_answer(db, hooks, e, k, durability, at)
+    held_answer(db, feed, e, k, durability, at)
 }
 
 /// A held key's answer -- `Idempotent-Replayed`, `Fennec-Seq` where the
@@ -1109,7 +1222,7 @@ fn replayed(
 /// the block that took the key ([`HeldKey::seq`](fennec_core::engine::HeldKey)).
 fn held_answer(
     db: &Arc<RwLock<Database>>,
-    hooks: &Hooks,
+    feed: Option<&Feed>,
     e: &Event,
     k: fennec_core::engine::HeldKey,
     durability: fennec_core::error::Result<Option<fennec_core::engine::Durability>>,
@@ -1121,7 +1234,7 @@ fn held_answer(
     };
     // The block that took the key, never the database's latest: a standby
     // behind on later writes holds this event already.
-    match durable(db, hooks, durability, k.seq) {
+    match durable(db, feed, durability, k.seq) {
         Err(resp) => Taken {
             outcome: Outcome::of(resp.status),
             resp,
@@ -1145,13 +1258,13 @@ fn held_answer(
 /// 2xx's place otherwise, a failed fsync's 500 or a standby's 503.
 fn durable(
     db: &Arc<RwLock<Database>>,
-    hooks: &Hooks,
+    feed: Option<&Feed>,
     durability: fennec_core::error::Result<Option<fennec_core::engine::Durability>>,
     upto: u64,
 ) -> std::result::Result<(), Response> {
     let durability = durability.map_err(|e| crate::error_response(&e))?;
     crate::await_durable(db, durability).map_err(|e| crate::error_response(&e))?;
-    if !hooks.standby_holds(upto) {
+    if !standby_holds(feed, upto) {
         return Err(Response::retry_after(
             503,
             "the event is taken and on disk, and no standby holds it yet: send it again, and \
@@ -1296,11 +1409,17 @@ fn fails() -> &'static Mutex<Fails> {
 
 /// A count's key: the address, canonical as `audit`'s are, and the name's
 /// digest -- odd, so no name's is the count of the paths naming none, 0.
-fn keyed(ip: IpAddr, name: Option<&str>) -> (IpAddr, u64) {
-    (
-        ip.to_canonical(),
-        name.map_or(0, |n| digest(n.as_bytes()) | 1),
-    )
+fn keyed(ip: IpAddr, name: Option<Named>) -> (IpAddr, u64) {
+    let digested = |n: Named| {
+        let mut d = digest(n.tenant.unwrap_or("").as_bytes());
+        // A unit separator between, which neither name holds: no tenant
+        // and hook split elsewhere digest alike.
+        for &b in [0x1f].iter().chain(n.hook.as_bytes()) {
+            d = (d ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        d | 1
+    };
+    (ip.to_canonical(), name.map_or(0, digested))
 }
 
 /// Entries with a refusal counted: a verified event asks the table only
@@ -1313,7 +1432,7 @@ const WINDOW: Duration = Duration::from_secs(60);
 
 /// How long a refusal to `ip` of an event naming hook `name` ([`named`])
 /// waits, counted.
-pub(crate) fn failed(ip: Option<IpAddr>, name: Option<&str>) -> Duration {
+pub(crate) fn failed(ip: Option<IpAddr>, name: Option<Named>) -> Duration {
     let base = crate::audit::delay_ms();
     let Some(ip) = ip.filter(|_| base > 0) else {
         return Duration::ZERO;
@@ -1325,19 +1444,24 @@ pub(crate) fn failed(ip: Option<IpAddr>, name: Option<&str>) -> Duration {
 }
 
 /// A verified event of hook `name` from `ip`: its count starts again.
-fn cleared(ip: Option<IpAddr>, name: &str) {
+fn cleared(ip: Option<IpAddr>, tenant: Option<&str>, hook: &str) {
     if let Some(ip) = ip.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
         let mut f = fails().lock().unwrap_or_else(|e| e.into_inner());
-        f.counts.remove(&keyed(ip, Some(name)));
+        f.counts.remove(&keyed(ip, Some(Named { tenant, hook })));
         FAILING.store(f.counts.len() as u64, Ordering::Relaxed);
     }
 }
 
 // ----------------------------------------------------------------- watching
 
-/// A hooks file was read: `/_metrics` writes the hooks' families. A server
-/// with none scrapes the bytes it did.
+/// A hooks file was read, or a node holds a tenant's set: `/_metrics`
+/// writes the hooks' families. A server with none scrapes the bytes it did.
 static SERVING: AtomicBool = AtomicBool::new(false);
+
+/// A node's tenant holds a set: the hooks' families are written from now.
+pub(crate) fn serving() {
+    SERVING.store(true, Ordering::Relaxed);
+}
 static UNVERIFIED_COUNT: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 static EVENTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 
@@ -1454,6 +1578,11 @@ mod tests {
 
     fn compares() -> usize {
         COMPARED.with(|c| c.replace(0))
+    }
+
+    /// A file's server's hook `hook`, as a path names it.
+    fn hook_named(hook: &str) -> Option<Named<'_>> {
+        Some(Named { tenant: None, hook })
     }
 
     const STRIPE_SECRET: &str = "whsec_test_secret";
@@ -1942,16 +2071,19 @@ mod tests {
         };
         let plain = at("/_hooks/stripe", "/_hooks/stripe");
         let encoded = at("/_hooks/%73tripe", "/_hooks/stripe");
-        assert_eq!(named(&plain), Some("stripe"));
-        assert_eq!(named(&encoded), Some("stripe"));
+        assert_eq!(named(&plain).map(|n| n.hook), Some("stripe"));
+        assert_eq!(named(&encoded).map(|n| n.hook), Some("stripe"));
         let mut f = Fails::default();
         let now = Instant::now();
         assert_eq!(f.count(keyed(ip, named(&plain)), now), Some(1));
         assert_eq!(f.count(keyed(ip, named(&encoded)), now), Some(2));
         let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
         assert_eq!(f.count(keyed(mapped, named(&plain)), now), Some(3));
-        assert_ne!(keyed(ip, Some("nosuch")), keyed(ip, Some("stripe")));
-        assert_ne!(keyed(ip, Some("stripe")).1, keyed(ip, None).1);
+        assert_ne!(
+            keyed(ip, hook_named("nosuch")),
+            keyed(ip, hook_named("stripe"))
+        );
+        assert_ne!(keyed(ip, hook_named("stripe")).1, keyed(ip, None).1);
 
         let long = "a".repeat(60_000);
         for i in 0..1_000 {
@@ -1981,22 +2113,22 @@ mod tests {
         let other: IpAddr = "198.51.100.7".parse().unwrap();
         let mut f = Fails::default();
         let t0 = Instant::now();
-        assert_eq!(f.count(keyed(other, Some("stripe")), t0), Some(1));
+        assert_eq!(f.count(keyed(other, hook_named("stripe")), t0), Some(1));
         let later = t0 + Duration::from_secs(30);
         for i in 0..KEPT - 1 {
-            f.count(keyed(ip, Some(&format!("h{i}"))), later);
+            f.count(keyed(ip, hook_named(&format!("h{i}"))), later);
         }
         assert_eq!(f.counts.len(), KEPT);
-        assert_eq!(f.count(keyed(ip, Some("more")), later), None);
+        assert_eq!(f.count(keyed(ip, hook_named("more")), later), None);
         assert_eq!(f.counts.len(), KEPT, "nothing cleared");
-        assert_eq!(f.count(keyed(other, Some("stripe")), later), Some(2));
+        assert_eq!(f.count(keyed(other, hook_named("stripe")), later), Some(2));
         // A sweep finding every count within its minute makes no room; once
         // they are past it, they are swept and the name counted.
         let early = t0 + WINDOW + Duration::from_secs(10);
-        assert_eq!(f.count(keyed(ip, Some("more")), early), None);
+        assert_eq!(f.count(keyed(ip, hook_named("more")), early), None);
         assert_eq!(f.counts.len(), KEPT);
         let swept = later + WINDOW + Duration::from_secs(1);
-        assert_eq!(f.count(keyed(ip, Some("more")), swept), Some(1));
+        assert_eq!(f.count(keyed(ip, hook_named("more")), swept), Some(1));
         assert_eq!(f.counts.len(), 1);
     }
 

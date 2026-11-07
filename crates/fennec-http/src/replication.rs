@@ -202,10 +202,11 @@ struct Sender {
     /// it held each tenant's durable writes for its `SENT_WAIT` whenever it
     /// was busy with any one.
     held: Option<Arc<AtomicBool>>,
-    /// A stream a promotion could take a write from: a file's replica,
-    /// never an archiver, which marks its request (`archive=1`) -- what a
-    /// hook's answer waits for ([`Feed::standby_sent`]). A tenant node's
-    /// stream of every tenant is none until F4's slice 4.
+    /// A stream a promotion could take a write from: a file's replica, a
+    /// tenant's pair standby or `--replicas` copy, never an archiver nor a
+    /// read replica, which mark their requests (`archive=1`, `reader=1`) --
+    /// what a hook's answer waits for ([`Feed::standby_sent`]). A tenant
+    /// node's stream of every tenant (`node_stream`) is none.
     standby: bool,
 }
 
@@ -1303,9 +1304,10 @@ fn stream(
         .and_then(|v| u64::from_str_radix(v, 16).ok())
         .unwrap_or(0);
     let force = param("image") == Some("1");
-    // An archiver says so: no promotion takes a write from its stream, so
-    // no hook's answer waits for it ([`Feed::standby_sent`]).
-    let standby = param("archive") != Some("1");
+    // An archiver says so, and a read replica: no promotion takes a write
+    // from either's stream, so no hook's answer waits for it
+    // ([`Feed::standby_sent`]).
+    let standby = param("archive") != Some("1") && param("reader") != Some("1");
 
     // Where the replica stands is judged against the database and the feed
     // at one moment, under the read lock: a write in between would leave
@@ -1545,7 +1547,7 @@ impl Upstream {
     /// Opens the stream for a database `since` changes in on `history`;
     /// `image` asks for one whatever the positions say.
     pub fn open(&self, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
-        self.request(connect(&self.addr)?, since, history, image)
+        self.request(connect(&self.addr)?, since, history, image, false)
     }
 
     /// [`Upstream::open`] over `s`, a connection to the primary made
@@ -1556,15 +1558,20 @@ impl Upstream {
         since: u64,
         history: u64,
         image: bool,
+        reading: bool,
     ) -> io::Result<Receiver> {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
+        // An archiver's stream and a read replica's say what they are: no
+        // promotion takes a write from either, so no hook's answer waits
+        // for them ([`Feed::standby_sent`]).
         let request = format!(
-            "GET {}/_replication?since={since}&history={history:016x}{}{} HTTP/1.1\r\n\
+            "GET {}/_replication?since={since}&history={history:016x}{}{}{} HTTP/1.1\r\n\
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
             self.base,
             if image { "&image=1" } else { "" },
             if self.archiving { "&archive=1" } else { "" },
+            if reading { "&reader=1" } else { "" },
             crate::dial::authority(&self.addr),
             self.token
         );
@@ -1678,6 +1685,10 @@ pub struct Follower {
     /// Set once a primary of another lineage was refused: the follower
     /// stops, the copy holding what it held, answering no marked read.
     refused: AtomicBool,
+    /// A read replica's copy ([`Follower::read_replica`]): its stream says
+    /// so, and no hook's answer waits for it, since no failover promotes
+    /// one.
+    reading: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -1712,7 +1723,15 @@ impl Follower {
             hello: Mutex::new(None),
             expect: Mutex::new(None),
             refused: AtomicBool::new(false),
+            reading: AtomicBool::new(false),
         }))
+    }
+
+    /// Marks this copy a read replica's, or not, from its next stream on:
+    /// a primary waits for no read replica to hold a hook's event before
+    /// its 2xx ([`Feed::standby_sent`]), a failover never promoting one.
+    pub fn read_replica(&self, on: bool) {
+        self.reading.store(on, Ordering::Relaxed);
     }
 
     /// Has `f` called each time the primary says hello and the replica
@@ -1814,7 +1833,10 @@ impl Follower {
         if self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let mut stream = self.upstream.request(s, since, history, *force_image)?;
+        let reading = self.reading.load(Ordering::Relaxed);
+        let mut stream = self
+            .upstream
+            .request(s, since, history, *force_image, reading)?;
         let Message::Hello {
             image,
             seq,

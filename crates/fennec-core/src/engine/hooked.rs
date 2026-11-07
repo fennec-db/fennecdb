@@ -14,12 +14,12 @@
 //! every `@ttl` row is. A key held answers the event as its first taking
 //! did and runs nothing, a second body under it too (decision 7).
 //!
-//! A file's server takes events (`fennec_http::hooks`): its database lets
-//! a hook be defined ([`Database::allow_hooks`]), its route judges an event
-//! before the write lock ([`Database::judge_event`]) and takes it under it
-//! ([`Database::take_judged`]). Every other way in refuses a definition --
-//! a tenant node's until F4's slice 4, the shell, the native library -- and
-//! the browser module and the native library keep the record and take no
+//! A file's server and a tenant node take events (`fennec_http::hooks`):
+//! its database lets a hook be defined ([`Database::allow_hooks`]), its
+//! route judges an event before the write lock ([`Database::judge_event`])
+//! and takes it under it ([`Database::take_judged`]). Every other way in
+//! refuses a definition -- the shell, the native library -- and the
+//! browser module and the native library keep the record and take no
 //! event. The server's token calls one with an event as its argument
 //! (`call <name> $1`, [`Database::callee`]), its condition asked and its
 //! parameters read as a delivery's, no key kept.
@@ -145,12 +145,12 @@ impl Judged {
 }
 
 impl Database {
-    /// Lets a webhook consumer be defined: a file's server, whose route
-    /// takes its hooks' events (`fennec_http::hooks`), and a test. Every
-    /// other way in refuses one ([`crate::named::HOOKED_UNTAKEN`]) -- a
-    /// tenant node until F4's slice 4 brings its secrets and routes, the
-    /// shell, the native library -- since one stored where no sender
-    /// reaches it would be a hook taking nothing, without a word.
+    /// Lets a webhook consumer be defined: a file's server and a tenant
+    /// node, whose routes take its hooks' events (`fennec_http::hooks`),
+    /// and a test. Every other way in refuses one
+    /// ([`crate::named::HOOKED_UNTAKEN`]) -- the shell, the native library
+    /// -- since one stored where no sender reaches it would be a hook
+    /// taking nothing, without a word.
     pub fn allow_hooks(&mut self) {
         self.hooking = true;
     }

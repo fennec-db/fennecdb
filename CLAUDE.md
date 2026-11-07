@@ -368,11 +368,12 @@ Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/
 
 ### `crates/fennec-shard/CLAUDE.md`
 
-Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, leases and replication (`tenants.rs`, `lease.rs`, `replication.rs`) and the entry Worker (`integrations/cloudflare/entry/`) too.
+Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, leases, replication and tenants' hook secrets (`tenants.rs`, `lease.rs`, `replication.rs`, `tenant_hooks.rs`) and the entry Worker (`integrations/cloudflare/entry/`) too.
 
 *Tenants and leases*
 - Scaling out is by tenant, one file each.
 - A failed attach is tried again, a file left taken back by identity.
+- A tenant's hook secrets are its file's, relayed by the router and kept by none of its records.
 - A tenant node runs its tenants' schedules from one thread, by name, a run no use of a tenant.
 
 *Regions and the global entry*

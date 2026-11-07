@@ -4111,8 +4111,9 @@ pub struct Database {
     /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
-    /// Whether a webhook consumer may be defined: a file's server's, whose
-    /// route takes its events, and a test's ([`Self::allow_hooks`]), so no
+    /// Whether a webhook consumer may be defined: a file's server's or a
+    /// tenant node's, whose routes take its events, and a test's
+    /// ([`Self::allow_hooks`]), so no
     /// hook is stored that no sender reaches.
     #[cfg(feature = "statements")]
     hooking: bool,

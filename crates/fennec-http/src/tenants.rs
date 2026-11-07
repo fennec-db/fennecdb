@@ -138,6 +138,9 @@ pub struct Tenant {
     /// identity to it ([`crate::instance`]): the file its identity names
     /// while this process holds it. Changed under the slot alone.
     bound: Mutex<Option<instance::Binding>>,
+    /// The compacts of its file its hook secrets were last carried past
+    /// ([`Tenants::rebind_hooks`]).
+    hooks_compactions: AtomicU64,
 }
 
 impl Tenant {
@@ -175,6 +178,10 @@ pub struct Expected {
 /// The line `.follows` takes once the copy heard from the node it was
 /// told to follow ([`mark_heard`]).
 const HEARD: &str = "heard";
+
+/// The line `.follows` takes for a read replica's copy
+/// ([`Tenants::reads_only`]).
+const READER: &str = "reader";
 
 /// Writes a tenant's `.follows` whole or not at all: beside, synced, then
 /// renamed, and the rename made durable -- until its directory is synced a
@@ -488,6 +495,10 @@ pub struct Tenants {
     /// with none -- `--http-read-only` -- takes no scheduled definition,
     /// and says how many each tenant holds unrun as it opens.
     scheduler: std::sync::OnceLock<Arc<crate::schedule::Node>>,
+    /// Each tenant's webhook secrets, its `<tenant>.hooks` read as the
+    /// node starts and as each is set: an event is verified against them
+    /// before its tenant is looked up ([`crate::tenant_hooks`]).
+    hooks: crate::tenant_hooks::Store,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -561,6 +572,7 @@ impl Tenants {
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Tenants> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
+        let hooks = crate::tenant_hooks::Store::open(&dir)?;
         Ok(Tenants {
             dir,
             slots: Mutex::new(HashMap::new()),
@@ -582,7 +594,13 @@ impl Tenants {
             departed: Mutex::new(Departed::default()),
             me: std::sync::OnceLock::new(),
             scheduler: std::sync::OnceLock::new(),
+            hooks,
         })
+    }
+
+    /// The tenants' webhook secrets ([`crate::tenant_hooks`]).
+    pub fn hooks(&self) -> &crate::tenant_hooks::Store {
+        &self.hooks
     }
 
     /// Has `node` run the tenants' scheduled statements: set by
@@ -863,6 +881,14 @@ impl Tenants {
             .and_then(|l| crate::replication::parse_lineage(l.trim()))
     }
 
+    /// Whether a tenant's copy is a read replica's, which `.follows` keeps
+    /// on a line of its own (`reader`): its stream says so, and no hook's
+    /// answer at its primary waits for it ([`Follower::read_replica`]).
+    fn reads_only(&self, name: &str) -> bool {
+        std::fs::read_to_string(self.follows_path(name))
+            .is_ok_and(|text| text.lines().any(|l| l.trim() == READER))
+    }
+
     /// Whether a tenant's copy has heard from the node it follows since it
     /// was last told to follow it (`.follows`' `heard` line, [`mark_heard`]):
     /// `None` where it was never told, a standby's copy made with its node
@@ -894,11 +920,16 @@ impl Tenants {
         name: &str,
         url: Option<&str>,
         lineage: Option<u32>,
+        reader: bool,
     ) -> std::io::Result<()> {
         let mut text = url.unwrap_or("").to_string();
         if let Some(l) = lineage {
             text.push_str("\nlineage ");
             text.push_str(&crate::replication::lineage_text(l));
+        }
+        if reader {
+            text.push('\n');
+            text.push_str(READER);
         }
         write_follows(&self.dir, name, &text)
     }
@@ -1216,7 +1247,7 @@ impl Tenants {
         lineage: Option<u32>,
     ) -> std::result::Result<(), Refused> {
         // Naming no identity, it judges none: never `Kept::Other`.
-        match self.follow_as(name, from, lineage, None, None) {
+        match self.follow_as(name, from, lineage, None, None, false) {
             Err(Kept::Refused(r)) => Err(r),
             _ => Ok(()),
         }
@@ -1243,6 +1274,9 @@ impl Tenants {
     /// primary: an identity goes with every change of what the file is (a
     /// follow puts the old one away, a promotion voids it), so one a router
     /// recorded never names a live primary another placed since.
+    ///
+    /// `reader` marks the copy a read replica's, kept in `.follows`: its
+    /// stream says so, and no hook's answer at its primary waits for it.
     pub fn follow_as(
         &self,
         name: &str,
@@ -1250,6 +1284,7 @@ impl Tenants {
         lineage: Option<u32>,
         proposed: Option<u64>,
         named: Option<&[u64]>,
+        reader: bool,
     ) -> std::result::Result<Option<u64>, Kept> {
         check_name(name)?;
         let Some(repl) = &self.repl else {
@@ -1280,6 +1315,7 @@ impl Tenants {
             _ => {}
         }
         let wanted = from.map(str::to_string).or_else(|| repl.upstream.clone());
+        let record = || self.record_following(name, from, lineage, reader);
         let followed = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
@@ -1309,7 +1345,7 @@ impl Tenants {
                     if let Some(f) = follower {
                         f.halt();
                     }
-                    let recorded = self.record_following(name, from, lineage).map_err(|e| {
+                    let recorded = record().map_err(|e| {
                         Refused(
                             500,
                             format!("could not record the node tenant `{name}` follows: {e}"),
@@ -1318,6 +1354,7 @@ impl Tenants {
                     if let Some(f) = follower {
                         if recorded.is_ok() {
                             f.expect_lineage(lineage);
+                            f.read_replica(reader);
                             t.ready.store(false, Ordering::SeqCst);
                         }
                         f.start(format!("fennec-replica-{name}")).map_err(|e| {
@@ -1341,7 +1378,7 @@ impl Tenants {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")).into());
             }
             self.put_away(name)?;
-            self.record_following(name, from, lineage).map_err(|e| {
+            record().map_err(|e| {
                 Refused(
                     500,
                     format!("could not record the node tenant `{name}` follows: {e}"),
@@ -1470,11 +1507,23 @@ impl Tenants {
     /// Refused (500) where it could not be put away: an identity from
     /// before, kept under the follow's lost stamp, held again once a
     /// promotion removed `.follows`, a live tenant a reclaim would take.
+    ///
+    /// Its hook secrets go with it, synced (`tenant_hooks::Store::put_away`):
+    /// a later file at the place -- another tenant of the name, a copy
+    /// following another primary -- is armed by no set this one held.
     fn put_away(&self, name: &str) -> std::result::Result<(), Refused> {
         instance::put_away(&self.dir, name).map_err(|e| {
             Refused(
                 500,
                 format!("tenant `{name}`'s identity could not be put away before it changes: {e}"),
+            )
+        })?;
+        self.hooks.put_away(name).map_err(|e| {
+            Refused(
+                500,
+                format!(
+                    "tenant `{name}`'s hook secrets could not be put away before it changes: {e}"
+                ),
             )
         })
     }
@@ -1596,6 +1645,11 @@ impl Tenants {
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
+        // Its events are taken at `/t/<tenant>/_hooks/<name>`, verified by
+        // the secrets the node keeps beside it: a statement taking a hook
+        // the tenant holds none for is said as it opens.
+        db.allow_hooks();
+        self.hooks.log_unarmed(name, &db);
         // Its bytes and rows are asked of each block as it lands, where
         // they are bounded: a tenant with neither has nothing asked.
         let held = QuotaHeld::new(self.quota_set(name)?.over(&self.quota));
@@ -1677,6 +1731,11 @@ impl Tenants {
                     // forgot a hello its reads had been answered after.
                     Said::Taken => {
                         mark_heard(&dir, &who);
+                        // Its image in place: the set the router sent it
+                        // bound to the file the image made.
+                        if let Some(tenants) = me.as_ref().and_then(|m| m.upgrade()) {
+                            tenants.hooks.rebind(&who);
+                        }
                         seen.store(true, Ordering::SeqCst);
                     }
                     Said::Refused { expected } => {
@@ -1685,6 +1744,7 @@ impl Tenants {
                     }
                 }));
                 f.expect_lineage(self.lineage_followed(name));
+                f.read_replica(self.reads_only(name));
                 f.start(format!("fennec-replica-{name}")).map_err(|e| {
                     Refused(
                         500,
@@ -1720,7 +1780,118 @@ impl Tenants {
             ready,
             opened,
             bound: Mutex::new(bound),
+            hooks_compactions: AtomicU64::new(0),
         }))
+    }
+
+    /// Carries each open tenant's hook secrets to its file as a compact of
+    /// this process's left it -- beside the queries, or a `compact` -- at
+    /// the node's tick ([`crate::tenant_hooks`]). The close carries them
+    /// too, but a crash between a compact's rename and the close left the
+    /// set naming the file before, which the next start puts away as
+    /// another file's: the tenant's hooks answered 401 until set again,
+    /// and a tenant busy enough to stay open runs for hours between the
+    /// two. Asked by the compacts' count, so a tick costs a tenant holding
+    /// a set one look under a read lock it does not wait for, a `stat`
+    /// only where its file was compacted since; a node holding no set asks
+    /// one map.
+    pub fn rebind_hooks(&self) {
+        if !self.hooks.any() {
+            return;
+        }
+        for t in self.open_tenants() {
+            if !self.hooks.holds(&t.name) {
+                continue;
+            }
+            // A writer holding it: the next tick looks.
+            let Ok(g) = t.db.try_read() else { continue };
+            let n = g.compactions();
+            drop(g);
+            if t.hooks_compactions.swap(n, Ordering::Relaxed) != n {
+                self.hooks.rebind(&t.name);
+            }
+        }
+    }
+
+    /// Runs `f` on tenant `name`'s hook secrets under its slot, where its
+    /// file is: a set is bound to the file it is written for, and a delete,
+    /// a create, an install or a follow puts it away under the same slot,
+    /// so none is written beside a file on its way out.
+    ///
+    /// Through a `dyn` closure, so the slot's code is one copy for the five
+    /// routes: generic, each made its own, 4 to 6 KB apiece.
+    fn with_hooks(
+        &self,
+        name: &str,
+        f: &mut dyn FnMut(&crate::tenant_hooks::Store) -> std::result::Result<(), Refused>,
+    ) -> std::result::Result<(), Refused> {
+        check_name(name)?;
+        self.with_slot(name, |_| {
+            if !self.path(name).exists() {
+                return Err(Refused(404, format!("no tenant `{name}` on this node")));
+            }
+            f(&self.hooks)
+        })
+    }
+
+    /// `PUT /_admin/tenants/<t>/hooks/<hook>`: the set's new version.
+    pub fn put_hook(
+        &self,
+        name: &str,
+        hook: &str,
+        body: &[u8],
+    ) -> std::result::Result<u64, Refused> {
+        let mut out = 0;
+        self.with_hooks(name, &mut |h| {
+            out = h.put_hook(name, hook, body)?;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `DELETE /_admin/tenants/<t>/hooks/<hook>`: the set's version after,
+    /// none where no hook is left.
+    pub fn drop_hook(&self, name: &str, hook: &str) -> std::result::Result<Option<u64>, Refused> {
+        let mut out = None;
+        self.with_hooks(name, &mut |h| {
+            out = h.drop_hook(name, hook)?;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `PUT /_admin/tenants/<t>/hook-secrets`: a set installed whole.
+    pub fn install_hooks(
+        &self,
+        name: &str,
+        body: &[u8],
+    ) -> std::result::Result<Option<u64>, Refused> {
+        let mut out = None;
+        self.with_hooks(name, &mut |h| {
+            out = h.install(name, body)?;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `GET /_admin/tenants/<t>/hooks`: no secret in it.
+    pub fn hooks_listing(&self, name: &str) -> std::result::Result<String, Refused> {
+        let mut out = String::new();
+        self.with_hooks(name, &mut |h| {
+            out = h.listing(name);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `GET /_admin/tenants/<t>/hook-secrets`: the set whole.
+    pub fn hooks_export(&self, name: &str) -> std::result::Result<String, Refused> {
+        let mut out = String::new();
+        self.with_hooks(name, &mut |h| {
+            out = h.export(name);
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Sets what a tenant's quota is over the node's, kept beside its file
@@ -1910,6 +2081,7 @@ impl Tenants {
         // Held from its open: a compact's or a checkpoint's rename is this
         // process's own, and the file keeps its identity across it.
         instance::closing(&self.dir, &name, bound, &self.path(&name));
+        self.hooks.rebind(&name);
         // Told once the last `Arc` went and its file was synced: one closing
         // holding no schedule leaves the hint only with its drop durable.
         if let Some((node, closing)) = closing {
@@ -2152,6 +2324,7 @@ impl Tenants {
                 .and_then(|_| fennec_core::fs::forget_sync_log(&target))
                 .and_then(|_| step("log forgotten"))
                 .and_then(|_| instance::put_away(&self.dir, name))
+                .and_then(|_| self.hooks.put_away(name))
                 .and_then(|_| std::fs::rename(&tmp, &target))
                 .and_then(|_| step("renamed"));
             if let Err(e) = written {
@@ -2485,6 +2658,7 @@ impl Tenants {
                 }
                 // Its last rewrite this process's, as a close's is.
                 instance::closing(&self.dir, &t.name, t.bound(), &self.path(&t.name));
+                self.hooks.rebind(&t.name);
                 // Leaked on purpose: the process is about to exit, and a lock
                 // released here would let a session write after the final sync.
                 std::mem::forget(g);

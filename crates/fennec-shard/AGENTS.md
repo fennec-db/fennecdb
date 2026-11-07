@@ -38,6 +38,22 @@ repairs a failed attach under the claim;
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
 slot; no id, never.
 
+**[A tenant's hook secrets are its file's, relayed by the router and kept
+by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**
+`<t>.hooks` is bound to its file as `.instance` is (`tenant_hooks::Store`,
+`fennec_http::instance`): put away, synced, before every create, install,
+follow, delete, reclaim and restore (`Tenants::put_away`,
+`put_away_beside`), never adopted by another file, carried by the node's
+own renames (`rebind`) and kept by a promotion. `hook-secrets` answers a set
+to the node's admin token alone, never logged or traced. The router's
+`PUT` takes the tenant's claim -- a running move refuses it -- and is
+answered once the primary and every copy a failover could promote hold its
+version, a copy behind named and counted
+(`fennec_router_tenants_hooks_behind`) until `repair_hooks` copies it; a
+copy that lacks it -- attached, following, a move's target before the flip,
+across regions (`Fennec-Hook-Secrets`, router to router) -- is sent it
+(`send_hooks`). Its directory holds names and versions, never a secret.
+
 **[A tenant node runs its tenants' schedules from one thread, by name, a
 run no use of a tenant.](../../docs/design/named-statements.md#where-a-run-happens-and-once)**
 `schedule::Node` keeps each scheduled tenant by its name, never an `Arc`,
@@ -75,8 +91,9 @@ router believes only with `--entry-token` and within 60 s (`audit::entry`),
 and drops from all it forwards (`forwarded_headers`); a router refuses an
 entry token empty or equal to another it holds, at the start and as a node
 is added (`set_node`). Every router answer carries `Fennec-Shard: 1`; a request that
-may have reached one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed,
-or, any request, after a guessed region's router's 503 marked
+may have reached one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
+-- a tenant's hook event among them (`hooked`) -- or, any request, after a
+guessed region's router's 503 marked
 `Fennec-Unsent`, which ran nowhere.
 
 ### Read replicas
@@ -108,8 +125,9 @@ preflights and puts its own CORS headers in place of a node's
 **[The router looks at a pooled connection first, and resends only what
 cannot have run or may run twice.](../../docs/design/router.md#pooled-connections)**
 A request not sent whole goes again, one sent whole only if `replayable`
-(a `GET`, `HEAD`, `OPTIONS`, keyed or marked read), judged by `Stage`, not
-errno; head and body are one `writev`. One never sent whole, the retry
+(a `GET`, `HEAD`, `OPTIONS`, keyed or marked read, or a `POST` to
+`/t/<t>/_hooks/`, keyed by its event: the entry's rule alike), judged by
+`Stage`, not errno; head and body are one `writev`. One never sent whole, the retry
 spent, is the router's 503 marked `Fennec-Unsent` (`region::unsent`),
 never a 502, and never once a try went whole (`Stage::Retried`); a node's
 mark is dropped (`answer_out`), a relayed router's too once a hop before

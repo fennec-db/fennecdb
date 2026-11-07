@@ -1471,9 +1471,15 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no node `{node}`"))?;
         let base = format!("/_admin/tenants/{tenant}");
+        // Marked a reader's: its stream says so, and no hook's answer at the
+        // primary waits for a copy no failover promotes.
         let body = match lineage {
-            Some(l) => format!("{{\"from\":{},\"lineage\":{}}}", quote(url), quote(l)),
-            None => format!("{{\"from\":{}}}", quote(url)),
+            Some(l) => format!(
+                "{{\"from\":{},\"lineage\":{},\"reader\":true}}",
+                quote(url),
+                quote(l)
+            ),
+            None => format!("{{\"from\":{},\"reader\":true}}", quote(url)),
         };
         // Named, so a node a newer term leases refuses to follow at the
         // word of a router it superseded.

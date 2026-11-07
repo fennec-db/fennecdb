@@ -8,6 +8,7 @@
 mod chunked;
 mod cors;
 mod fanout;
+mod hooks;
 mod leases;
 mod listen;
 mod no_thread;

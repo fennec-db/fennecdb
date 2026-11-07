@@ -184,7 +184,7 @@ answer was to be, a second body never run. A statement broken by its body
 refuses the events its condition takes, an unread one every event of its
 hook (409). No token but the server's calls one, with an event, keeping no
 key (`hooked_callee`); a run is the definition's, waking bindings. A file's
-server takes definitions (`Database::allow_hooks`); every other way in
-refuses one (`HOOKED_UNTAKEN`), a tenant node until F4's slice 4.
+server and a tenant node take definitions (`Database::allow_hooks`);
+every other way in refuses one (`HOOKED_UNTAKEN`).
 `MAX_HOOKED` bounds a hook's statements; `/_changes` passes over
 `_hook_events`.

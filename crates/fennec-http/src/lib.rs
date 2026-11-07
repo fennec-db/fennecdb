@@ -77,6 +77,7 @@ pub mod sse;
 pub mod statements;
 pub mod studio;
 pub mod sweep;
+pub mod tenant_hooks;
 pub mod tenants;
 pub mod timing;
 pub mod trace;
@@ -192,9 +193,13 @@ pub struct Config {
     /// The webhook consumers' hooks and their secrets (`--hooks`), whose
     /// events `POST /_hooks/<name>` takes ([`hooks`]); `None`, no such
     /// route: `/_hooks/` asks for a token as every unknown path does. A
-    /// file's server's alone until F4's slice 4: a node of tenants holds
-    /// none.
+    /// file's server's: a node of tenants keeps each tenant's beside its
+    /// file ([`tenant_hooks`]) and takes its events at
+    /// `/t/<tenant>/_hooks/<name>`.
     pub hooks: Option<Arc<hooks::Hooks>>,
+    /// Serving a node's tenants ([`Server::with_tenants`]): a tenant's
+    /// hooks are its own, and a definition says nothing of a hooks file.
+    pub tenants: bool,
 }
 
 impl Config {
@@ -241,6 +246,7 @@ impl Default for Config {
             mcp: None,
             tls: None,
             hooks: None,
+            tenants: false,
         }
     }
 }
@@ -334,10 +340,12 @@ impl Server {
         if cfg.router_mark.is_none() {
             cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
         }
-        // A tenant's hooks are its file's, which F4's slice 4 brings: a
-        // node takes no event, and `fennec-server` refuses `--hooks` with
-        // `--dir`.
+        // A tenant's hooks are its file's, kept beside it and set through
+        // `/_admin/` ([`tenant_hooks`]): a node reads no hooks file, and
+        // `fennec-server` refuses `--hooks` with `--dir`.
         cfg.hooks = None;
+        cfg.tenants = true;
+        tenants.hooks().set_max_body(cfg.max_body);
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
@@ -922,13 +930,17 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
         // close without the registry knowing.
+        // An event to a tenant's hook, verified in `route_tenant` against its
+        // secrets before the tenant was looked up: taken by `handle_tenant`.
+        let mut hooked = None;
         let tenant = match backend {
             Backend::Single { .. } | Backend::Metrics { .. } => None,
             Backend::Tenants(tenants) => match route_tenant(tenants, cfg, &mut req) {
-                Ok(t) => {
+                Ok((t, v)) => {
                     if trace::recording() {
                         trace::attr("fennec.tenant", t.name().to_string());
                     }
+                    hooked = v;
                     Some(t)
                 }
                 Err(resp) => {
@@ -1196,7 +1208,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let started = std::time::Instant::now();
         let run = || match &tenant {
             None => handle(db, cfg, &req),
-            Some(t) => handle_tenant(t, cfg, &req),
+            Some(t) => handle_tenant(t, cfg, &req, hooked.as_ref()),
         };
         // A client gone while its request was held: a peek finds the
         // connection closed and nothing more of it read.
@@ -1654,12 +1666,13 @@ fn node_stream(
 
 /// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below
 /// sees the single-database surface. `/_admin/` is answered here, and so is
-/// every refusal; `Ok` means "serve this request against the tenant".
+/// every refusal; `Ok` means "serve this request against the tenant", with
+/// the event a tenant's hook was sent where its signature verified.
 fn route_tenant(
     tenants: &Tenants,
     cfg: &Config,
     req: &mut Request,
-) -> std::result::Result<Arc<tenants::Tenant>, Response> {
+) -> std::result::Result<(Arc<tenants::Tenant>, Option<tenant_hooks::Verified>), Response> {
     let segs = req.segments();
     if segs.first() == Some(&"_admin") {
         return Err(admin::handle(tenants, cfg, req));
@@ -1692,8 +1705,26 @@ fn route_tenant(
     // against a 401 would tell an unauthenticated caller which tenants exist.
     // A tenant's replication stream carries the node's replication token
     // rather than the data one -- a replica is not a client -- so that is
-    // the one asked for there.
-    if segs.get(2) == Some(&"_replication") {
+    // the one asked for there. An event to a tenant's hook carries no token
+    // at all: its signature is asked in a token's place, against the
+    // tenant's secrets in the node's memory, before the tenant is looked
+    // up -- a forged event opens no tenant -- and every refusal before it
+    // verifies is one 401 after the same work, whatever is missing: the
+    // tenant, its secrets, the hook ([`tenant_hooks`]).
+    let mut hooked = None;
+    if segs.get(2) == Some(&"_hooks") {
+        if req.method != Method::Post {
+            return Err(Response::error(405, "a hook takes a POST").header("Allow", "POST"));
+        }
+        let hook = match &segs[3..] {
+            [h] => *h,
+            _ => "",
+        };
+        match tenants.hooks().verify(&name, hook, req, hooks::now_ms()) {
+            Ok(v) => hooked = Some(v),
+            Err(check) => return Err(hooks::unverified(req, check)),
+        }
+    } else if segs.get(2) == Some(&"_replication") {
         let given = req
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
@@ -1726,7 +1757,7 @@ fn route_tenant(
     // Rebuilt from the segments rather than cut at an offset: `//t/acme`
     // has the same segments as `/t/acme` but not the same prefix length.
     req.path = format!("/{}", segs[2..].join("/"));
-    Ok(t)
+    Ok((t, hooked))
 }
 
 /// A tenant request: held against `freeze` for its whole handling. A frozen
@@ -1740,7 +1771,12 @@ fn route_tenant(
 /// the node is asked again once a 403 comes back: a put let in just before
 /// the lease ran out was answered 403 on a slow CI runner, as if the write
 /// were not this server's to take, when the client should come back.
-fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
+fn handle_tenant(
+    t: &tenants::Tenant,
+    cfg: &Config,
+    req: &Request,
+    hooked: Option<&tenant_hooks::Verified>,
+) -> Response {
     // A request in flight, where the tenant's quota counts them: one held
     // here holds a worker thread, and a tenant past its share is told to
     // come back rather than queued behind the others' work.
@@ -1748,19 +1784,31 @@ fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
         Ok(slot) => slot,
         Err(refused) => return refused,
     };
-    quota::within(&t.quota, || handle_admitted(t, cfg, req))
+    quota::within(&t.quota, || handle_admitted(t, cfg, req, hooked))
 }
 
-/// [`handle_tenant`], the request let in by its tenant's quota.
-fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
+/// [`handle_tenant`], the request let in by its tenant's quota: an event
+/// verified for one of its hooks taken ([`hooks::handle_tenant`]), any
+/// other request handled, each held against a freeze and asked of the
+/// lease alike.
+fn handle_admitted(
+    t: &tenants::Tenant,
+    cfg: &Config,
+    req: &Request,
+    hooked: Option<&tenant_hooks::Verified>,
+) -> Response {
     let _held = t.enter();
+    let run = |cfg: &Config| match hooked {
+        None => handle(&t.db, cfg, req),
+        Some(v) => hooks::handle_tenant(t, cfg, v, req),
+    };
     // Read-only -- the server's mode, or a read its client marked
     // ([`marked`]) -- a request passes a freeze and a lapsed lease, since
     // it can only read: a marked write is refused in words of its own,
     // never turned into the 503 below, or told to come back, the client
     // would send it to the same replica again.
     if cfg.read_only {
-        let resp = handle(&t.db, cfg, req);
+        let resp = run(cfg);
         // A replayed key's kept answer is a write's ([`read_call`]), asked
         // of the lease as below: a keyed call sent marked to a home node
         // whose lease lapsed went out as the kept 200. Its refusal stays its
@@ -1773,7 +1821,7 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
     }
     let refused = refusal(t);
     let resp = match refused {
-        None => handle(&t.db, cfg, req),
+        None => run(cfg),
         // A call, too, is refused unjudged ([`Config::come_back`]): judged
         // against this copy's definitions, an old primary after a failover
         // answered 404 or 409 for a statement the new one holds, where the
@@ -1784,7 +1832,7 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
                 come_back: true,
                 ..cfg.clone()
             };
-            handle(&t.db, &read_only, req)
+            run(&read_only)
         }
     };
     // Run read-only, the request wrote nothing, but it may answer a write:
@@ -3324,7 +3372,9 @@ fn run_query(
         }
         if r.is_ok() {
             calls::after_drop(cfg.access.as_deref(), &guard, None, std::iter::once(&*stmt));
-            hooks::after_change(cfg.hooks.as_deref(), &guard, std::iter::once(&*stmt));
+            if !cfg.tenants {
+                hooks::after_change(cfg.hooks.as_deref(), &guard, std::iter::once(&*stmt));
+            }
         }
         let held = wait && held_run(&guard, (&stmt, &params), &r, (mark, before));
         seq = Some(At::of(&guard));
@@ -3999,7 +4049,9 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         None,
         stmts.iter().map(|(s, _)| s),
     );
-    hooks::after_change(cfg.hooks.as_deref(), &guard, stmts.iter().map(|(s, _)| s));
+    if !cfg.tenants {
+        hooks::after_change(cfg.hooks.as_deref(), &guard, stmts.iter().map(|(s, _)| s));
+    }
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),
@@ -4647,7 +4699,7 @@ mod tests {
             };
             // The thread's flags, as the connection resets them for each.
             metrics::begin_request();
-            handle_tenant(&t, &cfg, &req)
+            handle_tenant(&t, &cfg, &req, None)
         };
         let made = post("create collection notes (title text)");
         assert_eq!(made.status, 200, "{}", String::from_utf8_lossy(&made.body));
@@ -4704,7 +4756,7 @@ mod tests {
             };
             // The thread's flags, as the connection resets them for each.
             metrics::begin_request();
-            handle_tenant(&t, &cfg, &req)
+            handle_tenant(&t, &cfg, &req, None)
         };
         let batch = |lines: &[&str]| {
             let lines: Vec<String> = lines
@@ -5051,7 +5103,7 @@ mod tests {
                 keep_alive: false,
             };
             metrics::begin_request();
-            let resp = handle_tenant(&t, &cfg, &req);
+            let resp = handle_tenant(&t, &cfg, &req, None);
             let replayed = resp.extra.iter().any(|(k, _)| k == "Idempotent-Replayed");
             let body = String::from_utf8_lossy(&resp.body).into_owned();
             (resp.status, replayed, body)
@@ -5188,6 +5240,133 @@ mod tests {
         let (status, replayed, retry, body) = send("evt_2", "o-2");
         assert_eq!((status, replayed, retry), (200, true, false), "{body}");
         drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tenant's event, verified against the secrets its node keeps beside
+    /// its file and taken in its database: its 2xx waits for a standby of
+    /// the tenant's to hold it -- 503 with `Retry-After` past `SENT_WAIT`
+    /// otherwise, the block landed and its key kept, the event sent again
+    /// answered from its key once the standby holds it -- and a stream
+    /// marked as no standby's (a read replica's, an archiver's) is none it
+    /// waits for. Its lease lapsing after its block landed is `outcome:
+    /// unknown`, never the 2xx a failover meanwhile would make a lie; the
+    /// event sent again under a lease is answered from its key. Counted by
+    /// the answers and the database's change, never the clock.
+    #[test]
+    fn a_tenants_event_waits_for_its_standby_and_is_asked_of_its_lease() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-tenant-hook-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        fennec_ql::install();
+        let tenants =
+            Tenants::new(&dir)
+                .unwrap()
+                .with_lease()
+                .with_replication(tenants::Replicated {
+                    token: "repl".into(),
+                    buffer: 1 << 20,
+                    upstream: None,
+                    sync_on_write: true,
+                });
+        let lease = Arc::clone(tenants.lease().unwrap());
+        assert!(lease.grant(60_000, "e1", Some(vec!["acme".into()])).is_ok());
+        let t = tenants.create("acme").unwrap();
+        for q in [
+            "create collection orders (ref text @hash, status text)",
+            "put orders {ref: 'o-1', status: 'open'}",
+            "put orders {ref: 'o-2', status: 'open'}",
+            "put orders {ref: 'o-3', status: 'open'}",
+            "create statement paid($order text from event.order) on hook stripe as set orders \
+             {status: 'paid'} where ref = $order require 1",
+        ] {
+            let q = fennec_ql::parse_one(q).unwrap();
+            t.db.write().unwrap().execute(&q).unwrap();
+        }
+        const SECRET: &str = "whsec_a_tenants_own";
+        let put = format!(r#"{{"scheme":"stripe","secrets":["{SECRET}"]}}"#);
+        tenants.put_hook("acme", "stripe", put.as_bytes()).unwrap();
+        let cfg = Config::default();
+        let feed = Arc::clone(t.repl.as_ref().unwrap().feed().unwrap());
+        let send = |id: &str, order: &str| {
+            let body = format!(r#"{{"id":"{id}","order":"{order}"}}"#);
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mac = crypto::hmac_sha256(SECRET.as_bytes(), format!("{at}.{body}").as_bytes());
+            let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+            let mut req = Request {
+                method: Method::Post,
+                target: "/t/acme/_hooks/stripe".into(),
+                path: "/t/acme/_hooks/stripe".into(),
+                query: Vec::new(),
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Stripe-Signature".into(), format!("t={at},v1={hex}")),
+                ],
+                body: body.into_bytes(),
+                keep_alive: false,
+            };
+            let v = tenants
+                .hooks()
+                .verify("acme", "stripe", &req, hooks::now_ms());
+            let v = v.unwrap_or_else(|c| panic!("did not verify: {}", c.name()));
+            req.path = "/_hooks/stripe".into();
+            metrics::begin_request();
+            let resp = handle_tenant(&t, &cfg, &req, Some(&v));
+            let replayed = resp.extra.iter().any(|(k, _)| k == "Idempotent-Replayed");
+            let retry = resp.extra.iter().any(|(k, _)| k == "Retry-After");
+            let body = String::from_utf8_lossy(&resp.body).into_owned();
+            (resp.status, replayed, retry, body)
+        };
+        let seq = || t.db.read().unwrap().change_seq();
+        // A stream marked as no standby's, keeping up: answered once on
+        // disk.
+        feed.sending_standby(8, seq(), false);
+        let (status, _, _, body) = send("evt_1", "o-1");
+        assert_eq!(status, 200, "{body}");
+        // A standby from before the next event's block, which it never
+        // sends: the block lands, its key kept, and the sender is told to
+        // come back.
+        feed.sending_standby(7, seq(), true);
+        let (status, replayed, retry, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed, retry), (503, false, true), "{body}");
+        feed.sent(7, seq(), true);
+        let (status, replayed, _, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed), (200, true), "{body}");
+        assert_eq!(body, r#"{"event":"evt_2","taken":1}"#);
+
+        // The lease lapses once the next event's block landed, while its
+        // answer waits for the standby: unknown, whether or not the standby
+        // is sent the block before the wait ends.
+        let before = seq();
+        let (late, waited) = std::thread::scope(|s| {
+            let sent = s.spawn(|| send("evt_3", "o-3"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while seq() == before {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the block never landed"
+                );
+                std::thread::yield_now();
+            }
+            assert!(lease.grant(0, "e1", None).is_ok());
+            feed.sent(7, seq(), true);
+            (sent.join().unwrap(), seq())
+        });
+        let (status, _, _, body) = late;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains(r#""outcome":"unknown""#), "{body}");
+        // Leased again, the event sent again is answered from its key, the
+        // order paid once.
+        assert!(lease.grant(60_000, "e1", Some(vec!["acme".into()])).is_ok());
+        let (status, replayed, _, body) = send("evt_3", "o-3");
+        assert_eq!((status, replayed), (200, true), "{body}");
+        assert_eq!(seq(), waited, "nothing written again");
+        drop(t);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

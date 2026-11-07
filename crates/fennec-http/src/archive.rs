@@ -1002,6 +1002,7 @@ impl Archive {
         // a node's identity of a tenant file there (`crate::instance`).
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
+        crate::tenant_hooks::put_away_beside(given)?;
         fs::rename(&tmp, out)?;
         // Durable once it returns: lost to a crash, the file a server is
         // started on next was whatever was there before.
@@ -1467,6 +1468,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
+        crate::tenant_hooks::put_away_beside(given)?;
         fs::rename(&tmp, out)?;
         sync_dir_of(out)?;
     }
@@ -1490,6 +1492,7 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     File::open(&tmp)?.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
     crate::instance::put_away_beside(given)?;
+    crate::tenant_hooks::put_away_beside(given)?;
     fs::rename(&tmp, out)?;
     sync_dir_of(out)?;
     Ok(seq)

@@ -145,6 +145,27 @@ const SCHEMA: [&str; 13] = [
 const FILES: &str =
     "create collection if not exists files (key text @hash, tenant text, node text, instance text)";
 
+/// A tenant's webhook secrets as the directory knows them
+/// ([`HookSet`]): the names of its hooks and the version of the set its
+/// primary holds, and the copies -- its pair's standby, its `--replicas`
+/// copy -- known to lack that version, which the router's repair copies it
+/// to. Never a secret: those are its nodes' alone, beside each copy's file
+/// (`fennec_http::tenant_hooks`), and this directory is replicated and
+/// archived. Made by the first hook set, read where asked, never mapped; a
+/// router from before it neither reads nor writes it.
+const HOOK_SETS: &str = "create collection if not exists hook_sets \
+     (tenant text @hash, names text, version text, behind text)";
+
+/// What [`HOOK_SETS`] holds of a tenant: its hooks' names, the version of
+/// the set its primary holds (16 hex digits, empty where it holds none),
+/// and the copies lacking it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HookSet {
+    pub names: Vec<String>,
+    pub version: String,
+    pub behind: Vec<String>,
+}
+
 const LEFTOVERS: &str = "create collection if not exists leftovers \
      (key text @hash, tenant text, node text, why text, noted int, instances text)";
 
@@ -1270,6 +1291,72 @@ impl Directory {
         )
     }
 
+    /// What the directory knows of `tenant`'s webhook secrets: `None` where
+    /// it sets none, or the directory -- a standby's following a primary
+    /// from before it -- keeps no such record.
+    pub fn hook_set(&self, tenant: &str) -> Option<HookSet> {
+        let g = read(&self.db);
+        g.collection("hook_sets").ok()?;
+        let sql = "get hook_sets select names, version, behind where tenant = $1";
+        let stmt = fennec_ql::parse_one(sql).ok()?;
+        match g.query(&stmt, &[Value::Text(tenant.into())]) {
+            Ok(Response::Rows(rs)) => rs.rows.first().map(|r| hook_set_of(&r.values)),
+            _ => None,
+        }
+    }
+
+    /// Every tenant's [`HookSet`] the directory keeps.
+    pub fn hook_sets(&self) -> Vec<(String, HookSet)> {
+        let g = read(&self.db);
+        let sql = "get hook_sets select tenant, names, version, behind";
+        match rows(&g, "hook_sets", sql) {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(_, row)| (text(&row[0]), hook_set_of(&row[1..])))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// How many tenants have a copy lacking their set's version:
+    /// `fennec_router_tenants_hooks_behind`.
+    pub fn hooks_behind(&self) -> usize {
+        self.hook_sets()
+            .iter()
+            .filter(|(_, s)| !s.behind.is_empty())
+            .count()
+    }
+
+    /// Records what `tenant`'s webhook secrets are -- or forgets them,
+    /// `None`, and where its set has no hook and no copy lacks it.
+    pub fn set_hook_set(&mut self, tenant: &str, set: Option<&HookSet>) -> Result<()> {
+        let set = set.filter(|s| !s.names.is_empty() || !s.behind.is_empty());
+        let made = read(&self.db).collection("hook_sets").is_ok();
+        if !made {
+            if set.is_none() {
+                return Ok(());
+            }
+            self.run(HOOK_SETS, &[])?;
+        }
+        let key = Value::Text(tenant.into());
+        let Some(s) = set else {
+            return self.run("del hook_sets where tenant = $1", &[key]);
+        };
+        let row = vec![
+            key.clone(),
+            Value::Text(s.names.join(" ")),
+            Value::Text(s.version.clone()),
+            Value::Text(s.behind.join(" ")),
+        ];
+        self.write_block(&[
+            ("del hook_sets where tenant = $1", vec![key]),
+            (
+                "put hook_sets {tenant: $1, names: $2, version: $3, behind: $4}",
+                row,
+            ),
+        ])
+    }
+
     /// `tenant`'s file on `node`, where it is noted as left there.
     pub fn leftover(&self, tenant: &str, node: &str) -> Result<Option<Leftover>> {
         Ok(self
@@ -1608,6 +1695,7 @@ impl Directory {
         self.homes.remove(tenant);
         self.set_lineage(tenant, None)?;
         self.set_quota(tenant, None)?;
+        self.set_hook_set(tenant, None)?;
         self.set_replica(tenant, None)
     }
 
@@ -1863,6 +1951,22 @@ fn text(v: &Value) -> String {
     match v {
         Value::Text(s) => s.clone(),
         _ => String::new(),
+    }
+}
+
+/// A [`HookSet`] from its row's `names`, `version` and `behind`.
+fn hook_set_of(values: &[Value]) -> HookSet {
+    let words = |v: Option<&Value>| -> Vec<String> {
+        v.map(text)
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    HookSet {
+        names: words(values.first()),
+        version: values.get(1).map(text).unwrap_or_default(),
+        behind: words(values.get(2)),
     }
 }
 

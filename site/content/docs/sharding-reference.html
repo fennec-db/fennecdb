@@ -33,6 +33,11 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
     named in <code>schedules.hint</code> beside their files
     (<a href="sharding-tenants.html#scheduled-statements">Scheduled
     statements</a>).</li>
+  <li><b>Takes its tenants' webhook events</b> at
+    <code>POST /t/&lt;t&gt;/_hooks/&lt;name&gt;</code>, each verified against
+    its own tenant's secrets — kept beside its file in
+    <code>&lt;t&gt;.hooks</code>, never in it — before the tenant is looked up
+    (<a href="sharding-tenants.html#webhooks">Webhooks</a>).</li>
 </ul>
 
 <details class="deep"><summary>How a --dir node opens, closes and shuts down tenants, and its /_admin/ routes</summary>
@@ -93,7 +98,10 @@ image:</p>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant, answered once the file and its rename into place are on disk; one the disk would not make durable is taken back (500)</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there. <code>{"lineage", "history"}</code>, as the router sends them, refuse a copy of another lineage, or one lacking that history that has not heard from the node it follows since it was last told to follow it (409); without them, a copy with no write and no word from its primary since it opened or was told to follow is refused; <code>{"force": true}</code> promotes it whatever it holds, an audit event</td></tr>
-<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, or <code>https://host:port</code> (<a href="server.html#dialing-https">Dialing HTTPS</a>), kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code></td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, or <code>https://host:port</code> (<a href="server.html#dialing-https">Dialing HTTPS</a>), kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code>; <code>{"reader": true}</code> marks a read replica's copy, whose stream no write's answer at the primary waits for. Its hook secrets are put away first: the router sends the current set once it follows</td></tr>
+<tr><td><code>GET /_admin/tenants/&lt;t&gt;/hooks</code></td><td>its webhooks: each one's name, scheme, bounds and when it was set, and the set's version — never a secret</td></tr>
+<tr><td><code>PUT /_admin/tenants/&lt;t&gt;/hooks/&lt;h&gt;</code></td><td>set one hook, <code>{scheme, secrets, keep, tolerance, key, max_body}</code>, synced beside the file before it is answered; an empty or malformed secret refused (400) naming the field, never its value. <code>DELETE</code> takes it away (404 where it is not held)</td></tr>
+<tr><td><code>GET /_admin/tenants/&lt;t&gt;/hook-secrets</code></td><td>the set whole, its secrets in it, <code>Cache-Control: no-store</code> and an audit event naming the tenant: what the router copies onto a copy that lacks it. <code>PUT</code> installs a set whole, its version kept. Never in a log line or a trace</td></tr>
 </tbody>
 </table>
 </div>
@@ -145,6 +153,8 @@ does not return them.</p>
 <tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{region}</code> to place it in a region, <code>{node}</code> to choose the node, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FennecQL <code>create collection</code> text, applied there before the tenant is answered (<a href="sharding-tenants.html#schema">A tenant with its schema</a>)</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
 <tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>, <code>{region}</code> or both; see <a href="sharding-tenants.html#moving-a-tenant">Moving a tenant</a> and <a href="sharding-regions.html#regions">Regions</a></td></tr>
+<tr><td><code>PUT /_shard/tenants/&lt;t&gt;/hooks/&lt;h&gt;</code></td><td>set one of the tenant's webhooks, the node's body; <code>DELETE</code> takes it away. Under the tenant's claim (409 while it moves), its node first, then the set copied to each copy a failover could promote, answered <code>{tenant, hook, version, behind}</code> once each was sent it, a copy that did not take it named in <code>behind</code> (<a href="sharding-tenants.html#webhooks">Webhooks</a>)</td></tr>
+<tr><td><code>GET /_shard/tenants/&lt;t&gt;/hooks</code></td><td>what the node lists, and the copies behind; never a secret</td></tr>
 <tr><td><code>POST /_shard/query</code></td><td>one read on every tenant, or those named, the answers merged as the request says (<a href="sharding-tenants.html#across-tenants">A query across tenants</a>)</td></tr>
 <tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
 </tbody>

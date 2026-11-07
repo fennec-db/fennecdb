@@ -1,6 +1,6 @@
 <!--
 title: Webhooks from Stripe and GitHub — fennecdb
-description: Another service's events — Stripe's payments, GitHub's pushes, any sender signing as Standard Webhooks does — taken by a statement at POST /_hooks/<name>: verified by their signature before they are read, taken once by their key, answered only once on disk.
+description: Another service's events — Stripe's payments, GitHub's pushes, any sender signing as Standard Webhooks does — taken by a statement at POST /_hooks/<name>, or a tenant's at /t/<tenant>/_hooks/<name>: verified by their signature before they are read, taken once by their key, answered only once on disk.
 -->
 
 <h1>Webhooks from Stripe and GitHub</h1>
@@ -19,8 +19,10 @@ never take one event twice. The sender is told <code>200</code> only once
 the event is on disk.</p>
 
 <p>Webhooks are taken by a file's server (<code>fennec-server --file</code>)
-given a <a href="#hooks-file">hooks file</a> (<code>--hooks</code>). A
-tenant node takes none yet. For reacting to a write of your own — calling a
+given a <a href="#hooks-file">hooks file</a> (<code>--hooks</code>), and by
+each tenant of a <a href="#tenants">node of tenants</a> at
+<code>POST /t/&lt;tenant&gt;/_hooks/&lt;name&gt;</code>, its secrets set
+through the admin routes. For reacting to a write of your own — calling a
 URL when a row changes — see <a href="/docs/functions">Functions and
 webhooks</a>.</p>
 
@@ -210,6 +212,63 @@ statement takes (its events answered 409), and a statement taking a hook
 the file does not name (its events answered 401). Each is a line of its
 log.</p>
 
+<h2 id="tenants">On a node of tenants</h2>
+
+<p>Each tenant of a node (<code>fennec-server --dir</code>) takes its own
+events at <code>POST /t/&lt;tenant&gt;/_hooks/&lt;name&gt;</code>, verified
+against that tenant's secrets alone: one tenant's secret signs no event
+another takes. Behind the <a href="/docs/sharding-tenants">router</a> and
+the <a href="/docs/sharding-entry">global entry</a>, the sender is told
+<code>https://&lt;entry&gt;/t/acme/_hooks/stripe</code>. A node takes no
+hooks file: a tenant's secrets are set through the admin routes, with the
+same parts as a hooks file's line, the secrets' values in place of their
+files.</p>
+
+<pre data-lang="bash">curl -X PUT https://router.example.com/_shard/tenants/acme/hooks/stripe \
+  -H "Authorization: Bearer $ROUTER_TOKEN" \
+  -d '{"scheme": "stripe", "secrets": ["whsec_..."], "tolerance": "5m"}'
+{"tenant":"acme","hook":"stripe","version":"9c1f04e2b7a35d60","behind":[]}</pre>
+
+<table>
+<tr><th>Field</th><th>What it says</th></tr>
+<tr><td><code>scheme</code></td><td><code>stripe</code>, <code>github</code> or <code>standard</code></td></tr>
+<tr><td><code>secrets</code></td><td>one, or two while a secret rolls; an empty one, or a <code>standard</code> one not <code>whsec_</code> and base64, refused (400) naming the field, never its value</td></tr>
+<tr><td><code>keep</code>, <code>tolerance</code>, <code>key</code>, <code>max_body</code></td><td>as in <a href="#hooks-file">a hooks file</a>, held to the same bounds</td></tr>
+</table>
+
+<p>A <code>PUT</code> sets one hook and a <code>DELETE</code> takes it away;
+<code>GET /_shard/tenants/&lt;tenant&gt;/hooks</code> lists each hook's
+scheme, bounds and when it was set — never a secret. A tenant's set lives
+beside its file on its node, in <code>&lt;tenant&gt;.hooks</code>, readable
+by the node's user alone, and never in the database, its archive or the
+router's directory, which keeps each tenant's hook names and a version.
+The router sends the set to every copy a failover could promote — a pair's
+standby and the tenant's <code>--replicas</code> copy — before it answers:
+a copy that did not take it is named in <code>behind</code> and counted
+until the router's repair copies it. A move takes the set to the target
+before the tenant goes there, across regions too; a failover's promoted
+copy holds it already. A <code>PUT</code> while the tenant moves is refused
+(409): send it again once the move is done. Without the router, a node's
+own <code>PUT /_admin/tenants/&lt;tenant&gt;/hooks/&lt;name&gt;</code>
+takes the same body, with the node's admin token.</p>
+
+<p>A tenant's set belongs to its file. It goes with the file at a delete,
+and a create, a follow or a restore of the tenant puts away a set left
+beside the place, so a set never arms a later tenant of the name. A <a
+href="/docs/replication">restore</a> brings the statements back and no secret:
+the tenant's hooks are answered 401 until their secrets are set again,
+which the node logs as the tenant opens
+(<code>tenant `acme`'s hook `stripe`: consumed by 1 statement, no
+secret</code>).</p>
+
+<p>An event is verified against the secrets in the node's memory before its
+tenant is looked up, so a forged one opens no tenant. A verified one is
+held to its tenant's <a href="/docs/sharding-tenants#quotas">quota</a> and
+its node's lease as any write is (<a href="#answers">below</a>). The router
+and the global entry send an event again on another connection, or to the
+next router, where one was cut after it was sent: the node takes it once by
+its key and answers the second try from it.</p>
+
 <h2 id="once">Taken once</h2>
 
 <p>An event's key is <code>id</code> in a Stripe event's body,
@@ -264,7 +323,10 @@ the request id beside the event's key.</p>
 <tr><td>past <code>--call-max-rows</code></td><td>400, naming the bound</td></tr>
 <tr><td>a <a href="/docs/fennecql#write-bound-statements">statement bound to the writes</a> refusing</td><td>its status, its <code>reason</code></td></tr>
 <tr><td>above <code>--max-memory</code>, statements that insert or set</td><td>507</td></tr>
+<tr><td>a tenant's: past its quota's bytes or rows; its rate</td><td>507, naming the bound; 429</td></tr>
+<tr><td>a tenant's: being moved, or its node's lease lapsed before it ran</td><td>503, <code>Retry-After</code></td></tr>
 <tr><td>taken, but no replica a promotion could take it from holds it yet (<a href="#durable">below</a>)</td><td>503, <code>Retry-After</code></td></tr>
+<tr><td>a tenant's: its node's lease lapsed after its block landed</td><td>500, <code>"outcome":"unknown"</code>; the sender's retry is answered from its key, or takes it once where it never landed</td></tr>
 <tr><td>a storage error</td><td>500</td></tr>
 <tr><td>taken</td><td>200, <code>{"event":"&lt;key&gt;","taken":&lt;statements&gt;}</code>, <code>Fennec-Seq</code></td></tr>
 </table>
@@ -321,7 +383,11 @@ stream to have sent the block, up to the time a durable write waits for
 its replicas. Past it the answer is 503 with <code>Retry-After</code>: the
 event is taken and on disk, and the sender's next try is answered from its
 key once the replica holds it. An archiver's stream is no replica a
-promotion takes over, and is not waited for.</p>
+promotion takes over, and is not waited for. On a node of tenants the
+replica waited for is the tenant's own: its pair's standby, or its
+<code>--replicas</code> copy — never a <a
+href="/docs/sharding-read-replicas">read replica</a>, which no failover
+promotes.</p>
 
 <h2 id="authority">Who defines and calls one</h2>
 
@@ -366,7 +432,9 @@ counts each event once by its outcome in
 sender's retry may meet otherwise) and <code>unknown</code> — and the
 refusals before the signature in
 <code>fennec_hook_unverified_total{check}</code>. No label names a hook. A
-server with no hooks file writes neither family. Each refused event, and
+server with no hooks file writes neither family. The router counts the
+tenants a copy of which lacks their current set in
+<code>fennec_router_tenants_hooks_behind</code>. Each refused event, and
 each copy that came with another body, is a line of the server's log
 naming the hook, the event's key, GitHub's delivery and why — what the
 sender was not told — under the request's id; never the body, a signature

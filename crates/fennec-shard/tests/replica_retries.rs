@@ -662,7 +662,7 @@ fn a_follow_landing_late_gives_a_later_file_no_identity() {
     let from = format!("http://127.0.0.1:{}", n1.port);
     let follow = |id: u64| {
         n2.tenants
-            .follow_as("acme", Some(&from), None, Some(id), None)
+            .follow_as("acme", Some(&from), None, Some(id), None, false)
     };
     let (first, later) = (0xa1, 0xb2);
     // An attach: its `PUT` and its follow under one identity.
@@ -704,9 +704,14 @@ fn an_old_primary_back_from_a_failover_is_its_tenants_copy_again() {
     let created = n1.tenants.instance("acme").expect("the create's identity");
     // Another identity named: refused, the file as it was.
     let from = format!("http://127.0.0.1:{}", n2.port);
-    let other = n1
-        .tenants
-        .follow_as("acme", Some(&from), None, Some(7), Some(&[created ^ 1]));
+    let other = n1.tenants.follow_as(
+        "acme",
+        Some(&from),
+        None,
+        Some(7),
+        Some(&[created ^ 1]),
+        false,
+    );
     assert!(matches!(other, Err(Kept::Other(Some(id))) if id == created));
     assert_eq!(n1.tenants.instance("acme"), Some(created));
     let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "");

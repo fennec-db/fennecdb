@@ -1187,8 +1187,9 @@ impl super::Database {
         // First of all: where no server takes this database's events, one
         // stored would be a hook no sender reaches, without a word -- here
         // every way in (`/query`, `/batch`, the shell, the native library,
-        // a declared schema's apply) meets it. A file's server lets one be
-        // defined, its route taking the events ([`Self::allow_hooks`]).
+        // a declared schema's apply) meets it. A file's server and a tenant
+        // node let one be defined, their routes taking the events
+        // ([`Self::allow_hooks`]).
         if def.hook.is_some() && !self.hooking {
             return Err(Error::Query(HOOKED_UNTAKEN.into()));
         }

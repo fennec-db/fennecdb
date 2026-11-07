@@ -341,6 +341,12 @@ events:</p>
     sends each node (<code>POST /_admin/tenants/&lt;t&gt;/query</code>) is
     not, or one query over a thousand tenants would be a thousand lines; it
     carries the router's request id, which the router's line names.</li>
+  <li><b>A read of a tenant's <a href="webhooks.html#tenants">webhook
+    secrets</a></b> (<code>GET /_admin/tenants/&lt;t&gt;/hook-secrets</code>,
+    which the router asks as it copies a set onto a copy that lacks it): a
+    <code>hook_secrets</code> line naming the tenant, never a secret. Setting
+    or taking away a hook is an admin request's line, its path naming the
+    tenant and the hook, never its body.</li>
   <li><b>A promotion forced past its node's refusal</b>: a
     <code>failover_forced</code> line at the router naming the node, and a
     <code>promote_forced</code> line at each node naming the tenant and, in
@@ -435,6 +441,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fennec_router_same_zone_copies{region}</code></td><td>gauge</td><td>tenants whose replica or standby copy is in their primary's zone, so a datacenter lost takes both: placed there only where the region had no node free in another zone</td></tr>
 <tr><td><code>fennec_router_tenants_unreplicated{region}</code></td><td>gauge</td><td>with <code>--replicas</code>, the tenants with no copy a failover could promote — no replica of their own and no standby on their node — every region a node names, 0 or not: an attach that did not take, tried again for about four minutes (<a href="sharding-failover.html#replicas-of-their-own">Replicas of their own</a>); the replicas a failed-over node held, until it answers again or <code>POST /_shard/replicas</code>; a region with no other node. A standby router counts its primary's directory</td></tr>
 <tr><td><code>fennec_router_files_left</code></td><td>gauge</td><td>files the router may have left on nodes — made, or meant to be taken off, and placed by nothing: a create taken back whose <code>DELETE</code> its node refused, a copy that stayed — which every repair lists under <code>left</code> with why (<a href="sharding-failover.html#replicas-of-their-own">Replicas of their own</a>). A repair has the node take back each one noted with an identity that the file still carries, and forgets it, so the gauge falls; the rest — a copy of a deleted or detached tenant, an old primary on a node silent at the look, anything on a node from before identities, a file its node says is another now — an operator looks at and removes by hand. A standby router counts its primary's directory</td></tr>
+<tr><td><code>fennec_router_tenants_hooks_behind</code></td><td>gauge</td><td>tenants a copy of which a failover could promote — a pair's standby, a <code>--replicas</code> copy — lacks the version of their <a href="webhooks.html#tenants">webhook secrets</a> the directory records: a copy the router could not reach as a secret was set, until a repair copies the set from one holding it. Promoted so, the tenant's hooks answer 401 until their secrets are set again. A standby router counts its primary's directory</td></tr>
 <tr><td><code>fennec_router_tenants_moving</code></td><td>gauge</td><td>tenants a move began on and did not record done — served from where they were, and cleared by moving them again</td></tr>
 <tr><td><code>fennec_router_following</code></td><td>gauge</td><td>1 on a standby router; its directory's <code>fennec_replica_*</code> gauges follow, and a primary's <code>fennec_replicas</code></td></tr>
 <tr><td><code>fennec_router_lease_age_seconds{node, region}</code></td><td>gauge</td><td>with <code>--auto-failover</code>, the seconds since each node last took its lease: renewed every third of a lease, and failed over past the lease and a tenth</td></tr>

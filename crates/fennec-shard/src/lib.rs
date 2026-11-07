@@ -2294,7 +2294,7 @@ impl Router {
             let mut headers = forwarded_headers(req, traced);
             let cut = matches!(ended, upstream::Ended::Cut { .. });
             if ended == (upstream::Ended::Cut { whole: true })
-                && !upstream::replayable(req.method.name(), &headers)
+                && !upstream::replayable(req.method.name(), &req.target, &headers)
             {
                 metrics::cut(metrics::Cut::MayHaveRun, 1);
                 let why = format!(
@@ -2871,6 +2871,14 @@ impl Router {
         // Relayed, it is the relaying router's to know, which keeps the
         // client's count.
         fennec_http::audit::push_verified(&mut head);
+        // A node's one 401 to an event sent to a tenant's hook asks no
+        // token: waited out here by the hooks' own count, as the node
+        // waits out its own, never the tokens'.
+        if status == 401 {
+            let asks =
+                (answer.headers.iter()).any(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"));
+            fennec_http::audit::hook_forwarded(req, status, asks);
+        }
         fennec_http::audit::http(req, status, peer);
         fennec_http::request_id::with(|id| {
             head.push_str(fennec_http::request_id::HEADER);
@@ -3109,6 +3117,16 @@ impl Router {
     ///                                       over its node's, kept here and sent
     ///                                       to every node holding a copy
     /// GET    /_shard/tenants/<t>/quota         the node's report: set, quota, usage
+    /// PUT    /_shard/tenants/<t>/hooks/<h> {scheme, secrets, keep, tolerance,
+    ///                                       key, max_body}  hook h's secrets, set
+    ///                                       on the tenant's node and copied to
+    ///                                       each copy a failover could promote;
+    ///                                       the directory keeps names and a
+    ///                                       version, never a secret: {tenant,
+    ///                                       hook, version, behind}; DELETE takes
+    ///                                       the hook away
+    /// GET    /_shard/tenants/<t>/hooks         the node's listing, no secret in
+    ///                                       it, and the copies `behind`
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
     /// POST   /_shard/tenants/<t>/move {to, region}  move to another node: in
     ///                                       its region, or across to the one
@@ -3187,6 +3205,7 @@ impl Router {
                 | (Method::Get, ["tenants"])
                 | (Method::Get, ["tenants", _])
                 | (Method::Get, ["tenants", _, "quota"])
+                | (Method::Get, ["tenants", _, "hooks"])
                 | (Method::Get, ["region"])
                 | (Method::Get, ["regions"])
         ) && !readers::reads_only(req, &segs[1..]);
@@ -3238,6 +3257,8 @@ impl Router {
             },
             (Method::Put, ["tenants", t, "quota"]) => self.set_quota(t, &req.body),
             (Method::Get, ["tenants", t, "quota"]) => self.quota_report(t),
+            (Method::Put | Method::Delete, ["tenants", t, "hooks", h]) => self.set_hook(req, t, h),
+            (Method::Get, ["tenants", t, "hooks"]) => self.hooks_report(t),
             (Method::Delete, ["tenants", t]) => self.delete(t),
             (Method::Get, ["tenants", t, "read-replicas"]) => Ok(self.list_readers(t)),
             (Method::Put, ["tenants", t, "read-replicas", r]) => self.place_reader(t, r),
@@ -3341,6 +3362,16 @@ impl Router {
                 "Files this directory's router may have left on nodes -- made, or meant to be taken off, and placed by nothing -- for an operator to look at and remove by hand: a repair's `left` names each.",
             );
             out.sample("fennec_router_files_left", &[], dir.files_left());
+            out.family(
+                "fennec_router_tenants_hooks_behind",
+                "gauge",
+                "Tenants a copy of which a failover could promote lacks the version of their webhook secrets the directory records, until the repair copies it: promoted so, its hooks answer 401.",
+            );
+            out.sample(
+                "fennec_router_tenants_hooks_behind",
+                &[],
+                dir.hooks_behind(),
+            );
             out.family(
                 "fennec_router_tenants_moving",
                 "gauge",
@@ -3740,7 +3771,8 @@ impl Router {
                 let why = self
                     .on_standby(name, "PUT", &base)
                     .or_else(|| self.on_standby(name, "POST", &format!("{base}/follow")))
-                    .or_else(|| self.quota_on_standby(t, name));
+                    .or_else(|| self.quota_on_standby(t, name))
+                    .or_else(|| self.hooks_on_standby(t, name));
                 if let Some(w) = why {
                     fennec_http::log!("tenant `{t}` has no replica yet: {w}");
                     unfollowed.push(quote(t));
@@ -4002,6 +4034,12 @@ impl Router {
         // Its quota, so a failover onto it finds the tenant held as it was.
         if let Some(w) = self.send_quota(tenant, on) {
             return Err(left(how, &ids, w));
+        }
+        // Its hook secrets, which its follow put away: a copy that does
+        // not take them is noted behind, and copied them again by the
+        // repair, its attach standing.
+        if let Some(w) = self.send_hooks(tenant, on) {
+            fennec_http::log!("tenant `{tenant}`'s copy on `{on}` lacks its hook secrets: {w}");
         }
         // The identity it carries now, which an attach finding it again --
         // its node back from a failover that promoted another -- names.
@@ -4484,6 +4522,9 @@ impl Router {
                 }
             }
         }
+        let (copied, unhooked) = self.repair_hooks(&mut again);
+        done.extend(copied);
+        failed.extend(unhooked);
         self.repaired(again);
         let left = match leftovers {
             Ok(leftovers) => self.look_at_leftovers(leftovers, &holding),
@@ -4811,6 +4852,7 @@ impl Router {
         ) {
             Ok((200, body)) => {
                 self.quota_after_failover(tenant, to);
+                self.hooks_after_failover(tenant, to);
                 let left = from.as_ref().map(|(name, _)| name.as_str());
                 self.promoted(tenant, to, left, &body)
                     .map_err(|e| message(&e))?;
@@ -5013,6 +5055,26 @@ impl Router {
         self.send_quota(tenant, &standby)
     }
 
+    /// A promoted copy keeps the hook secrets it held: the router keeps
+    /// none to give it, and its old primary is gone. One the directory
+    /// knew lacked the set's version is said loudly, its hooks answering
+    /// 401 until an operator sets them again -- or the repair copies the
+    /// set from another copy holding it -- and stays counted behind.
+    fn hooks_after_failover(&self, tenant: &str, to: &str) {
+        let behind = self
+            .read_dir()
+            .hook_set(tenant)
+            .is_some_and(|s| s.behind.iter().any(|b| b == to));
+        if behind {
+            fennec_http::log!(
+                "tenant `{tenant}` failed over to `{to}`, which lacks its hook secrets' version: \
+                 its hooks may answer 401 until they are set again (PUT \
+                 /_shard/tenants/{tenant}/hooks/<name>)"
+            );
+            self.try_again();
+        }
+    }
+
     /// A promoted copy is sent the tenant's quota again: one it missed --
     /// a copy down when the quota was set -- would otherwise take writes
     /// with none. The failover goes on either way: a tenant taking writes
@@ -5021,6 +5083,269 @@ impl Router {
         if let Some(w) = self.send_quota(tenant, to) {
             fennec_http::log!("tenant `{tenant}` failed over to `{to}` without its quota: {w}");
         }
+    }
+
+    /// `PUT` or `DELETE /_shard/tenants/<t>/hooks/<h>`: a tenant's webhook
+    /// secrets, relayed and kept by none of the router's records
+    /// (`docs/design/named-statements.md`, *Where the secret lives*). Under
+    /// the tenant's claim, so a running move -- which holds it from its
+    /// freeze to its flip -- refuses it (409) rather than land it on the
+    /// source between the copy of its set and the flip. Its primary takes it
+    /// first, and one it refuses records nothing; then its set, read whole
+    /// from the primary, goes to each copy a failover could promote -- its
+    /// pair's standby, its `--replicas` copy -- and the directory records
+    /// the hooks' names and the set's version, never a secret. Answered
+    /// once every copy was sent it: each that did not take it is named
+    /// (`behind`), counted by `fennec_router_tenants_hooks_behind` and
+    /// copied again by the repair -- never a 2xx hiding a copy a failover
+    /// would promote without the set, whose secrets no one could give it
+    /// once its primary is gone.
+    fn set_hook(&self, req: &Request, tenant: &str, hook: &str) -> Outcome<Response> {
+        let _claim = self.claim(tenant)?;
+        let node = self
+            .read_dir()
+            .placement(tenant)
+            .map(|p| p.node.clone())
+            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let n = self.node(&node)?;
+        let target = format!("/_admin/tenants/{tenant}/hooks/{hook}");
+        let method = req.method.name();
+        expect(
+            self.pool
+                .call(&n.addr, method, &target, &n.token, &req.body),
+            200,
+            &node,
+        )?;
+        // The set as the primary holds it now, whole: what each copy takes.
+        let set = self
+            .hook_secrets(tenant, &node)
+            .map_err(|w| Fail(502, format!("tenant `{tenant}`'s hook secrets: {w}")))?;
+        let (names, version) = set.as_deref().map(names_and_version).unwrap_or_default();
+        let empty = br#"{"version":null,"hooks":{}}"#;
+        let mut behind = Vec::new();
+        for copy in self.promotable(tenant, &node) {
+            if let Some(w) = self.install_hook_set(tenant, &copy, set.as_deref().unwrap_or(empty)) {
+                fennec_http::log!("tenant `{tenant}`'s hook secrets did not reach its copy: {w}");
+                behind.push(copy);
+            }
+        }
+        let recorded = directory::HookSet {
+            names,
+            version: version.clone(),
+            behind: behind.clone(),
+        };
+        self.write_dir()
+            .set_hook_set(tenant, Some(&recorded))
+            .map_err(internal)?;
+        if !behind.is_empty() {
+            self.try_again();
+        }
+        let behind: Vec<String> = behind.iter().map(|b| quote(b)).collect();
+        Ok(Response::json(
+            200,
+            format!(
+                "{{\"tenant\":{},\"hook\":{},\"version\":{},\"behind\":[{}]}}",
+                quote(tenant),
+                quote(hook),
+                match version.is_empty() {
+                    true => "null".to_string(),
+                    false => quote(&version),
+                },
+                behind.join(",")
+            ),
+        ))
+    }
+
+    /// `GET /_shard/tenants/<t>/hooks`: what the primary lists -- names,
+    /// schemes, bounds, when each was set, never a secret -- and the copies
+    /// the directory knows lack its version (`behind`).
+    fn hooks_report(&self, tenant: &str) -> Outcome<Response> {
+        let node = self
+            .read_dir()
+            .placement(tenant)
+            .map(|p| p.node.clone())
+            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let n = self.node(&node)?;
+        let target = format!("/_admin/tenants/{tenant}/hooks");
+        let listing = expect(
+            self.pool.call(&n.addr, "GET", &target, &n.token, b""),
+            200,
+            &node,
+        )?;
+        let listing = String::from_utf8_lossy(&listing);
+        let behind: Vec<String> = (self.read_dir().hook_set(tenant))
+            .map(|s| s.behind.iter().map(|b| quote(b)).collect())
+            .unwrap_or_default();
+        let listing = listing.trim_end().trim_end_matches('}');
+        Ok(Response::json(
+            200,
+            format!("{listing},\"behind\":[{}]}}", behind.join(",")),
+        ))
+    }
+
+    /// The copies of `tenant` a failover could promote, `primary` aside:
+    /// its pair's standby and its `--replicas` copy. Never a read replica,
+    /// which answers marked reads alone and holds no secret.
+    fn promotable(&self, tenant: &str, primary: &str) -> Vec<String> {
+        let dir = self.read_dir();
+        let own = [dir.standby(primary), dir.replica(tenant)];
+        let mut out: Vec<String> = own.into_iter().flatten().map(str::to_string).collect();
+        out.dedup();
+        out
+    }
+
+    /// Whether `node` holds a copy of `tenant` the directory places: its
+    /// primary, its pair's standby or its replica.
+    fn holds_copy(&self, tenant: &str, node: &str) -> bool {
+        let dir = self.read_dir();
+        let Some(p) = dir.placement(tenant) else {
+            return false;
+        };
+        p.node == node || dir.standby(&p.node) == Some(node) || dir.replica(tenant) == Some(node)
+    }
+
+    /// The set of hook secrets `node` holds for `tenant`, whole, as its
+    /// `hook-secrets` answers it: `None` where it holds none -- a node from
+    /// before hooks too, which knows no such route (404). The bytes are in
+    /// this router's memory only until the copy's `PUT` is answered.
+    fn hook_secrets(
+        &self,
+        tenant: &str,
+        node: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let n = self.node(node).map_err(|Fail(_, w)| w)?;
+        let target = format!("/_admin/tenants/{tenant}/hook-secrets");
+        match self.pool.call(&n.addr, "GET", &target, &n.token, b"") {
+            Ok((200, body)) => Ok((!names_and_version(&body).1.is_empty()).then_some(body)),
+            Ok((404, _)) => Ok(None),
+            Ok((status, body)) => Err(format!(
+                "`{node}` answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Err(format!("`{node}` did not answer: {e}")),
+        }
+    }
+
+    /// Installs the set `set` on `node`'s copy of `tenant`, whole: what went
+    /// wrong, if anything.
+    fn install_hook_set(&self, tenant: &str, node: &str, set: &[u8]) -> Option<String> {
+        let n = match self.node(node) {
+            Ok(n) => n,
+            Err(Fail(_, w)) => return Some(w),
+        };
+        let target = format!("/_admin/tenants/{tenant}/hook-secrets");
+        match self.pool.call(&n.addr, "PUT", &target, &n.token, set) {
+            Ok((200, _)) => None,
+            Ok((status, body)) => Some(format!(
+                "`{node}` answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Some(format!("`{node}` did not answer: {e}")),
+        }
+    }
+
+    /// Copies `tenant`'s hook secrets onto `node`, a copy that lacks them
+    /// -- a standby attached, a copy that began to follow (which put its
+    /// own set away), a failed attach tried again -- from a copy the
+    /// directory knows holds the set's version, its primary first: what
+    /// went wrong, if anything, the copy then noted as behind. A tenant
+    /// whose directory records no set costs no call.
+    fn send_hooks(&self, tenant: &str, node: &str) -> Option<String> {
+        let set = self.read_dir().hook_set(tenant)?;
+        let why = self.copy_hooks(tenant, node, &set);
+        self.note_hooks(tenant, node, why.is_none());
+        why
+    }
+
+    fn copy_hooks(&self, tenant: &str, node: &str, set: &directory::HookSet) -> Option<String> {
+        let source = {
+            let dir = self.read_dir();
+            let p = dir.placement(tenant)?;
+            let candidates = [
+                Some(p.node.as_str()),
+                dir.standby(&p.node),
+                dir.replica(tenant),
+            ];
+            let found = candidates
+                .into_iter()
+                .flatten()
+                .find(|c| *c != node && !set.behind.iter().any(|b| b == c))
+                .map(str::to_string);
+            found
+        };
+        let Some(source) = source else {
+            return Some(format!(
+                "no copy of `{tenant}` known to hold its hook secrets' version answers"
+            ));
+        };
+        let empty = br#"{"version":null,"hooks":{}}"#.to_vec();
+        match self.hook_secrets(tenant, &source) {
+            Ok(held) => self.install_hook_set(tenant, node, &held.unwrap_or(empty)),
+            Err(w) => Some(w),
+        }
+    }
+
+    /// Notes whether `node` holds `tenant`'s hook secrets' version: off the
+    /// copies behind where it does, on them where it does not.
+    fn note_hooks(&self, tenant: &str, node: &str, held: bool) {
+        let mut dir = self.write_dir();
+        let Some(mut set) = dir.hook_set(tenant) else {
+            return;
+        };
+        let was = set.behind.clone();
+        set.behind.retain(|b| b != node);
+        if !held {
+            set.behind.push(node.to_string());
+        }
+        if set.behind != was {
+            if let Err(e) = dir.set_hook_set(tenant, Some(&set)) {
+                fennec_http::log!(
+                    "tenant `{tenant}`'s hook secrets' copies stayed unrecorded: {e}"
+                );
+            }
+        }
+    }
+
+    /// [`Self::send_hooks`] to the standby of `node`, where it has one.
+    fn hooks_on_standby(&self, tenant: &str, node: &str) -> Option<String> {
+        let standby = self.read_dir().standby(node).map(str::to_string)?;
+        self.send_hooks(tenant, &standby)
+    }
+
+    /// The copies lacking their tenant's hook secrets' version, each
+    /// copied it from one holding it; a copy no longer the tenant's let go
+    /// of. What the repair says of each: done, and failed.
+    fn repair_hooks(&self, again: &mut bool) -> (Vec<String>, Vec<String>) {
+        let (mut done, mut failed) = (Vec::new(), Vec::new());
+        let behind: Vec<(String, directory::HookSet)> = (self.read_dir().hook_sets())
+            .into_iter()
+            .filter(|(_, s)| !s.behind.is_empty())
+            .collect();
+        for (tenant, set) in behind {
+            let Ok(_claim) = self.claim(&tenant) else {
+                *again = true;
+                failed.push(why(&tenant, "another operation is in progress"));
+                continue;
+            };
+            for node in &set.behind {
+                if !self.holds_copy(&tenant, node) {
+                    self.note_hooks(&tenant, node, true);
+                    continue;
+                }
+                match self.send_hooks(&tenant, node) {
+                    None => done.push(format!(
+                        "{{\"tenant\":{},\"hook_secrets\":{}}}",
+                        quote(&tenant),
+                        quote(node)
+                    )),
+                    Some(w) => {
+                        *again = true;
+                        failed.push(why(&tenant, &format!("its hook secrets on `{node}`: {w}")));
+                    }
+                }
+            }
+        }
+        (done, failed)
     }
 
     fn remove_node(&self, name: &str) -> Outcome<Response> {
@@ -5557,6 +5882,30 @@ impl Router {
             self.take_back(tenant, to, "a move undone, its quota not taken", &target);
             return Err(thaw(Fail(502, w)));
         }
+        // So do its hook secrets, read whole off the frozen source and in
+        // this router's memory only until the target took them: a target
+        // that did not would answer every event 401 from the flip on, the
+        // source gone. Under the move's claim, so no hook's `PUT` lands on
+        // the source between this copy and the flip.
+        let hooks = self.hook_secrets(tenant, &from).and_then(|set| match set {
+            Some(set) => match self.install_hook_set(tenant, to, &set) {
+                Some(w) => Err(w),
+                None => Ok(Some(set)),
+            },
+            None => Ok(None),
+        });
+        let hooks = match hooks {
+            Ok(set) => set,
+            Err(w) => {
+                self.take_back(
+                    tenant,
+                    to,
+                    "a move undone, its hook secrets not taken",
+                    &target,
+                );
+                return Err(thaw(Fail(502, format!("its hook secrets: {w}"))));
+            }
+        };
 
         // Bound first: an `if let`'s guard lives through its block, where `thaw` locks it again.
         // The target's identity beside the flip, as a create's is.
@@ -5574,6 +5923,20 @@ impl Router {
             );
             return Err(thaw(internal(e)));
         }
+        // The set the target holds, the one the directory records; its
+        // copies are sent it as they follow it, below.
+        let recorded = hooks.as_deref().map(|set| {
+            let (names, version) = names_and_version(set);
+            directory::HookSet {
+                names,
+                version,
+                behind: Vec::new(),
+            }
+        });
+        drop(hooks);
+        if let Err(e) = self.write_dir().set_hook_set(tenant, recorded.as_ref()) {
+            fennec_http::log!("tenant `{tenant}`'s hook secrets stayed unrecorded: {e}");
+        }
         self.lease_now(to);
         // Its read replicas follow it there, from the next look, which comes
         // at once: the image carried the history, so each goes on from where
@@ -5586,6 +5949,7 @@ impl Router {
         if let Some(w) = self
             .on_standby(to, "PUT", &base)
             .or_else(|| self.quota_on_standby(tenant, to))
+            .or_else(|| self.hooks_on_standby(tenant, to))
         {
             fennec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
         }
@@ -5685,6 +6049,29 @@ impl Drop for Claim<'_> {
             .remove(&self.tenant);
         self.router.freed.notify_all();
     }
+}
+
+/// The hooks' names and the version a set of hook secrets holds, as
+/// `hook-secrets` answers it: the names its object's keys, and none, with
+/// an empty version, where it holds no hook. Its secrets are read past.
+pub(crate) fn names_and_version(set: &[u8]) -> (Vec<String>, String) {
+    use fennec_core::prelude::Value;
+    let text = String::from_utf8_lossy(set);
+    let Ok(Value::Object(fields)) = fennec_core::json::parse_json(&text) else {
+        return (Vec::new(), String::new());
+    };
+    let (mut names, mut version) = (Vec::new(), String::new());
+    for (k, v) in fields {
+        match (k.as_str(), v) {
+            ("version", Value::Text(t)) => version = t.to_string(),
+            ("hooks", Value::Object(hooks)) => names = hooks.into_iter().map(|(n, _)| n).collect(),
+            _ => {}
+        }
+    }
+    if names.is_empty() {
+        version.clear();
+    }
+    (names, version)
 }
 
 /// The answer a node gave, if it is the expected status; its body otherwise
@@ -6196,6 +6583,29 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the directory records of a set: its hooks' names and version,
+    /// never a secret; a set of no hook, or one that does not read, none.
+    #[test]
+    fn a_set_is_recorded_by_its_names_and_version() {
+        let set = br#"{"version":"00000000000000ab","hooks":{"stripe":{"scheme":"stripe","secrets":["whsec_x"]},"push":{"scheme":"github","secrets":["s"]}}}"#;
+        let (names, version) = names_and_version(set);
+        assert_eq!(
+            names,
+            ["push", "stripe"],
+            "in name order, as an object reads"
+        );
+        assert_eq!(version, "00000000000000ab");
+        assert_eq!(
+            names_and_version(br#"{"version":null,"hooks":{}}"#),
+            (Vec::new(), String::new())
+        );
+        assert_eq!(
+            names_and_version(br#"{"version":"00000000000000ab","hooks":{}}"#),
+            (Vec::new(), String::new())
+        );
+        assert_eq!(names_and_version(b"not json"), (Vec::new(), String::new()));
+    }
 
     /// A repair's tries again: a fresh failed attach is due 2 s after it,
     /// though the tries before it waited out their minute; one that came
