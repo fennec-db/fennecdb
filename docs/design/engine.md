@@ -825,4 +825,11 @@ none of its messages is in the module, `Undo::Reindexed` is native alone,
 a statement's put-back behind `statements`, which the module is built
 without: 838 714 bytes against main's 838 722 (brotli 286 468 against
 286 434). Its data is as first written (838 643), one function inlined
-otherwise, 71 bytes longer.
+otherwise, 71 bytes longer. `Waking` costs nothing measurable either:
+the same kind of harness over three builds (main, the PR before the
+guard and with it), each 8 copies under random UUIDs of 7 runs
+(`tools/instr/compare.py`), each run started under a 1-minute load below
+4 (1.75-3.44), read 13 229.4 instructions a record an `apply` with the
+guard against 13 217.7 without (SE 27.6 for the difference) and
+12 371.4 against 12 370.1 a thousand an `apply` (SE 20.3), main's
+13 727.8 and 12 798.7.
