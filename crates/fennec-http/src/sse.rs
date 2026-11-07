@@ -382,8 +382,10 @@ pub fn serve(
     let mut held = None;
     // The stream's long `in` lists as its last look bound them -- an inner
     // `get`'s answer, kept from one look to the next ([`Lists`]) -- where
-    // its filter holds one.
-    let mut lists = Lists::of(sub.filter.as_ref());
+    // its filter reads another collection ([`Reach`]) and holds one, made
+    // as its seed answers them. A plain stream's look evaluates its filter
+    // a row at a time, a long list written in too, as it did.
+    let mut lists = None;
     let mut cursor = match sub.since {
         // Resuming, a scoped subscriber is seeded all the same: the rows it
         // holds are not known here, and without them no deletion could be
@@ -707,9 +709,10 @@ fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
 /// ended at the first write to its collection. Made again at a look
 /// ([`look`]) where one of those collections was written since the
 /// stream's change, where a row of one reached its time since they were
-/// last answered -- the stream wakes for it ([`Reach::next`]) -- or at
-/// every look where an inner `get` reads the time; and run again where the
-/// answer moved, its rows diffed by id against those the stream was sent
+/// last answered, or where an inner `get` reads the time, once
+/// [`CLOCK_EVERY`] passed since -- the stream wakes for either
+/// ([`Reach::next`]); and the shape run again where the answer moved, its
+/// rows diffed by id against those the stream was sent
 /// ([`enter_and_leave`]): a row the write to the other collection let in
 /// enters, one it shut out leaves, a deletion of a row the stream was
 /// sent, its own collection unwritten. A customer following the courier
@@ -718,8 +721,8 @@ fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
 /// between; a board following `msg in (get notes select title)` hears the
 /// message a note's title names once the note is written and its deletion
 /// once the note is gone. The cost is an inner `get` a stream at each
-/// write to what it reads -- answered on a pin where a query's would be,
-/// beside the writers -- and the shape run again where its list moved:
+/// write to what it reads -- answered on a pin where a query of it would
+/// be, beside the writers -- and the shape run again where its list moved:
 /// the diff alone sent, where a reseed would send every row the shape
 /// holds at each such write. A stream whose filter reads no other
 /// collection has none, and runs nothing more at a look.
@@ -738,12 +741,21 @@ struct Reach {
     /// An inner `get` reads the time: its filter, an `order` key, an item
     /// of its list (`access::reads_time`).
     clock: bool,
-    /// The next moment a row of `reads` reaches its `@ttl`, worked out as
-    /// the lists were last answered: one leaving them with no write. Asked
-    /// of the collections then (`Database::wakes_at`), so a `@ttl` given
-    /// one later -- a write to it, which answers them again -- is followed.
+    /// When the lists are due by the time, worked out as they were last
+    /// answered ([`Reach::next_after`]): the next moment a row of `reads`
+    /// reaches its `@ttl`, one leaving them with no write, or where they
+    /// read the time, [`CLOCK_EVERY`] after. Asked of the collections then
+    /// (`Database::wakes_at`), so a `@ttl` given one later -- a write to
+    /// it, which answers them again -- is followed.
     next: Option<i64>,
 }
+
+/// How long lists an inner `get` reading the time makes are taken to hold,
+/// ms: such a stream answers them again once this passed since, waking for
+/// it, as it does at a write to what they read. Answered again at every
+/// look, they were answered at every write anywhere, which wakes every
+/// stream: an inner `get` a stream a write, whatever the write moved.
+const CLOCK_EVERY: i64 = 1_000;
 
 /// A stream's filter, list and view as [`Reach::rules`] binds them.
 type Answered = (Option<Expr>, Option<Vec<String>>, Option<View>);
@@ -796,22 +808,51 @@ impl Reach {
     }
 
     /// Whether the lists are to be answered again at a look after `since`:
-    /// a collection they read was written, a row of one reached its time,
-    /// or they read the time.
+    /// a collection they read was written, or they are due by the time
+    /// ([`Reach::next`]).
     fn due(&self, db: &Database, since: u64, now: i64) -> bool {
-        self.clock
-            || self.next.is_some_and(|at| at <= now)
+        self.next.is_some_and(|at| at <= now)
             || db
                 .changed_collections_since(since)
                 .is_none_or(|w| w.iter().any(|c| self.reads.contains(c)))
     }
 
-    /// The next moment a row of a collection the lists read reaches its
-    /// time, past `now`: under the lock, a pin holding no index.
+    /// When lists answered at `now` are due by the time: the next moment a
+    /// row of a collection they read reaches its time past it -- under the
+    /// lock, a pin holding no index -- or [`CLOCK_EVERY`] after it where
+    /// they read the time.
     fn next_after(&self, db: &Database, now: i64) -> Option<i64> {
         (self.reads.iter())
             .filter_map(|c| db.wakes_at(c, None, &[], now).ok().flatten())
+            .chain(self.clock.then_some(now.saturating_add(CLOCK_EVERY)))
             .min()
+    }
+}
+
+/// Lists a pin answered, kept for a lock taken after it to run the shape
+/// by where they still hold ([`Kept::holds`]): the change and the images
+/// they were answered at, and the time. A seed's pin that reached for an
+/// index keeps them for the lock to read by, and a look's whose lists
+/// moved, for the lock to run the shape by.
+struct Kept {
+    at: u64,
+    images: u64,
+    now: i64,
+    answered: Answered,
+}
+
+impl Kept {
+    /// Whether the lists hold under `db` at `now` as they did answered:
+    /// the same images, nothing they read written since, and no row of it
+    /// reaching its time since they were answered -- nor, reading the
+    /// time, [`CLOCK_EVERY`] passed. The time is theirs: worked out from
+    /// when the lock found them, a note reaching its time between left
+    /// them holding it with no wake.
+    fn holds(&self, db: &Database, r: &Reach, now: i64) -> bool {
+        db.adoptions() == self.images
+            && r.next_after(db, self.now).is_none_or(|at| at > now)
+            && (db.changed_collections_since(self.at))
+                .is_some_and(|w| !w.iter().any(|c| r.reads.contains(c)))
     }
 }
 
@@ -824,17 +865,37 @@ struct Looked {
     hold: Option<Hold>,
 }
 
+/// Where a look whose lists are due answers them ([`look`]).
+#[derive(Clone, Copy, PartialEq)]
+enum Answer {
+    /// The inner `get`s pinned on their own where a query of them would
+    /// be, the rows written since the cursor beside them
+    /// ([`Database::pin_lists`]) -- all a look reads where the lists did
+    /// not move -- else under the lock.
+    Apart,
+    /// The shape pinned whole, its inner `get`s and all: lists answered
+    /// apart moved, and what they read was written before the lock could
+    /// run the shape by them.
+    Whole,
+    /// Under the lock, all of it: a pin reached for an index.
+    Lock,
+}
+
 /// A stream's look after `cursor`, the database still on the images it
 /// had `adopted`. Where its filter reads another collection that was
 /// written ([`Reach::due`]), the rules are bound under the lock and the
-/// inner `get`s answered where a query's would be: on a pin taken under it
-/// ([`Database::pin`]), beside the writers -- a list read off a million
-/// rows held every writer for its scan otherwise, where the query of it
-/// pins -- the changes' ids read under the lock and judged on the pin, as
-/// the rows stood ([`Database::written_after`],
-/// [`Pinned::changes_held`]), the shape run there too where it moved, and
-/// the ring held back to that change till the next look. Under the lock
-/// where the pin declines it, or reached for an index.
+/// inner `get`s answered first, where a query of them would be: on a pin
+/// of what they read ([`Database::pin_lists`]), beside the writers -- a
+/// list read off a million rows held every writer for its scan otherwise
+/// -- with the rows written since the cursor beside them, judged there as
+/// they stood ([`Pinned::changes_held`]); else under the lock. Only where
+/// the lists moved is the shape run by them: under a lock where they still
+/// hold ([`Kept`]), pinned where a query of the shape would be, the ring
+/// held back to the pin's change till the next look; or, written again
+/// meanwhile, the whole shape pinned, lists and all. Pinned with the shape
+/// whatever the lists did, a look copied the id index of a million rows
+/// at every write to ten notes. Under the lock where a pin reached for an
+/// index.
 fn look(
     db: &Arc<RwLock<Database>>,
     (cursor, adopted): (u64, u64),
@@ -845,7 +906,10 @@ fn look(
         &mut Option<Lists>,
     ),
 ) -> fennec_core::error::Result<Looked> {
-    let mut pin = true;
+    let mut answer = Answer::Apart;
+    let mut kept: Option<Kept> = None;
+    // The shape reached for an index on a pin: the lock runs it.
+    let mut shape_out = false;
     loop {
         let guard = crate::held::read(db);
         let looked = |step| Looked {
@@ -869,43 +933,98 @@ fn look(
             }
             return Ok(looked(step));
         };
-        let answered = r.rules(&guard)?;
-        let pinned = match pin {
-            true => {
-                let (filter, project, _) = &answered;
-                let stmt = Statement::Select(shape_select(&sub.collection, filter, project));
-                guard.pin(&[(&stmt, &[][..])])
-            }
-            false => None,
-        };
-        let next = r.next_after(&guard, now);
         let Some(written) = guard.written_after(&sub.collection, cursor)? else {
             return Ok(looked(Changes::Reseed));
         };
-        let read = match &pinned {
-            Some(p) => {
-                let hold = guard.hold_changes();
-                drop(guard);
-                judge(On::Pin(p), written, answered, (sub, view, lists)).map(|r| {
-                    r.map(|l| Looked {
-                        hold: Some(hold),
-                        ..l
-                    })
-                })
-            }
-            None => judge(On::Lock(&guard), written, answered, (sub, view, lists)),
+        // The lists kept where they hold under this lock, answered already;
+        // else the rules bound, and the inner `get`s answered below.
+        let (mut answered, at, mut done) = match kept.take() {
+            Some(k) if k.holds(&guard, r, now) => (k.answered, k.now, true),
+            _ => (r.rules(&guard)?, now, false),
         };
-        match read {
-            Some(read) => {
-                if read.is_ok() {
-                    r.next = next;
-                }
-                return read;
+        let (next, seq) = (r.next_after(&guard, at), guard.change_seq());
+        let mut pinned = match (done, answer, &answered.0) {
+            (false, Answer::Apart, Some(f)) => guard.pin_lists(f, &sub.collection, &written),
+            (false, Answer::Whole, _) => pin_shape(&guard, &sub.collection, &answered),
+            _ => None,
+        };
+        if !(done || pinned.is_some()) {
+            if let Some(Err(e)) = On::Lock(&guard).answer(&mut answered.0) {
+                return Err(e);
             }
-            // The pin reached for an index: under the lock, all of it.
-            None => pin = false,
+            done = true;
         }
+        // Answered at this lock's moment and moved, the shape runs by them,
+        // pinned where a query of it would be.
+        let shape = done;
+        let mut moved = done && !same_answer(&sub.filter, &answered.0);
+        if moved && answer != Answer::Lock && !shape_out {
+            pinned = pin_shape(&guard, &sub.collection, &answered);
+        }
+        let hold = pinned.as_ref().map(|_| guard.hold_changes());
+        let guard = match pinned {
+            Some(_) => {
+                drop(guard);
+                None
+            }
+            None => Some(guard),
+        };
+        let on = match (&pinned, &guard) {
+            (Some(p), _) => On::Pin(p),
+            (None, Some(g)) => On::Lock(g),
+            (None, None) => continue,
+        };
+        if !done {
+            let Some(read) = on.answer(&mut answered.0) else {
+                answer = Answer::Lock;
+                continue;
+            };
+            read?;
+            moved = !same_answer(&sub.filter, &answered.0);
+            // Apart, the pin holds the shape's written rows alone: the
+            // lists are kept for a lock to run the shape by.
+            if moved && answer == Answer::Apart {
+                kept = Some(Kept {
+                    at: seq,
+                    images: adopted,
+                    now: at,
+                    answered,
+                });
+                answer = Answer::Whole;
+                continue;
+            }
+        }
+        let Some(read) = judge(on, written, &mut answered, moved, (sub, view, lists)) else {
+            // The shape reached for an index: run by the same lists under
+            // the lock; else all of it is the lock's.
+            match shape {
+                true => {
+                    shape_out = true;
+                    kept = Some(Kept {
+                        at: seq,
+                        images: adopted,
+                        now: at,
+                        answered,
+                    });
+                }
+                false => answer = Answer::Lock,
+            }
+            continue;
+        };
+        if read.is_ok() {
+            r.next = next;
+        }
+        return read.map(|l| Looked { hold, ..l });
     }
+}
+
+/// A pin of the stream's whole shape, its filter `answered` as the rules
+/// bound it, the inner `get`s answered or not, where a query of it would
+/// be pinned. Out of line: a look asks it in two places.
+#[inline(never)]
+fn pin_shape(db: &Database, collection: &str, answered: &Answered) -> Option<Pinned> {
+    let stmt = Statement::Select(shape_select(collection, &answered.0, &answered.1));
+    db.pin(&[(&stmt, &[][..])])
 }
 
 /// The changes after `cursor` by the stream's filter, its long lists bound
@@ -942,7 +1061,11 @@ impl On<'_> {
         }
     }
 
-    fn answer(&self, f: &mut Expr) -> Option<fennec_core::error::Result<()>> {
+    /// The inner `get`s of a filter answered as the lists they are.
+    fn answer(&self, f: &mut Option<Expr>) -> Option<fennec_core::error::Result<()>> {
+        let Some(f) = f else {
+            return Some(Ok(()));
+        };
         match self {
             On::Lock(db) => Some(db.answer_subqueries(f)),
             On::Pin(p) => p.answer_subqueries(f),
@@ -970,38 +1093,33 @@ impl On<'_> {
     }
 }
 
-/// A due look read on `on`: the inner `get`s of the stream's filter as
-/// the rules bound it (`answered`) answered, the changes `written` names
-/// judged by it, and where the lists moved, the rows the shape holds now
-/// -- the stream's filter, list, view and lists moved to it once every
-/// read came back. `None` where the pin reached for an index, the stream
-/// as it was.
+/// A due look read on `on`, the stream's filter's inner `get`s answered
+/// (`answered`, as the rules bound it): the changes `written` names judged
+/// by it, and where the lists `moved`, the rows the shape holds now -- the
+/// stream's filter, list, view and lists moved to it once every read came
+/// back. `None` where the pin reached for an index, the stream and
+/// `answered` as they were.
 fn judge(
     on: On,
     written: Written,
-    (mut filter, project, v): Answered,
+    answered: &mut Answered,
+    moved: bool,
     (sub, view, lists): (
         &mut api::Subscription,
         &mut Option<View>,
         &mut Option<Lists>,
     ),
 ) -> Option<fennec_core::error::Result<Looked>> {
-    if let Some(f) = &mut filter {
-        if let Err(e) = on.answer(f)? {
-            return Some(Err(e));
-        }
-    }
-    let moved = !same_answer(&sub.filter, &filter);
     let mut fresh = match moved {
-        true => Lists::of(filter.as_ref()),
+        true => Lists::of(answered.0.as_ref()),
         false => None,
     };
     let (f, pr, l, vw) = match moved {
         true => (
-            &filter,
-            &project,
+            &answered.0,
+            &answered.1,
             fresh.as_mut(),
-            v.as_ref().map_or(&*view, |_| &v),
+            answered.2.as_ref().map_or(&*view, |_| &answered.2),
         ),
         false => (&sub.filter, &sub.project, lists.as_mut(), &*view),
     };
@@ -1032,9 +1150,9 @@ fn judge(
         _ => None,
     };
     if moved {
-        (sub.filter, sub.project) = (filter, project);
-        if v.is_some() {
-            *view = v;
+        (sub.filter, sub.project) = (answered.0.take(), answered.1.take());
+        if let Some(v) = answered.2.take() {
+            *view = Some(v);
         }
         *lists = fresh;
     }
@@ -1091,19 +1209,20 @@ fn same_expr(a: &Expr, b: &Expr) -> bool {
 
 /// Two lists of values, the same ones in any order: their encodings
 /// sorted -- a total order, as `NaN` is not -- and compared. Sorted as
-/// byte slices, whose sort the binary holds already.
+/// byte slices, whose sort the binary holds already; read in a loop, as
+/// `collect` into an `Option` built a copy of its own (628 bytes).
 fn same_values(xs: &[Expr], ys: &[Expr]) -> bool {
-    let keys = |items: &[Expr]| -> Option<Vec<Vec<u8>>> {
-        (items.iter())
-            .map(|it| match it {
-                Expr::Lit(v) => {
-                    let mut key = Vec::new();
-                    fennec_core::codec::encode_value(&mut key, v);
-                    Some(key)
-                }
-                _ => None,
-            })
-            .collect()
+    let keys = |items: &[Expr]| {
+        let mut keys = Vec::with_capacity(items.len());
+        for it in items {
+            let Expr::Lit(v) = it else {
+                return None;
+            };
+            let mut key = Vec::new();
+            fennec_core::codec::encode_value(&mut key, v);
+            keys.push(key);
+        }
+        Some(keys)
     };
     if xs.len() != ys.len() {
         return false;
@@ -1225,8 +1344,8 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// passed, and one an image adopted meanwhile made stale: an image can land
 /// on the pin's own change, where neither the ring nor the counter shows
 /// it, and the pin read what it replaced. Lists the pin answered before its
-/// read reached for an index are kept where the database has not moved
-/// since, rather than answered again under the lock.
+/// read reached for an index are kept where they still hold ([`Kept`]),
+/// rather than answered again under the lock.
 fn seed(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
@@ -1240,19 +1359,18 @@ fn seed(
     quiet: bool,
 ) -> std::io::Result<(u64, Hold, u64)> {
     let mut pin = true;
-    // Lists the pin answered at its change, and the images adopted then.
-    let mut kept: Option<(u64, u64, Answered)> = None;
+    // Lists the pin answered, for the lock to read by where they hold.
+    let mut kept: Option<Kept> = None;
     let read = loop {
         let guard = crate::held::read(db);
         let now = now_ms() as i64;
         let (hold, adopted) = (guard.hold_changes(), guard.adoptions());
         // The rules bound under the lock; the inner `get`s answered below.
-        let ruled = match (reach.as_mut(), kept.take()) {
-            (Some(_), Some((at, images, a))) if at == hold.seq() && images == adopted => {
-                Ok(Some((a, true)))
-            }
-            (Some(r), _) => r.rules(&guard).map(|a| Some((a, false))),
-            (None, _) => Ok(None),
+        // Kept, the lists are due by the time from when they were answered.
+        let (ruled, at) = match (reach.as_mut(), kept.take()) {
+            (Some(r), Some(k)) if k.holds(&guard, r, now) => (Ok(Some((k.answered, true))), k.now),
+            (Some(r), _) => (r.rules(&guard).map(|a| Some((a, false))), now),
+            (None, _) => (Ok(None), now),
         };
         let ruled = match ruled {
             Ok(r) => r,
@@ -1261,7 +1379,7 @@ fn seed(
             }
         };
         if let Some(r) = reach.as_mut() {
-            r.next = r.next_after(&guard, now);
+            r.next = r.next_after(&guard, at);
         }
         let stmt = Statement::Select(match &ruled {
             Some(((filter, project, _), _)) => shape_select(&sub.collection, filter, project),
@@ -1308,9 +1426,14 @@ fn seed(
             None => (p.query(&stmt, &[]), None),
         };
         let Some(rows) = rows else {
-            // Answered at the pin's change: kept, for the lock to find
-            // there still.
-            kept = answer.map(|a| (p.change_seq(), adopted, a));
+            // Answered at the pin's change: kept, for the lock to read by
+            // where they still hold.
+            kept = answer.map(|answered| Kept {
+                at: p.change_seq(),
+                images: adopted,
+                now,
+                answered,
+            });
             pin = false;
             continue;
         };
@@ -1486,6 +1609,73 @@ mod tests {
         }
         assert!(!same_answer(&a, &None));
         assert!(same_answer(&None, &None));
+    }
+
+    /// Lists a pin answered hold under a later lock while nothing they
+    /// read was written and no row of it reached its time since they were
+    /// answered, or, reading the time, [`CLOCK_EVERY`] passed: their time
+    /// is when they were answered. Worked out from when the lock found
+    /// them, a note reaching its time between left the seed's lists
+    /// holding it, and the stream no wake for it.
+    #[test]
+    fn kept_lists_hold_while_what_they_read_stands() {
+        let mut db = Database::new();
+        let t1 = now_ms() as i64;
+        for sql in [
+            "create collection notes (title text, at timestamp @ttl(1s))".to_string(),
+            "create collection board (msg text)".to_string(),
+            // b1's note reaches its time at t1 + 1 500.
+            format!(
+                r#"put notes [{{title: "a1", at: {}}}, {{title: "b1", at: {}}}]"#,
+                t1 + 3_600_000,
+                t1 + 500
+            ),
+        ] {
+            db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+        }
+        let mut r = Reach {
+            rules: None,
+            collection: "board".into(),
+            shape: None,
+            project: None,
+            reads: vec!["notes".into()],
+            clock: false,
+            next: None,
+        };
+        let kept = |db: &Database| Kept {
+            at: db.change_seq(),
+            images: db.adoptions(),
+            now: t1,
+            answered: (None, None, None),
+        };
+        let k = kept(&db);
+        assert_eq!(r.next_after(&db, t1), Some(t1 + 1_500));
+        assert!(k.holds(&db, &r, t1 + 1_000));
+        assert!(!k.holds(&db, &r, t1 + 1_500), "b1 reached its time");
+        // A write to what the stream reads alone, the lists moved.
+        db.execute(&fennec_ql::parse_one(r#"put board {msg: "x"}"#).unwrap())
+            .unwrap();
+        assert!(k.holds(&db, &r, t1 + 1_000));
+        db.execute(&fennec_ql::parse_one(r#"put notes {title: "c1"}"#).unwrap())
+            .unwrap();
+        assert!(!k.holds(&db, &r, t1 + 1_000));
+        // Reading the time, a second.
+        let k = kept(&db);
+        r.clock = true;
+        assert_eq!(r.next_after(&db, t1), Some(t1 + CLOCK_EVERY));
+        assert!(k.holds(&db, &r, t1 + CLOCK_EVERY - 1));
+        assert!(!k.holds(&db, &r, t1 + CLOCK_EVERY));
+        // Due by a write to what they read, or by the time: reading the
+        // time, a write to anything else does not answer them again.
+        let since = db.change_seq();
+        r.next = r.next_after(&db, t1);
+        db.execute(&fennec_ql::parse_one(r#"put board {msg: "y"}"#).unwrap())
+            .unwrap();
+        assert!(!r.due(&db, since, t1 + 10));
+        assert!(r.due(&db, since, t1 + CLOCK_EVERY));
+        db.execute(&fennec_ql::parse_one(r#"put notes {title: "d1"}"#).unwrap())
+            .unwrap();
+        assert!(r.due(&db, since, t1 + 10));
     }
 
     /// A replica that takes an image can land on a lower change than it

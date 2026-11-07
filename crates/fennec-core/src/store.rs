@@ -1750,15 +1750,35 @@ impl Store {
     /// held 16 bytes of them a write.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn pinned(&self) -> Store {
+        self.pinned_with(self.index.clone())
+    }
+
+    /// The store as [`Self::pinned`] takes it, with the id index `index`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pinned_with(&self, index: IdIndex) -> Store {
         Store {
             segments: self.segments.clone(),
             base: self.base.as_ref().map(|(b, _)| (b.clone(), Vec::new())),
-            index: self.index.clone(),
+            index,
             next_id: self.next_id,
             dead_bytes: self.dead_bytes,
             total_bytes: self.total_bytes,
             dropped: self.dropped.clone(),
         }
+    }
+
+    /// [`Self::pinned`] of the documents `ids` alone, those of them the
+    /// store holds: the id index of a few rows rather than a copy of the
+    /// whole one, for a read of those rows on a pin ([`crate::engine::Pinned`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pinned_rows(&self, ids: &[DocId]) -> Store {
+        let mut index = IdIndex::default();
+        for &id in ids {
+            if let Some(at) = self.index.get(id) {
+                index.insert(id, at);
+            }
+        }
+        self.pinned_with(index)
     }
 
     /// What [`Self::pinned`] copies: the id index.

@@ -436,8 +436,9 @@ a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach ou
 (`sse::Reach`) binds them again under a look's lock where a collection
 they read was written since its change, where a row of one reached its
 `@ttl` since they were answered -- the stream wakes for it, as for a row
-of its own (`Reach::next`) -- or at every look where an inner `get` reads
-the time anywhere it makes its list (`access::reads_time`); runs the
+of its own (`Reach::next`) -- or a second after they were answered
+(`CLOCK_EVERY`, woken for too) where an inner `get` reads the time
+anywhere it makes its list (`access::reads_time`); runs the
 shape where the list moved and diffs by id
 against what it sent (`enter_and_leave`), a row leaving a deletion only of
 a row it was sent: a customer's stream gains the courier as the order is
@@ -445,8 +446,9 @@ claimed and loses them at the delivery, no write to `positions` between.
 The subscriber's own inner `get`s take the same path, any token's: held
 to the rules (`Scope::subscribed`), then answered with the rules of the
 collections they read (`bound_over`, under the lock) and by the engine
-(`Database::answer_subqueries`) on a pin where a query's would be, beside
-the writers, a write to an inner collection a reason to look again.
+(`Database::answer_subqueries`) on a pin where a query of them would be,
+beside the writers, a write to an inner collection a reason to look again
+([fennecql.md](fennecql.md#inner-gets)).
 Before #504 a stream holding one ended at its first change, `eval`
 refusing the `InSelect` ([fennecql.md](fennecql.md#inner-gets)).
 It costs one inner `get` a statement -- `make policy-bench`, a crew's
@@ -574,7 +576,12 @@ the tests to walk and the docs to name; no check reads it. So:
   write rate, so it is never counted a write and a tenant past its rate
   is told the 403 it earned; then the rate, whose 429 takes no lock;
   then, under the lock, the second (`own_migrations`), so a tenant past
-  its rate sending such a migration hears the 429 first. Still to
+  its rate sending such a migration hears the 429 first: whether a
+  migration is still to run is the record's, which a parse of the body
+  cannot tell, and read under a read lock before the rate it cost 1.4 KB
+  of `fennec-server` (`unrecorded` through `query`, beside `schema`'s
+  read of it through `execute_with`) for a refusal a tenant past its rate
+  meets. Still to
   run: asked under the write lock the plan or apply takes, of the
   migrations `_migrations` has not recorded (`fennec_abi::unrecorded`,
   which a test holds to `fennec_abi::schema`'s own reading of the record),

@@ -302,17 +302,19 @@ natively but made the unordered ones 4 to 6% slower in the browser and the
 module 1.9 KB larger, so it is not in.
 
 A stream's look tests the rows written since its cursor through a bound
-filter too, where the filter holds a long `in` list
-(`Database::changes_held`): an inner `get` answered as 100 000 titles,
-compared a value at a time by `eval`, made a look over 1 000 changed
-rows take 1.9 s. Bound once a look, the list's values and its set are
-kept for the next (`Lists`, by the ordinal of its `in` among the long
-ones and with the schema it was bound against), so a write's look looks
-its row up rather than copying and hashing the list again
-([fennecql.md](fennecql.md#inner-gets)). A filter holding no long list
-is evaluated a row at a time as before (`changes_since`), so a plain
-subscription's look runs what it ran: it tests the one or two rows a
-write made.
+filter too, where the filter reads another collection and holds a long
+`in` list (`Database::changes_held`): an inner `get` answered as 100 000
+titles, compared a value at a time by `eval`, made a look over 1 000
+changed rows no title named take 3.1 s. Bound once a look, each long
+list's set is kept for the next (`Lists`, by the ordinal of its `in`
+among the long ones and with the schema it was bound against): the
+positions of its values in the filter's own list, by their keys' hashes
+(`Positions`, 1.3 MB for 100 000 titles), so a write's look looks its row
+up rather than copying and hashing the list again
+([fennecql.md](fennecql.md#inner-gets)). Any other stream's filter is
+evaluated a row at a time as before (`changes_since`), a long list
+written in too, so a plain subscription's look runs what it ran: it
+tests the one or two rows a write made.
 
 ## @sorted
 

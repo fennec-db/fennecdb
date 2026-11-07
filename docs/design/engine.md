@@ -407,13 +407,23 @@ longest 12-29 ms, against 4 600-10 100 and 550-1 284 ms under the lock, and
 a seed took 716-863 ms at its median against 531-1 346: it shares the cores
 with eight times the writes. A shape an index answers, or one of fewer than `PIN_AT` rows, is
 read under the lock as before. A look whose inner `get`s or rules reading
-another collection are due again (`sse::look`) is pinned as the seed is:
-the rules bound, the ids written since the stream's cursor read
-(`Database::written_after`) and the ring held back to that change till
-the next look, under the lock; the lists answered, the changes judged as
-the rows stood (`Pinned::changes_held`) and the shape run where it moved
-(`enter_and_leave`), on the pin. Where the pin declines, or reached for
-an index, all of it runs under the lock, as a query's does. The
+another collection are due again (`sse::look`) answers the lists first,
+where a query of them would be: under the lock the rules bound, the ids
+written since the stream's cursor read (`Database::written_after`), what
+the inner `get`s read pinned with only those rows of the stream's
+collection beside them (`Database::pin_lists`, `Store::pinned_rows`),
+and the ring held back to that change till the next look; on the pin the
+lists answered and the rows judged as they stood
+(`Pinned::changes_held`). The shape runs again only where the lists
+moved (`enter_and_leave`), under a lock where they still hold
+(`sse::Kept`), pinned as a query of it would be. Pinned whole with the
+shape, a due look copied the id index of a million rows under the lock
+at every write to ten notes it read, moved or not: 0.84-1.16 ms of the
+process's CPU a write beside one stream, where answering the ten first
+takes 0.09-0.11, the write's own 0.06 among it
+([fennecql.md](fennecql.md#inner-gets)). Where a pin declines,
+or reached for an index, all of it runs under the lock, as a query's
+does. The
 browser module's code is the same to the byte: the hold is native, and its
 `record` drops a mark as it did.
 

@@ -61,7 +61,8 @@ scope bound under the pin's lock and its inner `get`s answered on the pin
 (`Pinned::answer_subqueries`), the ring held back to it till the first look (`hold_changes`);
 it reads again under the lock where the ring passed it or an image was
 adopted (`Database::adoptions`), as every look reseeds. A look answering
-them again is pinned so (`sse::look`, `Pinned::changes_held`).
+them again pins what they read and the rows written since alone
+(`Database::pin_lists`, `sse::look`), the shape where they moved.
 
 ### Durability
 
@@ -217,7 +218,8 @@ An `in` takes buckets only when every element resolves, else the scan.
 query.](../../docs/design/indexes.md#bound-filters)** What `Filter` cannot bind
 stays `eval`: an error at the first row, never over none. A stream's look
 binds a filter holding a long `in` list once a look, its lists kept for
-the next (`Database::changes_held`, `Lists`).
+the next (`Database::changes_held`, `Lists`, their sets alone), where it
+reads another collection.
 
 **[`@sorted` must give the scan's answer, row for
 row.](../../docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,

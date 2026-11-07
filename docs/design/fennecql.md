@@ -440,13 +440,16 @@ with `Database::answer_subqueries` -- `answer_subquery`, the path
 query's -- at the seed, and again at a look where one of the collections
 they read (at any depth, a scoped token's rules ANDed into them among
 them) was written since the stream's change, where a row of one reached
-its `@ttl` since they were answered, or at every look where an inner
-`get` reads the time anywhere it makes its list -- its filter, an `order`
-key, an item, a group key, `having` (`access::reads_time`; the filter's
-`now()` alone was asked, and `order now() - at limit 5` moved its list
-unseen). The moment the next row of those collections reaches its time
-is asked as the lists are answered (`Database::wakes_at`), and the stream
-sleeps to it as to a row of its own: a note reaching its time takes its
+its `@ttl` since they were answered, or, where an inner `get` reads the
+time anywhere it makes its list -- its filter, an `order` key, an item, a
+group key, `having` (`access::reads_time`; the filter's `now()` alone was
+asked, and `order now() - at limit 5` moved its list unseen) -- a second
+after they were answered (`sse::CLOCK_EVERY`). Such lists were answered
+at every look as first built, and every write anywhere wakes every
+stream: a write to any collection ran them again. The moment the next
+row of those collections reaches its time is asked as the lists are
+answered (`Database::wakes_at`), and the stream sleeps to it, or to the
+second's end, as to a row of its own: a note reaching its time takes its
 message's rows out then, where it waited for the stream's next keep-alive
 (20 s) or the next write -- and asked there, a `@ttl` given the inner
 collection later, a write to it, is followed, where the collections that
@@ -458,12 +461,36 @@ seed's lock the rules are bound (a scoped token's lists, held to
 it, so `pin` judges them as it judges a query's (`pinnable` walks them);
 on the pin they are answered (`Pinned::answer_subqueries`) and the seed
 read, and a pin that reached for an index reruns under the lock, keeping
-the lists the pin answered where the database has not moved since. A
-look whose lists are due does the same (`sse::look`): the rules bound,
-the ids written since the cursor read (`Database::written_after`) and the
-ring held to that change till the next look, under the lock; the lists
-answered, the changes judged as the rows stood (`Pinned::changes_held`)
-and the shape run where they moved, on the pin. Answered under the lock
+the lists the pin answered where they still hold (`sse::Kept`: nothing
+they read written since, no row of it past its time since they were
+answered -- that time theirs, not the lock's, or a note reaching its time
+between stayed with no wake -- and a second not passed where they read
+the time). A look whose lists are due answers them first, where a query
+of them would be (`sse::look`): under the lock the rules are bound, the
+ids written since the cursor read (`Database::written_after`), and what
+the inner `get`s read pinned as a query of them alone would be, with
+only those rows of the stream's collection beside them
+(`Database::pin_lists`, `Store::pinned_rows`), the ring held to that
+change till the next look; on the pin the lists are answered and the
+written rows judged by them as they stood (`Pinned::changes_held`).
+Lists too short to pin are answered under the lock and the rows judged
+there. Only where the lists moved does the shape run again: under a lock
+where they still hold, pinned where a query of the shape would be; or,
+written again meanwhile, the whole shape pinned, lists and all, as the
+seed is. Pinned whole with the shape as first built, every due look
+copied the id index of the stream's collection under the lock, 12 bytes
+a row, whether the lists moved or not: a board of a million rows
+following ten notes (`msg in (get notes select title)`), a write to a
+note every 2 ms that moved no title, took 0.84-1.16 ms of the process's
+CPU a write with one stream and 12.0-13.0 ms with eight, the writes' p99
+1.24-1.86 ms with eight; answered first, 0.09-0.11 and 0.37-0.43 ms, the
+p99 0.14-0.18 ms, where the same build with no read pinned took 0.10-0.12
+and 0.43-0.45, the p99 0.16-0.21, and a write beside no stream 0.06 (in
+process, 2 000 writes a run, three runs a side in turns, a load under
+6). Beside a list a million notes answer, moving at every look (`n <
+10`, a note let in each time), the look took 24 ms and its CPU, the
+board's writes 200 us apart and their p99 were the same as before, the
+scan on the pin either way. Answered under the lock
 before the pin, an inner `get` scanning a million notes held every writer
 for its scan at the seed and at every write to `notes`: beside a stream
 of `msg in (get notes select title where n < 10)` over a million notes,
@@ -475,21 +502,42 @@ five runs, the two builds in turns, a load under 5).
 
 **A look tests its rows through a bound filter.** `changes_since`
 evaluates the filter a row at a time, and `eval`'s `in` walks its list:
-100 000 titles answered, a look over 1 000 changed rows took 2.41-2.46 s
-where the filter as a query takes 18 ms, the planner binding a long list
-to a set (`Test::InSet`). A stream whose
-filter holds a long list (`Lists::of`, `IN_SET_AT`) reads its changes
-through `Database::changes_held`, which binds the filter once a look
-(`Filter`) and keeps its long lists -- each one's values and set, by the
-ordinal of its `in` among the long ones, with the schema they were bound
-against, a change of it binding them again -- from one look to the next
-(`Lists`), so a write's look looks its row up rather than copying and
-hashing 100 000 values again: a write to `board` and its look took 3.15
-ms at the median a value at a time and 1.7 us held, a look over 1 000
-written rows 0.14-0.17 ms. The first look after the list is answered
-binds it, 10.5-12.8 ms, beside the inner `get`'s 5.5 (in process, 2 000
-writes a side, each side twice in two runs). A stream whose filter holds
-none reads through `changes_since` as it did. A list answered again is
+100 000 titles answered, a look over 1 000 changed rows whose messages
+no title names took 3.13-3.16 s, the whole list walked for each, where
+the filter as a query takes 18 ms, the planner binding a long list to a
+set (`Test::InSet`). A stream whose filter reads another collection and
+holds a long list (`Lists::of`, `IN_SET_AT`) reads its changes through
+`Database::changes_held`, which binds the filter once a look (`Filter`)
+and keeps each long list's set from one look to the next (`Lists`), by
+the ordinal of its `in` among the long ones, with the schema they were
+bound against, a change of it binding them again: the position of each
+value in the filter's own list, open-addressed by the hash of its key --
+folded where the field is `nocase` -- a byte of the hash beside each
+slot, so a key the list does not hold is told so off those bytes alone,
+and a value it holds twice filed once, as a hash index files it -- laid
+end to end, the copies of a field few values fill would be a run every
+key landing in it walks (`Positions`, `Test::Listed`). A write to `board`
+and its look took 3.15
+ms at the median a value at a time and 1.29-1.33 us held, a look over 1
+000 written rows 0.07-0.09 ms where no title names them and 0.23-0.40
+where each is named, and the first look after the list is answered,
+which makes the set, 2.7-3.3 ms beside the inner `get`'s 5.5 (in
+process, 2 000 writes a run, six runs a side in turns). Kept first as
+the values beside a hash index of their keys, a stream held 15.3 MB for
+100 000 short titles, the index 11.5 of it, and took 1.29-1.42 us,
+0.09-0.12 ms, 0.33-0.41 ms and 11.2-11.8 ms; the positions take 1.3 MB,
+the filter's
+own list beside them as before. Built first with the hash's top half
+beside each position, eight bytes a slot, a look over rows the list did
+not hold read the 2 MB table and took 0.11-0.13 ms against the index's
+0.10, and with the position alone 0.18 against 0.08, each probe reading
+a value (a run or two each, under a load of 6 to 10). What a stream keeps is
+bounded as its filter is: a set a long `in`, of 100 000 values at most
+(an inner `get`'s bound), a stream a slot of `--max-streams`, counted by
+no quota, as its answered filter is not. A stream whose filter reads no
+other collection reads through `changes_since` as it did, a long list
+written in too: a plain stream `where=k in [1, ..., 20]` would bind its
+filter at every look. A list answered again is
 compared with the last by its values, sorted where the lengths agree
 (`sse::same_answer`): an inner `get` with no `order` answers in the order
 it reads, which a row moved or a compact changes, and by position the
@@ -513,33 +561,42 @@ replica's): an image can land on the very change a tag names, where the
 ring shows no write, and the poll was answered 304 over rows its copy no
 longer held.
 
-Measured against main (#503) in instructions retired in the loop
+Measured against main (#506) in instructions retired in the loop
 (`proc_pid_rusage`), eight turns a side alternating which went first,
 `MallocNanoZone=0`, each run started under a 1-minute load of 6 and
-dropped where it ended over it: a write by id through `handle` and a
-plain subscription's look at it, its change read by a client before the
-next write (`GET /t/changes?n=gte.0`, 240 000 a run), 98 326 -> 99 298
-instructions at the median (91 812-100 210 against 93 072-100 386; the
-turns' differences -640 to +1 060, +334 at their median), both builds'
-runs sitting near 92 000 or near 100 000 together, by when they ran; a
-scoped REST read by id (`GET /t?id=eq.<k>` under `t read where owner =
-$jwt.sub`, 600 000 a run) 35 669 -> 35 720 (35 471-35 763 against 35
-601-35 925; differences -162 to +247, +84 at their median). A pass ten
-turns long before the last changes, which touched neither path but for
-one call a changed row, found 94 827 -> 91 963 and 35 605 -> 35 656,
-the differences' medians +85 and -11. fennec-server's `__text` grew 23
-424 bytes against main (4 492 288 -> 4 515 712, release; its file 33 104):
-by a build keeping its symbols, the looks and the seed answering on a
-pin (`judge`, `Reach`, `seed`, 7.1 KB), the lists a look keeps
-(`changes_held`, `changed_rows`, `Lists`, `Taking`, their drops, 12.6 KB),
-the lists compared as sets (`same_answer`, 2.7 KB, sorting byte slices
-as the binary already did: `sort_by_cached_key` was 5.4 KB of a sort of
-its own), the inner `get`s' reads and wake 1 KB. A 100 000-value list's
-look is 1.7 us where it was 3.15 ms, and a scan the lists answer holds
-no writer: worth the 0.5%. The browser module
-is the same size (838 261 bytes), its functions of the same sizes laid
-out in another order: a query's bind hands down `None` where a look
-hands its lists, which it never holds there.
+dropped where it ended over it (three runs of 48): a write by id through
+`handle` and a plain subscription's look at it, its change read by a
+client before the next write (`GET /t/changes?n=gte.0`, 120 000 a run),
+104 558 -> 104 018 instructions at the median (101 145-111 646 against
+101 576-112 023; the turns' differences -1 895 to +4 558, +431 at their
+median); the same with the stream `where=k in [1, ..., 20]`, a long list
+written in, 104 728 -> 104 848 (differences -3 904 to +4 147, +102 at
+their median); a scoped REST read by id (`GET /t?id=eq.<k>` under `t
+read where owner = $jwt.sub`, 600 000 a run) 32 569 -> 32 460
+(differences -373 to +255, -85 at their median). As first built, before
+the second review, 98 326 -> 99 298 and 35 669 -> 35 720 against #503.
+fennec-server's `__text` grew 25 984 bytes against main (4 551 936 ->
+4 577 920, release; its file 33 104): by a build keeping its symbols, as
+first built the looks and the seed answering on a pin (`judge`, `Reach`,
+`seed`, 7.1 KB), the lists a look keeps (`changes_held`, `changed_rows`,
+`Lists`, `Taking`, their drops, 12.6 KB), the lists compared as sets
+(`same_answer`, 2.7 KB, sorting byte slices as the binary already did:
+`sort_by_cached_key` was 5.4 KB of a sort of its own), the inner `get`s'
+reads and wake 1 KB; then 2.6 KB more with the second review's -- a look
+answering its lists first and running the shape only where they moved
+(`Kept`, `pin_shape`, the look's paths, 2.6 KB), the rows written pinned
+alone (`pin_lists`, `pinned_within`, `Collection::pinned_with`,
+`Store::pinned_rows`, 1.3 KB), the sets as positions (`Positions`,
+`Test::Listed`, 1 KB) -- less the lists' drop glue built again in
+fennec-http where a stream dropped them (1.7 KB, `Lists` now dropped in
+fennec-core alone) and `same_values`' `collect` into an `Option`, a
+`try_process` of its own (0.2 KB). A 100 000-value list's look is 1.3 us
+where it was 3.15 ms, a scan the lists answer holds no writer, a look
+whose lists did not move copies nothing, and a stream keeps 1.3 MB a
+list where it kept 15.3: worth the 0.6%. The browser module is the same
+size as main's (838 472 bytes): a query's bind hands down `None` where a
+look hands its lists, which it never holds there, and the sets, the
+pins and the looks are native alone.
 
 ## List parameters
 

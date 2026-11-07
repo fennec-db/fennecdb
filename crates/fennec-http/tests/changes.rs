@@ -1446,3 +1446,56 @@ fn a_poll_tag_names_the_images_adopted() {
     assert_ne!(fresh, tag);
     assert_eq!(poll(&fresh).0, 304);
 }
+
+/// Every read pinned, an index's too (`set_pin_strays`): a pin reaching
+/// for an index answers `None`, and what it read is read again under the
+/// lock -- the seed by the lists its pin answered, kept where nothing they
+/// read moved (`sse::Kept`); a look's shape, run on a pin by lists answered
+/// apart, by those lists; a list whose inner `get` reaches for `notes`'
+/// index, answered there -- each telling what the lock tells.
+#[test]
+fn a_pin_reaching_for_an_index_is_read_again_under_the_lock() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection notes (title text, k int @hash)",
+        "create collection board (msg text @hash)",
+        r#"put notes [{title: "a1", k: 1}, {title: "b1", k: 1}]"#,
+        r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "c1"}]"#,
+    ] {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    db.set_pin_strays(true);
+    let h = start_over(db, Config::default());
+    let mut streams = Vec::new();
+    for path in [
+        INNER,
+        "/board/changes?where=msg+in+(get+notes+select+title+where+k+=+1)",
+    ] {
+        let mut s = Sub::open(h.port, path);
+        assert_eq!(s.status, 200, "{}", s.head_line());
+        let (name, data) = s.next().expect("seed");
+        assert_eq!(name, "seed", "{data}");
+        assert_eq!(
+            msgs(&data, "rows"),
+            [(1, "a1".into()), (2, "b1".into())],
+            "{path}: {data}"
+        );
+        streams.push(s);
+    }
+    let (st, body) = post(h.port, "/notes", r#"{"title":"c1","k":1}"#);
+    assert_eq!(st, 201, "{body}");
+    for s in &mut streams {
+        let (name, data) = s.next().expect("a change");
+        assert_eq!(name, "change", "{data}");
+        assert_eq!(msgs(&data, "puts"), [(3, "c1".into())], "{data}");
+        assert!(dels(&data).is_empty(), "{data}");
+    }
+    let (st, body) = call(h.port, "DELETE", "/notes?title=eq.a1", None, &[]);
+    assert_eq!(st, 200, "{body}");
+    for s in &mut streams {
+        let (name, data) = s.next().expect("a change");
+        assert_eq!(name, "change", "{data}");
+        assert_eq!(gone(&data), [1], "{data}");
+        assert_eq!(count(&data, "puts"), 0, "{data}");
+    }
+}
