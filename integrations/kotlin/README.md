@@ -186,8 +186,12 @@ in 'Europe/Berlin'`), the `next` slot, the `last` run (a `LastRun`: `slot`,
 `outcome` `ran` or `refused`, `status`, `reason`, `skipped`) and a slot the
 server holds back (`held`, a `HeldSlot`), each time in milliseconds since
 the epoch (`Instant.ofEpochMilli`), since `java.time` is on Android from API
-26 only. The library runs no schedule: a server's file opened in the app
-keeps its schedules for the server that next opens it.
+26 only; and a webhook consumer's `hook` and whether the server holds its
+secret (`armed`: `false` answers every event 401). `call("stripe_paid",
+event)` on `FennecRemote` sends a webhook consumer a test event, run as a
+delivery is, keeping no key. The library runs no schedule and takes no
+event: a server's file opened in the app keeps its schedules and hooks for
+the server that next opens it.
 
 ## Building and testing
 

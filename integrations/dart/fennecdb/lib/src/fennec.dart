@@ -239,11 +239,21 @@ class NamedStatement {
   /// error -- tried again as that changes.
   final HeldSlot? held;
 
+  /// A webhook consumer's hook, whose events are sent to `/_hooks/<hook>`.
+  final String? hook;
+
+  /// Whether this server -- on a tenant node, the tenant -- holds the hook's
+  /// secret: `false` answers every event of it 401. The app's own database
+  /// takes no event, and says `false` for a hook.
+  final bool? armed;
+
   const NamedStatement(this.name, this.version, this.signature, this.writes, this.comment, this.broken, this.after,
-      this.schedule, this.next, this.last, this.held);
+      this.schedule, this.next, this.last, this.held,
+      [this.hook, this.armed]);
 
   @override
-  String toString() => 'NamedStatement($name${schedule == null ? '' : ', $schedule, next $next'})';
+  String toString() => 'NamedStatement($name${schedule == null ? '' : ', $schedule, next $next'}'
+      '${hook == null ? '' : ', hook $hook${armed == true ? '' : ', not armed'}'})';
 }
 
 /// A scheduled statement's last run, as `statements` lists it: the slot it
@@ -309,6 +319,8 @@ NamedStatement namedStatement(Map<String, Object?> row) {
         : LastRun(at(last['slot'])!, last['outcome'] as String? ?? '', (last['status'] as num?)?.toInt(),
             last['reason'] as String?, (last['skipped'] as num?)?.toInt() ?? 0),
     held == null ? null : HeldSlot(at(held['slot'])!, (held['status'] as num).toInt(), at(held['since'])!),
+    row['hook'] as String?,
+    row['armed'] as bool?,
   );
 }
 

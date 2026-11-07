@@ -530,6 +530,13 @@ type NamedStatement struct {
 	// Held is a due slot the server's state holds back -- a tenant's
 	// quota, a storage error -- tried again as that changes.
 	Held *HeldSlot `json:"held"`
+	// Hook is a webhook consumer's hook, whose events are sent to
+	// /_hooks/<hook>; "" for a statement taking no hook.
+	Hook string `json:"hook"`
+	// Armed says whether this server -- on a tenant node, the tenant --
+	// holds the hook's secret: false answers every event of it 401. False
+	// too where Hook is "".
+	Armed bool `json:"armed"`
 }
 
 // LastRun is a scheduled statement's last run, as `statements` lists it.
@@ -560,7 +567,10 @@ type HeldSlot struct {
 // Statements lists the named statements the database holds, as the server
 // lists them to its own token -- a scoped one is refused (403): each one's
 // signature, whether it writes, its comment, why the schema broke it, what
-// a binding is bound to, and a scheduled one's clock.
+// a binding is bound to, a scheduled one's clock, and a webhook consumer's
+// hook and whether the server holds its secret. Call sends a webhook
+// consumer a test event, the event its args, run as a delivery is and
+// keeping no key.
 func (c *Client) Statements(ctx context.Context) ([]NamedStatement, error) {
 	return QueryAs[NamedStatement](ctx, c, "statements")
 }

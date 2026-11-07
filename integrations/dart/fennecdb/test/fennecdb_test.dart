@@ -266,18 +266,33 @@ void main() {
     await db.execute('create statement ticked() as get ticks count');
     final ticked = (await db.statements()).single;
     expect((ticked.name, ticked.signature, ticked.writes, ticked.version.length), ('ticked', '()', false, 2));
-    expect([ticked.schedule, ticked.next, ticked.last, ticked.held, ticked.after, ticked.broken], everyElement(isNull));
+    expect([
+      ticked.schedule,
+      ticked.next,
+      ticked.last,
+      ticked.held,
+      ticked.after,
+      ticked.broken,
+      ticked.hook,
+      ticked.armed
+    ], everyElement(isNull));
     await db.close();
-    final rows = (jsonDecode('''
+    final rows = (jsonDecode(r'''
       [{"name":"lapse","version":[-3244637736030576075,4],"signature":"()","writes":true,"comment":null,"broken":null,"after":null,
         "schedule":"every 15m","next":"2026-05-04T12:15:00Z",
         "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
         "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
        {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
-        "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
+        "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null},
+       {"name":"paid","version":[0,6],"signature":"($order text from event.data.object.metadata.order)","writes":true,
+        "comment":null,"broken":null,"after":null,"schedule":null,"next":null,"last":null,"held":null,"hook":"stripe","armed":true}]
       ''') as List).cast<Map<String, Object?>>();
     final lapse = namedStatement(rows[0]);
     final billed = namedStatement(rows[1]);
+    // A webhook consumer's hook and whether the server holds its secret; null
+    // where a row says nothing of a hook.
+    final paid = namedStatement(rows[2]);
+    expect((paid.hook, paid.armed, lapse.hook, lapse.armed), ('stripe', true, null, null));
     final noon = DateTime.utc(2026, 5, 4, 12);
     expect(lapse.version, [-3244637736030576075, 4]);
     expect(lapse.next, noon.add(const Duration(minutes: 15)));

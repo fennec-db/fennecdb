@@ -247,7 +247,10 @@ class NamedStatement(NamedTuple):
     `schedule` a scheduled one's clause as its text writes it (`every 1h`,
     `at '0 3 * * *' in 'Europe/Berlin'`), `next` the slot due next -- past
     while one is overdue or held -- `last` its last run and `held` a slot
-    held back. `version` is the history and change its definition landed
+    held back. `hook` is a webhook consumer's hook, whose events are sent
+    to `/_hooks/<hook>`, and `armed` whether this server -- on a tenant
+    node, the tenant -- holds its secret: `False` answers every event of
+    it 401. `version` is the history and change its definition landed
     at; `broken` why the schema broke it, which it runs no more until it
     reads again."""
 
@@ -262,6 +265,8 @@ class NamedStatement(NamedTuple):
     next: datetime | None
     last: LastRun | None
     held: HeldSlot | None
+    hook: str | None = None
+    armed: bool | None = None
 
 
 def _instant(text: str) -> datetime:
@@ -289,6 +294,8 @@ def _named(row: Mapping[str, Any]) -> NamedStatement:
             else None
         ),
         held=HeldSlot(_instant(held["slot"]), held["status"], _instant(held["since"])) if held else None,
+        hook=row.get("hook"),
+        armed=row.get("armed"),
     )
 
 
@@ -491,7 +498,10 @@ class Client:
         """Each named statement the database holds, as the server lists them
         to its own token (`statements`) -- a scoped one is refused (403):
         its signature, whether it writes, its comment, why the schema broke
-        it, what a binding is bound to, and a scheduled one's clock."""
+        it, what a binding is bound to, a scheduled one's clock, and a
+        webhook consumer's hook and whether the server holds its secret.
+        `call` sends a webhook consumer a test event, the event its
+        argument, run as a delivery is and keeping no key."""
         return [_named(r) for r in self.query("statements")]
 
     def query(

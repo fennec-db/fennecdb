@@ -177,8 +177,11 @@ server holds, as it lists them to its own token (a scoped one is refused,
 `schedule` (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `next`
 slot as an aware UTC `datetime`, the `last` run (a `LastRun`: `slot`,
 `outcome` `"ran"` or `"refused"`, `status`, `reason`, `skipped`) and a slot
-the server holds back (`held`, a `HeldSlot`). `db.call` of a scheduled one
-runs it now, as the server's token, marking no slot.
+the server holds back (`held`, a `HeldSlot`); and a webhook consumer's `hook`
+and whether the server holds its secret (`armed`: `False` answers every
+event 401). `db.call` of a scheduled one runs it now, as the server's token,
+marking no slot; of a webhook consumer, `db.call("stripe_paid", event)`
+sends it a test event, run as a delivery is, keeping no key.
 
 To see the text and parameters a chain builds, for logging or a test,
 `to_fennecql()` returns them and runs nothing:

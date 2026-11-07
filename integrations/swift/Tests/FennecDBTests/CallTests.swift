@@ -166,6 +166,7 @@ let bindingStatements = [
         #expect(transfer?.signature == "($from int, $to int, $amount int)" && transfer?.writes == true)
         #expect(transfer?.schedule == nil && transfer?.next == nil && transfer?.last == nil && transfer?.held == nil)
         #expect(transfer?.after == nil && transfer?.broken == nil && transfer?.version.count == 2)
+        #expect(transfer?.hook == nil && transfer?.armed == nil)
         try await db.close()
     }
 
@@ -180,10 +181,15 @@ let bindingStatements = [
               "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
               "held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},
              {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
-              "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]
+              "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null},
+             {"name":"paid","version":[0,6],"signature":"($order text from event.data.object.metadata.order)","writes":true,
+              "comment":null,"broken":null,"after":null,"schedule":null,"next":null,"last":null,"held":null,"hook":"stripe","armed":true}]
             """#
         ).array!.compactMap(\.object)
-        let (lapse, billed) = (NamedStatement(rows[0]), NamedStatement(rows[1]))
+        let (lapse, billed, paid) = (NamedStatement(rows[0]), NamedStatement(rows[1]), NamedStatement(rows[2]))
+        // A webhook consumer's hook and whether the server holds its
+        // secret; nil where a row says nothing of a hook.
+        #expect(paid.hook == "stripe" && paid.armed == true && lapse.hook == nil && lapse.armed == nil)
         #expect(lapse.version == [-3244637736030576075, 4] && lapse.schedule == "every 15m" && lapse.next.map(iso) == "2026-05-04T12:15:00.000Z")
         let last = lapse.last.map { [iso($0.slot), $0.outcome, "\($0.status ?? 0)", $0.reason ?? "", "\($0.skipped)"] }
         #expect(last == ["2026-05-04T12:00:00.000Z", "refused", "412", "no hold", "2"])
@@ -313,6 +319,29 @@ let bindingStatements = [
             #expect(try await db.call("tick").affected == 1)
             let again = try await db.statements().first { $0.name == "tick" }
             #expect(again?.next.map(iso) == newYearsText() && again?.last == nil)
+        }
+
+        /// A webhook consumer, listed by its hook -- not armed, this server
+        /// given no hooks file -- and a called statement by none; the
+        /// server's token sends one a test event with `call`, the event its
+        /// one argument, run as a delivery is.
+        @Test func aWebhookConsumerIsListedByItsHookAndSentATestEvent() async throws {
+            let s = try await Server("hooked")
+            defer { s.stop() }
+            let db = Fennec.connect(url: s.url)
+            try await db.execute(
+                "create statement paid($key text from event.data.object.metadata.key) on hook stripe "
+                    + "where event.type = 'payment_intent.succeeded' as set tasks {status: 'paid'} where key = $key require 1")
+            try await db.execute("create statement open_ones() as get tasks where status = 'open' count")
+            let listed = try await db.statements()
+            let paid = listed.first { $0.name == "paid" }
+            let open = listed.first { $0.name == "open_ones" }
+            #expect(paid?.hook == "stripe" && paid?.armed == false && paid?.signature == "($key text from event.data.object.metadata.key)")
+            #expect(open?.hook == nil && open?.armed == nil)
+            let event = try Value.parse(#"{"type":"payment_intent.succeeded","data":{"object":{"metadata":{"key":"a"}}}}"#)
+            #expect(try await db.call("paid", event).affected == 1)
+            let passed = await refusal { try await db.call("paid", try Value.parse(#"{"type":"charge.refunded"}"#)) }
+            #expect(passed?.status == 400 && passed?.message.contains("passes this event over") == true, "\(String(describing: passed))")
         }
 
         /// A binding's refusal over HTTP names it to the server's token;

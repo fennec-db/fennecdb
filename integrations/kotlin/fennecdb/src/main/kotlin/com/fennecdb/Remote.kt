@@ -229,7 +229,10 @@ class FennecRemote private constructor(
      * The named statements the server holds, as it lists them to its own
      * token (`statements`) -- a scoped one is refused (403): each one's
      * signature, whether it writes, its comment, why the schema broke it,
-     * what a binding is bound to, and a scheduled one's clock.
+     * what a binding is bound to, a scheduled one's clock, and a webhook
+     * consumer's hook and whether the server holds its secret. [call] sends
+     * a webhook consumer a test event, the event its argument, run as a
+     * delivery is and keeping no key.
      */
     suspend fun statements(): List<NamedStatement> = query("statements").map(NamedStatement::of)
 

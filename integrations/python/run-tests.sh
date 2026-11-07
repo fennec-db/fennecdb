@@ -14,11 +14,15 @@ cargo=${CARGO:-cargo}
 
 dir=$(mktemp -d)
 token=python-tests
+# A hooks file naming `stripe`, so a webhook consumer of it is listed armed
+# and one of any other hook not (test_call.py).
+printf 'whsec_python_tests' >"$dir/stripe.whsec"
+printf 'stripe stripe %s\n' "$dir/stripe.whsec" >"$dir/hooks"
 # Outside loopback, so the container reaches it: a token is required there.
 # On a port the system picks, read off the server's `listening on:` line: a
 # run never meets another, or any other server, on one.
 "$root/target/debug/fennec-server" --file "$dir/python.fennec" \
-    --http 0.0.0.0:0 --http-token "$token" --cdc 2>"$dir/server.log" &
+    --http 0.0.0.0:0 --http-token "$token" --cdc --hooks "$dir/hooks" 2>"$dir/server.log" &
 server=$!
 # The schema test's own: the migrations a schema ran are recorded in the
 # server's own `_migrations`, which no statement changes, so a list starts

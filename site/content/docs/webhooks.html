@@ -505,3 +505,49 @@ these to account: events that do not verify, events a statement refused,
 events held back by a quota, a lease or the disk, and a tenant's copy that
 lacks its hook secrets, which a failover onto that copy would turn into
 401s. The dashboard has a group for webhooks.</p>
+
+<h2 id="clients">In fennec studio, the SDKs and the shell</h2>
+
+<p><a href="/docs/studio#schema">fennec studio</a> lists each webhook
+consumer among the named statements by its hook, <code>on hook stripe</code>,
+<i>armed</i> or <i>not armed</i> — the second a hook whose every event is
+answered 401 until its secret is set. Its <b>Test event</b> opens the event
+as JSON, begun from the paths the statement's parameters read and the values
+its condition compares, and runs the call below in the query editor; its
+definition opens as <code>create or replace statement ...</code>. Its editor
+colours <code>hook</code>, and <code>event</code> where a path into the event
+follows it.</p>
+
+<p>The test event is the server's token's <code>call</code>, the event its one
+argument, which any client sends:</p>
+
+<pre data-lang="fennecql">call stripe_refunded $1
+-- $1 = {"type": "charge.refunded", "created": 1711627200,
+--       "data": {"object": {"id": "ch_1"}}}</pre>
+
+<p>It runs the statement as a delivery would — its condition asked, each
+parameter read from the event and typed, its body run, waking the bindings
+its writes reach — but alone, not beside the hook's other statements, with
+no signature asked and no key kept, so it can be sent again. It holds no
+<code>hook.id</code>, <code>hook.at</code> or <code>hook.event</code>: a
+parameter reading one is refused (400, naming it) unless it has a default —
+<code>stripe_paid</code> above, whose <code>$paid</code> reads
+<code>hook.at</code>, takes no test event — and a condition asking
+<code>hook.event = '…'</code> passes none; the studio's dialog says both
+before anything is sent. An event the condition passes over is
+refused in words (400), as is one missing a path a parameter reads.</p>
+
+<p>Every SDK's <code>statements()</code> reads the two columns into its
+<code>NamedStatement</code> — <code>hook</code> and <code>armed</code>, Go's
+and .NET's <code>Hook</code> and <code>Armed</code> — and its
+<code>call</code> sends the test event (<a
+href="/docs/languages#named-statements">every SDK's</a>):</p>
+
+<pre data-lang="js">const db = connect('https://db.example.com', { token });
+const unarmed = (await db.statements()).filter((s) =&gt; s.armed === false);
+await db.call('stripe_refunded', { type: 'charge.refunded', created: 1711627200,
+  data: { object: { id: 'ch_1' } } });</pre>
+
+<p>The shell's <code>.help</code> gives the form. The shell, the browser
+module and the native library take no event: a server's file opened in them
+keeps its webhook consumers for the server that next serves it.</p>

@@ -699,8 +699,14 @@ href="fennecql.html#scheduled-statements">scheduled statement</a>'s clock: its
 <code>last</code> run — <code>ran</code>, or <code>refused</code> with its
 status and the reason its <code>require</code> gave, and the slots a restart
 passed over — and a slot the server's state holds back (<code>held</code>: a
-tenant at its quota). The server's token runs a scheduled statement now with
-<code>call</code>, which marks no slot.</p>
+tenant at its quota); and a <a href="webhooks.html">webhook consumer</a>'s
+<code>hook</code> and whether the server holds the hook's secret
+(<code>armed</code>: <code>false</code> answers every event 401, a hook no
+secret was set for). The server's token runs a scheduled statement now with
+<code>call</code>, which marks no slot, and sends a webhook consumer a test
+event the same way, the event its one argument —
+<code>db.call('stripe_paid', event)</code> — run as a delivery is, keeping no
+key.</p>
 
 <div class="tbl">
 <table>
@@ -724,8 +730,9 @@ web, which read one past 2<sup>53</sup> rounded: the history is an identity,
 so there compare the change, not the history.</p>
 
 <p>Swift's, Kotlin's and Dart's own database lists the statements its file
-holds the same way. The library runs no schedule: a server's file opened in
-an app keeps its schedules for the server that next opens it.</p>
+holds the same way. The library runs no schedule and takes no event: a
+server's file opened in an app keeps its schedules and its hooks for the
+server that next opens it, each hook listed not armed.</p>
 
 <h2 id="http">From the shell</h2>
 
