@@ -324,8 +324,8 @@ sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
 `0.0`), `null` is held apart below every key, and `NaN` apart from both: it
 compares equal to everything, so it matches every inclusive comparison and no
 strict one, and an index holding one is never walked for `order`. A literal the
-key space cannot express exactly (`12.5` against an `int`, an int past 2^53
-against a `timestamp`) is left out of the range and evaluated per row. One of
+key space cannot express exactly (`12.5` against an `int`, 2^53 + 1 against a
+`float`) is left out of the range and evaluated per row. One of
 another kind than a typed field's, which `cmp_value` orders the field's values
 against by kind alone (`level > true`, `level < ""`, `t >= ""` where `""` reads
 as no time), is true of every value or of none (`SortedIndex::by_kind`), so it
@@ -360,6 +360,43 @@ every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built when a statement first reads
 it after an open (below), never in the file.
 
+**Numbers of two kinds compare by their true values** (`Value::cmp_value`,
+`value::tie`), and every index's keys with them. Met as two `f64`s alone, as
+they were, the ints 2^60 and 2^60 + 1 each equalled the float 2^60 and not
+each other: `n = 1152921504606846976.0` found one row through `@hash` and
+`@unique`, which key the int exactly, and through the scan and `@sorted`
+every one rounding to it, from 2^60 - 64 to 2^60 + 128; a sort over such
+values had no order to keep, and the float 2^63 equalled `i64::MAX`. Rounding to the
+nearest float is monotonic, so where two numbers' `f64`s differ they order
+the numbers; where they are equal short of 2^53, where every int is a float,
+the numbers are equal; and past it a tie of two kinds is told apart as two
+ints, 2^63 past every int (`tie`, out of line). A timestamp is its
+milliseconds' int, against an int too. So a whole float short of 2^63 either
+side is the one int it is, and a key says only that: `Value::key_as` hands a
+`@hash` lookup or a `lookup`'s probe the number itself or nothing (-2^63
+finds `i64::MIN`, 2^63 nothing, 2^53 + 1 no `float`; `NaN`, equal to every
+value, goes to the scan, where the bucket of its bits had found none of the
+rows the scan finds), `hash_key` files a whole float under its int up to
+2^63 (a path's `@unique` refuses 2^60.0 beside 2^60), `SortedIndex::bound`
+and `CompositeIndex::literal` key an int against a `float` only where a
+float holds it, and a json index keys every int a float holds as that
+float, holding apart only those none holds. The indexes are derived, so no
+file changes. Two floats have an arm of their own, and the mixed kinds go
+through the last arm, as they did, the tie looked at again there: arms of
+their own for the mixed kinds lengthened every comparison's dispatch, an
+order of 100 000 rows by a float 2.0% more instructions and by an int 0.6%.
+This way, against the build before (in-loop instructions, `proc_pid_rusage`,
+seven alternating runs and fifteen more for the orders, the 1-minute load
+under 6): an order by a float 1.5% fewer, by an int 0.6% fewer, a filter
+scan by an int 0.2% fewer with an int parameter and 0.3% more with a float
+one -- the mixed comparison -- a float field's scan 0.5% fewer with a float
+parameter and 0.4% more with an int one, an `@sorted` range the same; the
+orders' paired cycles moved +0.2%, inside their runs' spread. The browser
+module grew 288 bytes, 48 brotli, `tie` 317 of them. `tests/mixed_numbers.rs`
+holds every index, `lookup`, `in`, `order`, `min`, `max`, `having` and a
+json `@unique` to the scan near 2^53 to 2^63, random ints and literals among
+them, and `value::tests` the comparison to one worked out in `i128`.
+
 ## Composite indexes
 
 **An index over several fields is its parts' bytes laid end to end**
@@ -376,9 +413,11 @@ text escaped (`00` as `00 FF`) and ended (`00 01`), a json number as its
 `f64` below json text -- null a tag below every value, a descending part's
 bytes inverted; a collated text is kept as written behind a tag naming the
 collation, and an index holding one compares part by part (`cmp_keys`),
-the rest as bytes. A float's `NaN` and a json bool, list, object or int past
-2^53 are apart: their codec bytes are their part (a unique index finds them
-by them), the rows are listed, and while one is no walk answers and a
+the rest as bytes. A float's `NaN` and a json bool, list, object or int no
+`f64` holds exactly (2^53 + 1; one a float holds is keyed as that float,
+which `cmp_value` finds it equal to) are apart: their codec bytes are their
+part (a unique index finds them by them), the rows are listed, and while
+one is no walk answers and a
 filter's run takes them as candidates to test. Entries are `(KeyBytes,
 DocId)` in the ordered index's `Chunked`, a key of up to 22 bytes held in the
 32-byte entry (an int and a time are 18), longer on the heap, two held ones

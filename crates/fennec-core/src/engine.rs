@@ -2878,19 +2878,23 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// those too was 570 bytes of the browser module, for a hash index on such
 /// a field meeting a -0.0.
 ///
-/// A whole float an `f64` holds exactly as an int, up to 2^53, is filed
-/// under the int: a json path holds `3` in one document and `3.0` in
-/// another, which the scan finds equal and a bucket each would have split.
-/// A typed field never meets the two, its values and its literals coerced
-/// to its one type first, so it files and finds as it did.
+/// A whole float that is an int is filed under the int: a json path holds
+/// `3` in one document and `3.0` in another, which the scan finds equal
+/// and a bucket each would have split. `cmp_value` compares the two by
+/// their true values, so a float is equal to the one int it is, 2^60 to
+/// 2^60 and not to 2^60 + 1, and to none at 2^63 or past it -- where the
+/// float keeps a key of its own -- and a bucket is exactly the rows `=`
+/// finds. A typed field never meets the two, its values and its literals
+/// made its one type first ([`Value::key_as`]).
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     match v {
-        Value::Float(f) if f.fract() == 0.0 && f.abs() <= EXACT_INT => {
-            crate::codec::encode_value(&mut out, &Value::Int(*f as i64))
-        }
-        // Adding +0.0 turns -0.0 into 0.0 and leaves every other float alone.
-        Value::Float(f) => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
+        Value::Float(f) => match crate::value::exact_int(*f) {
+            Some(i) => crate::codec::encode_value(&mut out, &Value::Int(i)),
+            // Adding +0.0 turns -0.0 into 0.0 and leaves every other float
+            // alone.
+            None => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
+        },
         _ => crate::codec::encode_value(&mut out, v),
     }
     out
@@ -2938,9 +2942,6 @@ fn index_names(c: &Collection, f: &Expr, params: &[Value]) -> bool {
         || ranges.iter().any(|r| ordered(r.0))
         || shapes.iter().any(|s| c.geo.iter().any(|(n, _)| n == s.0))
 }
-
-/// 2^53: the ints an `f64` holds every one of.
-const EXACT_INT: f64 = 9_007_199_254_740_992.0;
 
 /// [`hash_key`] under a `nocase` field's fold: a text's key is its fold's
 /// encoding, so `Alice` and `alice` are one bucket and one `@unique` value.
@@ -3020,27 +3021,24 @@ fn merge_runs(ids: &mut Vec<DocId>, ends: &mut Vec<usize>) {
     }
 }
 
-/// The bucket key `v` finds in the hash index on `field`: the value coerced
-/// to the field's type, as the write path filed it, or -- over a `json`
-/// field or a path, whose values have no type -- the value itself where
-/// the bucket is exactly what `=` finds: null, a boolean, text, and a
-/// number an `f64` holds exactly. `None` sends the comparison to the scan:
-/// an int past 2^53 equals floats near it that no bucket of its own holds,
-/// and a timestamp equals the text it parses from.
+/// The bucket key `v` finds in the hash index on `field`: the value as the
+/// field's type files it ([`Value::key_as`]), or -- over a `json` field or
+/// a path, whose values have no type -- the value itself where the bucket
+/// is exactly what `=` finds: null, a boolean, text, and a number
+/// ([`hash_key`] files a whole float under the int it is). `None` sends
+/// the comparison to the scan: `NaN` equals every value, a timestamp the
+/// text it parses from, and a number no value of a typed field's type is
+/// -- 2.5 or 2^63 against an `int`, 2^53 + 1 against a `float` -- none of
+/// its rows, which the scan finds.
 fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
     let fd = schema.indexed(field)?;
     match &fd.ty {
         DataType::Json => match v {
-            Value::Null | Value::Bool(_) | Value::Text(_) => Some(hash_key(v)),
-            Value::Int(i) if i.unsigned_abs() <= 1 << 53 => Some(hash_key(v)),
-            Value::Float(f) if f.abs() <= EXACT_INT => Some(hash_key(v)),
+            Value::Null | Value::Bool(_) | Value::Text(_) | Value::Int(_) => Some(hash_key(v)),
+            Value::Float(f) if !f.is_nan() => Some(hash_key(v)),
             _ => None,
         },
-        ty => v
-            .clone()
-            .coerce(ty)
-            .ok()
-            .map(|k| folded_key(&k, fd.case_fold())),
+        ty => v.clone().key_as(ty).map(|k| folded_key(&k, fd.case_fold())),
     }
 }
 
@@ -3782,7 +3780,7 @@ impl<'a> Tuple<'a> {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
             };
-            vals.push(v.coerce_ends(ty).unwrap_or(Value::Null));
+            vals.push(v.key_as(ty).unwrap_or(Value::Null));
         }
         Ok(self.laid(&vals))
     }
@@ -3792,7 +3790,7 @@ impl<'a> Tuple<'a> {
     fn prefix_of(&self, row: &[Value]) -> Option<crate::composite::KeyBytes> {
         let mut vals = Vec::with_capacity(self.parts.len());
         for (pos, ty) in &self.parts {
-            vals.push(column(row, *pos).coerce_ends(ty).unwrap_or(Value::Null));
+            vals.push(column(row, *pos).key_as(ty).unwrap_or(Value::Null));
         }
         self.laid(&vals)
     }
@@ -3924,7 +3922,7 @@ impl<'a> Probe<'a> {
                 Ok(false)
             }
             Probe::Hash(map, ty) => {
-                let Ok(k) = key.clone().coerce_ends(ty) else {
+                let Some(k) = key.clone().key_as(ty) else {
                     return Ok(false);
                 };
                 // The child's index decides how its key compares: a
@@ -3972,7 +3970,7 @@ impl<'a> Probe<'a> {
                 // an `int` key has to become `10.0` before it can find
                 // `price = 10.0`. Skipping it lets the mere presence of an
                 // index change the answer.
-                let Ok(k) = key.clone().coerce_ends(ty) else {
+                let Some(k) = key.clone().key_as(ty) else {
                     return;
                 };
                 let Some(ids) = map.get(&map.key(&k)) else {
@@ -10911,7 +10909,7 @@ impl Database {
             let Some(fd) = child.schema.field(field) else {
                 continue;
             };
-            let Ok(key) = val.clone().coerce(&fd.ty) else {
+            let Some(key) = val.clone().key_as(&fd.ty) else {
                 continue;
             };
             let bucket = map.get(&map.key(&key));

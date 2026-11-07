@@ -584,21 +584,16 @@ impl CompositeIndex {
     /// comparison to be tested row by row: a value of another type than the
     /// part's (as `SortedIndex::bound` has it), and `null`.
     pub fn literal(&self, part: usize, v: &Value) -> Option<Vec<u8>> {
-        const EXACT: u64 = 1 << 53;
         let p = self.parts.get(part)?;
-        // An int and a timestamp meet as two f64s, exact up to 2^53; a
-        // timestamp meets a text it parses; a float meets an int as an
-        // f64 -- as `cmp_value` has them, and `SortedIndex::bound`.
+        // An int and a timestamp meet as two ints; a timestamp meets a
+        // text it parses; a float meets an int by their true values, the
+        // int keyed as the float it is where a float holds it -- as
+        // `cmp_value` has them, and `SortedIndex::bound`.
         let v = match (p.kind, v) {
-            (Kind::Int, Value::Int(_)) => v.clone(),
-            (Kind::Int | Kind::Time, Value::Int(i) | Value::Timestamp(i))
-                if i.unsigned_abs() <= EXACT =>
-            {
-                v.clone()
-            }
+            (Kind::Int | Kind::Time, Value::Int(_) | Value::Timestamp(_)) => v.clone(),
             (Kind::Time, Value::Text(t)) => Value::Timestamp(crate::time::parse(t).ok()?),
             (Kind::Float, Value::Float(f)) if !f.is_nan() => v.clone(),
-            (Kind::Float, Value::Int(i)) => Value::Float(*i as f64),
+            (Kind::Float, Value::Int(i)) => Value::Float(crate::value::exact_float(*i)?),
             (Kind::Bool, Value::Bool(_)) | (Kind::Text, Value::Text(_)) => v.clone(),
             (Kind::Json, v)
                 if matches!(json_slot(Some(v)), JsonSlot::Num(_) | JsonSlot::Text(_)) =>

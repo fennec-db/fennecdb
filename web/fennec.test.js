@@ -600,6 +600,35 @@ test('a number past an int\'s range is refused naming its field, in the module',
   db.close();
 });
 
+test('an int and a float compare by their true values, through every index, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, h int @hash, u int @unique, s int @sorted, a int, z int, m json, @sorted(a, z))');
+  db.run('create index on t (m.h) @hash');
+  // 2^60 - 1, 2^60, 2^60 + 1 and 2^60 + 128 each round to the float 2^60,
+  // which equals only the second: written as text, as JavaScript cannot
+  // hold them.
+  for (const n of ['1152921504606846975', '1152921504606846976', '1152921504606846977', '1152921504606847104']) {
+    db.run(`put t {n: ${n}, h: ${n}, u: ${n}, s: ${n}, a: ${n}, z: 0, m: {h: ${n}}}`);
+  }
+  const ids = (sql) => db.rows(sql).map((r) => r.id);
+  for (const field of ['n', 'h', 'u', 's', 'a', 'm.h']) {
+    assert.deepEqual(ids(`get t select id where ${field} = 1152921504606846976.0`), [2], field);
+    assert.deepEqual(ids(`get t select id where ${field} > 1152921504606846976.0 order id`), [3, 4], field);
+    assert.deepEqual(ids(`get t select id where ${field} in [1152921504606846976.0, 7.5] order id`), [2], field);
+    // 2^63 is past every int, -2^63 the least of them.
+    assert.equal(db.rows(`get t where ${field} >= 9223372036854775808.0 count`)[0].count, 0, field);
+    assert.equal(db.rows(`get t where ${field} > -9223372036854775808.0 count`)[0].count, 4, field);
+  }
+  // A json field holding both kinds is put in their true order, and its
+  // greatest is the int past the float.
+  db.run('create collection o (v json)');
+  db.run('put o [{v: 1152921504606846977}, {v: 1152921504606846976.0}, {v: 1152921504606846975}]');
+  assert.deepEqual(ids('get o select id order v'), [3, 2, 1]);
+  assert.equal(db.rows('get o where v > 1152921504606846976.0 count')[0].count, 1);
+  db.close();
+});
+
 test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

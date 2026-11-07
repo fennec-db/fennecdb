@@ -143,8 +143,9 @@ its type's range is refused the same way: a whole float going into an
 `set`'s float result -- is a type error naming the field (`Value::coerce`,
 `engine::in_field`), where `as` saturated it to `i64::MAX` and an `@hash`
 lookup then found a row the scan does not, while a key looked up by the
-float ±2^63 is the int's end, as `=` finds it (`Value::coerce_ends`). Full
-table in `site/content/docs/limits.html`.
+float -2^63 is `i64::MIN` and by 2^63 none, as `=` finds them
+(`Value::key_as`, [indexes.md](indexes.md#sorted)). Full table in
+`site/content/docs/limits.html`.
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every

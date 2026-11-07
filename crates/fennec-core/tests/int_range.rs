@@ -231,15 +231,15 @@ fn a_lists_element_past_it_is_refused_and_its_ends_kept() {
     );
 }
 
-/// A key looked up by is the int's end the float ±2^63 is, where only a
-/// write refuses the float: a parent's float key -9223372036854775808.0
-/// finds the child holding `i64::MIN` through its `@hash` -- `required`
-/// too -- and through an index over several fields, as `=` finds it, and
-/// 9223372036854775807.0 (2^63) the one holding `i64::MAX`, which `=`
-/// compares it equal to. A parent's `1e300` finds no child, where it found
+/// A key looked up by is the int the float is, where only a write refuses
+/// the float -2^63: a parent's float key -9223372036854775808.0 finds the
+/// child holding `i64::MIN` through its `@hash` -- `required` too -- and
+/// through an index over several fields, as `=` finds it, and
+/// 9223372036854775807.0 (2^63) none, as `=` finds none: it is past every
+/// int, `i64::MAX` too. A parent's `1e300` finds no child, where it found
 /// the one holding `i64::MAX` it was clamped to.
 #[test]
-fn a_lookup_by_the_float_2_to_63_finds_the_ints_end() {
+fn a_lookup_by_the_float_2_to_63_finds_the_int_it_is() {
     let mut db = db();
     run(
         &mut db,
@@ -254,22 +254,25 @@ fn a_lookup_by_the_float_2_to_63_finds_the_ints_end() {
         fennec_core::json::response_to_string(&run(db, text).unwrap())
     };
     for (k, end) in [
-        ("-9223372036854775808.0", "-9223372036854775808"),
-        ("9223372036854775807.0", "9223372036854775807"),
+        ("-9223372036854775808.0", Some("-9223372036854775808")),
+        ("9223372036854775807.0", None),
     ] {
         run(&mut db, &format!("del par; put par {{k: {k}, j: 1}}")).unwrap();
-        let child = format!(r#""pk":{end}"#);
+        let found = usize::from(end.is_some());
         for text in [
             "get par lookup ch on pk = k",
             "get par lookup ch on pk = k required",
             "get par lookup cc on (pk, z) = (k, j)",
         ] {
             let r = json(&mut db, text);
-            assert_eq!(r.matches(&child).count(), 1, "{text}: {r}");
-            assert_eq!(r.matches(r#""pk":"#).count(), 1, "{text}: {r}");
+            if let Some(end) = end {
+                let child = format!(r#""pk":{end}"#);
+                assert_eq!(r.matches(&child).count(), 1, "{text}: {r}");
+            }
+            assert_eq!(r.matches(r#""pk":"#).count(), found, "{text}: {r}");
         }
         let r = json(&mut db, &format!("get ch where pk = {k} count"));
-        assert!(r.contains(r#""count":1"#), "{k}: {r}");
+        assert!(r.contains(&format!(r#""count":{found}"#)), "{k}: {r}");
     }
     run(&mut db, "set par {k: 1e300}").unwrap();
     for text in [
