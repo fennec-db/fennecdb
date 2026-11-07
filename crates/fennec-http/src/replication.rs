@@ -1910,7 +1910,21 @@ impl Follower {
                             g.change_seq()
                         )));
                     }
-                    if let Err(e) = g.apply(&records) {
+                    // A panic applying them is caught here, the lock held: the
+                    // engine put back the records not landed, or failed the
+                    // database where one reached the sink. Let through, it
+                    // ended the follower's thread with nothing in the log --
+                    // the copy serving what it held, taking nothing more,
+                    // and a promotion's halt waiting for a thread gone.
+                    let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        g.apply(&records)
+                    }));
+                    let failed = match applied {
+                        Ok(Ok(_)) => None,
+                        Ok(Err(e)) => Some(e.to_string()),
+                        Err(p) => Some(format!("a panic: {}", crate::schedule::panic_words(&*p))),
+                    };
+                    if let Some(e) = failed {
                         *force_image = true;
                         return Err(io::Error::other(format!("could not apply a write: {e}")));
                     }

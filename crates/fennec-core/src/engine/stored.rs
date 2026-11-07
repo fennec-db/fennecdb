@@ -965,8 +965,11 @@ impl super::Database {
 
     /// A kind-13 record into the table, as a load or a replica's apply
     /// finds it: read into its tree, and checked, by
-    /// [`Self::read_statements`].
-    pub(super) fn take_statement(&mut self, body: &[u8]) -> Result<()> {
+    /// [`Self::read_statements`]. `keep`: what puts it back kept, as a
+    /// replica's apply asks ([`Self::keep_statement`]).
+    pub(super) fn take_statement(&mut self, body: &[u8], keep: bool) -> Result<()> {
+        #[cfg(not(feature = "statements"))]
+        let _ = keep;
         // A build running no schedule reads of a mark its name and version
         // alone, the slot between them passed over, and keeps its bytes:
         // never its outcome, which it neither reads nor refuses -- it runs
@@ -989,10 +992,18 @@ impl super::Database {
         match decode(body)? {
             Record::Defined(s) => {
                 #[cfg(feature = "statements")]
+                if keep {
+                    self.keep_statement(&s.name, true);
+                }
+                #[cfg(feature = "statements")]
                 self.marks.retain(|m| m.0 != s.name);
                 changed(&mut self.statements).put(s)
             }
             Record::Dropped(name) => {
+                #[cfg(feature = "statements")]
+                if keep {
+                    self.keep_statement(&name, true);
+                }
                 #[cfg(feature = "statements")]
                 self.marks.retain(|m| m.0 != name);
                 drop(changed(&mut self.statements).remove(&name))
@@ -1003,6 +1014,9 @@ impl super::Database {
             #[cfg(feature = "statements")]
             Record::Marked(name, slot) => {
                 if self.statements.marks(&name, slot.version) {
+                    if keep {
+                        self.keep_statement(&name, false);
+                    }
                     self.set_mark(name, slot);
                 }
                 return Ok(());
@@ -1010,6 +1024,23 @@ impl super::Database {
         }
         self.rebind();
         Ok(())
+    }
+
+    /// What puts back a replica's statement record that does not land
+    /// ([`Database::apply`]), in the spare block's log its records are
+    /// remembered in: `name`'s mark as it stands, and the table where the
+    /// record changes it. A build without statements keeps a mark's bytes
+    /// in the table and puts none back: a server's has them, and the
+    /// browser module links no `apply`.
+    #[cfg(feature = "statements")]
+    fn keep_statement(&mut self, name: &str, table: bool) {
+        if table {
+            let before = super::Undo::Statements(self.statements.clone());
+            self.spare.was.push(before);
+        }
+        let was = self.marks.iter().find(|m| m.0 == name).map(|m| m.1.clone());
+        let mark = super::Undo::Mark(Box::new((name.to_string(), was)));
+        self.spare.was.push(mark);
     }
 
     /// `name`'s last mark, as it landed: the mark of the slot it last ran

@@ -12,7 +12,12 @@ primary back from a crash holds every write any replica was sent. A replica
 applies them with `Database::apply`, which does the write path's index upkeep
 and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
-where it stopped. So every write goes through `wal`, and a record moves the
+where it stopped. A record is handed on as a block lands, whole in memory
+first, and one that fails or a panic stops part way is put back whole,
+never half of it served; the follower catches the panic with the lock
+held, as a write it could not apply, and connects again for an image --
+or stops, where the panic came from the sink call on and failed the copy
+([engine.md](engine.md#blocks)). So every write goes through `wal`, and a record moves the
 counter by the writes it holds (a block's, `writes_in`); a record that moved
 no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in

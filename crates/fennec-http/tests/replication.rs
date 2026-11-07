@@ -1309,3 +1309,67 @@ fn a_promotion_does_not_wait_for_a_primary_that_never_answers() {
     );
     assert!(!db.read().unwrap().history().following);
 }
+
+/// A copy's own sink, panicking as it is handed a write: a panic as the
+/// copy applies its primary's records, past the point the engine puts them
+/// back.
+struct Panicking;
+
+impl Sink for Panicking {
+    fn append(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+        Ok(())
+    }
+    fn record(&mut self, _: u64, _: &[u8]) -> fennec_core::error::Result<()> {
+        panic!("a test's panic as a write is handed to the sink")
+    }
+    fn rewrite(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+        Ok(())
+    }
+}
+
+/// A panic applying a primary's records is a write the follower could not
+/// apply: the engine put the records back whole, or -- here, from the sink
+/// call on -- failed the copy, which then takes nothing more and says why.
+/// Let through, it ended the follower's thread with the lock poisoned and
+/// nothing in the log, and the halt a promotion starts with waited for that
+/// thread for good.
+#[test]
+fn a_panic_applying_a_write_ends_the_follower_and_never_its_halt() {
+    let d = dir("apply-panic");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    let (status, body) = query(&p, SCHEMA);
+    assert_eq!(status, 200, "{body}");
+    let mut db = Database::with_sink(Box::new(Panicking));
+    let lineage = db.history().lineage.clone();
+    db.follow(lineage).unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let upstream = format!("http://127.0.0.1:{}", p.port);
+    let follower = Follower::new(&upstream, TOKEN.into(), Arc::clone(&db), None, false).unwrap();
+    follower.start("apply-panic".into()).unwrap();
+    write_some(&p, 0, 3);
+    let failed = || {
+        db.read()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure()
+            .is_some()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !failed() {
+        assert!(
+            Instant::now() < deadline,
+            "the copy took the panic as nothing"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (halted, halt) = std::sync::mpsc::channel();
+    let f = Arc::clone(&follower);
+    std::thread::spawn(move || {
+        f.halt();
+        let _ = halted.send(());
+    });
+    halt.recv_timeout(Duration::from_secs(20))
+        .expect("the halt waited for a follower's thread a panic ended");
+    assert!(!follower.running());
+    assert!(!db.is_poisoned(), "the panic let go of the lock unwinding");
+    let _ = std::fs::remove_dir_all(&d);
+}

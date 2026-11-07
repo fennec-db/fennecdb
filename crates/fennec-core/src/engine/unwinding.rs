@@ -5,7 +5,8 @@
 //! file holds already (`docs/design/engine.md`, *Blocks*). And a panic in
 //! the middle of a write -- as each index takes a document in or out, part
 //! way into one, in the graph's linking -- is put back whole with the block
-//! it is in: every write records what undoes it before it changes anything.
+//! it is in: every write records what undoes it before it changes anything,
+//! a replica's applying its primary's records too.
 
 use std::cell::Cell;
 
@@ -187,7 +188,8 @@ mod on_file {
 /// after one that went well; once the panic has put the block back, the
 /// rows, every index's entries and answers, the ids handed out, the change
 /// counter, the feed and the file opened again are what they were before
-/// the block, and the write made again is taken.
+/// the block, and the write made again is taken. And a replica applying
+/// the records of each, as its primary landed them: put back whole too.
 #[cfg(all(feature = "std-fs", feature = "indexes", feature = "geo"))]
 mod torn {
     use super::super::*;
@@ -351,13 +353,46 @@ mod torn {
         }
     }
 
+    /// A row of `u`, the second collection: a key, a vector in a graph of
+    /// its own and a note no index reads.
+    fn u_row(k: i64) -> Vec<(String, Expr)> {
+        [
+            ("k", Value::Int(k)),
+            ("w", Value::Vector(vec![k as f32, 0.5, 1.0, 0.0])),
+            ("note", text(&format!("alpha{k} beta"))),
+        ]
+        .into_iter()
+        .map(|(f, v)| (f.to_string(), Expr::Lit(v)))
+        .collect()
+    }
+
+    fn put_u(k: i64) -> Statement {
+        Statement::Put {
+            collection: "u".into(),
+            docs: vec![u_row(k)],
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        }
+    }
+
     /// A file holding rows 1 to 4 under every kind of index: `@unique`
     /// with `@text` beside it, `@hash`, `@sorted`, `@ttl`, `@text`, the
-    /// graph, `@inverted`, `@geo` and an index over two fields.
+    /// graph, `@inverted`, `@geo` and an index over two fields; and `u`'s
+    /// rows 1 and 2.
     fn made(path: &Path) -> Database {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(crate::synclog::path_for(path));
-        let mut db = crate::fs::open(path).expect("open");
+        let mut db = made_on(crate::fs::open(path).expect("open"));
+        db.sync().expect("sync");
+        db
+    }
+
+    /// [`made`]'s collections and rows, written into `db`.
+    fn made_on(mut db: Database) -> Database {
         let mut email = Field::new("email", DataType::Text).indexed(IndexKind::UNIQUE);
         email
             .add_index(IndexKind::Text(TextIndexSpec::default()))
@@ -396,7 +431,24 @@ mod torn {
         for k in 1..=4 {
             db.execute(&put(with_id(k, row(k)), false)).expect("a row");
         }
-        db.sync().expect("sync");
+        let u = Schema::new(
+            "u",
+            vec![
+                Field::new("k", DataType::Int).indexed(IndexKind::HASH),
+                Field::new("w", DataType::Vector(4, VecPrec::F32))
+                    .indexed(IndexKind::Vector(vector)),
+                Field::new("note", DataType::Text),
+            ],
+        )
+        .expect("u");
+        db.execute(&Statement::CreateCollection {
+            schema: u,
+            if_not_exists: false,
+        })
+        .expect("create u");
+        for k in 1..=2 {
+            db.execute(&put_u(k)).expect("a row of u");
+        }
         db
     }
 
@@ -510,31 +562,50 @@ mod torn {
     }
 
     /// The database as a test holds it to another: the change counter, the
-    /// next id handed out, each row, what each index answers and holds.
-    #[derive(Debug, PartialEq)]
+    /// next id handed out, each row, what each index answers and holds --
+    /// and the collections' ids, `t`'s schema, and every other collection,
+    /// its schema, rows and indexes.
+    #[derive(Clone, Debug, PartialEq)]
     struct State {
         seq: u64,
         next_id: DocId,
         rows: Vec<String>,
         answers: Vec<String>,
         indexes: Vec<(String, String)>,
+        next_coll_id: u32,
+        schema: String,
+        others: Vec<String>,
     }
 
-    fn state(db: &Database) -> State {
-        let c = db.collection("t").expect("t");
+    fn rows_of(c: &Collection) -> Vec<String> {
         let mut rows: Vec<_> = (c.store.iter_ids())
             .map(|id| format!("{id} {:?}", c.store.read(&c.schema, id)))
             .collect();
         rows.sort();
+        rows
+    }
+
+    fn state(db: &Database) -> State {
+        let c = db.collection("t").expect("t");
         // Answered first, so that the sorted words are made for the dump
         // to hold to the terms.
         let answers = answers(db);
+        let others = (db.order.iter().filter(|n| *n != "t"))
+            .map(|n| {
+                let o = &db.collections[n];
+                let s = (o.id, &*o.schema, rows_of(o), o.store.next_id());
+                format!("{n} {s:?} {:?}", o.dump_indexes())
+            })
+            .collect();
         State {
             seq: db.change_seq(),
             next_id: c.store.next_id(),
-            rows,
+            rows: rows_of(c),
             answers,
             indexes: c.dump_indexes(),
+            next_coll_id: db.next_coll_id,
+            schema: format!("{:?}", *c.schema),
+            others,
         }
     }
 
@@ -678,5 +749,408 @@ mod torn {
         reached.dedup();
         let missed: Vec<_> = want.iter().filter(|w| !reached.contains(w)).collect();
         assert!(missed.is_empty(), "never reached: {missed:?}");
+    }
+
+    /// A primary's sink in memory, keeping the records it is handed as
+    /// writes: what its feed sends a replica.
+    #[derive(Clone, Default)]
+    struct Tap(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+    impl Sink for Tap {
+        fn append(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, _: u64, bytes: &[u8]) -> Result<()> {
+            self.0.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+        fn rewrite(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The records a primary holding [`made`]'s rows lands for `writes`,
+    /// one after another, and the state it is in after them.
+    fn landed(writes: impl FnOnce(&mut Database) -> Result<()>) -> (Vec<u8>, State) {
+        let tap = Tap::default();
+        let mut p = made_on(Database::with_sink(Box::new(tap.clone())));
+        let from = tap.0.lock().unwrap().len();
+        writes(&mut p).expect("the primary's writes");
+        let records = tap.0.lock().unwrap()[from..].concat();
+        (records, state(&p))
+    }
+
+    /// How a write reaches a replica: its record alone; after the record
+    /// of a `put` to `u`, in one `apply`, which waits for the graph to take
+    /// its vector with the write; or in one block record with that `put`.
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        Alone,
+        After,
+        InBlock,
+    }
+
+    /// The records of `w` in `shape`, and the primary after them.
+    fn shaped(w: Write, shape: Shape) -> (Vec<u8>, State) {
+        let stmt = write(w);
+        landed(|p| match shape {
+            Shape::Alone => p.execute(&stmt).map(drop),
+            Shape::After => {
+                p.execute(&put_u(3))?;
+                p.execute(&stmt).map(drop)
+            }
+            Shape::InBlock => {
+                p.begin()?;
+                p.execute(&put_u(3))?;
+                p.execute(&stmt)?;
+                p.commit()
+            }
+        })
+    }
+
+    /// A replica over a file holding [`made`]'s rows, following.
+    fn replica(path: &Path) -> Database {
+        let mut db = made(path);
+        db.follow(vec![(7, 0)]).expect("follow");
+        db
+    }
+
+    /// Nothing on the feed after `seq`, of either collection.
+    fn unfed(db: &Database, seq: u64, tag: &str) {
+        for c in ["t", "u"] {
+            match db.changes_since(c, seq, None, None, &[]).expect("changes") {
+                Changes::Batch(b) => assert!(
+                    b.puts.rows.is_empty() && b.dels.is_empty(),
+                    "{tag}: {c}'s feed"
+                ),
+                Changes::Reseed => panic!("{tag}: {c}'s feed reseeds"),
+            }
+        }
+        assert_eq!(db.changed_collections_since(seq), Some(vec![]), "{tag}");
+    }
+
+    /// `records` applied by a replica with a panic at `at`; whether it
+    /// reached `at`. Once the panic has put them back the replica is as it
+    /// was -- its rows, every index, the ids, the counter, the feed, the
+    /// schemas -- and takes them again, as a follower connecting again
+    /// does: a `@unique` value, an id or a node left behind would refuse
+    /// them or tell the replica from `after`, as the file opened again
+    /// would.
+    fn applied(dir: &Path, name: &str, at: &'static str, records: &[u8], after: &State) -> bool {
+        let path = dir.join(format!("{name}{at}.fennec").replace(['+', '@'], "_"));
+        let mut db = replica(&path);
+        let before = state(&db);
+        PANIC_AT.with(|p| p.set(Some(at)));
+        let r = catch_unwind(AssertUnwindSafe(|| db.apply(records)));
+        let reached = PANIC_AT.with(|p| p.take()).is_none();
+        let tag = format!("{name} at {at}");
+        match r {
+            Ok(r) => {
+                assert!(!reached, "{tag}: a panic that did not unwind");
+                r.expect("the records");
+            }
+            Err(_) => {
+                assert!(reached, "{tag}: a panic not the test's");
+                assert!(!db.in_block(), "{tag}: a block left open");
+                assert!(db.failure().is_none(), "{tag}: the replica failed");
+                assert_eq!(state(&db), before, "{tag}: put back");
+                unfed(&db, before.seq, &tag);
+                db.apply(records).expect("the records again");
+            }
+        }
+        assert_eq!(state(&db), *after, "{tag}: applied");
+        drop(db);
+        let db = crate::fs::open(&path).expect("reopen");
+        assert_eq!(state(&db), *after, "{tag}: the file");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+        reached
+    }
+
+    /// A replica's `apply` writes no block of its own making, and a panic
+    /// in a record's upkeep of the indexes -- #501's, in the sorted words
+    /// -- left part of it in memory: the row in the store and some of its
+    /// indexes, in no record, the counter not moved, served to every read
+    /// until the next open. Each write, in each [`Shape`], with a panic at
+    /// each place it changes something, as the record is whole and as it
+    /// is handed to the sink: put back whole, and taken again.
+    #[test]
+    fn a_panic_anywhere_in_applying_a_record_puts_it_back_whole() {
+        let scratch = Scratch::new("fennecdb-applied");
+        let dir = &scratch.0;
+        let writes = [
+            Write::Insert,
+            Write::Over,
+            Write::Set,
+            Write::Del,
+            Write::Upsert,
+        ];
+        // The graph's own points aside: a replica links a batch, which
+        // `+v` stops before it changes the graph.
+        let points: Vec<&'static str> = (POINTS.iter().copied())
+            .filter(|p| !p.starts_with("graph-"))
+            .chain(["applied", "before"])
+            .collect();
+        let (mut reached, mut failed) = (Vec::new(), Vec::new());
+        for w in writes {
+            for shape in [Shape::Alone, Shape::After, Shape::InBlock] {
+                let (records, after) = shaped(w, shape);
+                let name = format!("{w:?}{shape:?}");
+                for &at in &points {
+                    match catch_unwind(AssertUnwindSafe(|| {
+                        applied(dir, &name, at, &records, &after)
+                    })) {
+                        Ok(true) => reached.push(format!("{w:?} {at}")),
+                        Ok(false) => {}
+                        Err(_) => failed.push(format!("{name} {at}")),
+                    }
+                }
+            }
+        }
+        drop(scratch);
+        assert!(failed.is_empty(), "{} failed: {failed:#?}", failed.len());
+        let mid = ["+text-term", "words", "+sparse-dim"];
+        let out_mid = ["-text-term", "-sparse-dim"];
+        let both: Vec<&str> = mid.iter().chain(&out_mid).copied().collect();
+        let all = [
+            "email",
+            "email@text",
+            "tag",
+            "n",
+            "at",
+            "body@text",
+            "v",
+            "s",
+            "p",
+            "tag+n",
+        ];
+        let mut want = Vec::new();
+        let mut each = |w: Write, dirs: &str, skip: &[&str], also: &[&str]| {
+            for d in dirs.chars() {
+                for f in all
+                    .iter()
+                    .filter(|f| !skip.contains(&format!("{d}{f}").as_str()))
+                {
+                    want.push(format!("{w:?} {d}{f}"));
+                }
+            }
+            let landing = ["applied", "before"];
+            want.extend(also.iter().chain(&landing).map(|a| format!("{w:?} {a}")));
+        };
+        each(Write::Insert, "+", &[], &mid);
+        each(Write::Over, "+-", &["-v"], &both);
+        each(Write::Set, "+-", &["-v"], &both);
+        each(Write::Del, "-", &[], &out_mid);
+        let upsert_skip = ["+email", "+email@text", "-email", "-email@text", "-v"];
+        each(Write::Upsert, "+-", &upsert_skip, &both);
+        want.sort();
+        want.dedup();
+        reached.sort();
+        reached.dedup();
+        let missed: Vec<_> = want.iter().filter(|w| !reached.contains(w)).collect();
+        assert!(missed.is_empty(), "never reached: {missed:?}");
+    }
+
+    /// From the sink call on, a panic fails the replica, as it fails a
+    /// primary landing a block: the record stays whole in memory, its
+    /// writes on no feed and the counter where it was -- no record takes
+    /// the numbers the file may hold -- and the file opened again holds it
+    /// or not, as far as the sink was handed it.
+    #[test]
+    fn a_panic_landing_an_applied_record_fails_the_replica() {
+        let scratch = Scratch::new("fennecdb-applied-landing");
+        let (records, after) = shaped(Write::Insert, Shape::Alone);
+        for (at, in_file) in [("sink", false), ("noted", true), ("notes", true)] {
+            let path = scratch.0.join(format!("{at}.fennec"));
+            let mut db = replica(&path);
+            let before = state(&db);
+            PANIC_AT.with(|p| p.set(Some(at)));
+            let r = catch_unwind(AssertUnwindSafe(|| db.apply(&records)));
+            assert!(r.is_err(), "{at}: no panic");
+            assert!(!db.in_block(), "{at}: a block left open");
+            assert!(!db.landing, "{at}: the landing left marked");
+            assert!(db.failure().is_some(), "{at}: the replica goes on");
+            let whole = State {
+                seq: before.seq,
+                ..after.clone()
+            };
+            assert_eq!(state(&db), whole, "{at}: in memory");
+            unfed(&db, before.seq, at);
+            let again = db.apply(&records);
+            assert!(matches!(again, Err(Error::Io(_))), "{at}: {again:?}");
+            drop(db);
+            let mut db = crate::fs::open(&path).expect("reopen");
+            if !in_file {
+                assert_eq!(state(&db), before, "{at}: the file");
+                db.apply(&records).expect("the record after the reopen");
+            }
+            assert_eq!(state(&db), after, "{at}: the file");
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+        }
+    }
+
+    /// A schema change applied, with a panic at each point it reaches:
+    /// put back whole -- the schema, every index it built or let go of,
+    /// a collection made or dropped -- and taken again. Alone and after a
+    /// record whose vector waits on the graph's batch, which the change
+    /// takes in first.
+    #[test]
+    fn a_panic_applying_a_schema_change_puts_it_back_whole() {
+        let scratch = Scratch::new("fennecdb-applied-schema");
+        let dir = &scratch.0;
+        let u = |change: Alter| Statement::AlterCollection {
+            collection: "u".into(),
+            change,
+        };
+        let z = Schema::new(
+            "z",
+            vec![Field::new("q", DataType::Int).indexed(IndexKind::HASH)],
+        )
+        .expect("z");
+        let changes: Vec<(&str, Option<Statement>, &[&str])> = vec![
+            (
+                "index",
+                Some(Statement::CreateIndex {
+                    collection: "u".into(),
+                    field: "note".into(),
+                    kind: IndexKind::Text(TextIndexSpec::default()),
+                    if_not_exists: false,
+                }),
+                &["+text-term"],
+            ),
+            (
+                "composite",
+                Some(Statement::CreateComposite {
+                    collection: "u".into(),
+                    index: Composite {
+                        keys: vec![("k".into(), false), ("note".into(), false)],
+                        unique: false,
+                    },
+                    if_not_exists: false,
+                }),
+                &[],
+            ),
+            (
+                "uncomposite",
+                Some(Statement::DropComposite {
+                    collection: "t".into(),
+                    keys: vec!["tag".into(), "n".into()],
+                    if_exists: false,
+                }),
+                &[],
+            ),
+            (
+                "add",
+                Some(u(Alter::AddField(
+                    Field::new("rank", DataType::Int).indexed(IndexKind::SORTED),
+                ))),
+                &[],
+            ),
+            ("dropfield", Some(u(Alter::DropField("w".into()))), &[]),
+            (
+                "rename",
+                Some(u(Alter::RenameField("k".into(), "key".into()))),
+                &[],
+            ),
+            (
+                "drop",
+                Some(Statement::DropCollection {
+                    name: "u".into(),
+                    if_exists: false,
+                }),
+                &[],
+            ),
+            (
+                "create",
+                Some(Statement::CreateCollection {
+                    schema: z,
+                    if_not_exists: false,
+                }),
+                &[],
+            ),
+            // An index record no statement writes now, which rebuilds them
+            // all: `k`'s index another kind, and `note` given one.
+            ("rebuild", None, &["+text-term"]),
+        ];
+        let (mut want, mut reached, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+        for (name, change, points) in &changes {
+            for after in [false, true] {
+                let (mut records, _) = landed(|p| {
+                    if after {
+                        p.execute(&put_u(3))?;
+                    }
+                    if let Some(c) = change {
+                        p.execute(c)?;
+                    }
+                    Ok(())
+                });
+                if change.is_none() {
+                    let p = made_on(Database::new());
+                    let c = &p.collections["u"];
+                    let mut s = Schema::clone(&c.schema);
+                    s.fields[0].index = IndexKind::SORTED;
+                    s.fields[2].index = IndexKind::Text(TextIndexSpec::default());
+                    records.extend_from_slice(&framed(REC_ALTER, c.id, &s.encode()));
+                }
+                // What a replica holds once it took them.
+                let mut taken = made_on(Database::new());
+                taken.apply(&records).expect("the records");
+                let taken = state(&taken);
+                let tag = format!("{name}{}", if after { "After" } else { "" });
+                for &at in ["applied", "before"].iter().chain(points.iter()) {
+                    want.push(format!("{name} {at}"));
+                    match catch_unwind(AssertUnwindSafe(|| {
+                        applied(dir, &tag, at, &records, &taken)
+                    })) {
+                        Ok(true) => reached.push(format!("{name} {at}")),
+                        Ok(false) => {}
+                        Err(_) => failed.push(format!("{tag} {at}")),
+                    }
+                }
+            }
+        }
+        drop(scratch);
+        assert!(failed.is_empty(), "{} failed: {failed:#?}", failed.len());
+        want.sort();
+        want.dedup();
+        reached.sort();
+        reached.dedup();
+        let missed: Vec<_> = want.iter().filter(|w| !reached.contains(w)).collect();
+        assert!(missed.is_empty(), "never reached: {missed:?}");
+    }
+
+    /// A record refused part way -- a block's second write, to a collection
+    /// the replica does not hold -- is put back whole, and with it the
+    /// record before it, waiting on the graph's batch: its first write
+    /// stayed, in no record and on no feed.
+    #[test]
+    fn a_record_refused_part_way_is_put_back_whole() {
+        let (records, _) = landed(|p| p.execute(&put_u(3)).map(drop));
+        let r = record_at(&records, &mut 0).expect("a record");
+        let mut inner = Vec::new();
+        frame_into(&mut inner, REC_DATA, r.cid, r.body);
+        frame_into(&mut inner, REC_DATA, 99, r.body);
+        let refused = framed(REC_BLOCK, 0, &inner);
+        let scratch = Scratch::new("fennecdb-applied-refused");
+        let path = scratch.0.join("refused.fennec");
+        let mut db = replica(&path);
+        let before = state(&db);
+        let mut two = records.clone();
+        two.extend_from_slice(&refused);
+        for (what, bytes) in [("alone", &refused), ("after one", &two)] {
+            let r = db.apply(bytes);
+            assert!(matches!(r, Err(Error::Corrupt(_))), "{what}: {r:?}");
+            assert!(!db.in_block(), "{what}: a block left open");
+            assert_eq!(state(&db), before, "{what}: put back");
+            unfed(&db, before.seq, what);
+        }
+        db.apply(&records).expect("the record alone");
+        assert_eq!(db.change_seq(), before.seq + 1);
+        drop(db);
+        let db = crate::fs::open(&path).expect("reopen");
+        assert_eq!(db.change_seq(), before.seq + 1);
     }
 }

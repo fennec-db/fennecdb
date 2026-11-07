@@ -636,3 +636,99 @@ panic, met by every write bringing a word new to the field, would have
 rebuilt them for each; how far a write got kept as it goes, an instruction
 or more an index on every write for the put-back of a panic alone; and
 every write of the block put back whole, each re-linking its vector.
+
+**A replica's records land as blocks do.** `Database::apply` opened no
+block: a record's frames went into the stores and their indexes one by
+one, the record went to the sink, and its vectors waited in a batch going
+on over the records after it, linked as it ended. So #505 left it out: a
+panic in a record's upkeep of the indexes -- #501's, in the sorted words
+-- left part of the record in memory, the row in the store and in some of
+its indexes, in no record and the counter not moved, and the replica
+answered every read from it until the next open; so did a record refused
+part way, a block's write to a collection the replica does not hold, its
+writes before the refusal left in. Now each frame is remembered before it
+changes anything, as a write is (`Block::remember_frame`: the store's
+mark and where the id's record was, the row read from there), and each
+schema change as the write path's is: a collection made or dropped (`Undo::Created`,
+`Undo::Dropped`, kept until the record lands), its fields changed
+(`Undo::Altered`), a statement record's table and mark
+(`keep_statement`), and an index record (`Undo::Reindexed`, native alone:
+the schema before and the indexes it built taken off -- or, where it
+builds every index again, those it let go of put back whole). A record
+lands once it is whole in memory, its vectors linked, as a block's are
+before its record is written (`land_applied`): one whose vectors wait in
+the batch waits with them, and lands with the records before it as the
+batch is linked, each handed to the sink in turn (`handing`) and its
+writes noted -- linked a record at a time, a stream of single `put`s
+would lose the batch's candidates found on every core. An error puts back
+every record not landed, by difference; a panic before the first sink
+call does too, the last write whole (`put_back_torn`, `apply_unwound`
+under `unwinding`, as `whole` is a block's); from the sink call a panic
+fails the database, the records whole in memory and the file holding
+them or not, as a block landing does; a sink's refusal stops writes and
+keeps them so, as it did. The records landed before stay. The log is the
+spare block's -- its marks, entries and notes, which the next block's
+`begin` takes and clears, and no block opens while a replica applies
+(`apply` refuses to run in one) -- read by the block's put-back
+(`rewind`). A `Block` of its own, taken from the spare and given back for
+every `apply` a follower makes, moved hundreds of bytes a record for
+buffers `apply` never fills, and its notes would have waited for a
+commit; a log of the database's own, a field beside the spare, was 57
+bytes of the browser module, which links no `apply`.
+
+Chosen over failing the database at a panic in `apply`, which is simpler:
+a failed database refuses writes but answers reads from memory
+(`Database::failure`: what every client was told so far), so a replica
+failed holding half a record would serve it until reopened, and refusing
+its reads too would be a rule of its own beside a storage error's. And a
+follower recovers from a write it could not apply already: it connects
+again and is sent an image (`force_image`), which a record put back joins.
+The follower takes a panic out of `apply` as it takes its error, caught
+with the lock held (`Follower::session`): let through, the panic ended
+the follower's thread with nothing in the log and the lock poisoned, the
+copy taking nothing more, and `halt` -- a promotion's first step -- waited
+for that thread for good.
+
+`engine/unwinding.rs`'s `a_panic_anywhere_in_applying_a_record_puts_it_back_whole`
+applies an insert, a `put` over a row, a `set`, a `del` and an upsert,
+each alone, after the record of a `put` to a second collection whose
+vector waits on the batch, and in one block record with that `put`, with
+a panic at each point a record reaches -- each index taking the row in or
+out, part way into the text index's terms, its sorted words and the
+sparse index's dimensions, the graph's batch, the record whole, the sink
+call -- 405 cases: the rows, every index, the ids, the counter, the feed
+and the schemas are as before, the records applied again are the
+primary's, and so is the file opened again. On main 294 of them failed.
+`a_panic_applying_a_schema_change_puts_it_back_whole` does so for an
+index made (part way into its terms), one over two fields made and
+dropped, a field added, dropped and renamed, a collection dropped and
+made, and an index record building every index again, alone and after a
+record waiting on the batch (on main each of the 22 cases whose panic it
+reaches failed); `a_panic_landing_an_applied_record_fails_the_replica`
+holds the sink call, the handover's note and the notes;
+`a_record_refused_part_way_is_put_back_whole` the refusal; and
+`tests/replication.rs`'s
+`a_panic_applying_a_write_ends_the_follower_and_never_its_halt` the
+follower, whose halt waited 20 s and more without the catch.
+
+A record applied pays nothing for it. Counted in process over a database
+in a file -- 50 000 lone `put` records of a collection under `@unique`,
+`@hash`, `@sorted` and `@text`, applied a record an `apply` and 1 000 an
+`apply`, a run the median of nine rounds and its loop's instructions a
+record (`proc_pid_rusage`, `MallocNanoZone=0`), main's build and this
+one's in turns, seven pairs, each run started under a 1-minute load below
+6 (3.2-5.9): a record an `apply` 13 115.7 instructions against 13 611.2
+(-3.6%), 1 000 an `apply` 12 375.3 against 12 735.1 (-2.8%), every pair
+of each lower; with a 16-dimension `@hnsw` field, 1 000 an `apply`,
+736 900 against 737 305, the graph's linking, in the batches it had. The
+put-back's entries alone cost 181 and 299 instructions a record (13 792.1
+and 13 034.5, three runs each, the frame made again as before): a frame
+taken into the store as the record holds it (`Store::append_frame`), where
+`Store::append` made it again in a `Vec` of its own, gives back more, 676
+and 659. In the two quietest pairs (load 3.2-3.5) a record took 1 074 and
+1 096 ns against 1 099 and 1 130 applied a record an `apply`, and 1 011
+and 1 030 against 1 060 and 1 034 a thousand an `apply`. The browser
+module links no `apply` and carries none of it -- `Undo::Reindexed` is
+native alone, a statement's
+put-back behind `statements`, which the module is built without: 838 643
+bytes against main's 838 722 (35 fewer brotli).

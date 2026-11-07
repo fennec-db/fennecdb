@@ -105,6 +105,7 @@ through; otherwise it is sent a fresh copy.</p>
 <tr><td>is pointed at a promoted replica, holding writes past the fork — the old primary, say</td><td>an image</td></tr>
 <tr><td>is further behind than the primary keeps writes for</td><td>an image</td></tr>
 <tr><td>starts empty</td><td>the writes from the first, or an image</td></tr>
+<tr><td>could not apply a write — refused, or stopped part way by a panic, which puts the write back whole before any read sees it</td><td>an image</td></tr>
 </tbody>
 </table>
 </div>
