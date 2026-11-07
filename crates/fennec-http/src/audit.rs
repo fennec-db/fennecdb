@@ -113,18 +113,16 @@ thread_local! {
     // -- an issuer, an audience, an expiry -- and never a value of the
     // token, every reason being a text of the server's own.
     static REASON: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
-    // The request this thread serves is a webhook event refused before its
-    // signature verified ([`hook_refused`]): its 401 waits by the hooks'
-    // own count, never the tokens'.
-    static HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // The statement bound to writes that the request this thread serves
     // was refused for waking, and why ([`unwoken`]): its `unwoken` line
     // names it for the operator writing the grant, where the token is told
     // no name.
     static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
     // What the statements bound to the writes of the request this thread
-    // serves left for its lines ([`TOLD`], [`HELD`]): a `Cell` a request
-    // looks at, the rest held in [`HELD_BOUND`] where something is.
+    // serves left for its lines ([`TOLD`], [`HELD`]), and whether it is a
+    // webhook event refused before its signature verified ([`HOOKED`]): a
+    // `Cell` a request looks at, reset as it starts, the rest held in
+    // [`HELD_BOUND`] where something is.
     static BOUND: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     // The binding that refused a scoped writer's write and the engine's
     // words, for the request's `bound` line, and the bound statements it
@@ -141,6 +139,11 @@ type Held = (Option<(String, String)>, Vec<(String, String, u8)>);
 const TOLD: u8 = 1;
 /// [`BOUND`]: [`HELD_BOUND`] holds the request's ([`bound`]).
 const HELD: u8 = 2;
+/// [`BOUND`]: the request is a webhook event refused before its signature
+/// verified ([`hook_refused`]): its 401 waits by the hooks' own count,
+/// never the tokens'. A bit of the flags every request resets already, so
+/// a request that is no event pays nothing for it.
+const HOOKED: u8 = 4;
 
 /// The reason the request this thread serves is refused its token, for its
 /// `refused` line: one of the server's own texts, never the token's. Set
@@ -159,7 +162,7 @@ pub fn refusal(why: &'static str) {
 /// event*). Let go by [`http`], as it writes the line.
 pub fn hook_refused(why: &'static str) {
     REASON.with(|r| r.set(Some(why)));
-    HOOK.with(|h| h.set(true));
+    BOUND.with(|b| b.set(b.get() | HOOKED));
 }
 
 /// The wait after a first failure, in milliseconds (`--auth-delay`): the
@@ -333,7 +336,6 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     // connection to many clients -- verified nothing of this one's.
     VERIFIED.with(|v| v.set(false));
     REASON.with(|r| r.set(None));
-    HOOK.with(|h| h.set(false));
     UNWOKEN.with(|u| u.borrow_mut().take());
     if BOUND.with(|b| b.replace(0)) & HELD != 0 {
         let_go_held();
@@ -734,7 +736,7 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     use crate::http::Method;
     let ip = peer.map(|p| p.ip());
     let path = req.target.split('?').next().unwrap_or("");
-    if HOOK.with(|h| h.replace(false)) && status == 401 {
+    if status == 401 && BOUND.with(|b| b.replace(b.get() & !HOOKED)) & HOOKED != 0 {
         hook_line(req, path, named().or(ip));
         return;
     }

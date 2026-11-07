@@ -176,9 +176,10 @@ a process counts them; the hooks' once a hooks file was read
 apart.](../../docs/design/http.md#statement-counts)** Literals are `$n`
 (`statements::shape`), a quoted key kept as written; a shape the server
 counts of its own -- `schedule <name>`, `after <name>` -- is keyed where no
-client's text is (`statements::own_key`). A shape names every collection, so they take what
-reads the data unscoped or the admin token; on a tenant node a tenant
-reads its own, and every tenant's, named, are the admin's alone.
+client's text is (`statements::own_key`). A shape names every collection,
+so they take what reads the data unscoped or the admin token; on a tenant
+node a tenant reads its own, and every tenant's, named, are the admin's
+alone.
 
 **[A webhook is verified by its signature before anything of it is read,
 and every refusal before is one 401.](../../docs/design/named-statements.md#verifying-an-event)**

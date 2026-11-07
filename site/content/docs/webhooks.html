@@ -120,8 +120,8 @@ type <code>application/json</code> (GitHub's default,
 type to set), the secret in the file, and the events to send.
 <code>hook.event</code> is GitHub's <code>X-GitHub-Event</code> header; a
 condition reads it beside the body. GitHub sends a <code>ping</code> when a
-webhook is made: with no statement taking it, it is answered
-<code>200</code>, <code>{"taken":0}</code>.</p>
+webhook is made: no condition takes it, so it is answered
+<code>200</code>, <code>{"taken":0}</code>, and nothing is written.</p>
 
 <p>GitHub's signature covers the body alone, so its key is chosen by the
 hook's line:</p>

@@ -460,18 +460,19 @@ pub(crate) fn shape_to(text: &str, out: &mut String, max: usize) {
             }
             continue;
         }
-        // A webhook consumer's quoted key, `event.metadata."order-id"`: a
-        // name of the event's JSON, never a value, kept as written -- a `$n`
-        // there named no path in an audit line or a shape. Only a `"` right
-        // after a name's dot opens one, which the lexer read as no text
-        // before hooks ("unexpected character `.`").
-        if c == b'"' && quoted_key_at(b, i) {
-            let end = key_end(b, i);
-            out.push_str(&text[i..end]);
-            i = end;
-            continue;
-        }
         if c == b'\'' || c == b'"' {
+            // A webhook consumer's quoted key, `event.metadata."order-id"`:
+            // a name of the event's JSON, never a value, kept as written --
+            // a `$n` there named no path in an audit line or a shape. Only a
+            // `"` right after a name's dot opens one, which the lexer read
+            // as no text before hooks ("unexpected character `.`"). Asked
+            // inside the quotes' arm, so a text with none pays nothing.
+            if c == b'"' && quoted_key_at(b, i) {
+                let end = key_end(b, i);
+                out.push_str(&text[i..end]);
+                i = end;
+                continue;
+            }
             i = string_end(b, i);
             hole(out);
             continue;
@@ -546,8 +547,6 @@ fn utf8_len(first: u8) -> usize {
     }
 }
 
-/// Past the string that starts at `at`: `"..."` with backslash escapes,
-/// `'...'` with a doubled quote for one.
 /// Whether the `"` at `at` opens a quoted key: right after a dot that
 /// follows a name, or a key closed before it.
 fn quoted_key_at(b: &[u8], at: usize) -> bool {
@@ -572,6 +571,8 @@ fn key_end(b: &[u8], at: usize) -> usize {
     b.len()
 }
 
+/// Past the string that starts at `at`: `"..."` with backslash escapes,
+/// `'...'` with a doubled quote for one.
 fn string_end(b: &[u8], at: usize) -> usize {
     let q = b[at];
     let mut i = at + 1;
