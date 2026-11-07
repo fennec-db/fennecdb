@@ -70,37 +70,6 @@ pub fn parse_i64(s: &str) -> Option<i64> {
     }
 }
 
-/// The integer at `j` -- `-` and digits, no fraction, exponent or `_`
-/// after them -- and `j` past it; `None` for any other number, or one past
-/// 64 bits. A list of integers alone is read by it into the integers it
-/// holds, by the JSON reader and FennecQL's lexer alike: read into a
-/// vector's `f32`s, 16777217 was 16777216. Natively: the browser module
-/// reads such a list a value at a time, and carries no reader of its own.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn int_at(b: &[u8], j: &mut usize) -> Option<i64> {
-    const MAX: u64 = 1 << 63;
-    let mut k = *j;
-    let neg = b.get(k) == Some(&b'-');
-    k += neg as usize;
-    let (start, mut n) = (k, 0u64);
-    while let Some(&c @ b'0'..=b'9') = b.get(k) {
-        if n > MAX / 10 {
-            return None;
-        }
-        n = n * 10 + (c - b'0') as u64;
-        k += 1;
-    }
-    if k == start || matches!(b.get(k), Some(b'.' | b'e' | b'E' | b'_')) {
-        return None;
-    }
-    *j = k;
-    match neg {
-        true if n <= MAX => Some((n as i64).wrapping_neg()),
-        false if n < MAX => Some(n as i64),
-        _ => None,
-    }
-}
-
 /// Parses a decimal number. `None` for anything that is not one -- the JSON
 /// scanner hands over whatever run of `[0-9.eE+-]` it found, so `1.2.3` and
 /// `--1` do arrive here and have to be rejected rather than guessed at.

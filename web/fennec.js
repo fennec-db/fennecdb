@@ -846,9 +846,7 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
  * most of its time on the digits, both sides of the call. A `-0` goes over
  * as `0`, as JSON writes it, so either way stores the same vector. Those
  * at `asJson` stay in the JSON: a json field keeps a list's numbers as
- * written, which the module asks for by their places. An array of
- * integers alone stays too, which the module reads as the integers it
- * holds: as `f32`s, an `[int]`'s 16777217 was 16777216, and asked for again.
+ * written, which the module asks for by their places.
  */
 function vectorsApart(params, asJson = null) {
   const found = [];
@@ -857,7 +855,6 @@ function vectorsApart(params, asJson = null) {
     if (asJson?.includes(i)) return;
     const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
-    if (Array.isArray(list) && Number.isInteger(list[0]) && list.every(Number.isInteger)) return;
     for (let k = 0; k < list.length; k++) {
       if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
     }

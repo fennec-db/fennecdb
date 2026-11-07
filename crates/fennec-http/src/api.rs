@@ -829,19 +829,6 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     let vector = match get("vector") {
         Some(Value::Vector(v)) if !sparse => Value::Vector(v.clone()),
         Some(v @ Value::List(_)) if point => v.clone(),
-        // Integers alone are the list of them to the reader (`num::int_at`),
-        // a vector all the same: `[0, 1]`.
-        Some(Value::List(items))
-            if !sparse && !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_))) =>
-        {
-            Value::Vector(
-                items
-                    .iter()
-                    .filter_map(Value::as_f64)
-                    .map(|x| x as f32)
-                    .collect(),
-            )
-        }
         // A sparse field's is pgvector's text form: `{1:0.5,3:0.25}/30522`.
         Some(Value::Text(t)) if sparse => Value::Text(t.clone()),
         Some(Value::List(items)) if items.is_empty() => {

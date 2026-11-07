@@ -232,8 +232,8 @@ fn a_requests_id_is_in_its_answer_and_every_line_it_wrote() {
         assert!(
             matches!(
                 call.iter().find(|(k, _)| k == "version").map(|(_, v)| v),
-                // `[history, change]`, a list of integers read as one.
-                Some(Value::List(v)) if v.len() == 2
+                // `[history, change]`, a list of numbers read as a vector.
+                Some(Value::Vector(v)) if v.len() == 2
             ),
             "{call:?}"
         );

@@ -378,13 +378,12 @@ impl Value {
                 }
                 Ok(Value::List(out))
             }
-            // In place: a list of integers alone is read as one, and a
-            // second `Vec` a list was an allocation an `[int]`'s insert paid.
-            (DataType::List(inner), Value::List(mut items)) => {
-                for it in items.iter_mut() {
-                    *it = std::mem::replace(it, Value::Null).coerce(inner)?;
+            (DataType::List(inner), Value::List(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(it.coerce(inner)?);
                 }
-                Ok(Value::List(items))
+                Ok(Value::List(out))
             }
             (DataType::Json, v) => json_value(v, 0),
             // A point is `[lon, lat]` once read, a list of two floats: a

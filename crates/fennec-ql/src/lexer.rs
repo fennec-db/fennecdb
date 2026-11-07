@@ -27,14 +27,6 @@ pub enum Tok {
     /// Numbers alone between brackets, read as the parser reads such a
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
-    /// Integers alone between brackets: the list of them, each as written
-    /// ([`tokenize_vectors`]) -- an `[int]`'s, a `[float]`'s or an id
-    /// list's, where a vector's `f32`s made 16777217 16777216. `i64`s, not
-    /// `Value`s: a token's drop stays a free, where one of `Value`s cost
-    /// every statement's tokens some 300 instructions. Natively: the
-    /// browser module reads such a list as tokens ([`floats_at`]).
-    #[cfg(not(target_arch = "wasm32"))]
-    Ints(Vec<i64>),
     LBrace,
     RBrace,
     LParen,
@@ -100,8 +92,6 @@ impl Tok {
             #[cfg(feature = "statements")]
             Tok::Keys(_) => "a path with a quoted key".into(),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
-            #[cfg(not(target_arch = "wasm32"))]
-            Tok::Ints(v) => format!("a list of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
             Tok::LParen => "`(`".into(),
@@ -303,8 +293,6 @@ fn subtracts(last: Option<&Token>) -> bool {
             | Tok::RParen
             | Tok::RBracket,
         ) => true,
-        #[cfg(not(target_arch = "wasm32"))]
-        Some(Tok::Ints(_)) => true,
         #[cfg(feature = "statements")]
         Some(Tok::Named(_) | Tok::Keys(_)) => true,
         _ => false,
@@ -439,59 +427,15 @@ impl Unclosed {
     }
 }
 
-/// At a `[` at byte `i`: the integers alone up to the `]` that closes it,
-/// each an `i64` as the token of its own reads it ([`Tok::Ints`]), and
-/// where the `]` ends. `None` at the first number that is no such integer
-/// -- a fraction, an exponent, past 64 bits -- which [`numbers_at`] then
-/// reads as a vector's: the first number of an embedding goes no further
-/// than its `.`.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(never)]
-fn ints_at(b: &[u8], mut i: usize) -> Option<(Vec<i64>, usize)> {
-    let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
-    let mut v = Vec::new();
-    i += 1;
-    loop {
-        while space(i) {
-            i += 1;
-        }
-        v.push(fennec_core::num::int_at(b, &mut i)?);
-        while space(i) {
-            i += 1;
-        }
-        match b.get(i) {
-            Some(b',') => i += 1,
-            Some(b']') => return Some((v, i + 1)),
-            _ => return None,
-        }
-    }
-}
-
-/// At a `[` at byte `i`: the numbers alone up to the `]` that closes it --
-/// integers alone their list ([`ints_at`]), any other each read as a token
-/// of its own reads it and made an `f32` as the parser makes it, a vector
-/// -- and where the `]` ends. `None` for anything else -- an empty list, a
-/// trailing comma, a comment, a `_` in a number, one that does not read --
-/// which the tokens then read as they always did.
-fn numbers_at(src: &str, b: &[u8], i: usize) -> Option<(Tok, usize)> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some((v, end)) = ints_at(b, i) {
-        return Some((Tok::Ints(v), end));
-    }
-    let (v, end) = floats_at(src, b, i)?;
-    Some((Tok::Vector(v), end))
-}
-
-/// [`numbers_at`]'s vector: each number made an `f32`.
-fn floats_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
+/// At a `[` at byte `i`: the numbers alone up to the `]` that closes it,
+/// each read as a token of its own reads it and made an `f32` as the parser
+/// makes it, and where the `]` ends. `None` for anything else -- an empty
+/// list, a trailing comma, a comment, a `_` in a number, one that does not
+/// read -- which the tokens then read as they always did.
+fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
     let mut v = Vec::new();
-    // The browser module hands integers alone to the tokens, which the
-    // parser makes the list they are: a reader of its own for them, and a
-    // token, were 1.7 KB of the module.
-    #[cfg(target_arch = "wasm32")]
-    let mut ints = true;
     i += 1;
     loop {
         while space(i) {
@@ -545,17 +489,11 @@ fn floats_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
             true => fennec_core::num::parse_f64(text)? as f32,
             false => fennec_core::num::parse_i64(text)? as f32,
         });
-        #[cfg(target_arch = "wasm32")]
-        {
-            ints &= !float;
-        }
         while space(i) {
             i += 1;
         }
         match b.get(i) {
             Some(b',') => i += 1,
-            #[cfg(target_arch = "wasm32")]
-            Some(b']') if ints => return None,
             Some(b']') => return Some((v, i + 1)),
             _ => return None,
         }
@@ -648,9 +586,9 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in") || w.eq_ignore_ascii_case("ranges"));
                 match !after_in {
                     true => match numbers_at(src, b, i) {
-                        Some((tok, end)) => {
+                        Some((v, end)) => {
                             i = end;
-                            tok
+                            Tok::Vector(v)
                         }
                         None => {
                             i += 1;

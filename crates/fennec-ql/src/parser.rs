@@ -1041,26 +1041,20 @@ impl Parser {
     }
 
     /// At a `[`: the numbers up to the `]` that closes it as `f32`s, and the
-    /// tokens stepped past, when there are any, each is followed by a `,` or
-    /// that `]`, and one is no integer -- integers alone are a list, as the
-    /// lexer reads them ([`Tok::Ints`]); `None`, and nothing stepped past,
-    /// otherwise.
+    /// tokens stepped past, when there are any and each is followed by a
+    /// `,` or that `]`; `None`, and nothing stepped past, otherwise.
     fn numbers_in_brackets(&mut self) -> Option<Vec<f32>> {
         let mut j = self.i + 1;
         let mut v = Vec::new();
-        let mut ints = true;
         loop {
             v.push(match self.toks.get(j)?.tok {
                 Tok::Int(n) => n as f32,
-                Tok::Float(f) => {
-                    ints = false;
-                    f as f32
-                }
+                Tok::Float(f) => f as f32,
                 _ => return None,
             });
             match self.toks.get(j + 1)?.tok {
                 Tok::Comma => j += 2,
-                Tok::RBracket if !ints => {
+                Tok::RBracket => {
                     self.i = j + 2;
                     return Some(v);
                 }
@@ -1861,13 +1855,8 @@ impl Parser {
             // `text[]`, `integer array`, `int array[3]`: a list, its length
             // not held, as PostgreSQL holds none.
             let array = self.eat_kw("array");
-            // `[3]` is a list of one to the lexer natively, three tokens
-            // in the browser module.
-            #[cfg(not(target_arch = "wasm32"))]
-            let one = matches!(self.peek(), Tok::Ints(v) if v.len() == 1);
-            #[cfg(target_arch = "wasm32")]
-            let one = false;
-            if one {
+            // `[3]` is a vector of one to the lexer.
+            if matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
                 self.skip();
                 ty = DataType::List(Box::new(ty));
             } else if matches!(self.peek(), Tok::LBracket) {
@@ -6042,21 +6031,10 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr> {
         // Taken rather than cloned, as `next` would.
-        match &mut self.toks[self.i].tok {
-            Tok::Vector(v) => {
-                let v = std::mem::take(v);
-                self.i += 1;
-                return Ok(Expr::Lit(Value::Vector(v)));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            Tok::Ints(v) => {
-                let v = std::mem::take(v);
-                self.i += 1;
-                return Ok(Expr::Lit(Value::List(
-                    v.into_iter().map(Value::Int).collect(),
-                )));
-            }
-            _ => {}
+        if let Tok::Vector(v) = &mut self.toks[self.i].tok {
+            let v = std::mem::take(v);
+            self.i += 1;
+            return Ok(Expr::Lit(Value::Vector(v)));
         }
         match self.peek().clone() {
             Tok::LParen => {
@@ -6118,19 +6096,16 @@ impl Parser {
                 // browser module.
                 let mut vals = Vec::with_capacity(items.len());
                 let mut numbers = !self.exact && !items.is_empty();
-                let mut ints = true;
                 for e in items {
                     let Expr::Lit(v) = e else {
                         return self.err("only constant values can be used inside a list");
                     };
                     numbers &= matches!(v, Value::Int(_) | Value::Float(_));
-                    ints &= matches!(v, Value::Int(_));
                     vals.push(v);
                 }
-                // Every element a constant number, one no integer: a vector,
-                // so embedding lists become Value::Vector in one go.
-                // Integers alone stay the list they are ([`Tok::Ints`]).
-                if numbers && !ints {
+                // Every element a constant number: a vector, so embedding
+                // lists become Value::Vector in one go.
+                if numbers {
                     let mut v = Vec::with_capacity(vals.len());
                     for x in &vals {
                         v.push(match x {

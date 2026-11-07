@@ -558,24 +558,17 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
             if depth > 0 {
                 return Ok(Value::List(parse_array_at(s, i, depth + 1, false)?));
             }
-            // Integers alone are the list of them, as written: an `[int]`'s
-            // or an id list's, where a vector's `f32`s made 16777217
-            // 16777216. Numbers alone, one no integer, are a vector, read
-            // straight into its `f32`s -- natively: a page's vectors come
-            // into the browser module as `f32`s already (`vectorsApart`),
-            // and there the reader was 474 bytes brotli for nothing.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(v) = ints(s, i) {
-                return Ok(Value::List(v));
-            }
+            // Numbers alone are a vector, read straight into its `f32`s --
+            // natively: a page's vectors come into the browser module as
+            // `f32`s already (`vectorsApart`), and there the reader was 474
+            // bytes brotli for nothing.
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(v) = numbers(s, i) {
                 return Ok(Value::Vector(v));
             }
             let items = parse_array_at(s, i, depth + 1, false)?;
-            // Every item a number, one no integer: a vector (embedding
-            // transfer).
-            if items.iter().any(|v| matches!(v, Value::Float(_)))
+            // If every item is a number, read it as a vector (embedding transfer)
+            if !items.is_empty()
                 && items
                     .iter()
                     .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
@@ -636,35 +629,6 @@ fn number_at<'s>(s: &'s str, i: &mut usize) -> (&'s str, bool) {
         *i += 1;
     }
     (s.get(start..*i).unwrap_or(""), is_float)
-}
-
-/// The array at `i` when it holds integers alone, each an `i64`
-/// (`num::int_at`), and `i` past it. `None`, `i` where it was, at the first
-/// number that is no such integer -- an embedding's goes no further than
-/// its `.` -- which [`numbers`] reads as a vector's.
-#[cfg(not(target_arch = "wasm32"))]
-fn ints(s: &str, i: &mut usize) -> Option<Vec<Value>> {
-    let b = s.as_bytes();
-    let mut j = *i + 1;
-    let mut out = Vec::new();
-    let space = |j: &mut usize| {
-        if b.get(*j).is_some_and(|&c| c <= b' ' || c >= 0x80) {
-            skip_ws(s, j);
-        }
-    };
-    loop {
-        space(&mut j);
-        out.push(Value::Int(crate::num::int_at(b, &mut j)?));
-        space(&mut j);
-        match b.get(j) {
-            Some(b',') => j += 1,
-            Some(b']') => {
-                *i = j + 1;
-                return Some(out);
-            }
-            _ => return None,
-        }
-    }
 }
 
 /// The array at `i` when it holds numbers alone, each the `f32` the vector
@@ -1050,8 +1014,8 @@ mod tests {
     }
 
     /// An array as the general path reads it, a value at a time: a vector
-    /// when every item is a number and one is no integer, as `parse_value`
-    /// reads every array the one-pass readers do not.
+    /// when every item is a number, as `parse_value` read every array
+    /// before the one-pass reader.
     fn a_value_at_a_time(s: &str) -> Result<Value> {
         let mut i = 0;
         skip_ws(s, &mut i);
@@ -1061,7 +1025,7 @@ mod tests {
             return Err(Error::Query("trailing characters after JSON".into()));
         }
         Ok(
-            match items.iter().any(|v| matches!(v, Value::Float(_)))
+            match !items.is_empty()
                 && items
                     .iter()
                     .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
@@ -1357,16 +1321,14 @@ mod tests {
 
     #[test]
     fn a_listed_member_keeps_its_numbers() {
-        let body = r#"{"params": [123456789, 19.99], "v": [1.5, 2], "w": [16777217]}"#;
+        let body = r#"{"params": [123456789, 19.99], "v": [1, 2]}"#;
         let o = parse_object_listing(body, "params").unwrap();
         assert_eq!(
             o[0].1,
             Value::List(vec![Value::Int(123_456_789), Value::Float(19.99)])
         );
-        // Another member's array of numbers is still a vector, but for
-        // integers alone, which are the list of them.
-        assert_eq!(o[1].1, Value::Vector(vec![1.5, 2.0]));
-        assert_eq!(o[2].1, Value::List(vec![Value::Int(16_777_217)]));
+        // Another member's array of numbers is still a vector.
+        assert_eq!(o[1].1, Value::Vector(vec![1.0, 2.0]));
         // A vector parameter is an array inside the list.
         let o = parse_object_listing(r#"{"params": [[0.1, 0.2], 7]}"#, "params").unwrap();
         assert_eq!(
