@@ -1484,6 +1484,46 @@ fn an_int_past_its_range_is_refused_naming_the_field() {
     }
 }
 
+/// An `[int]` and a `[float]` keep a list's numbers as written -- a REST
+/// insert's, a PATCH's, a `/query` text's and parameter's alike: read into
+/// a vector's `f32`s, as a list of numbers alone is read, i64::MIN was
+/// -2^63 and refused, 16777217 was 16777216 and 0.1 0.10000000149011612.
+#[test]
+fn an_int_or_float_list_keeps_its_numbers() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection lists (k int, xs [int], fs [float])"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let (xs, fs) = (
+        "[-9223372036854775808,9223372036854775807,16777217]",
+        "[0.1,16777217.5]",
+    );
+    let doc = |k: u8| format!(r#"{{"k":{k},"xs":{xs},"fs":{fs}}}"#);
+    let r = call(h.port, "POST", "/lists", Some(&doc(1)));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 2, xs: {xs}, fs: {fs}}}"}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 3, xs: $1, fs: $2}}","params":[{xs},{fs}]}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(q(r#"{"query":"put lists {k: 4}"}"#).status, 200);
+    let body = format!(r#"{{"xs":{xs},"fs":{fs}}}"#);
+    let r = call(h.port, "PATCH", "/lists?k=eq.4", Some(&body));
+    assert_eq!(r.body.trim(), r#"{"updated":1}"#);
+    let r = get(h.port, "/lists?select=xs,fs&order=k.asc");
+    assert_eq!(r.body.trim(), format!("[{body},{body},{body},{body}]"));
+    let near = "[-9223372036854775808,9223372036854775807,16777216]";
+    for (list, n) in [(near, 0), (xs, 4)] {
+        let r = q(&format!(
+            r#"{{"query":"get lists where xs = $1 count","params":[{list}]}}"#
+        ));
+        assert_eq!(r.body.trim(), format!(r#"[{{"count":{n}}}]"#), "{list}");
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

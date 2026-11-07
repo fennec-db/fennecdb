@@ -14,7 +14,11 @@ what a field holds, how it compares and which indexes it takes:
 64 bits, -9223372036854775808 to 9223372036854775807, and takes a float
 where it is whole (<code>20.0</code>); a value its type refuses is a type
 error naming the field, and a number past an int's range is one too, never
-clamped to its end (<a href="limits.html#fixed-limits">limits</a>).</p>
+clamped to its end (<a href="limits.html#fixed-limits">limits</a>). An
+<code>[int]</code> and a <code>[float]</code> keep their numbers as
+written, as the scalars do: <code>[16777217, -9223372036854775808]</code>
+is those two ints and <code>[0.1]</code> the decimal it is, never the
+<code>f32</code>s of a vector.</p>
 
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
@@ -111,8 +115,9 @@ reader. Its numbers are kept as written, an integer an integer and
 parameter over HTTP and in the browser, a JSON body, a row
 <code>fennec import</code> reads. A list of numbers alone is read the quick way, into the
 <code>f32</code>s of the vector it nearly always is; where it is given a
-<code>json</code> field, or compared with a path into one, the statement's
-text or the parameter's JSON is read again as written, so
+<code>json</code> field, an <code>[int]</code> or a <code>[float]</code>, or
+compared with one or a path into one, the statement's text or the
+parameter's JSON is read again as written, so
 <code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
 was never text — a <code>Float32Array</code> handed to the browser module,
 a vector built through the Rust API — is refused there rather than kept as

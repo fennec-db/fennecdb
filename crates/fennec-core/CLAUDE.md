@@ -296,7 +296,8 @@ shortest text reading back as it (`json::num32_into`), but for
 
 **[A number is read exactly.](../../docs/design/vector-search.md#numbers-in)**
 `num::parse_f64` reads one, and natively `num::clinger` a list of numbers
-alone into `f32`s.
+alone into `f32`s; a list bound for a json field, a point, an `[int]` or a
+`[float]` is read as written (`DataType::keeps_numbers`).
 
 **[A vector parameter goes into the module as
 `f32`s.](../../docs/design/vector-search.md#vector-parameters)** `run` hands it

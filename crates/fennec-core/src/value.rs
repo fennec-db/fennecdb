@@ -70,13 +70,17 @@ impl DataType {
     }
 
     /// Whether a field of the type keeps a list of numbers as written: a
-    /// json field, and a point, whose degrees are `f64`s -- where a reader
-    /// with no schema reads such a list into a vector's `f32`s, which would
-    /// move a point by up to 1.7 m (`Database::exactly`).
+    /// json field, a point, whose degrees are `f64`s, and an `[int]` or a
+    /// `[float]` -- where a reader with no schema reads such a list into a
+    /// vector's `f32`s, which would move a point by up to 1.7 m, store
+    /// 16777217 as 16777216 and `0.1` as 0.10000000149011612, and refuse
+    /// `i64::MIN`, an `f32` of -2^63 (`Database::exactly`).
     pub fn keeps_numbers(&self) -> bool {
         match self {
             DataType::Json | DataType::Geo => true,
-            DataType::List(t) => t.keeps_numbers(),
+            DataType::List(t) => {
+                matches!(**t, DataType::Int | DataType::Float) || t.keeps_numbers()
+            }
             _ => false,
         }
     }
@@ -361,11 +365,12 @@ impl Value {
             }
             // On the JSON side an all-numeric array is parsed as a vector
             // (json.rs), because `near $1` is evaluated without schema
-            // context. If the target field is a list it is converted back
-            // here; without this arm `[int]`/`[float]` fields could not be
-            // filled from the browser and fennec-server paths. Values drop to f32
-            // at that stage, so `[float]` loses precision one way; `[int]`
-            // stays lossless for whole numbers.
+            // context. An `[int]` or a `[float]` keeps its numbers as
+            // written (`DataType::keeps_numbers`): a statement handing one
+            // a vector is read again, or refused, before it comes here
+            // (`Database::exactly`), and this arm takes what `f32`s reach
+            // it otherwise, into an `[int]` where each is whole and short
+            // of 2^63.
             (DataType::List(inner), Value::Vector(v)) => {
                 let mut out = Vec::with_capacity(v.len());
                 for f in v {
@@ -393,6 +398,19 @@ impl Value {
                 v.type_name()
             ))),
         }
+    }
+
+    /// [`Value::coerce`] for a key looked up by, never written: -2^63 is
+    /// `i64::MIN` exactly, which only a write refuses, since its text may
+    /// have been past it ([`I64_END`]). A `lookup`'s parent holding the
+    /// float -2^63 finds the child holding `i64::MIN`, as `=` finds it.
+    pub(crate) fn coerce_key(self, ty: &DataType) -> Result<Value> {
+        if let (DataType::Int, Value::Float(f)) = (ty, &self) {
+            if *f == -I64_END {
+                return Ok(Value::Int(i64::MIN));
+            }
+        }
+        self.coerce(ty)
     }
 
     /// Backstop of the total ordering for types that cannot be compared.
@@ -569,10 +587,11 @@ fn not_bytes() -> Error {
 }
 
 /// 2^63: the first `f64` past `i64::MAX`, and `i64::MIN`'s magnitude.
-/// -2^63 is `i64::MIN`, yet a float of it is refused too: a
+/// -2^63 is `i64::MIN`, yet a float of it is refused too when written: a
 /// JSON integer past `i64::MIN` is read as the float it rounds to
 /// (`-9223372036854775809` is -2^63 exactly), and there the text that
-/// said it is gone. `i64::MIN` written as an integer is an `i64` and taken.
+/// said it is gone. `i64::MIN` written as an integer is an `i64` and taken,
+/// and a key looked up by -2^63 is `i64::MIN` ([`Value::coerce_key`]).
 const I64_END: f64 = 9_223_372_036_854_775_808.0;
 
 /// The refusal of a whole float at or past [`I64_END`] going into an `int`,
@@ -582,11 +601,7 @@ const I64_END: f64 = 9_223_372_036_854_775_808.0;
 #[cold]
 #[inline(never)]
 fn past_int() -> Error {
-    Error::Type(
-        "an int is from -9223372036854775808 to 9223372036854775807, and a number past it \
-         is refused, never clamped"
-            .into(),
-    )
+    Error::Type("an int is from -9223372036854775808 to 9223372036854775807".into())
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

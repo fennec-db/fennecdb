@@ -96,6 +96,28 @@ index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
 
+**A list a field keeps as written is read so.** A json field, a point, an
+`[int]` and a `[float]` keep a list's numbers as written
+(`DataType::keeps_numbers`), and where one is handed a list of numbers --
+or compared with one -- `Database::exactly` names it: the text is read
+again by `fennec_ql::parse_exact`, the parameters by
+`json::parse_params_exact`, a REST body's member by `parse_exact_at`, a
+replica's seed and changes alike, and the browser module and the native
+library ask for a parameter handed over as `f32`s as JSON
+(`Refused::Exact`), which the page sends so from then on. Read as a
+vector's `f32`s, an `[int]` stored 16777217 as 16777216 and refused
+-9223372036854775808 (-2^63 as a float, past an int: a replica's seed of
+such a row failed on every retry), and a `[float]` stored 0.1 as
+0.10000000149011612. A statement handing no such field a list pays
+nothing more: an insert of five ints retired 32 117 instructions before
+and 32 078 after, five int parameters 33 763 and 33 726 (`proc_pid_rusage`
+over 20 000 in a loop, medians of six, ±100 run to run). One that does
+pays the second read: an `[int]` of eight in the text 22 636 -> 44 076,
+as a parameter 24 916 -> 30 284; a vector put into a collection beside
+an `[int]` 21 422 -> 21 860, its field's name looked up. In the browser
+module the page sends such a parameter as JSON once it was asked to, and
+`keeps_numbers` grew 30 bytes.
+
 ## Vector parameters
 
 **A vector parameter goes into the module as `f32`s.** `web/fennec.js`'s

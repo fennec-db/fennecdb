@@ -666,15 +666,16 @@ mod tests {
 
     /// A number past an int's range is refused naming its field, never
     /// clamped to the nearest int -- a text's literal, a parameter's JSON, a
-    /// document's and a list's element handed over as `f32`s alike, the
-    /// module's and the native library's answer -- and the ends are taken.
+    /// document's and a list's element alike, the module's and the native
+    /// library's answer -- and the ends are taken. An `[int]` list handed
+    /// over as `f32`s is asked for as JSON, and read as written.
     #[test]
     fn an_int_past_its_range_is_refused_naming_the_field() {
         let mut db = Database::new();
         run(&mut db, "create collection t (n int, xs [int])", "", &[]);
         let refused = |field: &str| {
             format!(
-                r#"{{"kind":"error","message":"type error: field `{field}`: an int is from -9223372036854775808 to 9223372036854775807, and a number past it is refused, never clamped"}}"#
+                r#"{{"kind":"error","message":"type error: field `{field}`: an int is from -9223372036854775808 to 9223372036854775807"}}"#
             )
         };
         for n in [
@@ -692,14 +693,27 @@ mod tests {
         let mut apart = [0u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
         apart.extend(1e20f32.to_le_bytes());
         let r = run(&mut db, "put t {xs: $1}", "[null]", &apart);
-        assert_eq!(r, refused("xs"));
+        assert!(r.ends_with(r#""exact":[0]}"#), "{r}");
+        assert_eq!(
+            run(&mut db, "put t {xs: $1}", "[[1e20]]", &[]),
+            refused("xs")
+        );
+        // As `f32`s, i64::MIN was -2^63 and refused, and 16777217 16777216.
+        let xs = "[-9223372036854775808, 9223372036854775807, 16777217]";
+        let r = run(&mut db, "put t {xs: $1}", &format!("[{xs}]"), &[]);
+        assert!(r.contains("\"affected\""), "{r}");
+        let r = run(&mut db, &format!("put t {{xs: {xs}}}"), "", &[]);
+        assert!(r.contains("\"affected\""), "{r}");
+        let r = run(&mut db, "get t where xs != null select xs", "", &[]);
+        let want = format!(r#"[{{"xs":{xs}}},{{"xs":{xs}}}]"#).replace(", ", ",");
+        assert!(r.contains(&want), "{r}");
         for n in ["9223372036854775807", "-9223372036854775808"] {
             let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);
             assert!(r.contains("\"affected\""), "{r}");
             let r = run(&mut db, &format!("put t {{n: {n}}}"), "", &[]);
             assert!(r.contains("\"affected\""), "{r}");
         }
-        let r = run(&mut db, "get t select n order id", "", &[]);
+        let r = run(&mut db, "get t where n != null select n order id", "", &[]);
         assert!(
             r.contains(
                 r#"[{"n":9223372036854775807},{"n":9223372036854775807},{"n":-9223372036854775808},{"n":-9223372036854775808}]"#

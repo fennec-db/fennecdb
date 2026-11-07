@@ -538,6 +538,36 @@ fn an_offline_write_lands_once_its_answer_lost() {
     assert_eq!(w.state(), "online");
 }
 
+/// An `[int]` reaches a replica with its numbers as written, the seed's
+/// and a change's: read into a vector's `f32`s, as a reader with no schema
+/// reads a list of numbers alone, `i64::MIN` was -2^63, refused on every
+/// retry, and 16777217 was 16777216.
+#[test]
+fn an_int_lists_numbers_reach_the_replica_as_written() {
+    let list = |xs: [i64; 2]| Value::List(xs.map(Value::Int).to_vec());
+    let set = |db: &mut Database, key: &str, xs: [i64; 2]| {
+        let s = format!(r#"set tasks {{nums: $1}} where key = "{key}""#);
+        let s = fennec_ql::parse_one(&s).unwrap();
+        db.execute_with(&s, &[list(xs)]).unwrap();
+    };
+    let mut server = Server::new();
+    let alter = fennec_ql::parse_one("alter collection tasks add field nums [int]").unwrap();
+    server.db.execute(&alter).unwrap();
+    set(&mut server.db, "a", [i64::MIN, 16_777_217]);
+    let mut w = World::with(server, Database::new());
+    let nums = |w: &World, key: &str| {
+        let rows = w.local(&format!(r#"get tasks where key = "{key}" select nums"#));
+        rows[0].values[0].clone()
+    };
+    assert_eq!(w.refused, []);
+    assert_eq!(nums(&w, "a"), list([i64::MIN, 16_777_217]));
+    set(&mut w.server.db, "b", [i64::MAX, 16_777_217]);
+    w.deliver();
+    assert_eq!(w.refused, []);
+    assert_eq!(nums(&w, "b"), list([i64::MAX, 16_777_217]));
+    assert_eq!(w.state(), "online");
+}
+
 /// A text of two writes, letters outside ASCII in the first: each reaches
 /// the server as it was written. `fennec_ql::spans` placed them in
 /// characters, which the sync slices the text by as bytes, so the first

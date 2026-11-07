@@ -143,7 +143,12 @@ to its type's range the same way: a whole float going into an `int` --
 -2^63 included, since `-9223372036854775809` reads as exactly that float.
 It is a type error naming the field (`engine::in_field`); `as` had
 saturated it to `i64::MAX`, and an `@hash` lookup then found that row
-where the scan finds none. An integer read as one never meets the test:
+where the scan finds none. A key looked up by is not written: a
+`lookup`'s parent holding the float -2^63 finds the child holding
+`i64::MIN` (`Value::coerce_key`, 132 bytes of the browser module), as
+`=` does. An `[int]`'s list is read
+as written ([vector-search.md](vector-search.md#numbers-in)), so its
+ends go in as integers too. An integer read as one never meets the test:
 an insert of five int fields retired 20 042 instructions on main and
 20 018 with the test (medians of six, both ±100 run to run), five whole
 floats 20 618 and 20 582. Full table in `site/content/docs/limits.html`.

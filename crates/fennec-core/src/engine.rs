@@ -3401,7 +3401,7 @@ impl<'a> Tuple<'a> {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
             };
-            vals.push(v.coerce(ty).unwrap_or(Value::Null));
+            vals.push(v.coerce_key(ty).unwrap_or(Value::Null));
         }
         Ok(self.laid(&vals))
     }
@@ -3411,7 +3411,7 @@ impl<'a> Tuple<'a> {
     fn prefix_of(&self, row: &[Value]) -> Option<crate::composite::KeyBytes> {
         let mut vals = Vec::with_capacity(self.parts.len());
         for (pos, ty) in &self.parts {
-            vals.push(column(row, *pos).coerce(ty).unwrap_or(Value::Null));
+            vals.push(column(row, *pos).coerce_key(ty).unwrap_or(Value::Null));
         }
         self.laid(&vals)
     }
@@ -3543,7 +3543,7 @@ impl<'a> Probe<'a> {
                 Ok(false)
             }
             Probe::Hash(map, ty) => {
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_key(ty) else {
                     return Ok(false);
                 };
                 // The child's index decides how its key compares: a
@@ -3591,7 +3591,7 @@ impl<'a> Probe<'a> {
                 // an `int` key has to become `10.0` before it can find
                 // `price = 10.0`. Skipping it lets the mere presence of an
                 // index change the answer.
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_key(ty) else {
                     return;
                 };
                 let Some(ids) = map.get(&map.key(&k)) else {
@@ -12691,8 +12691,8 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
-                 and this one was read into a vector's f32s: read the text with \
+                "a json field, a point, an [int], a [float] or an `in $n` list keeps a list of \
+                 numbers as written, and this one was read into a vector's f32s: read the text with \
                  fennec_ql::parse_for, a parameter as JSON"
                     .into(),
             )),
@@ -12800,8 +12800,9 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     // The value given first: a key is looked up only for a list of numbers
     // or a parameter, so a `put` of 1 000 rows looks up the vector field's
     // name and none of the others.
-    // A collection with no json field or point is asked nothing of its
-    // values (`Known::Schema(_, false)`), checked once.
+    // A collection with no field keeping its numbers -- json, a point, an
+    // `[int]`, a `[float]` -- is asked nothing of its values
+    // (`Known::Schema(_, false)`), checked once.
     let any = !matches!(k, Known::Schema(_, false));
     let mut pair = |(key, e): &(String, Expr)| {
         if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
@@ -12922,8 +12923,9 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
     e.each_child(&mut |c| expr_needs(of, k, c, out));
 }
 
-/// Whether `name` is a json field of `schema` or a path into one, or a
-/// point -- a field that keeps a list of numbers as written.
+/// Whether `name` is a json field of `schema` or a path into one, a
+/// point, an `[int]` or a `[float]` -- a field that keeps a list of
+/// numbers as written ([`DataType::keeps_numbers`]).
 fn names_json(schema: &Schema, name: &str) -> bool {
     // A path's field is a json one, or the path is refused where it is read.
     let field = name.split_once('.').map_or(name, |(f, _)| f);
@@ -12999,20 +13001,23 @@ fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
 }
 
 fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
-    if let Some((pos, keys)) = schema.path_of(k)? {
-        let f = &schema.fields[pos];
-        let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
-        whole.set_path(&f.name, keys, v)?;
-        doc.set(
-            &f.name,
-            whole.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?,
-        );
-        return Ok(());
-    }
-    let f = schema
-        .field(k)
-        .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
-    doc.set(k, v.coerce(&f.ty).map_err(|e| in_field(k, e))?);
+    // A field and a path into one meet one `coerce`: a site each, its
+    // refusal named in both, was 153 bytes more of the browser module.
+    let (f, v) = match schema.path_of(k)? {
+        Some((pos, keys)) => {
+            let f = &schema.fields[pos];
+            let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
+            whole.set_path(&f.name, keys, v)?;
+            (f, whole)
+        }
+        None => {
+            let f = schema.field(k).ok_or_else(|| {
+                Error::NotFound(format!("field `{k}` in collection `{}`", schema.name))
+            })?;
+            (f, v)
+        }
+    };
+    doc.set(&f.name, v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?);
     Ok(())
 }
 

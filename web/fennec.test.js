@@ -584,11 +584,30 @@ test('a number past an int\'s range is refused naming its field, in the module',
   }
   assert.throws(() => db.run('put t {n: -1e300}'), past('n'));
   assert.throws(() => db.run('put t {n: 9223372036854775808}'), /invalid integer/);
-  // A list of numbers goes in as a vector's f32s, beside the JSON.
+  // A list of numbers goes in as a vector's f32s, beside the JSON; the
+  // module asks an [int]'s back as JSON, and reads it as written.
   assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs'));
   assert.equal(db.rows('get t count')[0].count, 0);
   db.run('put t [{n: 9223372036854775807}, {n: -9223372036854775808}]');
   assert.equal(db.rows('get t where n = 9223372036854775807 or n = -9223372036854775808 count')[0].count, 2);
+  db.close();
+});
+
+test('an [int] or a [float] keeps its list\'s numbers as written, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (k int, xs [int], fs [float])');
+  // As f32s, 16777217 was 16777216, 0.1 0.10000000149011612, and
+  // -9223372036854775808 the float -2 ** 63, refused past an int.
+  db.run('put t {k: 1, xs: [-9223372036854775808, 9223372036854775807, 16777217], fs: [0.1]}');
+  db.run('put t {k: 2, xs: $1, fs: $2}', [[16777217], [0.1]]);
+  db.run('put t {k: 3, xs: $1, fs: $2}', [new Float64Array([16777217]), new Float64Array([0.1])]);
+  await db.from('t').insert({ k: 4, xs: [16777217], fs: [0.1] });
+  assert.deepEqual(db.rows('get t select fs order k').map((r) => r.fs), [[0.1], [0.1], [0.1], [0.1]]);
+  assert.deepEqual(db.rows('get t where k > 1 select xs order k').map((r) => r.xs), [[16777217], [16777217], [16777217]]);
+  assert.equal(db.rows('get t where xs = [-9223372036854775808, 9223372036854775807, 16777217] count')[0].count, 1);
+  assert.equal(db.rows('get t where xs = $1 count', [[16777216]])[0].count, 0);
+  assert.equal(db.rows('get t where xs = $1 count', [[16777217]])[0].count, 3);
   db.close();
 });
 
