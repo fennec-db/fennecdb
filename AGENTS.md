@@ -138,12 +138,14 @@ lock.
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica
 and a subscriber see all of it or none. A failed one is undone in memory,
-a schema change too (`Undo`, a variant each); whatever counts records
+a schema change too (`Undo`, a variant each), every write recording its
+undo before it changes anything (`Block::remember`); whatever counts records
 counts their writes (`writes_in`), and what cannot be undone, a compact,
 is refused in a block (`Statement::fits_block`). A server takes a lock a
 panic poisoned as it stands: a panic before the sink call puts the block
 back whoever opened it (`Database::whole`, `Unlanded`, a server's or the
-native library's between statements by `held::Writing`); one from the
+native library's between statements by `held::Writing`), the write it
+stopped put back into every index whole (`put_back_torn`); one from the
 sink call through the notes to the block's end fails the database
 (`landing`), or the next block reuses the file's change numbers; nothing
 lent out around a write -- the registry, its hooks and `Check` (`Lent`), a
