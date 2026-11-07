@@ -123,7 +123,16 @@ from the database, each was a statement parsed and run. `readers` took
 is selected by the fields it has (`reader_fields`): the select naming one
 a directory from before lacked failed not found, which `rows` read as an
 empty collection, every record forgotten -- now only a collection not
-there reads as empty. With only the trace to go by, the trace
+there reads as empty. Every follow the router tells a read replica says
+it is one (`"reader": true`), which the copy keeps in `.follows` and its
+stream says (`reader=1`): its primary counts it no standby, so a webhook
+event's answer, which waits for one, never waits on another region's
+round trip, nor is answered by a copy no failover promotes while the
+pair's standby lags (`docs/design/named-statements.md`, *What F4 has
+built*); a durable write still waits for it while it keeps up. `readers`
+took `marked` as it took `lineage`: a replica placed by a router from
+before is unmarked, due at the next look though nothing else changed, and
+told again once (`Reader::marked`). With only the trace to go by, the trace
 let go of and the name made again on the very node, the look found
 nothing to change and the copy's follower took the new tenant's image; a
 `?forget` of a node that came back, and a router lost between the

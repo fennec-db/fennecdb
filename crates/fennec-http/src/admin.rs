@@ -118,28 +118,30 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // (`crate::tenant_hooks`): never in a log line, a span or an answer
         // but `hook-secrets`', whose read is an audit event of its own.
         (Method::Get, ["tenants", t, "hooks"]) => tenants
-            .hooks_listing(t)
+            .with_hooks(t, false, &mut |s, _| Ok(s.listing(t)))
             .map(|listing| Response::json(200, listing)),
         (Method::Put, ["tenants", t, "hooks", h]) => tenants
-            .put_hook(t, h, &req.body)
-            .map(|v| hooked(t, h, Some(v))),
-        (Method::Delete, ["tenants", t, "hooks", h]) => {
-            tenants.drop_hook(t, h).map(|v| hooked(t, h, v))
-        }
-        (Method::Get, ["tenants", t, "hook-secrets"]) => tenants.hooks_export(t).map(|set| {
-            crate::audit::event("hook_secrets", &[("tenant", crate::audit::Field::Text(t))]);
-            Response::json(200, set).header("Cache-Control", "no-store")
-        }),
-        (Method::Put, ["tenants", t, "hook-secrets"]) => {
-            tenants.install_hooks(t, &req.body).map(|v| {
-                let mut out = String::from("{\"tenant\":");
-                fennec_core::json::escape_into(&mut out, t);
-                out.push_str(",\"version\":");
-                out.push_str(&version_json(v));
-                out.push('}');
-                Response::json(200, out)
+            .with_hooks(t, true, &mut |s, open| {
+                s.put_hook(t, h, &req.body, open)
+                    .map(|v| hooked(t, Some(h), Some(v)))
             })
-        }
+            .map(|body| Response::json(200, body)),
+        (Method::Delete, ["tenants", t, "hooks", h]) => tenants
+            .with_hooks(t, true, &mut |s, open| {
+                s.drop_hook(t, h, open).map(|v| hooked(t, Some(h), v))
+            })
+            .map(|body| Response::json(200, body)),
+        (Method::Get, ["tenants", t, "hook-secrets"]) => tenants
+            .with_hooks(t, false, &mut |s, _| Ok(s.export(t)))
+            .map(|set| {
+                crate::audit::event("hook_secrets", &[("tenant", crate::audit::Field::Text(t))]);
+                Response::json(200, set).header("Cache-Control", "no-store")
+            }),
+        (Method::Put, ["tenants", t, "hook-secrets"]) => tenants
+            .with_hooks(t, true, &mut |s, open| {
+                s.install(t, &req.body, open).map(|v| hooked(t, None, v))
+            })
+            .map(|body| Response::json(200, body)),
         // The lineage the tenant's history is of, which a router binds its
         // read replicas to.
         (Method::Put, ["tenants", t]) => {
@@ -349,21 +351,23 @@ fn judged(t: &str, kept: Kept) -> Result<Response, Refused> {
     }
 }
 
-/// A hook's `PUT` or `DELETE` answered: the tenant, the hook and the set's
-/// version after it, `null` where no hook is left.
-fn hooked(t: &str, h: &str, v: Option<u64>) -> Response {
+/// A hook's `PUT` or `DELETE` answered, or a set's installed whole: the
+/// tenant, the hook and the set's version after it, `null` where no hook
+/// is left.
+fn hooked(t: &str, h: Option<&str>, v: Option<u64>) -> String {
     let mut out = String::from("{\"tenant\":");
     fennec_core::json::escape_into(&mut out, t);
-    out.push_str(",\"hook\":");
-    fennec_core::json::escape_into(&mut out, h);
+    if let Some(h) = h {
+        out.push_str(",\"hook\":");
+        fennec_core::json::escape_into(&mut out, h);
+    }
     out.push_str(",\"version\":");
-    out.push_str(&version_json(v));
+    match v {
+        Some(v) => out.push_str(&format!("\"{v:016x}\"")),
+        None => out.push_str("null"),
+    }
     out.push('}');
-    Response::json(200, out)
-}
-
-fn version_json(v: Option<u64>) -> String {
-    v.map_or_else(|| "null".into(), |v| format!("\"{v:016x}\""))
+    out
 }
 
 /// A follow's body: the node to follow, the lineage its tenant must be of

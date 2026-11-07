@@ -990,17 +990,7 @@ impl Router {
                     .find(|(k, _)| k == "to")
                     .map(|(_, v)| v.as_str());
                 let quota = req.header("fennec-quota");
-                let hooks = match req.header(HOOKS_HEADER) {
-                    Some(h) => {
-                        Some(fennec_http::crypto::b64_decode(h.trim()).ok_or_else(|| {
-                            Fail(
-                                400,
-                                format!("{HOOKS_HEADER} is a set of hook secrets in base64"),
-                            )
-                        })?)
-                    }
-                    None => None,
-                };
+                let hooks = hooks_in(req.header(HOOKS_HEADER), 400)?;
                 let (node, own) =
                     self.import_held(tenant, to, &req.body, quota, hooks.as_deref())?;
                 let region = self.read_dir().region_of(&node).to_string();
@@ -1110,7 +1100,7 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(Fail(502, w));
         }
-        if let Some(w) = hooks.and_then(|h| self.install_hook_set(tenant, to, h)) {
+        if let Some(w) = hooks.and_then(|h| self.install_hook_set(tenant, to, Some(h))) {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(Fail(502, format!("its hook secrets: {w}")));
         }
@@ -1173,8 +1163,7 @@ impl Router {
         let base = format!("/_admin/tenants/{tenant}");
         if let Some(w) = self
             .on_standby(to, "PUT", &base)
-            .or_else(|| self.quota_on_standby(tenant, to))
-            .or_else(|| self.hooks_on_standby(tenant, to))
+            .or_else(|| self.sidecars_on_standby(tenant, to))
         {
             fennec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
         }
@@ -1273,17 +1262,7 @@ impl Router {
                         .find(|(k, _)| k.eq_ignore_ascii_case(name))
                         .map(|(_, v)| v.clone())
                 };
-                let hooks = match header(HOOKS_HEADER) {
-                    Some(h) => {
-                        Some(fennec_http::crypto::b64_decode(h.trim()).ok_or_else(|| {
-                            Fail(
-                                502,
-                                format!("{} sent hook secrets that do not read", region_name(from)),
-                            )
-                        })?)
-                    }
-                    None => None,
-                };
+                let hooks = hooks_in(header(HOOKS_HEADER).as_deref(), 502)?;
                 (
                     image,
                     header("fennec-quota"),
@@ -1496,6 +1475,17 @@ impl Router {
 /// The header a move across regions carries a tenant's hook secrets in,
 /// router to router: the set whole, base64, as `hook-secrets` answers it.
 pub(crate) const HOOKS_HEADER: &str = "Fennec-Hook-Secrets";
+
+/// The set of hook secrets [`HOOKS_HEADER`] carries, decoded: one that
+/// does not read refused with `status` -- 400 to the router sending it,
+/// 502 from the router answering it.
+fn hooks_in(header: Option<&str>, status: u16) -> Outcome<Option<Vec<u8>>> {
+    let decoded = header.map(|h| {
+        fennec_http::crypto::b64_decode(h.trim())
+            .ok_or_else(|| Fail(status, format!("{HOOKS_HEADER} holds no set in base64")))
+    });
+    decoded.transpose()
+}
 
 /// What a move's export takes off the source: its image, its quota, its
 /// node and its hook secrets.

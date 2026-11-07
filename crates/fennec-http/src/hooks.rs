@@ -183,7 +183,9 @@ impl Check {
     }
 }
 
-/// A hook a hooks file's line makes.
+/// A hook a hooks file's line makes: cloned as a tenant's set is made
+/// again around a change of one of its hooks.
+#[derive(Clone)]
 pub struct Hook {
     pub name: String,
     pub scheme: Scheme,
@@ -513,7 +515,7 @@ pub(crate) fn hook_of(
 /// A secret file's bytes as its scheme reads them: Stripe's `whsec_` text
 /// and GitHub's chosen secret as written, a `standard` one's base64 after
 /// `whsec_` decoded. Its file's last line end is no part of it.
-pub(crate) fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
+fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
     let mut s = raw;
     while let [rest @ .., b'\n' | b'\r'] = s {
         s = rest;
@@ -1443,6 +1445,22 @@ pub(crate) fn failed(ip: Option<IpAddr>, name: Option<Named>) -> Duration {
     crate::audit::wait_after(base, n.unwrap_or(u32::MAX))
 }
 
+/// An event to a tenant's hook a router forwarded from `peer`, its node's
+/// answer a 2xx: verified there, so the router's count of that sender's
+/// refusals by the hook -- by the client the entry names, else the peer,
+/// as the refusals were counted -- starts again, as the node's does
+/// ([`cleared`]). Asked of every 2xx the router forwards: one holding no
+/// count pays a load.
+#[inline]
+pub(crate) fn taken_through(req: &Request, peer: Option<std::net::SocketAddr>) {
+    if FAILING.load(Ordering::Relaxed) > 0 && req.method == Method::Post {
+        let ip = crate::audit::named().or(peer.map(|p| p.ip()));
+        if let Some(n) = named(req).filter(|n| n.tenant.is_some()) {
+            cleared(ip, n.tenant, n.hook);
+        }
+    }
+}
+
 /// A verified event of hook `name` from `ip`: its count starts again.
 fn cleared(ip: Option<IpAddr>, tenant: Option<&str>, hook: &str) {
     if let Some(ip) = ip.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
@@ -2102,6 +2120,42 @@ mod tests {
         ] {
             assert_eq!(named(&at(path, path)), None, "{path}");
         }
+    }
+
+    /// A router's 2xx to an event to a tenant's hook, its node's answer to
+    /// an event it verified, starts the router's count of that sender's
+    /// refusals by the hook again, as a verified event starts the node's
+    /// ([`taken_through`]): nothing else does -- a `GET`, another tenant's
+    /// hook, a file's server's path. The address is this test's alone.
+    #[test]
+    fn a_router_forwarding_a_verified_event_starts_its_count_again() {
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let at = |method: Method, path: &str| {
+            let mut r = req(&[], "");
+            r.method = method;
+            r.target = path.into();
+            r.path = path.into();
+            r
+        };
+        let event = at(Method::Post, "/t/acme/_hooks/stripe");
+        let key = keyed(ip, named(&event));
+        {
+            let mut f = fails().lock().unwrap();
+            assert_eq!(f.count(key, Instant::now()), Some(1));
+            FAILING.store(f.counts.len() as u64, Ordering::Relaxed);
+        }
+        let held = || fails().lock().unwrap().counts.contains_key(&key);
+        let peer = Some(std::net::SocketAddr::new(ip, 443));
+        for other in [
+            at(Method::Get, "/t/acme/_hooks/stripe"),
+            at(Method::Post, "/t/beta/_hooks/stripe"),
+            at(Method::Post, "/_hooks/stripe"),
+        ] {
+            taken_through(&other, peer);
+        }
+        assert!(held(), "started again by its own event alone");
+        taken_through(&event, peer);
+        assert!(!held());
     }
 
     /// One address filling the table forgives no other's count: a name

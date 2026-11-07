@@ -43,13 +43,17 @@ by none of its records.](../../docs/design/named-statements.md#where-the-secret-
 `<t>.hooks` is bound to its file as `.instance` is (`tenant_hooks::Store`,
 `fennec_http::instance`): put away, synced, before every create, install,
 follow, delete, reclaim and restore (`Tenants::put_away`,
-`put_away_beside`), never adopted by another file, carried by the node's
-own renames (`rebind`) and kept by a promotion. `hook-secrets` answers a set
-to the node's admin token alone, never logged or traced. The router's
-`PUT` takes the tenant's claim -- a running move refuses it -- and is
-answered once the primary and every copy a failover could promote hold its
-version, a copy behind named and counted
-(`fennec_router_tenants_hooks_behind`) until `repair_hooks` copies it; a
+`put_away_beside`), never adopted by another file -- an open puts away one
+naming another than it opened, and an event verified against a set no
+longer the tenant's is the one 401 (`Store::opened`, `is_current`) --
+carried by its open's own renames alone (`rebind`) and kept by a
+promotion. `hook-secrets` answers a set to the node's admin token alone,
+never logged or traced. The router's `PUT` is refused (409) while the
+tenant moves -- its claim, its moving mark (`unmoving`), the frozen source
+-- as a quota's is, and is answered once the primary and every copy a
+failover could promote hold its version, a copy behind named and counted
+(`fennec_router_tenants_hooks_behind`), every one where the set is not read
+back, until `repair_hooks`, asking each copy its version, copies it; a
 copy that lacks it -- attached, following, a move's target before the flip,
 across regions (`Fennec-Hook-Secrets`, router to router) -- is sent it
 (`send_hooks`). Its directory holds names and versions, never a secret.
@@ -102,9 +106,10 @@ guessed region's router's 503 marked
 Only `Fennec-Read: replica` goes near, and
 every server runs a marked request read-only on every route (`marked`, read
 in `serve_connection` alone); a failover never promotes a read replica. One
-is recorded once its node follows; taken off, its record goes first, sent to
-the standbys, then its file; no name is made again while a directory keeps a
-trace of one (`reader_traces`). A copy answers only once its primary said
+is recorded once its node follows, its copy told it is one (`"reader":
+true`, `Reader::marked`: its stream no standby); taken off, its record goes
+first, sent to the standbys, then its file; no name is made again while a
+directory keeps a trace of one (`reader_traces`). A copy answers only once its primary said
 hello since it opened (`Tenant::ready`, else 503); a read replica is bound
 to its tenant's lineage, which every promotion and restore keeps
 (`fork_id`), and deletes itself rather than take another's

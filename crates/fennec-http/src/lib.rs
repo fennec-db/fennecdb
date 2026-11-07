@@ -1754,6 +1754,15 @@ fn route_tenant(
         404 => r.response().header(ABSENT_HEADER, "absent"),
         _ => r.response(),
     })?;
+    // Verified before the tenant was looked up, against the set it held
+    // then: one its open has put away since -- naming another file than
+    // the one opened, which a restore put in place under the running node
+    // -- or a change replaced, verifies nothing now. The one 401.
+    if let Some(v) = &hooked {
+        if !tenants.hooks().is_current(&name, v) {
+            return Err(hooks::unverified(req, hooks::Check::Hook));
+        }
+    }
     // Rebuilt from the segments rather than cut at an offset: `//t/acme`
     // has the same segments as `/t/acme` but not the same prefix length.
     req.path = format!("/{}", segs[2..].join("/"));
@@ -5287,7 +5296,12 @@ mod tests {
         }
         const SECRET: &str = "whsec_a_tenants_own";
         let put = format!(r#"{{"scheme":"stripe","secrets":["{SECRET}"]}}"#);
-        tenants.put_hook("acme", "stripe", put.as_bytes()).unwrap();
+        tenants
+            .with_hooks("acme", true, &mut |s, open| {
+                s.put_hook("acme", "stripe", put.as_bytes(), open)
+                    .map(|v| v.to_string())
+            })
+            .unwrap();
         let cfg = Config::default();
         let feed = Arc::clone(t.repl.as_ref().unwrap().feed().unwrap());
         let send = |id: &str, order: &str| {

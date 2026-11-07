@@ -245,19 +245,26 @@ router's directory, which keeps each tenant's hook names and a version.
 The router sends the set to every copy a failover could promote — a pair's
 standby and the tenant's <code>--replicas</code> copy — before it answers:
 a copy that did not take it is named in <code>behind</code> and counted
-until the router's repair copies it. A move takes the set to the target
-before the tenant goes there, across regions too; a failover's promoted
-copy holds it already. A <code>PUT</code> while the tenant moves is refused
-(409): send it again once the move is done. Without the router, a node's
-own <code>PUT /_admin/tenants/&lt;tenant&gt;/hooks/&lt;name&gt;</code>
-takes the same body, with the node's admin token.</p>
+until the router's repair copies it, which also asks each copy the
+version it holds and finds one that lost its set unseen. A move takes the
+set to the target before the tenant goes there, across regions too, router
+to router as plainly as their link carries it (give region routers
+<code>https://</code> URLs); a failover's promoted copy holds it already.
+A <code>PUT</code> while the tenant moves is refused (409): send it again
+once the move is done. A tenant holds 64 hooks at most, its set 32 KiB
+written out. Without the router, a node's own <code>PUT
+/_admin/tenants/&lt;tenant&gt;/hooks/&lt;name&gt;</code> takes the same
+body, with the node's admin token, refused (409) while the tenant is
+frozen for a move.</p>
 
 <p>A tenant's set belongs to its file. It goes with the file at a delete,
 and a create, a follow or a restore of the tenant puts away a set left
 beside the place, so a set never arms a later tenant of the name. A <a
 href="/docs/replication">restore</a> brings the statements back and no secret:
-the tenant's hooks are answered 401 until their secrets are set again,
-which the node logs as the tenant opens
+the tenant's hooks are answered 401 until their secrets are set again —
+one put in place under a running node too, whose set in memory the
+tenant's next open puts away, an event verified against it before that
+answered 401 — which the node logs as the tenant opens
 (<code>tenant `acme`'s hook `stripe`: consumed by 1 statement, no
 secret</code>).</p>
 

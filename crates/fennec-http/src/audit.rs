@@ -165,17 +165,30 @@ pub fn hook_refused(why: &'static str) {
     BOUND.with(|b| b.set(b.get() | HOOKED));
 }
 
-/// A router's answer of `status` to `req`, forwarded from a node: a 401 to
-/// an event sent to a tenant's hook (`POST /t/<tenant>/_hooks/...`) that
-/// carries no `WWW-Authenticate` -- the node's one 401 of a hook, which
-/// asks for no token -- is waited out by the hooks' own count, by the
-/// client's address and the hook the path names, as the node's own is
-/// (`hooks::failed`), never the tokens': a forged event raises no token's
-/// wait, and a node from before, asking a token there, is answered 401
-/// with the header and counted as tokens are. Let go by [`http`].
-pub fn hook_forwarded(req: &crate::http::Request, status: u16, www_authenticate: bool) {
-    if status == 401 && !www_authenticate && crate::hooks::to_tenant(req) {
-        BOUND.with(|b| b.set(b.get() | HOOKED));
+/// A router's answer of `status` to `req`, forwarded from a node for the
+/// client at `peer`: a 401 to an event sent to a tenant's hook (`POST
+/// /t/<tenant>/_hooks/...`) that carries no `WWW-Authenticate` -- the
+/// node's one 401 of a hook, which asks for no token -- is waited out by
+/// the hooks' own count, by the client's address and the hook the path
+/// names, as the node's own is (`hooks::failed`), never the tokens': a
+/// forged event raises no token's wait, and a node from before, asking a
+/// token there, is answered 401 with the header and counted as tokens are.
+/// Let go by [`http`]. A 2xx to one is an event the node verified, which
+/// starts that count here again, as the node's starts its own: kept, a
+/// sender's refusals while a secret rolled held its later events at the
+/// router the longest wait. A router holding no such count pays a load.
+pub fn hook_forwarded(
+    req: &crate::http::Request,
+    status: u16,
+    www_authenticate: bool,
+    peer: Option<std::net::SocketAddr>,
+) {
+    match status {
+        401 if !www_authenticate && crate::hooks::to_tenant(req) => {
+            BOUND.with(|b| b.set(b.get() | HOOKED));
+        }
+        200..=299 => crate::hooks::taken_through(req, peer),
+        _ => {}
     }
 }
 

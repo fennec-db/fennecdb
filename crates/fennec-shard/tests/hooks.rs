@@ -11,11 +11,12 @@ use fennec_http::crypto::hmac_sha256;
 use fennec_http::tenants::{Replicated, Tenants};
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
+use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const REPL: &str = "tenant-replication";
@@ -557,4 +558,288 @@ fn a_copy_behind_is_named_counted_and_repaired() {
     );
     let (_, listing, _) = call(port, "GET", "/_shard/tenants/acme/hooks", &[], "");
     assert!(listing.contains(r#""behind":[]"#), "{listing}");
+}
+
+/// A node as a router reaches it, through a gate the test closes on a
+/// request line's part: each request is read whole as it comes, one after
+/// another on a connection -- a pooled one's included -- and one naming
+/// that part is held until the gate opens, the test told it is there, or
+/// its connection ended unsent where the gate cuts it; every other goes on
+/// to the node. What holds the router in the middle of a call, its claim
+/// with it: a move held at its install.
+pub(crate) struct Gate {
+    pub(crate) addr: String,
+    state: Arc<(Mutex<Gating>, Condvar)>,
+}
+
+#[derive(Default)]
+struct Gating {
+    /// What a request line holds to be held, and whether one is held.
+    hold: Option<String>,
+    held: bool,
+    /// What a request line holds to have its connection ended unsent.
+    cut: Option<String>,
+}
+
+impl Gate {
+    pub(crate) fn to(target: &str) -> Gate {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let state = Arc::new((Mutex::new(Gating::default()), Condvar::new()));
+        let (target, shared) = (target.to_string(), Arc::clone(&state));
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { continue };
+                let (target, state) = (target.clone(), Arc::clone(&shared));
+                std::thread::spawn(move || {
+                    let _ = Gate::carry(client, &target, &state);
+                });
+            }
+        });
+        Gate { addr, state }
+    }
+
+    /// One connection's requests, each read whole and held where the gate
+    /// says, the node's answers carried back as they come.
+    fn carry(
+        client: TcpStream,
+        target: &str,
+        state: &(Mutex<Gating>, Condvar),
+    ) -> std::io::Result<()> {
+        let mut server = TcpStream::connect(target)?;
+        let (back, to) = (server.try_clone()?, client.try_clone()?);
+        std::thread::spawn(move || pipe(back, to));
+        let mut from = BufReader::new(client);
+        loop {
+            let mut head = Vec::new();
+            loop {
+                let mut line = Vec::new();
+                if from.read_until(b'\n', &mut line)? == 0 {
+                    let _ = server.shutdown(Shutdown::Write);
+                    return Ok(());
+                }
+                head.extend_from_slice(&line);
+                if line == b"\r\n" {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let len = (text.lines())
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse().ok())?
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; len];
+            from.read_exact(&mut body)?;
+            let first = text.lines().next().unwrap_or("").to_string();
+            let (lock, wake) = state;
+            let mut g = lock.lock().unwrap();
+            if g.cut.as_deref().is_some_and(|p| first.contains(p)) {
+                let _ = server.shutdown(Shutdown::Both);
+                return Ok(());
+            }
+            if g.hold.as_deref().is_some_and(|p| first.contains(p)) {
+                g.held = true;
+                wake.notify_all();
+                while g.hold.as_deref().is_some_and(|p| first.contains(p)) {
+                    g = wake.wait(g).unwrap();
+                }
+                g.held = false;
+            }
+            drop(g);
+            server.write_all(&head)?;
+            server.write_all(&body)?;
+        }
+    }
+
+    /// Holds every request whose line holds `part` from now.
+    pub(crate) fn close(&self, part: &str) {
+        self.state.0.lock().unwrap().hold = Some(part.to_string());
+    }
+
+    /// Ends unsent every request whose line holds `part` from now.
+    fn cut(&self, part: &str) {
+        self.state.0.lock().unwrap().cut = Some(part.to_string());
+    }
+
+    /// Waits until a request the gate holds is there: bounded, as only
+    /// that wait is.
+    pub(crate) fn held(&self) {
+        let (lock, wake) = &*self.state;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut g = lock.lock().unwrap();
+        while !g.held {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "nothing reached the gate");
+            g = wake.wait_timeout(g, left).unwrap().0;
+        }
+    }
+
+    pub(crate) fn open(&self) {
+        let (lock, wake) = &*self.state;
+        let mut g = lock.lock().unwrap();
+        (g.hold, g.cut) = (None, None);
+        wake.notify_all();
+    }
+}
+
+/// A move holds its tenant's claim from its freeze to its flip: a hook's
+/// or a quota's change through the router meanwhile is refused (409),
+/// never landing on the frozen source between the copy of its set and the
+/// flip, where the target would come up without it -- and the source
+/// itself refuses either while frozen, asked past the router. The set the
+/// move carried is the one the target holds.
+#[test]
+fn a_hook_or_a_quota_set_while_its_tenant_moves_is_refused() {
+    let n1 = node("moving1", None);
+    let n2 = node("moving2", None);
+    let gate = Gate::to(&n2.addr);
+    let port = router(false);
+    register(port, "n1", &n1, "adm-moving1", None);
+    let body = format!(r#"{{"addr":"{}","token":"adm-moving2"}}"#, gate.addr);
+    let (status, body, _) = call(port, "PUT", "/_shard/nodes/n2", &[], &body);
+    assert_eq!(status, 201, "{body}");
+    create(port, "acme", "n1");
+    assert_eq!(set_hook(port, "acme", "stripe", "whsec_before").0, 200);
+    let held = version_on(&n1, "acme");
+
+    gate.close("/_admin/tenants/acme/file ");
+    let moving = std::thread::spawn(move || {
+        call(
+            port,
+            "POST",
+            "/_shard/tenants/acme/move",
+            &[],
+            r#"{"to":"n2"}"#,
+        )
+    });
+    gate.held();
+    let (status, body) = set_hook(port, "acme", "stripe", "whsec_during");
+    assert_eq!(status, 409, "{body}");
+    let (status, body, _) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme/quota",
+        &[],
+        r#"{"rows":5}"#,
+    );
+    assert_eq!(status, 409, "{body}");
+    let admin = [("Authorization", "Bearer adm-moving1")];
+    for (target, body) in [
+        (
+            "/_admin/tenants/acme/hooks/stripe",
+            r#"{"scheme":"stripe","secrets":["whsec_during"]}"#,
+        ),
+        ("/_admin/tenants/acme/quota", r#"{"rows":5}"#),
+    ] {
+        let (status, answer, _) = call(n1.port, "PUT", target, &admin, body);
+        assert_eq!(status, 409, "{target}: {answer}");
+        assert!(answer.contains("frozen"), "{answer}");
+    }
+    gate.open();
+    let (status, body, _) = moving.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(version_on(&n2, "acme"), held, "the set the move carried");
+    let (status, body, _) = event(port, "acme", "stripe", "whsec_before", "evt_1", "o-1");
+    assert_eq!(status, 200, "{body}");
+    let (status, body, _) = event(port, "acme", "stripe", "whsec_during", "evt_2", "o-2");
+    assert_eq!(status, 401, "{body}");
+}
+
+/// A copy that lost its set with no record saying so -- a node putting it
+/// away as it started, its binding lost to a crash between a compact's
+/// rename and its tick -- is found by the repair, which asks each copy the
+/// version it lists: recorded behind and counted, then copied the set
+/// from its primary.
+#[test]
+fn a_copy_that_lost_its_set_unrecorded_is_found_and_repaired() {
+    let n1 = node("lost1", None);
+    let n2 = node("lost2", None);
+    let gate = Gate::to(&n2.addr);
+    let port = router(true);
+    register(port, "n1", &n1, "adm-lost1", None);
+    let body = format!(r#"{{"addr":"{}","token":"adm-lost2"}}"#, gate.addr);
+    let (status, body, _) = call(port, "PUT", "/_shard/nodes/n2", &[], &body);
+    assert_eq!(status, 201, "{body}");
+    create(port, "acme", "n1");
+    assert_eq!(placed(port, "acme").1.as_deref(), Some("n2"));
+    let (status, body) = set_hook(port, "acme", "stripe", "whsec_lost");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""behind":[]"#), "{body}");
+    let held = version_on(&n1, "acme");
+    assert_eq!(version_on(&n2, "acme"), held);
+
+    let admin = [("Authorization", "Bearer adm-lost2")];
+    let (status, body, _) = call(
+        n2.port,
+        "DELETE",
+        "/_admin/tenants/acme/hooks/stripe",
+        &admin,
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(version_on(&n2, "acme"), None);
+    gate.close("PUT /_admin/tenants/acme/hook-secrets ");
+    let repairing = std::thread::spawn(move || call(port, "POST", "/_shard/replicas", &[], ""));
+    gate.held();
+    let (_, scrape, _) = call(port, "GET", "/_metrics", &[], "");
+    assert!(
+        scrape.contains("\nfennec_router_tenants_hooks_behind 1\n"),
+        "{scrape}"
+    );
+    let (_, listing, _) = call(port, "GET", "/_shard/tenants/acme/hooks", &[], "");
+    assert!(listing.contains(r#""behind":["n2"]"#), "{listing}");
+    gate.open();
+    let (status, body, _) = repairing.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""hook_secrets":"n2""#), "{body}");
+    assert_eq!(version_on(&n2, "acme"), held);
+    let (_, scrape, _) = call(port, "GET", "/_metrics", &[], "");
+    assert!(
+        scrape.contains("\nfennec_router_tenants_hooks_behind 0\n"),
+        "{scrape}"
+    );
+}
+
+/// A set its primary took that cannot be read back records every copy a
+/// failover could promote behind -- named and counted, the primary's own
+/// word giving the version -- never a 502 that records nothing, those
+/// copies then promoted without the set no one knows they lack; the
+/// repair copies it once the primary answers.
+#[test]
+fn a_set_not_read_back_records_every_copy_behind() {
+    let n1 = node("unread1", None);
+    let n2 = node("unread2", None);
+    let gate = Gate::to(&n1.addr);
+    let port = router(true);
+    let body = format!(r#"{{"addr":"{}","token":"adm-unread1"}}"#, gate.addr);
+    let (status, body, _) = call(port, "PUT", "/_shard/nodes/n1", &[], &body);
+    assert_eq!(status, 201, "{body}");
+    register(port, "n2", &n2, "adm-unread2", None);
+    create(port, "acme", "n1");
+    assert_eq!(placed(port, "acme").1.as_deref(), Some("n2"));
+
+    gate.cut("GET /_admin/tenants/acme/hook-secrets ");
+    let (status, body) = set_hook(port, "acme", "stripe", "whsec_unread");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""behind":["n2"]"#), "{body}");
+    let held = version_on(&n1, "acme").expect("the primary took it");
+    let version = format!(r#""version":"{held:016x}""#);
+    assert!(body.contains(&version), "{body}");
+    let (_, scrape, _) = call(port, "GET", "/_metrics", &[], "");
+    assert!(
+        scrape.contains("\nfennec_router_tenants_hooks_behind 1\n"),
+        "{scrape}"
+    );
+    assert_eq!(version_on(&n2, "acme"), None);
+    gate.open();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while version_on(&n2, "acme") != Some(held) {
+        assert!(Instant::now() < deadline, "the repair never copied the set");
+        let (status, body, _) = call(port, "POST", "/_shard/replicas", &[], "");
+        assert!(status == 200 || status == 502, "{body}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

@@ -180,7 +180,7 @@ pub struct Expected {
 const HEARD: &str = "heard";
 
 /// The line `.follows` takes for a read replica's copy
-/// ([`Tenants::reads_only`]).
+/// ([`Tenants::followed`]).
 const READER: &str = "reader";
 
 /// Writes a tenant's `.follows` whole or not at all: beside, synced, then
@@ -871,22 +871,18 @@ impl Tenants {
         }
     }
 
-    /// The lineage a tenant was told its primary is of, which `.follows`
-    /// keeps on a line of its own after the address (`lineage <8 hex>`):
-    /// a restart keeps refusing another tenant of the name.
-    fn lineage_followed(&self, name: &str) -> Option<u32> {
-        let text = std::fs::read_to_string(self.follows_path(name)).ok()?;
-        text.lines()
+    /// What `.follows` keeps on lines of its own after the address, read
+    /// once as a following tenant opens: the lineage its primary was said
+    /// to be of (`lineage <8 hex>`), so a restart keeps refusing another
+    /// tenant of the name, and whether the copy is a read replica's
+    /// (`reader`), whose stream says so and which no hook's answer at its
+    /// primary waits for ([`Follower::read_replica`]).
+    fn followed(&self, name: &str) -> (Option<u32>, bool) {
+        let text = std::fs::read_to_string(self.follows_path(name)).unwrap_or_default();
+        let lineage = (text.lines())
             .find_map(|l| l.trim().strip_prefix("lineage "))
-            .and_then(|l| crate::replication::parse_lineage(l.trim()))
-    }
-
-    /// Whether a tenant's copy is a read replica's, which `.follows` keeps
-    /// on a line of its own (`reader`): its stream says so, and no hook's
-    /// answer at its primary waits for it ([`Follower::read_replica`]).
-    fn reads_only(&self, name: &str) -> bool {
-        std::fs::read_to_string(self.follows_path(name))
-            .is_ok_and(|text| text.lines().any(|l| l.trim() == READER))
+            .and_then(|l| crate::replication::parse_lineage(l.trim()));
+        (lineage, text.lines().any(|l| l.trim() == READER))
     }
 
     /// Whether a tenant's copy has heard from the node it follows since it
@@ -1369,7 +1365,7 @@ impl Tenants {
                 // database rather than the tenant, is halted, or it would go
                 // on writing the file under the next instance.
                 if t.is_frozen() {
-                    return Err(Refused(409, format!("tenant `{name}` is frozen")).into());
+                    return Err(frozen(name).into());
                 }
                 release(t, name)?;
                 *held = Held::Closed;
@@ -1645,9 +1641,13 @@ impl Tenants {
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
+        let opened = OPENS.fetch_add(1, Ordering::Relaxed);
         // Its events are taken at `/t/<tenant>/_hooks/<name>`, verified by
-        // the secrets the node keeps beside it: a statement taking a hook
-        // the tenant holds none for is said as it opens.
+        // the secrets the node keeps beside it -- this open's where they
+        // name the file it took, put away where they name another, which a
+        // restore put in its place under the running node -- and a
+        // statement taking a hook the tenant holds none for is said.
+        self.hooks.opened(name, bound, opened);
         db.allow_hooks();
         self.hooks.log_unarmed(name, &db);
         // Its bytes and rows are asked of each block as it lands, where
@@ -1707,7 +1707,6 @@ impl Tenants {
         // A primary's file holds its own history; a follower's a prefix of
         // its primary's once that primary has said hello since this open.
         let ready = Arc::new(AtomicBool::new(!following));
-        let opened = OPENS.fetch_add(1, Ordering::Relaxed);
         let mut follower = None;
         if let (Some(r), Some(url), true) = (&self.repl, &upstream, following) {
             let started = Follower::new(
@@ -1734,7 +1733,7 @@ impl Tenants {
                         // Its image in place: the set the router sent it
                         // bound to the file the image made.
                         if let Some(tenants) = me.as_ref().and_then(|m| m.upgrade()) {
-                            tenants.hooks.rebind(&who);
+                            tenants.hooks.rebind(&who, opened);
                         }
                         seen.store(true, Ordering::SeqCst);
                     }
@@ -1743,8 +1742,9 @@ impl Tenants {
                         refused_copy(me.clone(), &who, opened, expected);
                     }
                 }));
-                f.expect_lineage(self.lineage_followed(name));
-                f.read_replica(self.reads_only(name));
+                let (lineage, reader) = self.followed(name);
+                f.expect_lineage(lineage);
+                f.read_replica(reader);
                 f.start(format!("fennec-replica-{name}")).map_err(|e| {
                     Refused(
                         500,
@@ -1808,90 +1808,43 @@ impl Tenants {
             let n = g.compactions();
             drop(g);
             if t.hooks_compactions.swap(n, Ordering::Relaxed) != n {
-                self.hooks.rebind(&t.name);
+                self.hooks.rebind(&t.name, t.opened);
             }
         }
     }
 
     /// Runs `f` on tenant `name`'s hook secrets under its slot, where its
-    /// file is: a set is bound to the file it is written for, and a delete,
-    /// a create, an install or a follow puts it away under the same slot,
-    /// so none is written beside a file on its way out.
+    /// file is, with the open holding it (0, none): the answer of an admin
+    /// route of its hooks. A set is bound to the file it is written for,
+    /// and a delete, a create, an install or a follow puts it away under
+    /// the same slot, so none is written beside a file on its way out; one
+    /// naming another file than the one there -- a restore over the closed
+    /// tenant -- is put away before `f` changes, exports or lists it. A
+    /// change (`changes`) is refused while the tenant is frozen, as every
+    /// write is: a move takes the set off its source between the freeze
+    /// and the flip, and one landing there after it would be lost.
     ///
     /// Through a `dyn` closure, so the slot's code is one copy for the five
     /// routes: generic, each made its own, 4 to 6 KB apiece.
-    fn with_hooks(
+    pub(crate) fn with_hooks(
         &self,
         name: &str,
-        f: &mut dyn FnMut(&crate::tenant_hooks::Store) -> std::result::Result<(), Refused>,
-    ) -> std::result::Result<(), Refused> {
+        changes: bool,
+        f: &mut dyn FnMut(&crate::tenant_hooks::Store, u64) -> std::result::Result<String, Refused>,
+    ) -> std::result::Result<String, Refused> {
         check_name(name)?;
-        self.with_slot(name, |_| {
+        self.with_slot(name, |held| {
             if !self.path(name).exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
-            f(&self.hooks)
+            let open = match &*held {
+                Held::Open(t) if changes && t.is_frozen() => return Err(frozen(name)),
+                Held::Open(t) => t.opened,
+                Held::Closed => 0,
+            };
+            self.hooks.settle(name, open);
+            f(&self.hooks, open)
         })
-    }
-
-    /// `PUT /_admin/tenants/<t>/hooks/<hook>`: the set's new version.
-    pub fn put_hook(
-        &self,
-        name: &str,
-        hook: &str,
-        body: &[u8],
-    ) -> std::result::Result<u64, Refused> {
-        let mut out = 0;
-        self.with_hooks(name, &mut |h| {
-            out = h.put_hook(name, hook, body)?;
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// `DELETE /_admin/tenants/<t>/hooks/<hook>`: the set's version after,
-    /// none where no hook is left.
-    pub fn drop_hook(&self, name: &str, hook: &str) -> std::result::Result<Option<u64>, Refused> {
-        let mut out = None;
-        self.with_hooks(name, &mut |h| {
-            out = h.drop_hook(name, hook)?;
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// `PUT /_admin/tenants/<t>/hook-secrets`: a set installed whole.
-    pub fn install_hooks(
-        &self,
-        name: &str,
-        body: &[u8],
-    ) -> std::result::Result<Option<u64>, Refused> {
-        let mut out = None;
-        self.with_hooks(name, &mut |h| {
-            out = h.install(name, body)?;
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// `GET /_admin/tenants/<t>/hooks`: no secret in it.
-    pub fn hooks_listing(&self, name: &str) -> std::result::Result<String, Refused> {
-        let mut out = String::new();
-        self.with_hooks(name, &mut |h| {
-            out = h.listing(name);
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// `GET /_admin/tenants/<t>/hook-secrets`: the set whole.
-    pub fn hooks_export(&self, name: &str) -> std::result::Result<String, Refused> {
-        let mut out = String::new();
-        self.with_hooks(name, &mut |h| {
-            out = h.export(name);
-            Ok(())
-        })?;
-        Ok(out)
     }
 
     /// Sets what a tenant's quota is over the node's, kept beside its file
@@ -1899,12 +1852,19 @@ impl Tenants {
     /// once where the tenant is open: its next request, and its next block
     /// as it lands. An empty set leaves the tenant at the node's quota.
     /// What it is held to now.
+    ///
+    /// Refused while the tenant is frozen, as every write is: a move takes
+    /// the quota to its target before the freeze is let go, and one set on
+    /// its source meanwhile would be lost with the source.
     pub fn set_quota(&self, name: &str, set: Set) -> std::result::Result<Quota, Refused> {
         check_name(name)?;
         let quota = set.over(&self.quota);
         self.with_slot(name, |held| {
             if !self.path(name).exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
+            }
+            if matches!(&*held, Held::Open(t) if t.is_frozen()) {
+                return Err(frozen(name));
             }
             let path = self.quota_path(name);
             let written = match set.is_empty() {
@@ -2076,12 +2036,12 @@ impl Tenants {
                 .insert(t.name.clone(), place);
             streams.detach(&t.name, feed);
         }
-        let (name, bound) = (t.name.clone(), t.bound());
+        let (name, bound, opened) = (t.name.clone(), t.bound(), t.opened);
         *held = Held::Closed;
         // Held from its open: a compact's or a checkpoint's rename is this
         // process's own, and the file keeps its identity across it.
         instance::closing(&self.dir, &name, bound, &self.path(&name));
-        self.hooks.rebind(&name);
+        self.hooks.rebind(&name, opened);
         // Told once the last `Arc` went and its file was synced: one closing
         // holding no schedule leaves the hint only with its drop durable.
         if let Some((node, closing)) = closing {
@@ -2413,7 +2373,7 @@ impl Tenants {
                     .as_ref()
                     .and_then(|r| r.follower())
                     .is_some_and(|f| f.refused())
-                && self.lineage_followed(name) == Some(expected);
+                && self.followed(name).0 == Some(expected);
             if !refusing {
                 return Ok(false);
             }
@@ -2658,7 +2618,7 @@ impl Tenants {
                 }
                 // Its last rewrite this process's, as a close's is.
                 instance::closing(&self.dir, &t.name, t.bound(), &self.path(&t.name));
-                self.hooks.rebind(&t.name);
+                self.hooks.rebind(&t.name, t.opened);
                 // Leaked on purpose: the process is about to exit, and a lock
                 // released here would let a session write after the final sync.
                 std::mem::forget(g);
@@ -2903,6 +2863,15 @@ fn usage_json(
         opt(rows),
         opt(streams),
         opt(held)
+    )
+}
+
+/// A change of a frozen tenant's refused: a move is under way, and what
+/// lands on its source after the freeze is lost with the source.
+fn frozen(name: &str) -> Refused {
+    Refused(
+        409,
+        format!("tenant `{name}` is frozen: a move is under way, ask again once it ends"),
     )
 }
 

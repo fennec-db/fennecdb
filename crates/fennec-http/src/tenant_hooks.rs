@@ -9,36 +9,46 @@
 //! the file it was written for -- its device, inode and birth time
 //! ([`crate::instance::binding`]) -- and every way of fennec's that makes,
 //! removes or replaces a tenant's file puts it away first, synced: a
-//! create, an install, a follow, a delete, a reclaim, `fennec restore` and
-//! `backup --force` ([`Store::put_away`], [`put_away_beside`]). One naming
-//! another file is never adopted: read as the node starts, it is put away
-//! and logged, so a set a deleted tenant left -- a failed remove, a crash
-//! between two removals, a binary from before -- never arms a later tenant
-//! of its name. The node's own renames -- a `compact`, a checkpoint, a
-//! follower taking its primary's image -- carry the binding to the file
-//! they made: at the tenant's close and the node's shutdown, as
-//! `.instance`'s, and at a follower's hello, which comes once its image is
-//! in place ([`Store::rebind`]). A promotion keeps it; a follow drops it,
-//! and the router sends the set again once the copy follows.
+//! create, an install, a follow, a delete, a reclaim, `fennec restore`,
+//! `backup --force` and `unseal` ([`Store::put_away`], [`put_away_beside`]).
+//! One naming another file is never adopted: read as the node starts, or
+//! held in memory as the tenant opens -- a file a restore put in its place
+//! under a running node, whose memory no `fennec restore` reaches -- it is
+//! put away and logged ([`Store::opened`]), and an event verified before
+//! that open against the set put away is the one 401
+//! ([`Store::is_current`]). So a set a deleted tenant left -- a failed
+//! remove, a crash between two removals, a binary from before -- never
+//! arms a later tenant of its name. The node's own renames -- a `compact`,
+//! a checkpoint, a follower taking its primary's image -- carry the binding
+//! to the file they made, from the binding the open found alone: at the
+//! tenant's close and the node's shutdown, as `.instance`'s, at a
+//! follower's hello, which comes once its image is in place, and at the
+//! tick after a compact ([`Store::rebind`]). A promotion keeps it; a
+//! follow drops it, and the router sends the set again once the copy
+//! follows.
 //!
 //! **Set by the node's admin token alone.** `PUT
 //! /_admin/tenants/<t>/hooks/<name>` (`{scheme, secrets, keep, tolerance,
 //! key, max_body}`) and `DELETE` change one hook, refused (400) as a hooks
 //! file's line is at a server's start -- an empty or malformed secret above
-//! all -- naming the field, never its value; `GET /_admin/tenants/<t>/hooks`
+//! all -- naming the field, never its value, and refused (409) while the
+//! tenant is frozen, a move under way; `GET /_admin/tenants/<t>/hooks`
 //! lists names, schemes, bounds and when each was set, never a secret nor
 //! anything computed from one. `GET /_admin/tenants/<t>/hook-secrets`
 //! answers the set whole with its version, the one answer holding a
 //! secret, for the router to copy onto a copy lacking it, and `PUT` there
 //! installs one whole. A set's version is minted at random at each change
-//! and carried by a copy: two copies holding one version hold one set.
+//! and carried by a copy: two copies holding one version hold one set. A
+//! tenant holds [`MOST_HOOKS`] hooks at most, its set written out
+//! [`MOST_BYTES`] at most, so a set always fits the head a move across
+//! regions carries it in.
 //!
-//! The sidecar: `1 <device> <inode> <birth ns>`, `version <16 hex>`, then a
-//! line a hook -- when it was set, then a hooks file's line with each
-//! secret's bytes in base64 (`b64:`) in its file's place. A later layout
-//! raises the number, which this one reads as no set, put away.
+//! The sidecar: `1 <device> <inode> <birth ns>`, `version <16 hex>`, then
+//! the set as `hook-secrets` answers it, which [`Store::install`]'s reader
+//! reads. A later layout raises the number, which this one reads as no
+//! set, put away.
 
-use crate::crypto::{b64_decode, b64_encode, HmacKey};
+use crate::crypto::HmacKey;
 use crate::hooks::{self, Check, Hook, KeyBy, Scheme, CEILING};
 use crate::http::Request;
 use crate::instance::{self, Binding};
@@ -53,6 +63,16 @@ use std::sync::{Arc, RwLock};
 /// The sidecar's layout.
 const LAYOUT: &str = "1";
 
+/// The hooks a tenant holds at most.
+pub const MOST_HOOKS: usize = 64;
+
+/// The bytes a tenant's set takes at most as `hook-secrets` answers it: in
+/// base64 a third more, 43 KiB, under the 64 KiB head a move across
+/// regions carries it in (`Fennec-Hook-Secrets`) beside its others. A
+/// secret's length has no bound of its own -- GitHub's is its user's
+/// choice -- so the set's is the one held.
+pub const MOST_BYTES: usize = 32 << 10;
+
 /// A JSON body's fields as a hooks file's options: the field, and the
 /// option word it is.
 const OPTIONS: [(&str, &str); 4] = [
@@ -61,6 +81,9 @@ const OPTIONS: [(&str, &str); 4] = [
     ("key", "key"),
     ("max_body", "max-body"),
 ];
+
+/// A set holding no hook, as `hook-secrets` answers it.
+const NO_SET: &str = "{\"version\":null,\"hooks\":{}}";
 
 /// A node's tenants' hooks, kept beside its registry.
 pub struct Store {
@@ -81,6 +104,10 @@ struct Entry {
     set: Arc<Set>,
     /// The file the sidecar names.
     bound: Binding,
+    /// The open of the tenant's file that found it bound to that file, or
+    /// that set it while open ([`Store::opened`]): only that open's own
+    /// renames carry it ([`Store::rebind`]). 0 for none.
+    held: u64,
 }
 
 /// A tenant's hooks, as one version.
@@ -120,8 +147,9 @@ impl Verified {
 impl Store {
     /// The node's store over `dir`, each `<tenant>.hooks` there read and
     /// held to the file it names: one naming another, or none, put away and
-    /// logged. Refused where the system's randomness cannot be read: a
-    /// stand-in key is never the clock's.
+    /// logged, and a sidecar a crash left half written removed. Refused
+    /// where the system's randomness cannot be read: a stand-in key is
+    /// never the clock's.
     pub fn open(dir: &Path) -> io::Result<Store> {
         let key = hooks::stand_in().map_err(io::Error::other)?;
         let store = Store {
@@ -136,7 +164,18 @@ impl Store {
         };
         for e in entries.flatten() {
             let file = e.file_name();
-            let Some(name) = file.to_str().and_then(|f| f.strip_suffix(".hooks")) else {
+            let Some(file) = file.to_str() else {
+                continue;
+            };
+            // Cut short by a crash before its rename: secrets no set holds,
+            // which nothing would take away after.
+            if let Some(name) = file.strip_suffix(".hooks.writing") {
+                if crate::tenants::check_name(name).is_ok() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+                continue;
+            }
+            let Some(name) = file.strip_suffix(".hooks") else {
                 continue;
             };
             if crate::tenants::check_name(name).is_err() {
@@ -147,15 +186,7 @@ impl Store {
                     store.widen(&entry.set);
                     store.write_map().insert(name.to_string(), entry);
                 }
-                Err(why) => {
-                    crate::log!(
-                        "tenant `{name}`'s hook secrets {why}: put away, and its hooks answer \
-                         401 until they are set again"
-                    );
-                    if let Err(e) = store.unlink(name) {
-                        crate::log!("tenant `{name}`'s hook secrets could not be put away: {e}");
-                    }
-                }
+                Err(why) => store.forget(&mut store.write_map(), name, why),
             }
         }
         if !store.read_map().is_empty() {
@@ -225,8 +256,16 @@ impl Store {
         }
     }
 
-    /// Whether `tenant` holds a secret for hook `hook`: a statement's
-    /// `armed`, and what the log says as a tenant opens.
+    /// Whether `v`, verified before its tenant was looked up, verified
+    /// against the set `tenant` holds now: not where the tenant's open put
+    /// that set away -- one naming another file than the one opened -- nor
+    /// where a change replaced it since, either of which is the one 401.
+    pub fn is_current(&self, tenant: &str, v: &Verified) -> bool {
+        (self.read_map().get(tenant)).is_some_and(|e| Arc::ptr_eq(&e.set, &v.set))
+    }
+
+    /// Whether `tenant` holds a secret for hook `hook`: what the log says
+    /// as a tenant opens.
     pub fn armed(&self, tenant: &str, hook: &str) -> bool {
         self.read_map()
             .get(tenant)
@@ -236,14 +275,13 @@ impl Store {
     /// The sidecar read and held to the file it names, or why not.
     fn read(&self, name: &str) -> Result<Entry, &'static str> {
         let text = std::fs::read_to_string(self.path(name)).map_err(|_| "could not be read")?;
-        let mut lines = text.lines();
+        let mut lines = text.splitn(3, '\n');
         let mut first = lines.next().unwrap_or("").split(' ');
         if first.next() != Some(LAYOUT) {
             return Err("are of a layout this node does not read");
         }
         let mut n = || first.next()?.parse::<u64>().ok();
-        let bound = (n(), n(), n());
-        let (Some(dev), Some(ino), Some(born)) = bound else {
+        let (Some(dev), Some(ino), Some(born)) = (n(), n(), n()) else {
             return Err("name no file");
         };
         let bound = (dev, ino, born);
@@ -252,95 +290,26 @@ impl Store {
             Ok(_) => return Err("name another file than the tenant's"),
             Err(_) => return Err("lie beside no file of the tenant"),
         }
-        let version = (lines.next())
-            .and_then(|l| l.strip_prefix("version "))
-            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
-            .filter(|v| *v != 0)
-            .ok_or("hold no version")?;
-        let mut hooks: Vec<Hook> = Vec::new();
-        let mut kept = Vec::new();
-        for line in lines.filter(|l| !l.trim().is_empty()) {
-            let words: Vec<&str> = line.split_ascii_whitespace().collect();
-            let Some((set_ms, words)) = words.split_first() else {
-                continue;
-            };
-            let set_ms = set_ms
-                .parse::<i64>()
-                .map_err(|_| "hold a line that does not read")?;
-            let (hook, k) = self
-                .line_of(words, &hooks, set_ms, usize::MAX)
-                .map_err(|_| "hold a line that does not read")?;
-            hooks.push(hook);
-            kept.push(k);
-        }
-        if hooks.is_empty() {
-            return Err("hold no hook");
-        }
-        Ok(Entry {
-            set: Arc::new(Set {
-                version,
-                hooks,
-                kept,
+        // The version line is a reader's: the set holds its own.
+        let set = lines.nth(1).unwrap_or("");
+        match self.set_of(set.as_bytes(), usize::MAX) {
+            Ok(Some(set)) => Ok(Entry {
+                set: Arc::new(set),
+                bound,
+                held: 0,
             }),
-            bound,
-        })
+            Ok(None) => Err("hold no hook"),
+            Err(_) => Err("hold a set that does not read"),
+        }
     }
 
-    /// The hook a sidecar's line makes, beside `before`: a hooks file's
-    /// line, each secret its base64.
-    fn line_of(
-        &self,
-        words: &[&str],
-        before: &[Hook],
-        set_ms: i64,
-        max_body: usize,
-    ) -> Result<(Hook, Kept), hooks::Why> {
-        let secret = |w: &str| {
-            (w.strip_prefix("b64:").and_then(b64_decode))
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
-        };
-        let hook = hooks::hook_of(words, before, &secret, max_body, &self.stand_in[0])?;
-        let files = hook.secrets;
-        let secrets = words[2..2 + files]
-            .iter()
-            .map(|w| secret(w).map(|b| String::from_utf8_lossy(&b).into_owned()))
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(|_| "a secret does not read")?;
-        let mut opts = Vec::new();
-        let mut rest = words[2 + files..].iter();
-        while let (Some(k), Some(v)) = (rest.next(), rest.next()) {
-            if let Some((_, word)) = OPTIONS.iter().find(|(_, w)| w == k) {
-                opts.push((*word, v.to_string()));
-            }
-        }
-        Ok((
-            hook,
-            Kept {
-                set_ms,
-                secrets,
-                opts,
-            },
-        ))
-    }
-
-    /// The sidecar's text for `set`, bound to `bound`.
-    fn text(set: &Set, bound: Binding) -> String {
-        let mut s = format!(
-            "{LAYOUT} {} {} {}\nversion {:016x}\n",
-            bound.0, bound.1, bound.2, set.version
-        );
-        for (h, k) in set.hooks.iter().zip(&set.kept) {
-            s.push_str(&format!("{} {} {}", k.set_ms, h.name, h.scheme.name()));
-            for secret in &k.secrets {
-                s.push_str(" b64:");
-                s.push_str(&b64_encode(secret.as_bytes()));
-            }
-            for (word, v) in &k.opts {
-                s.push_str(&format!(" {word} {v}"));
-            }
-            s.push('\n');
-        }
-        s
+    /// The sidecar's text for a set of `version`, `json` as it is
+    /// exported, bound to `bound`.
+    fn text(bound: Binding, version: u64, json: &str) -> String {
+        format!(
+            "{LAYOUT} {} {} {}\nversion {version:016x}\n{json}\n",
+            bound.0, bound.1, bound.2
+        )
     }
 
     /// Writes `name`'s sidecar beside and renames it into place, synced: a
@@ -348,10 +317,9 @@ impl Store {
     /// binding carried past a rename of the node's own lost to one would
     /// name the file before, the set put away at the next start. Readable
     /// by the node's user alone.
-    fn write(&self, name: &str, set: &Set, bound: Binding) -> io::Result<()> {
+    fn write(&self, name: &str, text: &str) -> io::Result<()> {
         let path = self.path(name);
-        let tmp = self.dir.join(format!("{name}.hooks.writing"));
-        let text = Self::text(set, bound);
+        let tmp = self.writing(name);
         let written = (|| {
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
@@ -371,14 +339,28 @@ impl Store {
         written
     }
 
-    /// Unlinks `name`'s sidecar, the directory synced where there was one.
+    fn writing(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.hooks.writing"))
+    }
+
+    /// Unlinks `name`'s sidecar, the directory synced where there was one,
+    /// and one a crash left half written.
     fn unlink(&self, name: &str) -> io::Result<()> {
-        let path = self.path(name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+        remove(&self.writing(name))?;
+        remove(&self.path(name))
+    }
+
+    /// Puts `name`'s set away from disk and `map`, saying why: one that
+    /// does not read, or names another file than the tenant's.
+    fn forget(&self, map: &mut HashMap<String, Entry>, name: &str, why: &str) {
+        crate::log!(
+            "tenant `{name}`'s hook secrets {why}: put away, and its hooks answer 401 until \
+             they are set again"
+        );
+        if let Err(e) = self.unlink(name) {
+            crate::log!("tenant `{name}`'s hook secrets could not be put away: {e}");
         }
+        map.remove(name);
     }
 
     /// Puts `name`'s set away, synced, before its file is made, removed or
@@ -393,16 +375,66 @@ impl Store {
         Ok(())
     }
 
+    /// Tenant `name`'s file opened, open `open` of it, found as `at` before
+    /// anything here could rename it: the set is that open's where it names
+    /// that file, and put away otherwise -- one a file put in its place
+    /// left, `fennec restore`, `backup --force` or `unseal` under the
+    /// running node, or a hand, whose memory no such tool reaches. Asked
+    /// under the tenant's slot. A tenant holding no set pays a map's look.
+    pub(crate) fn opened(&self, name: &str, at: Option<Binding>, open: u64) {
+        if !self.holds(name) {
+            return;
+        }
+        let mut map = self.write_map();
+        let Some(e) = map.get_mut(name) else {
+            return;
+        };
+        if Some(e.bound) == at {
+            e.held = open;
+            return;
+        }
+        self.forget(&mut map, name, "name another file than the one opened");
+    }
+
+    /// Before a change or a read of `name`'s set through the admin routes,
+    /// under its slot, `open` the tenant's open (0 where it is closed): a
+    /// set naming another file than the one there -- a restore over the
+    /// closed tenant -- is put away first, never changed, exported or
+    /// carried onto the file that took its place.
+    pub(crate) fn settle(&self, name: &str, open: u64) {
+        let Some((bound, held)) = self.read_map().get(name).map(|e| (e.bound, e.held)) else {
+            return;
+        };
+        let mine = match open {
+            0 => instance::binding(&self.file(name)).ok() == Some(bound),
+            open => held == open,
+        };
+        if !mine {
+            self.forget(
+                &mut self.write_map(),
+                name,
+                "name another file than the tenant's",
+            );
+        }
+    }
+
     /// Carries `name`'s set to its file as it stands now, where the node's
     /// own rename -- a compact, a checkpoint, an image a follower took --
     /// made another of it: at a close, a shutdown, a follower's hello and
-    /// the tick after a compact ([`crate::tenants::Tenants::rebind_hooks`]).
-    /// Synced: a binding lost to a power loss names the file before, which
-    /// the next start puts away. A tenant holding no set pays a map's look.
-    pub(crate) fn rebind(&self, name: &str) {
-        if !self.read_map().contains_key(name) {
+    /// the tick after a compact ([`crate::tenants::Tenants::rebind_hooks`]),
+    /// each for `open`, the open of the file whose renames these are. A set
+    /// that open did not find bound to its file, or set, is not carried; nor
+    /// one replaced between the `stat` and the write -- a delete, a create,
+    /// a `PUT` -- which its own writing bound. Synced: a binding lost to a
+    /// power loss names the file before, which the next start puts away. A
+    /// tenant holding no set pays a map's look.
+    pub(crate) fn rebind(&self, name: &str, open: u64) {
+        let before = (self.read_map().get(name))
+            .filter(|e| e.held == open)
+            .map(|e| Arc::clone(&e.set));
+        let Some(before) = before else {
             return;
-        }
+        };
         let Ok(now) = instance::binding(&self.file(name)) else {
             return;
         };
@@ -410,10 +442,11 @@ impl Store {
         let Some(entry) = map.get_mut(name) else {
             return;
         };
-        if entry.bound == now {
+        if !Arc::ptr_eq(&entry.set, &before) || entry.held != open || entry.bound == now {
             return;
         }
-        match self.write(name, &entry.set, now) {
+        let text = Self::text(now, entry.set.version, &exported(&entry.set));
+        match self.write(name, &text) {
             Ok(()) => entry.bound = now,
             Err(e) => {
                 crate::log!("tenant `{name}`'s hook secrets were not bound to its file again: {e}")
@@ -423,22 +456,41 @@ impl Store {
 
     /// Replaces `name`'s set with `set` -- none, every hook taken away --
     /// bound to its file, durably: the sidecar first, then memory. Asked
-    /// under the tenant's slot, its file there.
-    fn replace(&self, name: &str, set: Option<Set>) -> Result<Option<u64>, Refused> {
+    /// under the tenant's slot, its file there, `open` its open (0, none).
+    fn replace(&self, name: &str, set: Option<Set>, open: u64) -> Result<Option<u64>, Refused> {
         let failed = |e: io::Error| {
             Refused(
                 500,
                 format!("tenant `{name}`'s hook secrets could not be written: {e}"),
             )
         };
-        let mut map = self.write_map();
         let Some(set) = set else {
+            let mut map = self.write_map();
             self.unlink(name).map_err(failed)?;
             map.remove(name);
             return Ok(None);
         };
+        if set.hooks.len() > MOST_HOOKS {
+            return Err(Refused(
+                400,
+                format!("a tenant holds {MOST_HOOKS} hooks at most"),
+            ));
+        }
+        let json = exported(&set);
+        if json.len() > MOST_BYTES {
+            return Err(Refused(
+                400,
+                format!(
+                    "a tenant's hook secrets take {} KiB at most, written out as hook-secrets \
+                     answers them",
+                    MOST_BYTES >> 10
+                ),
+            ));
+        }
         let bound = instance::binding(&self.file(name)).map_err(failed)?;
-        self.write(name, &set, bound).map_err(failed)?;
+        let mut map = self.write_map();
+        self.write(name, &Self::text(bound, set.version, &json))
+            .map_err(failed)?;
         self.widen(&set);
         hooks::serving();
         let version = set.version;
@@ -447,6 +499,7 @@ impl Store {
             Entry {
                 set: Arc::new(set),
                 bound,
+                held: open,
             },
         );
         Ok(Some(version))
@@ -456,22 +509,33 @@ impl Store {
         self.read_map().get(name).map(|e| Arc::clone(&e.set))
     }
 
-    /// `PUT /_admin/tenants/<t>/hooks/<hook>`: the hook set from `body` in
-    /// place of the one of its name, the set's new version answered.
-    pub(crate) fn put_hook(&self, name: &str, hook: &str, body: &[u8]) -> Result<u64, Refused> {
-        let fields = object(body)?;
-        let given = self.given(hook, &fields, false)?;
-        let mut hooks: Vec<Hook> = Vec::new();
-        let mut kept = Vec::new();
+    /// `name`'s set but its hook `hook`: the hooks and what each kept.
+    fn others(&self, name: &str, hook: &str) -> (Vec<Hook>, Vec<Kept>) {
+        let (mut hooks, mut kept) = (Vec::new(), Vec::new());
         if let Some(old) = self.current(name) {
             for (h, k) in old.hooks.iter().zip(&old.kept) {
                 if h.name != hook {
-                    hooks.push(self.again(h, k)?);
+                    hooks.push(h.clone());
                     kept.push(k.clone());
                 }
             }
         }
-        let (h, k) = self.made(hook, &given, &hooks, now_ms())?;
+        (hooks, kept)
+    }
+
+    /// `PUT /_admin/tenants/<t>/hooks/<hook>`: the hook set from `body` in
+    /// place of the one of its name, the set's new version answered.
+    pub(crate) fn put_hook(
+        &self,
+        name: &str,
+        hook: &str,
+        body: &[u8],
+        open: u64,
+    ) -> Result<u64, Refused> {
+        let given = self.given(hook, &object(body)?, false)?;
+        let (mut hooks, mut kept) = self.others(name, hook);
+        let max_body = self.max_body.load(Ordering::Relaxed);
+        let (h, k) = self.made(hook, given, &hooks, now_ms(), max_body)?;
         hooks.push(h);
         kept.push(k);
         let set = Set {
@@ -479,46 +543,51 @@ impl Store {
             hooks,
             kept,
         };
-        self.replace(name, Some(set)).map(|v| v.unwrap_or(0))
+        self.replace(name, Some(set), open).map(|v| v.unwrap_or(0))
     }
 
     /// `DELETE /_admin/tenants/<t>/hooks/<hook>`: the set's version after,
     /// `None` where no hook is left.
-    pub(crate) fn drop_hook(&self, name: &str, hook: &str) -> Result<Option<u64>, Refused> {
-        let old = self.current(name);
-        let held = old
-            .as_ref()
-            .is_some_and(|s| s.hooks.iter().any(|h| h.name == hook));
-        if !held {
+    pub(crate) fn drop_hook(
+        &self,
+        name: &str,
+        hook: &str,
+        open: u64,
+    ) -> Result<Option<u64>, Refused> {
+        if !self.armed(name, hook) {
             return Err(Refused(
                 404,
                 format!("tenant `{name}` holds no secret for hook `{hook}`"),
             ));
         }
-        let old = old.expect("held");
-        let mut hooks: Vec<Hook> = Vec::new();
-        let mut kept = Vec::new();
-        for (h, k) in old.hooks.iter().zip(&old.kept) {
-            if h.name != hook {
-                hooks.push(self.again(h, k)?);
-                kept.push(k.clone());
-            }
-        }
+        let (hooks, kept) = self.others(name, hook);
         let set = (!hooks.is_empty()).then(|| Set {
             version: fresh_version(),
             hooks,
             kept,
         });
-        self.replace(name, set)
+        self.replace(name, set, open)
     }
 
     /// `PUT /_admin/tenants/<t>/hook-secrets`: a set installed whole, its
     /// version kept -- what the router copies onto a copy lacking it.
-    pub(crate) fn install(&self, name: &str, body: &[u8]) -> Result<Option<u64>, Refused> {
-        let fields = object(body)?;
+    pub(crate) fn install(
+        &self,
+        name: &str,
+        body: &[u8],
+        open: u64,
+    ) -> Result<Option<u64>, Refused> {
+        let set = self.set_of(body, self.max_body.load(Ordering::Relaxed))?;
+        self.replace(name, set, open)
+    }
+
+    /// A set as `hook-secrets` answers it, each hook refused as a hook's
+    /// `PUT` is, each hook's ceiling held under `max_body`: `None` where it
+    /// holds no hook. The one reader of a set, a sidecar's too.
+    fn set_of(&self, body: &[u8], max_body: usize) -> Result<Option<Set>, Refused> {
         let mut version = None;
         let mut listed = None;
-        for (k, v) in fields {
+        for (k, v) in object(body)? {
             match (k.as_str(), v) {
                 ("version", Value::Null) => {}
                 ("version", Value::Text(t)) => {
@@ -539,87 +608,60 @@ impl Store {
                 }
             }
         }
-        let listed = listed.unwrap_or_default();
         let mut hooks: Vec<Hook> = Vec::new();
         let mut kept = Vec::new();
-        for (hook, v) in listed {
+        for (hook, v) in listed.unwrap_or_default() {
             let Value::Object(fields) = v else {
                 return Err(Refused(400, format!("hook `{hook}`: an object")));
             };
             let given = self.given(&hook, &fields, true)?;
             let set_ms = given.set_ms.unwrap_or_else(now_ms);
-            let (h, k) = self.made(&hook, &given, &hooks, set_ms)?;
+            let (h, k) = self.made(&hook, given, &hooks, set_ms, max_body)?;
             hooks.push(h);
             kept.push(k);
         }
         if hooks.is_empty() {
-            return self.replace(name, None);
+            return Ok(None);
         }
         let version =
             version.ok_or_else(|| Refused(400, "a set of hooks names its `version`".into()))?;
-        self.replace(
-            name,
-            Some(Set {
-                version,
-                hooks,
-                kept,
-            }),
-        )
-    }
-
-    /// A kept hook made again, beside others in a new set.
-    fn again(&self, h: &Hook, k: &Kept) -> Result<Hook, Refused> {
-        let words = Self::words(&h.name, h.scheme, k);
-        let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        self.line_of(&words, &[], k.set_ms, usize::MAX)
-            .map(|(h, _)| h)
-            .map_err(|why| Refused(500, format!("hook `{}`: {why}", h.name)))
-    }
-
-    /// A hook's line, its secrets in base64.
-    fn words(name: &str, scheme: Scheme, k: &Kept) -> Vec<String> {
-        let mut w = vec![name.to_string(), scheme.name().to_string()];
-        w.extend(
-            k.secrets
-                .iter()
-                .map(|s| format!("b64:{}", b64_encode(s.as_bytes()))),
-        );
-        for (word, v) in &k.opts {
-            w.push(word.to_string());
-            w.push(v.clone());
-        }
-        w
+        Ok(Some(Set {
+            version,
+            hooks,
+            kept,
+        }))
     }
 
     /// The hook `given` makes, beside `before`: refused as a hooks file's
-    /// line is at a server's start, naming the hook and the field.
+    /// line is at a server's start, naming the hook and the field -- the
+    /// line's own reader judging it, each secret named by its place.
     fn made(
         &self,
         hook: &str,
-        given: &Given,
+        given: Given,
         before: &[Hook],
         set_ms: i64,
+        max_body: usize,
     ) -> Result<(Hook, Kept), Refused> {
-        let refused = |why: &str| Refused(400, format!("hook `{hook}`: {why}"));
-        if !fennec_core::named::valid_name(hook) {
-            return Err(refused(
-                "a hook's name is ASCII letters, digits and `_`, a letter first, 59 bytes at most",
-            ));
+        let mut words = vec![hook, given.scheme.name(), "0", "1"];
+        words.truncate(2 + given.secrets.len());
+        for (word, v) in &given.opts {
+            words.extend([*word, v.as_str()]);
         }
-        for s in &given.secrets {
-            hooks::secret_of(given.scheme, s.as_bytes())
-                .map_err(|w| refused(&format!("`secrets`: {w}")))?;
-        }
+        let secret = |w: &str| {
+            (w.parse::<usize>().ok())
+                .and_then(|i| given.secrets.get(i))
+                .map(|s| s.as_bytes().to_vec())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        };
+        let h = hooks::hook_of(&words, before, &secret, max_body, &self.stand_in[0])
+            .map_err(|why| Refused(400, format!("hook `{hook}`: {why}")))?;
         let k = Kept {
             set_ms,
-            secrets: given.secrets.clone(),
-            opts: given.opts.clone(),
+            secrets: given.secrets,
+            opts: given.opts,
         };
-        let words = Self::words(hook, given.scheme, &k);
-        let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        let max_body = self.max_body.load(Ordering::Relaxed);
-        self.line_of(&words, before, set_ms, max_body)
-            .map_err(refused)
+        Ok((h, k))
     }
 
     /// A hook's fields read: its scheme, its secrets, its options and, in a
@@ -724,40 +766,8 @@ impl Store {
     /// `GET /_admin/tenants/<t>/hook-secrets`: the set whole with its
     /// version, the one answer holding a secret.
     pub(crate) fn export(&self, name: &str) -> String {
-        let set = self.current(name);
-        let mut out = String::from("{\"version\":");
-        push_version(&mut out, set.as_ref().map(|s| s.version));
-        out.push_str(",\"hooks\":{");
-        if let Some(set) = &set {
-            for (i, (h, k)) in set.hooks.iter().zip(&set.kept).enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                fennec_core::json::escape_into(&mut out, &h.name);
-                out.push_str(&format!(
-                    ":{{\"scheme\":\"{}\",\"secrets\":[",
-                    h.scheme.name()
-                ));
-                for (j, s) in k.secrets.iter().enumerate() {
-                    if j > 0 {
-                        out.push(',');
-                    }
-                    fennec_core::json::escape_into(&mut out, s);
-                }
-                out.push(']');
-                for (word, v) in &k.opts {
-                    let field = OPTIONS
-                        .iter()
-                        .find(|(_, w)| w == word)
-                        .map_or(*word, |(f, _)| f);
-                    out.push_str(&format!(",\"{field}\":"));
-                    fennec_core::json::escape_into(&mut out, v);
-                }
-                out.push_str(&format!(",\"set\":{}}}", k.set_ms));
-            }
-        }
-        out.push_str("}}");
-        out
+        self.current(name)
+            .map_or_else(|| NO_SET.to_string(), |s| exported(&s))
     }
 
     /// The version `name`'s set is at: `None` where it holds none.
@@ -810,6 +820,41 @@ fn object(body: &[u8]) -> Result<Vec<(String, Value)>, Refused> {
     }
 }
 
+/// `set` as `hook-secrets` answers it, and its sidecar holds it.
+fn exported(set: &Set) -> String {
+    let mut out = String::from("{\"version\":");
+    push_version(&mut out, Some(set.version));
+    out.push_str(",\"hooks\":{");
+    for (i, (h, k)) in set.hooks.iter().zip(&set.kept).enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        fennec_core::json::escape_into(&mut out, &h.name);
+        out.push_str(&format!(
+            ":{{\"scheme\":\"{}\",\"secrets\":[",
+            h.scheme.name()
+        ));
+        for (j, s) in k.secrets.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            fennec_core::json::escape_into(&mut out, s);
+        }
+        out.push(']');
+        for (word, v) in &k.opts {
+            let field = OPTIONS
+                .iter()
+                .find(|(_, w)| w == word)
+                .map_or(*word, |(f, _)| f);
+            out.push_str(&format!(",\"{field}\":"));
+            fennec_core::json::escape_into(&mut out, v);
+        }
+        out.push_str(&format!(",\"set\":{}}}", k.set_ms));
+    }
+    out.push_str("}}");
+    out
+}
+
 fn push_version(out: &mut String, v: Option<u64>) {
     match v {
         Some(v) => out.push_str(&format!("\"{v:016x}\"")),
@@ -834,6 +879,15 @@ fn now_ms() -> i64 {
     fennec_core::time::now_ms().unwrap_or(0)
 }
 
+/// Removes `path`, its directory synced where it was there.
+fn remove(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => fennec_core::fs::sync_dir(path).map_err(|e| io::Error::other(e.to_string())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// A file opened readable by its owner alone, where the system has modes:
 /// the sidecar holds secrets.
 trait Private {
@@ -853,23 +907,20 @@ impl Private for std::fs::OpenOptions {
 }
 
 /// Puts away the hook secrets beside a database file a way other than its
-/// node renames over -- `fennec restore`, `fennec backup --force`, as
-/// [`instance::put_away_beside`] puts its identity away -- synced: a
-/// restore brings a tenant's statements back and no secret.
+/// node renames over -- `fennec restore`, `fennec backup --force`, `fennec
+/// unseal`, as [`instance::put_away_beside`] puts its identity away --
+/// synced, one a crash left half written too: a restore brings a tenant's
+/// statements back and no secret. A node running beside holds the set in
+/// its memory still, which the tenant's next open puts away
+/// ([`Store::opened`]).
 pub fn put_away_beside(file: &Path) -> io::Result<()> {
     for f in [file.to_path_buf(), fennec_core::fs::resolved(file)] {
         let name = f.file_stem().and_then(|n| n.to_str());
         if let (Some(dir), Some(name), true) =
             (f.parent(), name, f.extension() == Some("fennec".as_ref()))
         {
-            let path = dir.join(format!("{name}.hooks"));
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string()))?
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            remove(&dir.join(format!("{name}.hooks.writing")))?;
+            remove(&dir.join(format!("{name}.hooks")))?;
         }
     }
     Ok(())

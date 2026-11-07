@@ -353,11 +353,6 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         assert!(listing.body.contains(part), "{part}: {}", listing.body);
     }
     assert!(!listing.body.contains(SECRET) && !listing.body.contains("whsec_acme"));
-    let sidecar = std::fs::read_to_string(n.dir.join("acme.hooks")).unwrap();
-    assert!(
-        !sidecar.contains(SECRET),
-        "the sidecar holds the secrets' bytes in base64"
-    );
 
     // A client's way in reaches no secret: the admin routes take the admin
     // token alone.
@@ -381,6 +376,20 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         export.head
     );
     assert!(export.body.contains("whsec_acme") && export.body.contains(SECRET));
+    // The sidecar holds the set as the export answers it, under the file it
+    // is bound to and its version: one reader for both, readable by the
+    // node's user alone.
+    let sidecar = std::fs::read_to_string(n.dir.join("acme.hooks")).unwrap();
+    let lines: Vec<&str> = sidecar.lines().collect();
+    assert_eq!(lines.len(), 3, "{}", lines[..2].join("\n"));
+    assert!(lines[0].starts_with("1 ") && lines[1].starts_with("version "));
+    assert_eq!(lines[2], export.body);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(n.dir.join("acme.hooks")).unwrap();
+        assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+    }
 
     // Installed whole on another tenant, its version kept.
     tenant(n.port, "copy");
@@ -644,4 +653,171 @@ fn a_read_replicas_stream_is_no_standby() {
         !feed().standby_sent(u64::MAX, Duration::ZERO),
         "a standby's stream is waited for"
     );
+}
+
+/// A file put in a closed tenant's place under the running node -- `fennec
+/// unseal`, `restore --force` or `backup --force` over it, or a hand -- is
+/// armed by none of the secrets the node holds in its memory, which no
+/// such tool reaches: an event signed with one verifies against memory
+/// before its tenant is looked up, and is the one 401 once the open has
+/// put that set away, naming another file; a hook set through the admin
+/// routes carries none of the set before; and no close binds the set
+/// before to the file that took its place.
+#[test]
+fn a_file_put_in_place_under_a_running_node_is_armed_by_no_secret_before_it() {
+    let n = node("restored", false);
+    tenant(n.port, "acme");
+    assert_eq!(set_secret(n.port, "acme", "whsec_before").status, 200);
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    let file = n.dir.join("acme.fennec");
+    let sidecar = n.dir.join("acme.hooks");
+
+    // Unsealed over it: the tool puts the sidecar away, the memory holds
+    // the set still.
+    let key_hex = fennec_http::seal::Key::generate().unwrap();
+    let key = fennec_http::seal::Key::from_hex(&key_hex).unwrap();
+    let sealed = n.dir.join("acme.sealed");
+    let plain = std::fs::read(&file).unwrap();
+    std::fs::write(&sealed, fennec_http::seal::seal_whole(&key, &plain)).unwrap();
+    fennec_http::archive::unseal(&sealed, &key, &file).unwrap();
+    assert!(!sidecar.exists(), "put away beside the file it replaced");
+    assert!(
+        n.tenants.hooks().version("acme").is_some(),
+        "in memory still"
+    );
+    let r = event(
+        n.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_before",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(r.status, 401, "{}", r.body);
+    assert_eq!(
+        r.body,
+        event(n.port, "/t/nobody/_hooks/stripe", "x", "e", "o").body
+    );
+    assert!(status_of(n.port, "acme").contains("open"), "nothing taken");
+    assert_eq!(
+        n.tenants.hooks().version("acme"),
+        None,
+        "put away as it opened"
+    );
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    assert!(
+        !sidecar.exists(),
+        "no close binds the set before to the file"
+    );
+    assert_eq!(Tenants::new(&n.dir).unwrap().hooks().version("acme"), None);
+
+    // Set again, then the file put in place by hand while the tenant is
+    // closed: a hook set through the admin routes carries none of the set
+    // before, and its listing and export name no hook of it.
+    assert_eq!(set_secret(n.port, "acme", "whsec_second").status, 200);
+    assert!(!is_open(&n, "acme"), "a hook's change opens no tenant");
+    let aside = n.dir.join("acme.aside");
+    std::fs::copy(&file, &aside).unwrap();
+    std::fs::rename(&aside, &file).unwrap();
+    let made = admin(
+        n.port,
+        "PUT",
+        "/_admin/tenants/acme/hooks/pushes",
+        r#"{"scheme":"github","secrets":["a later secret"]}"#,
+    );
+    assert_eq!(made.status, 200, "{}", made.body);
+    let export = admin(n.port, "GET", "/_admin/tenants/acme/hook-secrets", "");
+    assert!(export.body.contains("pushes"), "{}", export.body);
+    assert!(
+        !export.body.contains("stripe") && !export.body.contains("whsec_second"),
+        "{}",
+        export.body
+    );
+}
+
+/// A sidecar a crash left half written -- its secrets in no set -- goes as
+/// the node starts and with its tenant's set, a delete's included: never
+/// kept past them.
+#[test]
+fn a_sidecar_left_half_written_is_removed() {
+    let n = node("writing", false);
+    tenant(n.port, "acme");
+    let writing = n.dir.join("acme.hooks.writing");
+    std::fs::write(&writing, "1 0 0 0\nversion 00000000000000ab\n{}").unwrap();
+    let again = Tenants::new(&n.dir).unwrap();
+    assert!(!writing.exists(), "removed as the node starts");
+    drop(again);
+    std::fs::write(&writing, "half").unwrap();
+    assert_eq!(set_secret(n.port, "acme", "whsec_writing").status, 200);
+    std::fs::write(&writing, "half").unwrap();
+    let r = admin(n.port, "DELETE", "/_admin/tenants/acme", "");
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert!(!writing.exists(), "removed with the set, at a delete");
+    std::fs::write(&writing, "half").unwrap();
+    fennec_http::tenant_hooks::put_away_beside(&n.dir.join("acme.fennec")).unwrap();
+    assert!(!writing.exists(), "and beside a file a restore replaces");
+}
+
+/// A tenant holds 64 hooks at most, its set 32 KiB at most written out --
+/// so a set always fits the head a move across regions carries it in --
+/// each refused (400) naming its bound; and a frozen tenant's hooks and
+/// quota are refused a change (409) while its set is still read, as a
+/// move's export reads it.
+#[test]
+fn a_set_is_bounded_and_a_frozen_tenants_takes_no_change() {
+    let n = node("bounds", false);
+    tenant(n.port, "acme");
+    for i in 0..fennec_http::tenant_hooks::MOST_HOOKS {
+        let r = admin(
+            n.port,
+            "PUT",
+            &format!("/_admin/tenants/acme/hooks/h{i}"),
+            r#"{"scheme":"stripe","secrets":["whsec_x"]}"#,
+        );
+        assert_eq!(r.status, 200, "{i}: {}", r.body);
+    }
+    let r = admin(
+        n.port,
+        "PUT",
+        "/_admin/tenants/acme/hooks/one_more",
+        r#"{"scheme":"stripe","secrets":["whsec_x"]}"#,
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("64 hooks at most"), "{}", r.body);
+    let long = "s".repeat(fennec_http::tenant_hooks::MOST_BYTES);
+    let r = admin(
+        n.port,
+        "PUT",
+        "/_admin/tenants/acme/hooks/h0",
+        &format!(r#"{{"scheme":"github","secrets":["{long}"]}}"#),
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("32 KiB at most"), "{}", r.body);
+    assert!(!r.body.contains("sss"), "{}", r.body);
+
+    let r = admin(n.port, "POST", "/_admin/tenants/acme/freeze", "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    for (method, target, body) in [
+        (
+            "PUT",
+            "/_admin/tenants/acme/hooks/h1",
+            r#"{"scheme":"stripe","secrets":["whsec_y"]}"#,
+        ),
+        ("DELETE", "/_admin/tenants/acme/hooks/h1", ""),
+        (
+            "PUT",
+            "/_admin/tenants/acme/hook-secrets",
+            r#"{"version":null,"hooks":{}}"#,
+        ),
+        ("PUT", "/_admin/tenants/acme/quota", r#"{"rows":10}"#),
+    ] {
+        let r = admin(n.port, method, target, body);
+        assert_eq!(r.status, 409, "{method} {target}: {}", r.body);
+        assert!(r.body.contains("frozen"), "{}", r.body);
+    }
+    let read = admin(n.port, "GET", "/_admin/tenants/acme/hook-secrets", "");
+    assert_eq!(read.status, 200, "a move's export reads it: {}", read.body);
+    let r = admin(n.port, "POST", "/_admin/tenants/acme/thaw", "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/h1", "");
+    assert_eq!(r.status, 200, "{}", r.body);
 }

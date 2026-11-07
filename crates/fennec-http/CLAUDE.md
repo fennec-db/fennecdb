@@ -202,7 +202,8 @@ alone.
 and every refusal before is one 401.](../../docs/design/named-statements.md#verifying-an-event)**
 `POST /_hooks/<name>`, on a file's server under `--hooks`, and a node's
 `/t/<t>/_hooks/<name>`, asked in `route_tenant` before the tenant is looked
-up against its secrets in the node's memory (`tenant_hooks::Store`), is the
+up against its secrets in the node's memory (`tenant_hooks::Store`) and held
+after its open to the set it holds then (`Store::is_current`), is the
 one route running a statement without a token, judged before
 `authenticate`: `hooks::verified` reads the scheme from the headers
 present (each once, one `t`, `webhook-*` or Svix's `svix-*`, never both)

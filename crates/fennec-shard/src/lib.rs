@@ -2873,12 +2873,11 @@ impl Router {
         fennec_http::audit::push_verified(&mut head);
         // A node's one 401 to an event sent to a tenant's hook asks no
         // token: waited out here by the hooks' own count, as the node
-        // waits out its own, never the tokens'.
-        if status == 401 {
-            let asks =
-                (answer.headers.iter()).any(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"));
-            fennec_http::audit::hook_forwarded(req, status, asks);
-        }
+        // waits out its own, never the tokens'; and its 2xx, an event it
+        // verified, starts that count again.
+        let asks = status == 401
+            && (answer.headers.iter()).any(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"));
+        fennec_http::audit::hook_forwarded(req, status, asks, peer);
         fennec_http::audit::http(req, status, peer);
         fennec_http::request_id::with(|id| {
             head.push_str(fennec_http::request_id::HEADER);
@@ -3771,8 +3770,7 @@ impl Router {
                 let why = self
                     .on_standby(name, "PUT", &base)
                     .or_else(|| self.on_standby(name, "POST", &format!("{base}/follow")))
-                    .or_else(|| self.quota_on_standby(t, name))
-                    .or_else(|| self.hooks_on_standby(t, name));
+                    .or_else(|| self.sidecars_on_standby(t, name));
                 if let Some(w) = why {
                     fennec_http::log!("tenant `{t}` has no replica yet: {w}");
                     unfollowed.push(quote(t));
@@ -4956,11 +4954,7 @@ impl Router {
         let set = fennec_http::quota::Set::parse(&String::from_utf8_lossy(body))
             .map_err(|e| Fail(400, e))?;
         let _claim = self.claim(tenant)?;
-        let node = self
-            .read_dir()
-            .placement(tenant)
-            .map(|p| p.node.clone())
-            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let node = self.unmoving(tenant)?;
         let n = self.node(&node)?;
         let json = set.json();
         let report = expect(
@@ -5032,14 +5026,18 @@ impl Router {
     }
 
     fn put_quota(&self, tenant: &str, node: &str, json: &str) -> Option<String> {
+        let target = format!("/_admin/tenants/{tenant}/quota");
+        self.put_on(node, &target, json.as_bytes())
+    }
+
+    /// `PUT target` on `node`, one of a tenant's sidecars its admin routes
+    /// keep -- its quota, its hook secrets -- copied from what the
+    /// directory or another copy holds: what went wrong, if anything.
+    fn put_on(&self, node: &str, target: &str, body: &[u8]) -> Option<String> {
         let Some(n) = self.read_dir().node(node).cloned() else {
             return Some(format!("no node `{node}`"));
         };
-        let target = format!("/_admin/tenants/{tenant}/quota");
-        match self
-            .pool
-            .call(&n.addr, "PUT", &target, &n.token, json.as_bytes())
-        {
+        match self.pool.call(&n.addr, "PUT", target, &n.token, body) {
             Ok((200, _)) => None,
             Ok((status, body)) => Some(format!(
                 "`{node}` answered {status}: {}",
@@ -5049,10 +5047,12 @@ impl Router {
         }
     }
 
-    /// [`Self::send_quota`] to the standby of `node`, where it has one.
-    fn quota_on_standby(&self, tenant: &str, node: &str) -> Option<String> {
+    /// The tenant's quota and hook secrets sent to the standby of `node`,
+    /// where it has one: what a copy made there lacks.
+    fn sidecars_on_standby(&self, tenant: &str, node: &str) -> Option<String> {
         let standby = self.read_dir().standby(node).map(str::to_string)?;
         self.send_quota(tenant, &standby)
+            .or_else(|| self.send_hooks(tenant, &standby))
     }
 
     /// A promoted copy keeps the hook secrets it held: the router keeps
@@ -5102,29 +5102,47 @@ impl Router {
     /// once its primary is gone.
     fn set_hook(&self, req: &Request, tenant: &str, hook: &str) -> Outcome<Response> {
         let _claim = self.claim(tenant)?;
-        let node = self
-            .read_dir()
-            .placement(tenant)
-            .map(|p| p.node.clone())
-            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let node = self.unmoving(tenant)?;
         let n = self.node(&node)?;
         let target = format!("/_admin/tenants/{tenant}/hooks/{hook}");
         let method = req.method.name();
-        expect(
+        let answer = expect(
             self.pool
                 .call(&n.addr, method, &target, &n.token, &req.body),
             200,
             &node,
         )?;
         // The set as the primary holds it now, whole: what each copy takes.
-        let set = self
-            .hook_secrets(tenant, &node)
-            .map_err(|w| Fail(502, format!("tenant `{tenant}`'s hook secrets: {w}")))?;
-        let (names, version) = set.as_deref().map(names_and_version).unwrap_or_default();
-        let empty = br#"{"version":null,"hooks":{}}"#;
+        // Unread, every copy is behind -- recorded, named and repaired --
+        // the primary's own word giving the version, the record before
+        // this change the names: never a 502 that records nothing, its
+        // copies then promoted without the set no one knows they lack.
+        let copies = self.promotable(tenant, &node);
+        let read = self.hook_secrets(tenant, &node);
+        let (names, version) = match &read {
+            Ok(set) => set.as_deref().map(names_and_version).unwrap_or_default(),
+            Err(w) => {
+                fennec_http::log!(
+                    "tenant `{tenant}`'s hook secrets were not read back from `{node}`: {w}"
+                );
+                let mut names = (self.read_dir().hook_set(tenant))
+                    .map(|s| s.names)
+                    .unwrap_or_default();
+                names.retain(|n| n != hook);
+                if req.method == Method::Put {
+                    names.push(hook.to_string());
+                    names.sort();
+                }
+                (names, version_in(&answer))
+            }
+        };
         let mut behind = Vec::new();
-        for copy in self.promotable(tenant, &node) {
-            if let Some(w) = self.install_hook_set(tenant, &copy, set.as_deref().unwrap_or(empty)) {
+        for copy in copies {
+            let why = match &read {
+                Ok(set) => self.install_hook_set(tenant, &copy, set.as_deref()),
+                Err(w) => Some(w.clone()),
+            };
+            if let Some(w) = why {
                 fennec_http::log!("tenant `{tenant}`'s hook secrets did not reach its copy: {w}");
                 behind.push(copy);
             }
@@ -5154,6 +5172,24 @@ impl Router {
                 behind.join(",")
             ),
         ))
+    }
+
+    /// The node `tenant` is placed on, where it is not moving: a change of
+    /// what its copies hold beside the file -- its quota, its hook secrets
+    /// -- landing on a move's frozen source after its export is lost with
+    /// it (409). A move in the region holds the tenant's claim from its
+    /// freeze to its flip; one across regions holds the claim at the
+    /// source's router only for its export, and marks the placement moving
+    /// until the source is released or thawed.
+    fn unmoving(&self, tenant: &str) -> Outcome<String> {
+        match self.read_dir().placement(tenant) {
+            Some(p) if p.state == State::Moving => Err(Fail(
+                409,
+                format!("tenant `{tenant}` is moving: ask again once the move ends"),
+            )),
+            Some(p) => Ok(p.node.clone()),
+            None => Err(Fail(404, format!("no tenant `{tenant}` in the directory"))),
+        }
     }
 
     /// `GET /_shard/tenants/<t>/hooks`: what the primary lists -- names,
@@ -5226,22 +5262,11 @@ impl Router {
         }
     }
 
-    /// Installs the set `set` on `node`'s copy of `tenant`, whole: what went
-    /// wrong, if anything.
-    fn install_hook_set(&self, tenant: &str, node: &str, set: &[u8]) -> Option<String> {
-        let n = match self.node(node) {
-            Ok(n) => n,
-            Err(Fail(_, w)) => return Some(w),
-        };
+    /// Installs the set `set` -- none, every hook taken away -- on `node`'s
+    /// copy of `tenant`, whole: what went wrong, if anything.
+    fn install_hook_set(&self, tenant: &str, node: &str, set: Option<&[u8]>) -> Option<String> {
         let target = format!("/_admin/tenants/{tenant}/hook-secrets");
-        match self.pool.call(&n.addr, "PUT", &target, &n.token, set) {
-            Ok((200, _)) => None,
-            Ok((status, body)) => Some(format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
-            Err(e) => Some(format!("`{node}` did not answer: {e}")),
-        }
+        self.put_on(node, &target, set.unwrap_or(NO_HOOKS))
     }
 
     /// Copies `tenant`'s hook secrets onto `node`, a copy that lacks them
@@ -5278,9 +5303,8 @@ impl Router {
                 "no copy of `{tenant}` known to hold its hook secrets' version answers"
             ));
         };
-        let empty = br#"{"version":null,"hooks":{}}"#.to_vec();
         match self.hook_secrets(tenant, &source) {
-            Ok(held) => self.install_hook_set(tenant, node, &held.unwrap_or(empty)),
+            Ok(held) => self.install_hook_set(tenant, node, held.as_deref()),
             Err(w) => Some(w),
         }
     }
@@ -5306,28 +5330,51 @@ impl Router {
         }
     }
 
-    /// [`Self::send_hooks`] to the standby of `node`, where it has one.
-    fn hooks_on_standby(&self, tenant: &str, node: &str) -> Option<String> {
-        let standby = self.read_dir().standby(node).map(str::to_string)?;
-        self.send_hooks(tenant, &standby)
-    }
-
-    /// The copies lacking their tenant's hook secrets' version, each
-    /// copied it from one holding it; a copy no longer the tenant's let go
-    /// of. What the repair says of each: done, and failed.
+    /// Each tenant whose directory records a set: every copy of it -- its
+    /// primary and each a failover could promote -- asked the version it
+    /// lists, so one lacking it is found whatever made it lack it: a copy
+    /// down as the set changed, recorded behind, or a node that put its set
+    /// away as it started, which no record says -- its binding lost to a
+    /// crash between a compact's rename and its tick. Each lacking it is
+    /// recorded behind, then copied the set from one holding it under the
+    /// tenant's claim; a copy no longer the tenant's let go of. What the
+    /// repair says of each: done, and failed. A call a copy a tenant
+    /// holding a set, and no claim where every copy holds its version.
     fn repair_hooks(&self, again: &mut bool) -> (Vec<String>, Vec<String>) {
         let (mut done, mut failed) = (Vec::new(), Vec::new());
-        let behind: Vec<(String, directory::HookSet)> = (self.read_dir().hook_sets())
-            .into_iter()
-            .filter(|(_, s)| !s.behind.is_empty())
-            .collect();
-        for (tenant, set) in behind {
+        // Bound apart: a `for`'s guard lives through its loop.
+        let sets = self.read_dir().hook_sets(None);
+        for (tenant, set) in sets {
+            let primary = (self.read_dir().placement(&tenant))
+                .filter(|p| p.state == State::Active)
+                .map(|p| p.node.clone());
+            let Some(primary) = primary else {
+                continue;
+            };
+            let mut behind = set.behind.clone();
+            for node in std::iter::once(primary.clone()).chain(self.promotable(&tenant, &primary)) {
+                if behind.contains(&node) {
+                    continue;
+                }
+                let lacks = self
+                    .listed_version(&tenant, &node)
+                    .is_some_and(|v| v != set.version);
+                if lacks {
+                    // Recorded first: no copy lacking the set is the source
+                    // another is copied from.
+                    self.note_hooks(&tenant, &node, false);
+                    behind.push(node);
+                }
+            }
+            if behind.is_empty() {
+                continue;
+            }
             let Ok(_claim) = self.claim(&tenant) else {
                 *again = true;
                 failed.push(why(&tenant, "another operation is in progress"));
                 continue;
             };
-            for node in &set.behind {
+            for node in &behind {
                 if !self.holds_copy(&tenant, node) {
                     self.note_hooks(&tenant, node, true);
                     continue;
@@ -5346,6 +5393,17 @@ impl Router {
             }
         }
         (done, failed)
+    }
+
+    /// The version of `tenant`'s hook secrets `node` lists, empty where it
+    /// holds none: `None` where it does not answer it.
+    fn listed_version(&self, tenant: &str, node: &str) -> Option<String> {
+        let n = self.read_dir().node(node).cloned()?;
+        let target = format!("/_admin/tenants/{tenant}/hooks");
+        match self.pool.call(&n.addr, "GET", &target, &n.token, b"") {
+            Ok((200, body)) => Some(version_in(&body)),
+            _ => None,
+        }
     }
 
     fn remove_node(&self, name: &str) -> Outcome<Response> {
@@ -5625,7 +5683,7 @@ impl Router {
         // created on the standby as well.
         let warning = self
             .on_standby(&name, "PUT", &target)
-            .or_else(|| self.quota_on_standby(tenant, &name));
+            .or_else(|| self.sidecars_on_standby(tenant, &name));
         if let Some(w) = &warning {
             fennec_http::log!("tenant `{tenant}` has no replica yet: {w}");
         }
@@ -5888,7 +5946,7 @@ impl Router {
         // source gone. Under the move's claim, so no hook's `PUT` lands on
         // the source between this copy and the flip.
         let hooks = self.hook_secrets(tenant, &from).and_then(|set| match set {
-            Some(set) => match self.install_hook_set(tenant, to, &set) {
+            Some(set) => match self.install_hook_set(tenant, to, Some(&set)) {
                 Some(w) => Err(w),
                 None => Ok(Some(set)),
             },
@@ -5948,8 +6006,7 @@ impl Router {
         // more.
         if let Some(w) = self
             .on_standby(to, "PUT", &base)
-            .or_else(|| self.quota_on_standby(tenant, to))
-            .or_else(|| self.hooks_on_standby(tenant, to))
+            .or_else(|| self.sidecars_on_standby(tenant, to))
         {
             fennec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
         }
@@ -6050,6 +6107,23 @@ impl Drop for Claim<'_> {
         self.router.freed.notify_all();
     }
 }
+
+/// The `version` a node's answer of a tenant's hook secrets names -- a
+/// hook's `PUT`, a listing -- empty where it names none.
+fn version_in(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let fields = fennec_core::json::parse_object(&text).unwrap_or_default();
+    (fields.into_iter())
+        .find_map(|(k, v)| match (k.as_str(), v) {
+            ("version", fennec_core::prelude::Value::Text(t)) => Some(t),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// A set of hook secrets holding no hook, as `hook-secrets` answers it:
+/// what a copy is sent where its primary holds none.
+const NO_HOOKS: &[u8] = br#"{"version":null,"hooks":{}}"#;
 
 /// The hooks' names and the version a set of hook secrets holds, as
 /// `hook-secrets` answers it: the names its object's keys, and none, with
