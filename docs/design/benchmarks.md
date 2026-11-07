@@ -1,6 +1,6 @@
 # Benchmarks
 
-The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. The last, [Instruction counts](#instruction-counts), holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
 
 ## scale-bench
 
@@ -132,3 +132,81 @@ and MongoDB's `r` runs and the `rd` attempt sized beside the cells: the
 server in Docker leads the other three in every cell but buffered C and
 F at one client, 3.07 k against PostgreSQL's 3.14 k and 2.07 k against
 2.09 k, and Redis in every one.
+
+## Instruction counts
+
+**A difference under ~500 instructions a request between two builds is
+read over several identities of each, or in a trace's own code.** Two
+builds are held to each other by the instructions their loop retires an
+op (`proc_pid_rusage`'s `ri_instructions` read around it: `replays.rs`,
+`hook_events.rs`), not by the clock, which a shared machine moves by more
+than most changes cost. On macOS 26 that count carries the allocator's
+draw. Its allocator, xzone malloc, sends a binary's allocations and frees
+down paths its identity picks -- some through `mfm_alloc` and `mfm_free`,
+some through `_xzm_xzone_malloc_tiny` and `_xzm_free` -- a mix fixed for a
+binary and changed by a rebuild, or by its Mach-O UUID alone. #513 found it
+([named-statements.md](named-statements.md), *What slice 3 left on a
+request that is no event*): `edb629d2`'s `replays` with only its UUID
+changed and signed again ran one traced `put` through `/query` in 539
+instructions fewer, every one of them the allocator's; `bc7636b2` built
+without slice 3's three touches on a request's path (`v1`, its own code
+`edb629d2`'s to the instruction) 1 062 fewer, again all the allocator's.
+In plain pairs `v1` read -110 and -150 a `put` against `edb629d2` while
+`bc7636b2`, 26 instructions of its own code more, read +67 and +58, and a
+keyed write +485 and +311. Main's `replays` at `61fe4261` and one copy of
+it under another UUID trace one `put`'s `handle` in 18 833 and 17 698
+instructions: 8 630 of its own code both, `libsystem_malloc`'s 8 843
+against 7 741. `MallocNanoZone=0`, which held such a count still when
+[text.md](text.md#match-as-a-filter)'s ordered `get` was measured,
+holds it no longer, nor do `MallocSecureAllocator=0` or
+`MallocXzonePtrBucketCount=1`: the nano zone is not what serves these.
+
+Two ways read past the draw, both in `tools/instr/`. *The means over
+identities* (`make instr-compare`, `compare.py`): each build is copied
+under 8 random UUIDs (`setuuid.py` sets `LC_UUID` in a copy, never in the
+build's own output, and signs it again with `codesign -s - -f`), each copy
+another draw of the allocator's paths; every copy runs 7 times, all of them
+once a round in an order turning each round, each run started under a
+1-minute load below 4, and a build's figure is the mean of its copies'
+medians beside its standard error. A difference inside two standard errors
+is none. The report gives what one copy a side reads too: the range a
+plain pair could have landed anywhere in. In #513 `bc7636b2` read +45 a
+`put` and -14 a keyed write against `edb629d2` this way, where plain pairs
+read +126 and +121, and `v1` +2 and -35; two sets of eight read main
+(`d1be9713`) +40 and +61 a `put`. `make hook-bench`'s paired group reads
+this way by default (`UUIDS=8`). *A trace* (`TRACE=fennec_http::handle`,
+`trace.py`): lldb stops the program at a function's Nth call (the 30th,
+past a first request's one-time work), single-steps it into every call to
+its return and names each instruction's module and function, a clock read
+run whole (the commpage's retry loop never settles under single steps).
+The same binary traced again counts the same to the instruction, and its
+own code counts the same under any UUID, so two builds' traces say what a
+change costs in its own code by function, the allocator's apart (`trace.py
+diff`). A trace is one call: work done once every so many requests -- a
+table growing, a flush -- falls in some calls and not others, and the
+means count it.
+
+Which to use. Plain pairs (`UUIDS=0`, one binary a build, the order
+alternating) are enough where a difference is well past the draw, a few
+thousand instructions a request or a few percent of an op of
+microseconds, and for time on a large effect. Under ~500 instructions a
+request a difference is confirmed by the means or a trace before it is
+called a cost, a trace where what moved must be named. A control, `BASE`
+the commit this tree is at, shows the spread the program at hand gives.
+Main at `61fe4261` built twice, in a scratch worktree and in a tree whose
+crates are main's, is one code under two UUIDs: one `put`'s traced
+`handle` runs 8 630 instructions of its own code in each, the allocator's
+8 393 in one and 8 843 in the other. `replays.rs`'s `put`, every run
+started under a 1-minute load below 4 (2.5 to 3.9): in plain pairs, 30
+rounds, the second build read +98 instructions a request (+0.45%), the
+rounds' differences a median of +135 and 26 of 30 above -- a cost the code
+does not have; against the first, the second re-signed under a third UUID
+read +55, 18 of 30 above. Over 8 UUIDs a build, 7 runs each, two sets read
+-22 (standard error 42) and -63 (38), each inside two standard errors,
+where one copy a side read anywhere from -285 to +148. Eight copies a
+build resolve a `put` to about ±80 instructions (two standard errors);
+more narrow it as their square root, and a trace settles a program's own
+code to the instruction. The tools are macOS's -- the counts, the signing
+and lldb -- and elsewhere say so and exit 0; `tools/instr/test_instr.py`,
+run in CI, holds a copy's UUID, the refusals keeping a build's output
+untouched, the figures and a trace's deltas.

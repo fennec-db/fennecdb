@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -257,18 +257,41 @@ replay-bench:
 ## verify64k (Hooks::verify alone; 9 000 each unless given), and beside0,
 ## beside10 and beside100 (buffered writes' median and p99 beside 0, 10 and
 ## 100 events a second; a million). Without MODE, every mode in turns and
-## replays.rs's put and keyed against BASE (origin/main) in pairs, PAIRS (7)
-## of each, each run once the 1-minute load is under QUIET (2.5), ONLY=paired,
-## hooks or beside for those: medians to OUT (target/hook-bench/results.txt),
-## progress to its .log; an hour or so on an idle machine
+## replays.rs's put and keyed against BASE (origin/main), PAIRS (7) rounds of
+## each -- on macOS each build over UUIDS (8) copies of it under random UUIDs
+## (UUIDS=0: one binary a build, plain pairs; see instr-compare) -- each run
+## once the 1-minute load is under QUIET (2.5), ONLY=paired, hooks or beside
+## for those: medians to OUT (target/hook-bench/results.txt), progress to its
+## .log; an hour or so on an idle machine
 ## (crates/fennec-http/examples/hook_bench.py)
 hook-bench:
 ifneq ($(MODE),)
 	$(CARGO) run --release -p fennec-http --example hook_events -- $(MODE) $(N)
 else
 	python3 crates/fennec-http/examples/hook_bench.py --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
-	  --pairs $(or $(PAIRS),7) --quiet $(or $(QUIET),2.5) $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
+	  --pairs $(or $(PAIRS),7) --quiet $(or $(QUIET),2.5) $(if $(UUIDS),--uuids $(UUIDS)) \
+	  $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
 endif
+
+## This tree's build against BASE's (origin/main) in instructions an op, on
+## macOS: the allocator there takes paths a binary's identity picks, moving a
+## request by hundreds of instructions with the code unchanged, so each build
+## runs as UUIDS (8) copies under random UUIDs, signed again, ROUNDS (7) runs
+## each, and is read as the mean of their medians. EXAMPLE (replays) of PKG
+## (fennec-http), MODES (put,keyed) a run each, ARGS after the mode, PATTERN
+## the figure's line; TRACE=fennec_http::handle also counts one call (HIT, the
+## 30th) by function under lldb, the program's own code apart from the
+## allocator's. UUIDS=0 for plain pairs. Each run once the 1-minute load is
+## under QUIET (4); results to OUT (target/instr/results.txt), scratch in WORK
+## (target/instr): the binaries removed unless KEEP=1, BASE's worktree and
+## build unless KEEP_BASE=1 (tools/instr/compare.py;
+## docs/design/benchmarks.md#instruction-counts)
+instr-compare:
+	python3 tools/instr/compare.py --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  --package '$(or $(PKG),fennec-http)' --example '$(or $(EXAMPLE),replays)' --modes '$(or $(MODES),put,keyed)' \
+	  --uuids $(or $(UUIDS),8) --rounds $(or $(ROUNDS),7) --quiet $(or $(QUIET),4) $(if $(ARGS),--args '$(ARGS)') \
+	  $(if $(PATTERN),--pattern '$(PATTERN)') $(if $(TRACE),--trace '$(TRACE)' --hit $(or $(HIT),30)) \
+	  $(if $(WORK),--work '$(WORK)') $(if $(OUT),--out '$(OUT)') $(if $(KEEP),--keep) $(if $(KEEP_BASE),--keep-base)
 
 ## The browser module's size with every feature, with none, with each alone
 ## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and

@@ -51,6 +51,13 @@ jobs:
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
 
+      # docs/design/benchmarks.md#instruction-counts: the measuring is
+      # macOS's and runs by hand (make instr-compare); a copy's UUID, the
+      # refusals keeping a build's output untouched, the figures and a
+      # trace's deltas are held here.
+      - name: tools/instr's UUID copies, figures and trace deltas
+        run: python3 tools/instr/test_instr.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
