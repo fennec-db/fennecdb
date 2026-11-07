@@ -903,8 +903,11 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
                 fuzzy,
                 prefix,
             });
+            // As written: `Select::check` holds `k` to `MAX_FUSE_K`, as it
+            // does every `Select`'s -- clamped to `u32::MAX` here, a side's
+            // first ranks weighed alike.
             sel.fuse = Some(Fuse {
-                k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
+                k: as_usize("fuse_k")?,
                 candidates: as_usize("candidates")?,
             });
         }

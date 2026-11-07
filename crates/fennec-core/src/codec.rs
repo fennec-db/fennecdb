@@ -179,6 +179,25 @@ pub fn get_uvarint(buf: &[u8], pos: &mut usize) -> Result<u64> {
     }
 }
 
+/// A dimension or an index's parameter as [`put_uvarint`] wrote it, read
+/// whole into a `usize` or the file refused: `as usize` kept a 32-bit
+/// build's low bits of one a 64-bit build wrote, `vector<4294967297>` a
+/// vector of one.
+pub fn get_usize(buf: &[u8], pos: &mut usize) -> Result<usize> {
+    get_within(buf, pos, usize::MAX as u64).map(|n| n as usize)
+}
+
+/// [`get_uvarint`] held to `most`, the widest a target's `usize` holds, so
+/// a test reads it at a wasm32 build's width natively. Refused as a varint
+/// past 64 bits is, the one string: its own was 48 bytes of the module.
+#[inline]
+fn get_within(buf: &[u8], pos: &mut usize, most: u64) -> Result<u64> {
+    match get_uvarint(buf, pos)? {
+        n if n <= most => Ok(n),
+        _ => Err(Error::Corrupt("varint overflow".into())),
+    }
+}
+
 #[inline]
 pub(crate) fn zigzag(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
@@ -607,10 +626,10 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
         TAG_TEXT => DataType::Text,
         TAG_BYTES => DataType::Bytes,
         TAG_TIMESTAMP => DataType::Timestamp,
-        TAG_VECTOR => DataType::Vector(get_uvarint(buf, pos)? as usize, VecPrec::F32),
-        TAG_VECTOR_F16 => DataType::Vector(get_uvarint(buf, pos)? as usize, VecPrec::F16),
+        TAG_VECTOR => DataType::Vector(get_usize(buf, pos)?, VecPrec::F32),
+        TAG_VECTOR_F16 => DataType::Vector(get_usize(buf, pos)?, VecPrec::F16),
         TAG_LIST => DataType::List(Box::new(decode_type(buf, pos)?)),
-        TAG_SPARSE => DataType::Sparse(get_uvarint(buf, pos)? as usize),
+        TAG_SPARSE => DataType::Sparse(get_usize(buf, pos)?),
         TAG_JSON => DataType::Json,
         TAG_GEO => DataType::Geo,
         other => return Err(Error::Corrupt(format!("unknown type tag {other}"))),
@@ -825,6 +844,42 @@ mod tests {
             put_uvarint(&mut b, v);
             let mut p = 0;
             assert_eq!(get_uvarint(&b, &mut p).unwrap(), v);
+        }
+    }
+
+    /// A dimension a 64-bit build wrote is read whole where `usize` holds
+    /// it and refused where it does not -- never its low bits, as `as
+    /// usize` gave a 32-bit build `vector<1>` for `vector<4294967297>`.
+    #[test]
+    fn a_number_past_usize_is_refused_not_cut() {
+        let mut b = Vec::new();
+        let types = [
+            DataType::Vector(3, VecPrec::F32),
+            DataType::Vector(4, VecPrec::F16),
+            DataType::Sparse(5),
+        ];
+        for ty in &types {
+            encode_type(&mut b, ty);
+        }
+        let mut p = 0;
+        for ty in &types {
+            assert_eq!(&decode_type(&b, &mut p).unwrap(), ty);
+        }
+        for v in [u32::MAX as u64, u32::MAX as u64 + 2, u64::MAX] {
+            b.clear();
+            put_uvarint(&mut b, v);
+            let got = get_usize(&b, &mut 0).ok();
+            assert_eq!(got, usize::try_from(v).ok(), "{v}");
+            // At a wasm32 build's width, natively: past `u32` refused,
+            // where `as usize` read 4294967297 as 1.
+            let at_32 = get_within(&b, &mut 0, u32::MAX as u64);
+            match v {
+                v if v <= u32::MAX as u64 => assert_eq!(at_32.unwrap(), v),
+                _ => assert!(
+                    matches!(&at_32, Err(Error::Corrupt(m)) if m == "varint overflow"),
+                    "{v}: {at_32:?}"
+                ),
+            }
         }
     }
 }
