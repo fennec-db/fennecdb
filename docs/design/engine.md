@@ -571,7 +571,24 @@ opened again are what they were before the block, each index's entries
 those an open builds, and the write is taken again. On main 170 of its 280
 cases failed and the sorted words' aborted the test binary; remembered
 first but put back by difference, the 76 a panic stopped as the row
-written over left the indexes failed, and the words' aborted. TIME_AND_BYTES
+written over left the indexes failed, and the words' aborted. A write
+pays nothing for it: the entry is the one it made before, made sooner, and
+`set` and `del` take the store's mark only where a block is open. Counted
+in process over a database in a file -- `insert`, `set` by id and `del` by
+id, 50 000 each into a collection under `@unique`, `@hash`, `@sorted` and
+`@text`, a run the median of nine rounds and its loop's instructions an op
+(`proc_pid_rusage`, `MallocNanoZone=0`), main's build and this one's in
+turns, seven pairs, each run started under a 1-minute load of 6, which
+stood at 3.8-5.4 throughout: `insert` 22 257.7 instructions an op against
+22 382.4 (-0.56%), `set` by id 44 416.5 against 44 434.3 (-0.04%), `del`
+by id 359 994.0 against 360 100.9 (-0.03%), every pair of each lower; the
+time 1 581 ns against 1 606, 3 137 against 3 175 and 42.0 us against 42.5
+(a `del` here is its text index's lists, every row sharing their words).
+The browser module, which aborts on a panic and holds no put-back, grew
+250 bytes (gzip and brotli within their noise): the entry made before the
+hooks and forgotten where a document is passed over (`execute_inner`
++194, the two `remember`s -20) and the sparse index's count (+52);
+`fennec-server` 1.6 KB of code, the put-back of a write a panic stopped.
 Rejected: the collection's derived indexes let go of on a panic, rebuilt
 from the rows by the next read -- whole whatever the panic left inside an
 index, but a text index of a million rows is rebuilt at 16 us a row by the

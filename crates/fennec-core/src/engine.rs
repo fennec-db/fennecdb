@@ -7949,10 +7949,10 @@ impl Database {
     /// of ordinary deletes, so a replica, `/_changes`, an archive and a
     /// subscriber see each as any delete. Not through a statement: a
     /// `del` leaves out the rows past their time, as every read of the
-    /// collection does, and would find none of them.
-    /// The block it opens is put back as a statement's is where a panic
-    /// unwinds out of it ([`Self::whole`]): left open, only the server's
-    /// lock guard (`held::Writing`) put it back.
+    /// collection does, and would find none of them. The block it opens is
+    /// put back as a statement's is where a panic unwinds out of it
+    /// ([`Self::whole`]): left open, only the server's lock guard
+    /// (`held::Writing`) put it back.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sweep(&mut self, collection: &str, now: i64, ids: &[DocId]) -> Result<usize> {
         self.whole(|db| db.sweep_open(collection, now, ids))
