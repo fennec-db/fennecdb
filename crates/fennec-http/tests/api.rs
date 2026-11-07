@@ -1443,6 +1443,63 @@ fn numeric_params_keep_their_values() {
     assert_eq!(r.body.trim(), r#"[{"n":987654321,"price":0.1}]"#);
 }
 
+/// A number past an int's range is refused naming its field -- a REST
+/// insert's, a PATCH's and a `/query` parameter's alike, 400 -- never
+/// clamped to the nearest int; the ends are taken as written.
+#[test]
+fn an_int_past_its_range_is_refused_naming_the_field() {
+    let h = start(Config::default());
+    let refused = |r: Res, n: &str| {
+        assert_eq!(r.status, 400, "{n}: {}", r.body);
+        assert!(
+            r.body.contains("field `year`")
+                && r.body
+                    .contains("from -9223372036854775808 to 9223372036854775807"),
+            "{n}: {}",
+            r.body
+        );
+    };
+    for n in [
+        "1e300",
+        "-1e300",
+        "9223372036854775808",
+        "-9223372036854775809",
+    ] {
+        let body = format!(r#"{{"title":"far","year":{n}}}"#);
+        refused(call(h.port, "POST", "/articles", Some(&body)), n);
+        let body = format!(r#"{{"year":{n}}}"#);
+        refused(
+            call(h.port, "PATCH", "/articles?year=eq.2024", Some(&body)),
+            n,
+        );
+        let body =
+            format!(r#"{{"query":"put articles {{title: $1, year: $2}}","params":["far", {n}]}}"#);
+        refused(call(h.port, "POST", "/query", Some(&body)), n);
+    }
+    assert_eq!(get(h.port, "/articles?count").body.trim(), "{\"count\":3}");
+    assert_eq!(
+        get(h.port, "/articles?year=eq.2024&count").body.trim(),
+        "{\"count\":1}"
+    );
+    let r = call(
+        h.port,
+        "POST",
+        "/articles",
+        Some(
+            r#"[{"title":"max","year":9223372036854775807},
+                {"title":"min","year":-9223372036854775808}]"#,
+        ),
+    );
+    assert_eq!(r.status, 201, "{}", r.body);
+    for (title, year) in [
+        ("max", "9223372036854775807"),
+        ("min", "-9223372036854775808"),
+    ] {
+        let r = get(h.port, &format!("/articles?select=year&title=eq.{title}"));
+        assert_eq!(r.body.trim(), format!(r#"[{{"year":{year}}}]"#));
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

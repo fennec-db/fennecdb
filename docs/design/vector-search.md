@@ -96,6 +96,19 @@ index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
 
+**An `[int]` or a `[float]` is read as a vector's `f32`s, for now.** A
+list of numbers alone given one is read the quick way above and made its
+elements from the `f32`s (`Value::coerce`'s list arm): a `[float]` keeps
+an `f32`'s digits, `0.1` as 0.10000000149011612, and an `[int]` is exact
+only to 2^24, 16777217 stored as 16777216. Nor can an `f32` tell an int's
+ends from what is past them: every number from 2^63 - 2^38 to 2^63 + 2^39
+is 2^63, `i64::MAX` among them, so an `[int]` takes ±2^63 as the int's
+ends, as it always did, and refuses only an element past them, which only
+a number past 2^63 + 2^39 is. Reading these lists as written, as a json
+field's are (`DataType::keeps_numbers`, `Database::exactly`), is later
+work: the first try, beside the scalars' range check, went through four
+reviews without a version both right and flat in cost, and was split out.
+
 ## Vector parameters
 
 **A vector parameter goes into the module as `f32`s.** `web/fennec.js`'s

@@ -10,7 +10,13 @@ description: Collections and types in FennecQL: json fields and paths, points, t
 what a field holds, how it compares and which indexes it takes:
 <code>bool</code>, <code>int</code>, <code>float</code>, <code>text</code>,
 <code>bytes</code>, <code>timestamp</code>, lists such as <code>[text]</code>,
-<code>json</code>, <code>geo</code> and the vectors.</p>
+<code>json</code>, <code>geo</code> and the vectors. An <code>int</code> is
+64 bits, -9223372036854775808 to 9223372036854775807, and takes a float
+where it is whole (<code>20.0</code>); a value its type refuses is a type
+error naming the field, and a number past an int's range is one too, never
+clamped to its end. A list of numbers given an <code>[int]</code> or a
+<code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
+2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 

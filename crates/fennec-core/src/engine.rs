@@ -3539,7 +3539,7 @@ impl<'a> Tuple<'a> {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
             };
-            vals.push(v.coerce(ty).unwrap_or(Value::Null));
+            vals.push(v.coerce_ends(ty).unwrap_or(Value::Null));
         }
         Ok(self.laid(&vals))
     }
@@ -3549,7 +3549,7 @@ impl<'a> Tuple<'a> {
     fn prefix_of(&self, row: &[Value]) -> Option<crate::composite::KeyBytes> {
         let mut vals = Vec::with_capacity(self.parts.len());
         for (pos, ty) in &self.parts {
-            vals.push(column(row, *pos).coerce(ty).unwrap_or(Value::Null));
+            vals.push(column(row, *pos).coerce_ends(ty).unwrap_or(Value::Null));
         }
         self.laid(&vals)
     }
@@ -3681,7 +3681,7 @@ impl<'a> Probe<'a> {
                 Ok(false)
             }
             Probe::Hash(map, ty) => {
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_ends(ty) else {
                     return Ok(false);
                 };
                 // The child's index decides how its key compares: a
@@ -3729,7 +3729,7 @@ impl<'a> Probe<'a> {
                 // an `int` key has to become `10.0` before it can find
                 // `price = 10.0`. Skipping it lets the mere presence of an
                 // index change the answer.
-                let Ok(k) = key.clone().coerce(ty) else {
+                let Ok(k) = key.clone().coerce_ends(ty) else {
                     return;
                 };
                 let Some(ids) = map.get(&map.key(&k)) else {
@@ -13182,18 +13182,39 @@ fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
 }
 
 fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
-    if let Some((pos, keys)) = schema.path_of(k)? {
-        let f = &schema.fields[pos];
-        let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
-        whole.set_path(&f.name, keys, v)?;
-        doc.set(&f.name, whole.coerce(&f.ty)?);
-        return Ok(());
-    }
-    let f = schema
-        .field(k)
-        .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
-    doc.set(k, v.coerce(&f.ty)?);
+    // A field and a path into one meet one `coerce`: a site each, its
+    // refusal named in both, was 147 bytes more of the browser module.
+    let (f, v) = match schema.path_of(k)? {
+        Some((pos, keys)) => {
+            let f = &schema.fields[pos];
+            let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
+            whole.set_path(&f.name, keys, v)?;
+            (f, whole)
+        }
+        None => {
+            let f = schema.field(k).ok_or_else(|| {
+                Error::NotFound(format!("field `{k}` in collection `{}`", schema.name))
+            })?;
+            (f, v)
+        }
+    };
+    doc.set(&f.name, v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?);
     Ok(())
+}
+
+/// A value a field's type refused, the field named: of a document of
+/// several fields, `expected int, found text` or an int's range left its
+/// writer to find which, where the importer names a row's field
+/// (`fennec_import::load`) and a call its argument. Out of line, on the
+/// refusal alone: a value taken goes by as it did. Joined by `cat`, 132
+/// bytes of the browser module, where a `format!` was 148.
+#[cold]
+#[inline(never)]
+fn in_field(name: &str, e: Error) -> Error {
+    match e {
+        Error::Type(m) => Error::Type(crate::declared::cat(&["field `", name, "`: ", &m])),
+        e => e,
+    }
 }
 
 /// Whether the row `id` of `c` is past its time: its `@ttl` field, at
@@ -13354,10 +13375,11 @@ fn updated(
         let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
             Some(p) => {
-                if schema.fields[p].required && matches!(v, Value::Null) {
-                    return Err(not_null(&schema.fields[p].name));
+                let f = &schema.fields[p];
+                if f.required && matches!(v, Value::Null) {
+                    return Err(not_null(&f.name));
                 }
-                doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?
+                doc.fields[p].1 = v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?
             }
             None => set_field(schema, &mut doc, a.key, v)?,
         }
