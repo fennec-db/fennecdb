@@ -115,7 +115,10 @@ ring, webpki-roots), behind a `tls` feature: never by fennec-core, -ql,
 `near`, `match` and `fuse` rankings cap at 10 000 rows, expressions at 512 levels,
 a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
 `get` 4 levels deep), each a query error, never a cut result; a new limit
-takes that shape.
+takes that shape. A number a statement or a declared schema writes -- a
+dimension, a beam, `fuse k`, a count -- is read as written or refused
+naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
+to a 32-bit `usize`.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a

@@ -69,7 +69,20 @@ pub enum What {
 /// in $n)`, where they were a call of a function no build has, refused as
 /// it ran -- a definition holding one is marked broken, to be defined
 /// again.
-pub const GRAMMAR_EPOCH: u32 = 2;
+///
+/// 3: a number a statement writes is read as written within its range or
+/// refused naming it (`Parser::int_in`), where it was clamped or cut:
+/// `fuse k` past 1 000 000 (`k 99999999999` was `u32::MAX`); `near`'s
+/// `ef`, `fuse`'s and `rerank`'s `candidates` and a snippet's words under 1
+/// (read as 1, or refused as they ran) or past their range (natively `ef
+/// 5000000000` was read whole); a parameter's `vector<N>` past 10^9 -- a
+/// definition holding one no longer reads, and is marked broken ("its
+/// text no longer reads: ... under grammar epoch 3, where it was defined
+/// under 2: define it again"): its calls are refused, and a bound one
+/// refuses every write that would wake it, until it is defined again or
+/// dropped (`tests/stored.rs`). `@hnsw(ef_construction=4)` to `7`, built
+/// as 8 before, reads as written; no definition holds a `create`.
+pub const GRAMMAR_EPOCH: u32 = 3;
 
 /// What reads a named statement's stored text back into its tree: the
 /// parser's (`fennec_ql::definition`), which this crate does not hold.
@@ -2766,7 +2779,7 @@ impl Canon {
         if let Some(Fuse { k, candidates }) = fuse {
             self.tag(16);
             self.node(1);
-            self.opt_num(1, k.map(u64::from));
+            self.opt_num(1, k.map(|n| n as u64));
             self.opt_num(2, candidates.map(|n| n as u64));
             self.end();
         }

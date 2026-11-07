@@ -4696,7 +4696,9 @@ impl VectorIndex {
             found.sort();
         }
 
-        let mut out = Vec::with_capacity(k);
+        // No more than the walk found: `k` is the beam a caller widened
+        // it to, and `ef 4294967295` asked for 64 GiB here.
+        let mut out = Vec::with_capacity(k.min(found.len()));
         let mut docs = Vec::new();
         'found: for c in found {
             if self.is_deleted(c.node) {
@@ -4743,7 +4745,7 @@ impl VectorIndex {
     fn nearest_docs(&self, q: &[f32], pairs: &[(u32, DocId)], k: usize) -> Vec<(DocId, f32)> {
         let mut nodes: Vec<u32> = pairs.iter().map(|p| p.0).collect();
         nodes.dedup();
-        let mut out = Vec::with_capacity(k);
+        let mut out = Vec::with_capacity(k.min(pairs.len()));
         for c in self.nearest_of(q, &nodes, k) {
             let score = score_from_distance(self.spec.metric, c.dist);
             let at = pairs.partition_point(|p| p.0 < c.node);
@@ -5112,6 +5114,11 @@ impl VectorIndex {
             return None;
         }
         pos += 1;
+        // `as usize`, where a 32-bit build keeps the low bits: the graph was
+        // written with its field's dimension and spec, which the schema
+        // read whole (`codec::get_usize`) or refused the file, so a cut one
+        // is no file there is. Checked here as well, it was 88 bytes of the
+        // browser module.
         let dim = get_uvarint(bytes, &mut pos).ok()? as usize;
         if dim != expect_dim {
             return None;
@@ -5638,6 +5645,32 @@ mod tests {
         let r = ix.search(&[10.2, 0.0], 3, None, |_| true);
         assert_eq!(r[0].0, 10);
         assert_eq!(ix.len(), 200);
+    }
+
+    /// A beam as wide as a graph's ids reach -- `near ... ef 4294967295`,
+    /// which the engine hands down as `k` -- answers what the walk found
+    /// and reserves no more: `Vec::with_capacity(k)` asked for 64 GB
+    /// natively, and overflowed a wasm32 build's `usize`. A vector written
+    /// twice is one node of two documents, answered by `nearest_docs`.
+    #[test]
+    fn a_beam_past_the_graph_reserves_only_what_it_found() {
+        let mut ix = VectorIndex::new(2, spec());
+        for i in 0..40u64 {
+            ix.insert(i, &[i as f32, 0.0]);
+        }
+        ix.insert(40, &[3.0, 0.0]);
+        let ids: Vec<DocId> = (0..41).collect();
+        let most = u32::MAX as usize;
+        for (how, r) in [
+            ("walk", ix.search(&[10.2, 0.0], most, Some(most), |_| true)),
+            ("exact", ix.search_exact(&[10.2, 0.0], most, |_| true)),
+            ("ids", ix.search_ids(&[10.2, 0.0], most, &ids)),
+        ] {
+            assert_eq!((r.len(), r[0].0), (41, 10), "{how}");
+            // The nodes found reserved, and a node's second document grew
+            // it once: never the beam's 2^32.
+            assert!(r.capacity() <= 2 * r.len(), "{how}: {}", r.capacity());
+        }
     }
 
     /// The int8 kernels -- NEON's own on aarch64 -- give the scalar strips'
