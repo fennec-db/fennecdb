@@ -253,7 +253,9 @@ fn every_refusal_before_the_signature_is_one_401() {
     let big_sig = stripe_sig(STRIPE_SECRET, t, &big);
     let stale = stripe_sig(STRIPE_SECRET, t - 301, &body);
     let wrong = stripe_sig(STRIPE_TEST_SECRET, t, &body);
-    let cases: [(&str, Vec<(&str, &str)>, &str, &str); 7] = [
+    // A case: the hook, the headers sent, the body and the check named.
+    type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str, &'a str);
+    let cases: [Case; 7] = [
         ("nosuch", vec![("Stripe-Signature", &good)], &body, "hook"),
         (
             "stripe",

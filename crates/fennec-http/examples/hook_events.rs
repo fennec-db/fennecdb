@@ -21,6 +21,12 @@
 //!     HMACs computed (the audit's wait set to none).
 //!   * `verify4k`, `verify64k`: `Hooks::verify` alone over an event of 4
 //!     and 64 KB, in process.
+//!   * `beside0`, `beside10`, `beside100`: what an event's fsync costs the
+//!     buffered writers beside it (*An fsync an event costs the buffered
+//!     writers beside it*): `buffered`'s `set`s on this thread while
+//!     another sends 0, 10 or 100 events a second, each fsynced; it prints
+//!     the buffered writes' median and p99 besides, each timed alone. N is
+//!     a million unless given: some seconds, so that events meet them.
 //!
 //! `forged` writes the line a refused event writes to stderr, as a server
 //! does: send stderr to `/dev/null`.
@@ -37,8 +43,9 @@ use fennec_http::crypto::hmac_sha256;
 use fennec_http::hooks::Hooks;
 use fennec_http::http::{Method, Request};
 use fennec_http::Config;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ROUNDS: usize = 9;
 const SECRET: &str = "whsec_hook_events_bench";
@@ -104,7 +111,16 @@ fn send(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, want: u16) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "event".into());
-    let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(9_000);
+    // Beside events, the writes run for seconds, so that tens and hundreds
+    // of events meet them.
+    let n: usize =
+        args.next()
+            .and_then(|a| a.parse().ok())
+            .unwrap_or(if mode.starts_with("beside") {
+                1_000_000
+            } else {
+                9_000
+            });
     fennec_http::audit::set_delay(0);
     // The reader a server installs, which a hook's stored statement is
     // read by.
@@ -117,8 +133,9 @@ fn main() {
     let db = Arc::new(RwLock::new(db));
     let read = |_: &str| Ok(SECRET.as_bytes().to_vec());
     let hooks = Arc::new(Hooks::read("stripe stripe s max-body 128k\n", read, 64 << 20).unwrap());
+    let beside: Option<u64> = mode.strip_prefix("beside").and_then(|r| r.parse().ok());
     let cfg = Config {
-        sync_on_write: mode != "buffered",
+        sync_on_write: mode != "buffered" && beside.is_none(),
         hooks: Some(Arc::clone(&hooks)),
         ..Config::default()
     };
@@ -149,8 +166,37 @@ fn main() {
         .unwrap()
         .as_millis() as i64;
 
+    // The events sent beside the buffered writes, at their rate, from a
+    // thread of their own as a sender's connection would be.
+    let stop = Arc::new(AtomicBool::new(false));
+    let taken = Arc::new(AtomicUsize::new(0));
+    let sender = beside.filter(|r| *r > 0).map(|rate| {
+        let (db, cfg) = (Arc::clone(&db), cfg.clone());
+        let (stop, taken) = (Arc::clone(&stop), Arc::clone(&taken));
+        std::thread::spawn(move || {
+            let every = Duration::from_nanos(1_000_000_000 / rate);
+            let mut next = Instant::now();
+            let mut k = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                k += 1;
+                send(
+                    &db,
+                    &cfg,
+                    &event(&format!("evt_b{k}"), k % ORDERS, 0, SECRET),
+                    200,
+                );
+                taken.fetch_add(1, Ordering::Relaxed);
+                next += every;
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+            }
+        })
+    });
+
     let per = n / ROUNDS;
     let mut rounds = Vec::with_capacity(ROUNDS);
+    let mut each: Vec<u64> = Vec::new();
     let mut i = 0usize;
     let before = retired();
     for _ in 0..ROUNDS {
@@ -165,11 +211,12 @@ fn main() {
                     "event" => event(&format!("evt_{i}"), order, 0, SECRET),
                     "keyed" => query(set, &params, Some(&format!("k-{i}"))),
                     "put" | "buffered" => query(set, &params, None),
+                    _ if beside.is_some() => query(set, &params, None),
                     "forged" => event(&format!("evt_{i}"), order, 0, "whsec_not_it"),
                     "duplicate" | "verify4k" | "verify64k" => post("/", Vec::new(), String::new()),
                     other => panic!(
                         "no mode {other}: event, keyed, put, buffered, duplicate, forged, \
-                         verify4k or verify64k"
+                         verify4k, verify64k, beside0, beside10 or beside100"
                     ),
                 }
             })
@@ -182,17 +229,37 @@ fn main() {
                 "verify4k" | "verify64k" => {
                     assert!(hooks.verify("stripe", &verified, now_ms).is_ok())
                 }
+                _ if beside.is_some() => {
+                    let one = Instant::now();
+                    send(&db, &cfg, req, 200);
+                    each.push(one.elapsed().as_nanos() as u64);
+                }
                 _ => send(&db, &cfg, req, 200),
             }
         }
         rounds.push(t.elapsed().as_nanos() as f64 / per as f64);
     }
     let after = retired();
+    stop.store(true, Ordering::Relaxed);
+    if let Some(sender) = sender {
+        sender.join().unwrap();
+    }
     rounds.sort_by(|a, b| a.total_cmp(b));
     let ns = rounds[ROUNDS / 2];
     println!("mode {mode}, {} requests", per * ROUNDS);
     println!("ns a request {ns:.0}");
     println!("a second {:.0}", 1e9 / ns);
+    if !each.is_empty() {
+        each.sort_unstable();
+        let at = |q: f64| each[((each.len() - 1) as f64 * q) as usize];
+        println!(
+            "buffered writes: median {} ns, p99 {} ns, max {} ns; {} events beside them",
+            at(0.5),
+            at(0.99),
+            at(1.0),
+            taken.load(Ordering::Relaxed)
+        );
+    }
     if let (Some((i0, c0)), Some((i1, c1))) = (before, after) {
         let sent = (per * ROUNDS) as f64;
         println!("instructions in the loop {}", i1 - i0);
