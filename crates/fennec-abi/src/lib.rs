@@ -681,6 +681,76 @@ mod tests {
         }
     }
 
+    /// A number past an int's range is refused naming its field, never
+    /// clamped to the nearest int -- a text's literal, a parameter's JSON, a
+    /// document's and a list's element handed over as `f32`s alike, the
+    /// module's and the native library's answer -- and the ends are taken.
+    /// An `[int]`'s ends are `f32`s of ±2^63 and kept as they always were.
+    #[test]
+    fn an_int_past_its_range_is_refused_naming_the_field() {
+        let mut db = Database::new();
+        run(&mut db, "create collection t (n int, xs [int])", "", &[]);
+        let refused = |field: &str| {
+            format!(
+                r#"{{"kind":"error","message":"type error: field `{field}`: an int is from -9223372036854775808 to 9223372036854775807"}}"#
+            )
+        };
+        for n in [
+            "1e300",
+            "-1e300",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
+            let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);
+            assert_eq!(r, refused("n"), "{n}");
+            let r = run(&mut db, "put t $1", &format!(r#"[{{"n": {n}}}]"#), &[]);
+            assert_eq!(r, refused("n"), "{n}");
+        }
+        assert_eq!(run(&mut db, "put t {n: -1e300}", "", &[]), refused("n"));
+        let apart = |x: f32| {
+            let mut b = [0u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+            b.extend(x.to_le_bytes());
+            b
+        };
+        let r = run(&mut db, "put t {xs: $1}", "[null]", &apart(1e20));
+        assert_eq!(r, refused("xs"));
+        assert_eq!(
+            run(&mut db, "put t {xs: $1}", "[[1e20]]", &[]),
+            refused("xs")
+        );
+        assert_eq!(run(&mut db, "put t {xs: [-1e20]}", "", &[]), refused("xs"));
+        for xs in ["[-9223372036854775808]", "[9223372036854775807]"] {
+            let r = run(&mut db, &format!("put t {{xs: {xs}}}"), "", &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+            let r = run(&mut db, "put t {xs: $1}", &format!("[{xs}]"), &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+        }
+        for x in [-(2f32.powi(63)), 2f32.powi(63)] {
+            let r = run(&mut db, "put t {xs: $1}", "[null]", &apart(x));
+            assert!(r.contains("\"affected\""), "{r}");
+        }
+        let r = run(&mut db, "get t select xs order id", "", &[]);
+        let (min, max) = (
+            r#"{"xs":[-9223372036854775808]}"#,
+            r#"{"xs":[9223372036854775807]}"#,
+        );
+        let want = format!("[{min},{min},{max},{max},{min},{max}]");
+        assert!(r.contains(&want), "{r}");
+        for n in ["9223372036854775807", "-9223372036854775808"] {
+            let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+            let r = run(&mut db, &format!("put t {{n: {n}}}"), "", &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+        }
+        let r = run(&mut db, "get t where n != null select n order id", "", &[]);
+        assert!(
+            r.contains(
+                r#"[{"n":9223372036854775807},{"n":9223372036854775807},{"n":-9223372036854775808},{"n":-9223372036854775808}]"#
+            ),
+            "{r}"
+        );
+    }
+
     /// A `require` that says why: the answer's `reason`, beside `at` for a
     /// text of several, as a server's 412 says it; none where it said none.
     /// The module's and the native library's answer alike.

@@ -287,13 +287,40 @@ impl Value {
     /// list->vector conversion included). Schema validation funnels
     /// through this single point.
     pub fn coerce(self, ty: &DataType) -> Result<Value> {
+        self.coerce_as(ty, false)
+    }
+
+    /// [`Value::coerce`], but the float ±2^63 going into an `int` is that
+    /// int's end, which a write refuses, since its text may have been past
+    /// it ([`I64_END`]). For a key looked up by: `=` finds the row holding
+    /// `i64::MIN` by the float -2^63, which it is, and the one holding
+    /// `i64::MAX` by 2^63, which `cmp_value` compares it as, so a `lookup`'s
+    /// parent holding the float finds that child too. And for an `[int]`'s
+    /// `f32`s, where ±2^63 is what its ends were read as.
+    pub(crate) fn coerce_ends(self, ty: &DataType) -> Result<Value> {
+        self.coerce_as(ty, true)
+    }
+
+    /// The one body of [`Value::coerce`] and [`Value::coerce_ends`]: a
+    /// function of its own taking the ends and moving the value on into
+    /// `coerce` was 102 bytes more of the browser module.
+    fn coerce_as(self, ty: &DataType, ends: bool) -> Result<Value> {
         if self.is_null() {
             return Ok(Value::Null);
         }
         match (ty, self) {
             (DataType::Bool, Value::Bool(b)) => Ok(Value::Bool(b)),
             (DataType::Int, Value::Int(i)) => Ok(Value::Int(i)),
-            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => Ok(Value::Int(f as i64)),
+            // `as` saturates: `1e300` was filed as 9223372036854775807. A
+            // whole float under 2^63 either side is the int it says, and
+            // only a float takes this arm -- an integer written as one is
+            // read as an `i64` and never meets the test.
+            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => {
+                match f.abs() < I64_END || ends && f.abs() == I64_END {
+                    true => Ok(Value::Int(f as i64)),
+                    false => Err(past_int()),
+                }
+            }
             (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
             (DataType::Float, Value::Int(i)) => Ok(Value::Float(i as f64)),
             (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
@@ -356,20 +383,25 @@ impl Value {
             // (json.rs), because `near $1` is evaluated without schema
             // context. If the target field is a list it is converted back
             // here; without this arm `[int]`/`[float]` fields could not be
-            // filled from the browser and fennec-server paths. Values drop to f32
-            // at that stage, so `[float]` loses precision one way; `[int]`
-            // stays lossless for whole numbers.
+            // filled from the browser and fennec-server paths. The numbers
+            // are `f32`s by then: a `[float]` keeps an `f32`'s digits, and an
+            // `[int]` is exact only to 2^24 (vector-search.md#numbers-in).
+            // Nor does an `f32` tell an int's ends from past them: 2^63 is
+            // where every number from 2^63 - 2^38 to 2^63 + 2^39 lands,
+            // i64::MAX among them, so an `[int]` takes ±2^63 as its ends, as
+            // it always did ([`Value::coerce_ends`]), and refuses an `f32`
+            // past them, which only a number past 2^63 + 2^39 is.
             (DataType::List(inner), Value::Vector(v)) => {
                 let mut out = Vec::with_capacity(v.len());
                 for f in v {
-                    out.push(Value::Float(f as f64).coerce(inner)?);
+                    out.push(Value::Float(f as f64).coerce_as(inner, true)?);
                 }
                 Ok(Value::List(out))
             }
             (DataType::List(inner), Value::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
-                    out.push(it.coerce(inner)?);
+                    out.push(it.coerce_as(inner, ends)?);
                 }
                 Ok(Value::List(out))
             }
@@ -559,6 +591,24 @@ fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
 
 fn not_bytes() -> Error {
     Error::Type("bytes are numbers from 0 to 255".into())
+}
+
+/// 2^63: the first `f64` past `i64::MAX`, and `i64::MIN`'s magnitude.
+/// -2^63 is `i64::MIN`, yet a float of it is refused too when written: a
+/// JSON integer past `i64::MIN` is read as the float it rounds to
+/// (`-9223372036854775809` is -2^63 exactly), and there the text that
+/// said it is gone. `i64::MIN` written as an integer is an `i64` and taken,
+/// and a key looked up by ±2^63 is the int's end ([`Value::coerce_ends`]).
+const I64_END: f64 = 9_223_372_036_854_775_808.0;
+
+/// The refusal of a whole float at or past [`I64_END`] going into an `int`,
+/// which a document's write names the field of (`engine::in_field`). Out of
+/// line: the range is a limit, and a limit is an error, never the nearest
+/// int it would have been cut to.
+#[cold]
+#[inline(never)]
+fn past_int() -> Error {
+    Error::Type("an int is from -9223372036854775808 to 9223372036854775807".into())
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {
