@@ -848,6 +848,19 @@ ran is a <a href="/docs/monitoring#tracing">span</a>. <a
 href="/docs/webhooks#watching">Webhooks from Stripe and GitHub</a> gathers
 them, with the <a href="/docs/datadog#monitors">Datadog monitors</a>.</p>
 
+<p>Every SDK's <code>NamedStatement</code> carries the two columns,
+<code>hook</code> and <code>armed</code> (<a
+href="languages.html#named-statements">every SDK's</a>), and its
+<code>call</code> sends a webhook consumer a test event, the event its one
+argument. <a href="studio.html#schema">fennec studio</a> lists a webhook
+consumer among the named statements by its hook, armed or not, sends it a
+test event begun from the paths its parameters read and the values its
+condition compares, and opens its definition as <code>create or replace
+statement ...</code>; its editor colours <code>hook</code> and the
+<code>event</code> of <code>event.&lt;path&gt;</code>. The shell's
+<code>.help</code> gives the form, which a server defines and takes events
+for.</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents

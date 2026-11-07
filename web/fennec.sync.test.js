@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile, access, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Fennec, sync, connect, inc, FennecError } from './fennec.js';
@@ -1371,6 +1371,36 @@ test('the statements a server holds are listed, a scheduled one with its clock',
     assert.deepEqual([after.next, after.last], [`${next}-01-01T02:00:00Z`, null]);
   } finally {
     s.close();
+  }
+});
+
+// A webhook consumer, listed to the server's token: its hook, and whether
+// this server holds the hook's secret -- armed where its hooks file names
+// the hook, not where it does not; a called statement has neither. The
+// server's token sends one a test event with `call`, the event its one
+// argument, run as a delivery is.
+test('the statements a server holds name a webhook consumer\'s hook and whether it is armed', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fennec-js-hooks-'));
+  await writeFile(join(dir, 'stripe.whsec'), 'whsec_js_test');
+  await writeFile(join(dir, 'hooks'), `stripe stripe ${join(dir, 'stripe.whsec')}\n`);
+  // A server over a file: one in memory takes no webhook consumer.
+  const s = await server(['--file', join(dir, 'db.fennec'), '--hooks', join(dir, 'hooks')]);
+  const db = client.connect(s.url);
+  try {
+    await db.run("create statement paid($key text from event.data.object.metadata.key) on hook stripe where event.type = 'payment_intent.succeeded' as set tasks {status: 'paid'} where key = $key require 1");
+    await db.run("create statement pushed($key text from event.ref) on hook github as set tasks {status: 'pushed'} where key = $key require 1");
+    await db.run("create statement open_ones() as get tasks where status = 'open' count");
+    const listed = Object.fromEntries((await db.statements()).map((x) => [x.name, x]));
+    assert.deepEqual([listed.paid.hook, listed.paid.armed, listed.paid.signature, listed.paid.writes], ['stripe', true, '($key text from event.data.object.metadata.key)', true]);
+    assert.deepEqual([listed.pushed.hook, listed.pushed.armed], ['github', false]);
+    assert.deepEqual([listed.open_ones.hook, listed.open_ones.armed], [null, null]);
+    // A test event: its condition asked, its parameter read from it.
+    assert.equal((await db.call('paid', { type: 'payment_intent.succeeded', data: { object: { metadata: { key: 'a' } } } })).count, 1);
+    assert.deepEqual(await db.rows("get tasks select status where key = 'a'"), [{ status: 'paid' }]);
+    await assert.rejects(db.call('paid', { type: 'charge.refunded' }), (e) => e instanceof FennecError && e.status === 400 && /passes this event over/.test(e.message));
+  } finally {
+    s.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

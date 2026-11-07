@@ -279,7 +279,9 @@ public sealed partial class FennecClient : IDisposable
 
     /// <summary>The named statements the database holds, as the server lists them to its own token
     /// (<c>statements</c>) -- a scoped one is refused (403): each one's signature, whether it writes, its comment,
-    /// why the schema broke it, what a binding is bound to, and a scheduled one's clock.</summary>
+    /// why the schema broke it, what a binding is bound to, a scheduled one's clock, and a webhook consumer's hook and
+    /// whether the server holds its secret. <see cref="CallAsync"/> sends a webhook consumer a test event, the event
+    /// its arguments, run as a delivery is and keeping no key.</summary>
     public Task<IReadOnlyList<NamedStatement>> StatementsAsync(CancellationToken cancellationToken = default) =>
         QueryAsync<NamedStatement>("statements", null, cancellationToken);
 

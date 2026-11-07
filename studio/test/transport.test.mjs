@@ -233,7 +233,7 @@ test('a subscription: its seed, then each change, alike', { skip }, async () => 
 
 // Last: a definition is a write of the server's that the page has none
 // of, so the server's change counter stands ahead of the page's after it.
-test('a call: answered as the page answers its body, which refuses statements in words of its own', { skip }, async () => {
+test('a call and a test event: answered as the page answers the body, which refuses statements in words of its own', { skip }, async () => {
   await q('create collection acct (owner text @hash, balance int)');
   await q('put acct [{owner: "a", balance: 10}, {owner: "b", balance: 5}, {owner: "c", balance: 7}]');
   // Defined on the server alone: the module in the page is built without them.
@@ -256,6 +256,35 @@ test('a call: answered as the page answers its body, which refuses statements in
   await q('get acct select owner, balance order owner');
   // Refused as /query refuses any statement: an argument of another type.
   assert.equal((await call('pay', { owner: 'b', n: 'two' })).status, 400);
+  // A webhook consumer's test event, the schema view's: the same text, the
+  // event its one parameter, answered as the page answers the body its
+  // parameters read. Defined over a server's file with no hooks file, as
+  // the studio may: its hook is listed not armed.
+  const hook = await remote(
+    'POST',
+    '/query',
+    JSON.stringify({
+      query: "create statement paid($owner text from event.data.object.metadata.owner, $n int from event.data.object.amount) on hook stripe where event.type = 'payment_intent.succeeded' as set acct {balance: balance + $n} where owner = $owner require 1",
+    }),
+  );
+  assert.equal(hook.status, 200, JSON.stringify(hook));
+  const event = { type: 'payment_intent.succeeded', data: { object: { amount: 3, metadata: { owner: 'c' } } } };
+  const took = await call('paid', event);
+  assert.deepEqual([took.status, took.json], [200, (await body('set acct {balance: balance + $2} where owner = $1 require 1', ['c', 3])).json]);
+  assert.ok(took.seq > paid.seq, JSON.stringify(took));
+  const listed = (await remote('POST', '/query', JSON.stringify({ query: 'statements' }))).json.find((s) => s.name === 'paid');
+  assert.deepEqual([listed.hook, listed.armed, listed.signature], ['stripe', false, '($owner text from event.data.object.metadata.owner, $n int from event.data.object.amount)']);
+  // An event its condition passes over runs nothing; one missing a path its
+  // parameters read is refused naming it; a guard not met is 412.
+  for (const [e, status, words] of [
+    [{ ...event, type: 'charge.refunded' }, 400, /passes this event over/],
+    [{ type: event.type, data: { object: { amount: 3 } } }, 400, /data\.object\.metadata\.owner/],
+    [{ ...event, data: { object: { amount: 3, metadata: { owner: 'nobody' } } } }, 412, /./],
+  ]) {
+    const r = await call('paid', e);
+    assert.equal(r.status, status, JSON.stringify(r));
+    assert.match(r.json.error, words);
+  }
   // The page names what it lacks, before anything of the text runs.
   for (const text of ['statements', 'call rich $1', 'create statement x() as get acct select owner']) {
     const r = await local('POST', '/query', JSON.stringify({ query: text, params: [{ min: 1 }] }));

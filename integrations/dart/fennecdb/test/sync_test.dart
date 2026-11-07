@@ -392,6 +392,38 @@ void main() {
     db.close();
   });
 
+  // A webhook consumer, listed by its hook -- not armed, this server given no
+  // hooks file -- and a called statement by none; the server's token sends
+  // one a test event with callStatement, the event its args, run as a
+  // delivery is.
+  test('a webhook consumer is listed by its hook and sent a test event', () async {
+    final s = await server('hooked');
+    final db = Fennec.connect(s.url);
+    await db.execute(r'create statement paid($key text from event.data.object.metadata.key) on hook stripe '
+        r"where event.type = 'payment_intent.succeeded' as set tasks {status: 'paid'} where key = $key require 1");
+    await db.execute("create statement open_ones() as get tasks where status = 'open' count");
+    final listed = {for (final x in await db.statements()) x.name: x};
+    final paid = listed['paid']!;
+    expect(
+        (paid.hook, paid.armed, paid.signature), ('stripe', false, r'($key text from event.data.object.metadata.key)'));
+    expect((listed['open_ones']!.hook, listed['open_ones']!.armed), (null, null));
+    final event = {
+      'type': 'payment_intent.succeeded',
+      'data': {
+        'object': {
+          'metadata': {'key': 'a'}
+        }
+      }
+    };
+    expect((await db.callStatement('paid', args: event)).affected, 1);
+    await expectLater(
+        db.callStatement('paid', args: {'type': 'charge.refunded'}),
+        throwsA(isA<FennecException>()
+            .having((e) => e.status, 'status', 400)
+            .having((e) => e.message, 'message', contains('passes this event over'))));
+    db.close();
+  });
+
   test('connect runs every query on the server', () async {
     final s = await server('connect');
     final db = Fennec.connect(s.url);

@@ -348,7 +348,10 @@ class FennecRemote {
   /// The named statements the server holds, as it lists them to its own
   /// token (`statements`) -- a scoped one is refused (status 403): each one's
   /// signature, whether it writes, its comment, why the schema broke it, what
-  /// a binding is bound to, and a scheduled one's clock.
+  /// a binding is bound to, a scheduled one's clock, and a webhook consumer's
+  /// hook and whether the server holds its secret. [callStatement] sends a
+  /// webhook consumer a test event, the event its `args`, run as a delivery
+  /// is and keeping no key.
   Future<List<NamedStatement>> statements() async => (await query('statements')).map(namedStatement).toList();
 
   /// Lets the connections go: this one's, and every copy's.

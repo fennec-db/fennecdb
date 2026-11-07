@@ -23,7 +23,7 @@ registerHooks({
   },
 });
 const S = { ...(await import('../statements.js')), ...(await import('../statements-views.js')) };
-const { clockText } = await import('../schema.js');
+const { clockText, eventSkeleton } = await import('../schema.js');
 const { readInput, vectorSummary } = await import('../values.js');
 const { parseMetrics, claimsOf } = await import('../connect.js');
 
@@ -248,10 +248,10 @@ test('a call names its statement as FennecQL writes one, its arguments one param
   // The signature `statements` writes, read into the call form's inputs.
   assert.deepEqual(S.signatureParams('($from int, $to int = ..., $v vector<4, f16>, $tags [text]) claims (sub text, groups [text])'), {
     params: [
-      { name: 'from', type: 'int', optional: false },
-      { name: 'to', type: 'int', optional: true },
-      { name: 'v', type: 'vector<4, f16>', optional: false },
-      { name: 'tags', type: '[text]', optional: false },
+      { name: 'from', type: 'int', optional: false, from: undefined },
+      { name: 'to', type: 'int', optional: true, from: undefined },
+      { name: 'v', type: 'vector<4, f16>', optional: false, from: undefined },
+      { name: 'tags', type: '[text]', optional: false, from: undefined },
     ],
     claims: ['sub', 'groups'],
   });
@@ -288,6 +288,44 @@ test('a scheduled statement is run now by its name alone, and its clock read in 
     clockText({ next: null, last: { slot: '2026-11-03T03:00:00Z', outcome: 'ran', status: null, reason: null, skipped: 0 }, held: null }),
     'no next slot; ran for 2026-11-03T03:00:00Z',
   );
+});
+
+test('a webhook consumer is sent a test event as one parameter, begun from what it reads', () => {
+  const event = { type: 'payment_intent.succeeded', data: { object: { id: 'pi_1' } } };
+  assert.deepEqual(S.testEvent('stripe_paid', event), { text: 'call stripe_paid $1', params: [event] });
+  for (const v of NASTY) assert.equal(S.testEvent('t', { v }).text, 'call t $1');
+  for (const bad of ['stripe paid', 'x;drop', '', 'a'.repeat(60)]) assert.throws(() => S.testEvent(bad, {}), S.StatementError, bad);
+  for (const bad of [null, [event], 'evt_1', 7]) assert.throws(() => S.testEvent('t', bad), /an event is a JSON object/);
+  // The signature `statements` writes for a webhook consumer: what each
+  // parameter reads of the event, a default after it.
+  const signature = '($intent text from event.data.object.id, $order text from event.data.object.metadata.order-id, $amount int from event.data.object.amount, $live bool from event.livemode = ..., $at timestamp from hook.at, $e json from event)';
+  assert.deepEqual(
+    S.signatureParams(signature).params.map((p) => [p.name, p.type, p.optional, p.from]),
+    [
+      ['intent', 'text', false, 'event.data.object.id'],
+      ['order', 'text', false, 'event.data.object.metadata.order-id'],
+      ['amount', 'int', false, 'event.data.object.amount'],
+      ['live', 'bool', true, 'event.livemode'],
+      ['at', 'timestamp', false, 'hook.at'],
+      ['e', 'json', false, 'event'],
+    ],
+  );
+  // The test event begins with each path a parameter reads, a value of its
+  // type there, and each `event.<path> = <literal>` its condition compares.
+  const json = (v) => JSON.parse(JSON.stringify(v));
+  assert.deepEqual(json(eventSkeleton(signature, "event.type = 'payment_intent.succeeded' and event.livemode = true and event.data.object.amount=-2.5")), {
+    data: { object: { id: '', metadata: { 'order-id': '' }, amount: -2.5 } },
+    livemode: true,
+    type: 'payment_intent.succeeded',
+  });
+  assert.deepEqual(json(eventSkeleton('($n int from event.a.b, $j json from event.a.c, $at timestamp from event.at)', null)), { a: { b: 0, c: {} }, at: 0 });
+  // A key `__proto__` is a key of the event, never the page's prototypes.
+  const odd = eventSkeleton('($x text from event.__proto__.polluted)', "event.constructor.prototype.polluted = 'yes'");
+  assert.equal({}.polluted, undefined);
+  assert.equal(JSON.stringify(odd), '{"__proto__":{"polluted":""},"constructor":{"prototype":{"polluted":"yes"}}}');
+  // A callable statement's signature, or none, begins from nothing.
+  assert.deepEqual(json(eventSkeleton('($from int)', null)), {});
+  assert.deepEqual(json(eventSkeleton(null, undefined)), {});
 });
 
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {
@@ -430,7 +468,8 @@ test('an answer\'s columns are read off its rows; the metrics off their text', a
 // Each view is a module of its own, fetched when it opens: what it adds,
 // with the stylesheet and the modules the views share, gzipped. The schema
 // view, the largest, passed 24 KB with the scheduled statements' clock and
-// run now, and is held to 25 KB alone.
+// run now, and 25 KB with the webhook consumers' rows and test event, and
+// is held to 26 KB alone.
 test('each view past the rows loads apart from the first load, and small', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const gz = (f) => gzipSync(readFileSync(join(here, '..', f)), { level: 9 }).length;
@@ -439,7 +478,7 @@ test('each view past the rows loads apart from the first load, and small', () =>
   for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js', 'kit.js', 'highlight.js', 'views.css', 'statements-views.js']) {
     assert.ok(!page.includes(view), `${view} is on the first load`);
   }
-  for (const [view, most] of [['editor.js', 24_000], ['schema.js', 25_000], ['live.js', 24_000], ['admin.js', 24_000]]) {
+  for (const [view, most] of [['editor.js', 24_000], ['schema.js', 26_000], ['live.js', 24_000], ['admin.js', 24_000]]) {
     assert.ok(shared + gz(view) < most, `${view}: ${shared + gz(view)} bytes gzipped`);
   }
 });

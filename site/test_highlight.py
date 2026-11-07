@@ -35,6 +35,11 @@ SAMPLES = [
     "get sales select bucket(at, 1h) as hour where at > '2026-01-01' and format = 'at'",
     "create statement late at\n  '0 3 * * *' as del t where at < now()",
     'create statement nightly at "0 3 * * *" as del t where at < now()',
+    "create statement paid($id text from event.data.object.id, $e json from event) on hook stripe\n"
+    "  where event.type = 'payment_intent.succeeded' as set orders {status: 'paid'} where intent = $id require 1",
+    "create statement pushed($kind text from hook.event) on hook github where hook.event = 'push' as insert pushes {kind: $kind}",
+    'create collection deliveries (event text @unique, at timestamp @ttl(1d))',
+    'put deliveries {event: "evt_1J8", at: now()} if absent',
     '',
 ]
 
@@ -85,6 +90,15 @@ def main():
             raise SystemExit(f"`at` before a schedule's text is no keyword in {s!r}")
     if kw_at in build.highlight("get sales select bucket(at, 1h) where at > $1", "fennecql"):
         raise SystemExit("`at` is a keyword where it is a field")
+    # `hook` is a keyword, and `event` before the dot of a path into the
+    # event alone; a field `event` elsewhere.
+    kw_event, kw_hook = '<span class="t-kw">event</span>', '<span class="t-kw">hook</span>'
+    hooked = build.highlight("create statement p($id text from event.data.id) on hook stripe where event.type = 'x' as del t", "fennecql")
+    if hooked.count(kw_event) != 2 or kw_hook not in hooked:
+        raise SystemExit(f"a hook's `event.` and `hook` are no keywords in {hooked!r}")
+    for s in ('create collection deliveries (event text @unique)', 'put deliveries {event: "evt_1J8"}', "get deliveries where event = 'evt_1J8'"):
+        if kw_event in build.highlight(s, "fennecql"):
+            raise SystemExit(f"`event` is a keyword where it is a field in {s!r}")
     # The rules are written in, not copied: a keyword the docs know is one here.
     assert re.search(r'"fuse"', build.highlight_js())
     # fennec studio serves the file as the repository holds it: the one

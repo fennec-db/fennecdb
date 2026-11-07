@@ -243,6 +243,22 @@ or drop a field, and drop the collection.</p>
     the query editor as the server's token's call: no slot is marked, so the
     server's clock still runs the one due. Its definition opens in the query
     editor as <code>create or replace statement ...</code>.</li>
+  <li><b>A <a href="webhooks.html">webhook consumer</a></b> is listed by its
+    hook (<code>on hook stripe</code>) and whether the server holds the
+    hook's secret: <i>armed</i>, or <i>not armed</i> — no line of the hooks
+    file names it, or a tenant's secrets were never set — when every event a
+    sender sends it is answered 401. <b>Test event</b> opens the event as
+    JSON, begun from the paths its parameters read and the values its
+    condition compares (<code>{"type": "payment_intent.succeeded", "data":
+    {...}}</code>), shows the statement it sends, <code>call stripe_paid
+    $1</code> with the event as <code>$1</code>, and runs it in the query
+    editor as the server's token's call: its condition asked and its
+    parameters read as a delivery's are, with no signature and no key kept.
+    It holds no <code>hook.id</code>, <code>hook.at</code> or
+    <code>hook.event</code>, so a parameter reading one is refused unless it
+    has a default. Its definition says which events it takes and opens
+    in the query editor as <code>create or replace statement
+    ...</code>.</li>
   <li><b>A call form</b> gives each argument an input typed as the
     signature types it (a scoped token, which is not shown signatures, types
     the arguments as a JSON object), and shows the statement it sends,
