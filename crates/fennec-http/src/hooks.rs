@@ -923,6 +923,14 @@ impl Outcome {
 /// delivery beside the key -- what the sender was not told.
 fn noted(hook: &Hook, delivery: Option<&str>, t: Taken) -> Response {
     EVENTS[t.outcome as usize].fetch_add(1, Ordering::Relaxed);
+    // Its span names the hook -- the schema's, as a statement's name is --
+    // and what the event came to; never its key or its body, a value its
+    // sender chose (`docs/design/named-statements.md`, *Watching hooks*).
+    // Each statement that ran is a child of it (`trace::hooked`).
+    if crate::trace::recording() {
+        crate::trace::attr("fennec.hook", hook.name.clone());
+        crate::trace::attr("fennec.outcome", t.outcome.name());
+    }
     if matches!(
         t.outcome,
         Outcome::Refused | Outcome::Deferred | Outcome::Unknown | Outcome::Conflict

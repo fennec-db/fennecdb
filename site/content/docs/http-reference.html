@@ -40,7 +40,7 @@ PATCH  /_changes/consumers/C    body: {"since": N} -- move C: commit what it rea
 GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
 GET    /_whoami                 who the server takes the token for, the roles it read, the rules that apply to it and the statements it may call
-GET    /_schema                 the schema as a description (Schema in code), each collection's bound statements beside it, then the scheduled ones as schedules; ?as=fennecql: as its statements, the bound and the scheduled ones after them
+GET    /_schema                 the schema as a description (Schema in code), each collection's bound statements beside it, then the scheduled ones as schedules and the webhook consumers as hooks; ?as=fennecql: as its statements, the bound, the scheduled and the webhook ones after them
 POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
 POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
 POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
@@ -97,7 +97,19 @@ collections and the bound statements. Either form reads back through
 <code>schedule</code> other than its <code>text</code>'s is refused. A scoped
 token's <code>/_schema</code> names none.</p>
 
-<p>A bound or scheduled statement the schema broke — its collection or a
+<p>And where it holds a <a href="/docs/fennecql#webhook-consumers">webhook
+consumer</a>, a top-level <code>"hooks"</code> follows <code>"schedules"</code>
+(or <code>collections</code>), to the server's token:
+<code>[{"name", "hook", "text", "armed"}]</code>. <code>armed</code> is
+whether this server holds a secret for the hook, as <code>statements</code>
+lists it; a secret itself is never listed. <code>?as=fennecql</code> writes
+each hook's definition after the scheduled ones. Either form reads back
+through <code>POST /_schema/plan</code> as a plan of nothing, and a listed
+<code>hook</code> other than the one its <code>text</code> takes is refused
+(400, <code>is listed with the hook `github`, and its text takes `stripe`'s
+events</code>). A scoped token's <code>/_schema</code> names none.</p>
+
+<p>A bound, scheduled or hook-taking statement the schema broke — its collection or a
 field it reads dropped — is listed with why, <code>"broken":"..."</code>
 after its <code>text</code>, as <code>statements</code> lists it; the plan
 reads it back holding it to no collection, so the server's own description

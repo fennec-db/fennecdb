@@ -187,8 +187,10 @@ wrote.](../../docs/design/http.md#request-ids)** `tests/datadog.rs` and
 **[A request is a trace, sent over OTLP.](../../docs/design/http.md#traces)** A
 thread-local from `begin` to `end` -- a scheduled run's from `begin_run` to
 `end_run`, one `start` and `finish` for both -- `discard`ed before a stream
-takes the connection over; a span names a statement's shape, never a value,
-and a request never waits on the collector.
+takes the connection over; a span names a statement's shape, never a value
+-- a binding's or an event's statement a child by its name (`ran_spans`),
+never the event's key or body -- and a request never waits on the
+collector.
 
 **[`/_metrics` counts at the edge, a shard per
 thread.](../../docs/design/http.md#metrics)** Timed around `handle`, counted
@@ -202,8 +204,8 @@ a process counts them; the hooks' once a hooks file was read
 **[`/_stats/statements` counts by shape, a tenant's
 apart.](../../docs/design/http.md#statement-counts)** Literals are `$n`
 (`statements::shape`), a quoted key kept as written; a shape the server
-counts of its own -- `schedule <name>`, `after <name>` -- is keyed where no
-client's text is (`statements::own_key`). A shape names every collection,
+counts of its own -- `schedule <name>`, `after <name>`, `hook <name>` -- is
+keyed where no client's text is (`statements::own_key`). A shape names every collection,
 so they take what reads the data unscoped or the admin token; on a tenant
 node a tenant reads its own, and every tenant's, named, are the admin's
 alone.

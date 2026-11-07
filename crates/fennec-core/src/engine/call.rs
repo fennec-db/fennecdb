@@ -340,7 +340,7 @@ impl Database {
     pub(super) fn list_statements(&self) -> Response {
         let now = self.clock_for_schedules();
         let rows = (self.statements.iter())
-            .map(|s| row(s, false, self.schedule_shown(s, now)))
+            .map(|s| row(s, false, self.schedule_shown(s, now), self.armed_of(s)))
             .collect();
         Response::Rows(ResultSet {
             columns: columns(false),
@@ -357,9 +357,16 @@ impl Database {
         let shown = self.schedule_shown(s, self.clock_for_schedules());
         Ok(Response::Rows(ResultSet {
             columns: columns(true),
-            rows: vec![row(s, true, shown)],
+            rows: vec![row(s, true, shown, self.armed_of(s))],
             ..ResultSet::default()
         }))
+    }
+
+    /// Whether the server holds a secret for webhook consumer `s`'s hook
+    /// (`armed`, [`Self::hook_armed`]); `None` for a statement taking no
+    /// hook.
+    pub fn armed_of(&self, s: &super::Stored) -> Option<bool> {
+        s.hook.as_deref().map(|h| self.hook_armed(h))
     }
 
     /// The time a listing computes its schedules' next slots at: read only
@@ -736,7 +743,7 @@ fn exact_args(args: &Args, keeps: &[(&str, bool)], out: &mut super::Exactly) {
 }
 
 /// `statements`' columns, and `describe statement`'s four after them.
-const COLUMNS: [&str; 15] = [
+const COLUMNS: [&str; 17] = [
     "name",
     "version",
     "signature",
@@ -748,6 +755,8 @@ const COLUMNS: [&str; 15] = [
     "next",
     "last",
     "held",
+    "hook",
+    "armed",
     "answers",
     "text",
     "depends",
@@ -760,14 +769,16 @@ const COLUMNS: [&str; 15] = [
 fn columns(described: bool) -> Vec<String> {
     let listed = match described {
         true => &COLUMNS[..],
-        false => &COLUMNS[..11],
+        false => &COLUMNS[..13],
     };
     listed.iter().map(|&c| String::from(c)).collect()
 }
 
 /// A statement as `statements` and `describe statement` answer it, `shown`
-/// what the clock does with it (`Database::schedule_shown`).
-fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
+/// what the clock does with it (`Database::schedule_shown`) and `armed`
+/// whether the server holds a secret for the hook it takes, where it takes
+/// one (`Database::armed_of`).
+fn row(s: &super::Stored, described: bool, shown: [Value; 4], armed: Option<bool>) -> Row {
     let text = |t: &str| Value::Text(t.to_string());
     let def = s.tree.as_deref();
     // One allocation a row, the four laid in with the rest: extended after
@@ -800,6 +811,11 @@ fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
         next,
         last,
         held,
+        // A webhook consumer's hook, from its record -- read where its text
+        // is not -- and whether the server holds a secret for it: one it
+        // holds none for answers its every event 401.
+        s.hook.as_deref().map_or(Value::Null, text),
+        armed.map_or(Value::Null, Value::Bool),
     ];
     if described {
         values.push(def.map_or(Value::Null, |d| {
@@ -807,9 +823,10 @@ fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
         }));
         values.push(text(&s.text));
         values.push(Value::List(s.depends.iter().map(|d| text(d)).collect()));
-        values.push(match s.after {
-            Some(_) => crate::named::condition_text(&s.text).map_or(Value::Null, text),
-            None => Value::Null,
+        // A binding's condition, and a webhook consumer's.
+        values.push(match s.after.is_some() || s.hook.is_some() {
+            true => crate::named::condition_text(&s.text).map_or(Value::Null, text),
+            false => Value::Null,
         });
     }
     Row {
@@ -820,9 +837,12 @@ fn row(s: &super::Stored, described: bool, shown: [Value; 4]) -> Row {
 }
 
 /// `($from int, $to int) claims (sub text)`, as a caller writes a call to
-/// it.
+/// it; a webhook consumer's each with what it reads of the event, `($intent
+/// text from event.data.object.id)`, its keys as the event's JSON names
+/// them.
 fn signature(d: &Definition) -> String {
     let mut s = String::from("(");
+    let sources = d.hook.as_ref().map(|h| &h.sources[..]);
     for (i, p) in d.params.iter().enumerate() {
         if i > 0 {
             s.push_str(", ");
@@ -831,6 +851,9 @@ fn signature(d: &Definition) -> String {
         s.push_str(&p.name);
         s.push(' ');
         s.push_str(&p.ty.to_string());
+        if let Some(src) = sources.and_then(|all| all.get(i)) {
+            source_into(&mut s, src);
+        }
         if p.default.is_some() {
             s.push_str(" = ...");
         }
@@ -849,6 +872,25 @@ fn signature(d: &Definition) -> String {
         s.push(')');
     }
     s
+}
+
+/// ` from <source>`: what a webhook consumer's parameter reads, out of line
+/// -- a callable statement's signature never comes here.
+#[cold]
+#[inline(never)]
+fn source_into(s: &mut String, src: &crate::named::Source) {
+    use crate::named::Source;
+    s.push_str(" from ");
+    s.push_str(match src {
+        Source::Event(keys) if keys.is_empty() => "event",
+        Source::Event(_) => "event.",
+        Source::HookId => "hook.id",
+        Source::HookAt => "hook.at",
+        Source::HookEvent => "hook.event",
+    });
+    if let Source::Event(keys) = src {
+        s.push_str(keys);
+    }
 }
 
 /// A pick's order, and whether it has a `limit`.

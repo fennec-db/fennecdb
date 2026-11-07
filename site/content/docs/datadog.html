@@ -77,6 +77,8 @@ the metrics arrive as <code>fennecdb.*</code>.</p>
 <tr><td><code>fennec_router_requests_total{route, code}</code></td><td><code>fennecdb.router_requests.count</code>, tags <code>route</code>, <code>code</code></td><td>count</td></tr>
 <tr><td><code>fennec_scheduled_runs_total{outcome}</code></td><td><code>fennecdb.scheduled_runs.count</code>, tag <code>outcome</code></td><td>count</td></tr>
 <tr><td><code>fennec_scheduled_lateness_seconds</code></td><td><code>fennecdb.scheduled_lateness_seconds.bucket</code>, <code>.sum</code>, <code>.count</code></td><td>distribution</td></tr>
+<tr><td><code>fennec_hook_events_total{outcome}</code></td><td><code>fennecdb.hook_events.count</code>, tag <code>outcome</code></td><td>count</td></tr>
+<tr><td><code>fennec_hook_unverified_total{check}</code></td><td><code>fennecdb.hook_unverified.count</code>, tag <code>check</code></td><td>count</td></tr>
 </tbody>
 </table>
 </div>
@@ -89,6 +91,13 @@ statements</a> arrive through <code>conf.yaml</code> as well:
 <code>fennecdb.scheduled_lateness_seconds.bucket</code>. A server sends them
 once its scheduler made a look (<a href="/docs/monitoring#what-is-counted">Monitoring</a>).</p>
 
+<p>The two metrics of <a href="/docs/webhooks#watching">webhooks</a> arrive
+through <code>conf.yaml</code> too, <code>fennecdb.hook_events.count</code> and
+<code>fennecdb.hook_unverified.count</code>, sent once a server read a hooks
+file or a node holds a tenant's secrets. The router's
+<code>fennecdb.router_tenants_hooks_behind</code>, a gauge, arrives through
+<code>^router_.*$</code>.</p>
+
 <details class="deep"><summary>How metric names and labels arrive in Datadog</summary>
 <p>A counter loses its <code>_total</code> and arrives as a count,
 <code>fennecdb.&lt;name&gt;.count</code>; a gauge arrives under its name. A
@@ -100,7 +109,7 @@ over every server's buckets together — as Prometheus's
 metric's summary; its <code>.sum</code> and <code>.count</code> give the
 mean. Every label is a tag: <code>kind</code>, <code>collection</code>,
 <code>route</code>, <code>code</code>, <code>node</code>,
-<code>outcome</code>, <code>version</code>.</p>
+<code>outcome</code>, <code>check</code>, <code>version</code>.</p>
 
 <p><b>No label names a tenant.</b> A tenant node publishes its tenants'
 counts together (<code>fennec_tenants</code>, <code>fennec_tenants_open</code>,
@@ -194,7 +203,7 @@ described in Monitoring.</p>
 <p><code>monitoring/datadog/dashboard.json</code> opens on whether the disk
 has refused a write, statements and errors a second, refusals and the memory
 footprint, then requests and their latency, writes and storage, scheduled
-statements, replication, tenants, the router, and the logs.</p>
+statements, webhooks, replication, tenants, the router, and the logs.</p>
 
 <details class="deep"><summary>The dashboard's groups and what each shows</summary>
 <p>Its groups, each on the metrics <code>/_metrics</code> sends:</p>
@@ -209,6 +218,9 @@ statements, replication, tenants, the router, and the logs.</p>
   <li><b>Scheduled statements:</b> runs by outcome, how late they began past
     their slot (p50 and p99), and the slots passed over and the marks found
     ahead of the clock.</li>
+  <li><b>Webhooks:</b> verified events by outcome, events refused before a
+    verified signature by the check that failed, and the tenants a copy of
+    which lacks its hook secrets (the router's).</li>
   <li><b>Replication:</b> a replica's lag in writes, whether it is
     connected, since it last heard from its primary, a primary's replicas,
     reconnects and whole images.</li>
@@ -227,10 +239,10 @@ metric's summary.</p>
 
 <h2 id="monitors">The monitors</h2>
 
-<p><code>monitoring/datadog/monitors.json</code> holds five monitors on
-<a href="/docs/fennecql#scheduled-statements">scheduled statements</a>, an
-array Datadog's API takes one monitor a call (<code>POST
-/api/v1/monitor</code>).</p>
+<p><code>monitoring/datadog/monitors.json</code> holds nine monitors: five on
+<a href="/docs/fennecql#scheduled-statements">scheduled statements</a> and
+four on <a href="/docs/webhooks#watching">webhooks</a>, an array Datadog's
+API takes one monitor a call (<code>POST /api/v1/monitor</code>).</p>
 
 <pre data-lang="bash">jq -c '.[]' monitoring/datadog/monitors.json | while read -r monitor; do
   curl -X POST https://api.datadoghq.com/api/v1/monitor \
@@ -248,16 +260,27 @@ done
 <tr><td>a slot is held back</td><td><code>outcome:held</code> runs are over 3 in an hour; a warning from 0</td></tr>
 <tr><td>a mark is ahead of the clock</td><td><code>fennecdb.scheduled_mark_ahead.count</code> is over 0 in an hour</td></tr>
 <tr><td>runs are late</td><td>the p99 of <code>fennecdb.scheduled_lateness_seconds.bucket</code> is over 120 s in 30 minutes; a warning from 60 s</td></tr>
+<tr><td>webhook events do not verify</td><td><code>fennecdb.hook_unverified.count</code> is over 20 in 15 minutes, by host and <code>check</code>; a warning from 0: a secret rotated at the sender and not here, a forger, a sender pointed at a hook not held, a clock off (<code>stale</code>)</td></tr>
+<tr><td>a webhook event was refused by a statement</td><td><code>outcome:refused</code> events are over 10 in an hour; a warning from 0. The sender keeps retrying, so a guard waiting for its row is normal; a statement that can never take an event is not</td></tr>
+<tr><td>webhook events are held back</td><td><code>outcome:deferred</code> and <code>outcome:unknown</code> events together are over 20 in 30 minutes; a warning from 5: a quota, a rate, a freeze, a lease, the disk, no standby in time</td></tr>
+<tr><td>a tenant's copy lacks its hook secrets</td><td>the router's <code>fennecdb.router_tenants_hooks_behind</code> is over 0 in 15 minutes</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Each is grouped by host and tagged <code>service:fennecdb</code> and
-<code>fennec:scheduled</code>, and its message says what to look at: the
-listing's <code>last</code> and <code>held</code>, the log line of the run, the
-audit log's <code>clock</code> line. The lateness monitor needs the
-distribution's percentiles turned on, as the dashboard's do. A test holds
-every monitor's metric and tag, as the dashboard's, to a real scrape.</p>
+<code>fennec:scheduled</code> or <code>fennec:hooks</code>, and its message
+says what to look at. For a scheduled statement: the listing's
+<code>last</code> and <code>held</code>, the log line of the run, the audit
+log's <code>clock</code> line. For a webhook: the server's log and the audit
+log's <code>refused</code> line, which name the hook and the check under each
+request's id, <code>/_stats/statements</code>' <code>hook &lt;name&gt;</code>
+shapes, and the router's <code>GET /_shard/tenants/&lt;tenant&gt;/hooks</code>,
+which names the copy <code>behind</code> (<a
+href="/docs/webhooks#watching">Webhooks from Stripe and GitHub</a>). The
+lateness monitor needs the distribution's percentiles turned on, as the
+dashboard's do. A test holds every monitor's metric and tag, as the
+dashboard's, to a real scrape.</p>
 
 <h2 id="request-id">One id a request</h2>
 
