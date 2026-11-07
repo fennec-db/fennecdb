@@ -127,7 +127,15 @@ pub struct Declared {
     /// to tell, and no plan reads it.
     #[cfg(not(target_arch = "wasm32"))]
     pub scheduled: Vec<(String, Option<String>, String)>,
-    /// The bound and scheduled statements a description's JSON lists
+    /// The webhook consumers a description's JSON lists after its
+    /// collections (`"hooks"`, as `GET /_schema` writes them to the
+    /// server's token): each statement's name, the hook it is listed with,
+    /// where it is, and its text, read back as the scheduled ones are and
+    /// held to the hook its text takes. Whether the server holds a secret
+    /// for it (`armed`) is the server's to tell, and no plan reads it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub hooked: Vec<(String, Option<String>, String)>,
+    /// The bound, scheduled and hooked statements a description's JSON lists
     /// `broken`, as `GET /_schema` lists one whose dependency the schema
     /// lost: read back as their definitions held to no dependency
     /// (`fennec_ql::bound_into`), so the server's own description plans
@@ -204,8 +212,9 @@ pub struct Refusal {
 pub fn parse(src: &str) -> Result<Declared> {
     let top = json::parse_json(src)?;
     let top = object(&top, "the description")?;
-    // A server's `schedules` natively; the browser module, which runs none
-    // and reads a description as `fennecql`, takes no such member.
+    // A server's `schedules` and `hooks` natively; the browser module,
+    // which runs none and reads a description as `fennecql`, takes no such
+    // member.
     #[cfg(target_arch = "wasm32")]
     let members: &[&str] = &["format", "collections", "fennecql", "migrations"];
     #[cfg(not(target_arch = "wasm32"))]
@@ -215,6 +224,7 @@ pub fn parse(src: &str) -> Result<Declared> {
         "fennecql",
         "migrations",
         "schedules",
+        "hooks",
     ];
     only(top, members, "the description")?;
     if !matches!(member(top, "format"), Some(Value::Int(FORMAT))) {
@@ -253,7 +263,13 @@ pub fn parse(src: &str) -> Result<Declared> {
         &mut broken,
     )?;
     #[cfg(not(target_arch = "wasm32"))]
-    let scheduled = schedules(list(member(top, "schedules"), "schedules")?, &mut broken)?;
+    let scheduled = listed(
+        list(member(top, "schedules"), "schedules")?,
+        &SCHEDULED,
+        &mut broken,
+    )?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let hooked = listed(list(member(top, "hooks"), "hooks")?, &HOOKED, &mut broken)?;
     let mut migrations = Vec::new();
     for m in list(member(top, "migrations"), "migrations")? {
         migrations.push(match m {
@@ -285,32 +301,54 @@ pub fn parse(src: &str) -> Result<Declared> {
         #[cfg(not(target_arch = "wasm32"))]
         scheduled,
         #[cfg(not(target_arch = "wasm32"))]
+        hooked,
+        #[cfg(not(target_arch = "wasm32"))]
         broken,
     })
 }
 
-/// A description's scheduled statements ([`Declared::scheduled`]): each a
-/// name, its text and the schedule it is listed with, beside what the
-/// server tells of its runs (`next`, `last`, `held`), which no plan reads.
+/// What a scheduled statement is listed with: its name, its schedule, its
+/// text, `broken`, and what the server tells of its runs (`next`, `last`,
+/// `held`), which no plan reads.
 #[cfg(not(target_arch = "wasm32"))]
-fn schedules(
+const SCHEDULED: [&str; 7] = ["name", "schedule", "text", "broken", "next", "last", "held"];
+
+/// What a webhook consumer is listed with: its name, its hook, its text,
+/// `broken`, and whether the server holds a secret for it (`armed`), which
+/// no plan reads.
+#[cfg(not(target_arch = "wasm32"))]
+const HOOKED: [&str; 5] = ["name", "hook", "text", "broken", "armed"];
+
+/// A description's scheduled statements ([`Declared::scheduled`]) or its
+/// webhook consumers ([`Declared::hooked`]), each listed with `members` --
+/// its name, then what it is listed with (`schedule`, `hook`), then its
+/// text: each a name, what it is listed with where it is, and its text.
+/// One reader for both lists: a copy each was the plan's size twice.
+#[cfg(not(target_arch = "wasm32"))]
+fn listed(
     all: &[Value],
+    members: &[&str],
     broken: &mut Vec<String>,
 ) -> Result<Vec<(String, Option<String>, String)>> {
+    let what = match members[1] {
+        "hook" => "a webhook consumer",
+        _ => "a scheduled statement",
+    };
     let mut out = Vec::new();
     for s in all {
-        let s = object(s, "a scheduled statement")?;
-        only(
-            s,
-            &["name", "schedule", "text", "broken", "next", "last", "held"],
-            "a scheduled statement",
-        )?;
-        let n = name(s, "name", "a scheduled statement")?;
+        let s = object(s, what)?;
+        only(s, members, what)?;
+        let n = name(s, "name", what)?;
         listed_broken(s, &n, broken)?;
-        let schedule = match member(s, "schedule") {
+        let schedule = match member(s, members[1]) {
             None => None,
             Some(Value::Text(t)) => Some(t.clone()),
-            Some(_) => return Err(bad(&n, "is listed with a `schedule` that is not a text")),
+            Some(_) => {
+                return Err(bad(
+                    &n,
+                    &cat(&["is listed with a `", members[1], "` that is not a text"]),
+                ))
+            }
         };
         let Some(Value::Text(text)) = member(s, "text") else {
             return Err(bad(
@@ -328,7 +366,7 @@ fn schedules(
 #[cfg(not(target_arch = "wasm32"))]
 type Bound = Vec<(String, String, Option<String>, String)>;
 
-/// A bound or scheduled statement listed `broken`, with why, noted in
+/// A bound, scheduled or hooked statement listed `broken`, with why, noted in
 /// `broken` ([`Declared::broken`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn listed_broken(o: &[(String, Value)], n: &str, broken: &mut Vec<String>) -> Result<()> {

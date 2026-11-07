@@ -1275,3 +1275,273 @@ fn the_fixture_s_hook_and_its_event_are_read_and_kept() {
     let again = opened(&db.snapshot());
     assert_eq!(again.statements().get("stripe_paid"), Some(&s));
 }
+
+/// `statements` and `describe statement` as a row of `text` reads: each
+/// column by its name.
+fn listed(db: &mut Database, text: &str, name: &str) -> Vec<(String, Value)> {
+    let r = run(db, text).unwrap();
+    let rs = r.rows().unwrap();
+    let row = rs
+        .rows
+        .iter()
+        .find(|r| r.values[0] == Value::Text(name.into()))
+        .unwrap_or_else(|| panic!("no {name} in {rs:?}"));
+    rs.columns.iter().cloned().zip(row.values.clone()).collect()
+}
+
+fn column<'a>(row: &'a [(String, Value)], c: &str) -> &'a Value {
+    &row.iter()
+        .find(|(n, _)| n == c)
+        .unwrap_or_else(|| panic!("no column {c}"))
+        .1
+}
+
+/// The listings show a webhook consumer's hook, from its record, and
+/// whether the server holds a secret for it -- `false` where no server
+/// told the database, as the shell's and the native library's take no
+/// event -- and `describe statement` its condition as written and what
+/// each parameter reads (`docs/design/named-statements.md`, *Watching
+/// hooks*). A statement taking no hook is listed with neither.
+#[test]
+fn the_listings_show_a_hook_and_whether_it_is_armed() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(
+        &mut db,
+        "create statement totals() as get orders select id where ref = 'o-1'",
+    )
+    .unwrap();
+    let row = listed(&mut db, "statements", "stripe_paid");
+    assert_eq!(column(&row, "hook"), &Value::Text("stripe".into()));
+    assert_eq!(column(&row, "armed"), &Value::Bool(false));
+    assert!(row.iter().all(|(c, _)| c != "condition"), "{row:?}");
+    let other = listed(&mut db, "statements", "totals");
+    assert_eq!(column(&other, "hook"), &Value::Null);
+    assert_eq!(column(&other, "armed"), &Value::Null);
+
+    // A server holding the hook's secret says so, asked as it lists.
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let held = Arc::clone(&armed);
+    db.arm_hooks(Arc::new(move |h| {
+        h == "stripe" && held.load(std::sync::atomic::Ordering::Relaxed)
+    }));
+    let row = listed(&mut db, "statements", "stripe_paid");
+    assert_eq!(column(&row, "armed"), &Value::Bool(true));
+    armed.store(false, std::sync::atomic::Ordering::Relaxed);
+    let row = listed(&mut db, "describe statement stripe_paid", "stripe_paid");
+    assert_eq!(column(&row, "armed"), &Value::Bool(false));
+    assert_eq!(column(&row, "hook"), &Value::Text("stripe".into()));
+    assert_eq!(
+        column(&row, "condition"),
+        &Value::Text("event.type = 'payment_intent.succeeded' and event.livemode = true".into())
+    );
+    assert_eq!(
+        column(&row, "signature"),
+        &Value::Text(
+            "($intent text from event.data.object.id, $order text from \
+             event.data.object.metadata.order, $amount int from \
+             event.data.object.amount_received, $currency text from event.data.object.currency)"
+                .into()
+        )
+    );
+    // `hook.` and the whole body, and a key no name writes, as the event's
+    // JSON names it; no condition, none shown.
+    run(
+        &mut db,
+        "create statement kept($e json from event, $id text from hook.id, $at timestamp from \
+         hook.at, $o text from event.metadata.\"order-id\") on hook stripe as insert orders \
+         {ref: $o, intent: $id, at: $at}",
+    )
+    .unwrap();
+    let row = listed(&mut db, "describe statement kept", "kept");
+    assert_eq!(
+        column(&row, "signature"),
+        &Value::Text(
+            "($e json from event, $id text from hook.id, $at timestamp from hook.at, $o text \
+             from event.metadata.order-id)"
+                .into()
+        )
+    );
+    assert_eq!(column(&row, "condition"), &Value::Null);
+    let other = listed(&mut db, "describe statement totals", "totals");
+    assert_eq!(column(&other, "signature"), &Value::Text("()".into()));
+    assert_eq!(column(&other, "condition"), &Value::Null);
+}
+
+/// What an event's taking ran is noted on the thread, statement by
+/// statement -- its version, the rows its last statement answered, its
+/// time -- and the one that refused it, for a server to count by the shape
+/// `hook <name>`, write on the slow line and trace (`Database::take_runs`);
+/// an event no condition takes, or one answered from its key, runs none and
+/// notes none.
+#[test]
+fn an_event_s_taking_is_noted_statement_by_statement() {
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(
+        &mut db,
+        "create collection ledger (ref text @hash, amount int)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create statement a_note($order text from event.data.object.metadata.order) on hook \
+         stripe as insert ledger {ref: $order, amount: 0}",
+    )
+    .unwrap();
+    drop(Database::take_runs());
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 1)).unwrap(),
+        Took::Ran(2)
+    );
+    assert!(Database::runs_noted());
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    assert_eq!(t.hook, "stripe");
+    let ran: Vec<_> = t.ran.iter().map(|r| (r.name.as_str(), r.rows)).collect();
+    assert_eq!(ran, [("a_note", 1), ("stripe_paid", 1)]);
+    for r in &t.ran {
+        let listed = db.statements().get(&r.name).map(|s| s.version);
+        assert_eq!(Some(r.version), listed);
+    }
+    assert!(t.refusal.is_none());
+    assert!(!Database::runs_noted());
+
+    // Answered from its key: nothing ran, nothing noted.
+    assert!(matches!(
+        db.take_event(&event(&body, "evt_1", 1)).unwrap(),
+        Took::Held(_)
+    ));
+    assert!(Database::take_runs().is_none());
+
+    // The second refusing: both ran, the second failed and noted so.
+    run(
+        &mut db,
+        "put orders {ref: 'o-4', total: 9, currency: 'eur', status: 'paid'}",
+    )
+    .unwrap();
+    let body = paid("evt_4", "o-4", 9);
+    let e = db.take_event(&event(&body, "evt_4", 1)).unwrap_err();
+    assert!(matches!(&e, Error::Unmet(_)), "{e}");
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    let ran: Vec<_> = t.ran.iter().map(|r| (r.name.as_str(), r.rows)).collect();
+    assert_eq!(ran, [("a_note", 1), ("stripe_paid", 0)]);
+    // The first counted as it ran, its row though put back; the second
+    // refused.
+    assert!(t.refused(0).is_none());
+    assert_eq!(
+        t.refused(1).and_then(|e| e.reason()),
+        Some("no open order of that total")
+    );
+    let (at, _) = t.refusal.expect("the refusal");
+    assert_eq!(at, Some(1));
+
+    // One no condition takes runs nothing.
+    let test = fennec_core::json::parse_json(
+        r#"{"id": "evt_5", "type": "payment_intent.succeeded", "livemode": false}"#,
+    )
+    .unwrap();
+    run(&mut db, "drop statement a_note").unwrap();
+    drop(Database::take_runs());
+    assert_eq!(
+        db.take_event(&event(&test, "evt_5", 1)).unwrap(),
+        Took::Passed
+    );
+    assert!(Database::take_runs().is_none());
+}
+
+/// A sink whose writes fail once its flag is set: a block's commit refused
+/// after every statement of an event ran.
+#[derive(Clone, Default)]
+struct Failing(Arc<std::sync::atomic::AtomicBool>);
+
+impl Failing {
+    fn check(&self) -> Result<()> {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Io("the disk went away".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Sink for Failing {
+    fn append(&mut self, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+    fn record(&mut self, _: u64, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+    fn rewrite(&mut self, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+}
+
+/// An event whose statements all ran and that then failed to land -- its
+/// key's row refused, its block's commit -- is noted refused by each of
+/// them, their rows `0`: none landed, and a server counting them as taken
+/// would count rows no file holds.
+#[test]
+fn an_event_failing_to_land_is_noted_refused_by_each_statement() {
+    let each = |t: &fennec_core::engine::HookRuns| -> Vec<(String, u64, bool)> {
+        (t.ran.iter().enumerate())
+            .map(|(i, r)| (r.name.clone(), r.rows, t.refused(i).is_some()))
+            .collect()
+    };
+    // Its key's row refused, after both statements ran: a `_hook_events`
+    // whose `digest` is unique, another key holding the event's.
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(&mut db, "create collection ledger (ref text, amount int)").unwrap();
+    run(
+        &mut db,
+        "create statement a_note($order text from event.data.object.metadata.order) on hook \
+         stripe as insert ledger {ref: $order, amount: 0}",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create collection _hook_events (key text @hash, digest int @unique, taken int, until \
+         timestamp)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "put _hook_events {key: 'another', digest: 1, taken: 1}",
+    )
+    .unwrap();
+    drop(Database::take_runs());
+    let body = paid("evt_1", "o-1", 2000);
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    assert_eq!(
+        each(&t),
+        [("a_note".into(), 0, true), ("stripe_paid".into(), 0, true)]
+    );
+    let (at, noted) = t.refusal.as_ref().expect("the refusal");
+    assert_eq!((*at, noted.to_string()), (None, err.to_string()));
+    let Response::Rows(ledger) = run(&mut db, "get ledger").unwrap() else {
+        panic!("rows")
+    };
+    assert!(ledger.rows.is_empty(), "put back: {ledger:?}");
+
+    // Its block's commit refused.
+    let failing = Failing::default();
+    fennec_ql::install();
+    let mut db = Database::with_sink(Box::new(failing.clone()));
+    db.set_clock(Some(t0()));
+    db.allow_hooks();
+    run(&mut db, ORDERS).unwrap();
+    run(
+        &mut db,
+        "put orders {ref: 'o-1', total: 2000, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    run(&mut db, STRIPE_PAID).unwrap();
+    drop(Database::take_runs());
+    failing.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(matches!(err, Error::Io(_)), "{err}");
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    assert_eq!(each(&t), [("stripe_paid".into(), 0, true)]);
+    assert!(matches!(t.refusal, Some((None, Error::Io(_)))));
+}

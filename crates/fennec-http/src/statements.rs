@@ -22,7 +22,7 @@
 //! and not the node's to publish.
 
 use crate::http::{Method, Request, Response};
-use fennec_core::engine::{Database, Runs};
+use fennec_core::engine::{Database, HookRuns, Runs};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -257,6 +257,28 @@ pub(crate) fn scheduled(tenant: Option<&str>, name: &str, rows: u64, took: Durat
     );
 }
 
+/// Each statement a webhook event's taking ran, counted as the shape `hook
+/// <name>` (`docs/design/named-statements.md`, *Watching hooks*): a call
+/// an event it took, its rows what its body's last statement answered, as
+/// a call's are, its time its body's -- which the request's own shape,
+/// `POST /_hooks/<hook>`, holds too -- and an error where it refused the
+/// event, each statement's where the event failed to land after they ran
+/// (`HookRuns::refused`). On a tenant node it is the tenant's. Keyed apart
+/// from any text a client sends ([`own_key`]), as `schedule <name>` is.
+pub(crate) fn hooked(tenant: Option<&str>, t: &HookRuns) {
+    for (i, ran) in t.ran.iter().enumerate() {
+        let shape = format!("hook {}", ran.name);
+        let micros = ran.took.as_micros().min(u64::MAX as u128) as u64;
+        let counted = once(
+            own_key(tenant, &shape),
+            ran.rows,
+            micros,
+            t.refused(i).is_some(),
+        );
+        count(tenant, &shape, counted);
+    }
+}
+
 /// `counted` -- one request's counts of `shape`, its `id` the shape's hash
 /// -- added to this thread's shard.
 fn count(tenant: Option<&str>, shape: &str, counted: Entry) {
@@ -417,7 +439,8 @@ fn hash(tenant: Option<&str>, shape: &str) -> u64 {
 }
 
 /// The key of a shape the server counts of its own -- a scheduled run's
-/// `schedule <name>`, a binding's `after <name>` -- which no text a client
+/// `schedule <name>`, a binding's `after <name>`, a webhook consumer's
+/// `hook <name>` -- which no text a client
 /// sends is shaped into: the shape's hash taken on over a byte no UTF-8
 /// text holds, so a client's `schedule purge`, a parse error, is a shape
 /// of its own and never adds to the runs' errors (slice 5's review).

@@ -105,6 +105,7 @@ thread_local! {
             refused: 0,
             changed: Vec::new(),
             refusal: None,
+            taking: None,
         })
     };
 }
@@ -138,6 +139,78 @@ pub struct Runs {
     /// consumer's is here too, its hook in the collection's place and no
     /// event (`0`, which no binding is). At most [`RUNS_KEPT`].
     pub changed: Vec<(String, String, u8)>,
+    /// The statements a webhook event's taking ran, the last taking's on
+    /// this thread: a request takes one event, and a thread no server takes
+    /// it from keeps one taking, never a list growing with the events.
+    /// Boxed: a word in the note every binding's run takes.
+    pub taking: Option<Box<HookRuns>>,
+}
+
+/// What an event's taking ran (`Database::take_event`,
+/// `docs/design/named-statements.md`, *Watching hooks*): what a server
+/// counts as each statement's shape (`hook <name>`), writes on the slow
+/// line and makes a child span of -- timed by the engine, as a binding's
+/// runs are.
+#[derive(Debug)]
+pub struct HookRuns {
+    /// The hook whose event it took.
+    pub hook: String,
+    /// Each taking statement that ran, in name order, the order it ran
+    /// in: its `rows` what its body's last statement answered, as a
+    /// call's are counted, and its time its body's. One that refused is
+    /// among them, its rows `0`; those after it never ran. One before it
+    /// is counted as it ran, its rows what it answered though the refusal
+    /// put them back: what each statement did, the event's outcome being
+    /// its request's.
+    pub ran: Vec<Ran>,
+    /// The event's refusal and its error, whose words the sender is never
+    /// told: by a statement, its place in `ran` -- its guard, a clash, a
+    /// bound, a binding its writes woke -- or `None`, by none, every
+    /// statement having run and the event failing to land after them --
+    /// its key's row, its block's commit -- each statement's run refused
+    /// with it, its rows `0`.
+    pub refusal: Option<(Option<usize>, Error)>,
+}
+
+impl HookRuns {
+    /// The error the statement at `i` in `ran` is counted refused with.
+    pub fn refused(&self, i: usize) -> Option<&Error> {
+        match &self.refusal {
+            Some((at, e)) if at.is_none_or(|at| at == i) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Every statement ran, and the event failed to land with `e` after
+    /// them: each run refused with it, none of its rows landed. A refusal
+    /// noted before is the event's.
+    #[cold]
+    pub(super) fn unlanded(&mut self, e: &Error) {
+        if self.refusal.is_some() {
+            return;
+        }
+        for r in &mut self.ran {
+            r.rows = 0;
+        }
+        self.refusal = Some((None, e.clone()));
+    }
+}
+
+/// An event's taking, noted on this thread in place of the one before.
+pub(super) fn note_hook_runs(t: HookRuns) {
+    NOTED.with(|n| n.set(true));
+    RUNS.with(|r| r.borrow_mut().taking = Some(Box::new(t)));
+}
+
+/// The taking this thread noted last failed to land with `e` -- its
+/// block's commit, after `taking` noted it ([`HookRuns::unlanded`]).
+#[cold]
+pub(super) fn hook_runs_unlanded(e: &Error) {
+    RUNS.with(|r| {
+        if let Some(t) = r.borrow_mut().taking.as_mut() {
+            t.unlanded(e);
+        }
+    });
 }
 
 /// A binding's runs for one statement.
@@ -637,7 +710,8 @@ impl Database {
 
     /// What the bindings did on this thread since it was last taken --
     /// each binding's runs a statement, timed, the writes one refused and
-    /// the bound statements defined or dropped -- or `None` where nothing
+    /// the bound statements defined or dropped -- and the statements a
+    /// webhook event's taking ran ([`HookRuns`]), or `None` where nothing
     /// was: what a server counts, logs and traces once a request
     /// (`fennec_http`'s `/_metrics`, `/_stats/statements`, the slow line,
     /// the spans and the audit), asked where [`Self::runs_noted`] says so.
@@ -646,7 +720,8 @@ impl Database {
         NOTED.with(|n| n.set(false));
         RUNS.with(|r| {
             let mut r = r.borrow_mut();
-            let any = !r.ran.is_empty() || r.refused != 0 || !r.changed.is_empty();
+            let any =
+                !r.ran.is_empty() || r.refused != 0 || !r.changed.is_empty() || r.taking.is_some();
             any.then(|| std::mem::take(&mut *r))
         })
     }

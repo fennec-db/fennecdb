@@ -72,3 +72,8 @@ path = "tests/tls_failures.rs"
 [[test]]
 name = "scheduled_counts"
 path = "tests/scheduled_counts.rs"
+
+# Apart: the statements' shapes and tracing are the process's own.
+[[test]]
+name = "hook_counts"
+path = "tests/hook_counts.rs"

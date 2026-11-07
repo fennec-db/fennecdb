@@ -280,6 +280,43 @@ fn each_tenant_verifies_its_events_by_its_own_secrets() {
     assert!(get.head.contains("Allow: POST"), "{}", get.head);
 }
 
+/// What a tenant's listings say of its hooks (`docs/design/named-statements.md`,
+/// *Watching hooks*): its `statements` and `GET /_schema` say whether the
+/// node holds a secret for each statement's hook, asked as each is written
+/// -- a `PUT` arms it while the tenant stays open, a `DELETE` disarms it.
+/// What an event ran is counted in `tests/hook_counts.rs`, a binary of its
+/// own: it reads the process's counts.
+#[test]
+fn a_tenants_listings_say_whether_its_hook_is_armed() {
+    let n = node("armed", false);
+    tenant(n.port, "acme");
+    let armed = |q: &str| {
+        let r = query(n.port, "acme", q);
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body.contains(r#""hook":"stripe""#), "{}", r.body);
+        r.body.contains(r#""armed":true"#)
+    };
+    assert!(!armed("statements"));
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    assert!(is_open(&n, "acme"));
+    assert!(armed("statements"));
+    assert!(armed("describe statement paid"));
+    let schema = call(n.port, "GET", "/t/acme/_schema", &[], b"");
+    assert!(
+        schema
+            .body
+            .contains(r#""hooks":[{"name":"paid","hook":"stripe","#)
+            && schema.body.contains(r#""armed":true}]"#),
+        "{}",
+        schema.body
+    );
+    assert!(!schema.body.contains("whsec_acme"), "{}", schema.body);
+
+    let gone = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/stripe", "");
+    assert_eq!(gone.status, 200, "{}", gone.body);
+    assert!(!armed("statements"));
+}
+
 /// The admin routes: a hook's `PUT` refuses (400) what a hooks file is
 /// refused at a server's start, naming the field and never its value; the
 /// listing holds no secret; `hook-secrets` answers the set whole to the

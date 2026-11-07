@@ -58,5 +58,53 @@
       "notify_no_data": false,
       "require_full_window": false
     }
+  },
+  {
+    "name": "fennecdb: webhook events do not verify",
+    "type": "query alert",
+    "query": "sum(last_15m):sum:fennecdb.hook_unverified.count{*} by {host,check}.as_count() > 20",
+    "message": "Events sent to {{host.name}}'s hooks were refused before their signature verified ({{check.name}}), each answered the one 401 that names no check. `signature`: a secret rotated at the sender and not here -- set the new one beside the old (a hooks file's second secret file, or PUT /_shard/tenants/<t>/hooks/<name> with both) -- or someone forging events. `hook`: a sender pointed at a hook this server does not hold, or a tenant whose secret was never set (a restore takes none back). `stale`: the sender's clock, or this host's, is off by more than the hook's tolerance -- check NTP. `scheme`, `header`: the sender is not the scheme the hook names. `size`: an event past the hook's ceiling (`max-body`). The server's log and the audit's `refused` line name the hook, the sender's address and the check under each request's id; a sender's own delivery log shows the 401s.",
+    "tags": ["service:fennecdb", "fennec:hooks"],
+    "options": {
+      "thresholds": {"critical": 20, "warning": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: a webhook event was refused by a statement",
+    "type": "query alert",
+    "query": "sum(last_1h):sum:fennecdb.hook_events.count{outcome:refused} by {host}.as_count() > 10",
+    "message": "Verified webhook events on {{host.name}} were refused by what they came to: a statement's guard (412), a parameter missing or of another type (400), an id or unique value held (409), a statement broken or no statement taking the hook (409). The sender keeps each and sends it again -- Stripe for three days, Svix for about 28 hours, GitHub not at all -- so a guard waiting for its row is the queue working; a statement that can never take an event is not. The server's log names the hook, the event's key, the status and the engine's words; `/_stats/statements` counts each statement as `hook <name>`, its errors the events it refused. Mend the statement with `create or replace statement` and the sender's retries are taken.",
+    "tags": ["service:fennecdb", "fennec:hooks"],
+    "options": {
+      "thresholds": {"critical": 10, "warning": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: webhook events are held back",
+    "type": "query alert",
+    "query": "sum(last_30m):sum:fennecdb.hook_events.count{outcome:deferred} by {host}.as_count() + sum:fennecdb.hook_events.count{outcome:unknown} by {host}.as_count() > 20",
+    "message": "Verified webhook events on {{host.name}} were told to come back by the state they met -- a tenant at its quota (507) or its rate (429), a move's freeze or a lapsed lease (503), a storage error (500), no standby holding the event in time (503) -- or landed as a lease lapsed, their outcome unknown (500). Nothing is lost while the sender retries, and a retry of one that landed is answered from its key; but nothing is taken either. The server's log names each with its status; raise the quota, check the disk, the standby's stream (`fennec_replica_behind`) or the node's lease.",
+    "tags": ["service:fennecdb", "fennec:hooks"],
+    "options": {
+      "thresholds": {"critical": 20, "warning": 5},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
+  },
+  {
+    "name": "fennecdb: a tenant's copy lacks its hook secrets",
+    "type": "query alert",
+    "query": "max(last_15m):max:fennecdb.router_tenants_hooks_behind{*} by {host} > 0",
+    "message": "The router on {{host.name}} counts tenants a copy of which -- a pair's standby, a `--replicas` copy -- lacks the version of the tenant's hook secrets its directory records: a failover onto that copy would answer the tenant's senders 401 until the secret is set again. The router's repair copies the set from a copy holding it on its next look; GET /_shard/tenants/<t>/hooks names the copy `behind`. If it stays, the copy's node is down or refuses the set: PUT the hook again once it is back.",
+    "tags": ["service:fennecdb", "fennec:hooks"],
+    "options": {
+      "thresholds": {"critical": 0},
+      "notify_no_data": false,
+      "require_full_window": false
+    }
   }
 ]
