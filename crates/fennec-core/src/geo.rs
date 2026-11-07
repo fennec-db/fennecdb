@@ -722,6 +722,12 @@ impl GeoIndex {
         }
     }
 
+    /// Its entries in order: the same for two indexes holding the same rows.
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        format!("{:?}", self.keys.iter().collect::<Vec<_>>())
+    }
+
     /// The rows holding a point.
     pub fn len(&self) -> usize {
         self.keys.len

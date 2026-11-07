@@ -279,6 +279,14 @@ impl Dictionary {
         if marked(w) {
             return;
         }
+        // A test's panic leaving what the one #501 took out left: a chunk
+        // holding no word, whose first word every walk and every later
+        // `add` or `remove` reads.
+        #[cfg(test)]
+        if crate::engine::unwinding::armed("words") {
+            self.chunks.push(Chunk::default());
+            panic!("a test's panic in the sorted words");
+        }
         let w = w.as_bytes();
         // Sorted over no words, or every word taken out since: the word is a
         // chunk of its own. Pushed empty first, as it was, the chunk was

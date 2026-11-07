@@ -579,6 +579,30 @@ impl SortedIndex {
         }
     }
 
+    /// Its entries in order, the keys, the nulls and the NaNs (a json
+    /// one's numbers, texts and values apart): the same for two indexes
+    /// holding the same rows.
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        fn of<K: std::fmt::Debug>(o: &Ordered<K>) -> String
+        where
+            (K, DocId): Entry + Clone,
+        {
+            let all = |c: &Chunked<(K, DocId)>| format!("{:?}", c.iter().collect::<Vec<_>>());
+            format!("{} {} {}", all(&o.keys), all(&o.nulls), all(&o.nans))
+        }
+        match self {
+            SortedIndex::Num(o) => of(o),
+            SortedIndex::Text(o) => of(o),
+            SortedIndex::Json(j) => format!(
+                "{} {} {:?}",
+                of(&j.num),
+                of(&j.text),
+                j.apart.iter().collect::<Vec<_>>()
+            ),
+        }
+    }
+
     /// Whether any row holds `NaN`, which has no place in an order.
     pub fn has_nan(&self) -> bool {
         match self {

@@ -224,23 +224,31 @@ struct List {
 }
 
 impl List {
-    fn set(&mut self, doc: DocId, w: f32) {
+    /// `doc`'s weight; whether it was new to the list.
+    fn set(&mut self, doc: DocId, w: f32) -> bool {
         self.max = self.max.max(w);
         self.min = self.min.min(w);
         match self.docs.binary_search(&doc) {
-            Ok(at) => self.weights[at] = w,
+            Ok(at) => {
+                self.weights[at] = w;
+                false
+            }
             Err(at) => {
                 self.docs.insert(at, doc);
                 self.weights.insert(at, w);
+                true
             }
         }
     }
 
-    fn drop_doc(&mut self, doc: DocId) {
-        if let Ok(at) = self.docs.binary_search(&doc) {
-            self.docs.remove(at);
-            self.weights.remove(at);
-        }
+    /// `doc` out; whether the list held it.
+    fn drop_doc(&mut self, doc: DocId) -> bool {
+        let Ok(at) = self.docs.binary_search(&doc) else {
+            return false;
+        };
+        self.docs.remove(at);
+        self.weights.remove(at);
+        true
     }
 
     fn bytes(&self) -> usize {
@@ -305,10 +313,14 @@ impl SparseIndex {
         self.at.get(&(i as DocId)).map(|k| &self.lists[*k as usize])
     }
 
+    /// Puts a document in, counted as the first of its lists takes it --
+    /// so that one a panic left in some of them is counted, as a removal
+    /// finding it in any uncounts it.
     pub fn insert(&mut self, doc: DocId, entries: &[(u32, f32)]) {
         if entries.is_empty() {
             return;
         }
+        let mut counted = false;
         for &(i, w) in entries {
             let k = match self.at.get(&(i as DocId)) {
                 Some(k) => *k as usize,
@@ -321,29 +333,56 @@ impl SparseIndex {
             };
             let list = &mut self.lists[k];
             let before = list.bytes();
-            list.set(doc, w);
+            let new = list.set(doc, w);
             self.heap += list.bytes() - before;
+            if new && !counted {
+                self.docs += 1;
+                counted = true;
+            }
+            #[cfg(test)]
+            crate::engine::unwinding::panic_at("+sparse-dim");
         }
-        self.docs += 1;
     }
 
     /// Takes a document out. `entries` must be what was indexed -- every
-    /// caller reads the stored document first, as the text index's do.
+    /// caller reads the stored document first, as the text index's do --
+    /// or a write a panic stopped part way, being put back: uncounted only
+    /// where a list held it, a removal of what is not there moves nothing
+    /// ([`crate::engine::Collection`]'s `put_back_torn`), where the count
+    /// fell by one for every removal, the document held or not.
     pub fn remove(&mut self, doc: DocId, entries: &[(u32, f32)]) {
         if entries.is_empty() {
             return;
         }
+        let mut held = false;
         for (i, _) in entries {
             if let Some(k) = self.at.get(&(*i as DocId)) {
                 let list = &mut self.lists[*k as usize];
-                list.drop_doc(doc);
+                held |= list.drop_doc(doc);
                 if list.docs.is_empty() {
                     self.heap -= list.bytes() - List::default().bytes();
                     *list = List::default();
                 }
             }
+            #[cfg(test)]
+            crate::engine::unwinding::panic_at("-sparse-dim");
         }
-        self.docs = self.docs.saturating_sub(1);
+        self.docs = self.docs.saturating_sub(usize::from(held));
+    }
+
+    /// Each dimension's documents and weights, by dimension, and the count
+    /// of documents: the same for two indexes holding the same rows. A
+    /// list's bounds are left out: only ever widened, a removal leaves
+    /// them loose ([`List::max`]).
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        let mut dims: Vec<_> = (self.at.iter())
+            .map(|(d, &k)| (*d, &self.lists[k as usize]))
+            .filter(|(_, l)| !l.docs.is_empty())
+            .map(|(d, l)| format!("{d}: {:?} {:?}", l.docs, l.weights))
+            .collect();
+        dims.sort();
+        format!("{} docs {dims:?}", self.docs)
     }
 
     /// Gives back the growth slack of every list, where the index is known

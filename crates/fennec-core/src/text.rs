@@ -670,6 +670,9 @@ impl TextIndex {
                     words.add(t);
                 }
             }
+            // Part way: a term in, the rest and the length not.
+            #[cfg(test)]
+            crate::engine::unwinding::panic_at("+text-term");
         });
         if n == 0 {
             return;
@@ -695,10 +698,45 @@ impl TextIndex {
                     words.remove(t);
                 }
             }
+            #[cfg(test)]
+            crate::engine::unwinding::panic_at("-text-term");
         });
         if let Some(n) = self.lengths.remove(doc) {
             self.total_terms -= n as u64;
         }
+    }
+
+    /// Each term's documents and counts, the length of each of `ids` it
+    /// holds, how many it holds and their terms: the same for two indexes
+    /// holding the same rows, however each was grown. The sorted words,
+    /// where made, are held to the terms' own.
+    #[cfg(test)]
+    pub(crate) fn dump(&self, ids: impl Iterator<Item = DocId>) -> String {
+        if let Some(d) = self.words.get() {
+            let mut words = self.postings.words();
+            words.sort_unstable();
+            assert_eq!(d.sound(), words, "the sorted words are the terms' own");
+        }
+        let lengths: Vec<_> = ids
+            .map(|id| (id, self.lengths.get(id)))
+            .filter(|(_, n)| *n != 0)
+            .collect();
+        format!(
+            "{:?} lengths {lengths:?} of {} total {}",
+            self.postings.dump(),
+            self.lengths.len(),
+            self.total_terms
+        )
+    }
+
+    /// Lets go of the sorted words, which the next `match` that reads
+    /// loosely sorts again: what a panic in the middle of a write may have
+    /// left them as ([`crate::fuzzy::Dictionary`]) no one can tell, and a
+    /// write keeping them up or a walk reading them could panic again. A
+    /// build that aborts on a panic has nothing to put back.
+    #[cfg(panic = "unwind")]
+    pub(crate) fn forget_words(&mut self) {
+        self.words = Lazy::new();
     }
 
     /// Gives back the growth slack of every postings list, of the table
