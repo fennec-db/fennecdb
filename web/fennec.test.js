@@ -802,6 +802,46 @@ test('a text whose list the module asked for as JSON sends it so at once after',
   calls = 0;
   assert.deepEqual(ids('get p select id where id = $1', [16777217]), [16777217]);
   assert.equal(calls, 1);
+  // A list of integers under 2 ** 24 goes over apart, its place marked
+  // whole, and the module takes it as the integers it holds, asking for
+  // nothing: an [int]'s and a [float]'s, an `in $1`'s.
+  db.run('create collection q (k int, xs [int], fs [float])');
+  const lists = [[1, -2, 9999999, -0], new Float64Array([1, -2, 9999999, 0]), new Int32Array([1, -2, 9999999, 0])];
+  for (const [k, list] of lists.entries()) {
+    calls = 0;
+    db.run('put q {k: $1, xs: $2, fs: $2}', [k, list]);
+    assert.equal(calls, 1, `${k}`);
+  }
+  calls = 0;
+  assert.deepEqual(ids('get q select id where k in $1 order k', [[0, 2]]), [1, 3]);
+  assert.equal(calls, 1);
+  // Past 2 ** 24, or a fraction: asked for as JSON, and kept as written.
+  for (const [k, list] of [[3, [16777217]], [4, [16777216, 5]]]) {
+    calls = 0;
+    db.run('put q {k: $1, xs: $2}', [k, list]);
+    assert.equal(calls, k === 3 ? 2 : 1, `${k}`);
+  }
+  calls = 0;
+  db.run('put q {k: $1, fs: $2}', [5, [0.1]]);
+  assert.equal(calls, 2);
+  assert.deepEqual(db.rows('get q select xs, fs order k').map((r) => [r.xs, r.fs]), [
+    ...lists.map(() => [[1, -2, 9999999, 0], [1, -2, 9999999, 0]]),
+    [[16777217], null],
+    [[16777216, 5], null],
+    [null, [0.1]],
+  ]);
+  db.close();
+});
+
+test('a vector field compared with a list of integers finds it, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection v (e vector<3>)');
+  db.run('put v [{e: [1, 0, 0]}, {e: [1, 0, 0]}, {e: [0, 1, 0]}]');
+  for (const q of ['get v where e = [1, 0, 0] count', 'get v where e in [[1, 0, 0]] count', 'get v where [1, 0, 0] = e count']) {
+    assert.equal(db.rows(q)[0].count, 2, q);
+  }
+  assert.equal(db.rows('get v where e = $1 count', [[1, 0, 0]])[0].count, 2);
   db.close();
 });
 

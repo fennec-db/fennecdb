@@ -7997,6 +7997,11 @@ impl Database {
                 (FIELD_TTL, name.clone(), String::new())
             }
         };
+        // A field added or dropped moves the places after it.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            schema.keeps = Schema::kept(&schema.fields);
+        }
         let ch = FieldChange {
             op,
             field,
@@ -12668,17 +12673,39 @@ impl Database {
 /// field refuses (`Value::coerce`). A caller holding the text reads it again
 /// as written (`fennec_ql::parse_exact`, `json::parse_params_exact`) where
 /// this names it, and only then: a statement with no list of numbers costs
-/// the walk of its literals, and one into a collection with no json field a
-/// look at its fields.
+/// the walk of its literals, and one into a collection with no json field
+/// nothing more ([`Schema::keeps`]).
+///
+/// The reader notes whether a vector it made may not hold the numbers
+/// written -- a fraction or an exponent among them, or an integer of eight
+/// digits (`rounded`: natively `fennec_ql::parse_noting` and
+/// `json::parse_params_noting`, and a page's vector handed over apart). Where
+/// none may, the `f32`s are the integers written, and a caller turns them
+/// into those in place ([`Value::as_written`], [`Database::as_written`])
+/// rather than read anything again ([`Exactly::again`]): an `[int]` given
+/// `[1, 2, 3]` is read once.
 #[derive(Debug, Default, PartialEq)]
 pub struct Exactly {
     pub text: bool,
     pub params: Vec<usize>,
+    /// Whether a list `text` names is anywhere but at the top of a write's
+    /// values (a `put`'s documents, its `else set`, a `set`'s values):
+    /// compared with a field, an argument of `distance`, a call's -- which
+    /// the text is read again for whatever its parse noted.
+    pub deep: bool,
 }
 
 impl Exactly {
     pub fn is_needed(&self) -> bool {
         self.text || !self.params.is_empty()
+    }
+
+    /// Whether the text is read again, its parse having noted `rounded`:
+    /// where the lists it needs are all at the top of a write's values and
+    /// none of its vectors may be rounded, [`Database::as_written`] makes
+    /// them the lists written in place.
+    pub fn again(&self, rounded: bool) -> bool {
+        self.text && (rounded || self.deep)
     }
 }
 
@@ -12728,6 +12755,37 @@ impl Database {
         statement_needs(&of, stmt, &mut out);
         out
     }
+
+    /// The lists a write gives fields keeping their numbers, at the top of
+    /// its values, turned in place into the lists written
+    /// ([`Value::as_written`]): what [`Exactly::text`] names and not
+    /// [`Exactly::deep`], from a parse that noted no vector rounded -- each
+    /// an `f32` holding an integer exactly. Read again instead, an `[int]`
+    /// of eight in the text took 44 076 instructions to put against 22 636.
+    /// Natively: the browser module reads a text again where a list in it
+    /// is needed as written.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn as_written(&self, stmt: &mut Statement) {
+        let Some(c) = self.collections.get(stmt_collection(stmt)) else {
+            return;
+        };
+        let schema = &c.schema;
+        let mut pair = |(key, e): &mut (String, Expr)| {
+            if let Expr::Lit(v) = e {
+                if schema.keeps_numbers(key) {
+                    v.as_written();
+                }
+            }
+        };
+        match stmt {
+            Statement::Put { docs, else_set, .. } => {
+                docs.iter_mut().flatten().for_each(&mut pair);
+                else_set.iter_mut().flatten().for_each(&mut pair);
+            }
+            Statement::Update { set, .. } => set.iter_mut().for_each(&mut pair),
+            _ => {}
+        }
+    }
 }
 
 /// What [`exactly_for`]'s walk knows of a collection a statement reads.
@@ -12745,6 +12803,15 @@ enum Known<'a> {
 }
 
 impl<'a> Known<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn of(schema: &'a Schema) -> Known<'a> {
+        // Worked out wherever the fields change: every test asking this
+        // holds it to them.
+        debug_assert_eq!(schema.keeps, Schema::kept(&schema.fields));
+        Known::Schema(schema, !schema.keeps.is_empty())
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn of(schema: &'a Schema) -> Known<'a> {
         Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
     }
@@ -12817,7 +12884,13 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     let any = !matches!(k, Known::Schema(_, false));
     let mut pair = |(key, e): &(String, Expr)| {
         if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
-            given(e, out);
+            match e {
+                // At the top of a write: one `Database::as_written` reaches,
+                // natively. The browser module reads its text again.
+                #[cfg(not(target_arch = "wasm32"))]
+                Expr::Lit(_) => out.text = true,
+                e => given(e, out),
+            }
         }
         // A literal or a parameter holds no call and no inner `get`: a
         // `put`'s values, nearly all of them one, are not walked. Walked,
@@ -12936,21 +13009,33 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
 
 /// Whether `name` is a json field of `schema` or a path into one, a
 /// point, an `[int]` or a `[float]` -- a field that keeps a list of
-/// numbers as written ([`DataType::keeps_numbers`]).
+/// numbers as written ([`DataType::keeps_numbers`], [`Schema::keeps`]).
 fn names_json(schema: &Schema, name: &str) -> bool {
-    // A path's field is a json one, or the path is refused where it is read.
-    let field = name.split_once('.').map_or(name, |(f, _)| f);
-    schema.field(field).is_some_and(|f| f.ty.keeps_numbers())
+    #[cfg(not(target_arch = "wasm32"))]
+    return schema.keeps_numbers(name);
+    // The browser module keeps no places: its fields are walked.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let field = name.split_once('.').map_or(name, |(f, _)| f);
+        schema.field(field).is_some_and(|f| f.ty.keeps_numbers())
+    }
 }
 
 /// What a value given a json field, or compared with one, needs: a
 /// parameter by its place, once, or the text where a literal holds a list
-/// of numbers.
+/// of numbers -- read again, whatever its parse noted ([`Exactly::deep`]).
 fn given(e: &Expr, out: &mut Exactly) {
     match e {
         Expr::Param(i) if !out.params.contains(i) => out.params.push(*i),
         Expr::Param(_) => {}
-        e => out.text |= e.reads_vectors(),
+        e => {
+            let lists = e.reads_vectors();
+            out.text |= lists;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                out.deep |= lists;
+            }
+        }
     }
 }
 

@@ -1233,10 +1233,14 @@ the module as its <code>f32</code>s beside the JSON rather than as text:
 200 768-dim vectors are put in 4.4 ms, against 21.9 written out as digits
 and read back. The vector stored is the same, <code>-0</code> as
 <code>0</code> as JSON writes it; over HTTP a parameter is JSON. Where such
-a parameter is given a <code>json</code> field, or compared with a path
-into one, the module names it before running anything and <code>run</code>
-sends it again as JSON, so a plain array keeps its numbers as written and a
-<code>Float32Array</code> goes as the numbers it holds.</p>
+a parameter is given a <code>json</code> field, an <code>[int]</code> or a
+<code>[float]</code>, or compared with one or a path into one, the module
+names it before running anything and <code>run</code> sends it again as
+JSON, so a plain array keeps its numbers as written and a
+<code>Float32Array</code> goes as the numbers it holds. An array of
+integers short of 2<sup>24</sup>, which its <code>f32</code>s hold exactly,
+goes over once: <code>run</code> marks it as it hands it over, and the
+module takes it as those integers.</p>
 </details>
 
 <h2>Independent of the transport</h2>

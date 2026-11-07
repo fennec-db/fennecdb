@@ -901,7 +901,7 @@ impl Scope {
     pub fn shown_schema(&self, schema: &Schema) -> Option<Schema> {
         let v = View::of(self, &schema.name)?;
         let mut out = schema.clone();
-        out.fields.retain(|f| v.granted(&f.name));
+        out.retain_fields(|f| v.granted(&f.name));
         out.paths.retain(|p| v.granted(base(&p.name)));
         out.composites
             .retain(|c| c.keys.iter().all(|(k, _)| v.granted(base(k))));

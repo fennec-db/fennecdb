@@ -118,7 +118,11 @@ parameter over HTTP and in the browser, a JSON body, a row
 <code>json</code> field, an <code>[int]</code> or a <code>[float]</code>, or
 compared with one or a path into one, the statement's text or the
 parameter's JSON is read again as written, so
-<code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
+<code>[0.1, 12345678901]</code> is kept as those two numbers. A list of
+integers of seven digits at most, whose <code>f32</code>s are those
+integers exactly, is taken from them as it was read, once: the
+<code>[int]</code> nearly every one is (in the browser, an array handed to
+<a href="javascript.html">run</a>). A vector that
 was never text — a <code>Float32Array</code> handed to the browser module,
 a vector built through the Rust API — is refused there rather than kept as
 numbers it was not given. A timestamp becomes its ISO text, as JSON writes

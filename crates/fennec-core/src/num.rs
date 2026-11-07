@@ -948,8 +948,66 @@ pub fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
     Some(if neg && (float || m != 0) { -x } else { x })
 }
 
+/// The integer at `j` when it has seven digits at most -- under 2^24, so
+/// its `f32` is it -- and nothing after it that a number's text goes on
+/// with: the `f32` [`clinger`] makes of it, `-0` as `0`. `None`, and `j`
+/// where it was, for anything else -- a fraction, an exponent, eight digits
+/// -- which `clinger` reads. A reader of a list of numbers into a vector
+/// takes them with it first: a list it reads whole is the integers written,
+/// none rounded (`Database::exactly`), and an embedding leaves it at its
+/// first fraction, its numbers read after as they were. Noted a number at
+/// a time in `clinger`, the bit took 6 instructions a number, 1.8% of a
+/// 768-dim vector's insert.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+pub fn small_int(b: &[u8], j: &mut usize) -> Option<f32> {
+    let mut k = *j;
+    let neg = b.get(k) == Some(&b'-');
+    k += neg as usize;
+    let start = k;
+    let mut n = 0i32;
+    while let Some(&d @ b'0'..=b'9') = b.get(k) {
+        if k - start == 7 {
+            return None;
+        }
+        n = n * 10 + (d - b'0') as i32;
+        k += 1;
+    }
+    if k == start || matches!(b.get(k), Some(b'.' | b'e' | b'E' | b'+' | b'-')) {
+        return None;
+    }
+    *j = k;
+    Some(if neg { -n } else { n } as f32)
+}
+
 #[cfg(test)]
 mod tests {
+    /// A small integer is read to the `f32` and the end `clinger` reads it
+    /// to, and anything else -- eight digits, a fraction, an exponent, a
+    /// sign or a digit after it -- is left where it was, for `clinger`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_small_integer_reads_as_clinger_reads_it() {
+        let taken = [
+            "0", "-0", "7", "-7", "0007", "9999999", "-9999999", "16777", "12,", "12]", "3 ",
+        ];
+        for t in taken {
+            let (mut a, mut b) = (0, 0);
+            let x = super::small_int(t.as_bytes(), &mut a).expect(t);
+            let y = super::clinger(t.as_bytes(), &mut b).expect(t) as f32;
+            assert_eq!((x.to_bits(), a), (y.to_bits(), b), "{t}");
+        }
+        let left = [
+            "10000000", "00000001", "16777217", "1.5", "1.0", "1e3", "1E3", "1-", "1+", "-", "",
+            "]", "-x",
+        ];
+        for t in left {
+            let mut a = 0;
+            assert_eq!(super::small_int(t.as_bytes(), &mut a), None, "{t}");
+            assert_eq!(a, 0, "{t}");
+        }
+    }
+
     #[test]
     fn an_i64_reads_as_str_parse_reads_it() {
         let mut cases: Vec<String> = [

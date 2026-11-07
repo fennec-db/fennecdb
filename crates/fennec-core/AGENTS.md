@@ -297,11 +297,17 @@ shortest text reading back as it (`json::num32_into`), but for
 **[A number is read exactly.](../../docs/design/vector-search.md#numbers-in)**
 `num::parse_f64` reads one, and natively `num::clinger` a list of numbers
 alone into `f32`s; a list bound for a json field, a point, an `[int]` or a
-`[float]` is read as written (`DataType::keeps_numbers`).
+`[float]` is read as written (`DataType::keeps_numbers`): read again, unless
+its reader noted no number an `f32` may round -- a fraction, an exponent,
+eight digits -- and it is a parameter or a write's value, when its `f32`s
+are made those integers in place (`Exactly::again`, `as_written`). The
+note is a parse's or a parameter list's, never a `Value`'s; natively, as
+the browser module notes none.
 
 **[A vector parameter goes into the module as
 `f32`s.](../../docs/design/vector-search.md#vector-parameters)** `run` hands it
-beside the JSON (`vectorsApart`), `-0` as `0`.
+beside the JSON (`vectorsApart`), `-0` as `0`, its place's high bit set
+where it holds integers short of 2^24 (`fennec_abi::WHOLE`).
 
 **[A quantized index holds codes, and `near` orders by the
 vectors.](../../docs/design/vector-search.md#quantized-indexes)** `Space` orders

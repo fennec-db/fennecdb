@@ -371,19 +371,15 @@ impl Value {
             // (`Database::exactly`), and this arm takes what `f32`s reach
             // it otherwise, into an `[int]` where each is whole and short
             // of 2^63.
-            (DataType::List(inner), Value::Vector(v)) => {
-                let mut out = Vec::with_capacity(v.len());
-                for f in v {
-                    out.push(Value::Float(f as f64).coerce(inner)?);
+            (DataType::List(inner), Value::Vector(v)) => listed(&v, inner),
+            // In place: a list of integers is made one from a vector's
+            // `f32`s before it comes here (`Value::as_written`), and a
+            // second `Vec` was an allocation more than the vector's.
+            (DataType::List(inner), Value::List(mut items)) => {
+                for it in items.iter_mut() {
+                    *it = std::mem::replace(it, Value::Null).coerce(inner)?;
                 }
-                Ok(Value::List(out))
-            }
-            (DataType::List(inner), Value::List(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(it.coerce(inner)?);
-                }
-                Ok(Value::List(out))
+                Ok(Value::List(items))
             }
             (DataType::Json, v) => json_value(v, 0),
             // A point is `[lon, lat]` once read, a list of two floats: a
@@ -397,6 +393,50 @@ impl Value {
                 t.name(),
                 v.type_name()
             ))),
+        }
+    }
+
+    /// A vector whose reader noted nothing rounded (`Exactly`) as the list
+    /// of integers it was written as, in place -- each `f32` an integer it
+    /// holds exactly -- and a list's vectors so: `[[1, 2], [3]]` holds two.
+    /// What a second read as written makes of it, with no second read. No
+    /// reader makes a vector inside an object. A vector holding a number no
+    /// integer under 2^24 is -- handed over marked whole by a caller that
+    /// was wrong -- is left as it is, for the field to refuse.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn as_written(&mut self) {
+        match self {
+            Value::Vector(v) => {
+                let mut out = Vec::with_capacity(v.len());
+                for &f in v.iter() {
+                    if f.fract() != 0.0 || f.abs() >= 16_777_216.0 {
+                        return;
+                    }
+                    out.push(Value::Int(f as i64));
+                }
+                *self = Value::List(out);
+            }
+            // A text's list of lists.
+            Value::List(items) => {
+                for it in items {
+                    it.as_written();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Value::as_written`] in the browser module, of a vector a page
+    /// handed over whole: through `coerce`'s arm making an `[int]` of a
+    /// vector's `f32`s ([`listed`]), where a loop of its own was 168 bytes
+    /// of the module. The browser module reads a text again where a list in
+    /// it is needed as written, so no list of lists comes here.
+    #[cfg(target_arch = "wasm32")]
+    pub fn as_written(&mut self) {
+        if let Value::Vector(v) = self {
+            if let Ok(ints) = listed(v, &DataType::Int) {
+                *self = ints;
+            }
         }
     }
 
@@ -517,6 +557,17 @@ impl Value {
 /// than [`MAX_JSON_DEPTH`]. A timestamp becomes its ISO text, as JSON
 /// writes one. Bytes, a sparse vector, a number that is not finite and a
 /// vector -- `f32`s, not the numbers they were read from -- are refused.
+/// A vector's `f32`s as a list of `inner`s, each coerced as a float: into
+/// an `[int]` where each is whole and short of 2^63. `coerce`'s, and the
+/// browser module's `as_written`.
+fn listed(v: &[f32], inner: &DataType) -> Result<Value> {
+    let mut out = Vec::with_capacity(v.len());
+    for &f in v {
+        out.push(Value::Float(f as f64).coerce(inner)?);
+    }
+    Ok(Value::List(out))
+}
+
 fn json_value(v: Value, depth: usize) -> Result<Value> {
     let deeper = || {
         Error::Type(format!(

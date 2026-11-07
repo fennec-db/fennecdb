@@ -39,14 +39,40 @@ fn run(db: &mut Database, text: &str) -> Result<Response> {
 }
 
 /// `text` with its parameters read from JSON, as a server and the browser
-/// module read them: again as written where `Database::exactly` names one.
+/// module read them: where `Database::exactly` names one, the integers its
+/// `f32`s hold if its reader noted none rounded, and read again as written
+/// otherwise.
 fn with(db: &mut Database, text: &str, params: &str) -> Result<Response> {
     let s = fennec_ql::parse_one_for(db, text)?;
-    let params = match db.exactly(&s).params.is_empty() {
-        true => fennec_core::json::parse_params(params)?,
-        false => fennec_core::json::parse_params_exact(params)?,
+    let need = db.exactly(&s).params;
+    let (mut read, rounded) = fennec_core::json::parse_params_noting(params)?;
+    if !need.is_empty() && rounded {
+        read = fennec_core::json::parse_params_exact(params)?;
+    }
+    for i in need {
+        if let Some(v) = read.get_mut(i) {
+            v.as_written();
+        }
+    }
+    db.execute_with(&s, &read)
+}
+
+/// The literal a `put` or a `set` gives `key`.
+#[track_caller]
+fn given(s: &Statement, key: &str) -> Value {
+    let pairs = match s {
+        Statement::Put { docs, .. } => &docs[0],
+        Statement::Update { set, .. } => set,
+        other => panic!("{other:?}"),
     };
-    db.execute_with(&s, &params)
+    match pairs.iter().find(|(k, _)| k == key) {
+        Some((_, Expr::Lit(v))) => v.clone(),
+        other => panic!("{key}: {other:?}"),
+    }
+}
+
+fn ints(v: &[i64]) -> Value {
+    Value::List(v.iter().map(|&n| Value::Int(n)).collect())
 }
 
 fn db() -> Database {
@@ -329,4 +355,142 @@ fn an_index_answers_past_the_range_as_the_scan_does() {
     }
     assert_eq!(count(&mut db, "get h where m = 1e300"), 0);
     assert_eq!(count(&mut db, "get h where m = -9223372036854775808.0"), 1);
+}
+
+/// A list of integers short of 2^24 -- the `[int]` nearly every one is --
+/// is read once: its readers noted no number whose `f32` may not be it
+/// (`fennec_ql::parse_noting`, `json::parse_params_noting`), and its `f32`s
+/// are made the integers they hold, in place (`Database::as_written`,
+/// `Value::as_written`). The vector field beside it keeps the vector a
+/// second read as written would have made a list. Eight digits, a fraction
+/// or an exponent is read again, and stored as written.
+#[test]
+fn a_list_of_small_integers_is_read_once() {
+    let mut db = db();
+    run(
+        &mut db,
+        "create collection w (k int, xs [int], fs [float], meta json, v vector<2>)",
+    )
+    .unwrap();
+    let text = "put w {k: 1, xs: [1, -2, 9999999, -0], fs: [5, 6], meta: [[7], 8], v: [3, 4]}";
+    assert!(!fennec_ql::parse_noting(text).unwrap().1);
+    let s = fennec_ql::parse_one_for(&db, text).unwrap();
+    assert_eq!(given(&s, "xs"), ints(&[1, -2, 9_999_999, 0]));
+    assert_eq!(given(&s, "fs"), ints(&[5, 6]));
+    assert_eq!(
+        given(&s, "meta"),
+        Value::List(vec![ints(&[7]), Value::Int(8)])
+    );
+    assert_eq!(given(&s, "v"), Value::Vector(vec![3.0, 4.0]));
+    db.execute(&s).unwrap();
+    // What a second read as written stores, the same.
+    for s in fennec_ql::parse_exact(&text.replace("k: 1", "k: 2")).unwrap() {
+        db.execute(&s).unwrap();
+    }
+    // A `set`'s values, and the parameters.
+    let set = fennec_ql::parse_one_for(&db, "set w {xs: [4, 5]} where k = 9").unwrap();
+    assert_eq!(given(&set, "xs"), ints(&[4, 5]));
+    let params = "[[1, -2, 9999999, -0], [5, 6], [3, 4]]";
+    let (read, rounded) = fennec_core::json::parse_params_noting(params).unwrap();
+    assert!(!rounded);
+    assert_eq!(read[0], Value::Vector(vec![1.0, -2.0, 9_999_999.0, 0.0]));
+    with(&mut db, "put w {k: 3, xs: $1, fs: $2, v: $3}", params).unwrap();
+    let rows = |db: &Database, q: &str| {
+        let s = fennec_ql::parse_one_for(db, q).unwrap();
+        db.query(&s, &[]).unwrap().rows().unwrap().rows.clone()
+    };
+    let all = rows(&db, "get w select xs, fs, meta order k");
+    assert_eq!(all[0].values, all[1].values);
+    assert_eq!(all[0].values[..2], all[2].values[..2]);
+    assert_eq!(all[0].values[0], ints(&[1, -2, 9_999_999, 0]));
+    // A comparison reads its list again, the vector field beside it too.
+    assert_eq!(
+        rows(&db, "get w where xs = [1, -2, 9999999, 0] count")[0].values,
+        [Value::Int(3)]
+    );
+
+    // Eight digits or more, a fraction, an exponent: read again.
+    for (list, want) in [
+        ("[16777217]", ints(&[16_777_217])),
+        ("[10000000]", ints(&[10_000_000])),
+        ("[9223372036854775807, 1]", ints(&[i64::MAX, 1])),
+        ("[1.0, 2]", ints(&[1, 2])),
+        ("[1e1]", ints(&[10])),
+    ] {
+        let text = format!("put w {{k: 4, xs: {list}, v: [3, 4]}}");
+        assert!(fennec_ql::parse_noting(&text).unwrap().1, "{list}");
+        let s = fennec_ql::parse_one_for(&db, &text).unwrap();
+        assert_eq!(given(&s, "v"), ints(&[3, 4]), "{list}");
+        assert!(matches!(given(&s, "xs"), Value::List(_)), "{list}");
+        db.execute(&s).unwrap();
+        let params = format!("[{list}]");
+        assert!(
+            fennec_core::json::parse_params_noting(&params).unwrap().1,
+            "{list}"
+        );
+        with(&mut db, "put w {k: 5, xs: $1}", &params).unwrap();
+        let stored = rows(&db, "get w where k >= 4 select xs");
+        assert!(stored.iter().all(|r| r.values[0] == want), "{list}");
+        run(&mut db, "del w where k >= 4").unwrap();
+    }
+    let s = fennec_ql::parse_one_for(&db, "put w {k: 6, fs: [0.1]}").unwrap();
+    assert_eq!(given(&s, "fs"), Value::List(vec![Value::Float(0.1)]));
+    db.execute(&s).unwrap();
+    with(&mut db, "put w {k: 7, fs: $1}", "[[0.1]]").unwrap();
+    assert_eq!(
+        rows(&db, "get w where k >= 6 select fs order k")
+            .iter()
+            .map(|r| r.values[0].clone())
+            .collect::<Vec<_>>(),
+        vec![Value::List(vec![Value::Float(0.1)]); 2]
+    );
+}
+
+/// An integer list is a vector's `f32`s to a reader with no schema, as
+/// before an `[int]` kept its numbers: a vector field compared with one
+/// finds the rows holding it, on either side of `=` and in an `in` list.
+#[test]
+fn a_vector_field_compared_with_a_list_of_integers_finds_it() {
+    let mut db = db();
+    run(&mut db, "create collection v (e vector<3>)").unwrap();
+    run(
+        &mut db,
+        "put v [{e: [1, 0, 0]}, {e: [1, 0, 0]}, {e: [0, 1, 0]}]",
+    )
+    .unwrap();
+    for q in [
+        "get v where e = [1, 0, 0] count",
+        "get v where e in [[1, 0, 0]] count",
+        "get v where [1, 0, 0] = e count",
+        "get v where e = [1.0, 0, 0] count",
+    ] {
+        let s = fennec_ql::parse_one_for(&db, q).unwrap();
+        let r = db.query(&s, &[]).unwrap();
+        assert_eq!(r.rows().unwrap().rows[0].values, [Value::Int(2)], "{q}");
+    }
+}
+
+/// The fields keeping their numbers are known by their places
+/// (`Schema::keeps`), worked out again as a field is added, dropped or
+/// renamed: a list given one after is read as written, and one a vector
+/// field is given the quick way.
+#[test]
+fn an_altered_collection_knows_its_fields_keeping_numbers() {
+    let mut db = db();
+    run(&mut db, "create collection a (x int, v vector<2>)").unwrap();
+    let column = |db: &Database, field: &str| {
+        let s =
+            fennec_ql::parse_one(&format!("get a select {field} order id desc limit 1")).unwrap();
+        db.query(&s, &[]).unwrap().rows().unwrap().rows[0].values[0].clone()
+    };
+    run(&mut db, "alter collection a add field xs [int]").unwrap();
+    run(&mut db, "put a {xs: [16777217], v: [0.1, 2]}").unwrap();
+    assert_eq!(column(&db, "xs"), ints(&[16_777_217]));
+    run(&mut db, "alter collection a drop field x").unwrap();
+    run(&mut db, "put a {xs: [16777219], v: [0.1, 2]}").unwrap();
+    assert_eq!(column(&db, "xs"), ints(&[16_777_219]));
+    assert_eq!(column(&db, "v"), Value::Vector(vec![0.1, 2.0]));
+    run(&mut db, "alter collection a rename field xs to ys").unwrap();
+    run(&mut db, "put a {ys: [16777221]}").unwrap();
+    assert_eq!(column(&db, "ys"), ints(&[16_777_221]));
 }

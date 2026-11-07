@@ -2829,7 +2829,7 @@ fn writes(db: &RwLock<Database>, body: &[u8]) -> Option<String> {
         Value::Text(s) if k == "query" || k == "sql" => Some(s.as_str()),
         _ => None,
     })?;
-    let stmt = api::parsed(sql).ok()?;
+    let (stmt, _) = api::parsed(sql).ok()?;
     if let Statement::Call(c) = &*stmt {
         return (held::read(db).call_reads(c) == Some(false)).then(|| format!("call {}", c.name));
     }
@@ -2942,8 +2942,8 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
     };
-    let (stmt, params) = match api::parse_query(body).and_then(|(stmt, params)| {
-        let exact = api::exactly(db, body, stmt, params);
+    let (stmt, params) = match api::parse_query(body).and_then(|(stmt, params, rounded)| {
+        let exact = api::exactly(db, body, stmt, params, rounded);
         timing::lap(timing::Phase::Exactly);
         exact
     }) {

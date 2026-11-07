@@ -163,7 +163,12 @@ row is read, so the answer never depends on the rows. A list of numbers
 handed the quick way, as a vector's <code>f32</code>s, is read again from
 its JSON first: the server reads the body again, and the browser module
 asks the page to send that parameter as JSON, which the page then does
-at once for that text.</p>
+at once for that text. Ids of seven digits at most — integers each
+<code>f32</code> holds exactly — are taken as they were read, once, and
+so is an array of integers short of 2<sup>24</sup> a page hands the
+browser module: the reader of the parameters notes whether any number it
+read into a vector had a fraction, an exponent or eight digits, and the
+page whether it handed over anything but such integers.</p>
 </details>
 
 <h2 id="order-by-expression">Ordering by an expression</h2>

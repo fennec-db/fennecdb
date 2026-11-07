@@ -1057,8 +1057,8 @@ pub fn seed_select(sub: &Subscription) -> Select {
 /// (no DDL, no `or` groups). Raw input lifts that wall: so the query builder
 /// in the browser can hand the same text to wasm and to this endpoint alike
 /// -- one piece of query code, two transports.
-pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
-    let obj = json::parse_object_listing(body, "params")?;
+pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>, Rounded)> {
+    let (obj, of_params) = json::parse_object_listing_noting(body, "params")?;
     let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
     let sql = match get("query").or_else(|| get("sql")) {
         Some(Value::Text(s)) => s.clone(),
@@ -1073,37 +1073,48 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
         Some(other) => vec![other.clone()],
     };
     crate::timing::lap(crate::timing::Phase::Json);
-    let stmt = parsed(&sql);
+    let parsed = parsed(&sql);
+    let stmt = parsed.as_ref().map(|(s, _)| s);
     // What the request is counted as, rather than its JSON (`statements`):
     // a call by its name alone, `call transfer $1`, however its arguments
     // were written -- the call is the unit an operator tunes, and the
     // shape `POST /_call/<name>` is counted as.
-    match stmt.as_deref() {
+    match stmt.map(|s| &**s) {
         Ok(Statement::Call(c)) => crate::statements::call(&c.name),
         _ => crate::statements::text(&sql),
     }
-    let stmt = stmt?;
+    let (stmt, of_text) = parsed?;
     crate::timing::lap(crate::timing::Phase::Cache);
-    Ok((stmt, params))
+    Ok((stmt, params, (of_text, of_params)))
 }
+
+/// Whether a vector the statement's text was read into, and one among its
+/// parameters, may not hold the numbers written
+/// (`fennec_ql::parse_noting`, `json::parse_params_noting`): where neither
+/// may, [`exactly`] makes a list a field keeping its numbers is given the
+/// list written in place, rather than read the body again.
+pub type Rounded = (bool, bool);
 
 /// The statement and parameters of a `POST /query` body as a json field
 /// needs them: a list of numbers it is handed, or a path is compared with,
 /// read again as written, from the statement's text or the parameters'
 /// JSON -- read the quick way, into a vector's `f32`s, the field refuses it
-/// (`Database::exactly`). A statement with no such list, and parameters
-/// holding none, are handed back as they came, the database not looked at.
+/// (`Database::exactly`) -- or, where its reader noted nothing `rounded`,
+/// made the integers its `f32`s hold in place. A statement with no such
+/// list, and parameters holding none, are handed back as they came, the
+/// database not looked at.
 pub fn exactly(
     db: &std::sync::RwLock<Database>,
     body: &str,
     stmt: Arc<Statement>,
     params: Vec<Value>,
+    rounded: Rounded,
 ) -> Result<(Arc<Statement>, Vec<Value>)> {
     if !vectored(&stmt, &params) {
         return Ok((stmt, params));
     }
     let g = db.read().unwrap_or_else(|e| e.into_inner());
-    exactly_in(&g, body, stmt, params)
+    exactly_in(&g, body, stmt, params, rounded)
 }
 
 /// [`exactly`] for each line of a `POST /batch` body, the database looked
@@ -1111,16 +1122,16 @@ pub fn exactly(
 pub fn exactly_batch(
     db: &std::sync::RwLock<Database>,
     body: &str,
-    stmts: Vec<(Statement, Vec<Value>)>,
+    stmts: Vec<(Statement, Vec<Value>, Rounded)>,
 ) -> Result<Vec<(Statement, Vec<Value>)>> {
-    if !stmts.iter().any(|(s, p)| vectored(s, p)) {
-        return Ok(stmts);
+    if !stmts.iter().any(|(s, p, _)| vectored(s, p)) {
+        return Ok(stmts.into_iter().map(|(s, p, _)| (s, p)).collect());
     }
     let g = db.read().unwrap_or_else(|e| e.into_inner());
     let lines = body.lines().filter(|l| !l.trim().is_empty());
     let mut out = Vec::with_capacity(stmts.len());
-    for (line, (stmt, params)) in lines.zip(stmts) {
-        let (stmt, params) = exactly_in(&g, line, Arc::new(stmt), params)?;
+    for (line, (stmt, params, rounded)) in lines.zip(stmts) {
+        let (stmt, params) = exactly_in(&g, line, Arc::new(stmt), params, rounded)?;
         out.push((Arc::unwrap_or_clone(stmt), params));
     }
     Ok(out)
@@ -1213,16 +1224,31 @@ fn vectored(stmt: &Statement, params: &[Value]) -> bool {
 fn exactly_in(
     db: &Database,
     body: &str,
-    stmt: Arc<Statement>,
-    params: Vec<Value>,
+    mut stmt: Arc<Statement>,
+    mut params: Vec<Value>,
+    rounded: Rounded,
 ) -> Result<(Arc<Statement>, Vec<Value>)> {
     let need = db.exactly(&stmt);
     if !need.is_needed() {
         return Ok((stmt, params));
     }
+    let text = need.again(rounded.0);
+    let given = !need.params.is_empty() && rounded.1;
+    if need.text && !text {
+        // A copy of the statement the cache holds: a parse's worth less.
+        db.as_written(Arc::make_mut(&mut stmt));
+    }
+    if !text && !given {
+        for &i in &need.params {
+            if let Some(v) = params.get_mut(i) {
+                v.as_written();
+            }
+        }
+        return Ok((stmt, params));
+    }
     let obj = json::parse_object_listing_exact(body, "params")?;
     let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-    let stmt = match (need.text, get("query").or_else(|| get("sql"))) {
+    let stmt = match (text, get("query").or_else(|| get("sql"))) {
         (true, Some(Value::Text(sql))) => Arc::new(
             fennec_ql::parse_exact(sql)
                 .and_then(|mut s| match s.len() {
@@ -1235,10 +1261,18 @@ fn exactly_in(
         ),
         _ => stmt,
     };
-    let params = match get("params") {
-        Some(Value::List(items)) if !need.params.is_empty() => items.clone(),
+    let mut params = match get("params") {
+        Some(Value::List(items)) if given => items.clone(),
         _ => params,
     };
+    // Read with the text, the parameters' vectors noted none rounded.
+    if !given {
+        for &i in &need.params {
+            if let Some(v) = params.get_mut(i) {
+                v.as_written();
+            }
+        }
+    }
     Ok((stmt, params))
 }
 
@@ -1255,16 +1289,21 @@ const PARSED_PER_SHARD: usize = 64;
 /// statements no one asks for again.
 const PARSED_LONGEST: usize = 1024;
 
-type Parsed = std::sync::Mutex<Option<std::collections::HashMap<u64, (Box<str>, Arc<Statement>)>>>;
+/// A text, its statement, and whether a vector its parse made may not hold
+/// the numbers written ([`Rounded`]).
+type Parsed =
+    std::sync::Mutex<Option<std::collections::HashMap<u64, (Box<str>, Arc<Statement>, bool)>>>;
 static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) }; PARSED_SHARDS];
 
-/// `text` parsed as one statement, from the shards when it was before. A
-/// parse reads the text alone, so the statement is the same one each time.
-pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
+/// `text` parsed as one statement, from the shards when it was before, and
+/// whether a vector its parse made may not hold the numbers written
+/// ([`Rounded`]). A parse reads the text alone, so the statement is the
+/// same one each time.
+pub(crate) fn parsed(text: &str) -> Result<(Arc<Statement>, bool)> {
     let parse = || {
         crate::timing::parsed();
-        fennec_ql::parse_one(text)
-            .map(Arc::new)
+        fennec_ql::parse_one_noting(text)
+            .map(|(s, rounded)| (Arc::new(s), rounded))
             .map_err(|e| Error::Query(e.to_string()))
     };
     if text.len() > PARSED_LONGEST {
@@ -1279,19 +1318,19 @@ pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .and_then(|m| m.get(&hash))
-        .filter(|(t, _)| &**t == text)
-        .map(|(_, s)| Arc::clone(s));
-    if let Some(stmt) = found {
-        return Ok(stmt);
+        .filter(|(t, ..)| &**t == text)
+        .map(|(_, s, rounded)| (Arc::clone(s), *rounded));
+    if let Some(found) = found {
+        return Ok(found);
     }
-    let stmt = parse()?;
+    let (stmt, rounded) = parse()?;
     let mut shard = shard.lock().unwrap_or_else(|e| e.into_inner());
     let map = shard.get_or_insert_with(Default::default);
     if map.len() >= PARSED_PER_SHARD {
         map.clear();
     }
-    map.insert(hash, (text.into(), Arc::clone(&stmt)));
-    Ok(stmt)
+    map.insert(hash, (text.into(), Arc::clone(&stmt), rounded));
+    Ok((stmt, rounded))
 }
 
 /// The body of `POST /batch`: **one per line**, each a `POST /query` body
@@ -1317,13 +1356,13 @@ pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
 /// as a write is (`Statement::fits_block`); a `compact` cannot be, so a
 /// batch holding one runs each statement on its own: it stops at the first
 /// error, and `completed` says how many were applied.
-pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
+pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>, Rounded)>> {
     let mut out = Vec::new();
     for (i, line) in body.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let (stmt, params) = parse_query(line).map_err(|e| {
+        let (stmt, params, rounded) = parse_query(line).map_err(|e| {
             // The parse's own words: `{e}` said their kind again,
             // `query error: query error: position 11: ...`.
             let why = match e {
@@ -1332,7 +1371,7 @@ pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
             };
             Error::Query(format!("batch line {}: {why}", i + 1))
         })?;
-        out.push((Arc::unwrap_or_clone(stmt), params));
+        out.push((Arc::unwrap_or_clone(stmt), params, rounded));
     }
     if out.is_empty() {
         return Err(Error::Query("empty batch".into()));

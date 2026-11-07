@@ -298,6 +298,12 @@ pub struct Parser {
     /// rather than become a vector: only a `json` field holds an object,
     /// and `[19.99]` in it is two decimals, not an `f32`.
     exact: bool,
+    /// Whether a vector read may not hold the numbers written -- the
+    /// lexer's lists, and those made here of tokens ([`parse_noting`]).
+    /// Natively: the browser module reads a text again where a list in it
+    /// is needed as written.
+    #[cfg(not(target_arch = "wasm32"))]
+    rounded: bool,
     /// The end of the text decided how a statement was read: the SQL
     /// order's list ran to it and was read again as a collection's name
     /// for want of its `from`, or `alter field f` found it where an `@`
@@ -362,7 +368,34 @@ struct Bound {
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
-    statements(src, tokenize(src)?, false)
+    // One body natively, the lexer's and the statements' inlined once; the
+    // browser module notes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    return parse_noting(src).map(|(stmts, _)| stmts);
+    #[cfg(target_arch = "wasm32")]
+    statements(src, tokenize(src)?, false, &mut false)
+}
+
+/// [`parse`], and whether a vector it read may not hold the numbers
+/// written: a fraction or an exponent among a list's numbers, or an
+/// integer of eight digits (`fennec_core::num::small_int`), noted by the readers of
+/// the numbers from what they track anyway. Where none may, every list of
+/// numbers in it is the integers its `f32`s hold, and one a json field, an
+/// `[int]` or a `[float]` is given at the top of a write is made the list
+/// written in place (`Database::as_written`) rather than the text read
+/// again ([`parse_for`]).
+pub fn parse_noting(src: &str) -> Result<(Vec<Statement>, bool)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut rounded = false;
+        let toks = crate::lexer::tokenize_noting(src, &mut rounded)?;
+        let stmts = statements(src, toks, false, &mut rounded)?;
+        Ok((stmts, rounded))
+    }
+    // The browser module's readers note nothing: every list is taken as
+    // rounded, and read again where it is needed as written.
+    #[cfg(target_arch = "wasm32")]
+    Ok((parse(src)?, true))
 }
 
 /// [`parse`], every list of numbers kept as written -- integers integers,
@@ -371,23 +404,32 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
 /// at a time, which is slower than the vector [`parse`] makes, so a text is
 /// read so only where [`parse_for`] finds a json field given one.
 pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
-    statements(src, crate::lexer::tokenize(src)?, true)
+    statements(src, crate::lexer::tokenize(src)?, true, &mut false)
 }
 
 /// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
 /// statement hands a json field of `db` a list of numbers, or compares one
-/// with a path into it (`Database::exactly`). A statement with no list of
-/// numbers costs the walk of its literals, and one into a collection with
-/// no json field a look at its fields.
+/// with a path into it (`Database::exactly`) -- unless every such list is
+/// at the top of a write's values and the parse noted no vector rounded
+/// ([`parse_noting`]): those are made the lists written in place
+/// (`Database::as_written`), the text read once. A statement with no list
+/// of numbers costs the walk of its literals, and one into a collection
+/// with no json field nothing more.
+#[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
 pub fn parse_for(db: &Database, src: &str) -> Result<Vec<Statement>> {
-    let stmts = parse(src)?;
-    match stmts
-        .iter()
-        .any(|s| s.reads_vectors() && db.exactly(s).text)
-    {
-        true => parse_exact(src),
-        false => Ok(stmts),
+    let (mut stmts, rounded) = parse_noting(src)?;
+    for s in stmts.iter_mut().filter(|s| s.reads_vectors()) {
+        let need = db.exactly(s);
+        if need.again(rounded) {
+            return parse_exact(src);
+        }
+        // The browser module notes every list rounded, and has read again.
+        #[cfg(not(target_arch = "wasm32"))]
+        if need.text {
+            db.as_written(s);
+        }
     }
+    Ok(stmts)
 }
 
 /// [`parse_for`], of a single statement.
@@ -399,14 +441,24 @@ pub fn parse_one_for(db: &Database, src: &str) -> Result<Statement> {
 /// 128-dim rows parsed 1.4% slower (8.27 -> 8.39 ms) than with the body in
 /// `parse`; the browser module keeps one copy.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-#[cfg_attr(not(feature = "statements"), allow(unused_variables))]
-fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
+#[cfg_attr(
+    any(not(feature = "statements"), target_arch = "wasm32"),
+    allow(unused_variables)
+)]
+fn statements(
+    src: &str,
+    toks: Vec<Token>,
+    exact: bool,
+    rounded: &mut bool,
+) -> Result<Vec<Statement>> {
     let mut p = Parser {
         toks,
         i: 0,
         depth: 0,
         subqueries: 0,
         exact,
+        #[cfg(not(target_arch = "wasm32"))]
+        rounded: false,
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
@@ -425,6 +477,10 @@ fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>
     }
     if out.is_empty() {
         return Err(Error::Query("empty query".into()));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        *rounded |= p.rounded;
     }
     Ok(out)
 }
@@ -605,6 +661,8 @@ pub fn reading(src: &str) -> Reading {
         depth: 0,
         subqueries: 0,
         exact: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        rounded: false,
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
@@ -709,6 +767,13 @@ pub fn reading(src: &str) -> Reading {
 /// Parses a single statement; errors when there is more than one.
 pub fn parse_one(src: &str) -> Result<Statement> {
     one(parse(src)?)
+}
+
+/// [`parse_one`], and whether a vector it read may not hold the numbers
+/// written ([`parse_noting`]).
+pub fn parse_one_noting(src: &str) -> Result<(Statement, bool)> {
+    let (stmts, rounded) = parse_noting(src)?;
+    Ok((one(stmts)?, rounded))
 }
 
 /// A value the row cannot change: a literal, or a parameter.
@@ -902,6 +967,8 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        rounded: false,
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
@@ -922,6 +989,8 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        rounded: false,
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
@@ -942,6 +1011,8 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        rounded: false,
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
@@ -1057,6 +1128,12 @@ impl Parser {
                 Tok::Comma => j += 2,
                 Tok::RBracket => {
                     self.i = j + 2;
+                    // Its numbers not looked at: where the lexer made no
+                    // vector of a list, a `_` in a number, a comment.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.rounded = true;
+                    }
                     return Some(v);
                 }
                 _ => return None,
@@ -6152,6 +6229,11 @@ impl Parser {
                             _ => continue,
                         });
                     }
+                    // As in `numbers_in_brackets`.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.rounded = true;
+                    }
                     return Ok(Expr::Lit(Value::Vector(v)));
                 }
                 Ok(Expr::Lit(Value::List(vals)))
@@ -6699,6 +6781,8 @@ mod tests {
             depth: 0,
             subqueries: 0,
             exact: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            rounded: false,
             cut: false,
             outer: Around::At(usize::MAX),
             def: None,

@@ -776,7 +776,8 @@ impl std::ops::Deref for SchemaCell {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", derive(Debug))]
 pub struct Schema {
     pub name: String,
     /// The fields a document holds, in the order it holds them -- the
@@ -799,6 +800,31 @@ pub struct Schema {
     pub dropped: Vec<usize>,
     /// The indexes over several fields, in the order they were made.
     pub composites: Vec<Composite>,
+    /// The places in `fields` of those keeping a list of numbers as written
+    /// ([`DataType::keeps_numbers`]), worked out wherever the fields are
+    /// made or changed ([`Schema::kept`]): what `Database::exactly` asks of
+    /// a statement's values. A collection keeping none is asked nothing; one
+    /// keeping some compares a value's name with theirs alone. Found by a
+    /// walk of the fields, every statement holding a vector paid for it.
+    /// Natively: the browser module walks the fields, as it did.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) keeps: Vec<u32>,
+}
+
+/// A schema as written, `keeps` left out: worked out of the fields, it is
+/// no part of what a statement says, and `make fennecql-corpus` compares
+/// the trees by their `Debug`. The browser module, keeping none, derives it.
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for Schema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Schema")
+            .field("name", &self.name)
+            .field("fields", &self.fields)
+            .field("paths", &self.paths)
+            .field("dropped", &self.dropped)
+            .field("composites", &self.composites)
+            .finish()
+    }
 }
 
 /// A name read as a path: the field and the keys past it (`meta` and
@@ -898,10 +924,52 @@ impl Schema {
         one_expiry(&name, fields.iter())?;
         Ok(Schema {
             name,
+            #[cfg(not(target_arch = "wasm32"))]
+            keeps: Schema::kept(&fields),
             fields,
             paths: Vec::new(),
             dropped: Vec::new(),
             composites: Vec::new(),
+        })
+    }
+
+    /// The places of the fields keeping a list of numbers as written
+    /// ([`Schema::keeps`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn kept(fields: &[Field]) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (at, f) in fields.iter().enumerate() {
+            if f.ty.keeps_numbers() {
+                out.push(at as u32);
+            }
+        }
+        out
+    }
+
+    /// The fields `keep` keeps, [`Schema::keeps`] worked out again for
+    /// them: a schema as a token is shown it.
+    pub fn retain_fields(&mut self, keep: impl FnMut(&Field) -> bool) {
+        self.fields.retain(keep);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.keeps = Schema::kept(&self.fields);
+        }
+    }
+
+    /// Whether `name`, a field or a path into one, keeps a list of numbers
+    /// as written ([`Schema::keeps`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn keeps_numbers(&self, name: &str) -> bool {
+        if self.keeps.is_empty() {
+            return false;
+        }
+        // A path's field is a json one, or the path is refused where it is
+        // read.
+        let field = name.split_once('.').map_or(name, |(f, _)| f);
+        self.keeps.iter().any(|&at| {
+            self.fields
+                .get(at as usize)
+                .is_some_and(|f| f.name == field)
         })
     }
 
@@ -1317,6 +1385,8 @@ impl Schema {
         }
         Ok(Schema {
             name,
+            #[cfg(not(target_arch = "wasm32"))]
+            keeps: Schema::kept(&fields),
             fields,
             paths,
             dropped,

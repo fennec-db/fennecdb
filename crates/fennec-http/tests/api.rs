@@ -1540,6 +1540,61 @@ fn an_int_or_float_list_keeps_its_numbers() {
     }
 }
 
+/// A list of integers short of 2^24 an `[int]` is given is read once: the
+/// body's statement and parameters taken as they were read, the vector
+/// beside it left the vector it was read into -- which a second read as
+/// written makes a list -- and the integers stored. Eight digits or a
+/// fraction is read again from the body.
+#[test]
+fn a_list_of_small_integers_is_read_once() {
+    let db = RwLock::new(Database::new());
+    let create = fennec_ql::parse_one("create collection w (xs [int], v vector<2>)").unwrap();
+    db.write().unwrap().execute(&create).unwrap();
+    let ints = |v: &[i64]| Value::List(v.iter().map(|&n| Value::Int(n)).collect());
+    let read = |body: &str| {
+        let (s, p, rounded) = fennec_http::api::parse_query(body).unwrap();
+        fennec_http::api::exactly(&db, body, s, p, rounded).unwrap()
+    };
+    let given = |s: &Statement, key: &str| match s {
+        Statement::Put { docs, .. } => match docs[0].iter().find(|(k, _)| k == key) {
+            Some((_, Expr::Lit(v))) => v.clone(),
+            _ => panic!("{key}"),
+        },
+        _ => panic!("{key}"),
+    };
+    let (s, _) = read(r#"{"query":"put w {xs: [1, -2, 9999999], v: [3, 4]}"}"#);
+    assert_eq!(given(&s, "xs"), ints(&[1, -2, 9_999_999]));
+    assert_eq!(given(&s, "v"), Value::Vector(vec![3.0, 4.0]));
+    let (s, _) = read(r#"{"query":"put w {xs: [16777217], v: [3, 4]}"}"#);
+    assert_eq!(given(&s, "xs"), ints(&[16_777_217]));
+    assert_eq!(given(&s, "v"), ints(&[3, 4]));
+    let put = "put w {xs: $1, v: $2}";
+    let (_, p) = read(&format!(r#"{{"query":"{put}","params":[[1, 2],[3, 4]]}}"#));
+    assert_eq!(p, [ints(&[1, 2]), Value::Vector(vec![3.0, 4.0])]);
+    let (_, p) = read(&format!(
+        r#"{{"query":"{put}","params":[[16777217],[3, 4]]}}"#
+    ));
+    assert_eq!(p, [ints(&[16_777_217]), ints(&[3, 4])]);
+    // Through the server, stored as written.
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    assert_eq!(
+        q(r#"{"query":"create collection w (k int, xs [int])"}"#).status,
+        200
+    );
+    let r = q(r#"{"query":"put w {k: 1, xs: [1, -2, 9999999]}"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"put w {k: 2, xs: $1}","params":[[1, -2, 9999999]]}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"put w {k: 3, xs: $1}","params":[[16777217]]}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = get(h.port, "/w?select=xs&order=k.asc");
+    assert_eq!(
+        r.body.trim(),
+        r#"[{"xs":[1,-2,9999999]},{"xs":[1,-2,9999999]},{"xs":[16777217]}]"#
+    );
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

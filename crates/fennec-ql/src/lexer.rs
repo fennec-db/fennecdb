@@ -300,7 +300,7 @@ fn subtracts(last: Option<&Token>) -> bool {
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
-    lex::<false>(src)
+    lex::<false>(src, &mut false)
 }
 
 /// [`tokenize`], with numbers alone between brackets read at once into
@@ -315,7 +315,17 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 /// 768-dim rows as text took it from 58 to 130 MB, which it never gives
 /// back, for 0.3 KB brotli.
 pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
-    lex::<true>(src)
+    lex::<true>(src, &mut false)
+}
+
+/// [`tokenize_vectors`], and whether a vector it read may not hold the
+/// numbers written: a fraction or an exponent among them, or an integer of
+/// eight digits (`fennec_core::num::small_int`). The parser goes on noting
+/// it for the vectors it makes of tokens (`fennec_ql::parse_noting`).
+/// Natively: the browser module notes nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tokenize_noting(src: &str, rounded: &mut bool) -> Result<Vec<Token>> {
+    lex::<true>(src, rounded)
 }
 
 /// The words a text that ends inside a string is refused with, by which
@@ -432,7 +442,70 @@ impl Unclosed {
 /// makes it, and where the `]` ends. `None` for anything else -- an empty
 /// list, a trailing comma, a comment, a `_` in a number, one that does not
 /// read -- which the tokens then read as they always did.
-fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
+///
+/// Natively `rounded` is set where its `f32`s may not be its numbers --
+/// where it is not integers of seven digits at most alone, which are read
+/// first (`num::small_int`), the first eight held on the stack: a list of
+/// them alone -- an `[int]`'s, ids -- is the integers its `f32`s hold, and
+/// an embedding leaves at its first fraction for [`numbers_after`], which
+/// reads the list from its start as this did before, noting nothing a
+/// number.
+fn numbers_at(src: &str, b: &[u8], i: usize, rounded: &mut bool) -> Option<(Vec<f32>, usize)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
+        let mut j = i + 1;
+        let (mut few, mut n) = ([0f32; 8], 0);
+        let mut v = Vec::new();
+        loop {
+            while space(j) {
+                j += 1;
+            }
+            let Some(x) = fennec_core::num::small_int(b, &mut j) else {
+                break;
+            };
+            match few.get_mut(n) {
+                Some(slot) => *slot = x,
+                None => {
+                    if n == few.len() {
+                        v.extend_from_slice(&few);
+                    }
+                    v.push(x);
+                }
+            }
+            n += 1;
+            while space(j) {
+                j += 1;
+            }
+            match b.get(j) {
+                Some(b',') => j += 1,
+                Some(b']') => {
+                    if n <= few.len() {
+                        v.extend_from_slice(&few[..n]);
+                    }
+                    return Some((v, j + 1));
+                }
+                _ => return None,
+            }
+        }
+    }
+    numbers_after(src, b, i, rounded)
+}
+
+/// [`numbers_at`] past its integers: the list at `i` read from its start,
+/// each number as it comes, as it was before the bit. Natively out of line,
+/// its loop laid out as it was: in one function with the integers' loop it
+/// took up to 9 instructions a number more of a 128-dim vector, and the bit
+/// noted a number at a time 10. The browser module notes nothing: it reads
+/// a text again where a list in it is needed as written.
+#[cfg_attr(not(target_arch = "wasm32"), inline(never))]
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+fn numbers_after(
+    src: &str,
+    b: &[u8],
+    mut i: usize,
+    rounded: &mut bool,
+) -> Option<(Vec<f32>, usize)> {
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
     let mut v = Vec::new();
@@ -456,7 +529,14 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
                     i += 1;
                     continue;
                 }
-                Some(b']') => return Some((v, i + 1)),
+                Some(b']') => {
+                    // Natively past the integers `numbers_at` reads.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        *rounded = true;
+                    }
+                    return Some((v, i + 1));
+                }
                 _ => return None,
             }
         }
@@ -494,7 +574,14 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
         }
         match b.get(i) {
             Some(b',') => i += 1,
-            Some(b']') => return Some((v, i + 1)),
+            Some(b']') => {
+                // Natively past the integers `numbers_at` reads.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    *rounded = true;
+                }
+                return Some((v, i + 1));
+            }
             _ => return None,
         }
     }
@@ -504,12 +591,12 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
 /// module keeps one, the flag read at run time: [`tokenize`] is there only
 /// for a list a json field is given (`fennec_ql::parse_exact`), and a copy
 /// of its own was 2.9 KB of the module.
-fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
-    lex_with(src, VECTORS)
+fn lex<const VECTORS: bool>(src: &str, rounded: &mut bool) -> Result<Vec<Token>> {
+    lex_with(src, VECTORS, rounded)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
+fn lex_with(src: &str, vectors: bool, rounded: &mut bool) -> Result<Vec<Token>> {
     // Walked a byte at a time, a character read whole only where one
     // outside ASCII stands. Collected into a `Vec<char>` first, and each
     // number copied into a `String` of its own to parse, a query holding a
@@ -585,7 +672,7 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 // `f64`s: a bound past 2^24 is not an `f32`.
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in") || w.eq_ignore_ascii_case("ranges"));
                 match !after_in {
-                    true => match numbers_at(src, b, i) {
+                    true => match numbers_at(src, b, i, rounded) {
                         Some((v, end)) => {
                             i = end;
                             Tok::Vector(v)

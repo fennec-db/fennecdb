@@ -108,15 +108,107 @@ library ask for a parameter handed over as `f32`s as JSON
 vector's `f32`s, an `[int]` stored 16777217 as 16777216 and refused
 -9223372036854775808 (-2^63 as a float, past an int: a replica's seed of
 such a row failed on every retry), and a `[float]` stored 0.1 as
-0.10000000149011612. A statement handing no such field a list pays
-nothing more: an insert of five ints retired 32 117 instructions before
-and 32 078 after, five int parameters 33 763 and 33 726 (`proc_pid_rusage`
-over 20 000 in a loop, medians of six, ±100 run to run). One that does
-pays the second read: an `[int]` of eight in the text 22 636 -> 44 076,
-as a parameter 24 916 -> 30 284; a vector put into a collection beside
-an `[int]` 21 422 -> 21 860, its field's name looked up. In the browser
-module the page sends such a parameter as JSON once it was asked to, and
-`keeps_numbers` grew 30 bytes.
+0.10000000149011612.
+
+**Unless its `f32`s are the integers written.** Every reader of a list of
+numbers into a vector notes whether one it made may not hold the numbers
+written -- a number with a fraction or an exponent, or an integer of eight
+digits or more (16777217, 2^24 + 1, is the first an `f32` does not hold)
+-- one bit a parse (`fennec_ql::parse_noting`, kept with the statement in
+`/query`'s cache) and one a list of parameters
+(`json::parse_params_noting`, `parse_object_listing_noting`), never in a
+`Value`. Natively the lexer and the JSON reader read integers of seven
+digits at most first (`num::small_int`, the first eight held on the
+stack): a list of them alone is read whole so, and any other leaves for
+the reader as it was (`numbers_after`), from the list's start -- an
+embedding at its first fraction -- noting nothing a number. Where nothing
+is noted, the text is read again only for a list anywhere but at the top of
+a write's values (`Exactly::deep`: compared with a field, given to
+`distance`, a call's argument; `Exactly::again`), and the literals a
+`put`, its `else set` or a `set` gives such a field are turned in place
+into the lists of integers they were (`Database::as_written`,
+`Value::as_written`) -- what the second read makes of them, `-0` as `0`;
+a parameter so given -- anywhere, an `in $1` list too -- is turned in
+place, its JSON not read again. A list coerces into a list type in place,
+so an `[int]` made from a vector allocates what it did. The fields keeping
+numbers are kept on the schema by their places (`Schema::keeps`), worked
+out again wherever the fields change (`Schema::new`, its decoding,
+`alter_collection`, `retain_fields` for a token's view), and held to them
+by a `debug_assert` at every `exactly`: a collection keeping none is asked
+nothing, and one keeping some compares a value's name with theirs alone,
+where a walk of every field cost each statement holding a vector.
+
+The browser module notes nothing, and keeps no places: its readers take
+every list for rounded, and a text or a parameter's JSON is read again
+where a list in it is needed as written, as before. A page hands its
+arrays over as `f32`s, marking those whose numbers are all integers short
+of 2^24 ([Vector parameters](#vector-parameters)), and a marked one is the
+list it was where a field keeping numbers is given it -- `coerce`'s arm
+for a vector into an `[int]` doing it (`value::listed`), as a loop of its
+own was 168 bytes. The native path built into the module too -- the
+noting, the places, the turning in place -- was 2 725 bytes of it against
+main's, where this is 459, for lists a page hands over apart.
+
+Instructions an insert retires through the native library's path
+(`fennec_abi::prepare`, `exact`, `execute`: the text parsed, the
+parameters read from JSON, into an in-memory database), `proc_pid_rusage`
+around a loop of 20 000 (2 000 for a 768-dim vector, 5 000 for a 128-dim
+one), `MallocNanoZone=0`; eight runs of each build alternating, each started
+under a 1-minute load of 6, the median of each run's median of five
+rounds:
+
+| insert of | main | this | against main |
+| --- | ---: | ---: | ---: |
+| five ints | 31 722 | 31 856 | +0.4% |
+| five whole floats into ints | 31 707 | 31 881 | +0.5% |
+| five int parameters | 33 554 | 33 694 | +0.4% |
+| an `[int]` of 8 in the text | 19 606 | 19 715 | +0.6% |
+| an `[int]` of 8 as `$1` | 21 706 | 21 870 | +0.8% |
+| a `vector<8>` beside an `[int]` field | 19 334 | 19 689 | +1.8% |
+| a `vector<8>` beside a `json` field | 19 560 | 19 687 | +0.6% |
+| a `vector<128>` in the text | 61 052 | 60 482 | -0.9% |
+| one beginning `[0, 0.0123, ...` | 60 920 | 60 403 | -0.8% |
+| a `vector<768>` as `$1` | 259 213 | 259 286 | +0.0% |
+| 768 integers as `$1`, into a `vector<768>` | 177 330 | 124 708 | -29.7% |
+| an `[int]` of 8 past 2^24, read again | 19 722 | 37 873 | +92.0% |
+| a `[float]` of 8 with fractions, read again | 20 708 | 40 033 | +93.3% |
+
+The five scalar rows run none of the code changed, and moved what a build
+moves an untouched path: +0.4-0.5% in this build, +0.2, 0.0 and -0.1% in
+the one before it, which differed only in code they do not run (seven runs
+a side, the `[int]` of 8 as `$1` there at +1.9%: `given` a list of its own
+rather than the statement's moved, an allocation an insert). Main stored
+an `[int]` and a `[float]` list as a vector's `f32`s, read once and
+wrongly; this reads them once and as written. A `vector<8>` beside an
+`[int]` field pays bcebd832's comparison of its name with the field's
+(main asked nothing of an `[int]`, which kept no numbers then): +0.6% in
+the build before. A list of integers is read once, and a JSON one faster
+than main read it: its numbers each a short integer, no `clinger`. A list
+noting something rounded pays the second read, as every such list did
+before (bcebd832 read every `[int]` and `[float]` list again: an `[int]`
+of eight in the text 22 636 -> 44 076 instructions). Noted a number at a
+time in `clinger` instead, a 768-dim `$1` took 6 instructions a number
+more (1.8% of its insert) and a 128-dim text 10; read in one function
+after the integers' loop, handed what it had read, 2 a number, the vector
+filled behind a pointer. The browser module is 459 bytes larger than
+main's as served, 81 of them this note's over bcebd832's 378, where
+855fdf27's lists were 642: `exact_noting`'s list of the parameters to
+turn, `Value::as_written` through `value::listed`, the high bit masked off
+a handed place.
+
+*Integer lists as lists, rejected.* The fix's first answer to the second
+read made a list of integers alone a list, not a vector, to every reader
+with no schema (a token of its own, an integer reader, the page keeping
+such an array in the JSON). A vector field compared with one then matched
+nothing -- `e = [1, 0, 0]`, `e in [[1, 0, 0]]`, `[1, 0, 0] = e`, as
+`Value::cmp_value` has no arm between a vector and a list -- every integer
+list a text holds read as another tree (91 of the corpus's: vectors,
+points, boxes, sparse vectors), a named statement stored holding one read
+broken with no grammar epoch raised, an embedding of integers (an int8
+model's, as a plain array) took 41% longer to put and one whose first
+number is whole 1.4% longer to lex, for 642 bytes of the module. Integer
+lists stay `f32` vectors, and the bit says when theirs are the integers
+(`a_vector_field_compared_with_a_list_of_integers_finds_it`).
 
 ## Vector parameters
 
@@ -129,6 +221,15 @@ before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON wr
 so the file is the same either way (`web/fennec.test.js`). 200 768-dim
 vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
 builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
+Where every number of an array is an integer short of 2^24 -- looked for
+until one is not, an embedding's first fraction -- the high bit of its
+place says so (`fennec_abi::WHOLE`): a field keeping numbers given it takes
+the integers its `f32`s hold, asking for nothing, where one not marked is
+asked for as JSON ([Numbers in](#numbers-in)). A page from before the bit
+sets none, and is asked as it was. `web/fennec.test.js` counts the
+module's calls: one for `[1, -2, 9999999, -0]` into an `[int]` and a
+`[float]`, typed or not, and for an `in $1` list of ids; two for
+`[16777217]` and `[0.1]`.
 
 ## Quantized indexes
 

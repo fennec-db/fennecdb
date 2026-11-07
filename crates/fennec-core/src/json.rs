@@ -460,8 +460,14 @@ pub fn error_to_string(e: &Error) -> String {
 // browser module, against 23.7.
 
 pub fn parse(src: &str) -> Result<Value> {
+    parse_noting(src, &mut false)
+}
+
+/// [`parse`], `rounded` set where a vector it read may not hold the
+/// numbers written ([`crate::num::small_int`]).
+fn parse_noting(src: &str, rounded: &mut bool) -> Result<Value> {
     let mut i = 0;
-    let v = parse_value(src, &mut i)?;
+    let v = parse_value_at(src, &mut i, 0, rounded)?;
     skip_ws(src, &mut i);
     if i != src.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -487,10 +493,15 @@ pub fn parse_json(src: &str) -> Result<Value> {
 fn parse_exact_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
     skip_ws(s, i);
     match s.as_bytes().get(*i) {
-        Some(b'[') if depth < crate::value::MAX_JSON_DEPTH => {
-            Ok(Value::List(parse_array_at(s, i, depth + 1, false)?))
-        }
-        _ => parse_value_at(s, i, depth),
+        Some(b'[') if depth < crate::value::MAX_JSON_DEPTH => Ok(Value::List(parse_array_at(
+            s,
+            i,
+            depth + 1,
+            false,
+            &mut false,
+        )?)),
+        // No array, and so no vector, at the top.
+        _ => parse_value_at(s, i, depth, &mut false),
     }
 }
 
@@ -516,10 +527,6 @@ fn skip_ws(s: &str, i: &mut usize) {
     }
 }
 
-fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
-    parse_value_at(s, i, 0)
-}
-
 /// A value at `depth` containers down: an array of numbers alone is a
 /// vector at the top of a value (`depth` 0), as an embedding travels, and
 /// a list of numbers below it -- inside an object, which only a `json`
@@ -527,8 +534,13 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
 /// integer an integer: read into `f32`s there, `[19.99]` in a document's
 /// metadata came back as 19.989999771118164. Past
 /// [`crate::value::MAX_JSON_DEPTH`] it is refused, where the recursion
-/// would otherwise take the stack down with a deep enough text.
-fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
+/// would otherwise take the stack down with a deep enough text. `rounded`
+/// is set, natively, where a vector it read may not hold the numbers
+/// written: a fraction or an exponent among them, or an integer of eight
+/// digits ([`crate::num::small_int`]) -- what a reader of the parameters
+/// tells the caller, whose lists of integers are then read once
+/// (`Database::exactly`).
+fn parse_value_at(s: &str, i: &mut usize, depth: usize, rounded: &mut bool) -> Result<Value> {
     skip_ws(s, i);
     let b = s.as_bytes();
     let c = *b
@@ -556,23 +568,37 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
         b'"' => Ok(Value::Text(parse_string(s, i)?)),
         b'[' => {
             if depth > 0 {
-                return Ok(Value::List(parse_array_at(s, i, depth + 1, false)?));
+                return Ok(Value::List(parse_array_at(
+                    s,
+                    i,
+                    depth + 1,
+                    false,
+                    rounded,
+                )?));
             }
             // Numbers alone are a vector, read straight into its `f32`s --
             // natively: a page's vectors come into the browser module as
             // `f32`s already (`vectorsApart`), and there the reader was 474
             // bytes brotli for nothing.
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(v) = numbers(s, i) {
+            if let Some(v) = numbers(s, i, rounded) {
                 return Ok(Value::Vector(v));
             }
-            let items = parse_array_at(s, i, depth + 1, false)?;
-            // If every item is a number, read it as a vector (embedding transfer)
+            let items = parse_array_at(s, i, depth + 1, false, rounded)?;
+            // If every item is a number, read it as a vector (embedding
+            // transfer). Taken as rounded whatever it holds: only a number
+            // past an `i64` comes this way natively. The browser module
+            // notes nothing, and reads its parameters again where a list is
+            // needed as written: the page hands it its vectors apart.
             if !items.is_empty()
                 && items
                     .iter()
                     .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
             {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    *rounded = true;
+                }
                 return Ok(Value::Vector(
                     items.iter().map(|v| v.as_f64().unwrap() as f32).collect(),
                 ));
@@ -581,7 +607,7 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
         }
         // An object is a value of a `json` field: its members sorted, a key
         // given twice refused (`Value::object`).
-        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1)?)
+        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1, rounded)?)
             .map_err(|e| Error::Query(e.to_string())),
         b'-' | b'0'..=b'9' => {
             let (text, is_float) = number_at(s, i);
@@ -638,9 +664,68 @@ fn number_at<'s>(s: &'s str, i: &mut usize) -> (&'s str, bool) {
 /// Read a `Value` at a time and converted, each number's text found and
 /// then read twice over, a 128-dim vector took 5.26 us and a 768-dim one
 /// 30.1; read here, 2.05 and 11.1, and a COPY of 128-dim rows without an
-/// index went 120k -> 196k rows/s.
+/// index went 120k -> 196k rows/s. `rounded` is set where its `f32`s may
+/// not be its numbers: where it is not integers of seven digits at most
+/// alone.
+///
+/// Those are read first (`num::small_int`), the first eight held on the
+/// stack: a list of them alone -- an `[int]`'s, ids -- is the integers its
+/// `f32`s hold, none rounded, and an embedding leaves at its first fraction
+/// for [`numbers_after`], which reads the array from its start as this did
+/// before, noting nothing a number. Noted a number at a time instead, a
+/// 768-dim vector's insert took 6 instructions a number more (1.8%), and
+/// handed what the first loop had read, 2, the vector filled behind a
+/// pointer; a list of 768 integers under 2^24 is read in 92 thousand
+/// instructions against 145.
 #[cfg(not(target_arch = "wasm32"))]
-fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
+fn numbers(s: &str, i: &mut usize, rounded: &mut bool) -> Option<Vec<f32>> {
+    let b = s.as_bytes();
+    let mut j = *i + 1;
+    let space = |j: &mut usize| {
+        if b.get(*j).is_some_and(|&c| c <= b' ' || c >= 0x80) {
+            skip_ws(s, j);
+        }
+    };
+    let (mut few, mut n) = ([0f32; 8], 0);
+    let mut out = Vec::new();
+    loop {
+        space(&mut j);
+        let Some(x) = crate::num::small_int(b, &mut j) else {
+            break;
+        };
+        match few.get_mut(n) {
+            Some(slot) => *slot = x,
+            None => {
+                if n == few.len() {
+                    out.extend_from_slice(&few);
+                }
+                out.push(x);
+            }
+        }
+        n += 1;
+        space(&mut j);
+        match b.get(j) {
+            Some(b',') => j += 1,
+            Some(b']') => {
+                *i = j + 1;
+                if n <= few.len() {
+                    out.extend_from_slice(&few[..n]);
+                }
+                return Some(out);
+            }
+            _ => return None,
+        }
+    }
+    let out = numbers_after(s, i)?;
+    *rounded = true;
+    Some(out)
+}
+
+/// [`numbers`] past its integers: the array at `i` read from its start, each
+/// number as it comes. Out of line, the loop laid out as it was.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+fn numbers_after(s: &str, i: &mut usize) -> Option<Vec<f32>> {
     let b = s.as_bytes();
     let mut j = *i + 1;
     let mut out = Vec::new();
@@ -685,7 +770,13 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
 /// listed member, each read as at the top: `[[0.1, 0.2], 7]` hands a vector
 /// and an integer -- and each read as [`parse_json`] reads a value when
 /// `exact`.
-fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<Vec<Value>> {
+fn parse_array_at(
+    s: &str,
+    i: &mut usize,
+    depth: usize,
+    exact: bool,
+    rounded: &mut bool,
+) -> Result<Vec<Value>> {
     let b = s.as_bytes();
     *i += 1; // `[`
     let mut items = Vec::new();
@@ -697,7 +788,7 @@ fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<V
         }
         items.push(match exact {
             true => parse_exact_at(s, i, depth)?,
-            false => parse_value_at(s, i, depth)?,
+            false => parse_value_at(s, i, depth, rounded)?,
         });
         skip_ws(s, i);
         match b.get(*i) {
@@ -778,20 +869,34 @@ pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
 /// that list -- read as a vector, `[123456789]` handed the query the `f32`
 /// 123456792, and `[19.99]` 19.989999771118164.
 pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[])
+    listing(src, list, &[], &mut false)
+}
+
+/// [`parse_object_listing`], and whether a vector it read may not hold the
+/// numbers written ([`parse_params_noting`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_object_listing_noting(src: &str, list: &str) -> Result<(Vec<(String, Value)>, bool)> {
+    let mut rounded = false;
+    let out = listing(src, list, &[], &mut rounded)?;
+    Ok((out, rounded))
 }
 
 /// [`parse_object_listing`], the listed member's elements read as
 /// [`parse_json`] reads a value: a list of numbers alone as written, where
 /// a json field is given one (`Database::exactly`).
 pub fn parse_object_listing_exact(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[list])
+    listing(src, list, &[list], &mut false)
 }
 
-fn listing(src: &str, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
+fn listing(
+    src: &str,
+    list: &str,
+    json: &[&str],
+    rounded: &mut bool,
+) -> Result<Vec<(String, Value)>> {
     let s = src.trim();
     let mut i = 0;
-    let out = document(s, &mut i, list, json)?;
+    let out = document(s, &mut i, list, json, rounded)?;
     skip_ws(s, &mut i);
     if i != s.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -823,7 +928,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
                     i += 1;
                     break;
                 }
-                docs.push(document(s, &mut i, "", json)?);
+                docs.push(document(s, &mut i, "", json, &mut false)?);
                 skip_ws(s, &mut i);
                 match b.get(i) {
                     Some(b',') => i += 1,
@@ -836,7 +941,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
             }
             docs
         }
-        Some(b'{') => vec![document(s, &mut i, "", json)?],
+        Some(b'{') => vec![document(s, &mut i, "", json, &mut false)?],
         _ => {
             return Err(Error::Query(
                 "expected a JSON object or array of objects".into(),
@@ -852,8 +957,14 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
 
 /// A document at `i`: the member named `list` a parameter list, and those
 /// named in `json` read as [`parse_json`] reads a value.
-fn document(s: &str, i: &mut usize, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
-    let out = parse_members(s, i, list, json, 0)?;
+fn document(
+    s: &str,
+    i: &mut usize,
+    list: &str,
+    json: &[&str],
+    rounded: &mut bool,
+) -> Result<Vec<(String, Value)>> {
+    let out = parse_members(s, i, list, json, 0, rounded)?;
     // A repeated key is not silently overwritten: which one wins depends
     // on the parser, and that is an invisible difference. Asked here of a
     // document's fields, in the order they came; an object's members are
@@ -874,6 +985,7 @@ fn parse_members(
     list: &str,
     json: &[&str],
     depth: usize,
+    rounded: &mut bool,
 ) -> Result<Vec<(String, Value)>> {
     let b = s.as_bytes();
     skip_ws(s, i);
@@ -903,11 +1015,11 @@ fn parse_members(
         // A listed member keeps its elements' types, a parameter list's;
         // a json field's, every number.
         let value = if depth == 0 && key == list && b.get(*i) == Some(&b'[') {
-            Value::List(parse_array_at(s, i, 0, json.contains(&list))?)
+            Value::List(parse_array_at(s, i, 0, json.contains(&list), rounded)?)
         } else if depth == 0 && json.contains(&key.as_str()) {
             parse_exact_at(s, i, 0)?
         } else {
-            parse_value_at(s, i, depth)?
+            parse_value_at(s, i, depth, rounded)?
         };
         out.push((key, value));
         skip_ws(s, i);
@@ -935,17 +1047,31 @@ fn parse_members(
 /// `year in [$1, $2]` returned no rows at all. The shortcut stays valid
 /// inside nested arrays, so embedding transfer is unaffected.
 pub fn parse_params(src: &str) -> Result<Vec<Value>> {
-    params(src, false)
+    params(src, false, &mut false)
+}
+
+/// [`parse_params`], and whether a vector among them may not hold the
+/// numbers written: a fraction or an exponent in one, or an integer of
+/// eight digits ([`crate::num::small_int`]). Where none may, a list a json field, an
+/// `[int]`, a `[float]` or an `in $n` is given is the integers its `f32`s
+/// hold, taken from them in place (`Value::as_written`) rather than read
+/// again ([`parse_params_exact`]). Native: the browser module reads its
+/// parameters again where one is needed as written.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_params_noting(src: &str) -> Result<(Vec<Value>, bool)> {
+    let mut rounded = false;
+    let out = params(src, false, &mut rounded)?;
+    Ok((out, rounded))
 }
 
 /// [`parse_params`], each read as [`parse_json`] reads a value: a list of
 /// numbers alone as written, where a json field is given one
 /// (`Database::exactly`).
 pub fn parse_params_exact(src: &str) -> Result<Vec<Value>> {
-    params(src, true)
+    params(src, true, &mut false)
 }
 
-fn params(src: &str, exact: bool) -> Result<Vec<Value>> {
+fn params(src: &str, exact: bool, rounded: &mut bool) -> Result<Vec<Value>> {
     let t = src.trim();
     if t.is_empty() {
         return Ok(Vec::new());
@@ -956,10 +1082,10 @@ fn params(src: &str, exact: bool) -> Result<Vec<Value>> {
         // A single value is accepted too.
         return Ok(vec![match exact {
             true => parse_json(t)?,
-            false => parse(t)?,
+            false => parse_noting(t, rounded)?,
         }]);
     }
-    let items = parse_array_at(t, &mut i, 0, exact)?;
+    let items = parse_array_at(t, &mut i, 0, exact, rounded)?;
     skip_ws(t, &mut i);
     if i != t.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -1019,7 +1145,7 @@ mod tests {
     fn a_value_at_a_time(s: &str) -> Result<Value> {
         let mut i = 0;
         skip_ws(s, &mut i);
-        let items = parse_array_at(s, &mut i, 0, false)?;
+        let items = parse_array_at(s, &mut i, 0, false, &mut false)?;
         skip_ws(s, &mut i);
         if i != s.len() {
             return Err(Error::Query("trailing characters after JSON".into()));

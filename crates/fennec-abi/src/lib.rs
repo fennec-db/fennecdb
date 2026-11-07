@@ -24,6 +24,14 @@ use fennec_core::prelude::*;
 pub struct Prepared {
     pub stmts: Vec<Statement>,
     pub params: Vec<Value>,
+    /// Whether a vector the text's reader made, and one its parameters'
+    /// JSON reader made, may not hold the numbers written
+    /// (`fennec_ql::parse_noting`, `json::parse_params_noting`): where
+    /// neither may, a list a field keeping its numbers is given is made the
+    /// list written in place ([`exact`]) rather than read again. Natively:
+    /// the browser module notes nothing, and reads them again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub rounded: (bool, bool),
 }
 
 /// Why a statement was not answered.
@@ -69,10 +77,38 @@ impl From<Error> for Refused {
 /// behind a lock does it before taking one.
 #[inline(always)]
 pub fn prepare(sql: &str, params_src: &str, vectors: &[u8]) -> Result<Prepared> {
-    let params = json::parse_params(params_src).and_then(|p| with_vectors(p, vectors))?;
-    let stmts = fennec_ql::parse(sql)?;
-    Ok(Prepared { stmts, params })
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (params, of_params) = json::parse_params_noting(params_src)?;
+        let params = with_vectors(params, vectors)?;
+        let (stmts, of_text) = fennec_ql::parse_noting(sql)?;
+        Ok(Prepared {
+            stmts,
+            params,
+            rounded: (of_text, of_params),
+        })
+    }
+    // The browser module notes nothing: a text and its parameters' JSON are
+    // read again where a list in them is needed as written, a vector the
+    // page hands over marked where it is whole ([`WHOLE`]). The native
+    // path built into the module too, noting, places and all, was 2 725
+    // bytes of it against main's where this is 459, for lists a page
+    // hands over apart.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let params = json::parse_params(params_src).and_then(|p| with_vectors(p, vectors))?;
+        let stmts = fennec_ql::parse(sql)?;
+        Ok(Prepared { stmts, params })
+    }
 }
+
+/// The bit of a handed vector's place that says the page found its numbers
+/// integers under 2^24, which its `f32`s hold exactly (`vectorsApart`):
+/// one a field keeping its numbers is given is the list of them, made in
+/// place, where another is asked for as JSON ([`Refused::Exact`]). The
+/// place's high bit, as no list holds 2^31 parameters: a page from before
+/// it sets none, and is asked for every such list, as it was.
+const WHOLE: u32 = 1 << 31;
 
 /// The parameters with each vector handed over as `f32`s put in its place:
 /// for each, its place among the parameters and its length as two
@@ -81,7 +117,7 @@ pub fn prepare(sql: &str, params_src: &str, vectors: &[u8]) -> Result<Prepared> 
 /// most of its time on the numbers' digits, both sides of the call.
 pub fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Value>> {
     while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
-        let at = u32::from_le_bytes([a0, a1, a2, a3]) as usize;
+        let at = (u32::from_le_bytes([a0, a1, a2, a3]) & !WHOLE) as usize;
         let n = u32::from_le_bytes([n0, n1, n2, n3]) as usize;
         let body = n.checked_mul(4).and_then(|len| rest.split_at_checked(len));
         let slot = params.get_mut(at).filter(|p| p.is_null());
@@ -97,7 +133,9 @@ pub fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Valu
     }
 }
 
-/// Whether the parameter at `at` was handed over as `f32`s ([`with_vectors`]).
+/// Whether the parameter at `at` was handed over as `f32`s ([`with_vectors`])
+/// the page did not find integers under 2^24: `f32`s that may not be its
+/// numbers. A place marked [`WHOLE`] is never `at`.
 #[inline(always)]
 pub fn apart(mut bytes: &[u8], at: usize) -> bool {
     while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
@@ -113,8 +151,12 @@ pub fn apart(mut bytes: &[u8], at: usize) -> bool {
 /// A list of numbers a json field is handed, or a path compared with, read
 /// again as written: from the text, from the parameters' JSON, and from
 /// neither where it came over as `f32`s -- the caller is told which to send
-/// as JSON ([`Refused::Exact`]), before anything runs. Asks the schemas
-/// alone, so a reader holds the read lock for it.
+/// as JSON ([`Refused::Exact`]), before anything runs. Where its reader
+/// noted no vector rounded ([`Prepared::rounded`], [`WHOLE`]) it is the
+/// integers its `f32`s hold instead, made the list of them in place
+/// (`Database::as_written`, `Value::as_written`): an `[int]` given
+/// `[1, 2, 3]` is read once. Asks the schemas alone, so a reader holds the
+/// read lock for it.
 #[inline(always)]
 pub fn exact(
     db: &Database,
@@ -145,18 +187,48 @@ pub fn exact_noting(
     if !vectored {
         return Ok(());
     }
-    let (mut text, mut exact) = (false, false);
+    let mut text = false;
+    // A list at the top of a write's values, made the integers written in
+    // place where the text noted nothing rounded: natively, as the browser
+    // module notes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    let (mut lists, again) = (false, p.rounded.1);
+    #[cfg(target_arch = "wasm32")]
+    let (lists, again) = (false, true);
+    let mut given = Vec::new();
     let mut as_json = String::new();
     for s in &p.stmts {
         let need = db.exactly(s);
-        text |= need.text;
-        for i in need.params {
-            exact = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            text |= need.again(p.rounded.0);
+            lists |= need.text;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            text |= need.text;
+        }
+        for &i in &need.params {
             if apart(vectors, i) {
                 if !as_json.is_empty() {
                     as_json.push(',');
                 }
                 as_json.push_str(&i.to_string());
+            }
+            // In the module a list where main read every parameter again:
+            // 153 bytes less than moving the statement's own.
+            #[cfg(target_arch = "wasm32")]
+            given.push(i);
+        }
+        // The one statement's own list, nearly always: moved, where a list
+        // of its own was an allocation an insert (`[int]` of 8 as `$1`,
+        // 21 625 -> 22 038 instructions).
+        #[cfg(not(target_arch = "wasm32"))]
+        if given.is_empty() {
+            given = need.params;
+        } else {
+            for i in need.params {
+                given.push(i);
             }
         }
     }
@@ -166,10 +238,24 @@ pub fn exact_noting(
     if text {
         p.stmts = fennec_ql::parse_exact(sql)?;
     }
-    if exact {
+    #[cfg(not(target_arch = "wasm32"))]
+    if lists && !text {
+        for s in &mut p.stmts {
+            db.as_written(s);
+        }
+    }
+    if !given.is_empty() && again {
         p.params = json::parse_params_exact(params_src).and_then(|p| with_vectors(p, vectors))?;
     }
-    *anew = text || exact;
+    // Each vector left among them is the integers its `f32`s hold: read from
+    // JSON noting none rounded, or handed over by a page that found them
+    // whole -- `apart` holds none of either kind.
+    for &i in &given {
+        if let Some(v) = p.params.get_mut(i) {
+            v.as_written();
+        }
+    }
+    *anew = text || lists || !given.is_empty();
     Ok(())
 }
 
@@ -737,6 +823,70 @@ mod tests {
             ),
             "{r}"
         );
+    }
+
+    /// A list of integers short of 2^24 is read once: in the text, in the
+    /// parameters' JSON, and handed over as `f32`s a page found whole
+    /// ([`WHOLE`]) -- the vector beside it left the vector it was read
+    /// into, which a second read as written makes a list. One not marked
+    /// whole is asked for as JSON; a list holding eight digits or a
+    /// fraction is read again.
+    #[test]
+    fn a_list_of_small_integers_is_read_once() {
+        let mut db = Database::new();
+        let sql = "create collection t (xs [int], fs [float], v vector<2>)";
+        run(&mut db, sql, "", &[]);
+        let ints = |v: &[i64]| Value::List(v.iter().map(|&n| Value::Int(n)).collect());
+        let ready = |db: &Database, sql: &str, params: &str, vectors: &[u8]| {
+            let mut p = prepare(sql, params, vectors).ok().unwrap();
+            match exact(db, &mut p, sql, params, vectors) {
+                Ok(()) => Ok(p),
+                Err(Refused::Exact(places)) => Err(places),
+                Err(_) => panic!("{sql}"),
+            }
+        };
+        let given = |p: &Prepared, key: &str| match &p.stmts[0] {
+            Statement::Put { docs, .. } => match docs[0].iter().find(|(k, _)| k == key) {
+                Some((_, Expr::Lit(v))) => v.clone(),
+                _ => panic!("{key}"),
+            },
+            _ => panic!("{key}"),
+        };
+        let p = ready(&db, "put t {xs: [1, 2], fs: [3], v: [3, 4]}", "", &[]).unwrap();
+        assert_eq!(given(&p, "xs"), ints(&[1, 2]));
+        assert_eq!(given(&p, "v"), Value::Vector(vec![3.0, 4.0]));
+        let p = ready(&db, "put t {xs: [16777217], v: [3, 4]}", "", &[]).unwrap();
+        assert_eq!(given(&p, "v"), ints(&[3, 4]));
+        let put = "put t {xs: $1, fs: $2, v: $3}";
+        let p = ready(&db, put, "[[1, 2], [3], [3, 4]]", &[]).unwrap();
+        assert_eq!(
+            p.params,
+            [ints(&[1, 2]), ints(&[3]), Value::Vector(vec![3.0, 4.0])]
+        );
+        let p = ready(&db, put, "[[1, 2], [0.1], [3, 4]]", &[]).unwrap();
+        assert_eq!(p.params[1], Value::List(vec![Value::Float(0.1)]));
+        assert_eq!(p.params[2], ints(&[3, 4]));
+        // Handed over: whole, its place's high bit set, and not.
+        let handed = |at: u32, xs: &[f32]| {
+            let mut b = [at.to_le_bytes(), (xs.len() as u32).to_le_bytes()].concat();
+            xs.iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let whole = handed(WHOLE, &[1.0, 2.0]);
+        let p = ready(&db, "put t {xs: $1}", "[null]", &whole).unwrap();
+        assert_eq!(p.params, [ints(&[1, 2])]);
+        let r = ready(&db, "put t {xs: $1}", "[null]", &handed(0, &[1.0, 2.0]));
+        assert_eq!(r.err().as_deref(), Some("0"));
+        // Beside a list read again from the JSON, still the integers.
+        let p = ready(&db, "put t {xs: $1, fs: $2}", "[null, [0.1]]", &whole).unwrap();
+        assert_eq!(
+            p.params,
+            [ints(&[1, 2]), Value::List(vec![Value::Float(0.1)])]
+        );
+        let r = run(&mut db, "put t {xs: $1}", "[null]", &whole);
+        assert!(r.contains("\"affected\""), "{r}");
+        let r = run(&mut db, "get t where xs = [1, 2] count", "", &[]);
+        assert!(r.contains(r#""count":1"#), "{r}");
     }
 
     /// A `require` that says why: the answer's `reason`, beside `at` for a

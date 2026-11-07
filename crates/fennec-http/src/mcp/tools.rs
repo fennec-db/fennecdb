@@ -546,7 +546,7 @@ pub(super) fn read_local(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checke
 /// out of the shell, where it was most of what `fennec mcp` added.
 pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::http::Response {
     let body = query_body(text, params);
-    let parsed = api::parse_query(&body).and_then(|(s, p)| api::exactly(ctx.db, &body, s, p));
+    let parsed = api::parse_query(&body).and_then(|(s, p, r)| api::exactly(ctx.db, &body, s, p, r));
     let (stmt, params) = match parsed {
         Ok(v) => v,
         Err(e) => return crate::error_response(&e),
@@ -929,7 +929,7 @@ fn dimension(v: &[f32], field: &str, dim: usize) -> Checked<()> {
 /// the `get` tool's row by id took 6.3 us in process against `/query`'s 1.3.
 fn built(text: &str) -> Checked<Select> {
     crate::statements::text(text);
-    match api::parsed(text).map(Arc::unwrap_or_clone) {
+    match api::parsed(text).map(|(s, _)| Arc::unwrap_or_clone(s)) {
         Ok(Statement::Select(sel)) => Ok(sel),
         Ok(_) => Err(Outcome::refused(
             500,
@@ -1088,7 +1088,7 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
     json::value_into(&mut body, &Value::List(given));
     body.push('}');
     let (stmt, params) = api::parse_query(&body)
-        .and_then(|(s, p)| api::exactly(ctx.db, &body, s, p))
+        .and_then(|(s, p, r)| api::exactly(ctx.db, &body, s, p, r))
         .map_err(|e| refusal(&e))?;
     if let Statement::Call(c) = &*stmt {
         return Err(called_by_its_tool(&c.name));

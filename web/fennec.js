@@ -836,6 +836,11 @@ function beside(src) {
 // Whether this machine's typed arrays are little-endian, as the module
 // reads the vectors `vectorsApart` hands it. Every browser's are.
 const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+// 2 ** 24: past it an f32 holds no longer every integer (16777217 is
+// 16777216). And the high bit of a handed vector's place, set where its
+// numbers are integers short of it (`fennec_abi::WHOLE`).
+const WIDEST = 16777216;
+const WHOLE = 2 ** 31;
 
 /**
  * The parameters that are vectors, apart from the rest, as `f32`s: a
@@ -846,19 +851,28 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
  * most of its time on the digits, both sides of the call. A `-0` goes over
  * as `0`, as JSON writes it, so either way stores the same vector. Those
  * at `asJson` stay in the JSON: a json field keeps a list's numbers as
- * written, which the module asks for by their places.
+ * written, which the module asks for by their places -- unless every
+ * number is an integer under 2 ** 24, which its `f32` holds exactly: the
+ * place's high bit (`WHOLE`) says so, and the module takes those as the
+ * integers they are, asking for nothing. Looked for until a number is not
+ * one, the first fraction of an embedding.
  */
 function vectorsApart(params, asJson = null) {
   const found = [];
+  const whole = [];
   let size = 0;
   params.forEach((p, i) => {
     if (asJson?.includes(i)) return;
     const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
+    let ints = true;
     for (let k = 0; k < list.length; k++) {
-      if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
+      const x = list[k];
+      if (typeof x !== 'number' || !Number.isFinite(x)) return;
+      if (ints && !(Number.isInteger(x) && x < WIDEST && x > -WIDEST)) ints = false;
     }
     found.push(i);
+    whole.push(ints);
     size += 8 + 4 * list.length;
   });
   if (found.length === 0) return [params, null];
@@ -867,9 +881,10 @@ function vectorsApart(params, asJson = null) {
   const floats = new Float32Array(bytes.buffer);
   const json = params.slice();
   let at = 0;
-  for (const i of found) {
+  for (let f = 0; f < found.length; f++) {
+    const i = found[f];
     const n = params[i].length;
-    words[at] = i;
+    words[at] = whole[f] ? i + WHOLE : i;
     words[at + 1] = n;
     floats.set(params[i], at + 2);
     for (let k = at + 2; k < at + 2 + n; k++) if (floats[k] === 0) floats[k] = 0;
