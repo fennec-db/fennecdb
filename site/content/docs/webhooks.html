@@ -123,6 +123,18 @@ condition reads it beside the body. GitHub sends a <code>ping</code> when a
 webhook is made: no condition takes it, so it is answered
 <code>200</code>, <code>{"taken":0}</code>, and nothing is written.</p>
 
+<p>GitHub's signature covers the body alone, not
+<code>X-GitHub-Event</code>. Whoever holds one signed body can send it
+again under another event's name: under <code>key body</code> the copy is
+answered from its key while it is kept, and taken again once
+<code>keep</code> has passed; under <code>key delivery</code> a new
+delivery id has it taken at once. A condition on <code>hook.event</code>
+alone can then take an event its statement was never meant for. Write the
+condition on fields of the signed body as well, which tell one kind of
+event from another — <code>event.ref</code> for a push,
+<code>event.action</code> for a pull request: <code>where hook.event =
+'push' and event.ref = 'refs/heads/main'</code>.</p>
+
 <p>GitHub's signature covers the body alone, so its key is chosen by the
 hook's line:</p>
 
@@ -141,9 +153,14 @@ idempotent by what they write.</li>
 
 <p>Senders that sign as <a href="https://www.standardwebhooks.com/">Standard
 Webhooks</a> says — Svix and the services that send through it, among them
-Clerk and Resend — take the scheme <code>standard</code>. Its secret file
-holds the secret as the sender shows it, <code>whsec_</code> and base64; a
-file holding anything else is refused at the start.</p>
+Clerk and Resend — take the scheme <code>standard</code>. Their headers are
+<code>webhook-id</code>, <code>webhook-timestamp</code> and
+<code>webhook-signature</code>, or Svix's names for the same three,
+<code>svix-id</code>, <code>svix-timestamp</code> and
+<code>svix-signature</code>, which Clerk and Resend send; an event carrying
+both sets is refused. Its secret file holds the secret as the sender shows
+it, <code>whsec_</code> and base64; a file holding anything else is refused
+at the start.</p>
 
 <pre data-lang="text">clerk  standard  /run/secrets/clerk-webhook
 </pre>
@@ -157,7 +174,8 @@ create statement user_created(
   where event.type = 'user.created'
 as put users {clerk_id: $id, email: $email} if absent</pre>
 
-<p>An event's key is its <code>webhook-id</code>. <code>"0"</code> is the
+<p>An event's key is its <code>webhook-id</code> (or
+<code>svix-id</code>). <code>"0"</code> is the
 first element of a list: a key of digits reads a list by its place, and a
 key that is no word, such as <code>"order-id"</code>, is quoted.</p>
 
@@ -172,12 +190,12 @@ to write, never the secret's value.</p>
 <table>
 <tr><th>Part</th><th>What it says</th></tr>
 <tr><td>name</td><td>the path's last segment, <code>/_hooks/&lt;name&gt;</code>, and what a statement's <code>on hook</code> names: a word, as a statement's name is</td></tr>
-<tr><td>scheme</td><td><code>stripe</code> (<code>Stripe-Signature</code>), <code>github</code> (<code>X-Hub-Signature-256</code>) or <code>standard</code> (<code>webhook-id</code>, <code>webhook-timestamp</code>, <code>webhook-signature</code>)</td></tr>
+<tr><td>scheme</td><td><code>stripe</code> (<code>Stripe-Signature</code>), <code>github</code> (<code>X-Hub-Signature-256</code>) or <code>standard</code> (<code>webhook-id</code>, <code>webhook-timestamp</code>, <code>webhook-signature</code>, or Svix's <code>svix-id</code>, <code>svix-timestamp</code>, <code>svix-signature</code>)</td></tr>
 <tr><td>secret files</td><td>one, or two while a secret rolls: an event verifies under either. The file's trailing newline is not the secret's. An empty file is refused: it would make every signature anyone can compute verify</td></tr>
 <tr><td><code>keep</code></td><td>how long an event's key is kept: 30 days for <code>stripe</code> (Stripe retries for three), 7 for the others. A day at least, and more than twice the tolerance and a minute</td></tr>
 <tr><td><code>tolerance</code></td><td>how far the signed time may be from the server's clock either way: 5 minutes, Stripe's libraries' default; from a second to an hour. <code>github</code> signs no time, and is held to none</td></tr>
 <tr><td><code>key</code></td><td><code>github</code> alone: <code>body</code> or <code>delivery</code> (<a href="#github">above</a>)</td></tr>
-<tr><td><code>max-body</code></td><td>the largest body taken: 1 MiB unless given (<code>64k</code>, <code>4m</code>), at most the server's <code>--max-body</code></td></tr>
+<tr><td><code>max-body</code></td><td>the largest body taken: 1 MiB unless given (<code>64k</code>, <code>4m</code>), or the server's <code>--max-body</code> where that is lower; at most <code>--max-body</code></td></tr>
 </table>
 
 <p>The secrets are the deployment's, as the server's token is: never in the
@@ -195,7 +213,8 @@ log.</p>
 <h2 id="once">Taken once</h2>
 
 <p>An event's key is <code>id</code> in a Stripe event's body,
-<code>webhook-id</code> for a Standard Webhooks sender, and for GitHub what
+<code>webhook-id</code> (or <code>svix-id</code>) for a Standard Webhooks
+sender, and for GitHub what
 its hook's <code>key</code> says. The key is kept in
 <code>_hook_events</code> for the hook's <code>keep</code>, in the same
 block as the statements' writes. A copy of the event while its key is kept
@@ -259,24 +278,30 @@ endpoint, and never a redirect, which Stripe counts as a failure.</p>
 of an event is read before its signature verifies: the scheme is read from
 the headers present, each of which must come once; the hook is looked up;
 the signed time must be within the tolerance; the body must be within the
-ceiling; and two HMAC-SHA256s are computed, always, under the hook's
-secrets — a key of the process's own standing in for one that is not there
-— each compared in constant time with every <code>v1</code> signature sent.
-Stripe's <code>v0</code> and Standard Webhooks' <code>v1a</code> are not
-read. Every failure is the same 401 after the same work, so an answer's
-time tells no one whether a hook exists.</p>
+hook's <code>max-body</code>; and two HMAC-SHA256s are computed, always,
+under the hook's secrets — a random key of the process's own standing in
+for one that is not there, which never verifies — each compared in
+constant time with every <code>v1</code> signature sent. They cover the
+body up to the largest <code>max-body</code> of any hook, whichever hook
+the path names. Stripe's <code>v0</code> and Standard Webhooks'
+<code>v1a</code> are not read. Every failure is the same 401 after the
+same work, so an answer's time tells no one whether a hook exists, or what
+its <code>max-body</code> is.</p>
 
 <p>Which check failed is said where only you read it: the server's log
-(<code>hook "stripe": an event from 203.0.113.9 did not verify (stale):
-answered 401</code>), the <a href="/docs/monitoring#audit">audit log</a>'s
+(<code>hook `stripe`: an event from 203.0.113.9 did not verify (stale):
+answered 401</code>, <code>hook `?`</code> for a path naming no hook's
+name), the <a href="/docs/monitoring#audit">audit log</a>'s
 <code>refused</code> line and <code>fennec_hook_unverified_total{check}</code>
 — <code>header</code>, <code>scheme</code>, <code>stale</code>,
 <code>size</code>, <code>hook</code> or <code>signature</code>. A
 <code>stale</code> run from one sender is a clock to set right; a
 <code>signature</code> one a secret rolled at one end only. Refusals from
 one address wait longer each time, as a refused token's do, by a count of
-the hooks' own: a forged event raises no token's wait, and a verified event
-clears no token's.</p>
+the hooks' own, kept by the address and the hook's name:
+<code>/_hooks/%73tripe</code> counts as <code>/_hooks/stripe</code>, and
+every path naming no hook's name shares one count. A forged event raises no
+token's wait, and a verified event clears no token's.</p>
 
 <h2 id="durable">On disk before the 2xx</h2>
 

@@ -5090,7 +5090,8 @@ mod tests {
     /// `SENT_WAIT` makes its answer a 503 with `Retry-After`, the block
     /// landed and its key kept, and the event sent again is answered from
     /// its key once the standby holds it -- never a 2xx a failover to that
-    /// standby would make a lie. An archiver's stream is no standby: no
+    /// standby would make a lie -- the block that took the key, not the
+    /// database's latest change. An archiver's stream is no standby: no
     /// promotion takes an event from it. Counted by the answers, never the
     /// clock.
     #[test]
@@ -5178,6 +5179,14 @@ mod tests {
         let (status, replayed, retry, body) = send("evt_2", "o-2");
         assert_eq!((status, replayed, retry), (200, true, false), "{body}");
         assert_eq!(body, r#"{"event":"evt_2","taken":1}"#);
+        // A replay waits for the block that took its key, never the
+        // database's latest: a write since, which the standby was never
+        // sent, holds back no replay of an event the standby holds.
+        let later = fennec_ql::parse_one("put orders {ref: 'o-3', status: 'open'}").unwrap();
+        db.write().unwrap().execute(&later).unwrap();
+        assert!(db.read().unwrap().change_seq() > seq);
+        let (status, replayed, retry, body) = send("evt_2", "o-2");
+        assert_eq!((status, replayed, retry), (200, true, false), "{body}");
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }

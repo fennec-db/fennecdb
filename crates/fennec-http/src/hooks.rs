@@ -19,15 +19,17 @@
 //! without one, so every check before the signature is held to the end and
 //! answered alike ([`Hooks::verify`]): the scheme read from the headers
 //! present, each sent once; the hook looked up, the process's own key
-//! standing in for a secret that is not there; the signed timestamp within
-//! the hook's tolerance; the body within its ceiling; and two HMAC-SHA256s
-//! always, each compared in constant time with every `v1` signature sent.
-//! Every failure is one 401, after the same work, its check named only in
-//! the log line, the audit's `refused` line and
+//! standing in for a secret that is not there and never verifying; the
+//! signed timestamp within the hook's tolerance; the body within its
+//! ceiling; and two HMAC-SHA256s always, over the body up to the widest
+//! ceiling of any hook, each compared in constant time with every `v1`
+//! signature sent. Every failure is one 401, after the same work, its
+//! check named only in the log line, the audit's `refused` line and
 //! `fennec_hook_unverified_total{check}`; it waits by a count of the hooks'
-//! own, by the sender's address and the hook's path, which a verified
-//! event of that hook from that address starts again and nothing else
-//! does -- never `audit::verified`, a signature being no token.
+//! own, by the sender's address and the hook's name the decoded path
+//! names ([`named`]), which a verified event of that hook from that
+//! address starts again and nothing else does -- never `audit::verified`,
+//! a signature being no token.
 //!
 //! **Taken once.** Verified, the event's content type is asked (415), its
 //! body parsed exactly as an object (400), its key read -- Stripe's `id`,
@@ -56,7 +58,6 @@ use crate::replication::{Feed, SENT_WAIT};
 use crate::{held, Config};
 use fennec_core::engine::{Event, Took};
 use fennec_core::prelude::*;
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -189,23 +190,29 @@ pub struct Hook {
     /// Its secrets' keys, the process's own standing in for a second it
     /// lacks: two HMACs always, whatever it holds.
     keys: [HmacKey; 2],
-    /// How many secrets its line names: one or two.
+    /// How many secrets its line names: one or two. With one, the second
+    /// slot's match is masked out ([`Hooks::verify`]).
     pub secrets: usize,
     pub tolerance_ms: i64,
     /// How long an event's key is kept past its taking.
     pub keep_ms: i64,
     pub key: KeyBy,
-    /// The body's ceiling, `max-body`.
+    /// The body's ceiling, `max-body`: a body past it fails `size`.
     pub ceiling: usize,
 }
 
 /// A server's hooks, read from its hooks file at its start.
 pub struct Hooks {
     hooks: Vec<Hook>,
-    /// A key of the process's own, made at its start, for a secret that is
-    /// not there -- a hook missing, a second secret: the work goes on all
-    /// the same, and no signature anyone sent can match it.
+    /// A key of the process's own, made at its start from the system's
+    /// randomness, for a secret that is not there -- a hook missing, a
+    /// second secret: the work goes on all the same, and no signature
+    /// anyone sent can match it, a second slot's match masked besides.
     stand_in: [HmacKey; 2],
+    /// The widest ceiling of any hook, [`CEILING`] at least: every event's
+    /// HMACs run over its body up to it, whatever hook it names, so the
+    /// time they take tells no hook's ceiling from another's.
+    widest: usize,
     /// The feed a file's server sends its replicas from, whose standbys a
     /// 2xx waits for ([`Feed::standby_sent`]).
     feed: OnceLock<Arc<Feed>>,
@@ -223,158 +230,54 @@ pub struct Verified<'h> {
 /// <size>]`, a `#` starting a comment.
 const OPTIONS: [&str; 4] = ["keep", "tolerance", "key", "max-body"];
 
+/// What a refused line says, past its number: the server's own words,
+/// never a word of the line -- a secret pasted where its file's path goes
+/// is no path to echo -- one format site for them all.
+type Why = &'static str;
+
+// The name's refusal says 59 bytes.
+const _: () = assert!(fennec_core::named::MAX_NAME == 59);
+
 impl Hooks {
     /// The hooks `text` -- a hooks file's -- names, each secret read by
     /// `secret` from the file its line names; refused, naming the line and
     /// what to write, for whatever the design refuses at the start: a hook
-    /// named twice or by no word, a scheme unknown, a secret file empty or
-    /// holding a `standard` secret that is not `whsec_` and base64, a
-    /// tolerance of none or past an hour, a `keep` shorter than a day or not
-    /// past twice the tolerance and [`SKEW_MS`], a `key` on a hook not
-    /// `github`'s, a `max-body` past `max_body`. Never the secret's value.
+    /// named twice or by no word, a scheme unknown, a secret file empty,
+    /// unread or holding a `standard` secret that is not `whsec_` and
+    /// base64, a tolerance of none or past an hour, a `keep` shorter than
+    /// a day or not past twice the tolerance and [`SKEW_MS`], a `key` on a
+    /// hook not `github`'s, a `max-body` past `max_body`. Never a word of
+    /// the line, so never a secret's value. Refused too where the system's
+    /// randomness cannot be read: a stand-in key is never the clock's.
     pub fn read(
         text: &str,
         secret: impl Fn(&str) -> std::io::Result<Vec<u8>>,
         max_body: usize,
     ) -> std::result::Result<Hooks, String> {
-        let stand_in = HmacKey::new(&crate::crypto::random_bytes(32));
+        let seed = crate::crypto::system_random(32).ok_or(
+            "the hooks' stand-in key needs the system's randomness (/dev/urandom), which could \
+             not be read",
+        )?;
+        let stand_in = HmacKey::new(&seed);
         let mut hooks: Vec<Hook> = Vec::new();
         for (n, line) in text.lines().enumerate() {
-            let at = |why: String| format!("hooks file line {}: {why}", n + 1);
             let words: Vec<&str> = line
                 .split_ascii_whitespace()
                 .take_while(|w| !w.starts_with('#'))
                 .collect();
-            let [name, scheme, rest @ ..] = words.as_slice() else {
-                if words.is_empty() {
-                    continue;
-                }
-                return Err(at(
-                    "a hook is `<name> <scheme> <secret file> [<secret file>] [options]`".into(),
-                ));
-            };
-            if !fennec_core::named::valid_name(name) {
-                return Err(at(format!(
-                    "`{name}` is no hook's name: ASCII letters, digits and `_`, starting with a \
-                     letter, at most {} bytes",
-                    fennec_core::named::MAX_NAME
-                )));
+            if words.is_empty() {
+                continue;
             }
-            if hooks.iter().any(|h| h.name == *name) {
-                return Err(at(format!("hook `{name}` is named twice")));
-            }
-            let Some(scheme) = Scheme::read(scheme) else {
-                return Err(at(format!(
-                    "`{scheme}` is no scheme: `stripe`, `github` or `standard`"
-                )));
-            };
-            let files: Vec<&str> = rest
-                .iter()
-                .take_while(|w| !OPTIONS.contains(w))
-                .copied()
-                .collect();
-            if files.is_empty() || files.len() > 2 {
-                return Err(at(format!(
-                    "hook `{name}` names {} secret files: one, or two while a secret rolls",
-                    files.len()
-                )));
-            }
-            let mut keys = Vec::with_capacity(2);
-            for f in &files {
-                let raw = secret(f).map_err(|e| at(format!("could not read {f}: {e}")))?;
-                let bytes = secret_of(scheme, &raw).map_err(|why| at(format!("{f} {why}")))?;
-                keys.push(HmacKey::new(&bytes));
-            }
-            let mut opts = rest[files.len()..].iter();
-            let (mut keep, mut tolerance, mut key, mut ceiling) = (None, None, None, None);
-            while let Some(opt) = opts.next() {
-                let Some(value) = opts.next() else {
-                    return Err(at(format!("`{opt}` expects a value")));
-                };
-                let given = match *opt {
-                    "keep" => keep.replace(duration(value).map_err(at)?).is_some(),
-                    "tolerance" => tolerance.replace(duration(value).map_err(at)?).is_some(),
-                    "key" => {
-                        let by = match *value {
-                            "body" => KeyBy::Body,
-                            "delivery" => KeyBy::Delivery,
-                            _ => {
-                                return Err(at(format!(
-                                    "`key {value}`: a `github` hook keys its events by `body` \
-                                     or `delivery`"
-                                )))
-                            }
-                        };
-                        key.replace(by).is_some()
-                    }
-                    "max-body" => {
-                        let size = crate::quota::size(value)
-                            .filter(|s| *s > 0)
-                            .ok_or_else(|| at(format!("`max-body {value}` is no size")))?;
-                        ceiling.replace(size).is_some()
-                    }
-                    other => {
-                        return Err(at(format!(
-                            "`{other}` is no option: `keep`, `tolerance`, `key` or `max-body`"
-                        )))
-                    }
-                };
-                if given {
-                    return Err(at(format!("`{opt}` is given twice")));
-                }
-            }
-            if key.is_some() && scheme != Scheme::Github {
-                return Err(at(format!(
-                    "`key` is a `github` hook's: a {} event's key is one its signature covers",
-                    scheme.name()
-                )));
-            }
-            let tolerance_ms = tolerance.unwrap_or(TOLERANCE_MS);
-            if !(MIN_TOLERANCE_MS..=MAX_TOLERANCE_MS).contains(&tolerance_ms) {
-                return Err(at(
-                    "a tolerance is a second to an hour: none would turn the recency check \
-                     off, and past an hour a captured event verifies for longer than any \
-                     sender's clock needs"
-                        .into(),
-                ));
-            }
-            let keep_ms = keep.unwrap_or(match scheme {
-                Scheme::Stripe => 30 * DAY,
-                _ => 7 * DAY,
-            });
-            if keep_ms < MIN_KEEP_MS || keep_ms <= 2 * tolerance_ms + SKEW_MS {
-                return Err(at(
-                    "a `keep` is a day at least, and more than twice the tolerance and a \
-                     minute: a key let go sooner lets a copy of its event inside the window \
-                     its signature verifies in be taken again"
-                        .into(),
-                ));
-            }
-            let ceiling = ceiling.unwrap_or(CEILING as u64);
-            if ceiling > max_body as u64 {
-                return Err(at(format!(
-                    "`max-body` is at most the server's body ceiling, {max_body} bytes"
-                )));
-            }
-            let secrets = keys.len();
-            let mut keys = keys.into_iter();
-            let first = keys.next().unwrap_or_else(|| stand_in.clone());
-            let second = keys.next().unwrap_or_else(|| stand_in.clone());
-            hooks.push(Hook {
-                name: name.to_string(),
-                scheme,
-                keys: [first, second],
-                secrets,
-                tolerance_ms,
-                keep_ms,
-                key: key.unwrap_or(KeyBy::Body),
-                ceiling: ceiling as usize,
-            });
+            let hook = hook_of(&words, &hooks, &secret, max_body, &stand_in)
+                .map_err(|why| format!("hooks file line {}: {why}", n + 1))?;
+            hooks.push(hook);
         }
         SERVING.store(true, Ordering::Relaxed);
+        let widest = hooks.iter().map(|h| h.ceiling).fold(CEILING, usize::max);
         Ok(Hooks {
             hooks,
             stand_in: [stand_in.clone(), stand_in],
+            widest,
             feed: OnceLock::new(),
         })
     }
@@ -395,9 +298,10 @@ impl Hooks {
 
     /// The event `req` sent to hook `name`, verified at `now_ms`, or the
     /// first check it failed. Every check runs whatever fails before it --
-    /// the body read to the ceiling, both HMACs -- so an event refused for
-    /// its headers, its scheme, its time, its size, its hook or its
-    /// signature costs one work and is answered one 401.
+    /// both HMACs over the body up to the widest ceiling of any hook, the
+    /// same whatever `name` is -- so an event refused for its headers, its
+    /// scheme, its time, its size, its hook or its signature costs one
+    /// work and is answered one 401.
     pub fn verify(
         &self,
         name: &str,
@@ -413,11 +317,13 @@ impl Hooks {
             fail(Check::Header);
         }
         let hook = self.get(name);
-        let (keys, tolerance, ceiling) = match hook {
-            Some(h) => (&h.keys, h.tolerance_ms, h.ceiling),
+        // A second secret's match counts only where the hook names one: a
+        // stand-in's slot never verifies, whatever key made it.
+        let (keys, tolerance, ceiling, second) = match hook {
+            Some(h) => (&h.keys, h.tolerance_ms, h.ceiling, h.secrets == 2),
             None => {
                 fail(Check::Hook);
-                (&self.stand_in, TOLERANCE_MS, CEILING)
+                (&self.stand_in, TOLERANCE_MS, CEILING, false)
             }
         };
         let scheme = signed.as_ref().map(|s| s.scheme);
@@ -433,10 +339,13 @@ impl Hooks {
         {
             fail(Check::Stale);
         }
-        let body = &req.body[..req.body.len().min(ceiling)];
+        // The hook's own ceiling decides the failure; the HMACs cover the
+        // body up to the widest, so a hook whose ceiling was raised or
+        // lowered takes the time any other name takes.
         if req.body.len() > ceiling {
             fail(Check::Size);
         }
+        let body = &req.body[..req.body.len().min(self.widest)];
         let id = signed.as_ref().map_or(&b""[..], |s| s.id);
         let parts: [&[u8]; 5] = match scheme {
             Some(Scheme::Stripe) => [t, b".", body, b"", b""],
@@ -446,10 +355,12 @@ impl Hooks {
         let macs = [keys[0].mac(&parts), keys[1].mac(&parts)];
         #[cfg(test)]
         tests::counted(body.len());
+        // Every signature against both, no `||` and no early way out: the
+        // work is the same whichever matched, or none.
         let mut matched = false;
         if let Some(s) = &signed {
             for sig in &s.sigs[..s.n] {
-                matched |= ct_eq(&macs[0], sig) | ct_eq(&macs[1], sig);
+                matched |= compared(&macs[0], sig) | (compared(&macs[1], sig) & second);
             }
         }
         if !matched {
@@ -474,50 +385,141 @@ impl Hooks {
     }
 }
 
+/// A MAC against a signature sent, in constant time: every comparison
+/// `verify` makes goes through here, counted in a test build, so one made
+/// another way -- a slice's `==`, which stops at the first byte that
+/// differs -- or skipped shows in the count.
+#[inline(always)]
+fn compared(mac: &[u8; 32], sig: &[u8; 32]) -> bool {
+    #[cfg(test)]
+    tests::compared_one();
+    ct_eq(mac, sig)
+}
+
+/// The hook a hooks file's line `words` makes, beside the `hooks` read
+/// before it, or what is wrong with it.
+fn hook_of(
+    words: &[&str],
+    hooks: &[Hook],
+    secret: &impl Fn(&str) -> std::io::Result<Vec<u8>>,
+    max_body: usize,
+    stand_in: &HmacKey,
+) -> std::result::Result<Hook, Why> {
+    let [name, scheme, rest @ ..] = words else {
+        return Err("a hook is `<name> <scheme> <secret file> [<secret file>] [options]`");
+    };
+    if !fennec_core::named::valid_name(name) {
+        return Err(
+            "a hook's name is ASCII letters, digits and `_`, a letter first, 59 bytes at most",
+        );
+    }
+    if hooks.iter().any(|h| h.name == *name) {
+        return Err("a hook is named twice");
+    }
+    let scheme = Scheme::read(scheme).ok_or("a scheme is `stripe`, `github` or `standard`")?;
+    let files = rest.iter().take_while(|w| !OPTIONS.contains(w)).count();
+    if !(1..=2).contains(&files) {
+        return Err("a hook names one secret file, or two while a secret rolls");
+    }
+    let mut keys = [stand_in.clone(), stand_in.clone()];
+    for (slot, f) in keys.iter_mut().zip(&rest[..files]) {
+        let raw = secret(f).map_err(|_| "could not read a secret file it names")?;
+        *slot = HmacKey::new(&secret_of(scheme, &raw)?);
+    }
+    let mut opts = rest[files..].iter();
+    let (mut keep, mut tolerance, mut key, mut ceiling) = (None, None, None, None);
+    while let Some(opt) = opts.next() {
+        let value = *opts.next().ok_or("an option expects a value")?;
+        let given = match *opt {
+            "keep" => keep.replace(duration(value)?).is_some(),
+            "tolerance" => tolerance.replace(duration(value)?).is_some(),
+            "key" => {
+                let by = match value {
+                    "body" => KeyBy::Body,
+                    "delivery" => KeyBy::Delivery,
+                    _ => return Err("a `github` hook keys its events by `body` or `delivery`"),
+                };
+                key.replace(by).is_some()
+            }
+            "max-body" => {
+                let size = (crate::quota::size(value).filter(|s| *s > 0))
+                    .ok_or("`max-body` is a size: 64k, 4m")?;
+                ceiling.replace(size).is_some()
+            }
+            _ => return Err("an option is `keep`, `tolerance`, `key` or `max-body`"),
+        };
+        if given {
+            return Err("an option is given twice");
+        }
+    }
+    if key.is_some() && scheme != Scheme::Github {
+        return Err("`key` is a `github` hook's: the others' keys are signed");
+    }
+    let tolerance_ms = tolerance.unwrap_or(TOLERANCE_MS);
+    if !(MIN_TOLERANCE_MS..=MAX_TOLERANCE_MS).contains(&tolerance_ms) {
+        return Err("a tolerance is 1s to 1h");
+    }
+    let keep_ms = keep.unwrap_or(match scheme {
+        Scheme::Stripe => 30 * DAY,
+        _ => 7 * DAY,
+    });
+    if keep_ms < MIN_KEEP_MS || keep_ms <= 2 * tolerance_ms + SKEW_MS {
+        return Err("a `keep` is 1d at least, and past twice the tolerance and 1m");
+    }
+    // Unless given, a mebibyte or the server's own ceiling where that is
+    // lower: a default past `--max-body` refused a line that named none.
+    let ceiling = ceiling.unwrap_or(CEILING.min(max_body) as u64);
+    if ceiling > max_body as u64 {
+        return Err("`max-body` is at most the server's --max-body");
+    }
+    Ok(Hook {
+        name: name.to_string(),
+        scheme,
+        keys,
+        secrets: files,
+        tolerance_ms,
+        keep_ms,
+        key: key.unwrap_or(KeyBy::Body),
+        ceiling: ceiling as usize,
+    })
+}
+
 /// A secret file's bytes as its scheme reads them: Stripe's `whsec_` text
 /// and GitHub's chosen secret as written, a `standard` one's base64 after
 /// `whsec_` decoded. Its file's last line end is no part of it.
-fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
+fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
     let mut s = raw;
     while let [rest @ .., b'\n' | b'\r'] = s {
         s = rest;
     }
     if s.is_empty() {
-        return Err(
-            "is empty: an empty secret would make every signature anyone can compute \
-                    verify"
-                .into(),
-        );
+        return Err("a secret file is empty: an empty secret verifies any signature");
     }
     if scheme != Scheme::Standard {
         return Ok(s.to_vec());
     }
-    let malformed = || {
-        "holds no Standard Webhooks secret: `whsec_` and the secret in base64, as its sender \
-         shows it"
-            .to_string()
-    };
-    let text = std::str::from_utf8(s).map_err(|_| malformed())?;
-    let b64 = text.strip_prefix("whsec_").ok_or_else(malformed)?;
-    match b64_decode(b64) {
-        Some(key) if !key.is_empty() => Ok(key),
-        _ => Err(malformed()),
-    }
+    let key = (std::str::from_utf8(s).ok())
+        .and_then(|t| t.strip_prefix("whsec_"))
+        .and_then(b64_decode)
+        .filter(|k| !k.is_empty());
+    key.ok_or("a secret file holds no Standard Webhooks secret: `whsec_` and base64, as its sender shows it")
 }
 
 /// A duration of a hooks file: a number and `s`, `m`, `h` or `d`.
-fn duration(text: &str) -> std::result::Result<i64, String> {
-    let refused = || format!("`{text}` is no duration: a number and s, m, h or d (30d, 5m)");
-    let (n, unit) = text.split_at(text.len().saturating_sub(1));
+fn duration(text: &str) -> std::result::Result<i64, Why> {
+    const REFUSED: Why = "a duration is a number and s, m, h or d: 30d, 5m";
+    // Checked: a word ending in a letter of more than a byte (`5ü`) is no
+    // duration, never a panic at the start.
+    let (n, unit) = (text.split_at_checked(text.len().saturating_sub(1))).ok_or(REFUSED)?;
     let ms = match unit {
         "s" => 1_000,
         "m" => 60_000,
         "h" => 3_600_000,
         "d" => DAY,
-        _ => return Err(refused()),
+        _ => return Err(REFUSED),
     };
-    let n: i64 = n.parse().map_err(|_| refused())?;
-    n.checked_mul(ms).filter(|v| *v > 0).ok_or_else(refused)
+    let n: i64 = n.parse().map_err(|_| REFUSED)?;
+    n.checked_mul(ms).filter(|v| *v > 0).ok_or(REFUSED)
 }
 
 /// Seconds written as digits alone, as a signed timestamp is.
@@ -540,12 +542,18 @@ struct Signed<'r> {
 }
 
 /// The headers a scheme is told by, and GitHub's beside its signature.
-const HEADERS: [&str; 7] = [
+/// Standard Webhooks' three come under two names: its own `webhook-*` and
+/// Svix's `svix-*`, which Clerk, Resend and every service sending through
+/// Svix send, and which Svix's libraries read as the same.
+const HEADERS: [&str; 10] = [
     "stripe-signature",
     "x-hub-signature-256",
     "webhook-signature",
     "webhook-id",
     "webhook-timestamp",
+    "svix-signature",
+    "svix-id",
+    "svix-timestamp",
     "x-github-event",
     "x-github-delivery",
 ];
@@ -553,14 +561,16 @@ const HEADERS: [&str; 7] = [
 /// The scheme `req`'s headers sign by, read from the headers present and
 /// never from the hook: one scheme's headers, each sent once -- a reader
 /// signing with one `t` and holding another to the tolerance would take an
-/// old capture -- one `t` in `Stripe-Signature`, a `webhook-id` holding no
-/// `.` and a `webhook-timestamp` of digits, so no two splits of what is
-/// signed sign alike, and one to [`MAX_SIGNATURES`] `v1` signatures, each
-/// in its encoding; other versions (`v0`, `v1a`) passed over, never read
-/// as `v1`. `None` for anything else.
+/// old capture -- and Standard Webhooks' under one of its two names, never
+/// both, so no reader takes the id of one and the signature of the other;
+/// one `t` in `Stripe-Signature`, an id holding no `.` and a timestamp of
+/// digits, so no two splits of what is signed sign alike, and one to
+/// [`MAX_SIGNATURES`] `v1` signatures, each in its encoding; other
+/// versions (`v0`, `v1a`) passed over, never read as `v1`. `None` for
+/// anything else.
 fn signed(req: &Request) -> Option<Signed<'_>> {
-    let mut seen = [0u8; 7];
-    let mut value = [""; 7];
+    let mut seen = [0u8; HEADERS.len()];
+    let mut value = [""; HEADERS.len()];
     for (k, v) in &req.headers {
         if let Some(i) = HEADERS.iter().position(|h| k.eq_ignore_ascii_case(h)) {
             seen[i] = seen[i].saturating_add(1);
@@ -570,7 +580,8 @@ fn signed(req: &Request) -> Option<Signed<'_>> {
     if seen.iter().any(|&n| n > 1) {
         return None;
     }
-    let families = [seen[0] > 0, seen[1] > 0, seen[2..5].iter().any(|&n| n > 0)];
+    let sent = |at: usize| seen[at..at + 3].iter().any(|&n| n > 0);
+    let families = [seen[0] > 0, seen[1] > 0, sent(2), sent(5)];
     if families.iter().filter(|f| **f).count() != 1 {
         return None;
     }
@@ -607,16 +618,17 @@ fn signed(req: &Request) -> Option<Signed<'_>> {
         push(&mut s, hex32(hex))?;
     } else {
         s.scheme = Scheme::Standard;
-        if seen[2..5] != [1, 1, 1] {
+        let at = if families[2] { 2 } else { 5 };
+        if seen[at..at + 3] != [1, 1, 1] {
             return None;
         }
-        let (id, t) = (value[3].trim(), value[4].trim());
+        let (id, t) = (value[at + 1].trim(), value[at + 2].trim());
         if id.is_empty() || id.contains('.') || seconds(t.as_bytes()).is_none() {
             return None;
         }
         s.id = id.as_bytes();
         s.t = t.as_bytes();
-        for sig in value[2].split_ascii_whitespace() {
+        for sig in value[at].split_ascii_whitespace() {
             let (version, b64) = sig.split_once(',')?;
             if version == "v1" {
                 let raw = b64_decode(b64).filter(|r| r.len() == 32)?;
@@ -625,6 +637,15 @@ fn signed(req: &Request) -> Option<Signed<'_>> {
         }
     }
     (s.n > 0).then_some(s)
+}
+
+/// A Standard Webhooks event's id, under whichever of its two names it
+/// came: [`signed`] took one alone.
+fn standard_id(req: &Request) -> &str {
+    let id = |k: &str| k.eq_ignore_ascii_case("webhook-id") || k.eq_ignore_ascii_case("svix-id");
+    (req.headers.iter())
+        .find_map(|(k, v)| id(k).then_some(v.trim()))
+        .unwrap_or_default()
 }
 
 /// 64 hex digits as 32 bytes, either case.
@@ -673,7 +694,12 @@ pub const UNVERIFIED: &str = "the event does not verify";
 
 /// `POST /_hooks/<name>`: verified, then taken once by its key and
 /// answered once durable (the module's docs). Judged before `authenticate`:
-/// nothing of the request is read before its signature checks out.
+/// nothing of the request is read before its signature checks out. Out of
+/// line and cold: inlined, it made `fennec_http::handle`, which every
+/// request runs, 4.6 KB larger -- the HMACs, SHA-256, the taking -- for a
+/// route most servers never meet.
+#[cold]
+#[inline(never)]
 pub(crate) fn handle(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
@@ -686,24 +712,35 @@ pub(crate) fn handle(
     let name = req.path.strip_prefix("/_hooks/").unwrap_or_default();
     let v = match hooks.verify(name, req, now_ms()) {
         Ok(v) => v,
-        Err(check) => return unverified(name, check),
+        Err(check) => return unverified(req, check),
     };
     let hook = v.hook;
     // A verified event of this hook from this address starts its count
     // again, and nothing else does: never a token's (`audit::verified`).
-    cleared(crate::audit::client_ip(), &req.path);
+    cleared(crate::audit::client_ip(), &hook.name);
     let delivery = req.header("x-github-delivery");
     let taken = take(db, cfg, hooks, hook, &v, req);
     noted(hook, delivery, taken)
 }
 
+/// The hook's name `req`'s path names, decoded as the route looks a hook
+/// up, where it is one -- a word of at most 59 bytes -- whether or not the
+/// server holds that hook; `None` for any other path under `/_hooks/`. A
+/// refusal is counted, logged and audited by it alone: a path is up to the
+/// head's 64 KiB, and a forger's, kept or written, filled memory and the
+/// log by the megabyte.
+pub(crate) fn named(req: &Request) -> Option<&str> {
+    (req.path.strip_prefix("/_hooks/")).filter(|n| fennec_core::named::valid_name(n))
+}
+
 /// The one 401, its check named where an operator reads it alone.
 #[cold]
-fn unverified(name: &str, check: Check) -> Response {
+fn unverified(req: &Request, check: Check) -> Response {
     UNVERIFIED_COUNT[check as usize].fetch_add(1, Ordering::Relaxed);
     crate::audit::hook_refused(check.reason());
     crate::log!(
-        "hook {name:?}: an event from {} did not verify ({}): answered 401",
+        "hook `{}`: an event from {} did not verify ({}): answered 401",
+        named(req).unwrap_or("?"),
         crate::audit::client_ip().map_or_else(|| "?".to_string(), |ip| ip.to_string()),
         check.name()
     );
@@ -858,11 +895,7 @@ fn take(
                 )
             }
         },
-        Scheme::Standard => req
-            .header("webhook-id")
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
+        Scheme::Standard => standard_id(req).to_string(),
         Scheme::Github => match hook.key {
             KeyBy::Body => hex(&sha256(&req.body)),
             KeyBy::Delivery => match req.header("x-github-delivery") {
@@ -1071,8 +1104,9 @@ fn replayed(
     held_answer(db, hooks, e, k, durability, at)
 }
 
-/// A held key's answer -- `Idempotent-Replayed` -- once `durability` ran
-/// and a standby holds the database's writes up to `at`.
+/// A held key's answer -- `Idempotent-Replayed`, `Fennec-Seq` where the
+/// database stands at `at` -- once `durability` ran and a standby holds
+/// the block that took the key ([`HeldKey::seq`](fennec_core::engine::HeldKey)).
 fn held_answer(
     db: &Arc<RwLock<Database>>,
     hooks: &Hooks,
@@ -1085,7 +1119,9 @@ fn held_answer(
         true => Outcome::Replayed,
         false => Outcome::Conflict,
     };
-    match durable(db, hooks, durability, at.seq) {
+    // The block that took the key, never the database's latest: a standby
+    // behind on later writes holds this event already.
+    match durable(db, hooks, durability, k.seq) {
         Err(resp) => Taken {
             outcome: Outcome::of(resp.status),
             resp,
@@ -1201,7 +1237,7 @@ fn digest(body: &[u8]) -> u64 {
 
 // ------------------------------------------------- the hooks' refusal count
 
-/// A hook's refusals counted by the sender's address and the hook's path,
+/// A hook's refusals counted by the sender's address and the hook's name,
 /// apart from the tokens' (`audit::failed`): a verified event from an
 /// address many share -- a cloud's egress, a sender's ranges -- must not
 /// start the token-guessing count again for every client there, nor a
@@ -1209,63 +1245,91 @@ fn digest(body: &[u8]) -> u64 {
 /// events. The wait is the token count's shape: `--auth-delay` after the
 /// first within a minute, doubled for each more, 5 s at most -- under the
 /// 10 s GitHub gives an answer.
-type Fails = HashMap<(IpAddr, String), (u32, Instant)>;
+///
+/// Keyed by the address and a digest of the name the decoded path names
+/// ([`named`]), whether or not the server holds that hook -- so
+/// `/_hooks/%73tripe` counts as `/_hooks/stripe`, which takes its event,
+/// and whether a hook is there tells nothing -- every path naming no name
+/// one count of its own: an entry is a few dozen bytes whatever was sent.
+/// The table is `audit`'s type, one copy of its code.
+#[derive(Default)]
+struct Fails {
+    counts: crate::audit::Failures,
+    /// No sweep before then: the last one found every count within its
+    /// minute, the oldest's ending then.
+    full_until: Option<Instant>,
+}
+
+impl Fails {
+    /// `key`'s count raised at `now`, or `None` where [`KEPT`] counts are
+    /// held, each within its minute, and `key` is not among them: past
+    /// them a refusal waits the longest and is counted nowhere. One address
+    /// filling the table forgives no other's count -- it is swept of the
+    /// counts past their minute, never cleared.
+    fn count(&mut self, key: (IpAddr, u64), now: Instant) -> Option<u32> {
+        if self.counts.len() >= KEPT && !self.counts.contains_key(&key) {
+            if self.full_until.is_some_and(|t| now < t) {
+                return None;
+            }
+            self.counts
+                .retain(|_, (_, at)| now.duration_since(*at) <= WINDOW);
+            self.full_until = None;
+            if self.counts.len() >= KEPT {
+                self.full_until = self.counts.values().map(|(_, at)| *at + WINDOW).min();
+                return None;
+            }
+        }
+        let e = self.counts.entry(key).or_insert((0, now));
+        if now.duration_since(e.1) > WINDOW {
+            e.0 = 0;
+        }
+        e.0 = e.0.saturating_add(1);
+        e.1 = now;
+        Some(e.0)
+    }
+}
 
 fn fails() -> &'static Mutex<Fails> {
     static F: OnceLock<Mutex<Fails>> = OnceLock::new();
     F.get_or_init(Default::default)
 }
 
+/// A count's key: the address, canonical as `audit`'s are, and the name's
+/// digest -- odd, so no name's is the count of the paths naming none, 0.
+fn keyed(ip: IpAddr, name: Option<&str>) -> (IpAddr, u64) {
+    (
+        ip.to_canonical(),
+        name.map_or(0, |n| digest(n.as_bytes()) | 1),
+    )
+}
+
 /// Entries with a refusal counted: a verified event asks the table only
 /// when there is one.
 static FAILING: AtomicU64 = AtomicU64::new(0);
-/// Paths and addresses remembered at most; past it the table starts again.
+/// Counts kept at most, each a few dozen bytes: past them, those past their
+/// minute are swept, and a refusal finding none to sweep waits the longest.
 const KEPT: usize = 10_000;
 const WINDOW: Duration = Duration::from_secs(60);
 
-/// How long a refusal of hook `path` to `ip` waits, counted.
-pub(crate) fn failed(ip: Option<IpAddr>, path: &str) -> Duration {
+/// How long a refusal to `ip` of an event naming hook `name` ([`named`])
+/// waits, counted.
+pub(crate) fn failed(ip: Option<IpAddr>, name: Option<&str>) -> Duration {
     let base = crate::audit::delay_ms();
-    let Some(ip) = ip.filter(|_| base > 0).map(|ip| ip.to_canonical()) else {
+    let Some(ip) = ip.filter(|_| base > 0) else {
         return Duration::ZERO;
     };
-    let now = Instant::now();
-    let mut map = fails().lock().unwrap_or_else(|e| e.into_inner());
-    let key = (ip, path.to_string());
-    if map.len() >= KEPT && !map.contains_key(&key) {
-        map.clear();
-    }
-    let e = map.entry(key).or_insert((0, now));
-    if now.duration_since(e.1) > WINDOW {
-        e.0 = 0;
-    }
-    e.0 = e.0.saturating_add(1);
-    e.1 = now;
-    let n = e.0;
-    FAILING.store(map.len() as u64, Ordering::Relaxed);
-    crate::audit::wait_after(base, n)
+    let mut f = fails().lock().unwrap_or_else(|e| e.into_inner());
+    let n = f.count(keyed(ip, name), Instant::now());
+    FAILING.store(f.counts.len() as u64, Ordering::Relaxed);
+    crate::audit::wait_after(base, n.unwrap_or(u32::MAX))
 }
 
-/// What a refusal of hook `path` to `ip` would wait now, nothing counted.
-pub fn would_wait(ip: Option<IpAddr>, path: &str) -> Duration {
-    let base = crate::audit::delay_ms();
-    let Some(ip) = ip.filter(|_| base > 0).map(|ip| ip.to_canonical()) else {
-        return Duration::ZERO;
-    };
-    let map = fails().lock().unwrap_or_else(|e| e.into_inner());
-    let before = match map.get(&(ip, path.to_string())) {
-        Some(&(n, at)) if at.elapsed() <= WINDOW => n,
-        _ => 0,
-    };
-    crate::audit::wait_after(base, before.saturating_add(1))
-}
-
-/// A verified event of hook `path` from `ip`: its count starts again.
-fn cleared(ip: Option<IpAddr>, path: &str) {
+/// A verified event of hook `name` from `ip`: its count starts again.
+fn cleared(ip: Option<IpAddr>, name: &str) {
     if let Some(ip) = ip.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
-        let mut map = fails().lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&(ip.to_canonical(), path.to_string()));
-        FAILING.store(map.len() as u64, Ordering::Relaxed);
+        let mut f = fails().lock().unwrap_or_else(|e| e.into_inner());
+        f.counts.remove(&keyed(ip, Some(name)));
+        FAILING.store(f.counts.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -1366,6 +1430,11 @@ mod tests {
         /// covered: every refusal before a verified signature does the
         /// same work.
         static MACS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+        /// The comparisons of a MAC with a signature made on this thread
+        /// ([`compared`]): two a signature sent, whatever matched -- a `||`
+        /// or a loop leaving at its match makes fewer, a comparison made
+        /// around `compared` none.
+        static COMPARED: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(super) fn counted(body: usize) {
@@ -1375,15 +1444,25 @@ mod tests {
         });
     }
 
+    pub(super) fn compared_one() {
+        COMPARED.with(|c| c.set(c.get() + 1));
+    }
+
     fn macs() -> (usize, usize) {
         MACS.with(|m| m.replace((0, 0)))
     }
 
+    fn compares() -> usize {
+        COMPARED.with(|c| c.replace(0))
+    }
+
     const STRIPE_SECRET: &str = "whsec_test_secret";
     /// Stripe's libraries' test payload (stripe-python's
-    /// `DUMMY_WEBHOOK_PAYLOAD`), signed at the documented example header's
-    /// `t` with their test secret: `HMAC-SHA256("whsec_test_secret",
-    /// "1492774577." + payload)` in hex, the documented scheme.
+    /// `DUMMY_WEBHOOK_PAYLOAD`) and test secret, signed at the `t` of the
+    /// example header its docs show. Stripe publishes no signed vector --
+    /// its libraries' tests sign at run time -- so `STRIPE_V1` was computed
+    /// here, from that payload and secret by the documented scheme:
+    /// `HMAC-SHA256("whsec_test_secret", "1492774577." + payload)` in hex.
     const STRIPE_PAYLOAD: &str = "{\n  \"id\": \"evt_test_webhook\",\n  \"object\": \"event\",\n  \"data\": { \"object\": { \"id\": \"rdr_123\", \"object\": \"terminal.reader\" } }\n}";
     const STRIPE_T: i64 = 1_492_774_577;
     const STRIPE_V1: &str = "d21d91b425674689e03346536b8fec6384a8721d43ebe269a1689a3ad22cba9c";
@@ -1410,8 +1489,14 @@ mod tests {
         if let Some(s) = f.strip_prefix("file:") {
             return Ok(s.as_bytes().to_vec());
         }
-        let n: usize = f.trim_start_matches("/run/").parse().unwrap();
-        Ok(SECRETS[n].as_bytes().to_vec())
+        match f
+            .strip_prefix("/run/")
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            Some(n) => Ok(SECRETS[n].as_bytes().to_vec()),
+            // No file: what a secret pasted where its path goes names.
+            None => Err(std::io::ErrorKind::NotFound.into()),
+        }
     }
 
     const SECRETS: [&str; 3] = ["", "whsec_!!!", GITHUB_SECRET];
@@ -1471,10 +1556,11 @@ mod tests {
     }
 
     /// Each scheme against its sender's own example: Stripe's documented
-    /// scheme over its libraries' test payload and secret, GitHub's
-    /// documented test values, and the Standard Webhooks reference
-    /// library's signing test -- verified, and with one byte of the body,
-    /// the timestamp or the signature changed, refused.
+    /// scheme over its libraries' test payload and secret, the signature
+    /// computed here from them ([`STRIPE_V1`]); GitHub's documented test
+    /// values; and the Standard Webhooks reference library's signing test
+    /// -- verified, and with one byte of the body, the timestamp or the
+    /// signature changed, refused.
     #[test]
     fn each_scheme_verifies_its_senders_example() {
         let h = all();
@@ -1536,6 +1622,81 @@ mod tests {
                 Some(Check::Signature)
             );
         }
+    }
+
+    /// Svix's names for Standard Webhooks' three headers -- what Clerk and
+    /// Resend send -- verify as its own do: the reference example under
+    /// `svix-*`. Both names at once, or one header of each, are a header
+    /// failure: no reader takes the id of one and the signature of the
+    /// other.
+    #[test]
+    fn svix_names_are_standard_webhooks() {
+        let h = all();
+        let t = STANDARD_T.to_string();
+        let svix = |names: [&str; 3]| {
+            req(
+                &[
+                    (names[0], STANDARD_ID),
+                    (names[1], t.as_str()),
+                    (names[2], STANDARD_SIG),
+                ],
+                STANDARD_PAYLOAD,
+            )
+        };
+        let sv = svix(["svix-id", "svix-timestamp", "svix-signature"]);
+        let v = h.verify("standard", &sv, at(STANDARD_T)).ok().unwrap();
+        assert_eq!(v.at, Some(at(STANDARD_T)));
+        assert_eq!(standard_id(&sv), STANDARD_ID, "the key is the id sent");
+        let changed = req(
+            &[
+                ("svix-id", STANDARD_ID),
+                ("svix-timestamp", t.as_str()),
+                ("svix-signature", STANDARD_SIG),
+            ],
+            "{\"test\": 2432232315}",
+        );
+        assert_eq!(
+            h.verify("standard", &changed, at(STANDARD_T)).err(),
+            Some(Check::Signature)
+        );
+        for names in [
+            ["svix-id", "webhook-timestamp", "webhook-signature"],
+            ["webhook-id", "svix-timestamp", "svix-signature"],
+            ["svix-id", "svix-timestamp", "webhook-signature"],
+        ] {
+            assert_eq!(
+                h.verify("standard", &svix(names), at(STANDARD_T)).err(),
+                Some(Check::Header),
+                "{names:?}"
+            );
+        }
+        let mut both = standard_req(STANDARD_SIG, STANDARD_ID, &t, STANDARD_PAYLOAD);
+        both.headers.extend(sv.headers.iter().cloned());
+        assert_eq!(
+            h.verify("standard", &both, at(STANDARD_T)).err(),
+            Some(Check::Header)
+        );
+    }
+
+    /// The process's stand-in key verifies nothing: an event MAC'd under it
+    /// is refused by a hook of one secret, whose second slot it fills, and
+    /// by a hook that is not there.
+    #[test]
+    fn a_stand_in_key_never_verifies() {
+        let h = all();
+        let sig = |parts: &[&[u8]]| h.stand_in[0].mac(parts);
+        let gh = format!("sha256={}", hex(&sig(&[GITHUB_PAYLOAD.as_bytes()])));
+        let gh = req(&[("X-Hub-Signature-256", &gh)], GITHUB_PAYLOAD);
+        assert_eq!(h.verify("github", &gh, 0).err(), Some(Check::Signature));
+        assert_eq!(h.verify("nosuch", &gh, 0).err(), Some(Check::Hook));
+        let t = STRIPE_T.to_string();
+        let mac = sig(&[t.as_bytes(), b".", STRIPE_PAYLOAD.as_bytes()]);
+        let st = stripe_req(&format!("t={t},v1={}", hex(&mac)));
+        assert_eq!(
+            h.verify("stripe", &st, at(STRIPE_T)).err(),
+            Some(Check::Signature)
+        );
+        assert_eq!(h.get("stripe").unwrap().secrets, 1);
     }
 
     /// A `v0` or a `v1a` signature alone is no `v1`; nine are refused.
@@ -1668,14 +1829,18 @@ mod tests {
     }
 
     /// Every refusal before a verified signature does one work: two HMACs
-    /// over the body as far as the ceiling -- a hook missing, of another
-    /// scheme, stale, its headers malformed, its signature wrong -- each
-    /// answered byte for byte as the others, its check told apart only by
-    /// what `verify` hands the log.
+    /// over the body up to the widest ceiling, and two comparisons a
+    /// signature sent -- a hook missing, of another scheme, stale, its
+    /// headers malformed, its signature wrong, and a verified event alike
+    /// -- each answered byte for byte as the others, its check told apart
+    /// only by what `verify` hands the log. Counted, never timed: a `||`
+    /// between the two comparisons, a loop leaving at its match, or a
+    /// comparison made around [`compared`] changes the count.
     #[test]
     fn every_refusal_before_the_signature_does_the_same_work() {
         let h = hooks(&format!(
             "stripe stripe file:{STRIPE_SECRET}\n\
+             rolled stripe file:{STRIPE_OLD_SECRET} file:{STRIPE_SECRET}\n\
              github github /run/2\n\
              short stripe file:{STRIPE_SECRET} tolerance 10s\n"
         ));
@@ -1683,78 +1848,200 @@ mod tests {
         let good = format!("t={STRIPE_T},v1={STRIPE_V1}");
         let mut wrong = STRIPE_V1.to_string();
         wrong.replace_range(63..64, "0");
-        let cases: Vec<(&str, Request, Check)> = vec![
+        let first = format!("t={STRIPE_T},v1={STRIPE_V1},v1={wrong}");
+        let last = format!("t={STRIPE_T},v1={wrong},v1={STRIPE_V1}");
+        let old = format!("t={STRIPE_T},v1={STRIPE_OLD_V1},v1={wrong}");
+        let cases: Vec<(&str, Request, Option<Check>, usize)> = vec![
+            ("stripe", stripe_req(&good), None, 1),
+            ("stripe", stripe_req(&first), None, 2),
+            ("stripe", stripe_req(&last), None, 2),
+            ("rolled", stripe_req(&first), None, 2),
+            ("rolled", stripe_req(&old), None, 2),
             (
                 "stripe",
                 stripe_req(&format!("t={STRIPE_T},v1={wrong}")),
-                Check::Signature,
+                Some(Check::Signature),
+                1,
             ),
-            ("nosuch", stripe_req(&good), Check::Hook),
-            ("github", stripe_req(&good), Check::Scheme),
-            ("short", stripe_req(&good), Check::Stale),
-            ("stripe", stripe_req("t=1,v1=zz"), Check::Header),
-            ("stripe", req(&[], STRIPE_PAYLOAD), Check::Header),
+            ("nosuch", stripe_req(&good), Some(Check::Hook), 1),
+            ("github", stripe_req(&good), Some(Check::Scheme), 1),
+            ("short", stripe_req(&good), Some(Check::Stale), 1),
+            ("stripe", stripe_req("t=1,v1=zz"), Some(Check::Header), 0),
+            ("stripe", req(&[], STRIPE_PAYLOAD), Some(Check::Header), 0),
         ];
         macs();
-        assert!(h.verify("stripe", &stripe_req(&good), now).is_ok());
-        let work = macs();
-        assert_eq!(work, (2, 2 * STRIPE_PAYLOAD.len()));
+        compares();
         let mut answers = Vec::new();
-        for (name, r, check) in &cases {
-            assert_eq!(h.verify(name, r, now).err(), Some(*check), "{name}");
-            assert_eq!(macs(), work, "{name}: {check:?} did another work");
-            answers.push(unverified(name, *check).body);
+        for (name, r, check, sigs) in &cases {
+            assert_eq!(h.verify(name, r, now).err(), *check, "{name}");
+            let what = format!("{name}, {check:?}, {sigs} signatures");
+            assert_eq!(macs(), (2, 2 * STRIPE_PAYLOAD.len()), "{what}");
+            assert_eq!(compares(), 2 * sigs, "{what}: compared otherwise");
+            if let Some(check) = check {
+                answers.push(unverified(r, *check).body);
+            }
         }
         assert!(answers.windows(2).all(|w| w[0] == w[1]), "one answer");
         assert_eq!(answers[0], br#"{"error":"the event does not verify"}"#);
     }
 
-    /// A body a byte past the hook's ceiling is refused, the HMACs run over
-    /// what was read as far as it.
+    /// A body past its hook's ceiling fails `size`, and costs what it costs
+    /// under any other name: the HMACs run over it up to the widest ceiling
+    /// of any hook, so a hook whose `max-body` was lowered or raised takes
+    /// the time a missing one does.
     #[test]
-    fn a_body_past_the_ceiling_is_refused_after_its_read() {
-        let h = hooks("small github /run/2 max-body 13\n");
+    fn a_body_past_its_hooks_ceiling_costs_what_any_other_name_does() {
+        let h = hooks(
+            "exact github /run/2 max-body 13\nsmall github /run/2 max-body 64k\nbig github \
+             /run/2 max-body 4m\n",
+        );
+        assert_eq!(h.widest, 4 << 20);
         let gh = req(&[("X-Hub-Signature-256", GITHUB_SIG)], GITHUB_PAYLOAD);
         assert!(
-            h.verify("small", &gh, 0).is_ok(),
+            h.verify("exact", &gh, 0).is_ok(),
             "13 bytes, at the ceiling"
         );
-        macs();
         let gh = req(&[("X-Hub-Signature-256", GITHUB_SIG)], "Hello, World!!");
-        assert_eq!(h.verify("small", &gh, 0).err(), Some(Check::Size));
-        assert_eq!(macs(), (2, 26), "over the 13 bytes read");
+        assert_eq!(h.verify("exact", &gh, 0).err(), Some(Check::Size));
+        let large = "x".repeat(2 << 20);
+        let gh = req(&[("X-Hub-Signature-256", GITHUB_SIG)], &large);
+        macs();
+        for (name, check) in [
+            ("exact", Check::Size),
+            ("small", Check::Size),
+            ("big", Check::Signature),
+            ("nosuch", Check::Hook),
+        ] {
+            assert_eq!(h.verify(name, &gh, 0).err(), Some(check), "{name}");
+            assert_eq!(macs(), (2, 2 * large.len()), "{name}: another work");
+        }
+        // Past the widest, every name's HMACs stop there alike.
+        let huge = "x".repeat(5 << 20);
+        let gh = req(&[("X-Hub-Signature-256", GITHUB_SIG)], &huge);
+        for name in ["big", "nosuch"] {
+            assert!(h.verify(name, &gh, 0).is_err());
+            assert_eq!(macs(), (2, 2 * (4 << 20)), "{name}");
+        }
+        // With no hook raising it, the widest is a mebibyte.
+        assert_eq!(hooks("a github /run/2 max-body 64k\n").widest, CEILING);
+    }
+
+    /// A refusal is counted by the address and the name the decoded path
+    /// names: `/_hooks/%73tripe` is `/_hooks/stripe`'s count, whether or not
+    /// the server holds the hook, and every path naming no name -- a
+    /// forger's 64 KiB ones among them -- one count, the table never
+    /// growing with them. The log and the audit line show no such path.
+    #[test]
+    fn a_refusal_is_counted_by_the_name_its_path_names() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let at = |target: &str, path: &str| {
+            let mut r = req(&[], "");
+            r.target = target.into();
+            r.path = path.into();
+            r
+        };
+        let plain = at("/_hooks/stripe", "/_hooks/stripe");
+        let encoded = at("/_hooks/%73tripe", "/_hooks/stripe");
+        assert_eq!(named(&plain), Some("stripe"));
+        assert_eq!(named(&encoded), Some("stripe"));
+        let mut f = Fails::default();
+        let now = Instant::now();
+        assert_eq!(f.count(keyed(ip, named(&plain)), now), Some(1));
+        assert_eq!(f.count(keyed(ip, named(&encoded)), now), Some(2));
+        let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
+        assert_eq!(f.count(keyed(mapped, named(&plain)), now), Some(3));
+        assert_ne!(keyed(ip, Some("nosuch")), keyed(ip, Some("stripe")));
+        assert_ne!(keyed(ip, Some("stripe")).1, keyed(ip, None).1);
+
+        let long = "a".repeat(60_000);
+        for i in 0..1_000 {
+            let r = at(&format!("/_hooks/{long}{i}"), &format!("/_hooks/{long}{i}"));
+            assert_eq!(named(&r), None);
+            f.count(keyed(ip, named(&r)), now);
+        }
+        assert_eq!(f.counts.len(), 2, "one count for every path naming no name");
+        assert_eq!(f.counts[&keyed(ip, None)].0, 1_000);
+        for path in [
+            "/_hooks/",
+            "/_hooks",
+            "/_hooks/a/b",
+            "/_hooks/1a",
+            "/_hooks/a.b",
+        ] {
+            assert_eq!(named(&at(path, path)), None, "{path}");
+        }
+    }
+
+    /// One address filling the table forgives no other's count: a name
+    /// past [`KEPT`] live counts waits the longest, counted nowhere, and
+    /// the counts past their minute are swept, never the table cleared.
+    #[test]
+    fn a_full_table_is_swept_of_old_counts_never_cleared() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let other: IpAddr = "198.51.100.7".parse().unwrap();
+        let mut f = Fails::default();
+        let t0 = Instant::now();
+        assert_eq!(f.count(keyed(other, Some("stripe")), t0), Some(1));
+        let later = t0 + Duration::from_secs(30);
+        for i in 0..KEPT - 1 {
+            f.count(keyed(ip, Some(&format!("h{i}"))), later);
+        }
+        assert_eq!(f.counts.len(), KEPT);
+        assert_eq!(f.count(keyed(ip, Some("more")), later), None);
+        assert_eq!(f.counts.len(), KEPT, "nothing cleared");
+        assert_eq!(f.count(keyed(other, Some("stripe")), later), Some(2));
+        // A sweep finding every count within its minute makes no room; once
+        // they are past it, they are swept and the name counted.
+        let early = t0 + WINDOW + Duration::from_secs(10);
+        assert_eq!(f.count(keyed(ip, Some("more")), early), None);
+        assert_eq!(f.counts.len(), KEPT);
+        let swept = later + WINDOW + Duration::from_secs(1);
+        assert_eq!(f.count(keyed(ip, Some("more")), swept), Some(1));
+        assert_eq!(f.counts.len(), 1);
     }
 
     /// What a hooks file refuses at the start, naming the line and never a
-    /// secret.
+    /// word of it: a secret pasted where its file's path goes is not
+    /// echoed.
     #[test]
     fn a_hooks_file_is_refused_at_the_start() {
         for (text, says) in [
             ("a stripe file:\n", "is empty"),
             ("a stripe file:\n\n", "is empty"),
-            ("a carrier file:x\n", "no scheme"),
+            ("a carrier file:x\n", "a scheme is"),
             ("a stripe file:x\na github file:y\n", "named twice"),
-            ("1a stripe file:x\n", "no hook's name"),
-            ("a stripe file:x tolerance 0s\n", "no duration"),
-            ("a stripe file:x tolerance 2h\n", "a second to an hour"),
-            ("a stripe file:x keep 23h\n", "a day at least"),
-            ("a stripe file:x tolerance 1h keep 2h\n", "a day at least"),
+            ("1a stripe file:x\n", "a hook's name is"),
+            ("a stripe file:x tolerance 0s\n", "a duration is"),
+            ("a stripe file:x tolerance 5ü\n", "a duration is"),
+            ("a stripe file:x tolerance 2h\n", "a tolerance is 1s to 1h"),
+            ("a stripe file:x keep 23h\n", "1d at least"),
+            ("a stripe file:x tolerance 1h keep 2h\n", "1d at least"),
             ("a stripe file:x key delivery\n", "`github` hook's"),
             ("a github file:x key both\n", "`body` or `delivery`"),
             ("a standard file:secret\n", "Standard Webhooks secret"),
             ("a standard /run/1\n", "Standard Webhooks secret"),
             ("a stripe /run/0\n", "is empty"),
-            ("a stripe file:x file:y file:z\n", "names 3 secret files"),
-            ("a stripe file:x max-body 2M\n", "body ceiling"),
+            ("a stripe file:x file:y file:z\n", "one secret file, or two"),
+            ("a stripe file:x max-body 2M\n", "--max-body"),
+            ("a stripe file:x max-body lots\n", "is a size"),
             ("a stripe file:x keep 30d keep 31d\n", "given twice"),
-            ("a stripe\n", "names 0 secret files"),
+            ("a stripe file:x keep\n", "expects a value"),
+            ("a stripe file:x keep 30d often 1\n", "an option is"),
+            ("a stripe\n", "one secret file, or two"),
             ("a\n", "a hook is"),
+            (
+                "a stripe whsec_pasted_by_mistake\n",
+                "could not read a secret file",
+            ),
         ] {
             let e = refused_at(text);
             assert!(e.contains(says), "{text:?}: {e}");
             assert!(e.starts_with("hooks file line "), "{e}");
-            assert!(!e.contains("!!!"), "a secret's value in {e}");
+            for secret in ["!!!", "pasted", "carrier", "1a", "often", "lots"] {
+                assert!(!e.contains(secret), "a word of the line in {e}");
+            }
         }
+        assert!(refused_at("\n\na stripe\n").starts_with("hooks file line 3: "));
         // `keep` against the tolerance: twice it and a minute is short by
         // nothing, which the floor of a day covers for every tolerance.
         let h = hooks("a stripe file:x\nb github file:y key delivery keep 1d\n# a comment\n\n");
@@ -1763,6 +2050,10 @@ mod tests {
         assert_eq!(h.get("b").unwrap().keep_ms, DAY);
         assert_eq!(h.get("b").unwrap().key, KeyBy::Delivery);
         assert_eq!(h.get("b").unwrap().ceiling, CEILING);
+        assert_eq!((h.get("a").unwrap().secrets, h.widest), (1, CEILING));
+        // A server's lower `--max-body` is a hook's ceiling unless given.
+        let low = Hooks::read("a github /run/2\n", read_secret, 512 << 10).unwrap();
+        assert_eq!(low.get("a").unwrap().ceiling, 512 << 10);
     }
 
     #[test]

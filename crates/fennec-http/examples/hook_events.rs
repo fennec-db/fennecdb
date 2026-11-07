@@ -2,7 +2,10 @@
 //! compared with (`docs/design/named-statements.md`, *What a hook costs*):
 //! `make hook-bench MODE=<mode> [N=<n>]` (`cargo run --release -p
 //! fennec-http --example hook_events -- MODE [N]`), one mode a process, so
-//! that each count is that mode's alone beside the same setup.
+//! that each count is that mode's alone beside the same setup; `make
+//! hook-bench` alone runs every mode in turns, and `replays.rs` against
+//! main, each run once the load is low, the medians to a results file
+//! (`hook_bench.py`).
 //!
 //!   * `event`: N Stripe events, each a new `id`, to `POST /_hooks/stripe`,
 //!     each verified, taken -- a `set` of an order by its `@hash` key and

@@ -250,11 +250,25 @@ replay-bench:
 	$(CARGO) run --release -p fennec-http --example replays -- $(or $(MODE),replay)
 
 ## What a webhook event costs through `handle` (crates/fennec-http/examples/
-## hook_events.rs): MODE=event, keyed, put, buffered, duplicate, forged,
-## verify4k or verify64k, N requests (9 000 unless given); one mode a
-## process, run in turns with the one it is compared with, on an idle machine
+## hook_events.rs), MODE one mode a process, N requests: event (a Stripe
+## event taken and fsynced), keyed (its `set` under an Idempotency-Key, --sync
+## always), put (that `set` plain, --sync always), buffered (--sync 250),
+## duplicate (answered from its key), forged (the one 401), verify4k and
+## verify64k (Hooks::verify alone; 9 000 each unless given), and beside0,
+## beside10 and beside100 (buffered writes' median and p99 beside 0, 10 and
+## 100 events a second; a million). Without MODE, every mode in turns and
+## replays.rs's put and keyed against BASE (origin/main) in pairs, PAIRS (7)
+## of each, each run once the 1-minute load is under QUIET (2.5), ONLY=paired,
+## hooks or beside for those: medians to OUT (target/hook-bench/results.txt),
+## progress to its .log; an hour or so on an idle machine
+## (crates/fennec-http/examples/hook_bench.py)
 hook-bench:
-	$(CARGO) run --release -p fennec-http --example hook_events -- $(or $(MODE),event) $(N)
+ifneq ($(MODE),)
+	$(CARGO) run --release -p fennec-http --example hook_events -- $(MODE) $(N)
+else
+	python3 crates/fennec-http/examples/hook_bench.py --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  --pairs $(or $(PAIRS),7) --quiet $(or $(QUIET),2.5) $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
+endif
 
 ## The browser module's size with every feature, with none, with each alone
 ## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and

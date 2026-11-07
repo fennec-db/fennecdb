@@ -532,6 +532,24 @@ fn a_standard_webhooks_event_is_keyed_by_its_id() {
     let b = send(&server, "standard", &headers, body);
     assert_eq!(b.header("Idempotent-Replayed"), Some("true"));
     assert_eq!(count(&http.run("get users count")), 1);
+    // Svix's names for the three -- what Clerk and Resend send -- keyed by
+    // the id sent under them.
+    let body = r#"{"type":"user.created","data":{"id":"user_2"}}"#;
+    let mac = hmac_sha256(STANDARD_KEY, format!("msg_2.{t}.{body}").as_bytes());
+    let sig = format!("v1,{}", b64_encode(&mac));
+    let svix = [
+        ("svix-id", "msg_2"),
+        ("svix-timestamp", t.as_str()),
+        ("svix-signature", sig.as_str()),
+    ];
+    let a = send(&server, "standard", &svix, body);
+    assert_eq!(
+        (a.status, a.body.as_str()),
+        (200, r#"{"event":"msg_2","taken":1}"#)
+    );
+    let b = send(&server, "standard", &svix, body);
+    assert_eq!(b.header("Idempotent-Replayed"), Some("true"));
+    assert_eq!(count(&http.run("get users count")), 2);
 }
 
 /// An HS256 token for `claims`, an hour's `exp` added.
@@ -673,7 +691,11 @@ fn a_hooks_file_is_refused_at_the_start() {
     let secret = file("refused", "ok.secret", b"whsec_never_logged");
     for (n, (line, says)) in [
         (format!("a stripe {empty}"), "is empty"),
-        (format!("a carrier {secret}"), "no scheme"),
+        (format!("a carrier {secret}"), "a scheme is"),
+        (
+            "a stripe whsec_pasted_where_its_path_goes".to_string(),
+            "could not read a secret file",
+        ),
         (
             format!("a stripe {secret}\na stripe {secret}"),
             "named twice",
@@ -681,12 +703,9 @@ fn a_hooks_file_is_refused_at_the_start() {
         (format!("a stripe {secret} key delivery"), "`github` hook's"),
         (
             format!("a stripe {secret} tolerance 1h keep 2h"),
-            "a day at least",
+            "1d at least",
         ),
-        (
-            format!("a stripe {secret} tolerance 2h"),
-            "a second to an hour",
-        ),
+        (format!("a stripe {secret} tolerance 2h"), "1s to 1h"),
     ]
     .iter()
     .enumerate()
@@ -699,6 +718,7 @@ fn a_hooks_file_is_refused_at_the_start() {
         assert!(log.contains("hooks file line "), "{line:?}: {log}");
         assert!(log.contains(says), "{line:?}: {log}");
         assert!(!log.contains("never_logged"), "a secret logged: {log}");
+        assert!(!log.contains("pasted_where"), "a secret logged: {log}");
     }
     let hooks = file("refused", "fine", format!("a stripe {secret}").as_bytes());
     let dir = tmp("refused", "tenants");
@@ -876,6 +896,58 @@ fn a_hooks_refusals_wait_by_a_count_of_their_own() {
         took < Duration::from_secs(3),
         "the forged events raised the token's wait: {took:?}"
     );
+
+    // `/_hooks/%73tripe` is `/_hooks/stripe` decoded, which takes its
+    // events: one count, never a fresh one a path spelled otherwise.
+    assert_eq!(verified(), 200);
+    assert_eq!(forged(), 401);
+    let encoded = || {
+        send(
+            &server,
+            "%73tripe",
+            &[("Stripe-Signature", "t=1,v1=00")],
+            &body,
+        )
+        .status
+    };
+    let (status, took) = timed(&encoded);
+    assert_eq!(status, 401);
+    assert!(took >= 2 * base, "an encoded name counted apart: {took:?}");
+}
+
+/// A forged event's path is neither kept nor written: a path naming no
+/// hook's name -- here 60 KB, the head's ceiling 64 KiB -- is logged and
+/// audited as `/_hooks/` alone, counted as every such path is.
+#[test]
+fn a_forged_events_long_path_is_written_nowhere() {
+    let (server, audit) = serve("longpath", &[]);
+    let long = "a".repeat(60_000);
+    for i in 0..3 {
+        let a = send(
+            &server,
+            &format!("{long}{i}"),
+            &[("Stripe-Signature", "t=1,v1=00")],
+            "{}",
+        );
+        assert_eq!(a.status, 401, "{}", a.body);
+    }
+    assert!(server.logged(
+        "did not verify (header): answered 401",
+        Duration::from_secs(10)
+    ));
+    let lines = std::fs::read_to_string(&audit).unwrap();
+    let refused: Vec<&str> = lines.lines().filter(|l| l.contains("refused")).collect();
+    assert_eq!(refused.len(), 3, "{lines}");
+    for l in &refused {
+        assert!(l.contains(r#""path":"/_hooks/""#), "{l}");
+        assert!(l.len() < 1_000, "{} bytes", l.len());
+    }
+    let (_, log) = server.terminate();
+    assert!(!log.contains(&long[..100]), "a forged path in the log");
+    let line = (log.lines())
+        .find(|l| l.contains("did not verify"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(line.contains("hook `?`: an event from "), "{line}");
 }
 
 /// An event's insert answers a worker's claim held until a job comes

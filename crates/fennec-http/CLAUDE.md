@@ -201,24 +201,27 @@ and every refusal before is one 401.](../../docs/design/named-statements.md#veri
 `POST /_hooks/<name>`, on a file's server under `--hooks` (a tenant node's
 are F4's slice 4), is the one route running a statement without a token,
 judged before `authenticate`: `hooks::verify` reads the scheme from the
-headers present (each once, one `t`) and checks two HMAC-SHA256s always
-(`crypto::HmacKey`, `ct_eq` with every signature, `v1` alone, the process's
-key for a secret missing) over the raw body and the timestamp it signs,
-within the hook's tolerance and ceiling, before the body is parsed or a
-lock taken. Every failure before -- headers, scheme, tolerance, ceiling,
-no such hook, the signature -- is one 401 after the same work, its check
-named in the log, the audit's `refused` line and
-`fennec_hook_unverified_total` alone; it waits by the hooks' own count
-(`hooks::failed`), and a verified event never calls `audit::verified`. A
-secret is the hooks file's, never the database's, an archive's, a log's, a
-trace's or an answer's. An event's key is a value its signature covers, or
+headers present (each once, one `t`, `webhook-*` or Svix's `svix-*`, never
+both) and checks two HMAC-SHA256s always (`crypto::HmacKey`, `ct_eq` with
+every signature through `compared`, `v1` alone, the process's random key
+for a secret missing, never verifying) over the raw body, as far as the
+widest hook's ceiling, and the timestamp it signs, within the hook's
+tolerance and ceiling, before the body is parsed or a lock taken. Every
+failure before -- headers, scheme, tolerance, ceiling, no such hook, the
+signature -- is one 401 after the same work, its check named in the log,
+the audit's `refused` line and `fennec_hook_unverified_total` alone; it
+waits by the hooks' own count, by the address and the name the decoded
+path names (`hooks::failed`, `hooks::named`), and a verified event never
+calls `audit::verified`. A secret is the hooks file's, never the
+database's, an archive's, a log's, a trace's or an answer's. An event's key is a value its signature covers, or
 `X-GitHub-Delivery` where its hook says `key delivery`, kept more than
 twice the tolerance and `SKEW_MS`. A sender is told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's
 stream none; else 503), or where resending changes nothing, a replay no
-sooner than its first try; any other answer is the refusal's status, told
-as a scoped caller is (`hooks::told`), never a 410 or a 3xx.
+sooner than its first try, a standby holding its key's block
+(`HeldKey::seq`); any other answer is the refusal's status, told as a
+scoped caller is (`hooks::told`), never a 410 or a 3xx.
 
 **[A statement is parsed once, and an answer goes out in one
 write.](../../docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a

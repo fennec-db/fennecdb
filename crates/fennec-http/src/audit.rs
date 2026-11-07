@@ -737,7 +737,7 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     let ip = peer.map(|p| p.ip());
     let path = req.target.split('?').next().unwrap_or("");
     if status == 401 && BOUND.with(|b| b.replace(b.get() & !HOOKED)) & HOOKED != 0 {
-        hook_line(req, path, named().or(ip));
+        hook_line(req, named().or(ip));
         return;
     }
     if status == 401 {
@@ -801,9 +801,13 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
 /// A webhook event's 401 ([`hook_refused`]): its `refused` line, naming
 /// the check, and its wait by the hooks' count -- no token's, and no
 /// `fennec_refused_total`, which counts tokens refused; the hooks' own
-/// family counts it. Behind a router, the router waits it out.
+/// family counts it. Its path is the hook's, decoded, where the path names
+/// a hook's name, else `/_hooks/` alone: never a forger's 64 KiB.
+/// Behind a router, the router waits it out.
 #[cold]
-fn hook_line(req: &crate::http::Request, path: &str, ip: Option<IpAddr>) {
+fn hook_line(req: &crate::http::Request, ip: Option<IpAddr>) {
+    let name = crate::hooks::named(req);
+    let path = name.map_or("/_hooks/", |_| req.path.as_str());
     let mut fields = vec![
         ("method", Field::Text(req.method.name())),
         ("path", Field::Text(path)),
@@ -813,19 +817,25 @@ fn hook_line(req: &crate::http::Request, path: &str, ip: Option<IpAddr>) {
     }
     event("refused", &fields);
     if ROUTED.with(|r| r.get()).is_none() {
-        std::thread::sleep(crate::hooks::failed(ip, path));
+        std::thread::sleep(crate::hooks::failed(ip, name));
     }
 }
 
-type Failures = HashMap<IpAddr, (u32, Instant)>;
+/// Refusals counted, by the address and a second key: a token's are
+/// [`TOKENS`], a hook's its name's digest (`hooks::failed`), in a table of
+/// their own of this type -- one copy of the map's code for both.
+pub(crate) type Failures = HashMap<(IpAddr, u64), (u32, Instant)>;
 
-/// The address a count is kept by: an IPv4 address mapped into IPv6 as
-/// itself. A router listening on `[::]` sees a client reaching it over
+/// The second key of a token's count: an address has one.
+const TOKENS: u64 = 0;
+
+/// The key a token's count is kept by: its address, an IPv4 address
+/// mapped into IPv6 as itself. A router listening on `[::]` sees a client reaching it over
 /// IPv4 as `::ffff:a.b.c.d`, and the global entry names the same client
 /// `a.b.c.d`: kept apart, one client had two counts, and its good token
 /// through the entry cleared only one of them.
-fn counted_as(ip: IpAddr) -> IpAddr {
-    ip.to_canonical()
+fn counted_as(ip: IpAddr) -> (IpAddr, u64) {
+    (ip.to_canonical(), TOKENS)
 }
 
 fn failures() -> &'static Mutex<Failures> {

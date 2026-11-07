@@ -77,6 +77,11 @@ pub struct HeldKey {
     /// Whether this body is the first's, by its digest: another is
     /// answered as the first was all the same, never run (decision 7).
     pub same: bool,
+    /// The change that wrote its row, its block's last: what a replay
+    /// waits for a standby to hold, never the database's latest, which a
+    /// lagging standby would make a 503 for an event it holds already. Past
+    /// the change ring, a change at or above it ([`crate::changes::ChangeLog::last_of`]).
+    pub seq: u64,
 }
 
 /// What [`Database::take_event`] did.
@@ -307,45 +312,23 @@ impl Database {
             clock: Some(self.now()?),
             ..ctx
         };
-        if let Some(c) = &h.condition {
-            if !truthy(&eval(c, &mut EventRow(&e), &ctx)?) {
-                return Err(Error::Query(format!(
-                    "statement `{name}`: its condition passes this event over, so nothing \
-                     runs: a delivery of it would be taken by none"
-                )));
-            }
-        }
-        if let Some(why) = &s.broken {
-            return Err(super::call::broken(name, Some(why)));
-        }
-        let values = typed(def, &h.sources, &e)?;
-        if let Some(check) = &def.check {
-            let ctx = EvalCtx {
-                params: &values,
-                ..ctx
-            };
-            if eval(check, &mut NoRow, &ctx)? != Value::Bool(true) {
-                return Err(Error::Query(format!(
-                    "statement `{name}`: its `check` does not hold for this event"
-                )));
-            }
-        }
-        Ok(Callee {
-            def: Arc::clone(def),
-            values,
-            slot: None,
+        judge_one(s, def, h, &e, &ctx)?.ok_or_else(|| {
+            Error::Query(format!(
+                "statement `{name}`: its condition passes this event over, so nothing runs: a \
+                 delivery of it would be taken by none"
+            ))
         })
     }
 
     /// `key`'s row, read as every read is: past its `until`, as if never
     /// kept.
     fn kept(&self, key: &str, digest: u64) -> Result<Option<HeldKey>> {
-        if !self.collections.contains_key(HOOK_EVENTS) {
+        let Some(cid) = self.collections.get(HOOK_EVENTS).map(|c| c.id) else {
             return Ok(None);
-        }
+        };
         let read = Statement::Select(Select {
             collection: HOOK_EVENTS.into(),
-            project: Some(vec!["digest".into(), "taken".into()]),
+            project: Some(vec!["id".into(), "digest".into(), "taken".into()]),
             filter: Some(key_is()),
             ..Select::default()
         });
@@ -353,9 +336,10 @@ impl Database {
             return Ok(None);
         };
         Ok(match rs.rows.first().map(|r| r.values.as_slice()) {
-            Some([Value::Int(d), Value::Int(taken)]) => Some(HeldKey {
+            Some([Value::Int(id), Value::Int(d), Value::Int(taken)]) => Some(HeldKey {
                 taken: *taken as u32,
                 same: *d == digest as i64,
+                seq: self.changes.last_of(cid, *id as DocId),
             }),
             _ => None,
         })
@@ -398,40 +382,7 @@ impl Database {
             else {
                 continue;
             };
-            if let Some(c) = &h.condition {
-                if !truthy(&eval(c, &mut EventRow(e), &ctx)?) {
-                    continue;
-                }
-            }
-            // Broken by its body, a schema change by an internal writer
-            // under what it reads or writes: its condition, of the event
-            // and literals alone, still reads, so only the events it
-            // takes are refused, its hook's others taken as before.
-            if let Some(why) = &s.broken {
-                return Err(Error::Exists(format!(
-                    "statement `{}`, which takes hook `{hook}`, is broken: {why}: define it again \
-                     or drop it",
-                    s.name
-                )));
-            }
-            let values = typed(def, &h.sources, e)?;
-            if let Some(check) = &def.check {
-                let ctx = EvalCtx {
-                    params: &values,
-                    ..ctx
-                };
-                if eval(check, &mut NoRow, &ctx)? != Value::Bool(true) {
-                    return Err(Error::Query(format!(
-                        "statement `{}`: its `check` does not hold for this event",
-                        s.name
-                    )));
-                }
-            }
-            takers.push(Callee {
-                def: Arc::clone(def),
-                values,
-                slot: None,
-            });
+            takers.extend(judge_one(s, def, h, e, &ctx)?);
         }
         Ok(takers)
     }
@@ -493,6 +444,52 @@ impl Database {
         };
         self.run_one(&row, &[]).map(drop)
     }
+}
+
+/// Statement `s` of `e`'s hook judged against `e` at `ctx`'s instant, as a
+/// delivery's taking and the server's token's call judge it alike: `None`
+/// where its condition passes the event over; else its callee, its
+/// parameters typed and its `check` asked -- refused where it is broken
+/// by its body, a schema change by an internal writer under what it reads
+/// or writes. Its condition, of the event and literals alone, still reads,
+/// so only the events it takes are refused, its hook's others taken as
+/// before.
+fn judge_one(
+    s: &Stored,
+    def: &Arc<Definition>,
+    h: &crate::named::Webhook,
+    e: &Event,
+    ctx: &EvalCtx,
+) -> Result<Option<Callee>> {
+    if let Some(c) = &h.condition {
+        if !truthy(&eval(c, &mut EventRow(e), ctx)?) {
+            return Ok(None);
+        }
+    }
+    if let Some(why) = &s.broken {
+        return Err(Error::Exists(format!(
+            "statement `{}`, which takes hook `{}`, is broken: {why}: define it again or drop it",
+            s.name, h.name
+        )));
+    }
+    let values = typed(def, &h.sources, e)?;
+    if let Some(check) = &def.check {
+        let ctx = EvalCtx {
+            params: &values,
+            ..*ctx
+        };
+        if eval(check, &mut NoRow, &ctx)? != Value::Bool(true) {
+            return Err(Error::Query(format!(
+                "statement `{}`: its `check` does not hold for this event",
+                s.name
+            )));
+        }
+    }
+    Ok(Some(Callee {
+        def: Arc::clone(def),
+        values,
+        slot: None,
+    }))
 }
 
 /// `key = $1`.

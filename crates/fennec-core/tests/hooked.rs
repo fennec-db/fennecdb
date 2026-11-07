@@ -215,9 +215,12 @@ fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_a_hook() {
             .collect()
     };
     let want = held(&db);
+    // The key's block is the last: an open and an image hold no mark of
+    // it, their horizon standing there, and a replica the mark itself.
     let kept = Some(HeldKey {
         taken: 1,
         same: true,
+        seq: db.change_seq(),
     });
     let asked = event(&body, "evt_1", 7);
 
@@ -535,9 +538,11 @@ fn an_event_is_taken_once_its_writes_and_its_key_one_block() {
 
     // The same event again -- a retry, a duplicate -- is answered from its
     // key, nothing run, nothing written; a second body under it as well.
+    // Its change number the key's, the block's last.
     let held = HeldKey {
         taken: 1,
         same: true,
+        seq: before + 3,
     };
     let seq = db.change_seq();
     assert_eq!(
@@ -553,7 +558,8 @@ fn an_event_is_taken_once_its_writes_and_its_key_one_block() {
         db.take_event(&event(&other, "evt_1", 8)).unwrap(),
         Took::Held(HeldKey {
             taken: 1,
-            same: false
+            same: false,
+            seq: before + 3,
         })
     );
     assert_eq!(db.change_seq(), seq, "nothing written");
@@ -1262,7 +1268,8 @@ fn the_fixture_s_hook_and_its_event_are_read_and_kept() {
         db.event_kept(&event(&body, "evt_1", 7)).unwrap(),
         Some(HeldKey {
             taken: 1,
-            same: true
+            same: true,
+            seq: db.change_seq(),
         })
     );
     let again = opened(&db.snapshot());
