@@ -217,6 +217,20 @@ statement answered, as in <code>"scheduled":["tick",[0,4],"2026-11-03T03:00:00Z"
 The line adds <code>tenant</code> on a tenant node, <code>bound</code> where
 the run's writes woke bindings, and the run's own <code>request_id</code>; it
 counts in <code>fennec_slow_statements_total</code>.</p>
+
+<p>An event a <a href="/docs/webhooks">webhook</a> consumer took is a request
+like any other, and is logged when the request passes <code>--slow-ms</code>.
+Its <code>statement</code> is the route, <code>POST /_hooks/stripe</code>,
+its <code>kind</code> <code>write</code>. <code>hook</code> is <code>[hook,
+[[name, [history, change], rows], ...]]</code>: the hook, then each
+statement that ran, its version as <code>statements</code> lists it and the
+rows its last statement answered — <code>0</code> for the one that refused
+the event. The line holds neither the event's key, its body nor a secret;
+an event refused or held back, and a copy that came with another body, is
+also a line of the server's log naming its key under the same
+<code>request_id</code>.</p>
+
+<pre data-lang="json">{"at":"2026-11-07T09:31:40.870Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53114","request_id":"1c7e5a90d2b4f683","duration_ms":12.408,"kind":"write","failed":false,"statement":"POST /_hooks/stripe","hook":["stripe",[["stripe_paid",[0,4],1]]]}</pre>
 </details>
 
 <h2 id="statements">What each statement cost</h2>
@@ -271,6 +285,24 @@ never among the runs. On a tenant node a run is its tenant's
 shape, at <code>/t/&lt;tenant&gt;/_stats/statements</code>, and the admin
 token's <code>/_stats/statements</code> names every tenant's. The bindings a
 run woke are counted as <code>after &lt;name&gt;</code>, as for any write.</p>
+
+<p>Each statement an event of a <a href="/docs/webhooks">webhook</a> ran is a
+shape of its own, <code>hook stripe_paid</code>: its calls are the events it
+ran for, its rows what its body's last statement answered, as a call's, its
+time its body's, and its errors the events it refused — its guard, a taken id
+or unique value, a bound, a binding its writes woke that refused. The
+request's own shape, <code>POST /_hooks/stripe</code>, is counted too and
+holds that time. A client's text that reads the same — <code>hook
+stripe_paid</code> sent to <code>/query</code> — is a shape of its own, never
+among the runs. On a tenant node it is the tenant's shape, at
+<code>/t/&lt;tenant&gt;/_stats/statements</code>, and the admin token's
+<code>/_stats/statements</code> names every tenant's. An event answered from
+its key, taken by no condition or answered 401 runs no statement and counts
+none. A hook no secret arms answers its events so: its listing says
+<code>"armed":false</code> (<a href="/docs/webhooks#watching">Watching
+them</a>), and on a node the router's
+<code>fennec_router_tenants_hooks_behind</code> counts the tenants whose copy
+lacks the set.</p>
 </details>
 
 <h2 id="audit">The audit log</h2>
@@ -554,6 +586,7 @@ OTEL_SERVICE_NAME=orders-db fennec-server --file data.fennec \
 <tr><td><code>execute</code></td><td>internal</td><td>the statement run, under the lock; a <code>/batch</code>'s statements together, <code>fennec.statements</code> of them, and a <code>create index</code> or <code>compact</code> beside the database with <code>fennec.beside</code></td></tr>
 <tr><td><code>bound &lt;name&gt;</code></td><td>internal</td><td>a <a href="/docs/fennecql#write-bound-statements">bound statement</a>'s runs for one statement of the request, a child of the request's span: <code>db.operation.name</code> <code>bound</code>, <code>db.stored_procedure.name</code> its name and <code>fennec.rows_woken</code> the rows it ran for, never a row's value. The one that refused the write is marked failed with the status it answered and its <code>else</code>'s reason (<code>412 no ledger line</code>), <code>error.type</code> the status: never the engine's words, which may hold a row's value</td></tr>
 <tr><td><code>schedule &lt;name&gt;</code></td><td>internal</td><td>a <a href="/docs/fennecql#scheduled-statements">scheduled statement</a>'s run, the root of a trace of its own: its children are <code>lock.wait</code>, <code>execute</code>, <code>durability</code> where the run landed, and a <code>bound &lt;name&gt;</code> for each binding its writes woke. Its attributes follow the table</td></tr>
+<tr><td><code>hook &lt;name&gt;</code></td><td>internal</td><td>a statement a <a href="/docs/webhooks">webhook event</a> ran, a child of the event's request span: <code>db.operation.name</code> <code>hook</code>, <code>db.stored_procedure.name</code> its name and <code>fennec.rows</code> the rows its last statement answered. The one that refused the event is marked failed with its status and the reason its <code>else</code> wrote (<code>412 no open order of that total</code>), <code>error.type</code> the status: never the engine's words</td></tr>
 <tr><td><code>durability</code></td><td>internal</td><td>a write's wait for the disk after the lock (<code>--sync always</code>); on a primary it holds <code>fsync</code> and <code>replication.wait_sent</code>, the wait for its replicas' streams to send the write</td></tr>
 <tr><td><code>fennec.wait_for_write</code></td><td>internal</td><td>a replica's wait for the write a <code>Fennec-After</code> names</td></tr>
 <tr><td><code>forward</code></td><td>client</td><td><code>fennec-shard</code>'s forward to the node, to its whole answer: the node's server span is its child</td></tr>
@@ -599,6 +632,19 @@ run's span is marked failed with its status and the reason its
 <code>error.type</code> the status: never the engine's words, which may hold a
 row's value. A run whose outcome is unknown is failed as <code>500</code>, as
 a client's write would be answered.</p>
+
+<p>An event of a <a href="/docs/webhooks">webhook</a> is its request's trace.
+Its server span, <code>POST /_hooks/{name}</code> or <code>POST
+/t/{tenant}/_hooks/{name}</code>, templates the hook's name as
+<code>{name}</code> in <code>http.route</code> whatever word it is. It
+carries <code>db.operation.name</code> <code>hook</code>,
+<code>fennec.hook</code> (the hook's name) and <code>fennec.outcome</code>:
+<code>taken</code>, <code>ignored</code>, <code>replayed</code>,
+<code>conflict</code>, <code>refused</code>, <code>deferred</code> or
+<code>unknown</code>, the outcomes <code>fennec_hook_events_total</code>
+counts. Each statement the event ran is a child span, <code>hook
+&lt;name&gt;</code> in the table. No span holds the event's key or a value of
+its body.</p>
 
 <p>A request's <code>traceparent</code> is read as the W3C spec writes it;
 one that does not parse starts a trace of its own, and

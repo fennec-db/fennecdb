@@ -36,7 +36,7 @@ pub use limit::{Landing, Limit};
 #[cfg(feature = "statements")]
 mod bound;
 #[cfg(feature = "statements")]
-pub use bound::{Ran, Runs, RUNS_KEPT};
+pub use bound::{HookRuns, Ran, Runs, RUNS_KEPT};
 #[cfg(feature = "statements")]
 mod call;
 #[cfg(feature = "statements")]
@@ -50,7 +50,7 @@ pub use due::{Due, HeldSlot};
 #[cfg(feature = "statements")]
 mod hooked;
 #[cfg(feature = "statements")]
-pub use hooked::{Event, HeldKey, Judged, Took, HOOK_EVENTS};
+pub use hooked::{ArmedHooks, Event, HeldKey, Judged, Took, HOOK_EVENTS};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -4364,6 +4364,14 @@ pub struct Database {
     /// hook is stored that no sender reaches.
     #[cfg(feature = "statements")]
     hooking: bool,
+    /// Whether this server -- or this tenant on its node -- holds a secret
+    /// for a hook: what the listings' `armed` says of a webhook consumer
+    /// ([`Self::arm_hooks`]). The server's to answer, its hooks file's or
+    /// the node's sets, never the file's; `None` where none is told, every
+    /// hook unarmed -- the shell's, the native library's, which take no
+    /// event.
+    #[cfg(feature = "statements")]
+    hooks_armed: Option<hooked::ArmedHooks>,
     /// What is told how many schedules the table holds -- a definition, an
     /// image adopted, a replica's apply, a promotion -- the scheduler it
     /// wakes or the server's word on those it runs none of, asked at a
@@ -4472,6 +4480,8 @@ impl Database {
             scheduling: false,
             #[cfg(feature = "statements")]
             hooking: false,
+            #[cfg(feature = "statements")]
+            hooks_armed: None,
             #[cfg(feature = "statements")]
             on_schedules: None,
             #[cfg(feature = "statements")]

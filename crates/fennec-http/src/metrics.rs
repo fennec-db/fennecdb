@@ -24,7 +24,7 @@ use crate::http::{Request, Response};
 use crate::replication::Replication;
 use crate::tenants::Stats;
 use crate::{constant_eq, Config};
-use fennec_core::engine::Runs;
+use fennec_core::engine::{HookRuns, Runs};
 use fennec_core::prelude::*;
 use std::cell::Cell;
 use std::fmt::{Display, Write as _};
@@ -165,6 +165,10 @@ thread_local! {
     /// [`bound`] where the request is slow and taken by [`record`] as it
     /// writes that line.
     static SLOW_BOUND: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The slow line's `hook` for the event the request this thread serves
+    /// took, held by [`hooked`] where the request is slow and taken by
+    /// [`record`] as it writes that line.
+    static SLOW_HOOK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     /// This thread's shard, handed out in turn.
     static MINE: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS.len();
 }
@@ -325,6 +329,34 @@ pub(crate) fn bound(r: &Runs, took: Duration) {
     }
 }
 
+/// The statements a webhook event's taking ran (`Database::take_runs`'s
+/// [`HookRuns`]), on the request that took it: where the request, which took
+/// `took`, is slow, its line's `hook` held for [`record`] to write -- the
+/// hook and each statement with its version and rows, `["stripe",
+/// [["stripe_paid",[3,41],1]]]` (`docs/design/named-statements.md`,
+/// *Watching hooks*): never the event's key, a value of its body or a
+/// secret.
+pub(crate) fn hooked(t: &HookRuns, took: Duration) {
+    let micros = took.as_micros().min(u64::MAX as u128) as u64;
+    if micros < SLOW_MICROS.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut out = String::from("[");
+    fennec_core::json::escape_into(&mut out, &t.hook);
+    out.push_str(",[");
+    for (i, ran) in t.ran.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        fennec_core::json::escape_into(&mut out, &ran.name);
+        let (h, c) = ran.version;
+        let _ = write!(out, ",[{h},{c}],{}]", ran.rows);
+    }
+    out.push_str("]]");
+    SLOW_HOOK.with(|b| *b.borrow_mut() = Some(out));
+}
+
 /// A binding's runs over a request: its name and version, the statements
 /// that woke it, its rows and the time its runs took.
 type ByBinding<'a> = (&'a str, (u64, u64), u64, u64, Duration);
@@ -378,6 +410,8 @@ fn slow_line(
     // What the statements bound to the request's writes did, held for this
     // line where the request was slow ([`bound`]).
     let bound = SLOW_BOUND.with(|b| b.borrow_mut().take());
+    // And the statements the event it took ran ([`hooked`]).
+    let hook = SLOW_HOOK.with(|b| b.borrow_mut().take());
     let mut fields = vec![
         ("duration_ms", Field::Num(micros as f64 / 1000.0)),
         ("kind", Field::Text(if wrote { "write" } else { "read" })),
@@ -395,6 +429,9 @@ fn slow_line(
     }
     if let Some(b) = &bound {
         fields.push(("bound", Field::Json(b)));
+    }
+    if let Some(h) = &hook {
+        fields.push(("hook", Field::Json(h)));
     }
     let line = crate::audit::line("slow", Level::Warn, &fields);
     let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());

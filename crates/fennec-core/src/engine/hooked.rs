@@ -25,7 +25,9 @@
 //! parameters read as a delivery's, no key kept.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use super::bound::{note_hook_runs, HookRuns, Ran};
 use super::due::Clocked;
 use super::{Callee, Database, NoRow, Statements, Stored};
 use crate::error::{Error, Result};
@@ -68,6 +70,11 @@ pub struct Event<'a> {
     /// hook's `keep`.
     pub keep: i64,
 }
+
+/// Whether this server -- or this tenant on its node -- holds a secret for
+/// a hook, by its name: what a server tells its database
+/// ([`Database::arm_hooks`]) for the listings' `armed`.
+pub type ArmedHooks = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// What a held key says of the event's first taking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +160,23 @@ impl Database {
     /// taking nothing, without a word.
     pub fn allow_hooks(&mut self) {
         self.hooking = true;
+    }
+
+    /// Tells the database how to ask whether a hook is armed -- whether
+    /// the server holds a secret for it: a file's server its hooks file, a
+    /// tenant node the tenant's set, which changes as the router sets it --
+    /// for the listings' `armed` (`statements`, `describe statement`, `GET
+    /// /_schema`). Asked as a listing is written, never as an event is
+    /// taken: verification asks the secrets themselves.
+    pub fn arm_hooks(&mut self, armed: ArmedHooks) {
+        self.hooks_armed = Some(armed);
+    }
+
+    /// Whether this server holds a secret for hook `hook`
+    /// ([`Self::arm_hooks`]): `false` where it was told nothing, a
+    /// database no route takes events for.
+    pub fn hook_armed(&self, hook: &str) -> bool {
+        self.hooks_armed.as_ref().is_some_and(|a| a(hook))
     }
 
     /// The event's key as [`HOOK_EVENTS`] holds it, where it is held and
@@ -388,7 +412,12 @@ impl Database {
     }
 
     /// `takers`' bodies run in the block open, in their order, the clock
-    /// fixed to `now`, then `key`'s row: how many took the event.
+    /// fixed to `now`, then `key`'s row: how many took the event. Each
+    /// statement that ran is noted on the thread, timed, with the rows its
+    /// last statement answered and the one that refused
+    /// ([`HookRuns`](super::HookRuns), `Database::take_runs`): what a server
+    /// counts by the shape `hook <name>`, writes on the slow line and
+    /// traces, on the event's path alone.
     fn taking(&mut self, e: &Event, key: &str, takers: &[Callee], now: i64) -> Result<u32> {
         // As a block of statements starts: rows a panic left woken -- a
         // statement unwound out of a block its caller opened, which no
@@ -403,17 +432,44 @@ impl Database {
             .checked_add(e.keep)
             .ok_or_else(|| Error::Query("a hook's `keep` runs past the clock".into()))?;
         let taken = takers.len() as u32;
+        let mut noted = HookRuns {
+            hook: e.hook.to_string(),
+            ran: Vec::with_capacity(takers.len()),
+            refusal: None,
+        };
         // One budget for every statement the event wakes and their
         // bindings, fresh an event.
-        self.bounded(|db| {
+        let r = self.bounded(|db| {
             for t in takers {
+                let version = (db.statements.get(&t.def.name)).map_or((0, 0), |s| s.version);
+                let at = Instant::now();
+                let mut rows = 0;
+                let mut refused = None;
                 for s in &t.def.body {
-                    db.run_one(s, &t.values)?;
+                    match db.run_one(s, &t.values) {
+                        Ok(r) => rows = answered_rows(&r),
+                        Err(err) => {
+                            refused = Some(err);
+                            break;
+                        }
+                    }
+                }
+                noted.ran.push(Ran {
+                    name: t.def.name.clone(),
+                    version,
+                    rows: if refused.is_some() { 0 } else { rows },
+                    at,
+                    took: at.elapsed(),
+                });
+                if let Some(err) = refused {
+                    noted.refusal = Some((noted.ran.len() - 1, err.clone()));
+                    return Err(err);
                 }
             }
             db.keep_key(key, e.digest, taken, until)
-        })?;
-        Ok(taken)
+        });
+        note_hook_runs(noted);
+        r.map(|()| taken)
     }
 
     /// `key`'s row, the block's last write: the collection made where the
@@ -490,6 +546,16 @@ fn judge_one(
         values,
         slot: None,
     }))
+}
+
+/// The rows a body's statement answered, as a call's last statement's are
+/// counted: those it changed, or those it returned.
+fn answered_rows(r: &Response) -> u64 {
+    match r {
+        Response::Affected(n) => *n as u64,
+        Response::Rows(rs) => rs.rows.len() as u64,
+        _ => 0,
+    }
 }
 
 /// `key = $1`.

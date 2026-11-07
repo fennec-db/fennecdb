@@ -559,7 +559,10 @@ expect.</p>
     streams. A <a href="/docs/fennecql#scheduled-statements">scheduled
     statement</a> is one: a replica defines and runs none, and what a run
     writes reaches a synced app through the shapes following its
-    collections, as any server write does.</li>
+    collections, as any server write does. So is a <a
+    href="/docs/fennecql#webhook-consumers">webhook consumer</a>: a replica
+    defines and takes none, and what an event writes reaches a synced app the
+    same way.</li>
 </ul>
 
 <details class="deep"><summary>What a shape does not guarantee</summary>

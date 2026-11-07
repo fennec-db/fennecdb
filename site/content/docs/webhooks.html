@@ -446,3 +446,62 @@ each copy that came with another body, is a line of the server's log
 naming the hook, the event's key, GitHub's delivery and why — what the
 sender was not told — under the request's id; never the body, a signature
 or a secret.</p>
+
+<p>Where each hook stands is in the listings, to the server's token alone.
+<code>statements</code> and <code>describe statement</code> give a webhook
+consumer two columns after <code>held</code>: <code>hook</code>, the hook it
+takes, and <code>armed</code>, whether this server holds a secret for it —
+a line of the hooks file naming it, or on a tenant node the tenant's set,
+asked as the listing is written, so a <code>PUT</code> or <code>DELETE</code>
+through the router changes it while the tenant is open. <code>false</code>
+means the hook's events are answered 401, whoever sends them: the hooks file
+does not name the hook, or the tenant's secrets were never set (a restore
+brings none back). <code>null</code> is a statement that takes no hook. The
+shell and the native library take no event, and say <code>false</code> for
+one that does. A
+scoped token's <code>statements</code> is 403 as before.</p>
+
+<pre data-lang="json">{"name":"stripe_paid","version":[0,4],"signature":"($intent text from event.data.object.id, $order text from event.data.object.metadata.order)","writes":true,"comment":null,"broken":null,"after":null,"schedule":null,"next":null,"last":null,"held":null,"hook":"stripe","armed":true}</pre>
+
+<p><code>describe statement</code> adds the <code>condition</code> as the text
+writes it, <code>event.type = 'payment_intent.succeeded' and event.livemode =
+true</code>, and its <code>signature</code> names where each parameter reads
+from: <code>from event.data.object.id</code>, <code>from event</code> for
+the whole body, <code>from hook.id</code>, <code>hook.at</code> or
+<code>hook.event</code>. A quoted key is shown as the event's JSON names it,
+<code>event.metadata.order-id</code>. <code>GET /_schema</code> lists each
+hook beside the scheduled statements as <code>hooks</code>
+(<code>[{"name", "hook", "text", "armed"}]</code>, never a secret), and
+<code>?as=fennecql</code> writes their definitions (<a
+href="/docs/http-reference">HTTP reference</a>, <a
+href="/docs/fennecql#webhook-consumers">Webhook consumers</a>).</p>
+
+<p><a href="/docs/monitoring#statements"><code>/_stats/statements</code></a>
+counts each statement an event ran as a shape of its own, <code>hook
+stripe_paid</code>: its calls the events it ran for, its rows what its
+body's last statement answered, its errors the events it refused. The
+request's own shape, <code>POST /_hooks/stripe</code>, holds the time. On a
+tenant node the shape is the tenant's, at
+<code>/t/&lt;tenant&gt;/_stats/statements</code>. An event answered from its
+key, or taken by no condition, runs no statement and counts none.</p>
+
+<p>An event past <code>--slow-ms</code> writes <a
+href="/docs/monitoring#slow">the usual slow line</a>, its statement
+<code>POST /_hooks/stripe</code>, with a <code>hook</code> field: the hook
+and each statement that ran, with its version and the rows its last
+statement answered. Never the event's key, its body or a secret.</p>
+
+<p>An event is its request's <a href="/docs/monitoring#tracing">trace</a>.
+Its server span carries <code>fennec.hook</code> and
+<code>fennec.outcome</code>, one of the outcomes above, and each statement
+it ran is a child span, <code>hook stripe_paid</code>, with the rows its last
+statement answered. A statement that refused the event is marked failed with
+its status and the reason its <code>else</code> wrote, as <code>412 no open
+order of that total</code>. No span holds the event's key or a value of its
+body.</p>
+
+<p><a href="/docs/datadog#monitors">Datadog's monitors</a> hold four of
+these to account: events that do not verify, events a statement refused,
+events held back by a quota, a lease or the disk, and a tenant's copy that
+lacks its hook secrets, which a failover onto that copy would turn into
+401s. The dashboard has a group for webhooks.</p>

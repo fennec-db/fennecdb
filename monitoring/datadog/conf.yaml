@@ -17,8 +17,11 @@
 # crates/fennec-shard/tests/datadog.rs holds every name in `metrics` to a real
 # scrape of a server, a replica, a tenant node and a router, and every query of
 # dashboard.json and monitors.json -- the monitors on scheduled statements'
-# refused and held runs, marks ahead of the clock and lateness, each importable
-# by Datadog's API (POST /api/v1/monitor) -- to what arrives through it.
+# refused and held runs, marks ahead of the clock and lateness, and on webhook
+# events refused before their signature verified, refused by a statement or
+# held back by the state, and on tenants a copy of which lacks its hook
+# secrets, each importable by Datadog's API (POST /api/v1/monitor) -- to what
+# arrives through it.
 
 init_config:
 
@@ -63,6 +66,11 @@ instances:
       - scheduled_skipped
       - scheduled_mark_ahead
       - scheduled_lateness_seconds
+      # Webhooks, once a server read its hooks file or a node holds a
+      # tenant's secrets: verified events by outcome, and the events refused
+      # before a verified signature by the check they failed
+      - hook_events
+      - hook_unverified
       # Replication: a primary's replicas, a replica's lag
       - replicas
       - ^replica_.*$

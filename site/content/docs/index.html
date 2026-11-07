@@ -97,7 +97,7 @@ routes.</p>
 
 <ul class="cards">
   <li><a href="fennecql.html">FennecQL</a>
-    <p>The language: a tour from the first write to a lookup and a total, then a reference page for each family of statements. A statement bound to a collection's writes keeps a ledger line or a counter in the block of the write that made it, and <a href="fennecql.html#scheduled-statements">one run by the clock</a> sweeps or resets on a schedule, once a slot, each run listed with its next slot and last run, counted and traced.</p></li>
+    <p>The language: a tour from the first write to a lookup and a total, then a reference page for each family of statements. A statement bound to a collection's writes keeps a ledger line or a counter in the block of the write that made it, and <a href="fennecql.html#scheduled-statements">one run by the clock</a> sweeps or resets on a schedule, once a slot, each run listed with its next slot and last run, counted and traced. <a href="fennecql.html#webhook-consumers">One that takes another service's events</a> is listed with its hook and whether a secret arms it.</p></li>
   <li><a href="javascript.html">JavaScript and TypeScript</a>
     <p>The browser client, the query builder and generated TypeScript types.</p></li>
   <li><a href="mobile.html">Mobile and native apps</a>
@@ -113,7 +113,7 @@ routes.</p>
   <li><a href="functions.html">Functions and webhooks</a>
     <p>Reacting to a write: a Worker as an endpoint, a job queue, a consumer of the change stream that calls a webhook, and when each fits.</p></li>
   <li><a href="webhooks.html">Webhooks from Stripe and GitHub</a>
-    <p>Stripe's payments, GitHub's pushes and any Standard Webhooks sender's events (Svix, Clerk, Resend) taken by a statement: verified by their signature, taken once by their key, answered only once on disk. No code between the sender and the rows.</p></li>
+    <p>Stripe's payments, GitHub's pushes and any Standard Webhooks sender's events (Svix, Clerk, Resend) taken by a statement: verified by their signature, taken once by their key, answered only once on disk, each statement listed with whether a secret arms it, counted and traced. No code between the sender and the rows.</p></li>
   <li><a href="redis.html">Instead of Redis</a>
     <p>Counters, rate limits, locks, sessions, leaderboards and more, each a recipe a test runs.</p></li>
   <li><a href="integrations.html">Integrations</a>
