@@ -602,6 +602,7 @@ fn render(source: Source) -> String {
     );
     out.sample("fennec_held_runs_total", &[], held.runs);
     crate::schedule::metrics(&mut out);
+    crate::hooks::metrics(&mut out);
     crate::trace::metrics(&mut out);
     crate::mcp::metrics(&mut out);
 

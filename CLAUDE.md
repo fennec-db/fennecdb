@@ -304,7 +304,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 - Named statements are records of their database, called with their own text's authority.
 - A write-bound statement runs in the block of the write that woke it, once a row.
 - A scheduled statement runs once a slot, by the primary that may write its file.
-- A webhook consumer's record is kept by every build, and no server takes its events yet.
+- A webhook consumer takes a verified event once, by its key.
 
 ### `crates/fennec-http/CLAUDE.md`
 
@@ -339,6 +339,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A request is a trace, sent over OTLP.
 - `/_metrics` counts at the edge, a shard per thread.
 - `/_stats/statements` counts by shape, a tenant's apart.
+- A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.

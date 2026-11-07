@@ -119,8 +119,10 @@ thread_local! {
     // no name.
     static UNWOKEN: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
     // What the statements bound to the writes of the request this thread
-    // serves left for its lines ([`TOLD`], [`HELD`]): a `Cell` a request
-    // looks at, the rest held in [`HELD_BOUND`] where something is.
+    // serves left for its lines ([`TOLD`], [`HELD`]), and whether it is a
+    // webhook event refused before its signature verified ([`HOOKED`]): a
+    // `Cell` a request looks at, reset as it starts, the rest held in
+    // [`HELD_BOUND`] where something is.
     static BOUND: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     // The binding that refused a scoped writer's write and the engine's
     // words, for the request's `bound` line, and the bound statements it
@@ -137,6 +139,11 @@ type Held = (Option<(String, String)>, Vec<(String, String, u8)>);
 const TOLD: u8 = 1;
 /// [`BOUND`]: [`HELD_BOUND`] holds the request's ([`bound`]).
 const HELD: u8 = 2;
+/// [`BOUND`]: the request is a webhook event refused before its signature
+/// verified ([`hook_refused`]): its 401 waits by the hooks' own count,
+/// never the tokens'. A bit of the flags every request resets already, so
+/// a request that is no event pays nothing for it.
+const HOOKED: u8 = 4;
 
 /// The reason the request this thread serves is refused its token, for its
 /// `refused` line: one of the server's own texts, never the token's. Set
@@ -144,6 +151,29 @@ const HELD: u8 = 2;
 /// begins, so a line never names a reason of the request before.
 pub fn refusal(why: &'static str) {
     REASON.with(|r| r.set(Some(why)));
+}
+
+/// The webhook event the request this thread serves sent was refused
+/// before its signature verified, for `why`, the check that failed in the
+/// server's words: its `refused` line names it, and its 401 waits by the
+/// hooks' own count -- by the sender's address and the hook's path
+/// (`hooks::failed`) -- never the tokens', which a signature neither
+/// raises nor clears (`docs/design/named-statements.md`, *Verifying an
+/// event*). Let go by [`http`], as it writes the line.
+pub fn hook_refused(why: &'static str) {
+    REASON.with(|r| r.set(Some(why)));
+    BOUND.with(|b| b.set(b.get() | HOOKED));
+}
+
+/// The wait after a first failure, in milliseconds (`--auth-delay`): the
+/// hooks' count waits as the tokens' does.
+pub(crate) fn delay_ms() -> u64 {
+    DELAY_MS.load(Ordering::Relaxed)
+}
+
+/// The wait after the `n`th failure in a row, `base` after the first.
+pub(crate) fn wait_after(base: u64, n: u32) -> Duration {
+    wait(base, n)
 }
 
 /// A scoped token's write or call refused (403) for waking the statement
@@ -631,10 +661,17 @@ fn schema_events(tenant: Option<&str>, text: &str, shape: &str, failed: bool) {
         // it (`Runs::changed`).
         let bound =
             statement_named(one).and_then(|n| changed.iter().rev().find(|(name, ..)| name == n));
+        // A webhook consumer names its hook, noted with no event: a drop's
+        // text says nothing of it.
+        let hook = bound.filter(|(_, _, e)| *e == 0);
+        let bound = bound.filter(|(_, _, e)| *e != 0);
         let events = bound.map(|(_, _, e)| fennec_core::named::Binding::events_named(*e));
         if let (Some((_, c, _)), Some(e)) = (bound, &events) {
             fields.push(("bound_collection", Field::Text(c)));
             fields.push(("bound_events", Field::Text(e)));
+        }
+        if let Some((_, h, _)) = hook {
+            fields.push(("hook", Field::Text(h)));
         }
         if let Some(sched) = schedule {
             fields.push(("schedule", Field::Text(sched)));
@@ -699,6 +736,10 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     use crate::http::Method;
     let ip = peer.map(|p| p.ip());
     let path = req.target.split('?').next().unwrap_or("");
+    if status == 401 && BOUND.with(|b| b.replace(b.get() & !HOOKED)) & HOOKED != 0 {
+        hook_line(req, named().or(ip));
+        return;
+    }
     if status == 401 {
         REFUSED.fetch_add(1, Ordering::Relaxed);
         let mut fields = vec![
@@ -757,15 +798,44 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     }
 }
 
-type Failures = HashMap<IpAddr, (u32, Instant)>;
+/// A webhook event's 401 ([`hook_refused`]): its `refused` line, naming
+/// the check, and its wait by the hooks' count -- no token's, and no
+/// `fennec_refused_total`, which counts tokens refused; the hooks' own
+/// family counts it. Its path is the hook's, decoded, where the path names
+/// a hook's name, else `/_hooks/` alone: never a forger's 64 KiB.
+/// Behind a router, the router waits it out.
+#[cold]
+fn hook_line(req: &crate::http::Request, ip: Option<IpAddr>) {
+    let name = crate::hooks::named(req);
+    let path = name.map_or("/_hooks/", |_| req.path.as_str());
+    let mut fields = vec![
+        ("method", Field::Text(req.method.name())),
+        ("path", Field::Text(path)),
+    ];
+    if let Some(why) = REASON.with(|r| r.take()) {
+        fields.push(("reason", Field::Text(why)));
+    }
+    event("refused", &fields);
+    if ROUTED.with(|r| r.get()).is_none() {
+        std::thread::sleep(crate::hooks::failed(ip, name));
+    }
+}
 
-/// The address a count is kept by: an IPv4 address mapped into IPv6 as
-/// itself. A router listening on `[::]` sees a client reaching it over
+/// Refusals counted, by the address and a second key: a token's are
+/// [`TOKENS`], a hook's its name's digest (`hooks::failed`), in a table of
+/// their own of this type -- one copy of the map's code for both.
+pub(crate) type Failures = HashMap<(IpAddr, u64), (u32, Instant)>;
+
+/// The second key of a token's count: an address has one.
+const TOKENS: u64 = 0;
+
+/// The key a token's count is kept by: its address, an IPv4 address
+/// mapped into IPv6 as itself. A router listening on `[::]` sees a client reaching it over
 /// IPv4 as `::ffff:a.b.c.d`, and the global entry names the same client
 /// `a.b.c.d`: kept apart, one client had two counts, and its good token
 /// through the entry cleared only one of them.
-fn counted_as(ip: IpAddr) -> IpAddr {
-    ip.to_canonical()
+fn counted_as(ip: IpAddr) -> (IpAddr, u64) {
+    (ip.to_canonical(), TOKENS)
 }
 
 fn failures() -> &'static Mutex<Failures> {

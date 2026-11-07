@@ -1,0 +1,373 @@
+<!--
+title: Webhooks from Stripe and GitHub — fennecdb
+description: Another service's events — Stripe's payments, GitHub's pushes, any sender signing as Standard Webhooks does — taken by a statement at POST /_hooks/<name>: verified by their signature before they are read, taken once by their key, answered only once on disk.
+-->
+
+<h1>Webhooks from Stripe and GitHub</h1>
+<p class="kicker">Another service's events — Stripe's payments, GitHub's
+pushes, the events of any sender signing as Standard Webhooks does — taken
+by a statement, with no code of your own between the sender and the
+rows.</p>
+
+<p>A statement defined <code>on hook &lt;name&gt;</code> takes the events
+sent to <code>POST /_hooks/&lt;name&gt;</code>. The server checks each
+event's signature before it reads anything of it, binds the values the
+statement names from the event's body to typed parameters, and runs the
+statement. The writes and the event's key land as one block, so a sender's
+retry, a duplicate delivery and a crash between the write and its answer
+never take one event twice. The sender is told <code>200</code> only once
+the event is on disk.</p>
+
+<p>Webhooks are taken by a file's server (<code>fennec-server --file</code>)
+given a <a href="#hooks-file">hooks file</a> (<code>--hooks</code>). A
+tenant node takes none yet. For reacting to a write of your own — calling a
+URL when a row changes — see <a href="/docs/functions">Functions and
+webhooks</a>.</p>
+
+<h2 id="stripe">A payment from Stripe</h2>
+
+<p>An order is paid when Stripe says its payment intent succeeded. Put the
+endpoint's signing secret in a file only the server's user reads, and name
+it in a hooks file:</p>
+
+<pre data-lang="text"># /etc/fennec/hooks: a hook a line
+stripe  stripe  /run/secrets/stripe-live
+</pre>
+
+<pre data-lang="bash">fennec-server --file shop.fennec --http 0.0.0.0:8080 \
+  --http-token "$TOKEN" --hooks /etc/fennec/hooks</pre>
+
+<p>Then define the statement that takes the hook's events, with the
+server's token:</p>
+
+<pre data-lang="fennecql">create statement stripe_paid(
+    $intent text from event.data.object.id,
+    $order  text from event.data.object.metadata.order,
+    $amount int  from event.data.object.amount_received,
+    $paid   timestamp from hook.at)
+  on hook stripe
+  where event.type = 'payment_intent.succeeded' and event.livemode = true
+as set orders {status: 'paid', intent: $intent, amount: $amount, paid_at: $paid}
+   where ref = $order and (status = 'open' or intent = $intent)
+   require 1 else 'no open order for this payment yet'</pre>
+
+<p>In Stripe's Dashboard, add an event destination: a webhook endpoint at
+<code>https://db.example.com/_hooks/stripe</code>, the events
+<code>payment_intent.succeeded</code>, and the <strong>Snapshot</strong>
+payload style. A thin event carries no <code>data.object</code>; fennecdb
+never calls Stripe's API to fetch it, so a statement reading
+<code>data.object.*</code> refuses a thin event with a 400 naming the
+path, which shows in Stripe's delivery log.</p>
+
+<p>Three things in that statement are Stripe's, and worth copying:</p>
+
+<ul>
+<li><strong>A mode is a hook.</strong> Test mode and live mode sign with
+secrets of their own at endpoints of their own: name a hook for each
+(<code>stripe</code>, <code>stripe_test</code>), and have the live hook's
+statements read <code>event.livemode = true</code>, so a test secret set
+on the live hook by mistake writes nothing.</li>
+<li><strong>Its guard is idempotent by the object's id.</strong> Stripe may
+send two events for one change, each with an <code>id</code> of its own, so
+both are taken. <code>status = 'open' or intent = $intent</code> takes the
+second as a write over the row it already paid; a guard of
+<code>status = 'open'</code> alone would refuse it (412) for the three days
+Stripe retries. A <code>put ... if absent</code> over a <code>@unique</code>
+field holding the object's id is the other way.</li>
+<li><strong><code>require</code> says <em>not yet</em>.</strong> Stripe does
+not promise to deliver events in order: a payment may come before the
+order's row. The guard refuses it (412, its <code>reason</code> in Stripe's
+log), and Stripe sends it again until the row is there. A
+<code>where</code> with no <code>require</code> would take it as a write of
+no row and answer 200, and Stripe would never send it again.</li>
+</ul>
+
+<p>Stripe's times are seconds since 1970. A <code>timestamp</code>
+parameter reads a number as milliseconds, so <code>$created timestamp from
+event.created</code> would be an instant in January 1970. Read it as an
+<code>int</code> and multiply:</p>
+
+<pre data-lang="fennecql">create collection refunds (charge text @unique, at timestamp)
+
+create statement stripe_refunded(
+    $charge  text from event.data.object.id,
+    $created int  from event.created)
+  on hook stripe
+  where event.type = 'charge.refunded'
+as put refunds {charge: $charge, at: $created * 1000} if absent</pre>
+
+<p><code>hook.at</code>, the time the signature covers, is a
+<code>timestamp</code> already.</p>
+
+<h2 id="github">Pushes from GitHub</h2>
+
+<pre data-lang="text">github  github  /run/secrets/github-webhook
+</pre>
+
+<pre data-lang="fennecql">create statement pushed(
+    $repo   text from event.repository.full_name,
+    $branch text from event.ref,
+    $sha    text from event.after,
+    $kind   text from hook.event)
+  on hook github
+  where hook.event = 'push'
+as insert pushes {repo: $repo, branch: $branch, sha: $sha, kind: $kind}</pre>
+
+<p>In the repository's or organization's settings, add a webhook: the
+payload URL <code>https://db.example.com/_hooks/github</code>, the content
+type <code>application/json</code> (GitHub's default,
+<code>application/x-www-form-urlencoded</code>, is refused 415 with the
+type to set), the secret in the file, and the events to send.
+<code>hook.event</code> is GitHub's <code>X-GitHub-Event</code> header; a
+condition reads it beside the body. GitHub sends a <code>ping</code> when a
+webhook is made: no condition takes it, so it is answered
+<code>200</code>, <code>{"taken":0}</code>, and nothing is written.</p>
+
+<p>GitHub's signature covers the body alone, not
+<code>X-GitHub-Event</code>. Whoever holds one signed body can send it
+again under another event's name: under <code>key body</code> the copy is
+answered from its key while it is kept, and taken again once
+<code>keep</code> has passed; under <code>key delivery</code> a new
+delivery id has it taken at once. A condition on <code>hook.event</code>
+alone can then take an event its statement was never meant for. Write the
+condition on fields of the signed body as well, which tell one kind of
+event from another — <code>event.ref</code> for a push,
+<code>event.action</code> for a pull request: <code>where hook.event =
+'push' and event.ref = 'refs/heads/main'</code>.</p>
+
+<p>GitHub's signature covers the body alone, so its key is chosen by the
+hook's line:</p>
+
+<ul>
+<li><code>key body</code>, the default, keys an event by its body's
+SHA-256. A copy of the body is taken once whatever header it comes with;
+two events whose bodies are the same byte for byte are one.</li>
+<li><code>key delivery</code> keys it by <code>X-GitHub-Delivery</code>,
+which GitHub keeps when you redeliver from its log. No signature covers
+that header, so whoever holds one signed body may send it again under a
+new delivery and have it taken again; a hook keyed so has statements
+idempotent by what they write.</li>
+</ul>
+
+<h2 id="standard">Any sender of Standard Webhooks</h2>
+
+<p>Senders that sign as <a href="https://www.standardwebhooks.com/">Standard
+Webhooks</a> says — Svix and the services that send through it, among them
+Clerk and Resend — take the scheme <code>standard</code>. Their headers are
+<code>webhook-id</code>, <code>webhook-timestamp</code> and
+<code>webhook-signature</code>, or Svix's names for the same three,
+<code>svix-id</code>, <code>svix-timestamp</code> and
+<code>svix-signature</code>, which Clerk and Resend send; an event carrying
+both sets is refused. Its secret file holds the secret as the sender shows
+it, <code>whsec_</code> and base64; a file holding anything else is refused
+at the start.</p>
+
+<pre data-lang="text">clerk  standard  /run/secrets/clerk-webhook
+</pre>
+
+<pre data-lang="fennecql">create collection users (clerk_id text @unique, email text)
+
+create statement user_created(
+    $id    text from event.data.id,
+    $email text from event.data.email_addresses."0".email_address)
+  on hook clerk
+  where event.type = 'user.created'
+as put users {clerk_id: $id, email: $email} if absent</pre>
+
+<p>An event's key is its <code>webhook-id</code> (or
+<code>svix-id</code>). <code>"0"</code> is the
+first element of a list: a key of digits reads a list by its place, and a
+key that is no word, such as <code>"order-id"</code>, is quoted.</p>
+
+<h2 id="hooks-file">The hooks file</h2>
+
+<p>A line a hook, read once as the server starts; <code>#</code> starts a
+comment. Anything wrong is refused at the start, naming the line and what
+to write, never the secret's value.</p>
+
+<pre data-lang="text">&lt;name&gt; &lt;scheme&gt; &lt;secret file&gt; [&lt;secret file&gt;] [keep &lt;d&gt;] [tolerance &lt;d&gt;] [key body|delivery] [max-body &lt;size&gt;]</pre>
+
+<table>
+<tr><th>Part</th><th>What it says</th></tr>
+<tr><td>name</td><td>the path's last segment, <code>/_hooks/&lt;name&gt;</code>, and what a statement's <code>on hook</code> names: a word, as a statement's name is</td></tr>
+<tr><td>scheme</td><td><code>stripe</code> (<code>Stripe-Signature</code>), <code>github</code> (<code>X-Hub-Signature-256</code>) or <code>standard</code> (<code>webhook-id</code>, <code>webhook-timestamp</code>, <code>webhook-signature</code>, or Svix's <code>svix-id</code>, <code>svix-timestamp</code>, <code>svix-signature</code>)</td></tr>
+<tr><td>secret files</td><td>one, or two while a secret rolls: an event verifies under either. The file's trailing newline is not the secret's. An empty file is refused: it would make every signature anyone can compute verify</td></tr>
+<tr><td><code>keep</code></td><td>how long an event's key is kept: 30 days for <code>stripe</code> (Stripe retries for three), 7 for the others. A day at least, and more than twice the tolerance and a minute</td></tr>
+<tr><td><code>tolerance</code></td><td>how far the signed time may be from the server's clock either way: 5 minutes, Stripe's libraries' default; from a second to an hour. <code>github</code> signs no time, and is held to none</td></tr>
+<tr><td><code>key</code></td><td><code>github</code> alone: <code>body</code> or <code>delivery</code> (<a href="#github">above</a>)</td></tr>
+<tr><td><code>max-body</code></td><td>the largest body taken: 1 MiB unless given (<code>64k</code>, <code>4m</code>), or the server's <code>--max-body</code> where that is lower; at most <code>--max-body</code></td></tr>
+</table>
+
+<p>The secrets are the deployment's, as the server's token is: never in the
+database, an archive, a log line, a trace or an answer. A server with no
+hooks file has no <code>/_hooks/</code> route: a request there asks for a
+token as any unknown path does. A secret changes at a restart: name the
+new one second, restart, change it at the sender, then drop the old one at
+the next restart.</p>
+
+<p>The server says at its start what does not meet: a hook of the file no
+statement takes (its events answered 409), and a statement taking a hook
+the file does not name (its events answered 401). Each is a line of its
+log.</p>
+
+<h2 id="once">Taken once</h2>
+
+<p>An event's key is <code>id</code> in a Stripe event's body,
+<code>webhook-id</code> (or <code>svix-id</code>) for a Standard Webhooks
+sender, and for GitHub what
+its hook's <code>key</code> says. The key is kept in
+<code>_hook_events</code> for the hook's <code>keep</code>, in the same
+block as the statements' writes. A copy of the event while its key is kept
+— a retry, a duplicate delivery, Stripe sending again after a slow answer
+— runs nothing and is answered as the first was, marked
+<code>Idempotent-Replayed: true</code>, once the first's block is as
+durable as its answer was to be. A second body under a key that is kept
+is answered the same, never run, and logged.</p>
+
+<p>The keys cost a little of the file: a row an event, given back by <a
+href="/docs/server#compaction">compaction</a> once its <code>keep</code>
+has passed. An event sent again after its key was let go is taken again, as
+a new one: <code>keep</code> is what tells a retry from a new event, so
+keep it longer than the sender's retries and your own redeliveries from
+its log. A statement whose guard is idempotent by the object's id takes a
+late copy as a write of what is already there.</p>
+
+<p>Where a hook has several statements, an event runs every one whose
+condition takes it, in their names' order, in one block: all of them and
+the key, or none. A refusal by any is the event's answer.</p>
+
+<h2 id="answers">What a sender is told</h2>
+
+<p>A sender is told a 2xx once its event is taken and on disk, or when
+sending it again could change nothing. Every other answer is the refusal's
+status, so the sender's retries are the queue: Stripe retries for three
+days, Standard Webhooks senders on their own schedules, and GitHub
+redelivers from its log when asked. A sender is told what a <a
+href="/docs/http-access">scoped token</a> would be: the status, a guard's
+<code>reason</code> and the bound a refusal names — never a statement's
+name or a value from the database, which the server's log line holds under
+the request id beside the event's key.</p>
+
+<table>
+<tr><th>Answer</th><th>Status</th></tr>
+<tr><td>not a <code>POST</code></td><td>405, <code>Allow: POST</code></td></tr>
+<tr><td>anything before a verified signature (<a href="#one-401">below</a>)</td><td>401 <code>the event does not verify</code></td></tr>
+<tr><td>verified, not JSON's content type</td><td>415, naming the type to set</td></tr>
+<tr><td>a read-only server or a replica</td><td>403</td></tr>
+<tr><td>the body not a JSON object; no key, a key past 255 bytes or holding a control character; <code>Fennec-Wait</code></td><td>400</td></tr>
+<tr><td>the key kept: a retry, a duplicate, another body</td><td>as the first was answered, <code>Idempotent-Replayed: true</code></td></tr>
+<tr><td>no statement takes the hook; a statement of the hook that cannot run</td><td>409</td></tr>
+<tr><td>no condition takes the event</td><td>200, <code>{"taken":0}</code>, no key kept</td></tr>
+<tr><td>a parameter missing or of another type; <code>check</code> false</td><td>400, naming the parameter and its path</td></tr>
+<tr><td><code>require</code> unmet</td><td>412, its <code>reason</code></td></tr>
+<tr><td><code>insert</code> over a taken id, a <code>@unique</code> value taken</td><td>409</td></tr>
+<tr><td>past <code>--call-max-rows</code></td><td>400, naming the bound</td></tr>
+<tr><td>a <a href="/docs/fennecql#write-bound-statements">statement bound to the writes</a> refusing</td><td>its status, its <code>reason</code></td></tr>
+<tr><td>above <code>--max-memory</code>, statements that insert or set</td><td>507</td></tr>
+<tr><td>taken, but no replica a promotion could take it from holds it yet (<a href="#durable">below</a>)</td><td>503, <code>Retry-After</code></td></tr>
+<tr><td>a storage error</td><td>500</td></tr>
+<tr><td>taken</td><td>200, <code>{"event":"&lt;key&gt;","taken":&lt;statements&gt;}</code>, <code>Fennec-Seq</code></td></tr>
+</table>
+
+<p>Never a 410, which tells a Standard Webhooks sender to disable the
+endpoint, and never a redirect, which Stripe counts as a failure.</p>
+
+<h2 id="one-401">One 401 for everything before the signature</h2>
+
+<p>The route is the one that runs a statement without a token, so nothing
+of an event is read before its signature verifies: the scheme is read from
+the headers present, each of which must come once; the hook is looked up;
+the signed time must be within the tolerance; the body must be within the
+hook's <code>max-body</code>; and two HMAC-SHA256s are computed, always,
+under the hook's secrets — a random key of the process's own standing in
+for one that is not there, which never verifies — each compared in
+constant time with every <code>v1</code> signature sent. They cover the
+body up to the largest <code>max-body</code> of any hook, whichever hook
+the path names. Stripe's <code>v0</code> and Standard Webhooks'
+<code>v1a</code> are not read. Every failure is the same 401 after the
+same work, so an answer's time tells no one whether a hook exists, or what
+its <code>max-body</code> is.</p>
+
+<p>Which check failed is said where only you read it: the server's log
+(<code>hook `stripe`: an event from 203.0.113.9 did not verify (stale):
+answered 401</code>, <code>hook `?`</code> for a path naming no hook's
+name), the <a href="/docs/monitoring#audit">audit log</a>'s
+<code>refused</code> line and <code>fennec_hook_unverified_total{check}</code>
+— <code>header</code>, <code>scheme</code>, <code>stale</code>,
+<code>size</code>, <code>hook</code> or <code>signature</code>. A
+<code>stale</code> run from one sender is a clock to set right; a
+<code>signature</code> one a secret rolled at one end only. Refusals from
+one address wait longer each time, as a refused token's do, by a count of
+the hooks' own, kept by the address and the hook's name:
+<code>/_hooks/%73tripe</code> counts as <code>/_hooks/stripe</code>, and
+every path naming no hook's name shares one count. A forged event raises no
+token's wait, and a verified event clears no token's.</p>
+
+<h2 id="durable">On disk before the 2xx</h2>
+
+<p>A client told a buffered write landed can read it back and write it
+again; a sender told 2xx never sends the event again. So an event's block
+is fsynced before it is answered, as a write under <code>--sync
+always</code> is, whatever <code>--sync</code> says for the server's other
+writes: a crash a moment after a buffered 200 would lose a payment no one
+sends again. An event no condition takes writes nothing and waits for
+nothing. Events arriving together share one fsync. On a server under
+<code>--sync 250</code> each event is one more fsync among its buffered
+writes; the buffered writers beside it go on into memory while it runs.</p>
+
+<p>Where the server feeds a <a href="/docs/replication">replica</a> a
+promotion could take the event from, the 2xx waits too for that replica's
+stream to have sent the block, up to the time a durable write waits for
+its replicas. Past it the answer is 503 with <code>Retry-After</code>: the
+event is taken and on disk, and the sender's next try is answered from its
+key once the replica holds it. An archiver's stream is no replica a
+promotion takes over, and is not waited for.</p>
+
+<h2 id="authority">Who defines and calls one</h2>
+
+<p>The server's token defines a hook's statement, as it makes any schema
+change, and the audit log's <code>schema</code> line names its hook. The
+statement runs with its own text's authority, as every <a
+href="/docs/fennecql#named-statements">named statement</a> does: its writes
+wake the statements bound to them and are held to
+<code>--call-max-rows</code>. The server's token may <code>call</code> one
+to try it, with an event as its argument —
+<code>call stripe_paid {type: 'payment_intent.succeeded', data: {...}}</code>
+— which runs it as an event would and keeps no key; <code>hook.id</code>,
+<code>hook.at</code> and <code>hook.event</code> are <code>null</code>
+there. To every scoped token a hook's statement is the 404 a missing
+statement is, at <code>/query</code>, <code>/batch</code> and
+<code>/_call</code>, whatever its policy's <code>call</code> lines say; it
+is in none of their listings, and an agent gets no MCP tool for it.</p>
+
+<p>A <a href="/docs/sync">synced replica</a>, the browser module and the
+native library take no definition: nothing of theirs receives a sender's
+request. What an event writes reaches them as any write does.</p>
+
+<h2 id="addresses">Senders' addresses</h2>
+
+<p>The signature is what proves an event is the sender's; fennecdb keeps no
+list of addresses. Stripe also advises accepting its events only from <a
+href="https://docs.stripe.com/ips">the addresses it sends from</a>; a
+firewall in front of the server may hold <code>/_hooks/stripe</code> to
+them. Behind Cloudflare's proxy the server sees Cloudflare's addresses, so
+the rule is Cloudflare's: a WAF custom rule blocking
+<code>http.request.uri.path eq "/_hooks/stripe" and not ip.src in
+{...}</code>, the list Stripe publishes.</p>
+
+<h2 id="watching">Watching them</h2>
+
+<p><a href="/docs/monitoring#what-is-counted"><code>/_metrics</code></a>
+counts each event once by its outcome in
+<code>fennec_hook_events_total{outcome}</code> — <code>taken</code>,
+<code>ignored</code> (no condition took it), <code>replayed</code>,
+<code>conflict</code> (another body under a kept key),
+<code>refused</code>, <code>deferred</code> (a 429, 500, 503 or 507 the
+sender's retry may meet otherwise) and <code>unknown</code> — and the
+refusals before the signature in
+<code>fennec_hook_unverified_total{check}</code>. No label names a hook. A
+server with no hooks file writes neither family. Each refused event, and
+each copy that came with another body, is a line of the server's log
+naming the hook, the event's key, GitHub's delivery and why — what the
+sender was not told — under the request's id; never the body, a signature
+or a secret.</p>

@@ -202,6 +202,11 @@ struct Sender {
     /// it held each tenant's durable writes for its `SENT_WAIT` whenever it
     /// was busy with any one.
     held: Option<Arc<AtomicBool>>,
+    /// A stream a promotion could take a write from: a file's replica,
+    /// never an archiver, which marks its request (`archive=1`) -- what a
+    /// hook's answer waits for ([`Feed::standby_sent`]). A tenant node's
+    /// stream of every tenant is none until F4's slice 4.
+    standby: bool,
 }
 
 impl Sender {
@@ -352,8 +357,18 @@ impl Feed {
     /// feed as it opens and again as it judges where it stands, and a
     /// second entry of one key, never moved on, would have kept a durable
     /// write waiting and the tenant from closing.
+    #[cfg(test)]
     pub(crate) fn sending(&self, key: u64, at: u64) {
         self.sending_as(key, at, None, false);
+    }
+
+    /// [`Self::sending`], for a stream a promotion could take a write from
+    /// (`standby`) or none -- an archiver's.
+    pub(crate) fn sending_standby(&self, key: u64, at: u64, standby: bool) {
+        self.sending_as(key, at, None, false);
+        if let Some(x) = lock(&self.senders).iter_mut().find(|x| x.key == key) {
+            x.standby = standby;
+        }
     }
 
     /// [`Self::sending`], for a stream that `held` says is held up
@@ -378,6 +393,7 @@ impl Feed {
                 sent: at,
                 lagging: behind,
                 held: held.cloned(),
+                standby: false,
             }),
         }
     }
@@ -449,6 +465,37 @@ impl Feed {
                 }
                 self.waited_out.fetch_add(1, Ordering::Relaxed);
                 return;
+            }
+            s = self
+                .sent_cv
+                .wait_timeout(s, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// Whether a stream a promotion could take a write from has sent write
+    /// `upto`, waiting `timeout` at most -- a lagging one waited for too,
+    /// which [`Self::wait_sent`] passes over -- or none is there to: a
+    /// hook's 2xx, which its sender never sends again, waits for a standby
+    /// to hold the event (`docs/design/named-statements.md`, *What a sender
+    /// is told*), where a durable write's answer takes the streams keeping
+    /// up. `false` past `timeout`: the answer is a 503 its sender retries,
+    /// answered from the event's key once a standby holds it.
+    pub fn standby_sent(&self, upto: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut s = lock(&self.senders);
+        loop {
+            let mut standbys = s.iter().filter(|x| x.standby).peekable();
+            if standbys.peek().is_none() {
+                return true;
+            }
+            if standbys.any(|x| x.sent >= upto) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
             }
             s = self
                 .sent_cv
@@ -1256,6 +1303,9 @@ fn stream(
         .and_then(|v| u64::from_str_radix(v, 16).ok())
         .unwrap_or(0);
     let force = param("image") == Some("1");
+    // An archiver says so: no promotion takes a write from its stream, so
+    // no hook's answer waits for it ([`Feed::standby_sent`]).
+    let standby = param("archive") != Some("1");
 
     // Where the replica stands is judged against the database and the feed
     // at one moment, under the read lock: a write in between would leave
@@ -1329,7 +1379,7 @@ fn stream(
 
     // A durable write waits for this stream from here on: what it held
     // before, the image's, it already has.
-    feed.sending(key, seq);
+    feed.sending_standby(key, seq, standby);
     let _stopped = Stopped(feed, key);
     let mut cursor = seq;
     // The one shutdown wakes the stream to end it, its end over TLS a
@@ -1419,6 +1469,10 @@ pub struct Upstream {
     /// tenant of a node that replicates its tenants.
     pub(crate) base: String,
     pub(crate) token: String,
+    /// The stream is an archiver's or a backup's (`archive=1`): no
+    /// promotion takes a write from it, so the primary's hooks do not wait
+    /// for it ([`Feed::standby_sent`]).
+    archiving: bool,
 }
 
 /// A message of the stream, decoded.
@@ -1458,7 +1512,15 @@ impl Upstream {
             addr,
             base,
             token,
+            archiving: false,
         })
+    }
+
+    /// This upstream, its stream marked an archiver's: the primary's hooks
+    /// wait for no stream a promotion could not take a write from.
+    pub fn archiving(mut self) -> Upstream {
+        self.archiving = true;
+        self
     }
 
     pub fn url(&self) -> &str {
@@ -1498,10 +1560,11 @@ impl Upstream {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
         let request = format!(
-            "GET {}/_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
+            "GET {}/_replication?since={since}&history={history:016x}{}{} HTTP/1.1\r\n\
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
             self.base,
             if image { "&image=1" } else { "" },
+            if self.archiving { "&archive=1" } else { "" },
             crate::dial::authority(&self.addr),
             self.token
         );

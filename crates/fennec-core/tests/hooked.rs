@@ -11,7 +11,7 @@
 use crate::stored::{body_at, opened, refused, run, Tap};
 use fennec_core::codec::{encode_str, put_uvarint};
 use fennec_core::engine::{writes_in, ChangeKind, Event, HeldKey, Took, HOOK_EVENTS};
-use fennec_core::named::{event_at, GRAMMAR_EPOCH, HOOKED_NOT_BUILT, MAX_HOOKED};
+use fennec_core::named::{event_at, GRAMMAR_EPOCH, HOOKED_UNTAKEN, MAX_HOOKED};
 use fennec_core::prelude::*;
 use std::sync::Arc;
 
@@ -141,7 +141,7 @@ fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
     run(&mut db, ORDERS).unwrap();
     assert_eq!(
         refused(run(&mut db, STRIPE_PAID)),
-        Error::Query(HOOKED_NOT_BUILT.into()).to_string()
+        Error::Query(HOOKED_UNTAKEN.into()).to_string()
     );
     assert!(db.statements().is_empty());
 
@@ -175,9 +175,10 @@ fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
             "orders.currency"
         ]
     );
-    // No call runs it: its events do.
+    // A call with no event runs nothing: its events run it, and the
+    // server's token's call carries one.
     let e = refused(run(&mut db, "call stripe_paid"));
-    assert!(e.contains("takes the events of hook `stripe`"), "{e}");
+    assert!(e.contains("takes a hook's events"), "{e}");
     // What it reads, a schema change refused naming it.
     let e = refused(run(&mut db, "alter collection orders drop field total"));
     assert!(e.contains("statement `stripe_paid`"), "{e}");
@@ -214,9 +215,12 @@ fn an_image_a_compact_a_replica_and_a_reader_of_the_changes_keep_a_hook() {
             .collect()
     };
     let want = held(&db);
+    // The key's block is the last: an open and an image hold no mark of
+    // it, their horizon standing there, and a replica the mark itself.
     let kept = Some(HeldKey {
         taken: 1,
         same: true,
+        seq: db.change_seq(),
     });
     let asked = event(&body, "evt_1", 7);
 
@@ -534,9 +538,11 @@ fn an_event_is_taken_once_its_writes_and_its_key_one_block() {
 
     // The same event again -- a retry, a duplicate -- is answered from its
     // key, nothing run, nothing written; a second body under it as well.
+    // Its change number the key's, the block's last.
     let held = HeldKey {
         taken: 1,
         same: true,
+        seq: before + 3,
     };
     let seq = db.change_seq();
     assert_eq!(
@@ -552,7 +558,8 @@ fn an_event_is_taken_once_its_writes_and_its_key_one_block() {
         db.take_event(&event(&other, "evt_1", 8)).unwrap(),
         Took::Held(HeldKey {
             taken: 1,
-            same: false
+            same: false,
+            seq: before + 3,
         })
     );
     assert_eq!(db.change_seq(), seq, "nothing written");
@@ -1261,7 +1268,8 @@ fn the_fixture_s_hook_and_its_event_are_read_and_kept() {
         db.event_kept(&event(&body, "evt_1", 7)).unwrap(),
         Some(HeldKey {
             taken: 1,
-            same: true
+            same: true,
+            seq: db.change_seq(),
         })
     );
     let again = opened(&db.snapshot());

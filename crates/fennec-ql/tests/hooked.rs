@@ -7,8 +7,8 @@
 //! events, so no hook is defined that no sender reaches.
 
 use fennec_core::named::{
-    Definition, Source, Webhook, HOOKED_AND_OTHER, HOOKED_CONDITION_VALUES, HOOKED_NOT_BUILT,
-    HOOKED_PARAMS, HOOKED_VALUES,
+    Definition, Source, Webhook, HOOKED_AND_OTHER, HOOKED_CONDITION_VALUES, HOOKED_PARAMS,
+    HOOKED_UNTAKEN, HOOKED_VALUES,
 };
 use fennec_core::prelude::*;
 use fennec_ql::{parse, parse_one};
@@ -748,7 +748,7 @@ fn a_hook_is_refused_where_statements_run() {
         db.execute(&s).unwrap();
     }
     let stripe = parse_one(STRIPE).unwrap();
-    let not_built = Error::Query(HOOKED_NOT_BUILT.into());
+    let not_built = Error::Query(HOOKED_UNTAKEN.into());
     assert_eq!(db.execute(&stripe), Err(not_built.clone()));
     assert_eq!(db.execute_with(&stripe, &[]), Err(not_built.clone()));
     let put = parse_one("put orders {ref: 'a', total: 3}").unwrap();

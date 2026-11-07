@@ -198,6 +198,18 @@ usage: fennec-server [options]
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes
+      --hooks <path>        take webhook events at POST /_hooks/<name> (--file
+                            only): a line a hook, `<name> <scheme> <secret
+                            file> [<secret file>] [keep <d>] [tolerance <d>]
+                            [key body|delivery] [max-body <size>]`, the
+                            scheme stripe, github or standard (Standard
+                            Webhooks, Svix), two secret files while a secret
+                            rolls. Each event is verified by its signature
+                            before anything of it is read, taken once by its
+                            key by the statements defined `on hook <name>`,
+                            and answered 2xx once it is on disk whatever
+                            --sync says. Read at the start: a change needs a
+                            restart
       --studio              serve fennec studio, the admin pages, at
                             /_studio/: collections, rows and edits in a
                             browser, with the token pasted into the page and
@@ -514,6 +526,7 @@ fn main() {
     let mut jwt_secret: Option<String> = env_secret("FENNEC_JWT_SECRET");
     let mut jwt_keys: Option<String> = env_secret("FENNEC_JWT_KEYS");
     let mut policy: Option<String> = None;
+    let mut hooks_file: Option<String> = None;
     let mut mint: Option<String> = None;
     let mut demands = fennec_http::access::Demands::default();
     let mut follow_url: Option<String> = None;
@@ -735,6 +748,11 @@ fn main() {
                     Ok(s) => policy = Some(s),
                     Err(e) => fail(&format!("could not read {path}: {e}")),
                 }
+            }
+            "--hooks" => {
+                let path = next(&mut i, "--hooks");
+                not_stdin("--hooks", &path);
+                hooks_file = Some(path);
             }
             "--mint-token" => mint = Some(next(&mut i, "--mint-token")),
             "--http-cors" => http_cfg.cors = Some(next(&mut i, "--http-cors")),
@@ -1061,6 +1079,30 @@ fn main() {
     if !quota.is_none() && dir.is_none() {
         fail("the --tenant-* quotas hold a node's tenants: give --dir");
     }
+    // The hooks and their secrets, read once, each refusal naming its line
+    // and never a secret: a file's server's alone, since a 2xx means the
+    // event is on disk, and a node's tenants keep theirs beside their files
+    // once F4's slice 4 brings them.
+    if let Some(path) = &hooks_file {
+        if dir.is_some() {
+            fail(
+                "--hooks takes a file's events: a node's tenants take none yet (give --file, \
+                 not --dir)",
+            );
+        }
+        if file.is_none() {
+            fail("--hooks answers an event once it is on disk: give --file");
+        }
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| fail(&format!("could not read {path}: {e}")));
+        let secret = |f: &str| {
+            not_stdin("a hooks file's secret", f);
+            std::fs::read(f)
+        };
+        let hooks = fennec_http::hooks::Hooks::read(&text, secret, http_cfg.max_body)
+            .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+        http_cfg.hooks = Some(Arc::new(hooks));
+    }
 
     // `--follow`: the follower writes the file this server serves, the one
     // writer of the collection it mirrors.
@@ -1268,6 +1310,12 @@ fn main() {
         }
     }
 
+    // A file's server takes its hooks' events (`fennec_http::hooks`), so a
+    // webhook consumer may be defined over it: one whose hook the hooks
+    // file does not name is logged, not refused (`hooks::log_unheld`).
+    if file.is_some() {
+        db.allow_hooks();
+    }
     let read_only = http_cfg.read_only;
     let shared = Arc::new(RwLock::new(db));
     // From here threads run beside the database -- the graph keeper, the

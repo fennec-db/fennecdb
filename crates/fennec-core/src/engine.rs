@@ -50,7 +50,7 @@ pub use due::{Due, HeldSlot};
 #[cfg(feature = "statements")]
 mod hooked;
 #[cfg(feature = "statements")]
-pub use hooked::{Event, HeldKey, Took, HOOK_EVENTS};
+pub use hooked::{Event, HeldKey, Judged, Took, HOOK_EVENTS};
 mod maintenance;
 mod stored;
 use stored::REC_STATEMENT;
@@ -4111,8 +4111,8 @@ pub struct Database {
     /// schedule is defined where nothing runs it.
     #[cfg(feature = "statements")]
     scheduling: bool,
-    /// Whether a webhook consumer may be defined: a test's alone until a
-    /// server takes events ([`Self::allow_hooks`], F4's slice 2), so no
+    /// Whether a webhook consumer may be defined: a file's server's, whose
+    /// route takes its events, and a test's ([`Self::allow_hooks`]), so no
     /// hook is stored that no sender reaches.
     #[cfg(feature = "statements")]
     hooking: bool,

@@ -163,25 +163,28 @@ back to a node's queue before the look closes the tenant; a statement the
 schema broke is listed `broken`, which `/_schema/plan` holds to no
 dependency.
 
-**[A webhook consumer's record is kept by every build, and no server takes
-its events yet.](../../docs/design/named-statements.md#what-f4-has-built)**
+**[A webhook consumer takes a verified event once, by its
+key.](../../docs/design/named-statements.md#webhook-consumers-f4)**
 `create statement <n>($p <type> from event.<path>, ...) on hook <h> [where
 ...] as ...` is kind 13's op 6, its hook's name after its text: one write
-`writes_in` counts, refused by a binary from before, never misread. A
-server reads the name into `Stored::hook`; the module keeps it as the
-record's tail behind its op (`Timing`), reading none of it. An event is
-taken by `Database::take_event`: its key (`<hook>`, `U+001F`, the key)
-looked up in `_hook_events` first, again under the write lock, and where
-held answered as its first taking was (`Took::Held`), a second body too,
-never run; else the hook's statements in name order, each condition asked
-and each parameter typed with no cast (`named::event_at`, a key of digits a
-list's place), their bodies and the key's row -- its own `until`,
-`@ttl(1ms)` -- one block under one `--call-max-rows`, refused first where
-writes are (`may_start`), `now()` one instant fixed as it starts for the
-key, every `check` and every body (`Clocked`). A statement broken
-by its body refuses the events its condition takes, an unread one every
-event of its hook (409). A replacement keeps the kind
-(`named::Kind::Hooked`), its hook changing freely; `MAX_HOOKED` bounds a
-hook's statements; `/_changes` passes over `_hook_events`. Until a server
-takes events every way in refuses a definition (`HOOKED_NOT_BUILT`) but a
-test's (`Database::allow_hooks`), and no call runs one.
+`writes_in` counts, refused by a binary from before, never misread; the
+module keeps it as the record's tail (`Timing`), reading none of it. The
+event's values reach a body through its typed parameters alone
+(`named::event_at`, no cast, a key of digits a list's place; 400 where one
+is missing or mistyped), its condition -- the event and literals alone --
+picking the events it takes. An event's statements run in name order in
+one block with its key's row in `_hook_events` (`<hook>`, `U+001F`, the
+key; its own `until`, `@ttl(1ms)`), under one `--call-max-rows`, `now()`
+one instant (`Clocked`): `Database::take_event`, or `judge_event` beside
+the readers and `take_judged` under the lock, its takers reused only while
+the statements' table is the one judged (`Arc::ptr_eq`). The key is looked
+up again under the lock; a held one is answered as its first taking was
+(`Took::Held`) once that block is as durable and sent as the first's
+answer was to be, a second body never run. A statement broken by its body
+refuses the events its condition takes, an unread one every event of its
+hook (409). No token but the server's calls one, with an event, keeping no
+key (`hooked_callee`); a run is the definition's, waking bindings. A file's
+server takes definitions (`Database::allow_hooks`); every other way in
+refuses one (`HOOKED_UNTAKEN`), a tenant node until F4's slice 4.
+`MAX_HOOKED` bounds a hook's statements; `/_changes` passes over
+`_hook_events`.

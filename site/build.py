@@ -99,6 +99,9 @@ NAV = [
         ("docs/auth", "Auth with your identity provider"),
         ("docs/files", "Files with S3 and R2"),
         ("docs/functions", "Functions and webhooks"),
+        # Another service's events taken by a statement: the inbound half of
+        # what Functions and webhooks reacts to on the way out.
+        ("docs/webhooks", "Webhooks from Stripe and GitHub"),
         # What an app adds Redis for, a page a family of patterns: this one
         # says which page holds each, and is named for what it replaces now
         # that no group is.

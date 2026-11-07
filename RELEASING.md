@@ -180,6 +180,27 @@ each against `OP4_BASE`, a schedule defined over `/query` by this tree's
 primary, beside the server, a replica and `fennec types` refusing
 fennec-core's `tests/statements.fennec`.
 
+**A webhook consumer moves it once more.** From the release whose server
+takes webhook events (`docs/design/named-statements.md`, F4's slice 3), a
+file's primary writes one by `create statement ... on hook <h>`: kind 13's
+op 6, its hook's name after its text, its events' keys rows of
+`_hook_events` in the blocks of their writes. A binary from before it --
+the last main before the op, `6fb28002` -- reads it as a statement record
+it does not read and refuses it, never taking a hook's statement for a
+callable one whose text it cannot read. Its notes name `on hook` as the
+clause that moves the format, under the same upgrade heading and in the
+same order: every archiver, router and node upgraded before any primary
+defines one. A tenant node takes none in that release (F4's slice 4 brings
+them), so a tenant defines none. Where the order is not kept, each older
+binary stops in words ("a statement record this version does not read"):
+a replica stops following at the record and connects again, taking no
+write past it; an archiver keeps the stream and takes no image of its own,
+and its `fennec restore` refuses the archive this tree's restores; the
+server refuses to open the file that restore wrote. `make upgrade-check`
+drives each against `OP6_BASE`, a hook's statement defined over `/query` by
+this tree's primary, beside the server, a replica and `fennec types`
+refusing fennec-core's `tests/statements.fennec`.
+
 **A node recorded at `https://` waits for every router and node.** From
 the release that dials HTTPS (TLS slice 3), a node serving HTTPS
 (`--tls-cert`) is recorded at its `https://host:port` address (`PUT
