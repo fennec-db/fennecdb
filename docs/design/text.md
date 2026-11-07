@@ -612,7 +612,20 @@ start of one too. The words are a `Dictionary`: the index's terms but the
 each (1.3 MB for 60 000 words, where a `Box<str>` a word was twice that and
 25% slower to walk), sorted by the first loose `match` -- a `OnceLock`, a
 `OnceCell` in the browser, as `Derived` is -- and kept up by every write
-after it, never in the file. A prefix is a range of it; the words within
+after it, never in the file. No chunk of it is empty, since finding a
+word's chunk, a range's ends and the walk each read a chunk's first word: a
+chunk its last word leaves goes, and a dictionary holding none -- sorted
+over no words, or every word deleted since -- takes its next word as a
+chunk of one. Pushed empty first, as it was, that chunk was asked its first
+word and the write panicked: a loose `match`, a `del` of the last row and
+an `insert` closed the connection, every later word new to the field
+panicking the same way. `a_dictionary_kept_up_is_the_one_built` holds its
+shape after every add and remove, through runs that empty chunks first,
+last, between and all of them and split full ones, and a walk over it to
+one over a fresh build; `TextIndex`'s
+`the_words_kept_up_through_an_empty_index_are_a_fresh_build` holds the copy
+to a build from the index's words after every write. A prefix is a range
+of it; the words within
 `k` edits are found walking it as the trie it is, a row of the table a
 character banded to `2k + 1` cells, a node's children by binary search --
 only the query's characters near the depth where any other would end the
