@@ -68,7 +68,8 @@ adopted (`Database::adoptions`), as every look reseeds.
 
 **[A durable write syncs a log beside the file, not the file](../../docs/design/durability.md#the-sync-log)**
 (Linux and Android, `synclog.rs`). Whatever renames a file into a
-database's place removes the log first, durably (`fs::forget_sync_log`).
+database's place removes the log first, durably (`fs::forget_sync_log`),
+and syncs the directory after (`fs::sync_dir`).
 
 ### The HNSW graph
 

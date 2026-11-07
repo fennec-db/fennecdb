@@ -18,10 +18,21 @@ struct Harness {
     db: Arc<RwLock<Database>>,
 }
 
-fn start(mut cfg: Config, db: Database) -> Harness {
+fn start(cfg: Config, db: Database) -> Harness {
+    start_with(cfg, db, false)
+}
+
+/// [`start`], keeping a change feed for `/_changes` where `cdc` is set, as
+/// `--cdc` does: no replica is fed, and the database's sink is its own.
+fn start_with(mut cfg: Config, db: Database, cdc: bool) -> Harness {
+    use fennec_http::replication::{Feed, Replication};
     cfg.addr = "127.0.0.1:0".into();
     let db = Arc::new(RwLock::new(db));
-    let server = Server::new(Arc::clone(&db), cfg);
+    let mut server = Server::new(Arc::clone(&db), cfg);
+    if cdc {
+        let feed = Some(Feed::new(1 << 20));
+        server = server.with_replication(Replication::new(None, feed, None));
+    }
     let listener = server.bind().expect("bind");
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -81,9 +92,14 @@ impl Conn {
     /// A write sent with `Idempotency-Key: key`: `(status, whether it was
     /// a replay, body)`.
     fn keyed(&mut self, target: &str, key: &str, body: &str) -> (u16, bool, String) {
+        self.sent(target, &format!("Idempotency-Key: {key}\r\n"), body)
+    }
+
+    /// A `POST` with the header lines `extra`, each ending `\r\n`, answered
+    /// as [`Self::keyed`] is.
+    fn sent(&mut self, target: &str, extra: &str, body: &str) -> (u16, bool, String) {
         let req = format!(
-            "POST {target} HTTP/1.1\r\nHost: t\r\nIdempotency-Key: {key}\r\n\
-             Content-Length: {}\r\n\r\n{body}",
+            "POST {target} HTTP/1.1\r\nHost: t\r\n{extra}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         self.w.write_all(req.as_bytes()).unwrap();
@@ -252,7 +268,8 @@ struct Gate {
     /// Durabilities that began to run, before they take the disk: a
     /// replay waiting for the first try's fsync is one.
     asked: usize,
-    /// Replays a test's client was answered.
+    /// Replays a test's client was answered, and the other writes it
+    /// counts as their answers come ([`SlowDiskServer::send`]).
     replays: usize,
     timed_out: bool,
 }
@@ -374,9 +391,15 @@ impl SlowDiskServer {
 
     /// Sends a keyed write again, as a retry, and counts its answer in.
     fn replay(&self, target: &'static str, key: String, body: &'static str) -> Answer {
+        self.send(target, format!("Idempotency-Key: {key}\r\n"), body)
+    }
+
+    /// Sends a `POST` with the header lines `extra` and counts its answer
+    /// in, as a replay's.
+    fn send(&self, target: &'static str, extra: String, body: &'static str) -> Answer {
         let (port, gate) = (self.h.port, Arc::clone(&self.gate));
         std::thread::spawn(move || {
-            let answer = Conn::open(port).keyed(target, &key, body);
+            let answer = Conn::open(port).sent(target, &extra, body);
             gate.0.lock().unwrap().replays += 1;
             gate.1.notify_all();
             answer
@@ -414,6 +437,22 @@ fn now_reading(db: &RwLock<Database>) {
 }
 
 fn slow_disk_server(fail: bool) -> SlowDiskServer {
+    slow_disk_server_with(fail, false)
+}
+
+/// [`slow_disk_server`] serving as `cfg` says, `--sync always` whatever
+/// it does.
+fn slow_disk_server_cfg(fail: bool, cfg: Config) -> SlowDiskServer {
+    slow_disk_server_as(fail, false, cfg)
+}
+
+/// [`slow_disk_server`], keeping a change feed where `cdc` is set
+/// ([`start_with`]).
+fn slow_disk_server_with(fail: bool, cdc: bool) -> SlowDiskServer {
+    slow_disk_server_as(fail, cdc, Config::default())
+}
+
+fn slow_disk_server_as(fail: bool, cdc: bool, cfg: Config) -> SlowDiskServer {
     let fsyncs = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new((Mutex::new(Gate::default()), Condvar::new()));
     let mut db = Database::with_sink(Box::new(SlowDisk {
@@ -431,13 +470,11 @@ fn slow_disk_server(fail: bool) -> SlowDiskServer {
     ] {
         db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
     }
-    let h = start(
-        Config {
-            sync_on_write: true,
-            ..Config::default()
-        },
-        db,
-    );
+    let cfg = Config {
+        sync_on_write: true,
+        ..cfg
+    };
+    let h = start_with(cfg, db, cdc);
     SlowDiskServer { h, fsyncs, gate }
 }
 
@@ -836,6 +873,445 @@ fn a_key_a_killed_process_landed_is_replayed_once_on_disk() {
     assert_eq!(
         gate.0.lock().unwrap().events,
         ["asked", "durable", "answered"]
+    );
+}
+
+/// A write refused by what another write left: the statements that make
+/// its place, written into the database alone; the write that lands what
+/// the refusal reads, whose fsync the test holds; the refused write, with
+/// the header lines it is sent with; and the refusal's status -- or the
+/// status of an answer read from it as a refusal is, an apply finding it
+/// had nothing to do.
+struct HeldRefusal {
+    what: &'static str,
+    setup: &'static [&'static str],
+    first: (&'static str, &'static str),
+    refused: (&'static str, &'static str, &'static str),
+    status: u16,
+}
+
+/// A held write sent with `Fennec-Wait`, its wait short: answered at its
+/// end with its last run's answer.
+const WAIT: &str = "Fennec-Wait: 20\r\n";
+
+/// Every write path that can be refused by what another write left, each
+/// with a refusal of its own.
+const HELD_REFUSALS: [HeldRefusal; 17] = [
+    HeldRefusal {
+        what: "an insert of a held id",
+        setup: &["create collection d (n int)"],
+        first: ("/query", r#"{"query": "insert d {id: 7, n: 1}"}"#),
+        refused: ("/query", "", r#"{"query": "insert d {id: 7, n: 2}"}"#),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a @unique value held",
+        setup: &["create collection u (e text @unique)"],
+        first: ("/query", r#"{"query": "put u {e: \"a\"}"}"#),
+        refused: ("/query", "", r#"{"query": "put u {e: \"a\"}"}"#),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a collection made",
+        setup: &[],
+        first: ("/query", r#"{"query": "create collection made (n int)"}"#),
+        refused: (
+            "/query",
+            "",
+            r#"{"query": "create collection made (n int)"}"#,
+        ),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a statement made",
+        setup: &[],
+        first: (
+            "/query",
+            r#"{"query": "create statement s() as get t count"}"#,
+        ),
+        refused: (
+            "/query",
+            "",
+            r#"{"query": "create statement s() as get t count"}"#,
+        ),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a require's count",
+        setup: &["create collection q (n int)", "put q {n: 1}"],
+        first: ("/query", r#"{"query": "del q where n = 1"}"#),
+        refused: (
+            "/query",
+            "",
+            r#"{"query": "set q {n: 2} where n = 1 require 1"}"#,
+        ),
+        status: 412,
+    },
+    HeldRefusal {
+        what: "an index made",
+        setup: &["create collection ix (n int)"],
+        first: ("/query", r#"{"query": "create index on ix (n) @hash"}"#),
+        refused: ("/query", "", r#"{"query": "create index on ix (n) @hash"}"#),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a keyed insert of a held id",
+        setup: &["create collection k (n int)"],
+        first: ("/query", r#"{"query": "insert k {id: 7}"}"#),
+        refused: (
+            "/query",
+            "Idempotency-Key: dup\r\n",
+            r#"{"query": "insert k {id: 7}"}"#,
+        ),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a /batch's insert of a held id",
+        setup: &["create collection b (n int)"],
+        first: ("/query", r#"{"query": "insert b {id: 7}"}"#),
+        refused: ("/batch", "", r#"{"query": "insert b {id: 7}"}"#),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a /batch holding a compact, its first line refused",
+        setup: &["create collection bc (n int)"],
+        first: ("/query", r#"{"query": "insert bc {id: 7}"}"#),
+        refused: (
+            "/batch",
+            "",
+            "{\"query\": \"insert bc {id: 7}\"}\n{\"query\": \"compact bc\"}",
+        ),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a REST write of a @unique value held",
+        setup: &["create collection ru (e text @unique)"],
+        first: ("/query", r#"{"query": "put ru {e: \"a\"}"}"#),
+        refused: ("/ru", "", r#"{"e": "a"}"#),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "a REST write to a collection dropped",
+        setup: &["create collection gone (n int)"],
+        first: ("/query", r#"{"query": "drop collection gone"}"#),
+        refused: ("/gone", "", r#"{"n": 1}"#),
+        status: 404,
+    },
+    HeldRefusal {
+        what: "/_schema/apply's plan refused by a field another added",
+        setup: &["create collection sp (n int)"],
+        first: (
+            "/query",
+            r#"{"query": "alter collection sp add field m int"}"#,
+        ),
+        refused: ("/_schema/apply", "", SP_DECLARED),
+        status: 409,
+    },
+    HeldRefusal {
+        what: "/_schema/apply finding another applied it",
+        setup: &[],
+        first: ("/_schema/apply", SN_DECLARED),
+        refused: ("/_schema/apply", "", SN_DECLARED),
+        status: 200,
+    },
+    HeldRefusal {
+        what: "a consumer's since ahead of it",
+        setup: &[],
+        first: ("/_changes/consumers/sink", ""),
+        refused: ("/_changes/consumers/sink", "", r#"{"since": 99}"#),
+        status: 409,
+    },
+    // Held, a run that wrote nothing waits for nothing: its answer at its
+    // wait's end does.
+    HeldRefusal {
+        what: "a held require's count",
+        setup: &["create collection hq (n int)", "put hq {n: 1}"],
+        first: ("/query", r#"{"query": "del hq where n = 1"}"#),
+        refused: (
+            "/query",
+            WAIT,
+            r#"{"query": "set hq {n: 2} where n = 1 require 1"}"#,
+        ),
+        status: 412,
+    },
+    HeldRefusal {
+        what: "a held keyed require's count",
+        setup: &["create collection hk (n int)", "put hk {n: 1}"],
+        first: ("/query", r#"{"query": "del hk where n = 1"}"#),
+        refused: (
+            "/query",
+            "Fennec-Wait: 20\r\nIdempotency-Key: held\r\n",
+            r#"{"query": "set hk {n: 2} where n = 1 require 1"}"#,
+        ),
+        status: 412,
+    },
+    HeldRefusal {
+        what: "a held /batch's require's count",
+        setup: &["create collection hb (n int)", "put hb {n: 1}"],
+        first: ("/query", r#"{"query": "del hb where n = 1"}"#),
+        refused: (
+            "/batch",
+            WAIT,
+            r#"{"query": "set hb {n: 2} where n = 1 require 1"}"#,
+        ),
+        status: 412,
+    },
+];
+
+/// Under `--sync always` a write refused by what another write left is
+/// answered once that write's fsync is done, as its success would be, never
+/// before: the other write's block is read from the moment it lands, under
+/// the write lock, and its fsync runs after the lock. Answered at once, an
+/// `insert` was told 409 of a row a power loss before that fsync took
+/// back, and its client never sent it again. Every way a write is refused
+/// so, each through its path: `/query`, a keyed `/query`, `/batch` as one
+/// block and as statements on their own, a REST write refused as it runs
+/// and as it is routed, `create index` beside the database, a `/_changes`
+/// consumer, and a held write's answer at its wait's end. By the event:
+/// the refusal's own durability began -- waiting at the disk the held fsync
+/// has -- or it was answered.
+#[test]
+fn a_refusal_is_answered_once_what_it_read_is_on_disk() {
+    let s = slow_disk_server_with(false, true);
+    let mut early = Vec::new();
+    for case in &HELD_REFUSALS {
+        let what = case.what;
+        {
+            let mut g = s.h.db.write().unwrap();
+            for q in case.setup {
+                g.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+            }
+        }
+        let (target, body) = case.first;
+        let (was_early, (status, _, made), (refused, _, told)) =
+            refused_beside(&s, (target, "", body), case.refused);
+        if was_early {
+            early.push(what);
+        }
+        assert!(status < 300, "{what}: the first write {status} {made}");
+        assert_eq!(refused, case.status, "{what}: {told}");
+        if case.status == 200 {
+            assert!(told.contains(r#""applied":false"#), "{what}: {told}");
+        }
+    }
+    assert!(
+        early.is_empty(),
+        "refused before the fsync of what they read: {early:?}"
+    );
+    assert!(!s.timed_out(), "an fsync waited out the gate");
+}
+
+/// `sp` declared with `n` alone: refused (409) where another write added a
+/// field, applying nothing where none did.
+const SP_DECLARED: &str =
+    r#"{"format":1,"collections":[{"name":"sp","fields":[{"name":"n","type":"int"}]}]}"#;
+
+/// `sn` declared: made by the first apply, there for the second.
+const SN_DECLARED: &str =
+    r#"{"format":1,"collections":[{"name":"sn","fields":[{"name":"n","type":"int"}]}]}"#;
+
+/// Sends `first` and holds its fsync at the gate, then `refused` beside it,
+/// each `(target, header lines, body)`: whether `refused` was answered
+/// before a durability of its own began -- the one that waits at the disk
+/// with the held fsync -- and, once the gate is opened, the two answers.
+fn refused_beside(
+    s: &SlowDiskServer,
+    first: (&'static str, &str, &'static str),
+    refused: (&'static str, &str, &'static str),
+) -> (bool, (u16, bool, String), (u16, bool, String)) {
+    let reached = s.gate.0.lock().unwrap().reached;
+    let (asked, replays) = s.counts();
+    s.hold_for(u64::MAX);
+    let made = s.send(first.0, first.1.to_string(), first.2);
+    s.reached(reached + 1);
+    let answer = s.send(refused.0, refused.1.to_string(), refused.2);
+    let early = s.replayed_or_waiting(asked + 2, replays);
+    s.open();
+    (early, made.join().unwrap(), answer.join().unwrap())
+}
+
+/// A refusal of the request alone reads nothing another write left, and
+/// waits for no fsync: a REST write whose body is no JSON, or sent to a
+/// path no route takes, routed under the write lock while another write's
+/// fsync is held, is answered then -- it waited for that fsync, which
+/// changes nothing it says.
+#[test]
+fn a_refusal_of_the_request_alone_waits_for_no_fsync() {
+    let s = slow_disk_server(false);
+    s.h.db
+        .write()
+        .unwrap()
+        .execute(&fennec_ql::parse_one("create collection pz (n int)").unwrap())
+        .unwrap();
+    let first = ("/query", "", r#"{"query": "put pz {n: 1}"}"#);
+    for (what, refused, status) in [
+        ("a body that is no JSON", ("/pz", "", "{not json"), 400),
+        ("a path no route takes", ("/pz/a/b", "", r#"{"n": 2}"#), 404),
+    ] {
+        let (early, (made, _, _), (told, _, body)) = refused_beside(&s, first, refused);
+        assert!(made < 300, "{what}: the first write {made}");
+        assert_eq!(told, status, "{what}: {body}");
+        assert!(early, "{what}: waited for an fsync it never read");
+    }
+    assert!(!s.timed_out(), "an fsync waited out the gate");
+}
+
+/// A held write's run asks no durability: its answer is kept back, and the
+/// wait's end asks it once (`held_answered`). Asked at each run too, a
+/// `require` refused waited at the disk on every look of its group, whose
+/// other requests waited behind it. Counted by the durabilities begun: the
+/// first write's and the held one's at its end, never a third.
+#[test]
+fn a_held_run_asks_no_durability_its_wait_end_does() {
+    let s = slow_disk_server(false);
+    {
+        let mut g = s.h.db.write().unwrap();
+        for q in ["create collection hr (n int)", "put hr {n: 1}"] {
+            g.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+    }
+    let (asked, _) = s.counts();
+    let (early, (made, _, _), (told, _, body)) = refused_beside(
+        &s,
+        ("/query", "", r#"{"query": "del hr where n = 1"}"#),
+        (
+            "/query",
+            WAIT,
+            r#"{"query": "set hr {n: 2} where n = 1 require 1"}"#,
+        ),
+    );
+    assert!(made < 300 && !early, "{made} {early}");
+    assert_eq!(told, 412, "{body}");
+    assert_eq!(s.counts().0, asked + 2, "durabilities begun");
+}
+
+/// The stop of a `/batch` run statement by statement says `completed`
+/// statements were made: answered once they are durable, as a write is,
+/// and where the fsync fails, the 500 that failure is -- never the 409 of
+/// the line after, `completed: 1`, of a write the disk may have lost.
+#[test]
+fn a_batch_stop_after_a_statement_made_is_its_fsync_failure() {
+    let s = slow_disk_server(true);
+    s.h.db
+        .write()
+        .unwrap()
+        .execute(&fennec_ql::parse_one("create collection bf (n int)").unwrap())
+        .unwrap();
+    s.open();
+    let lines = "{\"query\": \"insert bf {id: 1}\"}\n\
+                 {\"query\": \"insert bf {id: 1}\"}\n\
+                 {\"query\": \"compact bf\"}";
+    let (status, _, body) = s.send("/batch", String::new(), lines).join().unwrap();
+    assert_eq!(status, 500, "{body}");
+    assert!(!body.contains("completed"), "{body}");
+    assert!(s.h.db.read().unwrap().failure().is_some());
+}
+
+/// A block a quota refuses as it lands is refused by what other writes
+/// left -- the rows another landed -- and is answered once those are
+/// durable, as every other such refusal: a `/batch`'s and an MCP call
+/// tool's, whose block lands at `mcp::land`. The quota is armed once the
+/// first write landed, which it would have refused too.
+#[test]
+fn a_quota_refused_at_land_is_answered_once_what_it_read_is_on_disk() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let cfg = Config {
+        sync_on_write: true,
+        token: Some("root".into()),
+        mcp: Some(Arc::new(fennec_http::mcp::Options {
+            write: true,
+            calls_per_sec: 0,
+            ..fennec_http::mcp::Options::default()
+        })),
+        ..Config::default()
+    };
+    let s = slow_disk_server_cfg(false, cfg);
+    {
+        let mut g = s.h.db.write().unwrap();
+        for q in [
+            "create collection ql (n int)",
+            "create statement grow() public as insert ql {n: 3}",
+        ] {
+            g.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        let on = Arc::clone(&armed);
+        g.set_limit(Some(Arc::new(
+            move |_: &Database, l: &fennec_core::engine::Landing| match on.load(Ordering::SeqCst)
+                && l.grows
+            {
+                true => Err("rows: at most 1".into()),
+                false => Ok(()),
+            },
+        )));
+    }
+    const AUTH: &str = "Authorization: Bearer root\r\n";
+    const MCP: &str = "Authorization: Bearer root\r\nMCP-Protocol-Version: 2026-07-28\r\n\
+                       Mcp-Method: tools/call\r\nMcp-Name: call_grow\r\n\
+                       Content-Type: application/json\r\n\
+                       Accept: application/json, text/event-stream\r\n";
+    const CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"call_grow","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"}}}}"#;
+    for (what, refused) in [
+        (
+            "/batch",
+            ("/batch", AUTH, r#"{"query": "insert ql {n: 2}"}"#),
+        ),
+        ("an MCP call tool", ("/_mcp", MCP, CALL)),
+    ] {
+        armed.store(false, Ordering::SeqCst);
+        let reached = s.gate.0.lock().unwrap().reached;
+        let (asked, replays) = s.counts();
+        s.hold_for(u64::MAX);
+        let made = s.send(
+            "/query",
+            AUTH.to_string(),
+            r#"{"query": "insert ql {n: 1}"}"#,
+        );
+        s.reached(reached + 1);
+        armed.store(true, Ordering::SeqCst);
+        let answer = s.send(refused.0, refused.1.to_string(), refused.2);
+        let early = s.replayed_or_waiting(asked + 2, replays);
+        s.open();
+        let (status, _, body) = made.join().unwrap();
+        assert!(status < 300, "{what}: the first write {status} {body}");
+        let (status, _, told) = answer.join().unwrap();
+        // A tool's refusal is its result's, the transport's answer a 200.
+        let refused = status == 507 || told.contains(r#""status":507"#);
+        assert!(refused, "{what}: {status} {told}");
+        assert!(!early, "{what}: refused before the fsync of what it read");
+    }
+    assert!(!s.timed_out(), "an fsync waited out the gate");
+}
+
+/// A refusal whose reading fsync fails is no refusal: an `insert` of an id
+/// another write holds, that write's fsync failing, is answered the 500 the
+/// failure is -- whether the row is there, no one here knows -- as the first
+/// write is, never the 409 of a row the disk may have lost. Its durability
+/// fails as the disk's failure sticks, running no fsync of its own.
+#[test]
+fn a_refusal_read_from_a_write_whose_fsync_failed_is_no_refusal() {
+    let s = slow_disk_server(true);
+    s.h.db
+        .write()
+        .unwrap()
+        .execute(&fennec_ql::parse_one("create collection d (n int)").unwrap())
+        .unwrap();
+    let (asked, replays) = s.counts();
+    let before = s.fsyncs.load(Ordering::SeqCst);
+    s.hold_for(u64::MAX);
+    let first = s.send("/query", String::new(), r#"{"query": "insert d {id: 7}"}"#);
+    s.reached(1);
+    let refused = s.send("/query", String::new(), r#"{"query": "insert d {id: 7}"}"#);
+    let early = s.replayed_or_waiting(asked + 2, replays);
+    s.open();
+    assert!(!early, "refused before the fsync of what it read");
+    let (status, _, made) = first.join().unwrap();
+    assert_eq!(status, 500, "{made}");
+    let (status, _, told) = refused.join().unwrap();
+    assert_eq!(status, 500, "{told}");
+    assert_eq!(
+        s.fsyncs.load(Ordering::SeqCst),
+        before + 1,
+        "the failed fsync was tried again"
     );
 }
 

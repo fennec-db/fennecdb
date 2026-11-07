@@ -567,10 +567,13 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
     if ctx.cfg.read_only && !reads {
         return crate::http::Response::error(403, "this session is read-only (--read-only)");
     }
-    // A call tool's block, held to its bounds before it lands.
+    // A call tool's block, held to its bounds before it lands. Its
+    // refusals wait for no durability, where a server's do
+    // (`crate::refusal_durability`): one caller writes here, and what they
+    // read its own writes left, each on disk before it was answered.
     let bounded = match super::open(&mut g, &stmt) {
         Ok(b) => b,
-        Err(refused) => return refused,
+        Err(refused) => return refused.0,
     };
     // A scoped token's call is judged under this lock and its body run
     // outside the token's scope, as `/query` runs it (`access::run_as`).
@@ -583,7 +586,7 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         }
     };
     if bounded {
-        if let Some(refused) = super::land(&mut g, &r) {
+        if let Some((refused, _)) = super::land(&mut g, &r) {
             return refused;
         }
     }

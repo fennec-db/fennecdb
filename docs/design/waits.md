@@ -66,15 +66,30 @@ empty queue, 16 busy HTTP workers took 148 000 jobs a second against
 at every write they looked 3 400 times and the workers took 142 000. A
 held request runs `handle` whole each time -- its token asked again, a
 tenant's gate entered and let go, so a freeze goes through beside it --
-and its time is out of the slow log; a tenant closed answers it 503 with
+and its wait is out of the slow log; a tenant closed answers it 503 with
 `Retry-After` and `retry_after`, a wait that ran out answers its last
 answer though a write it has not looked at landed in the moment before
-(its head woken late: the job is the next claim's, never lost), a SIGTERM
-answers every one at once with its last answer before the sync
-(`end_all`, `HELD_GRACE`), a client gone hands the row to the next (a
-`peek` before each run), a keyed one keeps no key while it writes nothing
-(sent again it waits again), a replica refuses it as any write, and the
-router waits `--upstream-timeout` plus the wait (`Pool::send_held`: cut
+(its head woken late: the job is the next claim's, never lost) -- under
+`--sync always` once what that answer read is durable, as a write's
+refusal waits (`durability.md`, *Storage errors*; `held_answered`), since
+a run that is held keeps its answer back with no durability of its own,
+the 412 of a `del` another worker landed a power loss could take back
+among them. A run asks none (`waits::plan` says it is held): asked at
+each, a `/query`'s 412 waited at the disk on every look of its group,
+which held the group's other requests behind it (the #497 review). One
+whose plan has nothing to look for is not held, and is answered then,
+after the durability any run's answer waits for. That end's wait is the
+request's own time, as a write's fsync is, not its hold: up to an fsync
+and, on a primary, `SENT_WAIT` for the streams keeping up past the
+`Fennec-Wait` asked, `respond` adds it to the runs' time, so the slow log,
+`fennec_statement_duration_seconds` and `/_stats/statements` count it, and
+the trace has its `durability` span. A SIGTERM answers every one at once
+with its last answer before the sync (`end_all`, `HELD_GRACE`), after the
+same durability, as is a request whose wait the shutdown ended before it
+began; a client gone hands the row to the next (a `peek` before each run),
+a keyed one keeps no key while it writes nothing (sent again it waits
+again), a replica refuses it as any write, and the router waits
+`--upstream-timeout` plus the wait (`Pool::send_held`: cut
 at the timeout, a 502 while the node leased the job to no one). `/_metrics`
 counts `fennec_held_requests` and the heads' looks and runs. A job
 enqueued reached one of 8 held workers in 0.38 ms p50, 0.76 p99, against

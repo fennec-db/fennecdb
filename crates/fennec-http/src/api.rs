@@ -128,8 +128,35 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                 shape: Shape::Affected("deleted", 200),
             })
         }
-        _ => Err(Error::NotFound(format!("path `{}`", req.path))),
+        _ => Err(unrouted(req)),
     }
+}
+
+/// [`route`]'s refusal of a path no route takes.
+fn unrouted(req: &Request) -> Error {
+    Error::NotFound(format!("path `{}`", req.path))
+}
+
+/// Whether [`route`]'s refusal `e` of `req` was read from the database it
+/// routed against -- a collection, a field or a type another write made,
+/// dropped or changed -- rather than from the request alone: a path no
+/// route takes, a body that is no UTF-8 or no JSON, which no write changes.
+/// A write refused under the write lock by what another write left waits
+/// for that write's fsync before it is answered, under `--sync always`
+/// (`crate::refusal_durability`); one refused by its request alone tells
+/// nothing a power loss could take back, and waited for an fsync it never
+/// read -- `POST /<c>` with `{not json` stood behind another client's
+/// write. A refusal this cannot place counts as read: a wait too many, never
+/// one too few. Asked on the refusal's path alone, the body parsed again.
+pub fn refusal_read(req: &Request, e: &Error) -> bool {
+    if *e == unrouted(req) {
+        return false;
+    }
+    let refused = match body_str(req) {
+        Ok(body) => json::parse_documents_json(body, &[]).err(),
+        Err(not_text) => Some(not_text),
+    };
+    refused.as_ref() != Some(e)
 }
 
 /// `POST /<name>`: the body's documents as the `insert` that makes them,

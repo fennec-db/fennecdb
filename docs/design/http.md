@@ -292,6 +292,19 @@ tenant's write answered after its lease lapsed says it in words
 refused, the write is there once the file opens again or it is not, and
 the client reads it back then rather than take it as made.
 
+A replay is the answer of a write, whichever path finds its key, and on a
+tenant it is asked of the lease as that write's answer is
+(`answered_under_lease`): a key a writing call kept, found once its
+statement was made to read by the read path (`read_call`), sets
+`metrics::wrote` as the write paths do before their replays, so a lapsed
+node answers it `outcome: unknown` rather than the kept 200 -- which it
+had handed back as a read's, run read-only under the lapse, where the
+tenant may have been failed over without the write (`tenants.md`,
+*Scaling out by tenant*). A write's refusal waits as its success does
+too, the 409 of an id another write holds among them (`durability.md`,
+*Storage errors*); the 422 of a key sent with another request still waits
+for nothing.
+
 A key an earlier process landed is in the file and may not be on the
 disk, that process having crashed before its fsync: a file sink's
 durability fsyncs what it inherited once, though it covers nothing

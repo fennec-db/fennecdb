@@ -14,7 +14,10 @@ never while its follower or anything beside it holds the database: no two
 `Database`s share a file. A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
 the export), copy, install, the flip in one statement, the source
-deleted once the standbys were sent it (`standbys_sent`). A node
+deleted once the standbys were sent it (`standbys_sent`). A create or an
+install answers once the file and its name in the directory are durable
+(`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the
+file back under `<file>.lock` (`take_back_made`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
 reading (`grant_from`); the router counts a node by the directory's

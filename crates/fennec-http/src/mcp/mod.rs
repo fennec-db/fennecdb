@@ -880,26 +880,37 @@ pub(crate) fn writes_refused(db: &Database, stmt: &Statement) -> Option<Response
 /// to the bounds before it lands ([`land`]): `false`, opening none, where
 /// no call tool runs on this thread. A call tool's statement that writes
 /// where the session takes no writes is refused here, under the write lock
-/// it would run under ([`writes_refused`]).
-pub(crate) fn open(db: &mut Database, stmt: &Statement) -> std::result::Result<bool, Response> {
+/// it would run under ([`writes_refused`]). A refusal comes with whether it
+/// was read from what other writes left (`crate::refusal_durability`): the
+/// statement's definition is; a block left open, the one refusal of
+/// `begin`, is not. Boxed, as a refusal alone pays for it: a `Response`
+/// and a `bool` beside it make every `Result` of the call past clippy's
+/// bound for an error.
+pub(crate) fn open(
+    db: &mut Database,
+    stmt: &Statement,
+) -> std::result::Result<bool, Box<(Response, bool)>> {
     if BOUND.with(Cell::get).is_none() {
         return Ok(false);
     }
     if let Some(refused) = writes_refused(db, stmt) {
-        return Err(refused);
+        return Err(Box::new((refused, true)));
     }
     db.begin()
         .map(|_| true)
-        .map_err(|e| crate::error_response(&e))
+        .map_err(|e| Box::new((crate::error_response(&e), false)))
 }
 
 /// Lands the block [`open`] opened, or puts it back: where the statement
 /// failed, or its answer is past the bounds -- refused then (413) -- or the
-/// block cannot land. What to answer in place of the answer, if anything.
+/// block cannot land. What to answer in place of the answer, if anything,
+/// and whether that refusal was read from what other writes left: the
+/// rows past the bounds and a quota's 507 are, a storage error's is not
+/// (`crate::read_from_writes`).
 pub(crate) fn land(
     db: &mut Database,
     r: &fennec_core::error::Result<api::Response2>,
-) -> Option<Response> {
+) -> Option<(Response, bool)> {
     let why = match r {
         Ok(resp) => past_answer(resp),
         Err(_) => {
@@ -909,10 +920,12 @@ pub(crate) fn land(
     };
     if let Some(why) = why {
         db.rollback();
-        return Some(Response::error(413, &why));
+        return Some((Response::error(413, &why), true));
     }
     // A block the sink refuses is put back by `commit` itself.
-    db.commit().err().map(|e| crate::error_response(&e))
+    db.commit()
+        .err()
+        .map(|e| (crate::error_response(&e), crate::read_from_writes(&e)))
 }
 
 // ------------------------------------------------------------ rate
