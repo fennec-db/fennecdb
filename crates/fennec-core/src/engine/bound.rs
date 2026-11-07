@@ -158,18 +158,59 @@ pub struct HookRuns {
     /// Each taking statement that ran, in name order, the order it ran
     /// in: its `rows` what its body's last statement answered, as a
     /// call's are counted, and its time its body's. One that refused is
-    /// among them, its rows `0`; those after it never ran.
+    /// among them, its rows `0`; those after it never ran. One before it
+    /// is counted as it ran, its rows what it answered though the refusal
+    /// put them back: what each statement did, the event's outcome being
+    /// its request's.
     pub ran: Vec<Ran>,
-    /// The statement that refused the event, by its place in `ran`, and
-    /// the error it refused with -- its guard, a clash, a bound, a binding
-    /// its writes woke -- whose words the sender is never told.
-    pub refusal: Option<(usize, Error)>,
+    /// The event's refusal and its error, whose words the sender is never
+    /// told: by a statement, its place in `ran` -- its guard, a clash, a
+    /// bound, a binding its writes woke -- or `None`, by none, every
+    /// statement having run and the event failing to land after them --
+    /// its key's row, its block's commit -- each statement's run refused
+    /// with it, its rows `0`.
+    pub refusal: Option<(Option<usize>, Error)>,
+}
+
+impl HookRuns {
+    /// The error the statement at `i` in `ran` is counted refused with.
+    pub fn refused(&self, i: usize) -> Option<&Error> {
+        match &self.refusal {
+            Some((at, e)) if at.is_none_or(|at| at == i) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Every statement ran, and the event failed to land with `e` after
+    /// them: each run refused with it, none of its rows landed. A refusal
+    /// noted before is the event's.
+    #[cold]
+    pub(super) fn unlanded(&mut self, e: &Error) {
+        if self.refusal.is_some() {
+            return;
+        }
+        for r in &mut self.ran {
+            r.rows = 0;
+        }
+        self.refusal = Some((None, e.clone()));
+    }
 }
 
 /// An event's taking, noted on this thread in place of the one before.
 pub(super) fn note_hook_runs(t: HookRuns) {
     NOTED.with(|n| n.set(true));
     RUNS.with(|r| r.borrow_mut().taking = Some(Box::new(t)));
+}
+
+/// The taking this thread noted last failed to land with `e` -- its
+/// block's commit, after `taking` noted it ([`HookRuns::unlanded`]).
+#[cold]
+pub(super) fn hook_runs_unlanded(e: &Error) {
+    RUNS.with(|r| {
+        if let Some(t) = r.borrow_mut().taking.as_mut() {
+            t.unlanded(e);
+        }
+    });
 }
 
 /// A binding's runs for one statement.

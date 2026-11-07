@@ -286,7 +286,16 @@ impl Database {
         self.whole(|db| {
             db.open_block();
             match db.taking(e, key, &takers, now) {
-                Ok(n) => db.commit().map(|_| Took::Ran(n)),
+                Ok(n) => match db.commit() {
+                    Ok(_) => Ok(Took::Ran(n)),
+                    // Noted as taken by `taking`, and never landed: each
+                    // statement's run refused with it. A block its caller
+                    // opened is the caller's to land.
+                    Err(err) => {
+                        super::bound::hook_runs_unlanded(&err);
+                        Err(err)
+                    }
+                },
                 Err(err) => {
                     db.rollback();
                     Err(err)
@@ -462,12 +471,18 @@ impl Database {
                     took: at.elapsed(),
                 });
                 if let Some(err) = refused {
-                    noted.refusal = Some((noted.ran.len() - 1, err.clone()));
+                    noted.refusal = Some((Some(noted.ran.len() - 1), err.clone()));
                     return Err(err);
                 }
             }
             db.keep_key(key, e.digest, taken, until)
         });
+        // Its key's row refused after every statement ran -- the storage,
+        // the bound, a full disk's spill: none of their runs landed, and
+        // none is counted as though it had.
+        if let Err(err) = &r {
+            noted.unlanded(err);
+        }
         note_hook_runs(noted);
         r.map(|()| taken)
     }

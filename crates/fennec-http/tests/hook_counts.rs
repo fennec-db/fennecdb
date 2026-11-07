@@ -205,10 +205,25 @@ fn an_events_statements_are_counted_and_traced_by_name_a_tenant_s_apart() {
     for t in ["acme", "beta"] {
         assert!(tenants_of.contains(&Some(Value::Text(t.into()))), "{all}");
     }
-    // A client's text shaped so is a shape of its own, never the runs'.
-    query(port, "acme", "get notes where ref = 'hook paid' count");
+    // A client's text reading the same -- `hook paid`, which no parser
+    // reads, its shape its text -- is a shape of its own, never among the
+    // runs: keyed where no client's is (`statements::own_key`), never by
+    // the text's hash.
+    let (status, answer) = call(
+        port,
+        "POST",
+        "/t/acme/query",
+        &[],
+        r#"{"query":"hook paid"}"#,
+    );
+    assert_eq!(status, 400, "{answer}");
     let (_, stats) = call(port, "GET", "/t/acme/_stats/statements", &[], "");
-    assert_eq!(shapes(&stats, "hook paid").len(), 1, "{stats}");
+    let both: Vec<_> = (shapes(&stats, "hook paid").iter())
+        .map(|e| (n(e, "calls"), n(e, "errors")))
+        .collect();
+    assert_eq!(both.len(), 2, "{stats}");
+    assert!(both.contains(&(1, 1)), "the client's: {stats}");
+    assert!(both.contains(&(2, 1)), "the runs': {stats}");
 
     // The event's request is its trace: the hook and what it came to on
     // its span, each statement that ran a child of it.

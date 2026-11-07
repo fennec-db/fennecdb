@@ -621,7 +621,7 @@ pub fn bound_runs(runs: &fennec_core::engine::Runs) {
     }
     // The binding that refused the write: its last span is the failed one.
     let refused = (runs.refusal.as_ref())
-        .and_then(|(n, e)| Some((runs.ran.iter().rposition(|r| r.name == *n)?, e)));
+        .and_then(|(n, e)| Some((Some(runs.ran.iter().rposition(|r| r.name == *n)?), e)));
     ran_spans("bound", "fennec.rows_woken", &runs.ran, refused);
 }
 
@@ -629,8 +629,9 @@ pub fn bound_runs(runs: &fennec_core::engine::Runs) {
 /// child span of it each (`docs/design/named-statements.md`, *Watching
 /// hooks*): `hook <name>`, its `db.operation.name` `hook`,
 /// `db.stored_procedure.name` the statement and `fennec.rows` what its last
-/// statement answered, the one that refused the event failed -- never the
-/// event's key or a value of its body, as a span names no value.
+/// statement answered, the one that refused the event failed -- each of
+/// them where the event failed to land after they ran -- never the event's
+/// key or a value of its body, as a span names no value.
 #[cold]
 #[inline(never)]
 pub fn hooked(t: &fennec_core::engine::HookRuns) {
@@ -644,7 +645,7 @@ pub fn hooked(t: &fennec_core::engine::HookRuns) {
 /// A child span of this thread's request for each of `ran` -- what the
 /// engine timed of a statement it ran for the request, a binding's or a
 /// webhook consumer's -- named `<op> <name>`, the one at `refused`'s place
-/// failed: marked with the status its error answers and the reason its
+/// failed, every one where it names none: marked with the status its error answers and the reason its
 /// `else` wrote -- the statement's own text -- alone, never the engine's
 /// words, which may hold a row's value: a unique clash's names the value
 /// held, and a span names a shape, never a value.
@@ -652,7 +653,7 @@ fn ran_spans(
     op: &'static str,
     rows: &'static str,
     ran: &[fennec_core::engine::Ran],
-    refused: Option<(usize, &fennec_core::error::Error)>,
+    refused: Option<(Option<usize>, &fennec_core::error::Error)>,
 ) {
     CTX.with(|c| {
         let mut c = c.borrow_mut();
@@ -680,7 +681,7 @@ fn ran_spans(
                 ("db.stored_procedure.name", Val::from(ran.name.clone())),
                 (rows, Val::Int(ran.rows as i64)),
             ];
-            let failed = (refused.as_ref()).filter(|(at, ..)| *at == i);
+            let failed = (refused.as_ref()).filter(|(at, ..)| at.is_none_or(|at| at == i));
             if let Some((_, status, _)) = failed {
                 attrs.push(("error.type", Val::from(status.to_string())));
             }
@@ -1731,6 +1732,9 @@ mod tests {
         // A call's name is never its route, a word the server knows or not.
         assert_eq!(route("/_call/transfer"), "/_call/{name}");
         assert_eq!(route("/t/acme/_call/stats"), "/t/{tenant}/_call/{name}");
+        // A hook's too: `stats` had a route of its own, and its span with it.
+        assert_eq!(route("/_hooks/stats"), "/_hooks/{name}");
+        assert_eq!(route("/t/acme/_hooks/stripe"), "/t/{tenant}/_hooks/{name}");
         assert_eq!(route("/_schema/plan"), "/_schema/plan");
         assert_eq!(
             route("/_admin/tenants/acme/freeze"),

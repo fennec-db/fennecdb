@@ -262,10 +262,10 @@ pub(crate) fn scheduled(tenant: Option<&str>, name: &str, rows: u64, took: Durat
 /// an event it took, its rows what its body's last statement answered, as
 /// a call's are, its time its body's -- which the request's own shape,
 /// `POST /_hooks/<hook>`, holds too -- and an error where it refused the
-/// event. On a tenant node it is the tenant's. Keyed apart from any text a
-/// client sends ([`own_key`]), as `schedule <name>` is.
+/// event, each statement's where the event failed to land after they ran
+/// (`HookRuns::refused`). On a tenant node it is the tenant's. Keyed apart
+/// from any text a client sends ([`own_key`]), as `schedule <name>` is.
 pub(crate) fn hooked(tenant: Option<&str>, t: &HookRuns) {
-    let refused = t.refusal.as_ref().map(|(at, _)| *at);
     for (i, ran) in t.ran.iter().enumerate() {
         let shape = format!("hook {}", ran.name);
         let micros = ran.took.as_micros().min(u64::MAX as u128) as u64;
@@ -273,7 +273,7 @@ pub(crate) fn hooked(tenant: Option<&str>, t: &HookRuns) {
             own_key(tenant, &shape),
             ran.rows,
             micros,
-            refused == Some(i),
+            t.refused(i).is_some(),
         );
         count(tenant, &shape, counted);
     }

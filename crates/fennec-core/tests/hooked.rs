@@ -1426,9 +1426,15 @@ fn an_event_s_taking_is_noted_statement_by_statement() {
     let t = Database::take_runs().unwrap().taking.expect("the taking");
     let ran: Vec<_> = t.ran.iter().map(|r| (r.name.as_str(), r.rows)).collect();
     assert_eq!(ran, [("a_note", 1), ("stripe_paid", 0)]);
-    let (at, err) = t.refusal.expect("the refusal");
-    assert_eq!(at, 1);
-    assert_eq!(err.reason(), Some("no open order of that total"));
+    // The first counted as it ran, its row though put back; the second
+    // refused.
+    assert!(t.refused(0).is_none());
+    assert_eq!(
+        t.refused(1).and_then(|e| e.reason()),
+        Some("no open order of that total")
+    );
+    let (at, _) = t.refusal.expect("the refusal");
+    assert_eq!(at, Some(1));
 
     // One no condition takes runs nothing.
     let test = fennec_core::json::parse_json(
@@ -1442,4 +1448,100 @@ fn an_event_s_taking_is_noted_statement_by_statement() {
         Took::Passed
     );
     assert!(Database::take_runs().is_none());
+}
+
+/// A sink whose writes fail once its flag is set: a block's commit refused
+/// after every statement of an event ran.
+#[derive(Clone, Default)]
+struct Failing(Arc<std::sync::atomic::AtomicBool>);
+
+impl Failing {
+    fn check(&self) -> Result<()> {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Io("the disk went away".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Sink for Failing {
+    fn append(&mut self, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+    fn record(&mut self, _: u64, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+    fn rewrite(&mut self, _: &[u8]) -> Result<()> {
+        self.check()
+    }
+}
+
+/// An event whose statements all ran and that then failed to land -- its
+/// key's row refused, its block's commit -- is noted refused by each of
+/// them, their rows `0`: none landed, and a server counting them as taken
+/// would count rows no file holds.
+#[test]
+fn an_event_failing_to_land_is_noted_refused_by_each_statement() {
+    let each = |t: &fennec_core::engine::HookRuns| -> Vec<(String, u64, bool)> {
+        (t.ran.iter().enumerate())
+            .map(|(i, r)| (r.name.clone(), r.rows, t.refused(i).is_some()))
+            .collect()
+    };
+    // Its key's row refused, after both statements ran: a `_hook_events`
+    // whose `digest` is unique, another key holding the event's.
+    let tap = Tap::default();
+    let mut db = defined(&tap);
+    run(&mut db, "create collection ledger (ref text, amount int)").unwrap();
+    run(
+        &mut db,
+        "create statement a_note($order text from event.data.object.metadata.order) on hook \
+         stripe as insert ledger {ref: $order, amount: 0}",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create collection _hook_events (key text @hash, digest int @unique, taken int, until \
+         timestamp)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "put _hook_events {key: 'another', digest: 1, taken: 1}",
+    )
+    .unwrap();
+    drop(Database::take_runs());
+    let body = paid("evt_1", "o-1", 2000);
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    assert_eq!(
+        each(&t),
+        [("a_note".into(), 0, true), ("stripe_paid".into(), 0, true)]
+    );
+    let (at, noted) = t.refusal.as_ref().expect("the refusal");
+    assert_eq!((*at, noted.to_string()), (None, err.to_string()));
+    let Response::Rows(ledger) = run(&mut db, "get ledger").unwrap() else {
+        panic!("rows")
+    };
+    assert!(ledger.rows.is_empty(), "put back: {ledger:?}");
+
+    // Its block's commit refused.
+    let failing = Failing::default();
+    fennec_ql::install();
+    let mut db = Database::with_sink(Box::new(failing.clone()));
+    db.set_clock(Some(t0()));
+    db.allow_hooks();
+    run(&mut db, ORDERS).unwrap();
+    run(
+        &mut db,
+        "put orders {ref: 'o-1', total: 2000, currency: 'eur', status: 'open'}",
+    )
+    .unwrap();
+    run(&mut db, STRIPE_PAID).unwrap();
+    drop(Database::take_runs());
+    failing.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = db.take_event(&event(&body, "evt_1", 1)).unwrap_err();
+    assert!(matches!(err, Error::Io(_)), "{err}");
+    let t = Database::take_runs().unwrap().taking.expect("the taking");
+    assert_eq!(each(&t), [("stripe_paid".into(), 0, true)]);
+    assert!(matches!(t.refusal, Some((None, Error::Io(_)))));
 }

@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 /// The sidecar's layout.
 const LAYOUT: &str = "1";
@@ -98,7 +98,18 @@ pub struct Store {
     /// The node's `--max-body`, which a hook's own ceiling stays under.
     max_body: AtomicUsize,
     sets: RwLock<HashMap<String, Entry>>,
+    /// Held across every change of a set -- its sidecar written or unlinked
+    /// and synced, then its entry swapped -- so two never interleave
+    /// ([`Store::changing`]). The map's write lock is taken for the swap
+    /// alone, after the sync: a read of the sets -- an event's `verify`, a
+    /// listing's `armed`, every tenant's -- never waits on one tenant's
+    /// fsync, which it did while the map's lock was held across it.
+    writing: Mutex<()>,
 }
+
+/// [`Store::writing`] held: what a change of a set takes before it reads
+/// the entry it changes.
+type Changing<'a> = MutexGuard<'a, ()>;
 
 struct Entry {
     set: Arc<Set>,
@@ -158,6 +169,7 @@ impl Store {
             widest: AtomicUsize::new(CEILING),
             max_body: AtomicUsize::new(usize::MAX),
             sets: RwLock::new(HashMap::new()),
+            writing: Mutex::new(()),
         };
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Ok(store);
@@ -186,7 +198,7 @@ impl Store {
                     store.widen(&entry.set);
                     store.write_map().insert(name.to_string(), entry);
                 }
-                Err(why) => store.forget(&mut store.write_map(), name, why),
+                Err(why) => store.forget(&store.changing(), name, why),
             }
         }
         if !store.read_map().is_empty() {
@@ -214,8 +226,16 @@ impl Store {
         self.read_map().contains_key(name)
     }
 
+    /// For the swap of an entry alone, under [`Self::changing`], never
+    /// across a write or a sync of a sidecar.
     fn write_map(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Entry>> {
         self.sets.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Taken before a change of a set reads the entry it changes, and held
+    /// through its sidecar's sync and its swap in memory.
+    fn changing(&self) -> Changing<'_> {
+        self.writing.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -350,9 +370,9 @@ impl Store {
         remove(&self.path(name))
     }
 
-    /// Puts `name`'s set away from disk and `map`, saying why: one that
+    /// Puts `name`'s set away from disk, then memory, saying why: one that
     /// does not read, or names another file than the tenant's.
-    fn forget(&self, map: &mut HashMap<String, Entry>, name: &str, why: &str) {
+    fn forget(&self, _: &Changing<'_>, name: &str, why: &str) {
         crate::log!(
             "tenant `{name}`'s hook secrets {why}: put away, and its hooks answer 401 until \
              they are set again"
@@ -360,18 +380,18 @@ impl Store {
         if let Err(e) = self.unlink(name) {
             crate::log!("tenant `{name}`'s hook secrets could not be put away: {e}");
         }
-        map.remove(name);
+        self.write_map().remove(name);
     }
 
     /// Puts `name`'s set away, synced, before its file is made, removed or
     /// replaced -- a create, an install, a follow, a delete, a reclaim --
     /// and out of memory: a later file at the place is armed by no set
     /// another left. Asked under the tenant's slot. A node holding no set
-    /// for it pays a map's look and an unlink that finds nothing.
+    /// for it pays a lock, an unlink that finds nothing and a map's look.
     pub(crate) fn put_away(&self, name: &str) -> io::Result<()> {
-        let mut map = self.write_map();
+        let _changing = self.changing();
         self.unlink(name)?;
-        map.remove(name);
+        self.write_map().remove(name);
         Ok(())
     }
 
@@ -385,15 +405,18 @@ impl Store {
         if !self.holds(name) {
             return;
         }
-        let mut map = self.write_map();
-        let Some(e) = map.get_mut(name) else {
-            return;
-        };
-        if Some(e.bound) == at {
-            e.held = open;
-            return;
+        let changing = self.changing();
+        {
+            let mut map = self.write_map();
+            let Some(e) = map.get_mut(name) else {
+                return;
+            };
+            if Some(e.bound) == at {
+                e.held = open;
+                return;
+            }
         }
-        self.forget(&mut map, name, "name another file than the one opened");
+        self.forget(&changing, name, "name another file than the one opened");
     }
 
     /// Before a change or a read of `name`'s set through the admin routes,
@@ -411,7 +434,7 @@ impl Store {
         };
         if !mine {
             self.forget(
-                &mut self.write_map(),
+                &self.changing(),
                 name,
                 "name another file than the tenant's",
             );
@@ -429,25 +452,31 @@ impl Store {
     /// power loss names the file before, which the next start puts away. A
     /// tenant holding no set pays a map's look.
     pub(crate) fn rebind(&self, name: &str, open: u64) {
-        let before = (self.read_map().get(name))
+        if !self.holds(name) {
+            return;
+        }
+        // Every change takes it before it reads its entry: the entry read
+        // here is the one swapped after the sync.
+        let _changing = self.changing();
+        let entry = (self.read_map().get(name))
             .filter(|e| e.held == open)
-            .map(|e| Arc::clone(&e.set));
-        let Some(before) = before else {
+            .map(|e| (Arc::clone(&e.set), e.bound));
+        let Some((set, bound)) = entry else {
             return;
         };
         let Ok(now) = instance::binding(&self.file(name)) else {
             return;
         };
-        let mut map = self.write_map();
-        let Some(entry) = map.get_mut(name) else {
-            return;
-        };
-        if !Arc::ptr_eq(&entry.set, &before) || entry.held != open || entry.bound == now {
+        if bound == now {
             return;
         }
-        let text = Self::text(now, entry.set.version, &exported(&entry.set));
+        let text = Self::text(now, set.version, &exported(&set));
         match self.write(name, &text) {
-            Ok(()) => entry.bound = now,
+            Ok(()) => {
+                if let Some(e) = self.write_map().get_mut(name) {
+                    e.bound = now;
+                }
+            }
             Err(e) => {
                 crate::log!("tenant `{name}`'s hook secrets were not bound to its file again: {e}")
             }
@@ -465,9 +494,9 @@ impl Store {
             )
         };
         let Some(set) = set else {
-            let mut map = self.write_map();
+            let _changing = self.changing();
             self.unlink(name).map_err(failed)?;
-            map.remove(name);
+            self.write_map().remove(name);
             return Ok(None);
         };
         if set.hooks.len() > MOST_HOOKS {
@@ -488,13 +517,13 @@ impl Store {
             ));
         }
         let bound = instance::binding(&self.file(name)).map_err(failed)?;
-        let mut map = self.write_map();
+        let _changing = self.changing();
         self.write(name, &Self::text(bound, set.version, &json))
             .map_err(failed)?;
         self.widen(&set);
         hooks::serving();
         let version = set.version;
-        map.insert(
+        self.write_map().insert(
             name.to_string(),
             Entry {
                 set: Arc::new(set),

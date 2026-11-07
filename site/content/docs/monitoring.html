@@ -290,8 +290,10 @@ run woke are counted as <code>after &lt;name&gt;</code>, as for any write.</p>
 shape of its own, <code>hook stripe_paid</code>: its calls are the events it
 ran for, its rows what its body's last statement answered, as a call's, its
 time its body's, and its errors the events it refused — its guard, a taken id
-or unique value, a bound, a binding its writes woke that refused. The
-request's own shape, <code>POST /_hooks/stripe</code>, is counted too and
+or unique value, a bound, a binding its writes woke that refused — and,
+counted against each statement with no rows, an event that failed to land
+after they ran. A statement before the one that refused counts the rows it
+wrote, though the refusal put them back. The request's own shape, <code>POST /_hooks/stripe</code>, is counted too and
 holds that time. A client's text that reads the same — <code>hook
 stripe_paid</code> sent to <code>/query</code> — is a shape of its own, never
 among the runs. On a tenant node it is the tenant's shape, at
