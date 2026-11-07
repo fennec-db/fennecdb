@@ -13003,14 +13003,32 @@ fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<(
         let f = &schema.fields[pos];
         let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
         whole.set_path(&f.name, keys, v)?;
-        doc.set(&f.name, whole.coerce(&f.ty)?);
+        doc.set(
+            &f.name,
+            whole.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?,
+        );
         return Ok(());
     }
     let f = schema
         .field(k)
         .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
-    doc.set(k, v.coerce(&f.ty)?);
+    doc.set(k, v.coerce(&f.ty).map_err(|e| in_field(k, e))?);
     Ok(())
+}
+
+/// A value a field's type refused, the field named: of a document of
+/// several fields, `expected int, found text` or an int's range left its
+/// writer to find which, where the importer names a row's field
+/// (`fennec_import::load`) and a call its argument. Out of line, on the
+/// refusal alone: a value taken goes by as it did. Joined by `cat`, 132
+/// bytes of the browser module, where a `format!` was 148.
+#[cold]
+#[inline(never)]
+fn in_field(name: &str, e: Error) -> Error {
+    match e {
+        Error::Type(m) => Error::Type(crate::declared::cat(&["field `", name, "`: ", &m])),
+        e => e,
+    }
 }
 
 /// Whether the row `id` of `c` is past its time: its `@ttl` field, at
@@ -13171,10 +13189,11 @@ fn updated(
         let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
             Some(p) => {
-                if schema.fields[p].required && matches!(v, Value::Null) {
-                    return Err(not_null(&schema.fields[p].name));
+                let f = &schema.fields[p];
+                if f.required && matches!(v, Value::Null) {
+                    return Err(not_null(&f.name));
                 }
-                doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?
+                doc.fields[p].1 = v.coerce(&f.ty).map_err(|e| in_field(&f.name, e))?
             }
             None => set_field(schema, &mut doc, a.key, v)?,
         }

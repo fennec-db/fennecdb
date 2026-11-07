@@ -664,6 +664,50 @@ mod tests {
         }
     }
 
+    /// A number past an int's range is refused naming its field, never
+    /// clamped to the nearest int -- a text's literal, a parameter's JSON, a
+    /// document's and a list's element handed over as `f32`s alike, the
+    /// module's and the native library's answer -- and the ends are taken.
+    #[test]
+    fn an_int_past_its_range_is_refused_naming_the_field() {
+        let mut db = Database::new();
+        run(&mut db, "create collection t (n int, xs [int])", "", &[]);
+        let refused = |field: &str| {
+            format!(
+                r#"{{"kind":"error","message":"type error: field `{field}`: an int is from -9223372036854775808 to 9223372036854775807, and a number past it is refused, never clamped"}}"#
+            )
+        };
+        for n in [
+            "1e300",
+            "-1e300",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
+            let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);
+            assert_eq!(r, refused("n"), "{n}");
+            let r = run(&mut db, "put t $1", &format!(r#"[{{"n": {n}}}]"#), &[]);
+            assert_eq!(r, refused("n"), "{n}");
+        }
+        assert_eq!(run(&mut db, "put t {n: -1e300}", "", &[]), refused("n"));
+        let mut apart = [0u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+        apart.extend(1e20f32.to_le_bytes());
+        let r = run(&mut db, "put t {xs: $1}", "[null]", &apart);
+        assert_eq!(r, refused("xs"));
+        for n in ["9223372036854775807", "-9223372036854775808"] {
+            let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+            let r = run(&mut db, &format!("put t {{n: {n}}}"), "", &[]);
+            assert!(r.contains("\"affected\""), "{r}");
+        }
+        let r = run(&mut db, "get t select n order id", "", &[]);
+        assert!(
+            r.contains(
+                r#"[{"n":9223372036854775807},{"n":9223372036854775807},{"n":-9223372036854775808},{"n":-9223372036854775808}]"#
+            ),
+            "{r}"
+        );
+    }
+
     /// A `require` that says why: the answer's `reason`, beside `at` for a
     /// text of several, as a server's 412 says it; none where it said none.
     /// The module's and the native library's answer alike.

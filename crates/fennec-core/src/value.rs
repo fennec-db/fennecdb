@@ -293,7 +293,14 @@ impl Value {
         match (ty, self) {
             (DataType::Bool, Value::Bool(b)) => Ok(Value::Bool(b)),
             (DataType::Int, Value::Int(i)) => Ok(Value::Int(i)),
-            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => Ok(Value::Int(f as i64)),
+            // `as` saturates: `1e300` was filed as 9223372036854775807. A
+            // whole float under 2^63 either side is the int it says, and
+            // only a float takes this arm -- an integer written as one is
+            // read as an `i64` and never meets the test.
+            (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => match f.abs() < I64_END {
+                true => Ok(Value::Int(f as i64)),
+                false => Err(past_int()),
+            },
             (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
             (DataType::Float, Value::Int(i)) => Ok(Value::Float(i as f64)),
             (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
@@ -559,6 +566,27 @@ fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
 
 fn not_bytes() -> Error {
     Error::Type("bytes are numbers from 0 to 255".into())
+}
+
+/// 2^63: the first `f64` past `i64::MAX`, and `i64::MIN`'s magnitude.
+/// -2^63 is `i64::MIN`, yet a float of it is refused too: a
+/// JSON integer past `i64::MIN` is read as the float it rounds to
+/// (`-9223372036854775809` is -2^63 exactly), and there the text that
+/// said it is gone. `i64::MIN` written as an integer is an `i64` and taken.
+const I64_END: f64 = 9_223_372_036_854_775_808.0;
+
+/// The refusal of a whole float at or past [`I64_END`] going into an `int`,
+/// which a document's write names the field of (`engine::in_field`). Out of
+/// line: the range is a limit, and a limit is an error, never the nearest
+/// int it would have been cut to.
+#[cold]
+#[inline(never)]
+fn past_int() -> Error {
+    Error::Type(
+        "an int is from -9223372036854775808 to 9223372036854775807, and a number past it \
+         is refused, never clamped"
+            .into(),
+    )
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

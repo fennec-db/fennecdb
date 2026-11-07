@@ -106,9 +106,10 @@ past 64 bits is refused, never wrapped; <code>/</code> between
 An <code>int</code> and a <code>float</code> make a <code>float</code>,
 which an <code>int</code> field takes when it is whole and refuses when it
 is not — <code>n * 2.0</code> fits, <code>n + 0.5</code> does not, as the
-literal <code>2.5</code> does not. A float that is no longer finite is
-refused. A <code>timestamp</code> plus or minus an <code>int</code> is a
-timestamp that many milliseconds on (<code>now() + 30000</code>), and two
+literal <code>2.5</code> does not — or when it is past an int's range,
+never clamped to its end (<a href="limits.html#fixed-limits">limits</a>).
+A float that is no longer finite is refused. A <code>timestamp</code>
+plus or minus an <code>int</code> is a timestamp that many milliseconds on (<code>now() + 30000</code>), and two
 timestamps apart are the milliseconds between them. <code>+</code> joins two
 texts (<code>$1 + ":dr"</code>), and only two texts. Anything else — text
 and a number, either way round, or <code>-</code> between texts — is a type

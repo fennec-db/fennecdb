@@ -571,6 +571,27 @@ test('an update works out its values over the row, in the module', { skip: wasm 
   assert.equal(db.run('set hits {n: 0} where key = $1 and n = $2', ['a', 3]).count, 0);
 });
 
+test('a number past an int\'s range is refused naming its field, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, xs [int])');
+  const past = (field) => new RegExp(`field \`${field}\`: an int is from -9223372036854775808 to 9223372036854775807`);
+  // JavaScript writes 2 ** 63 as 9223372036854775808, past the range, and
+  // -(2 ** 63) as -9223372036854776000: an int past 2 ** 53 goes as text.
+  for (const n of [1e300, -1e300, 2 ** 63, -(2 ** 63)]) {
+    assert.throws(() => db.run('put t {n: $1}', [n]), past('n'), `${n}`);
+    await assert.rejects(db.from('t').insert({ n }), past('n'), `${n}`);
+  }
+  assert.throws(() => db.run('put t {n: -1e300}'), past('n'));
+  assert.throws(() => db.run('put t {n: 9223372036854775808}'), /invalid integer/);
+  // A list of numbers goes in as a vector's f32s, beside the JSON.
+  assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs'));
+  assert.equal(db.rows('get t count')[0].count, 0);
+  db.run('put t [{n: 9223372036854775807}, {n: -9223372036854775808}]');
+  assert.equal(db.rows('get t where n = 9223372036854775807 or n = -9223372036854775808 count')[0].count, 2);
+  db.close();
+});
+
 test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
