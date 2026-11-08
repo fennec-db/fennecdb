@@ -347,6 +347,12 @@ import Testing
     // A job queue's claim through the engine: order and limit pick the
     // rows, updateReturning answers them as written, deleteReturning as
     // they were.
+    //
+    // A job is ready by an instant the test holds, not by now(): a lease
+    // of now() + a minute runs out whenever a minute passes between two
+    // claims, and an iOS simulator's run once stalled 75 s between them,
+    // the second claim taking a job the first held. now() writes the
+    // leases still, every one of them past that instant.
     @Test func aClaimAnswersTheRowsItTook() async throws {
         let db = try Fennec.memory()
         try await db.execute("create collection jobs (n int, run_at timestamp @sorted, owner text, attempts int)")
@@ -355,8 +361,10 @@ import Testing
             ["n": 1, "run_at": 1, "attempts": 0] as Value, ["n": 2, "run_at": 2, "attempts": 0],
             ["n": 3, "run_at": 3, "attempts": 0],
         ] as Value)
+        // Past every job's run_at (milliseconds since the epoch).
+        let ready = 1000
         func claim(_ owner: String) async throws -> [Row] {
-            try await jobs.where(.raw("run_at <= now()")).order("run_at").limit(2).updateReturning(
+            try await jobs.where(.raw("run_at <= ?", ready)).order("run_at").limit(2).updateReturning(
                 ["owner": .string(owner), "run_at": .expr("now() + ?", 60000), "attempts": .inc(1)] as Value,
                 returning: ["id", "n", "attempts"])
         }

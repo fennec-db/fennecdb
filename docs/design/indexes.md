@@ -27,7 +27,10 @@ it and asks nothing: the primary did. The clash names the value as the
 row holding it stores it, read from that row (the refusal alone pays it):
 under `nocase` the spelling written is not that one, and a sign-up as
 `SAMI.lindqvist@...` was told the row held `SAMI...` where it held
-`sami...`. A scoped token is told the field alone (`access::told`, in
+`sami...`. A float JSON has no number for -- a `NaN`, an infinity -- is
+named `NaN`, `inf` or `-inf` (`json::named`), in a list too: JSON's `null`
+had said "document 1 holds null already" of a `NaN`, a value no `@unique`
+refuses. A scoped token is told the field alone (`access::told`, in
 `within`): the clash names the other row's id and echoes its value, which
 told alice that bob's profile existed, where, and what it held. A
 `@unique` beside a `@text` ([below](#two-indexes-on-a-field)) is this one:
@@ -321,9 +324,8 @@ tests the one or two rows a write made.
 **`@sorted` must give the scan's answer, row for row.** Its keys order exactly
 as `Value::cmp_value` orders the field's values (ints and timestamps through a
 sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
-`0.0`), `null` is held apart below every key, and `NaN` apart from both: it
-compares equal to everything, so it matches every inclusive comparison and no
-strict one, and an index holding one is never walked for `order`. A literal the
+`0.0` and every `NaN` onto the last key, past `+inf`'s -- below), and `null`
+is held apart below every key. A literal the
 key space cannot express exactly (`12.5` against an `int`) is left out of the
 range and evaluated per row; an int no float holds against a `float` or a json
 path (2^53 + 1) lies between two keys with none between them, and is said by
@@ -376,9 +378,8 @@ ints, 2^63 past every int (`tie`, out of line). A timestamp is its
 milliseconds' int, against an int too. So a whole float short of 2^63 either
 side is the one int it is, and a key says only that: `Value::key_as` hands a
 `@hash` lookup or a `lookup`'s probe the number itself or nothing (-2^63
-finds `i64::MIN`, 2^63 nothing, 2^53 + 1 no `float`; `NaN`, equal to every
-value, goes to the scan, where the bucket of its bits had found none of the
-rows the scan finds), `hash_key` files a whole float under its int up to
+finds `i64::MIN`, 2^63 nothing, 2^53 + 1 no `float`; a `NaN` its own key,
+below), `hash_key` files a whole float under its int up to
 2^63 (a path's `@unique` refuses 2^60.0 beside 2^60), `SortedIndex::bound`
 and `CompositeIndex::literal` key an int against a `float` only where a
 float holds it, and a json index keys every int a float holds as that
@@ -406,8 +407,8 @@ by row over every row, where `as` had made it 2^53's key before. It lies
 between two adjacent floats (`value::floats_beside`), and every comparison
 with it is said by one of them as strict or inclusive as it was -- `>` and
 `<=` by the one below, `>=` and `<` by the one above, `=` by both, a range
-of no key (`Range::narrow_beside`) -- so a `NaN` row, equal to every value,
-is taken or left as the literal would take it. A float field's `@sorted`, a
+of no key (`Range::narrow_beside`) -- so a `NaN` row, past both, is taken or
+left as the literal would take it. A float field's `@sorted`, a
 json path's (whose numbers are keyed as floats) and an index over several
 fields with a float or json part (`CompositeIndex::beside`, through its
 `literal` of each float) answer it so, natively: the browser module tests
@@ -415,13 +416,124 @@ such a comparison row by row, as it did, as it does a literal of another
 kind (`by_kind`) -- with the bounds it grew 960 bytes more. A facet's
 ranges by such an int are counted row by row, as they were: the key above
 it would have answered them, for 160 bytes of the module no one asked for.
-A `lookup` whose parent key is `NaN` finds no child: it is no key
-(`Value::key_as`), where it had looked in the bucket of `NaN`'s bits and
-found children holding the same bits, though the scan's `=` finds every
-row equal to `NaN`. A `@hash` over a float field still files a `NaN` row in
-the bucket of its bits, where `x = 5.0` does not look, though the scan's `=`
-takes it -- as it did before; the random test holds `@hash` to a twin
-holding no `NaN`.
+**A `NaN` equals a `NaN` and is above every other number, `+inf`
+included** -- PostgreSQL's order, what a user of a general database
+expects. `cmp_value` found a `NaN` equal to every value, the one comparison
+left that was no order after the true values above: `NaN = 3`, `NaN = 5` and
+`3 < 5` at once. A sort over a float field holding one could panic in the
+standard library (Rust 1.81 on: "user-provided comparison function does not
+correctly implement a total order"), or put rows in no order; a float
+field's `@hash` filed a `NaN` under its bits, where `xh = 5.0` did not look,
+and answered 3 rows where the scan took 432; and since #511 a `lookup` by a
+`NaN` key found no child, `key_as` making it no key. A `NaN` reaches a
+field by the Rust API's values and parameters, the native library's vector
+bytes (a `vector<N>` or a `[float]` it fills), a PostgreSQL import's
+`'NaN'::float8` (text `COPY` and `--follow`) into a `float` or a `[float]`
+-- never a vector field, where `load::adapt` refuses a non-finite
+component of a list as of a vector, its row named -- a SQLite text `'NaN'`
+read into a float column (`load::adapt` reads a text through
+`parse::<f64>()`, which takes `nan`, `inf` and `infinity` in any case;
+SQLite stores a `NaN` itself as `NULL`, so no `REAL` holds one), a
+`vector` function over an infinity a text reader made of `1e39`
+(`put c {x: dot([1e39], [0])}`, `set v = normalize(v)`); JSON cannot carry
+one, and writes one as `null`, as it does an infinity. Two floats compare through `value::floats`, which asks the `NaN`
+question only where `partial_cmp` finds no order, a mixed pair's last arm
+the same, and a vector's or a sparse vector's `f32`s as the `f64`s they
+widen to. Every key files every `NaN` as one, whatever its sign or payload
+-- `0.0 / 0.0` is `-NaN` on x86, a signalling one reads as written: an
+ordered index's and a composite part's `float_key` is `u64::MAX`, past
+`+inf`'s (a positive `NaN`'s bits already ordered there, a negative one's
+below `-inf`), and `hash_key` and the keys a group, a distinct count, a
+facet and a sketch count by take `f64::NAN`'s bytes (`codec::key_float`,
+beside `-0.0`'s fold) -- inside a list, an object or a vector too
+(`codec::encode`'s key copy, the `f32`s as `f32::NAN`'s, which `hash_key`
+reaches through `encode_key`): filed by their floats' bits, a
+`[float]` field's `@hash` answered `xs = [NaN]` with one of the two rows
+the scan took, and `[0.0]` with one against `[-0.0]`, though its plan said
+"which is the answer"; a group, a distinct count and a sketch split `[NaN]`
+from `[-NaN]` and `[0.0]` from `[-0.0]`; and `@unique` held both. Every
+index follows that key, since a rewrite leaves the entries of a value whose
+hash key it keeps (`same`): an index over several fields keys a json part apart
+so too, where by its bits a `[-0.0]` rewritten as `[0.0]` kept its entry,
+the delete after it looked for the other, and the entry left refused a
+later row as a duplicate of the row deleted
+(`a_zero_rewritten_in_a_list_leaves_no_entry_behind`). So `Value::key_as`
+takes a `NaN` as a `float`'s key and no `int`'s, `@unique` holds one
+`NaN`, `max` is a `NaN` where one is held and `min` the least number,
+`x > 5` takes the `NaN` rows as PostgreSQL's does -- through the ordered
+index as a range of keys -- and an ordered index holding a `NaN` is walked
+for `order`, where it was passed
+over: its `nans` set, `Range::strict`, which decided whether they matched,
+and `SortedIndex::has_nan` are gone, the browser module the smaller for it
+(below). A facet's ranges count a `NaN` in none: a range ends short of its
+bound, and none is past a `NaN`. Rejected: SQLite's way, turning a `NaN`
+into `null` as it is written, loses the value a write was given, and every
+reader of a file a `NaN` is in would need it; IEEE 754's `totalOrder`
+(`f64::total_cmp`) puts `-NaN` below `-inf` and `-0.0` below `0.0`, which
+`=` holds equal; refusing a `NaN` refuses PostgreSQL's data on import. A
+router merging tenants' rows reads them from JSON, where a `NaN` is `null`
+and orders first, so a tenant whose ordered rows end in one is named out of
+order, never merged wrong -- as one ending in `+inf` was. A held write's
+rank by an expression (`waits::rank`) leaves a non-finite key to the
+arrival's order, as before. The `NaN` test is out of line and cold
+(`value::nan_order`): inlined, it was folded into the `>` path, and an
+order of 100 000 rows by a float took 1.8% more instructions. This way,
+against the build before (`make instr-compare PKG=fennec-core
+EXAMPLE=orders`, each build under 8 UUIDs, 7 rounds, the 1-minute load at
+most 4.2): an order by an int +0.01%, by a float -0.54%, a float field's
+scan -0.19%, a group by a float +0.03% -- the key's `NaN` test, under one
+instruction a row. The browser module was 1 399 bytes smaller, 507 gzip and
+274 brotli (inside the 0.3 KB brotli moves by), 1 081 of them the ordered
+index's. The review's round folded a list's floats and named a `NaN` in a
+refusal, and `codec::encode` became a copy for a record and one for a key
+(`KEY`) -- a second copy kept for its speed, as the vector index's stable
+sort is ([one copy of a
+generic](browser-module.md#one-copy-of-a-generic)): a record is written by
+the code it was, and a key of an int or a text reaches its arm as it did.
+One copy cost every key, each measured
+against the branch before: the kind tested ahead of the float's took a
+group by a float 0.22% more instructions, after it a group by an int
+0.30%, and a flag handed down 0.14% to the int's group and two registers
+saved to every value a record writes. Against main, each build under 8
+UUIDs, 7 rounds, every run started under a 1-minute load of 4 and ending
+at most at 4.47 (`MODES=...,group-int,group-list,hash-list`): an order by
+an int +0.01%, by a float -0.51%, the scan -0.19%, a group by a float
++0.04% and by an int 0.00% -- the branch before's each -- a group by a
+`[float]` pair +0.17%, the fold of two floats a row, and 1 000 lookups in
+its `@hash` +0.21%, inside 2 SE. The key's copy is 640 bytes of the
+module, `key_f32s` 99 and `json::named` 257: against the branch before
++1 006 bytes, 343 gzip and 342 brotli, against main -393, -164 and +68
+(noise). The test build without the indexes is 898 bytes larger than
+main's, brotli inside its noise. `tests/nan.rs` holds every index -- `@hash`,
+`@sorted`, an index over several fields either way, a json path's, an
+int's and a timestamp's against a `NaN` literal -- to the scan and the
+scan to PostgreSQL's order over random edges (`NaN`s of four bit patterns,
+the infinities, both zeros, floats from 2^53 to 2^63), `between` and `in`
+lists too, every `order` path, a page and a descending one, to that order
+(`an_order_over_nan_is_a_total_order`; on main its sort put the rows in no
+order), and groups, counts, sketches, facets, `max`, `having`, `greatest`,
+`@unique` and `lookup` to one `NaN`, a list's and a vector's `NaN`s and
+zeros through a `[float]` field's `@hash`, `group`, `count(distinct)`, the
+sketches and `@unique` to one value
+(`a_list_or_a_vector_holds_one_nan_and_one_zero`), and a refusal to name
+a `NaN` as itself (`a_unique_refusal_names_a_nan_as_it_is`);
+`value::tests` holds `cmp_value` antisymmetric and transitive over every
+triple of 67 edge values of every kind.
+
+*What a file written before meets.* No record changes -- every key is
+derived, built at the first read -- but three answers move with the order,
+and fennecdb is alpha, so they are said here, not migrated. A `@unique`
+field holding a `NaN` and a `-NaN` side by side, or a `[float]` one
+`[NaN]` beside `[-NaN]` or `[0.0]` beside `[-0.0]`, holds one value twice
+now: every `set` of either row is refused `Duplicate` -- `unique_holders`
+asks every `@unique` value of the document the `set` leaves, not only the
+fields it changes -- until one of them is changed to another value or
+deleted. A sketch `hll_accumulate` stored before hashed a `NaN` of other
+bits by those bits, and a list's or a vector's floats unfolded: combined
+with one made after, an approximate count may be one more. And a scoped
+token's rule compares by the order too: `x <= $jwt.max` admitted a `NaN`
+row, equal to every claim, and admits none now, where `x > $jwt.min`
+admits every one (`http-access.html` says so).
 
 **A value read back through JSON is the value it was.** `json::num_into`
 writes a whole float short of 2^63 either side as every digit of the int it
@@ -558,11 +670,13 @@ text escaped (`00` as `00 FF`) and ended (`00 01`), a json number as its
 `f64` below json text -- null a tag below every value, a descending part's
 bytes inverted; a collated text is kept as written behind a tag naming the
 collation, and an index holding one compares part by part (`cmp_keys`),
-the rest as bytes. A float's `NaN` and a json bool, list, object or int no
+the rest as bytes. A float's `NaN` is its part's last key, every `NaN` one
+(`float_key`, [above](#sorted)). A json bool, list, object or int no
 `f64` holds exactly (2^53 + 1; one a float holds is keyed as that float,
 which `cmp_value` finds it equal to) are apart: their codec bytes are their
-part (a unique index finds them by them), the rows are listed, and while
-one is no walk answers and a
+part, a list's and an object's floats folded as a hash key folds them
+(`codec::encode_key`; a unique index finds them by them), the rows are
+listed, and while one is no walk answers and a
 filter's run takes them as candidates to test. Entries are `(KeyBytes,
 DocId)` in the ordered index's `Chunked`, a key of up to 22 bytes held in the
 32-byte entry (an int and a time are 18), longer on the heap, two held ones

@@ -329,6 +329,45 @@ open, as before: a SIGTERM while they open stops it at once by the default
 action, rather than wait for each to open past a supervisor's grace. What
 its followers had applied by then is not lost to the primary: a replica
 asks from its file's own position, so the primary sends it again.
+Windows raises no `SIGTERM`, and the CRT's `signal` caught Ctrl+C alone:
+Ctrl+Break, its `SIGBREAK`, ended the process by the default action, as
+closing the console did, with no final sync. There
+`install_signal_handlers` is kernel32's `SetConsoleCtrlHandler` in the
+CRT's place (`durability/windows.rs`, [windows.md](windows.md#4-stopping-console-events-and-services)),
+its handler run on a thread the system makes for it, Ctrl+C turned on
+first (`SetConsoleCtrlHandler(NULL, FALSE)`: a process started in a group
+of its own begins with it off). Ctrl+C and Ctrl+Break store `SHUTDOWN` and
+return. The console's close -- its window shut, or *End Task* --, a logoff
+in a user's session and the system's shutdown store a deadline and then
+the flag, and hold the handler until the syncer's `process::exit` ends its
+thread: their handler's return lets the system end the process at once,
+and it waits 5 s for one at most. Those five seconds are the whole
+shutdown's, and its waits came first -- the held requests' grace (2 s),
+the TLS connections' (0.5 s), the hooks (an OTLP flush of up to 2 s, the
+mirror's join) -- 4.7 s with tracing on, so under `--sync <ms>` or `off`
+the buffered writes were lost where the system ended the process before
+the final sync. Past a deadline the shutdown syncs first: before the
+graces, again before the hooks (`windows::sync_first`, a node's tenants
+through `before_the_deadline`), then its final sync and checkpoint as
+before. Every write acknowledged before the event is on disk within `LOOK`
+and an fsync; one acknowledged during the graces reaches it with the next
+sync if the process is still there; a checkpoint cut short leaves the file
+whole as a failed rewrite does. Ctrl+C and Ctrl+Break, with no timeout,
+keep a signal's order. A logoff in session 0, the services', which it
+reaches at any user's logoff, is passed on: a server run as a service
+outlives it, as the JVM's handler passes it on where its window station is
+not visible -- whether a service wrapper's child gets the default handler
+a service's own process gets is unverified ([windows.md](windows.md#4-stopping-console-events-and-services)).
+Ctrl+Break is the one event a process can send another, to a process
+group (`GenerateConsoleCtrlEvent`, the group made by
+`CREATE_NEW_PROCESS_GROUP`), so on Windows it is a supervisor's `SIGTERM`
+and the tests' (`support::Server::terminate`); a service runs under a
+wrapper that sends it, or Ctrl+C, and waits before it kills (WinSW, NSSM).
+`durability::windows`' unit tests call the handler as the system would:
+each event's flag and deadline, the close's, a user's logoff's and the
+shutdown's held until the exit is asked, and a file's writes synced first
+only past a deadline; `shutdown.rs` and the rest of the server's tests
+stop their servers through it on Windows CI.
 `--exit-on-stdin-close` sets the flag (`request_shutdown`) from a thread
 that reads stdin to its end. An app
 that starts a server for a file it opened holds a pipe on the server's

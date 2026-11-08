@@ -7,8 +7,6 @@
 //!
 //!     cargo test -p fennec-server --test all follow:: -- --ignored
 
-#![cfg(unix)]
-
 use crate::support::{count, Server};
 use fennec_wire::client::{Client, Url};
 use std::path::{Path, PathBuf};

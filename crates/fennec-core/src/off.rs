@@ -380,9 +380,6 @@ impl SortedIndex {
     pub(crate) fn dump(&self) -> String {
         match *self {}
     }
-    pub fn has_nan(&self) -> bool {
-        match *self {}
-    }
     pub fn answers(&self) -> bool {
         match *self {}
     }

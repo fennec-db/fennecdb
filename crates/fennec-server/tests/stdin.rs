@@ -7,7 +7,7 @@
 //! flag stdin is never read, so a server started with whatever stdin a
 //! shell gave it goes on as it did.
 
-use crate::support::{count, start, start_piped, tmp, try_start_with};
+use crate::support::{count, start, start_piped, tmp};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -176,11 +176,13 @@ fn stdin_of_dev_null_ends_the_server_at_once() {
 
 /// A terminal is refused at the start: reading one from the background
 /// would stop the whole server (SIGTTIN), its file's lock held. Without
-/// the flag the terminal is nothing to the server, which starts.
+/// the flag the terminal is nothing to the server, which starts. A
+/// pseudo-terminal is Unix's: Windows' is ConPTY, a harness of its own.
+#[cfg(unix)]
 #[test]
 fn a_terminal_on_stdin_is_refused_with_the_flag_alone() {
     let (master, slave) = pty();
-    let free = try_start_with(&[], &[], Stdio::from(slave.try_clone().unwrap()))
+    let free = crate::support::try_start_with(&[], &[], Stdio::from(slave.try_clone().unwrap()))
         .unwrap_or_else(|log| panic!("a terminal stopped a server without the flag:\n{log}"));
     assert!(free.http().run("collections").starts_with('['));
     drop(free);
@@ -200,6 +202,9 @@ fn a_terminal_on_stdin_is_refused_with_the_flag_alone() {
 
 /// A secret read from stdin would end it: refused before it is read, the
 /// pipe still open, rather than waited on for an end that is the server's.
+/// `/dev/stdin` is Unix's: Windows names no file for a process's stdin
+/// pipe (`CONIN$` is the console's).
+#[cfg(unix)]
 #[test]
 fn a_secret_read_from_stdin_is_refused_with_the_flag() {
     let policy = tmp("stdin", "policy.txt");
@@ -250,6 +255,7 @@ fn ended(child: Child) -> (i32, String) {
 }
 
 /// A pseudo-terminal: its master, and its slave to hand a child as stdin.
+#[cfg(unix)]
 fn pty() -> (std::fs::File, std::fs::File) {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::FromRawFd;

@@ -610,7 +610,11 @@ messages   read,insert  where room in (get members select room where user = $jwt
     number and a bool are values like any other. A claim a rule compares
     by order (<code>level &lt;= $jwt.clearance</code>) admits only values
     of its own kind, under a <code>not</code> too: given
-    <code>"top"</code>, no number is below it. A row with no value answers
+    <code>"top"</code>, no number is below it. A float's <code>NaN</code>
+    is above every number, as PostgreSQL orders it
+    (<a href="fennecql-schema.html">Collections and types</a>):
+    <code>level &lt;= $jwt.clearance</code> admits no row holding one, and
+    <code>level &gt; $jwt.floor</code> admits every such row. A row with no value answers
     as the rule written out: <code>not (level &gt; $jwt.c)</code> admits
     the rows with no <code>level</code>. A text claim that reads as a
     time, such as <code>"2026-07-01T00:00:00Z"</code>, orders a time field

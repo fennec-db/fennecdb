@@ -861,7 +861,8 @@ from `Document::at`; `Collection::fit_paths` makes the structures match the
 schema after an alter or an undo, unbuilt, rather than move them by name.
 `@hash` files a whole float as the int it is (`hash_key`), up to 2^63 either
 side, and a lookup over json takes only what a bucket answers exactly
-(`lookup_key`: not `NaN`, not a timestamp, not a list or an object);
+(`lookup_key`: not a timestamp, not a list or an object; a `NaN`, which no
+json value holds, its own key and found in none);
 `@sorted` keys numbers as `f64`s and text by its bytes, numbers first, and
 holds apart what it cannot order -- a boolean, a list, an object, an int no
 `f64` holds exactly (2^53 + 1) -- answering nothing while it holds one
