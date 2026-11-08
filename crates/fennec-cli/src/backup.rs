@@ -211,7 +211,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             ));
         }
         let Some(hex) = Key::generate() else {
-            fail("no randomness from the system (/dev/urandom) to make a key with");
+            fail("no randomness from the system to make a key with");
         };
         return match write_private(path, &format!("{hex}\n")) {
             Ok(()) => {

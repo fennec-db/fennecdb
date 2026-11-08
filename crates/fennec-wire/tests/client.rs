@@ -243,7 +243,7 @@ fn authenticate(auth: &Auth, s: &mut TcpStream) -> bool {
             ct_eq(got, expected.as_bytes()) || refuse(s)
         }
         Auth::Scram(password) => {
-            let v = Verifier::new(password, random_bytes(16));
+            let v = Verifier::new(password, system_random(16).unwrap());
             let mut b = 10i32.to_be_bytes().to_vec();
             cstr(&mut b, "SCRAM-SHA-256");
             b.push(0);
@@ -254,7 +254,7 @@ fn authenticate(auth: &Auth, s: &mut TcpStream) -> bool {
             };
             let at = body.iter().position(|&c| c == 0).unwrap() + 1 + 4;
             let first = String::from_utf8_lossy(&body[at..]).into_owned();
-            let (ex, server_first) = Exchange::client_first(&v, &first, &nonce(18));
+            let (ex, server_first) = Exchange::client_first(&v, &first, &nonce(18).unwrap());
             let mut b = 11i32.to_be_bytes().to_vec();
             b.extend_from_slice(server_first.as_bytes());
             s.write_all(&framed(b'R', &b)).unwrap();

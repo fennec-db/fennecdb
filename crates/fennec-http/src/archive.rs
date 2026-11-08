@@ -275,7 +275,7 @@ impl Segment {
             return Ok(());
         }
         let mut frame = Vec::with_capacity(pending.len() + 32);
-        seal::seal_frame(key, *index, false, pending, &mut frame);
+        seal::seal_frame(key, *index, false, pending, &mut frame)?;
         *index += 1;
         pending.clear();
         self.file()?.write_all(&frame)
@@ -518,7 +518,7 @@ impl Archive {
         let tmp = path.with_extension("tmp");
         let mut f = File::create(&tmp)?;
         match &self.key {
-            Some(key) => f.write_all(&seal::seal_whole(key, bytes))?,
+            Some(key) => f.write_all(&seal::seal_whole(key, bytes)?)?,
             None => f.write_all(bytes)?,
         }
         f.sync_all()?;
@@ -923,7 +923,7 @@ impl Archive {
                     let sealed = match &self.key {
                         Some(key) => {
                             let mut head = seal::MAGIC.to_vec();
-                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head);
+                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head)?;
                             file.write_all(&head)?;
                             Some((key.clone(), 1, Vec::new()))
                         }
@@ -1460,7 +1460,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         let id = crate::replication::fork_id(&history, fresh_id());
         bytes.extend_from_slice(&history.forked(id, seq).record());
         if let Some(key) = key {
-            bytes = seal::seal_whole(key, &bytes);
+            bytes = seal::seal_whole(key, &bytes)?;
         }
         let tmp = out.with_extension("tmp");
         let mut f = File::create(&tmp)?;

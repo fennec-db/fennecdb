@@ -176,11 +176,11 @@ pub fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
+/// Drawn once a process: a trace's and a span's ids need to be unique, not
+/// secret, so the clock's stands in where the system gives no randomness
+/// (`id_u64`).
 fn key() -> u64 {
-    *KEY.get_or_init(|| {
-        let b = crate::crypto::random_bytes(8);
-        u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))
-    })
+    *KEY.get_or_init(crate::crypto::id_u64)
 }
 
 /// A fresh 64 bits: SplitMix64's finalizer over a key and the thread's
