@@ -168,7 +168,8 @@ Flutter -- each a folder to open and run, with a live list, filters, and
 full-text and vector search.
 
 **Binaries.** `fennec`, the shell, and `fennec-server`, the HTTP server, for macOS
-and Linux on arm64 and x86_64 (not Windows yet; the image runs anywhere):
+and Linux on arm64 and x86_64, and Windows on x86_64 from the release after
+0.1.12 (the image runs anywhere):
 
 ```bash
 brew install fennec-db/tap/fennecdb            # Homebrew
@@ -176,11 +177,17 @@ curl -fsSL https://fennecdb.com/install.sh | sh # ~/.fennecdb/bin, no sudo
 sudo apt install ./fennecdb_X.Y.Z-1_amd64.deb  # or: sudo dnf install ./fennecdb-X.Y.Z-1.x86_64.rpm
 ```
 
-The script downloads the release from GitHub and checks the tarball against
-the release's `SHA256SUMS` before it unpacks it; it touches no shell startup
-file, only prints the `PATH` line to add. Read it first with
-`curl -fsSL https://fennecdb.com/install.sh | less`
-([`site/install.sh`](site/install.sh)). The `.deb` and `.rpm` are attached to
+```powershell
+irm https://fennecdb.com/install.ps1 | iex     # Windows: %LOCALAPPDATA%\fennecdb\bin, no administrator
+```
+
+The scripts download the release from GitHub and check the tarball, or on
+Windows the zip, against the release's `SHA256SUMS` before they unpack it;
+they touch no shell startup file, profile or `PATH`, only print the line to
+add. Read them first with `curl -fsSL https://fennecdb.com/install.sh | less`
+([`site/install.sh`](site/install.sh), [`site/install.ps1`](site/install.ps1)).
+The Windows programs are not signed, and need no Visual C++ runtime beside
+them. The `.deb` and `.rpm` are attached to
 each release after 0.1.11, for amd64 and arm64, with their checksums in
 `SHA256SUMS`. [Install](https://fennecdb.com/docs/install) has each of them,
 and the tarball, the image and the language packages too; the tap's formula is
@@ -342,6 +349,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Backend recipes** | what a backend platform bundles, done with fennecdb and a standard service and each run against a real server: sign-in from your [identity provider](https://fennecdb.com/docs/auth) · [files in S3 or R2](https://fennecdb.com/docs/files) behind links the rules decide · [functions and webhooks](https://fennecdb.com/docs/functions) on a write (a Worker, a job queue, a consumer of the change stream) |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment, every tenant of a node over one connection · a file per tenant behind a router, failed over on a lease, a replica that did not take tried again and the tenants left without one counted ([replicas of their own](https://fennecdb.com/docs/sharding-failover#replicas-of-their-own)) |
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fennecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fennecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
+| **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
 | **Runtime size** | 338 KB gzip wasm + 66 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |

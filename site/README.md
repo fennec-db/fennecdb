@@ -135,9 +135,10 @@ session locally and from the environment in CI.
 Locally, `wrangler login` once, then `make site-deploy`.
 
 `site/dist/_headers` is written by `build.py` on every build: security headers
-for everything, five minutes of caching and `text/plain` for `/install.sh` (the
-installer, `curl -fsSL https://fennecdb.com/install.sh | sh`: it reaches the next
-install when a change merges, and a browser shows it rather than saving it),
+for everything, five minutes of caching and `text/plain` for `/install.sh` and
+`/install.ps1` (the installers, `curl -fsSL https://fennecdb.com/install.sh | sh`
+and `irm https://fennecdb.com/install.ps1 | iex`: each reaches the next install
+when a change merges, and a browser shows it rather than saving it),
 and a year of immutable caching for every content-hashed asset.
 That now includes the engine — the site loads `fennec.<hash>.js` and
 `fennec.<hash>.wasm`, so a returning visitor pays no revalidation round trip for
@@ -182,6 +183,9 @@ site/
   install.sh      the installer, copied to dist/install.sh and served as
                   text/plain at https://fennecdb.com/install.sh
   test_install.sh it against a release of its own served from localhost
+  install.ps1     the Windows installer, copied to dist/install.ps1 and served
+                  as text/plain at https://fennecdb.com/install.ps1
+  test_install.ps1  it on Windows, against a zip CI built, served from localhost
   worker.js       /api/embed, the only code that runs on the edge
   worker.test.mjs its limits and refusals, its bindings faked
   fonts/          Bricolage Grotesque and IBM Plex Mono, Google Fonts' latin

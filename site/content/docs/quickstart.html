@@ -68,10 +68,15 @@ href="server.html#security">Security</a>). The file is in the
     machine reaches, and asks for no token (<code>[no auth]</code>).
     <code>--studio</code> serves the admin page you will open in step 5. If
     port 8080 is taken, start it with <code>--http 127.0.0.1:8081</code> (Docker:
-    <code>-p 127.0.0.1:8081:8080</code>) and use that port below. On Windows, use
-    Docker, or WSL with the macOS and Linux steps. Other ways to install:
-    Homebrew, a <code>.deb</code> or <code>.rpm</code>, a tarball, from source,
-    in <a href="install.html">Install</a>.</p>
+    <code>-p 127.0.0.1:8081:8080</code>) and use that port below. On Windows,
+    from a release after 0.1.12, <code>irm https://fennecdb.com/install.ps1 |
+    iex</code> in PowerShell installs both programs (<a
+    href="install.html#windows">Windows</a>) and <code>fennec-server --file
+    notes.fennec --studio</code> starts the server; the <code>curl</code> steps
+    below are written for a Unix shell, Git Bash or WSL. Docker, or WSL with the
+    macOS and Linux steps, works there too. Other ways to install: Homebrew, a
+    <code>.deb</code> or <code>.rpm</code>, a tarball, from source, in <a
+    href="install.html">Install</a>.</p>
   </li>
   <li>
     <p>Make a collection and write two rows. The language is FennecQL: a

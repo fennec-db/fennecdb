@@ -1,6 +1,6 @@
 <!--
 title: Install — fennecdb
-description: Every way to install fennecdb: the install script, Homebrew, a .deb or .rpm, a release tarball, the Docker image, the package for your language, or a build from source.
+description: Every way to install fennecdb: the install script, Homebrew, a .deb or .rpm, a release tarball, the PowerShell script and zip for Windows, the Docker image, the package for your language, or a build from source.
 -->
 
 <h1>Install</h1>
@@ -19,6 +19,7 @@ show that your install lacks is in the next one, and
 <thead><tr><th>Way</th><th>Gives you</th><th>On</th></tr></thead>
 <tbody>
 <tr><td><a href="#install-script">The install script</a></td><td><code>fennec-server</code> and <code>fennec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64</td></tr>
 <tr><td><a href="#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
 <tr><td><a href="#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
@@ -29,21 +30,9 @@ show that your install lacks is in the next one, and
 </table>
 </div>
 
-<p>There is no Windows build of the programs yet: run the image, or the script
-inside WSL. Built <a href="#source">from source</a> on Windows, they take a
-file's lock as everywhere else, so a second process over a served file is
-refused there too, and a checkpoint's or a compact's rename is made durable
-as on Linux and macOS, the file and its directory flushed. That rename
-replaces a file other programs hold open on NTFS and ReFS; FAT32 and exFAT
-have no such rename, so a checkpoint there fails and writes stop, which the
-server says as it starts. Keep a database out of a folder OneDrive, Dropbox
-or a backup agent reads: one holding the file can refuse the rename, which
-is tried again for a second before writes stop. On NTFS and ReFS the file
-is mapped, as on Linux and macOS, in views Windows 10 1803 and later lay end
-to end (an earlier Windows maps it anew as it grows); on FAT32, exFAT or a
-network share it is read into memory, as <code>--no-mmap</code> reads it,
-which the server says as it starts. The clients run anywhere their language
-does.</p>
+<p>On Windows, the <a href="#windows">PowerShell script</a> installs the
+two programs, or the image runs the server. The clients run anywhere their
+language does.</p>
 
 <h2 id="install-script">The install script</h2>
 
@@ -71,6 +60,69 @@ that puts the directory on your <code>PATH</code> and leaves that to you.</p>
     (<a href="https://fennecdb.com/install.sh">install.sh</a>).</li>
   <li><b>To remove it,</b> delete <code>~/.fennecdb</code>.</li>
 </ul>
+
+<h2 id="windows">Windows</h2>
+
+<p>In PowerShell, Windows PowerShell 5.1 or PowerShell 7:</p>
+
+<pre data-lang="powershell">irm https://fennecdb.com/install.ps1 | iex</pre>
+
+<p>Releases after 0.1.12 carry a Windows build,
+<code>fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip</code>: a folder holding
+<code>fennec-server.exe</code> and <code>fennec.exe</code> for x86_64, which an
+arm64 Windows 11 runs under its emulation. Before the first of them, the
+script says the latest release has no build for Windows and installs
+nothing. The programs need nothing installed beside them, the C runtime
+built in: unzipped anywhere, they run from there.</p>
+
+<ul>
+  <li><b>It installs into your profile:</b>
+    <code>%LOCALAPPDATA%\fennecdb\bin</code>
+    (<code>$env:FENNEC_INSTALL</code> names another folder), with no
+    administrator. It touches no profile and no <code>PATH</code>: it prints the
+    line that puts the folder on this session's <code>PATH</code>, and to keep
+    it you add the folder to your user's <code>Path</code> — Start, <i>Edit
+    environment variables for your account</i> — not the machine's.</li>
+  <li><b>It checks the zip</b> against the release's <code>SHA256SUMS</code>
+    before it unpacks anything, as the shell script checks a tarball.
+    <code>$env:FENNEC_VERSION = '0.1.13'</code> before it names a release.</li>
+  <li><b>Nothing runs until its last line.</b> The script is functions, and
+    <code>Install-Fennec @args</code> on its last line is what starts them, so a
+    download cut short runs nothing; run through <code>iex</code> it changes
+    none of your session's settings. To read it first, open <a
+    href="https://fennecdb.com/install.ps1">install.ps1</a> in a browser.</li>
+  <li><b>Not signed.</b> The programs carry no Authenticode signature. What
+    the script installs carries no mark of the web, which it takes off the
+    zip once the sum holds, so nothing warns of it; a zip a browser
+    downloads is marked, and SmartScreen warns of a program in it opened from
+    Explorer ("Windows protected your PC": <i>More info</i>, <i>Run
+    anyway</i>). Check its sum first (<a href="#checking">below</a>), then
+    <code>Unblock-File</code> the zip before you unpack it.</li>
+  <li><b>Without the network,</b> copy the zip and <code>SHA256SUMS</code> from
+    the <a href="https://github.com/fennec-db/fennecdb/releases">release</a>
+    into a folder and run the script with <code>$env:FENNEC_FROM</code> naming
+    it: it checks and installs from there.</li>
+  <li><b>To upgrade,</b> run it again, a server running from the folder or not:
+    a running program's file is renamed aside and removed once it stops.
+    <b>To remove it,</b> delete <code>%LOCALAPPDATA%\fennecdb</code>.</li>
+</ul>
+
+<p>On Windows the programs take a file's lock as everywhere else, so a second
+process over a served file is refused, and a checkpoint's or a compact's
+rename is made durable as on Linux and macOS, the file and its directory
+flushed. That rename replaces a file other programs hold open on NTFS and
+ReFS; FAT32 and exFAT have no such rename, so a checkpoint there fails and
+writes stop, which the server says as it starts. Keep a database out of a
+folder OneDrive, Dropbox or a backup agent reads: one holding the file can
+refuse the rename, which is tried again for a second before writes stop. On
+NTFS and ReFS the file is mapped, as on Linux and macOS, in views Windows 10
+1803 and later lay end to end (an earlier Windows maps it anew as it grows);
+on FAT32, exFAT or a network share it is read into memory, as
+<code>--no-mmap</code> reads it, which the server says as it starts. The
+server stops on Ctrl+C, Ctrl+Break and a console's close, and runs as a
+service under a wrapper (<a href="server.html#durability">Durability</a>). A file
+server, a shell and an app's library are what Windows is for here: a node of
+tenants runs there, and a cluster and its router are Linux's.</p>
 
 <h2 id="homebrew">Homebrew</h2>
 
@@ -167,6 +219,12 @@ each make target does.</p>
 
 <pre data-lang="bash">curl -LO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/SHA256SUMS
 shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-missing SHA256SUMS</pre>
+
+<p>On Windows, the zip's sum beside its line in <code>SHA256SUMS</code>:</p>
+
+<pre data-lang="powershell">$zip = 'fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip'
+(Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+Select-String -SimpleMatch $zip SHA256SUMS</pre>
 
 <h2 id="next">Next</h2>
 

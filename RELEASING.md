@@ -29,7 +29,11 @@ nothing reaches a registry before the notes have had a read.
    the same commit and named by nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
-   `release.yml` builds the binaries for Linux and macOS, the `fennec-web`
+   `release.yml` builds the binaries for Linux and macOS, the Windows zip
+   (`fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `tools/windows-zip.sh`: the
+   C runtime linked in, installed through `install.ps1` from the folder it
+   was made in and run before it is kept, `tools/windows-zip-check.ps1`),
+   the `fennec-web`
    bundle, the Android AAR (`fennecdb-android-X.Y.Z.aar`, the native library
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
@@ -47,11 +51,22 @@ nothing reaches a registry before the notes have had a read.
    registry to publish to. A release built again, by the tag or by a
    dispatch, replaces the assets of a draft; a published release's are never
    replaced, and it only gets the files it has no asset of, with a warning
-   that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`
-   and the packages name the release's files by checksum, and a rebuild is
-   not byte for byte the first build: a replaced tarball would fail every
-   `brew install` and every sum already taken. To change what a published
-   release holds, release a new version.
+   that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`,
+   `install.ps1` and the packages name the release's files by checksum, and a
+   rebuild is not byte for byte the first build: a replaced tarball would fail
+   every `brew install` and every sum already taken. To change what a
+   published release holds, release a new version.
+
+   **Windows.** The zip is unsigned (SmartScreen warns of a program a
+   browser downloaded; `install.ps1` takes the mark off what it checked),
+   and nothing publishes it but the release itself: there is no winget or
+   Scoop manifest yet. Before the first release with a Windows build, the
+   power cut docs/design/windows.md asks for (the owner's ninth decision):
+   on a Windows VM, a compact and `--sync always` writes in flight, the VM
+   powered off, then every acknowledged write read back. After the draft is
+   published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
+   Windows machine and the Quickstart's Windows line, as the other
+   installs are run once more.
 4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
@@ -254,6 +269,8 @@ field of it is read another way.
 | `fennecdb` in the Homebrew tap `fennec-db/homebrew-tap` | `packaging/homebrew`, `tools/homebrew-formula.py` | the formula: `fennec` and `fennec-server` from the release's tarballs, by platform, each with its SHA-256 |
 | `fennecdb_X.Y.Z-1_<arch>.deb`, `fennecdb-X.Y.Z-1.<arch>.rpm` on the release | `packaging/nfpm.yaml`, `tools/linux-packages.sh` | `/usr/bin/fennec` and `/usr/bin/fennec-server` from the musl tarballs, for amd64 and arm64; no dependencies |
 | `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; deployed with the site, not with a release |
+| `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
+| `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; deployed with the site, not with a release |
 
 ## Once: the desktop app's signing Environment
 
@@ -474,6 +491,15 @@ is more than `set -eu`, comments, assignments and function definitions) and
 deployed with it, so a change reaches `https://fennecdb.com/install.sh` when
 it merges, not when a release is made. It finds the latest release itself.
 `sh site/test_install.sh` runs it against a release of its own on localhost.
+
+**install.ps1.** Nothing to set up either: `site/install.ps1` is built into
+the site beside `install.sh` (`site/build.py` checks that nothing before
+`Install-Fennec @args`, its last line, is more than comments and function
+definitions, and that it is ASCII) and reaches
+`https://fennecdb.com/install.ps1` when it merges. Until a release carries
+the Windows zip, it says the latest release has no build for Windows and
+installs nothing. CI's `windows (release zip)` job runs
+`site/test_install.ps1` on Windows against the zip it builds.
 
 **GitHub.** The environments `pypi`, `npm`, `nuget`, `maven`, `pub` and `homebrew` are made the first
 time the workflow runs. A required reviewer on them makes a publish wait for a second
