@@ -4804,6 +4804,13 @@ pub(crate) fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+// A secret's file its owner's alone on Windows, a DACL where a Unix gives
+// the file mode 0600 (owner_only.rs). Below the code a Unix build compiles,
+// so its lines -- a panic's location among them -- stay where they were
+// (docs/design/windows.md, 7l).
+#[cfg(windows)]
+pub mod owner_only;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4882,9 +4889,9 @@ mod tests {
             }
         }
         let dir = std::env::temp_dir().join(format!(
-            "fennec-lease-race-{}-{:?}",
+            "fennec-lease-race-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let tenants = Tenants::new(&dir).unwrap().with_lease();
         let lease = Arc::clone(tenants.lease().unwrap());
@@ -4938,9 +4945,9 @@ mod tests {
             }
         }
         let dir = std::env::temp_dir().join(format!(
-            "fennec-lease-answer-{}-{:?}",
+            "fennec-lease-answer-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let tenants = Tenants::new(&dir).unwrap().with_lease();
         let lease = Arc::clone(tenants.lease().unwrap());
@@ -5028,9 +5035,9 @@ mod tests {
     #[test]
     fn a_lapsed_write_is_told_to_resend_with_its_key_or_to_wait_to_read() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-lease-told-{}-{:?}",
+            "fennec-lease-told-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let tenants = Tenants::new(&dir).unwrap().with_lease();
         let lease = Arc::clone(tenants.lease().unwrap());
@@ -5216,9 +5223,9 @@ mod tests {
     #[test]
     fn a_replay_waits_for_the_streams_as_its_first_try() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-replay-sent-{}-{:?}",
+            "fennec-replay-sent-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.fennec");
@@ -5280,9 +5287,9 @@ mod tests {
     #[test]
     fn a_tenants_replay_waits_for_the_nodes_stream_as_its_first_try() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-replay-node-{}-{:?}",
+            "fennec-replay-node-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let tenants = Tenants::new(&dir)
             .unwrap()
@@ -5358,9 +5365,9 @@ mod tests {
     #[test]
     fn an_events_2xx_waits_for_a_standby_to_hold_it() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-hook-standby-{}-{:?}",
+            "fennec-hook-standby-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.fennec");
@@ -5465,9 +5472,9 @@ mod tests {
     #[test]
     fn a_tenants_event_waits_for_its_standby_and_is_asked_of_its_lease() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-tenant-hook-{}-{:?}",
+            "fennec-tenant-hook-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         fennec_ql::install();
         let tenants =

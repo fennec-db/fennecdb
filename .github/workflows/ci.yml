@@ -388,6 +388,50 @@ jobs:
       - name: fennec-abi's, fennec's and the native library's suites
         run: cargo test -p fennec-abi -p fennec-cli -p fennec-ffi
 
+  # docs/design/windows.md, slice 4: fennec-http's suite on Windows -- its
+  # servers run in the tests' own process, over files mapped as slice 2
+  # maps them -- beside fennec-ql's and fennec-import's. With `tls`, as the
+  # workspace's run builds it on Linux: HTTPS listeners, dials and their
+  # failures' counts. The doc tests and the examples are the Linux job's:
+  # platform-free, and minutes here.
+  windows-http:
+    name: windows (http)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: windows-latest-http-
+
+      - name: Build the suites
+        run: cargo test -p fennec-http -p fennec-ql -p fennec-import --features fennec-http/tls --lib --tests --no-run
+
+      # What the design left to Windows itself, printed: the module the
+      # lease's clock is found in, what a device's name opens in a node's
+      # directory, and whom a file the temporary directory gives is open to.
+      - name: The lease's clock, devices' names and a secret's DACL
+        run: cargo test -p fennec-http --features tls --lib -- --nocapture lease::tests::the_boot_clock owner_only::tests device_s_name
+
+      # Each suite runs whatever the step before found, so one run names
+      # every failing test.
+      - name: fennec-ql's and fennec-import's suites
+        if: ${{ !cancelled() }}
+        run: cargo test -p fennec-ql -p fennec-import --lib --tests --no-fail-fast
+
+      - name: fennec-http's suite
+        if: ${{ !cancelled() }}
+        run: cargo test -p fennec-http --features tls --lib --tests --no-fail-fast
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved

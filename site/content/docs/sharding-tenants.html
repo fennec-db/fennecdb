@@ -219,7 +219,8 @@ curl -X PUT localhost:8090/_shard/tenants/acme/hooks/stripe -H 'Authorization: B
 <ul>
   <li><b>Verified by the tenant's own secrets, before the tenant is
     opened.</b> A node keeps each tenant's set beside its file
-    (<code>acme.hooks</code>, readable by the node's user alone) and in its
+    (<code>acme.hooks</code>, readable by the node's user alone: mode
+    <code>0600</code>, on Windows an ACL granting that user alone) and in its
     memory: one tenant's secret signs no event another takes, and a forged
     event opens no tenant.</li>
   <li><b>Never in the database, and never the router's.</b> The router's

@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
@@ -265,9 +265,9 @@ fn a_run_is_counted_by_outcome_and_shaped_by_name_a_tenant_s_apart() {
 
     // A tenant node's run, its tenant's name in no label.
     let dir = std::env::temp_dir().join(format!(
-        "fennec-scheduled-counts-{}-{:?}",
+        "fennec-scheduled-counts-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let tenants = Arc::new(Tenants::new(&dir).unwrap());

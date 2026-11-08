@@ -43,9 +43,9 @@ fn start_with(tag: &str, quota: Quota, cfg: Config) -> Node {
 fn start_of(tag: &str, quota: Quota, cfg: Config, feeds: bool) -> Node {
     fennec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
-        "fennec-quotas-{tag}-{}-{:?}",
+        "fennec-quotas-{tag}-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     let mut tenants = Tenants::new(&dir).unwrap().with_quota(quota);

@@ -102,6 +102,12 @@ fn a_name_the_certificate_does_not_hold_is_refused_before_a_byte_is_sent() {
     assert!(s.is_tls());
     s.write_all(b"ping").unwrap();
     s.flush().unwrap();
+    // Ended, and read until the stand-in has gone: a socket closed with the
+    // server's session tickets unread is reset, and Windows drops what the
+    // server had not read yet at a reset (`windows (http)`), where Unix
+    // gives it.
+    s.end_writing().unwrap();
+    let _ = s.read_to_end(&mut Vec::new());
     drop(s);
     assert_eq!(served.recv().unwrap().unwrap(), b"ping");
 }

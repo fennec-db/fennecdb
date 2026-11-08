@@ -34,9 +34,9 @@ impl Drop for Node {
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "fennec-tenant-hooks-{tag}-{}-{:?}",
+        "fennec-tenant-hooks-{tag}-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     dir
@@ -427,6 +427,10 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         let mode = std::fs::metadata(n.dir.join("acme.hooks")).unwrap();
         assert_eq!(mode.permissions().mode() & 0o777, 0o600);
     }
+    // On Windows a protected DACL of the node's user alone, the directory's
+    // inherited entries gone (docs/design/windows.md, 7h).
+    #[cfg(windows)]
+    assert!(fennec_http::owner_only::owner_alone(&n.dir.join("acme.hooks")).unwrap());
 
     // Installed whole on another tenant, its version kept.
     tenant(n.port, "copy");

@@ -110,7 +110,24 @@ image:</p>
 is refused rather than installed, and the file appears by rename, never
 half-written. Tenant names are <code>[a-z0-9_-]</code>, 1 to 64 characters:
 they become file names, and that set means the same thing on every file
-system.</p>
+system. Windows' device names — <code>con</code>, <code>prn</code>,
+<code>aux</code>, <code>nul</code>, <code>com1</code> to <code>com9</code>,
+<code>lpt1</code> to <code>lpt9</code> — are refused (400) on every system,
+since a Windows before 11 reads <code>con.fennec</code> as the console, and
+every one reads <code>nul</code> as nothing: a node's directory and its
+archive restore on any. A tenant a node on Linux or macOS took under such a
+name before the rule is out of reach once the node is upgraded: no longer
+listed, archived or opened, answered 400, deleted by no request, and named
+in the node's log as it is passed over; an archiver and a restore pass its
+archive over too, said. Copy it under another name before the upgrade (its
+image, <code>GET /_admin/tenants/&lt;t&gt;/file</code>, installed by
+<code>PUT /_admin/tenants/&lt;new&gt;/file</code>). After it, stop the
+node, rename by hand the file and every file beside it named
+<code>&lt;t&gt;.*</code> — <code>con.fennec</code>,
+<code>con.instance</code>, <code>con.hooks</code> and the rest — keeping
+what follows the name, remove <code>schedules.hint</code>, which the node
+learns again as it starts, and start it. A router's directory still names
+the old name.</p>
 </details>
 
 <h2>The router: <code>fennec-shard</code></h2>

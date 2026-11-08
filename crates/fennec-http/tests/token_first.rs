@@ -118,9 +118,9 @@ struct Single {
 fn single(name: &str) -> Single {
     fennec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
-        "fennec-token-first-{name}-{}-{:?}",
+        "fennec-token-first-{name}-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("data.fennec");
@@ -353,9 +353,9 @@ fn a_wait_for_changes_or_a_subscription_is_refused_at_once_without_its_token() {
 fn a_tenant_s_waits_come_after_its_token_and_its_tenant() {
     fennec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
-        "fennec-token-first-tenants-{}-{:?}",
+        "fennec-token-first-tenants-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let tenants = Arc::new(Tenants::new(&dir).unwrap());
     for name in ["acme", "globex"] {

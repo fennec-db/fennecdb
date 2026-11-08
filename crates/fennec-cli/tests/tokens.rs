@@ -47,6 +47,37 @@ fn an_empty_replication_token_is_none_or_refused() {
     assert!(said(&out).contains("--token is empty"), "{}", said(&out));
 }
 
+/// `fennec key` writes a key its owner alone can read: mode 0600, and on
+/// Windows, where a file inherits its directory's ACL, a protected DACL of
+/// its owner alone, set before the key is written (docs/design/windows.md,
+/// 7h). A key there already is never written over.
+#[test]
+fn a_new_key_is_its_owner_s_alone() {
+    let dir = std::env::temp_dir().join(format!("fennec-cli-new-key-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = dir.join("archive.key");
+    let _ = std::fs::remove_file(&key);
+    let out = fennec(&["key", key.to_str().unwrap()], &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    let hex = std::fs::read_to_string(&key).unwrap();
+    assert_eq!(hex.trim_end().len(), 64, "{hex}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    #[cfg(windows)]
+    {
+        assert!(fennec_http::owner_only::owner_alone(&key).unwrap());
+        assert_eq!(fennec_http::owner_only::open_to(&key).unwrap(), None);
+    }
+    let again = fennec(&["key", key.to_str().unwrap()], &[]);
+    assert_eq!(again.status.code(), Some(2), "{}", said(&again));
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), hex);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn an_empty_key_file_is_refused() {
     let dir = std::env::temp_dir().join(format!("fennec-cli-keys-{}", std::process::id()));

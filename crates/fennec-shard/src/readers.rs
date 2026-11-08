@@ -653,15 +653,15 @@ impl Router {
     /// look ([`Self::follow_round`]) fits the replica to it. A delete waits
     /// it out, holding the region's changes ([`Self::readers_gone`]).
     pub(crate) fn place_reader(&self, tenant: &str, region: &str) -> Outcome<Response> {
-        fennec_http::tenants::check_name(region).map_err(|_| {
-            Fail(
+        if !fennec_http::tenants::shaped(region) {
+            return Err(Fail(
                 400,
                 format!(
                     "a region is named [a-z0-9_-], 1 to {} characters",
                     fennec_http::tenants::MAX_NAME
                 ),
-            )
-        })?;
+            ));
+        }
         let _hold = self
             .hold_reader(tenant, region)
             .ok_or_else(|| Router::held_elsewhere(tenant, region))?;
