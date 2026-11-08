@@ -127,7 +127,9 @@ image on every system again, and
 `a_round_consolidates_in_a_file_of_its_own_and_sweeps_what_others_left`
 plants what rounds left -- on Windows one held as a copier holds it, under
 the round's own name -- and finds the image taken and every one gone once
-let go of.
+let go of (in the `windows (http)` job, the held one said in the log
+once). Its code is in `fennec-server`'s 832 bytes more of `__text`
+([http.md](http.md#connections-without-a-thread)).
 
 ## A node's archive
 

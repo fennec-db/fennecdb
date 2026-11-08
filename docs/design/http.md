@@ -1024,7 +1024,14 @@ connections at a ceiling of one, each panicking in a hook as its write
 lands, each closed unanswered, then a request answered 200 -- failed at
 its second connection, a 503, with the drop skipped on unwinding, and
 `accept`'s `a_slot_is_given_back_however_its_thread_ends` holds the slot
-served, unwound and never spawned.
+served, unwound and never spawned. A request pays nothing for it: the
+guard is a connection's, and `make instr-compare EXAMPLE=replays` against
+main read a `put` through `handle` -30.8 instructions (-0.14%, SE 43.1)
+and a keyed one +58.7 (+0.07%, SE 65.5), each inside two standard errors.
+With the archive's round file ([replication.md](replication.md#replication),
+*A round's own file*) `fennec-server`'s `__text` grew 832 bytes and
+`fennec-shard`'s 1 024 (aarch64-apple-darwin): the slot's moves and
+drops, the held request's, the sweep and its line.
 
 ## Chunked bodies
 
