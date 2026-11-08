@@ -334,7 +334,7 @@ jobs:
       # shares a console with its servers, and whether a second `listen`
       # changes a listener's queue.
       - name: A console shared with the servers, and a second listen
-        run: cargo test -p fennec-server --test all windows:: -- --nocapture
+        run: cargo test -p fennec-server --test all 'windows::' -- --nocapture
 
       - name: fennec-server's suite, its servers stopped by Ctrl+Break
         run: cargo test -p fennec-server
