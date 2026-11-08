@@ -1974,46 +1974,38 @@ def install_script():
 
 def install_ps1():
     """dist/install.ps1: the Windows installer `irm https://fennecdb.com/install.ps1
-    | iex` runs, as the repository has it, held to what makes running it
-    through `iex` safe: outside its functions -- each `function Verb-Noun {`
-    at the margin to the `}` at the margin -- only comments and blank lines,
-    and the one thing that runs is `Install-Fennec @args` on the last line,
-    so a download cut short defines some functions at most and runs nothing.
-    Run in the caller's session, it assigns nothing there. Its code invokes
-    no expression, and its text is ASCII, which Windows PowerShell 5.1 reads
-    a file with no byte order mark as (docs/design/windows.md, decision 6)."""
+    | iex` runs, as the repository has it. `iex` runs a text in the caller's
+    session, so what makes that safe -- outside its functions only the one
+    last call, `Install-Fennec @args`, so a download cut short defines some
+    functions at most and runs nothing, and no expression invoked anywhere in
+    it -- is held by PowerShell's own parser, tools/install-ps1-check.ps1 (a
+    line-by-line reading of the text was let through by a quote inside a
+    string and by a `}; command` on a function's last line). Run in the
+    caller's session it defines its fennec-named functions there and
+    assigns no variable. What this holds itself is exact: the text is
+    ASCII, which Windows PowerShell 5.1 reads a file with no byte order mark
+    as (docs/design/windows.md, decision 6); _headers below serves it as
+    text/plain."""
     src = os.path.join(ROOT, "install.ps1")
     raw = open(src, "rb").read()
     if any(b > 0x7E or (b < 0x20 and b not in (0x0A, 0x0D)) for b in raw):
         raise SystemExit("  site/install.ps1 must be printable ASCII")
-    text = raw.decode("ascii")
-    lines = text.splitlines()
-    if [l for l in lines if l.strip()][-1] != "Install-Fennec @args":
-        raise SystemExit("  site/install.ps1 must end by calling Install-Fennec @args")
-    if text.count("Install-Fennec @args") != 1:
-        raise SystemExit("  site/install.ps1 calls Install-Fennec once")
-    # The code, without its comments and the text of its strings: what is
-    # quoted is said, not run (the usage names `irm ... | iex`).
-    code = "\n".join(l for l in lines if not l.lstrip().startswith("#"))
-    code = re.sub(r"'(?:[^']|'')*'", "''", code)
-    code = re.sub(r'"(?:[^"`]|`.)*"', '""', code)
-    if re.search(r"(?i)\b(invoke-expression|iex|invoke-command|add-type)\b|\[scriptblock\]::create", code):
-        raise SystemExit("  site/install.ps1 invokes no expression")
-    inside = False
-    for n, line in enumerate(lines, 1):
-        if inside:
-            inside = line != "}"
-        elif not line.strip() or line.startswith("#") or line == "Install-Fennec @args":
-            continue
-        elif re.fullmatch(r"function [A-Z][A-Za-z]*-[A-Z][A-Za-z]*(\([^)]*\))? \{", line):
-            inside = True
-        else:
-            raise SystemExit(
-                f"  site/install.ps1:{n}: outside a function, only comments come before "
-                f"Install-Fennec @args: {line!r}"
-            )
-    if inside:
-        raise SystemExit("  site/install.ps1 ends inside a function")
+    check = os.path.join(ROOT, "..", "tools", "install-ps1-check.ps1")
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        done = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-File", check, src],
+            capture_output=True, text=True)
+        if done.returncode != 0:
+            raise SystemExit("  tools/install-ps1-check.ps1 refuses site/install.ps1:\n"
+                             + (done.stdout + done.stderr).rstrip())
+    elif os.environ.get("CI"):
+        # pwsh is on the runners that build the site (ubuntu-latest); without
+        # it the file would ship unparsed.
+        raise SystemExit("  pwsh not found: site/install.ps1 cannot be checked (CI)")
+    else:
+        print("  (pwsh not found: site/install.ps1 not checked with "
+              "tools/install-ps1-check.ps1 here; CI parses it)")
     shutil.copy(src, os.path.join(OUT, "install.ps1"))
 
 

@@ -459,6 +459,11 @@ jobs:
       # Before the build, so a script that does not read fails in seconds:
       # install.ps1 under Windows PowerShell 5.1, which `irm | iex` runs on
       # a Windows 10, and PowerShell 7; the tests under 7, which runs them.
+      # Then what makes running install.ps1 through `iex` safe, held by
+      # PowerShell's parser under both (tools/install-ps1-check.ps1): only
+      # functions and its one last call at the top level, no expression
+      # invoked anywhere in it. site/build.py runs the same check before the
+      # site ships the file.
       - name: The PowerShell scripts parse
         shell: pwsh
         run: |
@@ -468,6 +473,10 @@ jobs:
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script site/install.ps1
           if ($LASTEXITCODE) { exit 1 }
           pwsh -NoProfile -NonInteractive -File $script site/install.ps1 site/test_install.ps1 tools/windows-zip-check.ps1
+          if ($LASTEXITCODE) { exit 1 }
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/install-ps1-check.ps1 site/install.ps1
+          if ($LASTEXITCODE) { exit 1 }
+          pwsh -NoProfile -NonInteractive -File tools/install-ps1-check.ps1 site/install.ps1
           if ($LASTEXITCODE) { exit 1 }
 
       # The arm64 runner's image holds rustup and the clang ring builds its C

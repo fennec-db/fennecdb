@@ -125,6 +125,15 @@ function Get-FennecListed([string[]] $sums, [string] $target) {
     return $null
 }
 
+# The version of the release SHA256SUMS belongs to, from any file it lists,
+# or nothing: a release lists all its files, a tarball's among a zip's.
+function Get-FennecRelease([string[]] $sums) {
+    foreach ($line in $sums) {
+        if ($line -cmatch '^[0-9a-f]{64} [ *]fennec-v([0-9A-Za-z.+-]+?)-(x86_64|aarch64)-\S+\s*$') { return $Matches[1] }
+    }
+    return $null
+}
+
 # Where the programs go: $env:FENNEC_INSTALL\bin, else
 # $env:LOCALAPPDATA\fennecdb\bin, made absolute against this session's
 # folder, so the PATH line it prints is good from any other.
@@ -141,41 +150,73 @@ function Get-FennecBin {
 # Each program written beside its place and renamed into it. A running
 # program's file cannot be written over or deleted, but it can be renamed, so
 # one there already is first renamed aside, and removed once nothing runs it:
-# now, or at the next install.
+# now, or at the next install. Both programs are copied before either is
+# replaced, and one that cannot be put in its place puts back the one before
+# it, so a failure leaves the two programs the versions they were -- or says,
+# exactly, which one it could not put back.
 function Install-FennecFiles([string] $src, [string] $bindir) {
     New-Item -ItemType Directory -Force -Path $bindir -ErrorAction SilentlyContinue | Out-Null
     if (-not (Test-Path -LiteralPath $bindir -PathType Container)) {
         throw "could not make $bindir`: say where to install with FENNEC_INSTALL"
     }
-    $kept = @()
-    foreach ($b in @('fennec.exe', 'fennec-server.exe')) {
+    $names = @('fennec.exe', 'fennec-server.exe')
+    $staged = @{}
+    foreach ($b in $names) {
         foreach ($left in @(Get-ChildItem -LiteralPath $bindir -Force -File -Filter ".$b.old.*")) {
             Remove-Item -LiteralPath $left.FullName -Force -ErrorAction SilentlyContinue
         }
-        $dest = Join-Path $bindir $b
-        $staged = Join-Path $bindir ".$b.new.$PID"
-        try {
-            Copy-Item -LiteralPath (Join-Path $src $b) -Destination $staged -Force
+        $staged[$b] = Join-Path $bindir ".$b.new.$PID"
+    }
+    $done = @()
+    $at = $null
+    try {
+        foreach ($b in $names) {
+            $at = $b
+            Copy-Item -LiteralPath (Join-Path $src $b) -Destination $staged[$b] -Force
+        }
+        foreach ($b in $names) {
+            $at = $b
+            $dest = Join-Path $bindir $b
+            $old = $null
             if (Test-Path -LiteralPath $dest) {
                 $old = Join-Path $bindir (".$b.old." + [Guid]::NewGuid().ToString('N').Substring(0, 8))
                 Move-Item -LiteralPath $dest -Destination $old -Force
-                try {
-                    Move-Item -LiteralPath $staged -Destination $dest
-                } catch {
-                    Move-Item -LiteralPath $old -Destination $dest -Force
-                    throw
-                }
-                try {
-                    Remove-Item -LiteralPath $old -Force
-                } catch {
-                    $kept += $old
-                }
-            } else {
-                Move-Item -LiteralPath $staged -Destination $dest
             }
-        } catch {
-            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            throw "could not write $dest`: $($_.Exception.Message)"
+            try {
+                Move-Item -LiteralPath $staged[$b] -Destination $dest
+            } catch {
+                if ($old) { Move-Item -LiteralPath $old -Destination $dest -Force }
+                throw
+            }
+            $done += @{ Name = $b; Dest = $dest; Old = $old }
+        }
+    } catch {
+        $said = $_.Exception.Message
+        foreach ($b in $names) { Remove-Item -LiteralPath $staged[$b] -Force -ErrorAction SilentlyContinue }
+        $back = @()
+        $stuck = @()
+        for ($i = $done.Count - 1; $i -ge 0; $i--) {
+            try {
+                Remove-Item -LiteralPath $done[$i].Dest -Force
+                if ($done[$i].Old) { Move-Item -LiteralPath $done[$i].Old -Destination $done[$i].Dest -Force }
+                $back += $done[$i].Name
+            } catch {
+                $stuck += $done[$i].Name
+            }
+        }
+        $tail = ''
+        if ($back.Count) { $tail += " ($($back -join ', ') is back as it was)" }
+        if ($stuck.Count) { $tail += " ($($stuck -join ', ') could not be put back and is the new version, the other the old)" }
+        throw "could not write $(Join-Path $bindir $at)`: $said$tail"
+    }
+    $kept = @()
+    foreach ($d in $done) {
+        if ($d.Old) {
+            try {
+                Remove-Item -LiteralPath $d.Old -Force
+            } catch {
+                $kept += $d.Old
+            }
         }
     }
     return , $kept
@@ -220,11 +261,12 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     }
     $bindir = Get-FennecBin
 
-    # x86_64 where a release has no build for an arm64 machine -- one from
-    # before arm64's -- which Windows 11 runs under its emulation.
+    # The build for this machine's processor, and no other: a release has
+    # both Windows zips or neither (release.yml's publish), and an x86_64
+    # program does not run on a Windows 10 for arm64, only a Windows 11's
+    # emulation does, so a machine whose zip is not listed is refused.
     $arch = Get-FennecArch
-    $targets = @("$arch-pc-windows-msvc")
-    if ($arch -ne 'x86_64') { $targets += 'x86_64-pc-windows-msvc' }
+    $target = "$arch-pc-windows-msvc"
 
     $sumsFile = Join-Path $tmp 'SHA256SUMS'
     $version = $null
@@ -259,30 +301,27 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     }
     $sums = @(Get-Content -LiteralPath $sumsFile)
 
-    $target = $null
     $name = $null
     $want = $null
-    foreach ($t in $targets) {
-        $v = $version
-        if (-not $v) { $v = Get-FennecListed $sums $t }
-        if (-not $v -or $v -cnotmatch '^[0-9A-Za-z.+-]+$') { continue }
-        $n = "fennec-v$v-$t.zip"
-        $s = Get-FennecSum $sums $n
-        if ($s) {
-            $version = $v
-            $target = $t
-            $name = $n
-            $want = $s
-            break
-        }
+    $v = $version
+    if (-not $v) { $v = Get-FennecListed $sums $target }
+    if ($v -and $v -cmatch '^[0-9A-Za-z.+-]+$') {
+        $name = "fennec-v$v-$target.zip"
+        $want = Get-FennecSum $sums $name
     }
     if (-not $want) {
-        if ($version) { throw "release v$version lists no fennec-v$version-$($targets[0]).zip: it has no build for this machine" }
-        throw "the latest release lists no build for $($targets[0])"
+        $which = 'the latest release'
+        if ($version) {
+            $which = "release v$version"
+        } else {
+            $release = Get-FennecRelease $sums
+            if ($release) { $which = "the latest release (v$release)" }
+        }
+        $why = ''
+        if ($arch -ne 'x86_64') { $why = "; the x86_64 build is not taken in its place, a Windows 10 for arm64 does not run it" }
+        throw "$which lists no build for $target (fennec-v*-$target.zip)$why"
     }
-    if ($target -ne $targets[0]) {
-        Write-Host "No build for $($targets[0]) in v$version`: taking $target, which Windows 11 runs under its emulation"
-    }
+    $version = $v
 
     $zip = Join-Path $tmp $name
     if ($from) {

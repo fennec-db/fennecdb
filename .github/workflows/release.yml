@@ -17,9 +17,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Reads the tag and builds: it writes no release and no package, so the
+  # workflow's write permissions are not its token's, and the checkout does
+  # not leave the token in .git/config for the dependencies' build scripts
+  # (ring, cc, ...) to find. The artifact upload needs no token of the
+  # repository's.
   binaries:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +49,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       # rust-toolchain.toml also asks for wasm32, which this job does not need
       # but which costs one small download; the channel pin is worth keeping.
@@ -100,9 +108,15 @@ jobs:
   # runner of its own architecture, which runs what it built. A tag from
   # before the scripts -- a dispatch for an older one -- builds none, and
   # says so.
+  #
+  # Read-only, its checkout keeping no token: the crates' build scripts (ring,
+  # cc, windows_aarch64_msvc) run here, and the workflow's contents: write
+  # and packages: write are for the jobs that publish.
   windows:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +132,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Whether the tag builds for Windows
         id: has

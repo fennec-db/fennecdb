@@ -21,6 +21,8 @@ on:
       - 'crates/fennec-abi/**'
       - 'crates/fennec-core/**'
       - 'crates/fennec-ql/**'
+      # install.ps1 is served only once this has parsed it.
+      - 'tools/install-ps1-check.ps1'
       - '.github/workflows/site.yml'
   workflow_dispatch:
 
@@ -72,6 +74,12 @@ jobs:
       # token may run it (CLOUDFLARE_AI_TOKEN, or the deploy token given
       # Workers AI Read), and goes without a vector otherwise -- found by its
       # words alone until someone commits the cache again. Never a failure.
+      #
+      # The build also runs tools/install-ps1-check.ps1 under the runner's
+      # own `pwsh` (preinstalled on ubuntu-latest) on site/install.ps1, which
+      # `irm | iex` runs in a visitor's session: it fails, and the file is
+      # not served, unless the top level is functions and the one last call
+      # and no expression is invoked in it.
       - name: Build the wasm module and the site
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -71,8 +71,11 @@ that puts the directory on your <code>PATH</code> and leaves that to you.</p>
 <code>fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip</code> and
 <code>fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip</code>: a folder holding
 <code>fennec-server.exe</code> and <code>fennec.exe</code>. The script takes
-the machine's. Before the first of them, the script says the latest release
-has no build for Windows and installs nothing. The programs need nothing installed beside them, the C runtime
+the machine's, and no other: a release that does not list the zip for your
+processor is refused, named, and nothing is installed — an x86_64 build is
+not taken for an arm64 machine, which a Windows 10 for arm64 cannot run.
+Before the first of them, the script says the latest release has no build for
+Windows and installs nothing. The programs need nothing installed beside them, the C runtime
 built in: unzipped anywhere, they run from there.</p>
 
 <ul>
@@ -88,8 +91,12 @@ built in: unzipped anywhere, they run from there.</p>
     <code>$env:FENNEC_VERSION = '0.1.13'</code> before it names a release.</li>
   <li><b>Nothing runs until its last line.</b> The script is functions, and
     <code>Install-Fennec @args</code> on its last line is what starts them, so a
-    download cut short runs nothing; run through <code>iex</code> it changes
-    none of your session's settings. To read it first, open <a
+    download cut short runs nothing; PowerShell's own parser holds that, and
+    that it invokes no expression, before the site serves it. Run through
+    <code>iex</code>, it changes none of your session's settings or
+    variables, but its functions — each named for fennec, <code>Install-Fennec</code>
+    and <code>Get-FennecArch</code> among them — stay defined in your session
+    until it ends. To read it first, open <a
     href="https://fennecdb.com/install.ps1">install.ps1</a> in a browser.</li>
   <li><b>Not signed.</b> The programs carry no Authenticode signature. What
     the script installs carries no mark of the web, which it takes off the
@@ -103,7 +110,9 @@ built in: unzipped anywhere, they run from there.</p>
     into a folder and run the script with <code>$env:FENNEC_FROM</code> naming
     it: it checks and installs from there.</li>
   <li><b>To upgrade,</b> run it again, a server running from the folder or not:
-    a running program's file is renamed aside and removed once it stops.
+    a running program's file is renamed aside and removed once it stops, and
+    if the second program cannot be replaced the first is put back, so the two
+    stay the version they were.
     <b>To remove it,</b> delete <code>%LOCALAPPDATA%\fennecdb</code>.</li>
 </ul>
 

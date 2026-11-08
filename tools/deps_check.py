@@ -32,18 +32,15 @@ EXEMPT = {
 CLOSED = ("fennec-core", "fennec-ql", "fennec-abi", "fennec-wasm", "fennec-ffi")
 
 # fennec-tls's whole tree, normal and build edges, as Cargo.lock resolves it
-# for the targets the binaries ship for (TLS_TARGETS). The Windows zips' take
-# the same less libc, and on aarch64 ring's windows-sys besides --
-# Microsoft's declarations of the Windows API, windows-targets and
-# windows_aarch64_msvc beneath it, an import library and a build script that
-# names its folder to the linker, read at 0.52.6 (docs/design/windows.md,
-# decision 6). Its Cargo.toml names two crates; these are what they bring, and
-# a rustls feature turned on (aws-lc-rs, brotli), a default moved or a
-# `cargo update` changes them without a line of any Cargo.toml changing. A
-# difference fails the check: read what came in or moved (what it is, who
-# publishes it, its build.rs), then write the list again. A build script
-# here that the image's Linux builds run is one tools/image-cargo.sh names by
-# version too.
+# for the targets the binaries ship for (TLS_TARGETS), the union of what every
+# target takes but TLS_ARM_WINDOWS (a target's tree is held to it apart, below).
+# The Windows zips' take the same less libc. Its Cargo.toml names two crates;
+# these are what they bring, and a rustls feature turned on (aws-lc-rs,
+# brotli), a default moved or a `cargo update` changes them without a line of
+# any Cargo.toml changing. A difference fails the check: read what came in or
+# moved (what it is, who publishes it, its build.rs), then write the list
+# again. A build script here that the image's Linux builds run is one
+# tools/image-cargo.sh names by version too.
 TLS_TREE = {
     "cc@1.4.6",
     "cfg-if@1.0.5",
@@ -60,11 +57,20 @@ TLS_TREE = {
     "subtle@2.6.1",
     "untrusted@0.9.0",
     "webpki-roots@1.0.11",
+    "zeroize@1.9.0",
+}
+# What aarch64-pc-windows-msvc's tree adds, ring's windows-sys there --
+# Microsoft's declarations of the Windows API, windows-targets and
+# windows_aarch64_msvc beneath it, an import library and a build script that
+# names its folder to the linker, read at 0.52.6 (docs/design/windows.md,
+# decision 6). Allowed on that target alone: on any other, one of them is a
+# crate that came in by a target nobody reviewed it for.
+TLS_ARM_WINDOWS = {
     "windows-sys@0.52.0",
     "windows-targets@0.52.6",
     "windows_aarch64_msvc@0.52.6",
-    "zeroize@1.9.0",
 }
+TLS_EXTRA = {"aarch64-pc-windows-msvc": TLS_ARM_WINDOWS}
 TLS_TARGETS = (
     "x86_64-unknown-linux-musl",
     "aarch64-apple-darwin",
@@ -101,21 +107,35 @@ def tls_tree(meta):
     return {f"{packages[i]['name']}@{packages[i]['version']}" for i in seen if i not in members}
 
 
-def check_tls(took):
-    """Each way fennec-tls's tree differs from TLS_TREE, as a line."""
+def check_tls(trees):
+    """Each way fennec-tls's tree differs from TLS_TREE, as a line. `trees`:
+    the tree of each target (TLS_TARGETS), held apart, so what one target is
+    allowed (TLS_EXTRA) is not allowed on another."""
     errors = []
-    pinned = {t.split("@")[0]: t for t in TLS_TREE}
-    for t in sorted(took - TLS_TREE):
-        name = t.split("@")[0]
-        was = f" where TLS_TREE names {pinned[name]}" if name in pinned else ""
-        errors.append(
-            f"fennec-tls: its tree takes {t}{was}: review it (what it is, who publishes it, "
-            "its build.rs), then update TLS_TREE in tools/deps_check.py"
-        )
-    names = {t.split("@")[0] for t in took}
-    for t in sorted(TLS_TREE - took):
-        if t.split("@")[0] not in names:
-            errors.append(f"fennec-tls: its tree no longer takes {t}: take it off TLS_TREE")
+    everything = TLS_TREE.union(*TLS_EXTRA.values())
+    pinned = {t.split("@")[0]: t for t in everything}
+    for target, took in sorted(trees.items()):
+        allowed = TLS_TREE | TLS_EXTRA.get(target, set())
+        for t in sorted(took - allowed):
+            name = t.split("@")[0]
+            if pinned.get(name) == t:
+                was = ", pinned for other targets only"
+            else:
+                was = f" where TLS_TREE names {pinned[name]}" if name in pinned else ""
+            errors.append(
+                f"fennec-tls: its tree for {target} takes {t}{was}: review it (what it is, who "
+                "publishes it, its build.rs), then update TLS_TREE or TLS_EXTRA in "
+                "tools/deps_check.py"
+            )
+    # Each pinned crate is taken somewhere (its own target, if it has one).
+    for t in sorted(everything):
+        owners = [g for g, extra in TLS_EXTRA.items() if t in extra]
+        looked = {g: trees[g] for g in owners} if owners else trees
+        if not any(t in took for took in looked.values()):
+            names = {x.split("@")[0] for took in looked.values() for x in took}
+            if t.split("@")[0] not in names:
+                where = f" for {', '.join(owners)}" if owners else ""
+                errors.append(f"fennec-tls: its tree{where} no longer takes {t}: take it off TLS_TREE or TLS_EXTRA")
     return errors
 
 
@@ -176,10 +196,8 @@ def check(meta):
 
 def main():
     errors = check(metadata())
-    took = set()
-    for target in TLS_TARGETS:
-        took |= tls_tree(metadata("--filter-platform", target))
-    errors += check_tls(took)
+    trees = {t: tls_tree(metadata("--filter-platform", t)) for t in TLS_TARGETS}
+    errors += check_tls(trees)
     for e in errors:
         print(e, file=sys.stderr)
     if errors:
