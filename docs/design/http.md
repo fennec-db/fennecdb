@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), and the OpenAPI document (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), and the OpenAPI document and the compatibility it is held to (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -1668,3 +1668,131 @@ version, the document after the preflight (the same two compares, swapped)
 -- moved it 6 792 400 -> 6 792 432 bytes: `__DATA_CONST.__const` +1 664
 (each row's `head` and `tenant_flag`), the rest tens of bytes either way;
 the scan and the tests are tests alone.
+
+## Compatibility
+
+**The REST API only grows** (`tools/openapi_compat.py`, the baseline in
+`integrations/openapi/`, `fennec_http::openapi::Deprecated`). A client
+written against one release's documents keeps working against every later
+one: a route keeps its method and path, takes what it took, asks no more
+than it asked, and answers what it answered. What is new comes beside
+what was. Removing or changing what a client relies on is caught in CI,
+made on purpose, and announced first with HTTP's own headers.
+
+*The baseline.* `make openapi-golden` writes the three documents a file's
+server, a tenant node and a router serve -- as fennec-server's
+`tests/openapi.rs` fetched them, the router's beside them in
+`target/tmp/openapi/` -- into `integrations/openapi/{file,node,router}.json`,
+indented and in the document's own order, so a pull request's diff shows
+which operation moved (about 240 KB of text for the three; one line a
+document would make every change a one-line diff no one reads). An
+addition passes the check and is written into the baseline in the same
+pull request: a baseline left behind fails (`the document changed ... run
+make openapi-golden`), or an operation added and taken away again before
+the next baseline would never have been held.
+
+*What breaks.* `tools/openapi_compat.py` reads both documents with the
+standard library alone (tools/ may take Python; the crates take nothing,
+and oasdiff, which does this in Go, would be a toolchain CI pins for one
+step) and compares them operation by operation, keyed by method and path
+with the placeholders unnamed (`{collection}` renamed is the same route to
+a client), every `$ref` followed, `allOf` laid into one schema and a
+`oneOf`'s alternatives each matched to the closest of the other side's:
+
+- an operation removed, or its method or path changed (an operation
+  whose id stays is named as moved);
+- a parameter, a request body or a body field that became required, or a
+  required one added;
+- a parameter or a request body field removed: nothing is refused, but a
+  field the server no longer reads is one a client's request now means
+  nothing by, a `select` or an `ef` silently dropped;
+- a request type narrowed: a type, an enum's value, a bound (`minimum`,
+  `maxLength`, `maxItems` ...), a `pattern`, `format` or `multipleOf`, a
+  `oneOf`'s alternative, `additionalProperties` closed, a parameter's
+  `style` or `explode`;
+- a documented response status removed; a response field removed (every
+  path an answer may hold, a `oneOf`'s alternatives together, so `Read`
+  losing `Faceted` loses `count` and `facets`), a response header or media
+  type removed, or a response field's type changed (a client parsing an
+  `integer` meets a `string`, or a `null`);
+- a security requirement added to an operation that took none (a `security:
+  []`, or a `{}` among its ways), or a way of authenticating it took no
+  longer taken -- an old way is still taken where a new one asks some of its
+  schemes or none.
+
+Additions pass: an operation, an optional parameter or field, a response
+status, field or header, an enum's value, a bound loosened, a type
+widened (an `integer` taken as a `number`), an alternative, a requirement
+made optional, a way of authenticating added or a token no longer asked,
+`deprecated`, a description, the version. `tools/test_openapi_compat.py`
+holds each of them, break and addition, on documents of its own, and holds
+the committed baseline to itself.
+
+*A break on purpose.* It is an entry of `BREAKS` in the checker: the kind
+(`file`, `node`, `router`), the operation and the change as the failure
+printed them -- the failure prints the entry to paste -- the reason, which
+says what a caller does instead, and the document `version` it goes out
+in. An entry allows its break only while the built document's
+`info.version` is the entry's and differs from the baseline's: a break
+moves `DOCUMENT_VERSION` (`openapi.rs`), which the OpenAPI rule already
+kept "moved by hand where an operation's contract changes", and an entry
+stays as the history of breaks, binding nothing once its version is
+past. A marker on the table's row was the other place considered and
+rejected: a removed operation has no row to carry it, and the checker is
+where the entry is read. A break is never allowed by writing the baseline
+again: `--write` refuses one `BREAKS` does not name, and CI's test job
+holds the documents to main's baseline too (`--base-ref FETCH_HEAD`, main
+fetched at depth 1; a merge group's main is the queue's base), so a
+baseline written by hand past a break fails there, its message saying the
+committed baseline was written again past it. Every failure names which
+document, which comparison (the committed baseline, or the base branch's),
+the operation, the change and what was there; a ref naming no commit is
+an error, a base with no baseline (the pull request that brought it) holds
+nothing.
+
+*Deprecation.* An operation on its way out is deprecated first: its row's
+`deprecated` is a `Deprecated` -- when (seconds since the epoch), the
+sunset where a date is set, and the docs' page saying what replaces it.
+The document writes `deprecated: true`, OpenAPI's own mark that Swagger UI
+and the generators show, `x-fennec-sunset` as an ISO date, and the three
+headers on the operation's answer, inline, so a document deprecating
+nothing is the one it was to the byte. The route answers RFC 9745's
+`Deprecation: @<seconds>`, RFC 8594's `Sunset` as an IMF-fixdate where a
+date is set, and `Link: <page>; rel="deprecation"; type="text/html"`: the
+standard headers rather than a `Fennec-*` one, which a proxy, a client
+library or a log search already knows. Its handler marks its own answer
+with the `pub const` its row names (`Deprecated::mark`); a stream writing
+its own head adds `Deprecated::headers` there. The dispatcher looking the
+request up in the table on the way out was rejected: it is the table match
+the OpenAPI section above rejected for routing, a cost every request would
+pay once any route is deprecated, where this way only the deprecated
+route's answer does. fennec-server's and fennec-shard's
+`tests/openapi.rs` hold the two together from the wire: an operation the
+document marks answers `Deprecation` (a refusal made before its handler ran
+aside), and no other operation's answer carries it; the router relays a
+node's answer as it came. `a_deprecated_route_answers_the_rfcs_headers`
+holds the header writer to RFC 9110's own IMF-fixdate example, and
+`a_deprecated_row_is_marked_in_the_document` a test table's rows to the
+document, a tenant's copy and a HEAD among them; nothing in `OPS` is
+deprecated yet. A deprecated route is removed no sooner than its sunset,
+named in the release's notes (RELEASING.md).
+
+*No version in the path.* `/v1/` was rejected: a prefix would double every
+route a version, the router's and the entry Worker's matching with them,
+for a promise "only grows" already keeps; HTTP has the standard headers
+for the one thing a version prefix would announce, a route going.
+
+*Its cost.* Nothing on a request's way: no route but a deprecated one runs
+a line of it, and none is deprecated. `make instr-compare` (replays, 8
+identities a build, 7 rounds, against main at `66f3e8eb`) read `put`
+21 164.8 -> 21 111.2 instructions an op (-53.6, SE 36.5) and `keyed`
+83 761.1 -> 83 794.6 (+33.5, SE 107.4), each inside two standard errors:
+the allocator's draw. `fennec-server`'s release binary went 6 792 432 ->
+6 792 464 bytes (+32): `__text` +2 048 (the writer of a deprecation and the
+IMF-fixdate, which `build` reaches; `mark` and `headers` are linked only
+once a handler calls them), `__DATA_CONST.__const` +2 976 (each row's
+`deprecated`, some 40 bytes beside 67 rows) and `__cstring` +169, inside
+the pages the `__TEXT` segment had. The documents served are the same
+bytes. The check is a CI step of under a second over the documents `make
+openapi-lint` already wrote; the baseline is 240 KB of text in the tree,
+about 10 KB a document as git compresses it.

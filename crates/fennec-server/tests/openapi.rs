@@ -3,9 +3,11 @@
 //! list in the document they serve is sent to them, under every flag a
 //! route is served with, and answered neither 404 nor 405; each one whose
 //! `security` asks a token is 401 without one, and one asking none is not;
-//! a GET the document lists no HEAD beside answers HEAD 404 or 405. A row
-//! of the document with no route behind it fails here; a route with no
-//! row, fennec-http's `every_route_the_server_matches_is_documented`.
+//! a GET the document lists no HEAD beside answers HEAD 404 or 405; an
+//! operation the document marks `deprecated` answers `Deprecation`, and no
+//! other does. A row of the document with no route behind it fails here; a
+//! route with no row, fennec-http's
+//! `every_route_the_server_matches_is_documented`.
 //! fennec-shard's `tests/openapi.rs` sends the router's.
 //!
 //! The documents it read are left in `CARGO_TARGET_TMPDIR/openapi/`, the
@@ -52,6 +54,9 @@ struct Operation {
     /// takes, the server's flags deciding.
     unauthorized: Option<bool>,
     body: bool,
+    /// The document marks it `deprecated`: its answer carries
+    /// `Deprecation` (RFC 9745).
+    deprecated: bool,
 }
 
 /// The document `server` serves, with no token, as it is: written where
@@ -142,6 +147,7 @@ fn operations(doc: &Value) -> Vec<Operation> {
                 token,
                 unauthorized,
                 body: get(op, "requestBody").is_some(),
+                deprecated: get(op, "deprecated") == Some(&Value::Bool(true)),
             });
         }
     }
@@ -191,8 +197,14 @@ fn filled(path: &str) -> String {
 }
 
 /// The status `method path` is answered with, on a connection of its own:
-/// its status line alone, so a stream's head is enough.
+/// its head alone, so a stream's is enough.
 fn status(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> u16 {
+    answer(port, method, path, token, body).0
+}
+
+/// The status `method path` is answered with, and whether its head carries
+/// `Deprecation`: the head alone, read to its blank line.
+fn answer(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, bool) {
     let target = filled(path);
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -204,12 +216,30 @@ fn status(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) 
         body.len()
     )
     .unwrap();
+    let mut head = BufReader::new(s);
     let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).unwrap();
-    line.split_whitespace()
+    head.read_line(&mut line).unwrap();
+    let status = line
+        .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"))
+        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"));
+    (status, deprecation(&mut head))
+}
+
+/// Whether the head left on `head`, past its status line, carries
+/// `Deprecation`: read to its blank line, never into a stream's body.
+fn deprecation(head: &mut impl BufRead) -> bool {
+    let mut marked = false;
+    loop {
+        let mut h = String::new();
+        if head.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+            return marked;
+        }
+        marked |= h
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("deprecation"));
+    }
 }
 
 /// Holds the server on `port` to `doc`, the fixtures made: what a token
@@ -250,9 +280,23 @@ fn every_operation_is_answered(port: u16, doc: &Value, least: usize) {
     let mut unrouted = false;
     for op in &ops {
         let body = if op.body { body(&op.id) } else { "" };
-        let s = status(port, &op.method, &op.path, op.token, body);
+        let (s, marked) = answer(port, &op.method, &op.path, op.token, body);
         unrouted |= s == 404 || s == 405;
         answered.push(format!("{s} {} {} ({})", op.method, op.path, op.id));
+        // A deprecated route's handler marks what it answers; a refusal
+        // made before it ran (a token, a body) may carry no mark, but no
+        // other route's answer ever carries one.
+        if marked && !op.deprecated {
+            wrong.push(format!(
+                "{s} {} {}: answered Deprecation, which the document does not say",
+                op.method, op.path
+            ));
+        } else if !marked && op.deprecated && s < 400 {
+            wrong.push(format!(
+                "{s} {} {}: deprecated in the document, answered without Deprecation",
+                op.method, op.path
+            ));
+        }
     }
     assert!(
         !unrouted && wrong.is_empty(),

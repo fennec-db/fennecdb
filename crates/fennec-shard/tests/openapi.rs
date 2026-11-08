@@ -3,7 +3,8 @@
 //! its node, and the router's own -- is sent to a router in front of a
 //! node, answered neither 404 nor 405; each one whose `security` asks a
 //! token is 401 without one, and one asking none is not; a GET it lists no
-//! HEAD beside answers HEAD 404 or 405. fennec-server's `tests/openapi.rs`
+//! HEAD beside answers HEAD 404 or 405; one it marks `deprecated` answers
+//! `Deprecation`, and no other does. fennec-server's `tests/openapi.rs`
 //! holds a file's server and a node to theirs.
 
 use fennec_core::value::Value;
@@ -99,9 +100,16 @@ fn router(path: &std::path::Path) -> u16 {
     port
 }
 
-/// The status of `method target`, on a connection of its own: its status
-/// line alone, so a stream's head is enough.
+/// The status of `method target`, on a connection of its own: its head
+/// alone, so a stream's is enough.
 fn status(port: u16, method: &str, target: &str, token: Option<&str>, body: &str) -> u16 {
+    answer(port, method, target, token, body).0
+}
+
+/// The status of `method target`, and whether its head carries
+/// `Deprecation`: the head alone, read to its blank line, never into a
+/// stream's body.
+fn answer(port: u16, method: &str, target: &str, token: Option<&str>, body: &str) -> (u16, bool) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
@@ -112,12 +120,24 @@ fn status(port: u16, method: &str, target: &str, token: Option<&str>, body: &str
         body.len()
     )
     .unwrap();
+    let mut head = BufReader::new(s);
     let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).unwrap();
-    line.split_whitespace()
+    head.read_line(&mut line).unwrap();
+    let status = line
+        .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"))
+        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"));
+    let mut marked = false;
+    loop {
+        let mut h = String::new();
+        if head.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+            return (status, marked);
+        }
+        marked |= h
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("deprecation"));
+    }
 }
 
 /// The status and body of `method target`, read to its end.
@@ -148,6 +168,9 @@ struct Operation {
     /// what it takes.
     unauthorized: Option<bool>,
     body: bool,
+    /// The document marks it `deprecated`: its answer, the node's relayed
+    /// or the router's own, carries `Deprecation`.
+    deprecated: bool,
 }
 
 fn operations(doc: &Value) -> Vec<Operation> {
@@ -203,6 +226,7 @@ fn operations(doc: &Value) -> Vec<Operation> {
                 token,
                 unauthorized,
                 body: get(op, "requestBody").is_some(),
+                deprecated: get(op, "deprecated") == Some(&Value::Bool(true)),
             });
         }
     }
@@ -304,11 +328,24 @@ fn every_operation_of_the_routers_document_is_answered() {
     let mut unrouted = false;
     for op in &ops {
         let body = if op.body { body(&op.id) } else { "" };
-        let s = status(port, &op.method, &op.target, op.token, body);
+        let (s, marked) = answer(port, &op.method, &op.target, op.token, body);
         // A 502 or a 503 is a forward that never reached the node: the
         // run would hold nothing.
         unrouted |= matches!(s, 404 | 405 | 502 | 503);
         answered.push(format!("{s} {} {} ({})", op.method, op.target, op.id));
+        // A refusal made before a deprecated route's handler ran may carry
+        // no mark; no other route's answer ever carries one.
+        if marked && !op.deprecated {
+            wrong.push(format!(
+                "{s} {} {}: answered Deprecation, which the document does not say",
+                op.method, op.target
+            ));
+        } else if !marked && op.deprecated && s < 400 {
+            wrong.push(format!(
+                "{s} {} {}: deprecated in the document, answered without Deprecation",
+                op.method, op.target
+            ));
+        }
     }
     assert!(
         !unrouted && wrong.is_empty(),

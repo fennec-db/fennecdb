@@ -319,7 +319,18 @@ gets its region), a route in a form the scan does not read teaching it that
 form; fennec-server's and fennec-shard's `tests/openapi.rs` send every
 operation a file's server, a tenant node and a router list, none answered
 404 or 405, each whose `security` asks a token 401 without one, a HEAD
-only where listed.
+only where listed. [The API only grows](../../docs/design/http.md#compatibility):
+`tools/openapi_compat.py` holds the three documents to
+`integrations/openapi/` and to main's copy of it (CI's test job, `make
+openapi-check`); an addition writes the baseline again in its change
+(`make openapi-golden`), and a break -- an operation, a status, a field or
+a way in removed, a field made required, a request type narrowed, a token
+asked where none was -- is named in its `BREAKS` with its reason and moves
+`DOCUMENT_VERSION`, never let through by writing the baseline alone. A
+route leaving is deprecated first: its row's `deprecated` is a `pub const`
+`Deprecated` its handler marks its answer with (`Deprecated::mark`:
+`Deprecation`, `Sunset`, `Link`), no dispatcher looking for one; the
+`tests/openapi.rs` pair hold each answer's mark to the document.
 
 ### Held writes
 

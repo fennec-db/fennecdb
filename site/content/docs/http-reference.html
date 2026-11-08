@@ -1,6 +1,6 @@
 <!--
 title: HTTP reference — fennecdb
-description: Every route of the HTTP endpoint and its OpenAPI 3.1 document, the filters of the query string, vector search and lookups over REST, the headers that hold a write or mark a read, the statuses a refusal answers with, subscriptions, polling and the change stream.
+description: Every route of the HTTP endpoint and its OpenAPI 3.1 document, what may change in it and how a route is deprecated, the filters of the query string, vector search and lookups over REST, the headers that hold a write or mark a read, the statuses a refusal answers with, subscriptions, polling and the change stream.
 -->
 
 <h1>HTTP reference</h1>
@@ -152,7 +152,8 @@ serves it — a file's <code>/_changes</code> under <code>--cdc</code>, a
 node's tenants' under <code>--replication-token</code>; a file's hook under
 <code>--hooks</code>, a tenant's under <code>--admin-token</code>, whose
 routes set its secrets — and its <code>info.version</code> is the
-document's own, never the build's, which only a token reads. A GET that
+document's own, never the build's, which only a token reads; it moves
+where a break is made on purpose (<a href="#compatibility">below</a>). A GET that
 answers <code>HEAD</code> lists a <code>head</code> operation beside it;
 the others (the change stream, a replica's stream and status, a
 subscription, the admin's reads) answer GET alone. A file's server
@@ -179,6 +180,41 @@ npx @openapitools/openapi-generator-cli generate -i fennecdb.json -g python -o f
 <p>The official SDKs (<a href="/docs/languages">Languages</a>) speak the same
 routes with the query builder and the sync on top; a generated client is
 for a language they do not cover, or a contract test.</p>
+
+<h2 id="compatibility">Compatibility</h2>
+
+<p>The REST API only grows. There is no <code>/v1/</code> in a path: a
+route keeps its method, its path, its parameters and what its answer holds,
+and what is new comes beside it. CI holds every pull request's documents
+to the ones committed before it, so a change that would break a client
+cannot land by accident.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th></th><th>What</th></tr></thead>
+<tbody>
+<tr><td><b>May change without notice</b></td><td>a new route; a new optional parameter, header or body field; a new field or header in an answer; a status for a new case; a request type taking more (a value, a longer list, another form); a token no longer asked; the words of a refusal's <code>error</code>, a description, the order of an object's fields. A client ignores what it does not know and reads a refusal by its status.</td></tr>
+<tr><td><b>Announced first</b></td><td>a route removed or moved; a parameter or body field removed or made required; a request type taking less; a documented status, answer field or header removed, or a field's type changed; a token asked where none was. Each is made on purpose, named with its reason, and moves the document's <code>info.version</code>.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A route on its way out is <code>deprecated: true</code> in the OpenAPI
+document (with <code>x-fennec-sunset</code> where a date is set), and every
+answer it gives says so in the standard headers, so a client, a proxy or a
+log search sees it before it goes:</p>
+
+<pre data-lang="http">Deprecation: @1794096000
+Sunset: Sat, 08 May 2027 00:00:00 GMT
+Link: &lt;https://fennecdb.com/docs/http-reference#compatibility&gt;; rel="deprecation"; type="text/html"</pre>
+
+<p><code>Deprecation</code> (<a
+href="https://www.rfc-editor.org/rfc/rfc9745">RFC 9745</a>) is when it was
+deprecated, in seconds since the epoch; <code>Sunset</code> (<a
+href="https://www.rfc-editor.org/rfc/rfc8594">RFC 8594</a>) the date after
+which it may go, where one is set; the <code>Link</code> the page saying
+what replaces it. Its removal comes later, past that date where one is
+set, in a release whose notes name it. Nothing is deprecated today.</p>
 
 
 <h2>Filters</h2>
