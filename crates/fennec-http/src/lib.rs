@@ -3147,8 +3147,8 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
     };
-    let (stmt, params) = match api::parse_query(body).and_then(|(stmt, params)| {
-        let exact = api::exactly(db, body, stmt, params);
+    let (stmt, params) = match api::parse_query(body).and_then(|q| {
+        let exact = api::exactly(db, body, q);
         timing::lap(timing::Phase::Exactly);
         exact
     }) {

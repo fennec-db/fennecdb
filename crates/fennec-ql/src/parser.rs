@@ -312,6 +312,65 @@ pub struct Parser {
     /// the names its `$from` and `$jwt.sub` are numbered by. None
     /// anywhere else, where a name after `$` is refused.
     def: Option<Box<Names>>,
+    /// Where a `put`'s documents give a field a list of numbers read into
+    /// a vector, natively and where asked ([`parse_one_listing`]).
+    noting: Noting,
+}
+
+/// The lists of numbers alone a `put`'s documents give their fields, each
+/// read into a vector's `f32`s, with their numbers as written: what the
+/// server makes the tree read as written of, where a field keeps its
+/// numbers (`Database::exactly`), rather than read the text a second time
+/// ([`parse_exact`]). Natively alone: the browser module reads a text as
+/// written a token a number.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct Listing {
+    kept: crate::lexer::Kept,
+    /// Whether every list of numbers the text holds read into a vector is
+    /// a document's field's, the list's one token: then the documents' lists
+    /// in order are the lexer's, and each put in its place as written is
+    /// what [`parse_exact`] makes of the text, nothing else differing.
+    whole: bool,
+}
+
+/// What a parse notes beside its tree ([`Listing`]): nothing in the
+/// browser module, nor natively unless asked.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct Noting {
+    on: bool,
+    /// Whether a `put`'s document is being read.
+    doc: bool,
+    /// The lists of numbers a document's field was given, the list's one
+    /// token.
+    noted: u32,
+    /// The vectors the parse made of lists of numbers, noted or not.
+    vectors: u32,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct Noting;
+
+impl Noting {
+    /// A list of numbers read into a vector.
+    #[inline(always)]
+    fn vector(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.vectors += self.on as u32;
+        }
+    }
+
+    /// Whether a `put`'s document is read next.
+    #[inline(always)]
+    fn doc(&mut self, _doc: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.doc = _doc;
+        }
+    }
 }
 
 /// What a definition's `$from` and `$jwt.sub` are numbered by: its
@@ -362,7 +421,54 @@ struct Bound {
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
-    statements(src, tokenize(src)?, false)
+    statements(src, tokenize(src)?, false, Noting::default()).map(|(s, _)| s)
+}
+
+/// [`parse_one`], and the lists of numbers its `put`'s documents give a
+/// field read into a vector, as written beside ([`Listing`]): what a server
+/// reads a text too long to keep with (`api::parse_query`). A `put` or an
+/// `insert` is read as [`parse_one`] reads it, the lexer keeping each
+/// list's numbers as written as it reads them ([`crate::lexer::Kept`]); any
+/// other statement is [`parse_one`]'s, with no lists.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_one_listing(src: &str) -> Result<(Statement, Listing)> {
+    let head = src.trim_start().as_bytes();
+    let word = |w: &[u8]| head.len() > w.len() && head[..w.len()].eq_ignore_ascii_case(w);
+    if !(word(b"put") || word(b"insert")) {
+        return Ok((parse_one(src)?, Listing::default()));
+    }
+    let (toks, kept) = crate::lexer::tokenize_kept(src)?;
+    let noting = Noting {
+        on: true,
+        ..Noting::default()
+    };
+    let (stmts, noting) = statements(src, toks, false, noting)?;
+    let listing = Listing {
+        whole: noting.noted == noting.vectors,
+        kept,
+    };
+    Ok((one(stmts)?, listing))
+}
+
+/// `stmt`, the statement [`parse_one_listing`] read from a text with
+/// `listing`, made the one [`parse_exact`] reads the text as: each of its
+/// documents' lists, in their order, the lexer's next as written. `false`,
+/// `stmt` as it was, where the listing is not whole or `stmt` is not the
+/// `put` it was read with, for [`parse_exact`] to read the text instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_listed(stmt: &mut Statement, listing: &mut Listing) -> bool {
+    let Statement::Put { docs, .. } = stmt else {
+        return false;
+    };
+    if !listing.whole {
+        return false;
+    }
+    for (_, e) in docs.iter_mut().flatten() {
+        if let Expr::Lit(Value::Vector(quick)) = e {
+            *e = Expr::Lit(Value::List(listing.kept.next(quick)));
+        }
+    }
+    true
 }
 
 /// [`parse`], every list of numbers kept as written -- integers integers,
@@ -371,7 +477,13 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
 /// at a time, which is slower than the vector [`parse`] makes, so a text is
 /// read so only where [`parse_for`] finds a json field given one.
 pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
-    statements(src, crate::lexer::tokenize_values(src)?, true)
+    statements(
+        src,
+        crate::lexer::tokenize_values(src)?,
+        true,
+        Noting::default(),
+    )
+    .map(|(s, _)| s)
 }
 
 /// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
@@ -400,7 +512,12 @@ pub fn parse_one_for(db: &Database, src: &str) -> Result<Statement> {
 /// `parse`; the browser module keeps one copy.
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 #[cfg_attr(not(feature = "statements"), allow(unused_variables))]
-fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
+fn statements(
+    src: &str,
+    toks: Vec<Token>,
+    exact: bool,
+    noting: Noting,
+) -> Result<(Vec<Statement>, Noting)> {
     let mut p = Parser {
         toks,
         i: 0,
@@ -410,6 +527,7 @@ fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
+        noting,
     };
     let mut out = Vec::new();
     while !p.ended() {
@@ -426,7 +544,7 @@ fn statements(src: &str, toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>
     if out.is_empty() {
         return Err(Error::Query("empty query".into()));
     }
-    Ok(out)
+    Ok((out, p.noting))
 }
 
 /// A definition's own text: the characters from its first token to the
@@ -608,6 +726,7 @@ pub fn reading(src: &str) -> Reading {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
+        noting: Noting::default(),
     };
     // In characters, as tokens are placed: each statement read whole, by
     // where it starts, and the one just read, which what follows decides,
@@ -905,6 +1024,7 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
+        noting: Noting::default(),
     };
     let list = p.select_list()?;
     if !p.ended() {
@@ -925,6 +1045,7 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
+        noting: Noting::default(),
     };
     let list = p.group_list()?;
     if !p.ended() {
@@ -945,6 +1066,7 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
+        noting: Noting::default(),
     };
     let list = p.facet_list()?;
     if !p.ended() {
@@ -2390,6 +2512,7 @@ impl Parser {
                 if matches!(self.peek(), Tok::RBracket) {
                     break;
                 }
+                self.noting.doc(true);
                 docs.push(self.document()?);
                 if !matches!(self.peek(), Tok::Comma) {
                     break;
@@ -2400,6 +2523,7 @@ impl Parser {
         } else if insert && !matches!(self.peek(), Tok::LBrace) {
             docs = self.values()?;
         } else {
+            self.noting.doc(true);
             docs.push(self.document()?);
             // consecutive objects are accepted too: put docs {..} {..}, and
             // with commas between them, a list without its brackets.
@@ -2412,6 +2536,7 @@ impl Parser {
                 docs.push(self.document()?);
             }
         }
+        self.noting.doc(false);
         if docs.is_empty() && docs_param.is_none() {
             return self.err("put expects at least one document");
         }
@@ -2684,7 +2809,16 @@ impl Parser {
             #[cfg(not(feature = "statements"))]
             let _ = written;
             self.expect(Tok::Colon)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let at = self.i;
             pairs.push((key, self.expr()?));
+            // A `put`'s document's field given a list of numbers read into
+            // a vector, the list's one token and nothing else: counted.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.noting.on && written && self.noting.doc {
+                let vector = self.i == at + 1 && matches!(self.toks[at].tok, Tok::Vector(_));
+                self.noting.noted += vector as u32;
+            }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
@@ -6088,6 +6222,7 @@ impl Parser {
             Tok::Vector(v) => {
                 let v = std::mem::take(v);
                 self.i += 1;
+                self.noting.vector();
                 return Ok(Expr::Lit(Value::Vector(v)));
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -6137,6 +6272,7 @@ impl Parser {
                 // query holding one took to parse.
                 if !self.exact {
                     if let Some(v) = self.numbers_in_brackets() {
+                        self.noting.vector();
                         return Ok(Expr::Lit(Value::Vector(v)));
                     }
                 }
@@ -6170,6 +6306,7 @@ impl Parser {
                 // `f32`s would pass for whole numbers one was not.
                 if numbers {
                     if let Some(v) = fennec_core::value::quick_vector(&vals) {
+                        self.noting.vector();
                         return Ok(Expr::Lit(Value::Vector(v)));
                     }
                 }
@@ -6721,6 +6858,7 @@ mod tests {
             cut: false,
             outer: Around::At(usize::MAX),
             def: None,
+            noting: Noting::default(),
         };
         let mut out = Vec::new();
         while !p.at_eof() {
@@ -6736,42 +6874,8 @@ mod tests {
     /// bit (`-0.0`).
     #[test]
     fn a_list_read_as_a_vector_parses_as_its_tokens_did() {
-        let items = [
-            "0",
-            "-0",
-            "7",
-            "-123",
-            "0.5",
-            "-0.0",
-            "1e5",
-            "1E-3",
-            "2.5e+2",
-            "-4.25E1",
-            "9007199254740993",
-            "-9007199254740993",
-            "9223372036854775807",
-            "99999999999999999999",
-            "3.14159265358979323846264338",
-            "1e",
-            "1.5e1234",
-            "1e-400",
-            ".5",
-            "1.",
-            "1_000",
-            "0.1_5",
-            "\"a\"",
-            "$1",
-            "[1]",
-            "[]",
-            "-",
-            "- 1",
-            "1e05",
-            "0.000001",
-            "123456789.123456789",
-            "-- c\n1",
-            "1 # c\n",
-        ];
-        let seps = [", ", ",", " , ", ",\n", "\t,\t"];
+        let items = ITEMS;
+        let seps = SEPS;
         let mut read_at_once = 0;
         let mut x = 0x2545f4914f6cdd1du64;
         let mut rnd = |n: usize| {
@@ -6823,5 +6927,133 @@ mod tests {
         }
         // As written, the lists were read at once, many times over.
         assert!(read_at_once > 5_000, "{read_at_once}");
+    }
+
+    /// The numbers [`a_list_read_as_a_vector_parses_as_its_tokens_did`]
+    /// writes lists of: every shape the lexer reads, and some it does not.
+    const ITEMS: [&str; 33] = [
+        "0",
+        "-0",
+        "7",
+        "-123",
+        "0.5",
+        "-0.0",
+        "1e5",
+        "1E-3",
+        "2.5e+2",
+        "-4.25E1",
+        "9007199254740993",
+        "-9007199254740993",
+        "9223372036854775807",
+        "99999999999999999999",
+        "3.14159265358979323846264338",
+        "1e",
+        "1.5e1234",
+        "1e-400",
+        ".5",
+        "1.",
+        "1_000",
+        "0.1_5",
+        "\"a\"",
+        "$1",
+        "[1]",
+        "[]",
+        "-",
+        "- 1",
+        "1e05",
+        "0.000001",
+        "123456789.123456789",
+        "-- c\n1",
+        "1 # c\n",
+    ];
+    const SEPS: [&str; 5] = [", ", ",", " , ", ",\n", "\t,\t"];
+
+    /// A `put` read with its documents' lists as written beside
+    /// (`parse_one_listing`) is `parse_one`'s statement, and those lists put
+    /// in their places (`read_listed`) make the one the whole text read as
+    /// written does (`parse_exact`), to the bit, where the listing is whole:
+    /// every list read into a vector a document's field's. Over documents of
+    /// several fields, lists among other values, nested ones, one hiding a
+    /// rounding, a list given a field of an `else set`, which the listing is
+    /// not whole for, and a letter outside ASCII before a list.
+    #[test]
+    fn a_put_s_lists_read_again_are_its_text_read_as_written() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        let (mut listed, mut not) = (0, 0);
+        for _ in 0..20_000 {
+            let docs = 1 + rnd(3);
+            let mut text = String::from(["put t ", "insert into t ", "put t "][rnd(3)]);
+            let bracketed = docs > 1 || rnd(2) == 0;
+            if bracketed {
+                text.push('[');
+            }
+            for d in 0..docs {
+                if d > 0 {
+                    text.push_str(", ");
+                }
+                text.push('{');
+                for f in 0..1 + rnd(4) {
+                    if f > 0 {
+                        text.push_str(", ");
+                    }
+                    text.push_str(&format!("f{f}: "));
+                    let mut list = String::from("[");
+                    for k in 0..rnd(6) {
+                        if k > 0 {
+                            list.push_str(SEPS[rnd(SEPS.len())]);
+                        }
+                        list.push_str(match rnd(4) {
+                            0 => ITEMS[rnd(ITEMS.len())],
+                            _ => ITEMS[rnd(10)],
+                        });
+                    }
+                    list.push(']');
+                    match rnd(11) {
+                        0 => text.push_str("'é'"),
+                        10 => text.push_str("[1.00000001, 2]"),
+                        1 => text.push_str(&format!("{{j: {list}}}")),
+                        2 => text.push_str(&format!("[{list}, [2]]")),
+                        3 => text.push_str("7"),
+                        4 => text.push_str(&format!("{list} + 1")),
+                        _ => text.push_str(&list),
+                    }
+                }
+                text.push('}');
+            }
+            if bracketed {
+                text.push(']');
+            }
+            if rnd(6) == 0 {
+                text.push_str(" if absent else set {f0: [0.5, 0.25]}");
+            }
+            let quick = parse_one(&text);
+            let (mut stmt, listing) = match (parse_one_listing(&text), &quick) {
+                (Ok((s, l)), Ok(q)) => {
+                    // To the bit: `==` takes -0 for 0.
+                    assert_eq!(format!("{s:?}"), format!("{q:?}"), "{text}");
+                    (s, l)
+                }
+                (Err(_), Err(_)) => continue,
+                (a, b) => panic!("{text}: {a:?} against {b:?}"),
+            };
+            let mut listing = listing;
+            let lists = format!("{stmt:?}").contains("Vector") as u32;
+            match read_listed(&mut stmt, &mut listing) {
+                true => {
+                    let exact = parse_exact(&text).unwrap().remove(0);
+                    assert_eq!(format!("{stmt:?}"), format!("{exact:?}"), "{text}");
+                    listed += lists;
+                }
+                false => not += 1,
+            }
+        }
+        // Both ways, many times over.
+        assert!(listed > 1_000 && not > 1_000, "{listed} {not}");
     }
 }

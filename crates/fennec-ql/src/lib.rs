@@ -17,6 +17,8 @@ pub use parser::{
     parse, parse_exact, parse_facet_list, parse_for, parse_group_list, parse_one, parse_one_for,
     parse_select_list, reading, spans, Reading, Refusal, Rest, SelectList, MAX_EXPR_DEPTH,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use parser::{parse_one_listing, read_listed, Listing};
 
 /// The grammar's epoch (`fennec_core::named::GRAMMAR_EPOCH`, beside the
 /// encoder of the tree whose digest a stored statement is held to): raised

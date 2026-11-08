@@ -118,7 +118,8 @@ a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
 takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
-to a 32-bit `usize`.
+to a 32-bit `usize`; a list's elements too, each read as written and
+refused naming the field and the element.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a

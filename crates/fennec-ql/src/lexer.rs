@@ -321,6 +321,125 @@ pub(crate) fn tokenize_values(src: &str) -> Result<Vec<Token>> {
     lex::<false>(src, cfg!(not(target_arch = "wasm32")))
 }
 
+/// [`tokenize_vectors`], each list read into a vector kept as written
+/// beside ([`Kept`]): what a long `put` is read with
+/// (`parser::parse_one_listing`). Natively alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tokenize_kept(src: &str) -> Result<(Vec<Token>, Kept)> {
+    let mut kept = Kept::default();
+    let toks = lex_with(src, true, false, Some(&mut kept))?;
+    Ok((toks, kept))
+}
+
+/// The numbers of the lists a text read into vectors, as written, in one
+/// arena: a list that keeps any a slot holding its place among the lists
+/// and how many of its numbers follow, then those numbers, an integer's
+/// `i64` or a float's `f64` by its bits. Kept only from a list's first
+/// number an `f32` does not hold -- one with a fraction or an exponent, or
+/// an integer past 2^24 -- those before it the integers their `f32`s are; a
+/// list of such integers alone keeps none, and is made from its vector.
+/// Pushed in the pass that reads the vector, and read back in the lists'
+/// order ([`Kept::next`]). The arena is set aside once, by the text's
+/// length, where a list first keeps: kept in a `Vec` a list, in a `Vec` a
+/// slot each list, or in one grown as it went, the allocations sent the
+/// allocator down its slow paths, some 600 instructions a document
+/// (`tools/instr/trace.py`), more than the numbers cost.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub(crate) struct Kept {
+    nums: Vec<u64>,
+    ints: Vec<bool>,
+    /// The lists read into vectors so far.
+    lists: u64,
+    /// The next slot [`Kept::next`] reads, and the lists it has passed.
+    at: usize,
+    passed: u64,
+}
+
+/// Where a list being read keeps its numbers: its slot once it keeps any.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Default)]
+struct Keeping {
+    slot: Option<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Kept {
+    /// The number just read into `v`'s last `f32`, by its bits, an integer
+    /// where `int`: kept from the first an `f32` does not hold on.
+    #[inline(always)]
+    fn keep(&mut self, at: &mut Keeping, v: &[f32], bits: u64, int: bool, text: usize) {
+        if at.slot.is_none() {
+            if int && (bits as i64).unsigned_abs() < 1 << 24 {
+                return;
+            }
+            self.start(at, v, text);
+        }
+        self.nums.push(bits);
+        self.ints.push(int);
+    }
+
+    /// Keeping from the number just read on: the list's slot, and those
+    /// before it the integers their `f32`s are.
+    #[cold]
+    #[inline(never)]
+    fn start(&mut self, at: &mut Keeping, v: &[f32], text: usize) {
+        if self.nums.capacity() == 0 {
+            // A number and its comma are two bytes at the least, and
+            // nearly every list's are more.
+            self.nums.reserve(text / 8);
+            self.ints.reserve(text / 8);
+        }
+        at.slot = Some(self.nums.len());
+        self.nums.push(self.lists << 32);
+        self.ints.push(false);
+        let before = &v[..v.len() - 1];
+        self.nums.extend(before.iter().map(|&f| f as i64 as u64));
+        self.ints.extend(before.iter().map(|_| true));
+    }
+
+    /// A list read: where it is a vector, counted and its slot told how
+    /// many it kept; where it is not, its slot and its numbers given back.
+    #[inline(always)]
+    fn close(&mut self, at: Keeping, vector: bool) {
+        match (vector, at.slot) {
+            (true, Some(slot)) => self.nums[slot] |= (self.nums.len() - slot - 1) as u64,
+            (false, Some(slot)) => {
+                self.nums.truncate(slot);
+                self.ints.truncate(slot);
+            }
+            _ => {}
+        }
+        self.lists += vector as u64;
+    }
+
+    /// The numbers of the next list read into a vector, in the text's
+    /// order, as written -- made from `quick`, its `f32`s, where it kept
+    /// none.
+    pub(crate) fn next(&mut self, quick: &[f32]) -> Vec<fennec_core::value::Value> {
+        use fennec_core::value::Value;
+        let list = self.passed;
+        self.passed += 1;
+        let slot = self.nums.get(self.at).copied();
+        match slot.filter(|&s| s >> 32 == list) {
+            Some(s) => {
+                let from = self.at + 1;
+                let to = from + (s & 0xffff_ffff) as usize;
+                self.at = to;
+                self.nums[from..to]
+                    .iter()
+                    .zip(&self.ints[from..to])
+                    .map(|(&n, &int)| match int {
+                        true => Value::Int(n as i64),
+                        false => Value::Float(f64::from_bits(n)),
+                    })
+                    .collect()
+            }
+            None => quick.iter().map(|&f| Value::Int(f as i64)).collect(),
+        }
+    }
+}
+
 /// [`tokenize`], with numbers alone between brackets read at once into
 /// the vector the parser makes of them (`Parser::numbers_in_brackets`): a
 /// token and a pass over the text for the whole list, where each number and
@@ -454,7 +573,13 @@ impl Unclosed {
 /// another (`[1.00000001]`), which the parser reads as written: a list of
 /// numbers takes a vector of whole `f32`s as the integers written
 /// (`fennec_core::value::whole_f32s`), so the quick read makes no other.
-fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
+fn numbers_at(
+    src: &str,
+    b: &[u8],
+    mut i: usize,
+    #[cfg(not(target_arch = "wasm32"))] mut kept: Option<&mut Kept>,
+    #[cfg(not(target_arch = "wasm32"))] keeping: &mut Keeping,
+) -> Option<(Vec<f32>, usize)> {
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
     let mut v = Vec::new();
@@ -478,8 +603,17 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
         // 3.5 -> 2.3 ms of the 1 000 rows' parse. The browser module goes
         // the general way, and carries no second reader.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(x) = fennec_core::num::clinger(b, &mut i, &mut floats) {
+        let mut float = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(x) = fennec_core::num::clinger(b, &mut i, &mut float) {
+            floats |= float;
             v.push(x as f32);
+            if let Some(k) = kept.as_deref_mut() {
+                match float {
+                    true => k.keep(keeping, &v, x.to_bits(), false, b.len()),
+                    false => k.keep(keeping, &v, x as i64 as u64, true, b.len()),
+                }
+            }
             while space(i) {
                 i += 1;
             }
@@ -518,10 +652,30 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
         }
         let text = src.get(s..i)?;
         floats |= float;
+        #[cfg(not(target_arch = "wasm32"))]
+        let bits;
         v.push(match float {
-            true => fennec_core::num::parse_f64(text)? as f32,
-            false => fennec_core::num::parse_i64(text)? as f32,
+            true => {
+                let x = fennec_core::num::parse_f64(text)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    bits = x.to_bits();
+                }
+                x as f32
+            }
+            false => {
+                let n = fennec_core::num::parse_i64(text)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    bits = n as u64;
+                }
+                n as f32
+            }
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(k) = kept.as_deref_mut() {
+            k.keep(keeping, &v, bits, !float, b.len());
+        }
         while space(i) {
             i += 1;
         }
@@ -604,11 +758,22 @@ fn values_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<fennec_core::valu
 /// for a list a json field is given (`fennec_ql::parse_exact`), and a copy
 /// of its own was 2.9 KB of the module.
 fn lex<const VECTORS: bool>(src: &str, values: bool) -> Result<Vec<Token>> {
-    lex_with(src, VECTORS, values)
+    lex_with(
+        src,
+        VECTORS,
+        values,
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+    )
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-fn lex_with(src: &str, vectors: bool, values: bool) -> Result<Vec<Token>> {
+fn lex_with(
+    src: &str,
+    vectors: bool,
+    values: bool,
+    #[cfg(not(target_arch = "wasm32"))] mut kept: Option<&mut Kept>,
+) -> Result<Vec<Token>> {
     // The browser module reads a list as written a token a number, and
     // carries no code for the other way (`tokenize_values`).
     #[cfg(target_arch = "wasm32")]
@@ -691,16 +856,33 @@ fn lex_with(src: &str, vectors: bool, values: bool) -> Result<Vec<Token>> {
                 // `f64`s: a bound past 2^24 is not an `f32`.
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in") || w.eq_ignore_ascii_case("ranges"));
                 match !after_in {
-                    true if vectors => match numbers_at(src, b, i) {
-                        Some((v, end)) => {
-                            i = end;
-                            Tok::Vector(v)
+                    true if vectors => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let mut keeping = Keeping::default();
+                        let read = numbers_at(
+                            src,
+                            b,
+                            i,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            kept.as_deref_mut(),
+                            #[cfg(not(target_arch = "wasm32"))]
+                            &mut keeping,
+                        );
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(k) = kept.as_deref_mut() {
+                            k.close(keeping, read.is_some());
                         }
-                        None => {
-                            i += 1;
-                            Tok::LBracket
+                        match read {
+                            Some((v, end)) => {
+                                i = end;
+                                Tok::Vector(v)
+                            }
+                            None => {
+                                i += 1;
+                                Tok::LBracket
+                            }
                         }
-                    },
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     true => match values_at(src, b, i) {
                         Some((v, end)) => {

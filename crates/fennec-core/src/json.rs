@@ -675,7 +675,7 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
         }
         // An object is a value of a `json` field: its members sorted, a key
         // given twice refused (`Value::object`).
-        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1)?)
+        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1, Places::default())?)
             .map_err(|e| Error::Query(e.to_string())),
         b'-' | b'0'..=b'9' => {
             let (text, is_float) = number_at(s, i);
@@ -859,17 +859,6 @@ fn member_at(s: &str, name: &str) -> Result<Option<usize>> {
     }
 }
 
-/// The member `name` of the object `src`, read as [`parse`] reads a value,
-/// those before it stepped over: `POST /query`'s text, read again as
-/// written where `Database::exactly` names it.
-pub fn member(src: &str, name: &str) -> Result<Option<Value>> {
-    let s = src.trim();
-    match member_at(s, name)? {
-        Some(mut i) => parse_value(s, &mut i).map(Some),
-        None => Ok(None),
-    }
-}
-
 /// The parameters at `at`, each read as [`parse_json`] reads a value -- a
 /// list of numbers alone as written -- with its place, those beside them
 /// stepped over unread: the list `src` holds, or where `list` names one,
@@ -935,6 +924,41 @@ fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<V
         items.push(match exact {
             true => parse_exact_at(s, i, depth)?,
             false => parse_value_at(s, i, depth)?,
+        });
+        skip_ws(s, i);
+        match b.get(*i) {
+            Some(b',') => *i += 1,
+            Some(b']') => {
+                *i += 1;
+                break;
+            }
+            _ => return Err(Error::Query("expected `,` or `]` in JSON array".into())),
+        }
+    }
+    Ok(items)
+}
+
+/// [`parse_array_at`] of a query's parameters, those at the places `at`
+/// names, ascending, read as [`parse_json`] reads a value and the rest as
+/// [`parse_value_at`] does: what [`exact_params`] would read again, read so
+/// at once.
+fn array_at_places(s: &str, i: &mut usize, at: &[usize]) -> Result<Vec<Value>> {
+    let b = s.as_bytes();
+    *i += 1; // `[`
+    let mut items = Vec::new();
+    // The next place named: they come ascending, as the elements do.
+    let mut next = at.iter().copied().peekable();
+    loop {
+        skip_ws(s, i);
+        if b.get(*i) == Some(&b']') {
+            *i += 1;
+            break;
+        }
+        let place = items.len();
+        while next.next_if(|&p| p < place).is_some() {}
+        items.push(match next.next_if_eq(&place) {
+            Some(_) => parse_exact_at(s, i, 0)?,
+            None => parse_value_at(s, i, 0)?,
         });
         skip_ws(s, i);
         match b.get(*i) {
@@ -1015,20 +1039,44 @@ pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
 /// that list -- read as a vector, `[123456789]` handed the query the `f32`
 /// 123456792, and `[19.99]` 19.989999771118164.
 pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[])
+    listing(src, list, &[], Places::default())
+}
+
+/// What names the places of a listed member's elements to read as
+/// [`parse_json`] reads a value, asked once that member is reached with the
+/// members before it. The browser module names none: nothing there, not a
+/// byte.
+#[cfg(not(target_arch = "wasm32"))]
+type Places<'a> = Option<&'a mut dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>>>;
+#[cfg(target_arch = "wasm32")]
+type Places<'a> = std::marker::PhantomData<&'a ()>;
+
+/// [`parse_object_listing`], the listed member's elements at the places
+/// `places` names, ascending, read as [`parse_json`] reads a value -- a list
+/// of numbers alone as written -- in the one read: `POST /query`'s text
+/// comes before its parameters, and its last request named the places it
+/// read again so (`api::parse_query`). Natively alone: the browser module
+/// reads its parameters' JSON whole, again, where one is named.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_object_listing_at(
+    src: &str,
+    list: &str,
+    places: &mut dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>>,
+) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[], Some(places))
 }
 
 /// [`parse_object_listing`], the listed member's elements read as
 /// [`parse_json`] reads a value: a list of numbers alone as written, where
 /// a json field is given one (`Database::exactly`).
 pub fn parse_object_listing_exact(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[list])
+    listing(src, list, &[list], Places::default())
 }
 
-fn listing(src: &str, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
+fn listing(src: &str, list: &str, json: &[&str], places: Places) -> Result<Vec<(String, Value)>> {
     let s = src.trim();
     let mut i = 0;
-    let out = document(s, &mut i, list, json)?;
+    let out = document(s, &mut i, list, json, places)?;
     skip_ws(s, &mut i);
     if i != s.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -1060,7 +1108,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
                     i += 1;
                     break;
                 }
-                docs.push(document(s, &mut i, "", json)?);
+                docs.push(document(s, &mut i, "", json, Places::default())?);
                 skip_ws(s, &mut i);
                 match b.get(i) {
                     Some(b',') => i += 1,
@@ -1073,7 +1121,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
             }
             docs
         }
-        Some(b'{') => vec![document(s, &mut i, "", json)?],
+        Some(b'{') => vec![document(s, &mut i, "", json, Places::default())?],
         _ => {
             return Err(Error::Query(
                 "expected a JSON object or array of objects".into(),
@@ -1089,8 +1137,14 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
 
 /// A document at `i`: the member named `list` a parameter list, and those
 /// named in `json` read as [`parse_json`] reads a value.
-fn document(s: &str, i: &mut usize, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
-    let out = parse_members(s, i, list, json, 0)?;
+fn document(
+    s: &str,
+    i: &mut usize,
+    list: &str,
+    json: &[&str],
+    places: Places,
+) -> Result<Vec<(String, Value)>> {
+    let out = parse_members(s, i, list, json, 0, places)?;
     // A repeated key is not silently overwritten: which one wins depends
     // on the parser, and that is an invisible difference. Asked here of a
     // document's fields, in the order they came; an object's members are
@@ -1111,7 +1165,10 @@ fn parse_members(
     list: &str,
     json: &[&str],
     depth: usize,
+    mut places: Places,
 ) -> Result<Vec<(String, Value)>> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = &mut places;
     let b = s.as_bytes();
     skip_ws(s, i);
     if b.get(*i) != Some(&b'{') {
@@ -1140,7 +1197,14 @@ fn parse_members(
         // A listed member keeps its elements' types, a parameter list's;
         // a json field's, every number.
         let value = if depth == 0 && key == list && b.get(*i) == Some(&b'[') {
-            Value::List(parse_array_at(s, i, 0, json.contains(&list))?)
+            #[cfg(not(target_arch = "wasm32"))]
+            let at = places.as_mut().and_then(|p| p(&out));
+            #[cfg(target_arch = "wasm32")]
+            let at: Option<std::sync::Arc<[usize]>> = None;
+            match at {
+                Some(at) => Value::List(array_at_places(s, i, &at)?),
+                None => Value::List(parse_array_at(s, i, 0, json.contains(&list))?),
+            }
         } else if depth == 0 && json.contains(&key.as_str()) {
             parse_exact_at(s, i, 0)?
         } else {
@@ -1291,7 +1355,8 @@ mod tests {
     /// A parameter read again as written by its place is the one the whole
     /// list read so holds there, whatever the ones stepped over beside it
     /// hold -- strings with escaped quotes and brackets, objects, lists in
-    /// lists -- in a list alone and in `/query`'s body, its text first.
+    /// lists -- in a list alone and in `/query`'s body, its text first --
+    /// and read at once by its place, in the body's one read, too.
     #[test]
     fn a_parameter_read_again_by_its_place_is_the_lists() {
         let lists = [
@@ -1326,10 +1391,27 @@ mod tests {
                     want,
                     "{body}"
                 );
-                assert_eq!(
-                    member(&body, "query").unwrap(),
-                    Some(Value::Text("get t where \"]\" = $1".into()))
+                // Read at once at those places, in the one read of the
+                // body, the rest as the quick read reads them.
+                let params = |obj: Vec<(String, Value)>| match obj.into_iter().last() {
+                    Some((k, Value::List(v))) if k == "params" => v,
+                    other => panic!("{other:?}"),
+                };
+                let quick = params(parse_object_listing(&body, "params").unwrap());
+                let hinted = params(
+                    parse_object_listing_at(&body, "params", &mut |before| {
+                        assert!(matches!(before, [(k, Value::Text(_))] if k == "query"));
+                        Some(at.clone().into())
+                    })
+                    .unwrap(),
                 );
+                assert_eq!(hinted.len(), quick.len());
+                for (i, v) in hinted.iter().enumerate() {
+                    match want.iter().find(|(j, _)| *j == i) {
+                        Some((_, w)) => assert_eq!(v, w, "{body} {i}"),
+                        None => assert_eq!(v, &quick[i], "{body} {i}"),
+                    }
+                }
             }
         }
         let one = r#"{"a": [0.1, 2]}"#;
@@ -1337,7 +1419,6 @@ mod tests {
             exact_params(one, None, &[0]).unwrap(),
             [(0, parse_params_exact(one).unwrap().remove(0))]
         );
-        assert_eq!(member(r#"{"params": [1]}"#, "query").unwrap(), None);
         assert_eq!(
             exact_params(r#"{"query": "x"}"#, Some("params"), &[0]).unwrap(),
             []

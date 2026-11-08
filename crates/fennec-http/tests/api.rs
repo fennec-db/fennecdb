@@ -1567,6 +1567,99 @@ fn an_int_or_float_list_keeps_its_numbers() {
     }
 }
 
+/// The parameters a statement's last request read again as written are
+/// read so at once (`api::parse_query`'s hint) -- a short text's kept on
+/// its parse-cache entry, a long one's by its hash, a `/batch` line's too
+/// -- and no answer depends on the hint: where the schema no longer keeps
+/// a field's numbers, the parameters are read the quick way again. A long
+/// text's documents' lists are read again alone (`fennec_ql::read_listed`),
+/// a short one's text as written kept beside it.
+#[test]
+fn a_hint_reads_a_list_at_once_and_changes_no_answer() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection h (k text, fs [float], xs [int], v vector<2>)"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let fs = "[0.1, 0.3333333333333333]";
+    let xs = "[16777217]";
+    let short = |k: &str| {
+        format!(
+            r#"{{"query":"put h {{k: $1, fs: $2, xs: $3, v: $4}}","params":["{k}", {fs}, {xs}, [0.5, 0.25]]}}"#
+        )
+    };
+    // A text past the parse cache's 1 024 bytes, a parameter a field.
+    let long = |k: &str| {
+        let docs: Vec<String> = (0..40)
+            .map(|d| {
+                format!(
+                    "{{k: ${}, fs: ${}, xs: ${}}}",
+                    3 * d + 1,
+                    3 * d + 2,
+                    3 * d + 3
+                )
+            })
+            .collect();
+        let params: Vec<String> = (0..40)
+            .map(|d| format!(r#""{k}{d}", {fs}, {xs}"#))
+            .collect();
+        format!(
+            r#"{{"query":"put h [{}]","params":[{}]}}"#,
+            docs.join(", "),
+            params.join(", ")
+        )
+    };
+    let text = |k: &str| {
+        let docs: Vec<String> = (0..40)
+            .map(|d| format!("{{k: '{k}{d}', fs: {fs}, xs: {xs}, v: [0.5, 0.25]}}"))
+            .collect();
+        format!(r#"{{"query":"put h [{}]"}}"#, docs.join(", "))
+    };
+    for round in 0..3 {
+        for body in [
+            short(&format!("short{round}")),
+            long(&format!("long{round}-")),
+            text(&format!("text{round}-")),
+            format!(r#"{{"query":"put h {{k: 'kept{round}', fs: {fs}, xs: {xs}}}"}}"#),
+        ] {
+            assert!(body.len() > 1024 || !body.contains("put h ["), "{body}");
+            let r = q(&body);
+            assert_eq!(r.status, 200, "{}", r.body);
+        }
+        let line =
+            format!(r#"{{"query":"put h {{k: $1, fs: $2}}","params":["batch{round}", {fs}]}}"#);
+        let r = call(h.port, "POST", "/batch", Some(&line));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(r#"{"query":"get h select k, fs, xs order k"}"#);
+    let rows = r.body.matches("\"k\":").count();
+    assert_eq!(rows, 3 * (1 + 40 + 40 + 1 + 1), "{}", r.body);
+    assert_eq!(
+        r.body.matches(r#""fs":[0.1,0.3333333333333333]"#).count(),
+        rows,
+        "{}",
+        r.body
+    );
+    assert_eq!(r.body.matches(r#""xs":[16777217]"#).count(), rows - 3);
+    // `fs` a vector now: the hint the texts left names a parameter the
+    // statement no longer reads as written, and the vector is the quick
+    // read's, as it is with no hint.
+    for alter in [
+        "alter collection h drop field fs",
+        "alter collection h add field fs vector<2>",
+    ] {
+        let r = q(&format!(r#"{{"query":"{alter}"}}"#));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(&short("vector"));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(&long("vector-"));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"get h select fs where k = 'vector'"}"#);
+    assert_eq!(r.body.trim(), r#"[{"fs":[0.1,0.33333334]}]"#);
+    let r = q(r#"{"query":"get h select fs where k = 'vector-7'"}"#);
+    assert_eq!(r.body.trim(), r#"[{"fs":[0.1,0.33333334]}]"#);
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

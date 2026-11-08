@@ -13581,17 +13581,23 @@ impl Exactly {
         self.text || !self.params.is_empty()
     }
 
-    /// `params` less those of `lists` whose value among `values` -- the
-    /// parameters as the quick read made them -- holds no vector but of
-    /// whole `f32`s short of 2^24: the numbers written, for the list of
-    /// numbers given them. A vector handed over apart as `f32`s
-    /// (`fennec_abi::with_vectors`) is the `f32`s of a number its sender
-    /// may have rounded, and its caller takes it out of `lists` first.
+    /// `params` less those whose value among `values` -- the parameters as
+    /// the quick read made them -- holds no vector, which is what reading
+    /// it as written makes of it (a vector is the one value the two reads
+    /// make otherwise, and one read as written is a list), and less those
+    /// of `lists` holding no vector but of whole `f32`s short of 2^24: the
+    /// numbers written, for the list of numbers given them. A vector handed
+    /// over apart as `f32`s (`fennec_abi::with_vectors`) is the `f32`s of a
+    /// number its sender may have rounded, and its caller takes it out of
+    /// `lists` first. So a parameter the server read as written at once,
+    /// as its statement's last request asked (`api::parse_query`), is not
+    /// read again.
     pub fn settle(&mut self, values: &[Value]) {
         let lists = std::mem::take(&mut self.lists);
-        kept(&mut self.params, &|i| {
-            lists.binary_search(&i).is_err()
-                || values.get(i).is_some_and(crate::query::holds_rounded)
+        kept(&mut self.params, &|i| match values.get(i) {
+            Some(v) if lists.binary_search(&i).is_ok() => crate::query::holds_rounded(v),
+            Some(v) => crate::query::holds_vector(v),
+            None => false,
         });
     }
 

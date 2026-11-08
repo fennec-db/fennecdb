@@ -546,7 +546,7 @@ pub(super) fn read_local(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checke
 /// out of the shell, where it was most of what `fennec mcp` added.
 pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::http::Response {
     let body = query_body(text, params);
-    let parsed = api::parse_query(&body).and_then(|(s, p)| api::exactly(ctx.db, &body, s, p));
+    let parsed = api::parse_query(&body).and_then(|q| api::exactly(ctx.db, &body, q));
     let (stmt, params) = match parsed {
         Ok(v) => v,
         Err(e) => return crate::error_response(&e),
@@ -1088,7 +1088,7 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
     json::value_into(&mut body, &Value::List(given));
     body.push('}');
     let (stmt, params) = api::parse_query(&body)
-        .and_then(|(s, p)| api::exactly(ctx.db, &body, s, p))
+        .and_then(|q| api::exactly(ctx.db, &body, q))
         .map_err(|e| refusal(&e))?;
     if let Statement::Call(c) = &*stmt {
         return Err(called_by_its_tool(&c.name));

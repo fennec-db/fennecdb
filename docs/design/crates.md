@@ -144,8 +144,13 @@ its type's range is refused the same way: a whole float going into an
 `engine::in_field`), where `as` saturated it to `i64::MAX` and an `@hash`
 lookup then found a row the scan does not, while a key looked up by the
 float -2^63 is `i64::MIN` and by 2^63 none, as `=` finds them
-(`Value::key_as`, [indexes.md](indexes.md#sorted)). Full table in
-`site/content/docs/limits.html`.
+(`Value::key_as`, [indexes.md](indexes.md#sorted)). A list's elements
+too: an `[int]`'s, a `[float]`'s and a `[timestamp]`'s are read as written
+and each held to its type as a scalar is, refused naming the field and the
+element counted from 0 -- "field `xs`, element 2: an int is from ..." --
+where they were the `f32`s of a vector, `[16777217]` stored as 16777216
+and 2^63 as `i64::MAX` ([vector-search.md](vector-search.md#numbers-in)).
+Full table in `site/content/docs/limits.html`.
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every

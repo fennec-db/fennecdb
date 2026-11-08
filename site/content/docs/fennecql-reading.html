@@ -134,8 +134,9 @@ del cart_items where cart = $1 and product not in $2
     each value is a bucket of the index, as it is for a list written out;
     <code>explain</code> names the index.</li>
   <li><b>Its numbers are read as written.</b> A list of numbers sent as a
-    parameter is read elsewhere as a vector's 32-bit floats, where 16777217
-    is 16777216 and 0.1 is 0.100000001; an <code>in $1</code> list is read
+    parameter is read as a vector's 32-bit floats where nothing keeps it as
+    written — a vector field, <code>near</code> — and there 16777217 is
+    16777216 and 0.1 is 0.100000001; an <code>in $1</code> list is read
     as its JSON says, every 64-bit integer and every float as a
     64-bit one — on a server, in the browser module and in an app's
     library alike.</li>

@@ -96,18 +96,140 @@ index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
 
-**An `[int]` or a `[float]` is read as a vector's `f32`s, for now.** A
-list of numbers alone given one is read the quick way above and made its
-elements from the `f32`s (`Value::coerce`'s list arm): a `[float]` keeps
-an `f32`'s digits, `0.1` as 0.10000000149011612, and an `[int]` is exact
-only to 2^24, 16777217 stored as 16777216. Nor can an `f32` tell an int's
-ends from what is past them: every number from 2^63 - 2^38 to 2^63 + 2^39
-is 2^63, `i64::MAX` among them, so an `[int]` takes ±2^63 as the int's
-ends, as it always did, and refuses only an element past them, which only
-a number past 2^63 + 2^39 is. Reading these lists as written, as a json
-field's are (`DataType::keeps_numbers`, `Database::exactly`), is later
-work: the first try, beside the scalars' range check, went through four
-reviews without a version both right and flat in cost, and was split out.
+**A list of numbers is read as written.** An `[int]`, a `[float]` and a
+`[timestamp]` keep each element as written, or refuse the statement naming
+the field, the element counted from 0 and the range -- "field `xs`, element
+2: an int is from -9223372036854775808 to 9223372036854775807" -- as a
+scalar is ([crates.md](crates.md#limits)), never clamped or rounded. Before,
+such a list was read the quick way above and made its elements from the
+`f32`s: a `[float]` kept 0.10000000149011612 for `0.1`, an `[int]` 16777216
+for 16777217, 9007199254740992 for 9007199254740993, 1 for `1.00000001`,
+and took 2^63 -- every number from 2^63 - 2^38 to 2^63 + 2^39 as an `f32`
+-- as `i64::MAX`. A `[timestamp]` given numbers refused them, and `xs =
+[1, 2]` found no row, a vector never equal to the list stored. A list of
+numbers is one of the types that keep numbers as written now
+(`DataType::keeps_numbers`, `holds_numbers`), as a json field and a point
+are: `Database::exactly` names the text, or the parameters by place, where
+one is handed a list read the quick way, and the reader reads them again as
+written -- the server from the body (`api::exactly`, the named parameters
+alone, `json::exact_params` stepping over the rest), the native library and
+the browser module from the parameters' JSON (`exact_noting`, a list handed
+over apart as `f32`s asked for as JSON, as a json field's is), the text
+through `fennec_ql::parse_exact`. A REST body's and a replica's documents
+name the field, and read it as written the first time.
+
+*Where the rounding is told.* In the value itself, per literal and per
+parameter. A vector of whole `f32`s short of 2^24 (`value::whole_f32s`) is
+the integers written: the quick readers never make one of a list that hid
+a rounding -- a list holding a number written with a fraction or an
+exponent whose `f32`s all come out whole is read again
+(`num::hides_rounding`, one pass, asked only of such a list, so an
+embedding pays nothing) and made the list as written instead
+(`[1.00000001, 2]`, `value::quick_vector` a value at a time). So a literal
+or parameter of whole numbers is taken as it came (`Exactly::lists`,
+`Exactly::settle` against the parameters as read), every other vector bound
+for a list of numbers is read again, and a vector built in Rust and handed
+to one is its `f32`s widened (`Value::coerce`).
+
+*Read once where it can be, and nothing kept decides an answer.* A server
+reads a list as written in its first read wherever it can know to:
+
+- A parameter: a text's parse-cache entry (`api::Cached`) -- for a text
+  too long to keep, a table by its hash (`api::HINTS`) -- holds the places
+  its last request read again as written (`Cached::hint`), and the next
+  request's parameters are read with those as written at once
+  (`json::parse_object_listing_at`): every client writes the text before
+  the parameters, and the text is looked up as they are reached, the one
+  lookup the cache made before. The hint is held to what
+  `Database::exactly` names at every request: a place it no longer names
+  -- the schema changed, or a long text's hash met another's -- has the
+  parameters read the quick way again and the hint dropped; a place it
+  names is read as written either way, at once or again, since
+  `Exactly::settle` drops a value holding no vector, which is what a value
+  read as written is. Kept again only where it changed, under its shard's
+  lock: a statement whose hint holds takes no lock for it. The first
+  request of a text still reads twice.
+- A kept text: its tree read as written is kept beside its quick one, read
+  once (`Cached::exact`) -- what the text says alone, the same tree each
+  time.
+- A text too long to keep -- a page of rows written out -- is a `put` or
+  an `insert` read once (`fennec_ql::parse_one_listing`): the lexer reads
+  each list into its vector as the quick read does, and keeps its numbers
+  as written beside it from its first number an `f32` does not hold on, in
+  one arena set aside by the text's length the first time a list keeps any
+  (`lexer::Kept`); a list of small integers keeps none and is made from its
+  vector. Where a request needs the text read as written and every list
+  read into a vector is a document's field's, the documents' lists are put
+  in their places in order (`read_listed`) -- the tree `parse_exact` reads,
+  to the bit (`a_put_s_lists_read_again_are_its_text_read_as_written`,
+  20 000 random `put`s); otherwise the text is read whole again. Read again
+  from the text instead (`values_at` at each list's place), those lists
+  cost as much as their first read, 14% of the page; kept in a `Vec` a
+  list, with a `Vec` of their places beside, or in an arena grown as it
+  went, the allocations sent the allocator down its slow paths, some 600
+  instructions a document (`tools/instr/trace.py`): 2.5 to 5.5% of the
+  page, 0.7 to 2.6% of a page of `[int]`s, 3 to 8% of a page of vectors.
+
+Rejected: a bit returned beside the statement (`Result<(Statement,
+bool)>`) or set on the thread is one per parse, not per literal; the
+`f64`s kept beside each vector double every embedding's memory, which the
+browser module never gives back; a literal found again by its address or
+its `f32`s fails a cached tree cloned, and two texts reading to the same
+`f32`s -- the listing reads its lists back in the order the documents hold
+them, into a tree the request alone holds. And every literal list read as
+written, its `f32`s
+made where it binds to a vector, as the browser module makes a page's
+(a double, then `Math.fround`): no bit would move -- the lexer reads each
+number into an `f64` first and rounds that, natively (`num::clinger`,
+`num::parse_f64`) as in the module -- but the tree would. A short list
+read so made a vector's kind its length's, `near` on a vector of 8 and a
+`vector<8>` field handed lists; every list read so makes a definition's
+tree, and so its digest, the native parser's and not the module's, which
+reads such a list into a vector: a statement a server defined
+holding a vector would be marked broken where the module opens it. Its
+cost is not what rules it out: read as written, a page of 100 128-dim
+vectors parsed in 6.78 M instructions, the quick read 5.77 M (`make
+instr-compare PKG=fennec-http EXAMPLE=number_lists MODES=parse,parse-exact`)
+-- but each list a `Value` a number, eight times a vector's memory until
+it binds.
+
+*What reading again costs, and what was made cheaper for it.* A list read
+again is read in one pass, as the quick read reads it: the lexer makes a
+list of numbers alone one token as written (`Tok::Values`, `values_at`) for
+`parse_exact`, where a token a number was most of what reading the text
+again cost; the JSON reader reads one so too (`json::exact_numbers`), 10.7
+M instructions for 1 000 parameters each a `[float]` of 16 against 17.2 M
+a value at a time; Clinger's path divides a 17-digit fraction itself
+(`num::divided`), which went the general path's two more scans before,
+some 250 instructions a number read either way, a vector's too; and
+`Value::coerce` makes an `[int]` of whole `f32`s and a `[float]` at once
+natively, and keeps a list already of its type as it came. A body's text
+and parameters are taken out of what the JSON reader made, where they were
+copied. The browser module reads a text as written a token a number, as
+before, and its parameters' JSON whole: a page's vectors go over apart, so
+what the JSON holds is small.
+
+Against main before (`number_lists`, `make instr-compare`, the mean of 8
+binary identities' medians of 7 runs each; instructions a request):
+
+| mode | main | lists as written | |
+|---|---:|---:|---:|
+| `docs`: 1 000 rows as one parameter | 53.79 M | 45.31 M | -15.8% |
+| `text`: the rows written in the statement | 48.70 M | 47.88 M | -1.7% |
+| `params`: a parameter a value | 47.83 M | 46.33 M | -3.1% |
+| `ints`: the rows' `[int]`s alone, written | 25.55 M | 25.21 M | -1.4% |
+| `embed`: a 128-dim vector and an `[int]`, parameters | 118 741 | 94 727 | -20.2% |
+| `vectors`: 100 128-dim vectors written | 12.78 M | 9.65 M | -24.5% |
+| `short`: a kept text, a `[float]` of 16 written | 38 429 | 38 136 | -0.8% |
+| `parse`: the `vectors` text parsed alone | 9.24 M | 5.77 M | -37.5% |
+| `parse-exact`: that text read as written | 20.49 M | 6.78 M | -66.9% |
+| replays' `put` | 22 066 | 21 224 | -3.8% |
+| replays' `keyed` | 84 760 | 83 763 | -1.2% |
+
+On main those lists were stored as `f32`s; each request here stores the
+numbers written. The first reading of the hint (a parameter read again at
+every request) was +20% on `params`, and a page's lists read again from its
+text +44% on `text`.
 
 ## Vector parameters
 

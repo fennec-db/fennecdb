@@ -1,8 +1,9 @@
 //! What a list of numbers given an `[int]` or a `[float]` costs a write
 //! through `handle` (`POST /query`), its numbers read as written: `make
-//! instr-compare PKG=fennec-http EXAMPLE=number_lists MODES=docs,text,params,ints,embed`
-//! (`cargo run --release -p fennec-http --example number_lists -- MODE [N]`), one
-//! mode a process, so its instructions are that mode's alone.
+//! instr-compare PKG=fennec-http EXAMPLE=number_lists
+//! MODES=docs,text,params,ints,embed,vectors,short` (`cargo run --release -p
+//! fennec-http --example number_lists -- MODE [N]`), one mode a process, so
+//! its instructions are that mode's alone.
 //!
 //!   * `docs`: a page of 1 000 documents as one parameter, `put t $1`, each
 //!     an `[int]` and a `[float]` of 16 -- the REST body's shape, its lists
@@ -14,6 +15,14 @@
 //!     whose `f32`s are the numbers written.
 //!   * `embed`: one document a request, a 128-dim vector beside an `[int]`
 //!     of 16, each a parameter.
+//!   * `vectors`: 100 documents each a 128-dim vector written in the
+//!     statement, no list of numbers among them.
+//!   * `short`: one document a request written in a statement the parse
+//!     cache keeps, a `[float]` of 16 among its fields.
+//!   * `parse` and `parse-exact`: the `vectors` text parsed alone, the quick
+//!     way and as written (`fennec_ql::parse_exact`), each list a list of
+//!     numbers rather than a vector -- what reading every literal as written
+//!     would cost a vector, its `f32`s made from the list where it binds.
 //!
 //! Each request writes the same ids over. It prints ns a request, the
 //! median of 9 rounds, and on macOS the instructions the loop retired a
@@ -60,6 +69,14 @@ fn ints(d: usize) -> String {
         .map(|k| ((d * LIST + k) as i64 * 7).to_string())
         .collect();
     format!("[{}]", xs.join(", "))
+}
+
+/// Document `d`'s 128-dim vector, as JavaScript writes an `f32`'s `f64`.
+fn embedding(d: usize) -> String {
+    let e: Vec<String> = (0..128)
+        .map(|k| (((d * 128 + k) as f32 / 7.0 - 9.0) as f64).to_string())
+        .collect();
+    format!("[{}]", e.join(", "))
 }
 
 /// The `[float]` of document `d`: fractions an `f32` does not hold.
@@ -114,6 +131,21 @@ fn body(mode: &str) -> String {
             )
             .unwrap();
         }
+        "vectors" => {
+            let docs: Vec<String> = (1..=100)
+                .map(|d| format!("{{id: {d}, e: {}}}", embedding(d)))
+                .collect();
+            write!(out, r#"{{"query":"put t [{}]"}}"#, docs.join(", ")).unwrap();
+        }
+        "short" => {
+            write!(
+                out,
+                r#"{{"query":"put t {{id: 1, xs: {}, fs: {}}}"}}"#,
+                ints(1),
+                floats(1)
+            )
+            .unwrap();
+        }
         "embed" => {
             let e: Vec<String> = (0..128)
                 .map(|k| (k as f64 / 7.0 - 9.0).to_string())
@@ -126,7 +158,7 @@ fn body(mode: &str) -> String {
             )
             .unwrap();
         }
-        other => panic!("no mode {other}: docs, text, params, ints or embed"),
+        other => panic!("no mode {other}: docs, text, params, ints, embed, vectors or short"),
     }
     out
 }
@@ -134,7 +166,14 @@ fn body(mode: &str) -> String {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "docs".into());
-    let per_doc = matches!(mode.as_str(), "embed");
+    if let Some(exact) = match mode.as_str() {
+        "parse" => Some(false),
+        "parse-exact" => Some(true),
+        _ => None,
+    } {
+        return parse_only(exact, args.next().and_then(|a| a.parse().ok()));
+    }
+    let per_doc = matches!(mode.as_str(), "embed" | "short");
     let n: usize = args
         .next()
         .and_then(|a| a.parse().ok())
@@ -160,6 +199,38 @@ fn main() {
     rounds.sort_by(|a, b| a.total_cmp(b));
     println!("mode {mode}, {} requests", per * ROUNDS);
     println!("ns a request {:.0}", rounds[ROUNDS / 2]);
+    if let (Some((i0, c0)), Some((i1, c1))) = (before, after) {
+        let sent = (per * ROUNDS) as f64;
+        println!(
+            "a request: {:.1} instructions, {:.1} cycles",
+            (i1 - i0) as f64 / sent,
+            (c1 - c0) as f64 / sent
+        );
+    }
+}
+
+/// The `vectors` text parsed alone `n` times, the quick way or as written.
+fn parse_only(exact: bool, n: Option<usize>) {
+    let docs: Vec<String> = (1..=100)
+        .map(|d| format!("{{id: {d}, e: {}}}", embedding(d)))
+        .collect();
+    let text = format!("put t [{}]", docs.join(", "));
+    let n = n.unwrap_or(270);
+    let per = (n / ROUNDS).max(1);
+    let before = retired();
+    for _ in 0..per * ROUNDS {
+        let s = match exact {
+            true => fennec_ql::parse_exact(&text),
+            false => fennec_ql::parse(&text),
+        };
+        std::hint::black_box(s.unwrap());
+    }
+    let after = retired();
+    println!(
+        "mode parse{}, {} requests",
+        ["", "-exact"][exact as usize],
+        per * ROUNDS
+    );
     if let (Some((i0, c0)), Some((i1, c1))) = (before, after) {
         let sent = (per * ROUNDS) as f64;
         println!(

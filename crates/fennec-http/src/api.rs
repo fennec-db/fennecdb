@@ -1051,29 +1051,123 @@ pub fn seed_select(sub: &Subscription) -> Select {
 
 // ----------------------------------------------------------- raw query
 
+/// A `POST /query` body read ([`parse_query`]): its statement and its
+/// parameters, and what [`exactly`] reads them again as written by.
+pub struct Query {
+    pub stmt: Arc<Statement>,
+    pub params: Vec<Value>,
+    seen: Seen,
+}
+
+/// What a body's first read was told and found: its text, the places of its
+/// parameters it read as written at once -- the hint the text's last request
+/// left ([`Cached::hint`]) -- and, for a text too long to keep, where its
+/// documents give a field a list of numbers ([`fennec_ql::Listing`]).
+#[derive(Default)]
+struct Seen {
+    text: String,
+    hash: Option<u64>,
+    hint: Option<Arc<[usize]>>,
+    /// The text read as written, where its shard kept it ([`Cached::exact`]).
+    exact: Option<Arc<Statement>>,
+    listing: Option<fennec_ql::Listing>,
+}
+
 /// The body of `POST /query`: `{"query": "...", "params": [...]}`.
 ///
 /// The REST surface is derived from the schema and is deliberately narrow
 /// (no DDL, no `or` groups). Raw input lifts that wall: so the query builder
 /// in the browser can hand the same text to wasm and to this endpoint alike
 /// -- one piece of query code, two transports.
-pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
-    let obj = json::parse_object_listing(body, "params")?;
-    let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-    let sql = match get("query").or_else(|| get("sql")) {
-        Some(Value::Text(s)) => s.clone(),
+///
+/// The text's parsed statement is looked up once the parameters are
+/// reached -- after the text, as clients write it -- and the places its last
+/// request read again as written ([`exactly`]) are read so at once: a page
+/// of 1 000 rows each a parameter a field, `[float]`s among them, was read
+/// twice over, 20% more than the quick read alone. A body naming its
+/// parameters first is read the quick way, as before.
+pub fn parse_query(body: &str) -> Result<Query> {
+    let mut found: Option<Found> = None;
+    let mut obj = json::parse_object_listing_at(body, "params", &mut |before| {
+        let at = text_at(before)?;
+        let Value::Text(sql) = &before[at].1 else {
+            return None;
+        };
+        let f = Found::of(at, sql);
+        let hint = f.hint();
+        found = Some(f);
+        hint
+    })?;
+    let at = text_at(&obj);
+    // Taken, not cloned: the text and the parameters are the body's alone.
+    let sql = match at.map(|a| &mut obj[a].1) {
+        Some(Value::Text(s)) => std::mem::take(s),
         Some(_) => return Err(Error::Query("`query` must be text".into())),
         None => return Err(Error::Query("`query` is required".into())),
     };
-    // A list whose elements keep their types, as the browser module reads
-    // its parameters: a vector parameter is an array inside it, `[[..]]`.
-    let params = match get("params") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::List(items)) => items.clone(),
-        Some(other) => vec![other.clone()],
-    };
+    let mut params = listed_params(&mut obj);
     crate::timing::lap(crate::timing::Phase::Json);
-    let stmt = parsed(&sql);
+    // Found for the text the statement is: a body holding both `sql` and
+    // `query`, the latter after its parameters, was told of the other --
+    // and its parameters, read by the other's hint, are read again.
+    if found
+        .as_ref()
+        .is_some_and(|f| Some(f.at) != at && f.hint().is_some())
+    {
+        params = listed_params(&mut json::parse_object_listing(body, "params")?);
+    }
+    let found = found.filter(|f| Some(f.at) == at);
+    // Whether the shard was asked already, and had nothing.
+    let looked = found.is_some();
+    let mut seen = Seen {
+        hash: found.as_ref().map(|f| f.hash),
+        ..Seen::default()
+    };
+    let hit = found.and_then(|f| f.hit);
+    let kept = match hit {
+        Some(Hit {
+            stmt: Some(stmt),
+            exact,
+            hint,
+        }) => {
+            seen.hint = hint;
+            seen.exact = exact;
+            Some(stmt)
+        }
+        // A long text's hint alone, or nothing.
+        hit => {
+            seen.hint = hit.and_then(|h| h.hint);
+            None
+        }
+    };
+    let stmt = match kept {
+        Some(stmt) => Ok(stmt),
+        None if sql.len() > PARSED_LONGEST => {
+            crate::timing::parsed();
+            fennec_ql::parse_one_listing(&sql)
+                .map(|(stmt, listing)| {
+                    seen.listing = Some(listing);
+                    Arc::new(stmt)
+                })
+                .map_err(|e| Error::Query(e.to_string()))
+        }
+        // Not looked up yet -- a body of no parameters, or naming them
+        // first -- or looked up and not found.
+        None => {
+            let hash = *seen.hash.get_or_insert_with(|| hash_of(&sql));
+            match (!looked).then(|| cached(&sql, hash)).flatten() {
+                Some(Hit {
+                    stmt: Some(stmt),
+                    exact,
+                    ..
+                }) => {
+                    seen.exact = exact;
+                    Ok(stmt)
+                }
+                _ => parsed_by(&sql, hash),
+            }
+        }
+    };
     // What the request is counted as, rather than its JSON (`statements`):
     // a call by its name alone, `call transfer $1`, however its arguments
     // were written -- the call is the unit an operator tunes, and the
@@ -1084,7 +1178,65 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
     }
     let stmt = stmt?;
     crate::timing::lap(crate::timing::Phase::Cache);
-    Ok((stmt, params))
+    seen.text = sql;
+    Ok(Query { stmt, params, seen })
+}
+
+/// The member holding a body's text: `query`, or else `sql`.
+fn text_at(members: &[(String, Value)]) -> Option<usize> {
+    let at = |name: &str| members.iter().position(|(k, _)| k == name);
+    at("query").or_else(|| at("sql"))
+}
+
+/// A body's parameters, taken out of its members: a list whose elements
+/// keep their types, as the browser module reads its parameters -- a
+/// vector parameter is an array inside it, `[[..]]`.
+fn listed_params(members: &mut [(String, Value)]) -> Vec<Value> {
+    match members
+        .iter_mut()
+        .find(|(k, _)| k == "params")
+        .map(|(_, v)| v)
+    {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::List(items)) => std::mem::take(items),
+        Some(other) => vec![std::mem::replace(other, Value::Null)],
+    }
+}
+
+/// What the parse cache holds of a body's text, found as its parameters
+/// are reached ([`parse_query`]): where the text stands among the members,
+/// its hash, its statement where kept, and the hint its last request left.
+struct Found {
+    at: usize,
+    hash: u64,
+    hit: Option<Hit>,
+}
+
+impl Found {
+    fn of(at: usize, text: &str) -> Found {
+        let hash = hash_of(text);
+        let hit = match text.len() > PARSED_LONGEST {
+            // A long text's hint alone: its statement is not kept.
+            true => long_hint(hash).map(|hint| Hit {
+                stmt: None,
+                exact: None,
+                hint: Some(hint),
+            }),
+            false => cached(text, hash),
+        };
+        Found { at, hash, hit }
+    }
+
+    fn hint(&self) -> Option<Arc<[usize]>> {
+        self.hit.as_ref().and_then(|h| h.hint.clone())
+    }
+}
+
+/// What a shard keeps of a text, as a request takes it.
+struct Hit {
+    stmt: Option<Arc<Statement>>,
+    exact: Option<Arc<Statement>>,
+    hint: Option<Arc<[usize]>>,
 }
 
 /// The statement and parameters of a `POST /query` body as a json field
@@ -1092,18 +1244,19 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
 /// read again as written, from the statement's text or the parameters'
 /// JSON -- read the quick way, into a vector's `f32`s, the field refuses it
 /// (`Database::exactly`). A statement with no such list, and parameters
-/// holding none, are handed back as they came, the database not looked at.
+/// holding none, are handed back as they came, the database not looked at,
+/// unless the first read took a hint, which is looked at each time.
 pub fn exactly(
     db: &std::sync::RwLock<Database>,
     body: &str,
-    stmt: Arc<Statement>,
-    params: Vec<Value>,
+    q: Query,
 ) -> Result<(Arc<Statement>, Vec<Value>)> {
-    if !vectored(&stmt, &params) {
+    let Query { stmt, params, seen } = q;
+    if !vectored(&stmt, &params) && seen.hint.is_none() {
         return Ok((stmt, params));
     }
     let g = db.read().unwrap_or_else(|e| e.into_inner());
-    exactly_in(&g, body, stmt, params)
+    exactly_in(&g, body, stmt, params, seen)
 }
 
 /// [`exactly`] for each line of a `POST /batch` body, the database looked
@@ -1111,16 +1264,22 @@ pub fn exactly(
 pub fn exactly_batch(
     db: &std::sync::RwLock<Database>,
     body: &str,
-    stmts: Vec<(Statement, Vec<Value>)>,
+    stmts: Vec<Query>,
 ) -> Result<Vec<(Statement, Vec<Value>)>> {
-    if !stmts.iter().any(|(s, p)| vectored(s, p)) {
-        return Ok(stmts);
+    if !stmts
+        .iter()
+        .any(|q| vectored(&q.stmt, &q.params) || q.seen.hint.is_some())
+    {
+        return Ok(stmts
+            .into_iter()
+            .map(|q| (Arc::unwrap_or_clone(q.stmt), q.params))
+            .collect());
     }
     let g = db.read().unwrap_or_else(|e| e.into_inner());
     let lines = body.lines().filter(|l| !l.trim().is_empty());
     let mut out = Vec::with_capacity(stmts.len());
-    for (line, (stmt, params)) in lines.zip(stmts) {
-        let (stmt, params) = exactly_in(&g, line, Arc::new(stmt), params)?;
+    for (line, q) in lines.zip(stmts) {
+        let (stmt, params) = exactly_in(&g, line, q.stmt, q.params, q.seen)?;
         out.push((Arc::unwrap_or_clone(stmt), params));
     }
     Ok(out)
@@ -1210,40 +1369,39 @@ fn vectored(stmt: &Statement, params: &[Value]) -> bool {
     stmt.reads_vectors() || params.iter().any(fennec_core::query::holds_vector)
 }
 
+/// [`exactly`] over a statement and parameters as the first read made
+/// them, `seen` what it was told and found.
+///
+/// The hint: each place the first read took as written must be one the
+/// statement still names (`Database::exactly`, before `settle`), or the
+/// parameters are read the quick way again and the hint dropped -- the
+/// schema changed, or a long text's hash met another's. Every place it names
+/// is read as written either way, at once or again ([`Exactly::settle`]
+/// drops a value holding no vector, which is what a value read as written
+/// is), so no answer depends on it. The places read as written are the
+/// next request's hint, kept only where they changed: a statement whose
+/// hint holds takes no lock for it.
 fn exactly_in(
     db: &Database,
     body: &str,
     stmt: Arc<Statement>,
-    params: Vec<Value>,
+    mut params: Vec<Value>,
+    mut seen: Seen,
 ) -> Result<(Arc<Statement>, Vec<Value>)> {
     let mut need = db.exactly(&stmt);
-    need.settle(&params);
-    if !need.is_needed() {
-        return Ok((stmt, params));
+    let held = seen.hint.take();
+    let mut hint = held.as_deref();
+    if hint.is_some_and(|h| !h.iter().all(|i| need.params.binary_search(i).is_ok())) {
+        params = listed_params(&mut json::parse_object_listing(body, "params")?);
+        hint = None;
     }
-    // The text, and those parameters alone, read again as written: the
-    // rest of the body is stepped over, an embedding beside them unread.
-    let sql = match need.text {
-        true => match json::member(body, "query")? {
-            Some(sql) => Some(sql),
-            None => json::member(body, "sql")?,
-        },
-        false => None,
+    need.settle(&params);
+    let stmt = match need.text {
+        true => exact_text(stmt, &mut seen)?,
+        false => stmt,
     };
-    let stmt = match sql {
-        Some(Value::Text(sql)) => Arc::new(
-            fennec_ql::parse_exact(&sql)
-                .and_then(|mut s| match s.len() {
-                    1 => Ok(s.remove(0)),
-                    n => Err(Error::Query(format!(
-                        "expected a single statement, found {n}"
-                    ))),
-                })
-                .map_err(|e| Error::Query(e.to_string()))?,
-        ),
-        _ => stmt,
-    };
-    let mut params = params;
+    // Those parameters alone read again as written: the rest of the body
+    // is stepped over, an embedding beside them unread.
     if !need.params.is_empty() {
         for (i, v) in json::exact_params(body, Some("params"), &need.params)? {
             if let Some(p) = params.get_mut(i) {
@@ -1251,7 +1409,79 @@ fn exactly_in(
             }
         }
     }
+    // A place the hint read as written holds no vector, and is read again
+    // never: the hint is the next request's as it stands unless one was
+    // read again, or it was dropped.
+    if !need.params.is_empty() || hint.is_none() != held.is_none() {
+        remember(&seen, merged(hint.unwrap_or_default(), &need.params));
+    }
     Ok((stmt, params))
+}
+
+/// The statement of `seen`'s text read as written ([`fennec_ql::parse_exact`]):
+/// a text too long to keep has its documents' lists put in their places as
+/// they were written, kept from its one read, where they are every list it
+/// holds ([`fennec_ql::read_listed`]); a kept text's is kept beside it,
+/// read once.
+fn exact_text(stmt: Arc<Statement>, seen: &mut Seen) -> Result<Arc<Statement>> {
+    let Some(mut listing) = seen.listing.take() else {
+        return match seen.exact.take() {
+            Some(exact) => Ok(exact),
+            None => exact_kept(&seen.text, seen.hash),
+        };
+    };
+    let mut stmt = stmt;
+    // A long text's statement is no shard's: this request's alone.
+    if let Some(s) = Arc::get_mut(&mut stmt) {
+        if fennec_ql::read_listed(s, &mut listing) {
+            return Ok(stmt);
+        }
+    }
+    parse_exact_one(&seen.text).map(Arc::new)
+}
+
+fn parse_exact_one(text: &str) -> Result<Statement> {
+    fennec_ql::parse_exact(text)
+        .and_then(|mut s| match s.len() {
+            1 => Ok(s.remove(0)),
+            n => Err(Error::Query(format!(
+                "expected a single statement, found {n}"
+            ))),
+        })
+        .map_err(|e| Error::Query(e.to_string()))
+}
+
+/// Two lists of places ascending, as one; `None` where both are empty.
+fn merged(a: &[usize], b: &[usize]) -> Option<Arc<[usize]>> {
+    if b.is_empty() {
+        return (!a.is_empty()).then(|| a.into());
+    }
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        let x = match (a.get(i), b.get(j)) {
+            (Some(&x), Some(&y)) if x == y => {
+                j += 1;
+                i += 1;
+                x
+            }
+            (Some(&x), Some(&y)) if x < y => {
+                i += 1;
+                x
+            }
+            (Some(&x), None) => {
+                i += 1;
+                x
+            }
+            (_, Some(&y)) => {
+                j += 1;
+                y
+            }
+            (None, None) => break,
+        };
+        out.push(x);
+    }
+    Some(out.into())
 }
 
 /// Shards of the statements parsed, by their text's hash: a client sends
@@ -1267,42 +1497,168 @@ const PARSED_PER_SHARD: usize = 64;
 /// statements no one asks for again.
 const PARSED_LONGEST: usize = 1024;
 
-type Parsed = std::sync::Mutex<Option<std::collections::HashMap<u64, (Box<str>, Arc<Statement>)>>>;
+/// A statement parsed, as its text's shard keeps it.
+struct Cached {
+    text: Box<str>,
+    stmt: Arc<Statement>,
+    /// The text read as written, once a request of it needed that
+    /// (`Database::exactly`): what the text says alone, so the same tree
+    /// each time, where it was parsed again each request.
+    exact: Option<Arc<Statement>>,
+    /// The places of its parameters its last request read as written,
+    /// ascending: its next request reads them so at once ([`exactly_in`]).
+    hint: Option<Arc<[usize]>>,
+}
+
+type Parsed = std::sync::Mutex<Option<std::collections::HashMap<u64, Cached>>>;
 static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) }; PARSED_SHARDS];
 
-/// `text` parsed as one statement, from the shards when it was before. A
-/// parse reads the text alone, so the statement is the same one each time.
-pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
-    let parse = || {
-        crate::timing::parsed();
-        fennec_ql::parse_one(text)
-            .map(Arc::new)
-            .map_err(|e| Error::Query(e.to_string()))
-    };
-    if text.len() > PARSED_LONGEST {
-        return parse();
-    }
-    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+/// The hints of texts too long to keep, by their hash alone, as [`PARSED`]
+/// keeps its texts': a page of rows a parameter a field is one long text
+/// sent again and again. A hint read for another text changes no answer
+/// ([`exactly_in`]) and is put right by the request that read it.
+type Hints = std::sync::Mutex<Option<std::collections::HashMap<u64, Arc<[usize]>>>>;
+static HINTS: [Hints; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) }; PARSED_SHARDS];
+
+fn hash_of(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-    });
-    let shard = &PARSED[(hash % PARSED_SHARDS as u64) as usize];
-    let found = shard
+    })
+}
+
+fn shard_of(hash: u64) -> usize {
+    (hash % PARSED_SHARDS as u64) as usize
+}
+
+/// The statement kept for `text`, the text read as written where it is
+/// kept too, and its hint.
+fn cached(text: &str, hash: u64) -> Option<Hit> {
+    PARSED[shard_of(hash)]
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .and_then(|m| m.get(&hash))
-        .filter(|(t, _)| &**t == text)
-        .map(|(_, s)| Arc::clone(s));
-    if let Some(stmt) = found {
+        .filter(|c| &*c.text == text)
+        .map(|c| Hit {
+            stmt: Some(Arc::clone(&c.stmt)),
+            exact: c.exact.clone(),
+            hint: c.hint.clone(),
+        })
+}
+
+fn long_hint(hash: u64) -> Option<Arc<[usize]>> {
+    HINTS[shard_of(hash)]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&hash).cloned())
+}
+
+/// `next` kept as the hint of `seen`'s text: on its shard's statement, or
+/// for a long text by its hash.
+fn remember(seen: &Seen, next: Option<Arc<[usize]>>) {
+    let hash = seen.hash.unwrap_or_else(|| hash_of(&seen.text));
+    if seen.text.len() > PARSED_LONGEST {
+        let mut shard = HINTS[shard_of(hash)]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let map = shard.get_or_insert_with(Default::default);
+        match next {
+            Some(h) => {
+                if map.len() >= PARSED_PER_SHARD {
+                    map.clear();
+                }
+                map.insert(hash, h);
+            }
+            None => {
+                map.remove(&hash);
+            }
+        }
+        return;
+    }
+    let mut shard = PARSED[shard_of(hash)]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = shard
+        .as_mut()
+        .and_then(|m| m.get_mut(&hash))
+        .filter(|c| *c.text == *seen.text)
+    {
+        c.hint = next;
+    }
+}
+
+/// The statement `text` reads as written: kept beside its quick one, read
+/// once, where the text is kept.
+fn exact_kept(text: &str, hash: Option<u64>) -> Result<Arc<Statement>> {
+    if text.len() > PARSED_LONGEST {
+        return parse_exact_one(text).map(Arc::new);
+    }
+    let hash = hash.unwrap_or_else(|| hash_of(text));
+    let shard = &PARSED[shard_of(hash)];
+    let kept = shard
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&hash))
+        .filter(|c| &*c.text == text)
+        .and_then(|c| c.exact.clone());
+    if let Some(stmt) = kept {
         return Ok(stmt);
     }
-    let stmt = parse()?;
-    let mut shard = shard.lock().unwrap_or_else(|e| e.into_inner());
+    let stmt = Arc::new(parse_exact_one(text)?);
+    if let Some(c) = shard
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .and_then(|m| m.get_mut(&hash))
+        .filter(|c| &*c.text == text)
+    {
+        c.exact = Some(Arc::clone(&stmt));
+    }
+    Ok(stmt)
+}
+
+/// `text` parsed as one statement, from the shards when it was before. A
+/// parse reads the text alone, so the statement is the same one each time.
+pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
+    if text.len() > PARSED_LONGEST {
+        return parse_text(text);
+    }
+    let hash = hash_of(text);
+    match cached(text, hash).and_then(|hit| hit.stmt) {
+        Some(stmt) => Ok(stmt),
+        None => parsed_by(text, hash),
+    }
+}
+
+fn parse_text(text: &str) -> Result<Arc<Statement>> {
+    crate::timing::parsed();
+    fennec_ql::parse_one(text)
+        .map(Arc::new)
+        .map_err(|e| Error::Query(e.to_string()))
+}
+
+/// [`parsed`], `text` -- of a kept length -- found in no shard: parsed, and
+/// kept.
+fn parsed_by(text: &str, hash: u64) -> Result<Arc<Statement>> {
+    let stmt = parse_text(text)?;
+    let mut shard = PARSED[shard_of(hash)]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let map = shard.get_or_insert_with(Default::default);
     if map.len() >= PARSED_PER_SHARD {
         map.clear();
     }
-    map.insert(hash, (text.into(), Arc::clone(&stmt)));
+    map.insert(
+        hash,
+        Cached {
+            text: text.into(),
+            stmt: Arc::clone(&stmt),
+            exact: None,
+            hint: None,
+        },
+    );
     Ok(stmt)
 }
 
@@ -1329,13 +1685,13 @@ pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
 /// as a write is (`Statement::fits_block`); a `compact` cannot be, so a
 /// batch holding one runs each statement on its own: it stops at the first
 /// error, and `completed` says how many were applied.
-pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
+pub fn parse_batch(body: &str) -> Result<Vec<Query>> {
     let mut out = Vec::new();
     for (i, line) in body.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let (stmt, params) = parse_query(line).map_err(|e| {
+        let q = parse_query(line).map_err(|e| {
             // The parse's own words: `{e}` said their kind again,
             // `query error: query error: position 11: ...`.
             let why = match e {
@@ -1344,7 +1700,7 @@ pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
             };
             Error::Query(format!("batch line {}: {why}", i + 1))
         })?;
-        out.push((Arc::unwrap_or_clone(stmt), params));
+        out.push(q);
     }
     if out.is_empty() {
         return Err(Error::Query("empty batch".into()));
@@ -1658,5 +2014,84 @@ pub fn status_of(e: &Error) -> u16 {
         // Insufficient storage, as --max-memory answers: the write fits
         // once rows are deleted, not by sending it again.
         Error::Quota(_) => 507,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::RwLock;
+
+    /// A statement's request reads at once, as written, the parameters its
+    /// last request read again -- a short text's hint on its parse-cache
+    /// entry, a long one's by its hash -- and the hint holds where it is
+    /// right, no lock taken to keep it again.
+    #[test]
+    fn a_statement_s_next_request_reads_its_lists_at_once() {
+        let db = RwLock::new(Database::new());
+        let create = fennec_ql::parse_one("create collection hinted (fs [float], v vector<2>)");
+        db.write().unwrap().execute(&create.unwrap()).unwrap();
+        let short = r#"{"query":"put hinted {id: 1, fs: $1, v: $2}","params":[[0.1],[0.5, 0.25]]}"#;
+        let docs: Vec<String> = (0..60)
+            .map(|d| format!("{{id: {}, fs: ${}, v: ${}}}", d + 2, 2 * d + 1, 2 * d + 2))
+            .collect();
+        let params = vec!["[0.1], [0.5, 0.25]"; 60];
+        let long = format!(
+            r#"{{"query":"put hinted [{}]","params":[{}]}}"#,
+            docs.join(", "),
+            params.join(", ")
+        );
+        assert!(long.len() > 2 * PARSED_LONGEST);
+        let floats = Value::List(vec![Value::Float(0.1)]);
+        for (body, places) in [(short, vec![0]), (&*long, (0..60).map(|d| 2 * d).collect())] {
+            let q = parse_query(body).unwrap();
+            assert!(q.seen.hint.is_none());
+            assert!(matches!(q.params[0], Value::Vector(_)));
+            let (_, params) = exactly(&db, body, q).unwrap();
+            assert_eq!(params[0], floats);
+            for _ in 0..2 {
+                let q = parse_query(body).unwrap();
+                assert_eq!(q.seen.hint.as_deref(), Some(&places[..]));
+                assert_eq!(q.params[0], floats);
+                assert!(matches!(q.params[1], Value::Vector(_)));
+                let (_, params) = exactly(&db, body, q).unwrap();
+                assert_eq!(params[0], floats);
+            }
+        }
+        // A body naming its text as `sql` before its parameters and as
+        // `query` after them is the `query`'s: the `sql`'s hint read its
+        // parameters, and they are read the quick way again.
+        let both = r#"{"sql":"put hinted {id: 1, fs: $1, v: $2}","params":[[0.1],[0.5, 0.25]],"query":"get hinted where id = $3"}"#;
+        let q = parse_query(both).unwrap();
+        assert!(q.seen.hint.is_none());
+        assert!(matches!(q.params[0], Value::Vector(_)));
+    }
+
+    /// A text is parsed once whether its body names parameters or not,
+    /// before its text or after: each request after the first is handed
+    /// the statement kept.
+    #[test]
+    fn a_text_is_parsed_once_however_its_body_is_written() {
+        for body in [
+            r#"{"query":"get kept_once_a where n = 1"}"#,
+            r#"{"query":"get kept_once_b where n = $1","params":[1]}"#,
+            r#"{"params":[1],"query":"get kept_once_c where n = $1"}"#,
+            r#"{"sql":"get kept_once_d where n = $1","params":[1]}"#,
+        ] {
+            let first = parse_query(body).unwrap().stmt;
+            let again = parse_query(body).unwrap().stmt;
+            assert!(Arc::ptr_eq(&first, &again), "{body}");
+        }
+    }
+
+    #[test]
+    fn places_merge_ascending_each_once() {
+        assert_eq!(merged(&[], &[]), None);
+        assert_eq!(merged(&[1, 4], &[]).as_deref(), Some(&[1, 4][..]));
+        assert_eq!(merged(&[], &[2]).as_deref(), Some(&[2][..]));
+        assert_eq!(
+            merged(&[1, 3, 5], &[0, 3, 6, 7]).as_deref(),
+            Some(&[0, 1, 3, 5, 6, 7][..])
+        );
     }
 }

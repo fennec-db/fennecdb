@@ -718,14 +718,19 @@ at once after, looked up only where a list of numbers is among the
 parameters, so a run with none pays nothing, and a place it names beside
 them is added: 10 ids went 14.1-15.2 us a run -> 10.2-11.0, and `= $1`
 read 4.7-5.3 us either way (node, 200 000 runs back to back, in turns).
-The server reads the body a second time at every request whose numbers
-`exactly` names: 18.0-18.3 us for a body of 1 000 ids, the quick reading
-before it 10.4-10.6 (`make lists-bench`'s readings), of a request's
-177-181 us p50. Avoiding it would read the parameters after the
-statement, which every request's body would pay for, or have the quick
-reader tell whole numbers apart, which every vector's would; a list of
-texts is read once. A `Value::Vector` handed to `Database::query` is refused
-(`refuse_inexact`, its words naming `in $n`). A call's argument is named
+The server reads the parameters `exactly` names a second time at a text's
+first request, the rest of the body stepped over unread
+(`json::exact_params`), and as written in its one read from then on: the
+text's parse-cache entry keeps their places (its hint,
+[vector-search.md](vector-search.md#numbers-in)), looked up as the
+parameters are reached, after the text -- the lookup the cache made
+anyway. Read whole again, a body of 1 000 ids took 18.0-18.3 us, the
+quick reading before it 10.4-10.6 (`make lists-bench`'s readings), of a
+request's 177-181 us p50. Reading the parameters after the statement
+would have every request's body pay for it, and the quick reader telling
+whole numbers apart every vector's; a list of texts is read once. A
+`Value::Vector` handed to `Database::query` is refused (`refuse_inexact`,
+its words naming `in $n`). A call's argument is named
 where its parameter is a list (`$ids [int]`) as where it keeps numbers, and
 one handed as a parameter (`call f($1)`) is the parameter's -- `exact_args`
 asked only the literals written in before, so `call f($1)` handed a json
