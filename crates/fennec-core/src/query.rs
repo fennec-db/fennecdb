@@ -2060,7 +2060,8 @@ pub struct Facet {
     /// `ranges [0, 2500, 5000]`: rows counted by the range their number
     /// falls in -- from each bound, included, to the next, excluded --
     /// rather than by value, every range answered in order, an empty one
-    /// with 0. A value outside them all, a null and a `NaN` count in none.
+    /// with 0. A value outside them all, a null and a `NaN` -- above every
+    /// bound but a `NaN`, where a range ends -- count in none.
     pub ranges: Option<Vec<Value>>,
     /// `disjunctive`: counted over the rows the query selects with the
     /// filter's own conditions on this field left out -- the `and` chain's

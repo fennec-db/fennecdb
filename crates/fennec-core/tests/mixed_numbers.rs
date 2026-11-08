@@ -530,12 +530,11 @@ fn random_edges(seed: u64, json: Json) {
         let text = "put f {x: $1, xh: $1, xs: $1, a: $1, b: $1, y: $1, z: 0}";
         with(&mut db, text, &[Value::Float(f)]).unwrap();
     }
-    // `NaN`, equal to every value: an inclusive comparison takes it, a
-    // strict one does not, through the ordered indexes as through the scan.
-    // A `@hash` keeps it in the bucket of its bits, where `= 5.0` does not
-    // look: `xh` holds none, held to `y`, which holds none either.
+    // `NaN`, above every number: through the ordered indexes and the
+    // `@hash`, whose buckets file every `NaN` under one key, as through
+    // the scan.
     for _ in 0..3 {
-        let text = "put f {x: $1, xs: $1, a: $1, b: $1, z: 0}";
+        let text = "put f {x: $1, xh: $1, xs: $1, a: $1, b: $1, y: $1, z: 0}";
         with(&mut db, text, &[Value::Float(f64::NAN)]).unwrap();
     }
     if json == Json::Exact {
@@ -704,13 +703,14 @@ fn an_int_no_float_holds_is_bounded_by_the_floats_beside_it() {
         );
         assert!(p.contains(&format!("a range on {field}")), "{p}");
     }
-    // `=` is a range of no key: the `NaN` row alone, as the scan has it.
+    // `=` is a range of no key: no row, the `NaN` one neither, as the scan
+    // has it.
     let text = "get f where xs = 9007199254740993";
     assert_eq!(
         ids(&db, text, &[]),
         ids(&db, "get f where x = 9007199254740993", &[])
     );
-    assert_eq!(ids(&db, text, &[]).len(), 1);
+    assert_eq!(ids(&db, text, &[]).len(), 0);
     // A facet's ranges by such ints count what the scan counts.
     let text = "get f facet xs ranges [9007199254740993, 1152921504606846977] limit 0";
     let r = answer(&db, text, &[]);

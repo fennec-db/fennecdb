@@ -63,15 +63,12 @@ pub struct JsonOrdered {
 /// The entries, and the rows that have no place among them.
 ///
 /// `null` sorts before every value, so it is held apart rather than given a
-/// key. `NaN` is held apart too: `cmp_value` finds it equal to everything,
-/// so it matches every inclusive comparison and no strict one, and has no
-/// position an order could agree on. Both sets use the key type's default as
-/// a dummy key, so they are the same structure as the keys and cost no code
-/// of their own.
+/// key, the key type's default a dummy key, so the set is the same
+/// structure as the keys and costs no code of its own. A `NaN` has a key,
+/// the last of all ([`float_key`]).
 pub struct Ordered<K> {
     keys: Chunked<(K, DocId)>,
     nulls: Chunked<(K, DocId)>,
-    nans: Chunked<(K, DocId)>,
     /// Bytes the keys hold beyond their own size -- the text of a `text`
     /// key -- kept as a running sum: `memory_bytes` is read before every
     /// write under `--max-memory`, and must not walk the entries to answer.
@@ -90,7 +87,6 @@ where
         Ordered {
             keys: Chunked::new(order.coll),
             nulls: Chunked::new(None),
-            nans: Chunked::new(None),
             heap: 0,
             fold: order.fold,
         }
@@ -367,11 +363,10 @@ impl<T: Entry + Clone> Chunked<T> {
     }
 }
 
-/// A key a value sorts under, or where it goes instead.
+/// A key a value sorts under, or the nulls.
 enum Slot<K> {
     Key(K),
     Null,
-    Nan,
 }
 
 /// A bound on the key space, from `where` comparisons. Over a json path a
@@ -383,12 +378,10 @@ pub enum Key {
     Text(Box<str>),
 }
 
-/// The ids a range covers. `strict` says whether any of the comparisons that
-/// made it was `<` or `>`, which decides whether the `NaN` rows match.
+/// The ids a range covers.
 pub struct Range {
     pub lo: Bound<Key>,
     pub hi: Bound<Key>,
-    pub strict: bool,
     /// The collation text bounds compare in: the field's.
     pub coll: Option<Collation>,
 }
@@ -401,8 +394,14 @@ pub(crate) fn int_key(i: i64) -> u64 {
 
 /// `float` onto `u64`, order kept: a negative has every bit flipped, a
 /// positive only its sign. `-0.0` and `0.0` compare equal, so they share a
-/// key. The caller keeps `NaN` out.
+/// key, and so does every `NaN`, whatever its bits: the last key of all,
+/// past `+inf`'s, as `cmp_value` puts it above every number -- where a
+/// positive `NaN`'s bits would have keyed it there too, and a negative
+/// one's below `-inf`.
 pub(crate) fn float_key(f: f64) -> u64 {
+    if f.is_nan() {
+        return u64::MAX;
+    }
     let f = if f == 0.0 { 0.0 } else { f };
     let b = f.to_bits();
     if b >> 63 == 1 {
@@ -470,21 +469,20 @@ impl SortedIndex {
                 let by = |a: &(Box<str>, DocId), b: &(Box<str>, DocId)| a.order(b, coll);
                 keys.sort_unstable_by(by);
                 nulls.sort_unstable_by(by);
-                SortedIndex::Text(Ordered::from_sorted(keys, nulls, Vec::new(), heap, order))
+                SortedIndex::Text(Ordered::from_sorted(keys, nulls, heap, order))
             }
             _ => {
-                let (mut keys, mut nulls, mut nans) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut keys, mut nulls) = (Vec::new(), Vec::new());
                 for (id, v) in rows {
                     match num_slot(v.as_ref()) {
                         Slot::Key(k) => keys.push((k, id)),
                         Slot::Null => nulls.push((0, id)),
-                        Slot::Nan => nans.push((0, id)),
                     }
                 }
-                for v in [&mut keys, &mut nulls, &mut nans] {
+                for v in [&mut keys, &mut nulls] {
                     radix_sort(v);
                 }
-                SortedIndex::Num(Ordered::from_sorted(keys, nulls, nans, 0, TextOrder::BYTES))
+                SortedIndex::Num(Ordered::from_sorted(keys, nulls, 0, TextOrder::BYTES))
             }
         }
     }
@@ -514,9 +512,6 @@ impl SortedIndex {
                 }
                 Slot::Null => {
                     o.nulls.insert((0, id));
-                }
-                Slot::Nan => {
-                    o.nans.insert((0, id));
                 }
             },
             SortedIndex::Text(o) => match text_slot(v, o.fold) {
@@ -561,9 +556,6 @@ impl SortedIndex {
                 Slot::Null => {
                     o.nulls.remove(&(0, id));
                 }
-                Slot::Nan => {
-                    o.nans.remove(&(0, id));
-                }
             },
             SortedIndex::Text(o) => match text_slot(v, o.fold) {
                 Slot::Key(k) => {
@@ -579,9 +571,9 @@ impl SortedIndex {
         }
     }
 
-    /// Its entries in order, the keys, the nulls and the NaNs (a json
-    /// one's numbers, texts and values apart): the same for two indexes
-    /// holding the same rows.
+    /// Its entries in order, the keys and the nulls (a json one's numbers,
+    /// texts and values apart): the same for two indexes holding the same
+    /// rows.
     #[cfg(test)]
     pub(crate) fn dump(&self) -> String {
         fn of<K: std::fmt::Debug>(o: &Ordered<K>) -> String
@@ -589,7 +581,7 @@ impl SortedIndex {
             (K, DocId): Entry + Clone,
         {
             let all = |c: &Chunked<(K, DocId)>| format!("{:?}", c.iter().collect::<Vec<_>>());
-            format!("{} {} {}", all(&o.keys), all(&o.nulls), all(&o.nans))
+            format!("{} {}", all(&o.keys), all(&o.nulls))
         }
         match self {
             SortedIndex::Num(o) => of(o),
@@ -603,17 +595,8 @@ impl SortedIndex {
         }
     }
 
-    /// Whether any row holds `NaN`, which has no place in an order.
-    pub fn has_nan(&self) -> bool {
-        match self {
-            SortedIndex::Num(o) => !o.nans.is_empty(),
-            SortedIndex::Text(_) => false,
-            SortedIndex::Json(j) => !j.apart.is_empty(),
-        }
-    }
-
-    /// Whether the index answers at all: a json one holding a value apart
-    /// does not, and the scan answers instead.
+    /// Whether the index answers at all, a filter or an order: a json one
+    /// holding a value apart does not, and the scan answers instead.
     pub fn answers(&self) -> bool {
         match self {
             SortedIndex::Json(j) => j.apart.is_empty(),
@@ -657,8 +640,8 @@ impl SortedIndex {
             // `cmp_value` compares an int against a float by their true
             // values: an int a float holds is that float's key, and one it
             // does not -- 2^53 + 1 -- lies between two keys, tested row by
-            // row.
-            (DataType::Float, Value::Float(f)) if !f.is_nan() => Some(Key::Num(float_key(*f))),
+            // row. A `NaN` is the last key.
+            (DataType::Float, Value::Float(f)) => Some(Key::Num(float_key(*f))),
             (DataType::Float, Value::Int(i)) => {
                 crate::value::exact_float(*i).map(|f| Key::Num(float_key(f)))
             }
@@ -738,9 +721,9 @@ impl SortedIndex {
         })
     }
 
-    /// Every id in the range, in key order, and the `NaN` rows when every
-    /// comparison was inclusive. `None` once more than `cap` ids turn up: a
-    /// range that wide is cheaper to scan than to collect and sort.
+    /// Every id in the range, in key order. `None` once more than `cap` ids
+    /// turn up: a range that wide is cheaper to scan than to collect and
+    /// sort.
     pub fn range_ids(&self, r: &Range, cap: usize) -> Option<Vec<DocId>> {
         let mut out = Vec::new();
         let mut take = |ids: &mut dyn Iterator<Item = DocId>| {
@@ -754,10 +737,8 @@ impl SortedIndex {
         };
         let whole = match self {
             SortedIndex::Num(o) => {
-                let nans = if r.strict { None } else { Some(&o.nans) };
                 let (lo, hi) = (num_bound(&r.lo, true), num_bound(&r.hi, false));
-                nans.is_none_or(|n| take(&mut n.iter().map(|e| e.1)))
-                    && take(&mut o.keys.range(&lo, &hi).map(|e| e.1))
+                take(&mut o.keys.range(&lo, &hi).map(|e| e.1))
             }
             SortedIndex::Text(o) => {
                 let (lo, hi) = (text_bound(&r.lo, true), text_bound(&r.hi, false));
@@ -779,7 +760,8 @@ impl SortedIndex {
     /// every row a range is counted from the chunks' lengths, over a set by
     /// walking its entries and asking the set. `None` for an index that
     /// cannot answer: a text or json field's, or bounds that are not
-    /// numbers. `null` and `NaN` lie in no range, as in no comparison.
+    /// numbers. `null` lies in no range, as in no comparison, nor does a
+    /// `NaN`: a range ends short of its bound, and no bound is past a `NaN`.
     pub fn range_counts(&self, keys: &[Key], member: Option<&[u64]>) -> Option<Vec<u64>> {
         let SortedIndex::Num(o) = self else {
             return None;
@@ -839,7 +821,8 @@ impl SortedIndex {
     /// descending id, so a descending walk gathers each run of equal keys and
     /// hands it over reversed.
     ///
-    /// The caller checks `has_nan` first: this walk has no place for them.
+    /// The caller checks `answers` first: a json index's values apart have
+    /// no place in it.
     pub fn walk(
         &self,
         desc: bool,
@@ -896,14 +879,14 @@ pub(crate) enum JsonSlot {
 /// keyed as that float, which `cmp_value` finds it equal to and orders it
 /// as against every number; one no float holds -- 2^53 + 1 -- would share
 /// a key with ints and a float `cmp_value` tells it apart from, so it
-/// goes apart, as a `NaN` does.
+/// goes apart. A `NaN`, which no json value holds, is a literal's last key.
 pub(crate) fn json_slot(v: Option<&Value>) -> JsonSlot {
     match v {
         Some(Value::Int(i)) => match crate::value::exact_float(*i) {
             Some(f) => JsonSlot::Num(float_key(f)),
             None => JsonSlot::Apart,
         },
-        Some(Value::Float(f)) if !f.is_nan() => JsonSlot::Num(float_key(*f)),
+        Some(Value::Float(f)) => JsonSlot::Num(float_key(*f)),
         Some(Value::Text(t)) => JsonSlot::Text(t.as_str().into()),
         None | Some(Value::Null) => JsonSlot::Null,
         Some(_) => JsonSlot::Apart,
@@ -973,21 +956,19 @@ where
     fn from_sorted(
         keys: Vec<(K, DocId)>,
         nulls: Vec<(K, DocId)>,
-        nans: Vec<(K, DocId)>,
         heap: usize,
         order: TextOrder,
     ) -> Self {
         Ordered {
             keys: Chunked::from_sorted(keys, order.coll),
             nulls: Chunked::from_sorted(nulls, None),
-            nans: Chunked::from_sorted(nans, None),
             heap,
             fold: order.fold,
         }
     }
 
     fn entries(&self) -> usize {
-        self.keys.len + self.nulls.len + self.nans.len
+        self.keys.len + self.nulls.len
     }
 }
 
@@ -1116,7 +1097,6 @@ pub(crate) fn radix_sort(v: &mut Vec<(u64, DocId)>) {
 fn num_slot(v: Option<&Value>) -> Slot<u64> {
     match v {
         Some(Value::Int(i) | Value::Timestamp(i)) => Slot::Key(int_key(*i)),
-        Some(Value::Float(f)) if f.is_nan() => Slot::Nan,
         Some(Value::Float(f)) => Slot::Key(float_key(*f)),
         _ => Slot::Null,
     }
@@ -1154,20 +1134,19 @@ fn text_bound(b: &Bound<Key>, lower: bool) -> Bound<(Box<str>, DocId)> {
 }
 
 impl Range {
-    /// No bounds yet: every value, and no `NaN` excluded, over a field
-    /// whose text compares in `coll`.
+    /// No bounds yet: every value, over a field whose text compares in
+    /// `coll`.
     pub fn all(coll: Option<Collation>) -> Range {
         Range {
             lo: Bound::Unbounded,
             hi: Bound::Unbounded,
-            strict: false,
             coll,
         }
     }
 
     /// Takes every row of a field of type `ty` out: a comparison true of
-    /// none ([`SortedIndex::by_kind`]). Below the least key of the field's
-    /// kind, whose `<` also keeps the `NaN` rows out.
+    /// none ([`SortedIndex::by_kind`]): below the least key of the field's
+    /// kind.
     pub fn close(&mut self, ty: &DataType) {
         let least = match ty {
             DataType::Text => Key::Text("".into()),
@@ -1185,15 +1164,9 @@ impl Range {
                 self.tighten_hi(Bound::Included(key));
             }
             Ge => self.tighten_lo(Bound::Included(key)),
-            Gt => {
-                self.strict = true;
-                self.tighten_lo(Bound::Excluded(key));
-            }
+            Gt => self.tighten_lo(Bound::Excluded(key)),
             Le => self.tighten_hi(Bound::Included(key)),
-            Lt => {
-                self.strict = true;
-                self.tighten_hi(Bound::Excluded(key));
-            }
+            Lt => self.tighten_hi(Bound::Excluded(key)),
             Ne => {}
         }
     }
@@ -1202,8 +1175,8 @@ impl Range {
     /// `below` and `above` with no key between them
     /// ([`SortedIndex::beside`]): `>` and `<=` said by the key below, `>=`
     /// and `<` by the one above, as strict or inclusive as they were, so a
-    /// `NaN` row -- equal to every value -- is taken as `v` would take it;
-    /// `=` by both, a range of no key.
+    /// `NaN` row, past both, is taken as `v` would take it; `=` by both, a
+    /// range of no key.
     pub fn narrow_beside(&mut self, op: crate::query::CmpOp, below: Key, above: Key) {
         use crate::query::CmpOp::*;
         match op {
@@ -1372,6 +1345,16 @@ mod tests {
             assert!(float_key(w[0]) < float_key(w[1]), "{:?}", w);
         }
         assert_eq!(float_key(-0.0), float_key(0.0));
+        // Every `NaN` one key, past `+inf`'s, whatever its sign or payload.
+        for bits in [
+            0x7FF8_0000_0000_0000,
+            0xFFF8_0000_0000_0000,
+            0xFFF0_0000_0000_0001,
+        ] {
+            let nan = f64::from_bits(bits);
+            assert_eq!(float_key(nan), float_key(f64::NAN), "{bits:x}");
+            assert!(float_key(nan) > float_key(f64::INFINITY), "{bits:x}");
+        }
     }
 
     /// The chunks against the B-tree they replaced: every insert and remove

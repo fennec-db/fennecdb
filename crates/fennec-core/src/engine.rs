@@ -2178,7 +2178,7 @@ impl Collection {
         let held = self.store.read(&self.schema, *other)?;
         let at = |k: &str| {
             let v = held.as_ref().and_then(|d| d.at(k)).or_else(|| doc.at(k));
-            crate::json::to_string(v.unwrap_or(&Value::Null))
+            crate::json::named(v.unwrap_or(&Value::Null))
         };
         match holders.first() {
             Some((Unique::Field(f), other)) => Err(Error::Duplicate(format!(
@@ -2953,9 +2953,12 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// finds the two equal -- PostgreSQL's float hash hashes -0 as 0 for the
 /// same reason -- and under a key of its own a stored -0.0 was missed by
 /// `price = 0.0` through the index alone. The document keeps the value as
-/// it was written. A -0.0 inside a list or a vector keeps its sign: folding
-/// those too was 570 bytes of the browser module, for a hash index on such
-/// a field meeting a -0.0.
+/// it was written. A list's, an object's and a vector's floats are folded
+/// as a group's key folds them (`codec::encode_key`), one copy of the fold
+/// for both: `[-0.0]` is `[0.0]`, and `[NaN]` of any bits one key, as `=`
+/// finds them. Left unfolded once, for 570 bytes of the browser module, a
+/// `[float]` field's `@hash` answered `xs = [NaN]` with one of the two
+/// rows the scan took, and `@unique` held `[0.0]` beside `[-0.0]`.
 ///
 /// A whole float that is an int is filed under the int: a json path holds
 /// `3` in one document and `3.0` in another, which the scan finds equal
@@ -2965,16 +2968,21 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// float keeps a key of its own -- and a bucket is exactly the rows `=`
 /// finds. A typed field never meets the two, its values and its literals
 /// made its one type first ([`Value::key_as`]).
+///
+/// Every `NaN` is filed under one key, `f64::NAN`'s, whatever its bits --
+/// a sign, a payload, the one `0.0 / 0.0` makes on x86 -- as `=` finds them
+/// equal and PostgreSQL's float hash files them; under the key of its bits
+/// a `NaN` row was missed by `x = $1` through the index alone.
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     match v {
         Value::Float(f) => match crate::value::exact_int(*f) {
             Some(i) => crate::codec::encode_value(&mut out, &Value::Int(i)),
-            // Adding +0.0 turns -0.0 into 0.0 and leaves every other float
-            // alone.
-            None => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
+            None => {
+                crate::codec::encode_value(&mut out, &Value::Float(crate::codec::key_float(*f)))
+            }
         },
-        _ => crate::codec::encode_value(&mut out, v),
+        _ => crate::codec::encode_key(&mut out, v),
     }
     out
 }
@@ -3104,17 +3112,18 @@ fn merge_runs(ids: &mut Vec<DocId>, ends: &mut Vec<usize>) {
 /// field's type files it ([`Value::key_as`]), or -- over a `json` field or
 /// a path, whose values have no type -- the value itself where the bucket
 /// is exactly what `=` finds: null, a boolean, text, and a number
-/// ([`hash_key`] files a whole float under the int it is). `None` sends
-/// the comparison to the scan: `NaN` equals every value, a timestamp the
-/// text it parses from, and a number no value of a typed field's type is
-/// -- 2.5 or 2^63 against an `int`, 2^53 + 1 against a `float` -- none of
-/// its rows, which the scan finds.
+/// ([`hash_key`] files a whole float under the int it is, and every `NaN`
+/// under one key, which no json value holds). `None` sends the comparison
+/// to the scan: a timestamp equals the text it parses from, and a number
+/// no value of a typed field's type is -- 2.5 or 2^63 against an `int`,
+/// 2^53 + 1 against a `float` -- none of its rows, which the scan finds.
 fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
     let fd = schema.indexed(field)?;
     match &fd.ty {
         DataType::Json => match v {
-            Value::Null | Value::Bool(_) | Value::Text(_) | Value::Int(_) => Some(hash_key(v)),
-            Value::Float(f) if !f.is_nan() => Some(hash_key(v)),
+            Value::Null | Value::Bool(_) | Value::Text(_) | Value::Int(_) | Value::Float(_) => {
+                Some(hash_key(v))
+            }
             _ => None,
         },
         ty => v.clone().key_as(ty).map(|k| folded_key(&k, fd.case_fold())),
@@ -10256,12 +10265,13 @@ impl Database {
         else {
             return Ok(None);
         };
-        if ix.has_nan() {
-            let what = match ix.answers() {
-                true => "a NaN",
-                false => "a value it cannot order",
-            };
-            plan(|| format!("order: the ordered index on {field} not walked, it holds {what}"));
+        if !ix.answers() {
+            plan(|| {
+                format!(
+                    "order: the ordered index on {field} not walked, it holds a value it cannot \
+                     order"
+                )
+            });
             return Ok(None);
         }
         if sel.lookup.as_ref().is_some_and(|l| l.required) {
@@ -12662,8 +12672,8 @@ impl Database {
                     if !matches!(v, Value::Int(_) | Value::Float(_) | Value::Timestamp(_)) {
                         return;
                     }
-                    // The bounds at or below it; a `NaN`, equal to every
-                    // one, is past them all.
+                    // The bounds at or below it; a `NaN`, above every
+                    // number, is past them all, as the index keys it.
                     let at =
                         bounds.partition_point(|b| b.cmp_value(v) != std::cmp::Ordering::Greater);
                     if at > 0 && at < bounds.len() && last[at - 1] != row {
@@ -13195,7 +13205,7 @@ fn composite_shared(c: &Collection, comp: &Composite, a: DocId, b: DocId) -> Err
             if i > 0 {
                 vals.push_str(", ");
             }
-            vals.push_str(&crate::json::to_string(doc.at(k).unwrap_or(&Value::Null)));
+            vals.push_str(&crate::json::named(doc.at(k).unwrap_or(&Value::Null)));
         }
     }
     vals.push(']');
@@ -13223,7 +13233,7 @@ fn refuse_shared(c: &Collection, field: &str) -> Result<()> {
             Err(Error::Duplicate(format!(
                 "`{}.{field}` cannot be unique: documents {a} and {b} both hold {}",
                 c.schema.name,
-                crate::json::to_string(&v)
+                crate::json::named(&v)
             )))
         }
         None => Ok(()),
@@ -14834,8 +14844,9 @@ const IN_SET_AT: usize = 8;
 /// says: every value of the type the field holds -- an int, a text, a
 /// timestamp or a boolean, which a typed field's every row holds or
 /// `null` -- so equal keys are equal values and no others are. A float
-/// (`NaN` equals everything), a timestamp written as text, a json field or
-/// a path is compared a value at a time, as before.
+/// (`-0.0` is `0.0`, a `NaN` of any bits every other), a timestamp written
+/// as text, a json field or a path is compared a value at a time, as
+/// before.
 fn in_set(c: &Collection, slot: Slot, values: &[Value]) -> Option<HashIndex> {
     let ty = match slot {
         Slot::Id => DataType::Int,

@@ -290,6 +290,12 @@ void main() {
 
   // A job queue's claim through the engine: order and limit pick the rows,
   // updateReturning answers them as written, deleteReturning as they were.
+  //
+  // A job is ready by an instant the test holds, not by now(): a lease of
+  // now() + a minute runs out whenever a minute passes between two claims,
+  // and an iOS simulator's run of the Swift twin once stalled 75 s between
+  // them, the second claim taking a job the first held. now() writes the
+  // leases still, every one of them past that instant.
   test('a claim answers the rows it took', () async {
     final db = await Fennec.memory();
     await db.execute('create collection jobs (n int, run_at timestamp @sorted, owner text, attempts int)');
@@ -297,8 +303,10 @@ void main() {
     await jobs.insert([
       for (var n = 1; n <= 3; n++) {'n': n, 'run_at': n, 'attempts': 0}
     ]);
+    // Past every job's run_at (milliseconds since the epoch).
+    const ready = 1000;
     Future<Rows> claim(String owner) =>
-        jobs.where(Cond.raw('run_at <= now()')).order('run_at').limit(2).updateReturning({
+        jobs.where(Cond.raw('run_at <= ?', [ready])).order('run_at').limit(2).updateReturning({
           'owner': owner,
           'run_at': Computed.expr('now() + ?', [60000]),
           'attempts': Computed.inc(1),

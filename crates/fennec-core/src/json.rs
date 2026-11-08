@@ -241,6 +241,33 @@ pub fn to_string(v: &Value) -> String {
     s
 }
 
+/// `v` as a refusal names it: its JSON, but a float JSON has no number for
+/// -- a `NaN`, an infinity, which it writes as `null` -- as `NaN`, `inf`
+/// or `-inf`, in a list too: a `@unique` refusal said "document 1 holds
+/// null already" of a `NaN`, and `null` is no value `@unique` refuses.
+pub fn named(v: &Value) -> String {
+    let mut s = String::new();
+    named_into(&mut s, v);
+    s
+}
+
+fn named_into(out: &mut String, v: &Value) {
+    match v {
+        Value::Float(f) if !f.is_finite() => crate::num::f64_into(out, *f),
+        Value::List(items) => {
+            out.push('[');
+            for (i, x) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                named_into(out, x);
+            }
+            out.push(']');
+        }
+        v => value_into(out, v),
+    }
+}
+
 /// A row's group at one level of a `lookup` chain, and the levels below it.
 ///
 /// `group` is the index the owning row has among the rows of the level
