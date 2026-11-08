@@ -353,7 +353,8 @@ impl Value {
     /// holds, where `as` would have made it 2^53. A `NaN` is a `float`'s
     /// key like any other, every `NaN` the same one ([`Value::cmp_value`];
     /// `hash_key` files them under one key whatever their bits), and no
-    /// `int`'s.
+    /// `int`'s. A time is no `text` key: `=` finds it equal to every text
+    /// naming it, however spelled, which no one key files.
     pub(crate) fn key_as(self, ty: &DataType) -> Option<Value> {
         self.coerce_as(ty, Fit::Key).ok()
     }
@@ -423,7 +424,13 @@ impl Value {
             (DataType::Timestamp, Value::Int(ms)) => Ok(Value::Timestamp(ms)),
             (DataType::Timestamp, Value::Text(s)) => Ok(Value::Timestamp(crate::time::parse(&s)?)),
             (DataType::Int, Value::Timestamp(ms)) => Ok(Value::Int(ms)),
-            (DataType::Text, Value::Timestamp(ms)) => Ok(Value::Text(crate::time::format_iso(ms))),
+            // No key: `=` reads a text field's every spelling of the time
+            // as the time ([`Value::cmp_read`]) -- `2026-01-01`, a space for
+            // the `T` -- and the ISO text found that one alone through a
+            // `@hash`, where the scan found them all.
+            (DataType::Text, Value::Timestamp(ms)) if fit != Fit::Key => {
+                Ok(Value::Text(crate::time::format_iso(ms)))
+            }
             (DataType::Vector(dim, _), Value::Vector(v)) => check_dim(v, *dim),
             // pgvector's text form is how a sparse vector arrives from JSON, a
             // FennecQL literal or an import; either way it is put in index
@@ -518,10 +525,13 @@ impl Value {
         }
     }
 
-    /// Backstop of the total ordering for types that cannot be compared.
-    /// Numeric types form a single group (Int <-> Float convert), and so do
-    /// Text and Bytes -- since the schema coerces a `text` value into a
-    /// `bytes` field, the two are compared within the same group.
+    /// The order of the kinds, which values of two kinds take
+    /// ([`Value::cmp_value`]). The numbers are one group, an int, a float
+    /// and a timestamp (its milliseconds' int) compared by their true
+    /// values, and so are Text and Bytes -- since the schema coerces a
+    /// `text` value into a `bytes` field, the two are compared by their
+    /// bytes. Any other two kinds order by this alone: a time is below
+    /// every text.
     fn type_rank(&self) -> u8 {
         match self {
             Value::Null => 0,
@@ -535,10 +545,43 @@ impl Value {
         }
     }
 
-    /// Total ordering for sorting/comparison. Null counts as the smallest;
-    /// a `NaN` equals a `NaN`, whatever its bits, and is greater than every
-    /// other number, `+inf` included: PostgreSQL's order ([`floats`]).
+    /// The total order `order`, `min`, `max` and every key take. Null
+    /// counts as the smallest; a `NaN` equals a `NaN`, whatever its bits,
+    /// and is greater than every other number, `+inf` included:
+    /// PostgreSQL's order ([`floats`]). Values of two kinds order by kind
+    /// ([`Value::type_rank`]), but for the numbers, and a text and bytes,
+    /// each group compared as one: a time is below every text. A comparison
+    /// -- `=`, `<`, `in`, `has` -- reads a text beside a time as the time it
+    /// names ([`Value::cmp_read`]).
+    #[inline]
     pub fn cmp_value(&self, other: &Value) -> std::cmp::Ordering {
+        self.cmp_kinds::<false>(other)
+    }
+
+    /// Two values as a comparison takes them -- `=`, `<`, `in`, `has`, a
+    /// filter's and an expression's alike: as [`Value::cmp_value`] orders
+    /// them, but a text beside a time is read as the time it names, in a
+    /// list or an object too, one naming none above every time. Whichever
+    /// side it came from -- a literal, a parameter, a json field's ISO
+    /// text, a text field's: `where j.at > now() - 1d` compares two times.
+    /// Never an order: a time equals the text naming it and the int 0 the
+    /// time 0, while the text ranks above every int, so a sort by it could
+    /// panic, and `order coalesce(t, j)` did (docs/design/indexes.md#sorted).
+    #[inline]
+    pub fn cmp_read(&self, other: &Value) -> std::cmp::Ordering {
+        self.cmp_kinds::<true>(other)
+    }
+
+    /// [`Value::cmp_value`], and with `READ` [`Value::cmp_read`]: one body,
+    /// two copies, 1.1 KB more of the browser module. A flag the copies
+    /// shared, asked only where a time meets a text, was a register kept
+    /// through the recursion and one more to pass at every call: an order
+    /// of 100 000 rows by any field took 2.2% more instructions, a float
+    /// field's scan 0.8%. A `cmp_read` of the reading arms alone, the rest
+    /// sent on to `cmp_value` and `query::compare` sending it those kinds
+    /// alone, was 682 bytes smaller, and took the float field's scan 1.9%
+    /// more, the kinds asked before every comparison.
+    fn cmp_kinds<const READ: bool>(&self, other: &Value) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (self, other) {
             (Value::Null, Value::Null) => Ordering::Equal,
@@ -558,16 +601,22 @@ impl Value {
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-            // A timestamp must be comparable with a text literal: the write
-            // path parses the text, so `where created_at >= "2026-01-01"`
-            // must agree. Unparseable text falls back to type rank.
-            (Value::Timestamp(a), Value::Text(b)) => match crate::time::parse(b) {
-                Ok(ms) => a.cmp(&ms),
-                Err(_) => Ordering::Less,
+            // A time and a text order by kind, the time below, as any two
+            // kinds do (`type_rank`); a comparison reads the text as the
+            // time it names (`cmp_read`), as the write path reads one into
+            // a `timestamp` field, so `where created_at >= "2026-01-01"`
+            // agrees. Read in the order too, `Timestamp(0)` equalled
+            // "1970-01-01T00:00:00Z", which the int 0, equal to the time,
+            // ranked below: no order, and `order coalesce(t, j)` over a time
+            // field and a json one holding ints and ISO texts panicked in
+            // the standard library's sort in 3 of 117 runs.
+            (Value::Timestamp(a), Value::Text(b)) => match READ {
+                true => time_beside(*a, b),
+                false => Ordering::Less,
             },
-            (Value::Text(a), Value::Timestamp(b)) => match crate::time::parse(a) {
-                Ok(ms) => ms.cmp(b),
-                Err(_) => Ordering::Greater,
+            (Value::Text(a), Value::Timestamp(b)) => match READ {
+                true => time_beside(*b, a).reverse(),
+                false => Ordering::Greater,
             },
             // A `bytes` field must be comparable with a text literal: the
             // write path turns Text into Bytes, so the read path must agree.
@@ -578,7 +627,7 @@ impl Value {
             // every row.
             (Value::List(a), Value::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    let o = x.cmp_value(y);
+                    let o = x.cmp_kinds::<READ>(y);
                     if o != Ordering::Equal {
                         return o;
                     }
@@ -598,7 +647,7 @@ impl Value {
             // goes element by element.
             (Value::Object(a), Value::Object(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    let o = x.0.cmp(&y.0).then_with(|| x.1.cmp_value(&y.1));
+                    let o = x.0.cmp(&y.0).then_with(|| x.1.cmp_kinds::<READ>(&y.1));
                     if o != Ordering::Equal {
                         return o;
                     }
@@ -639,6 +688,18 @@ impl Value {
                 _ => self.type_rank().cmp(&other.type_rank()),
             },
         }
+    }
+}
+
+/// A time `t` beside a text, as a comparison reads them: the text as the
+/// time it names, one naming none above every time, as
+/// [`Value::cmp_value`] ranks it. Out of line: no comparison of two other
+/// kinds pays for the parse's code.
+#[inline(never)]
+fn time_beside(t: i64, text: &str) -> std::cmp::Ordering {
+    match crate::time::parse(text) {
+        Ok(ms) => t.cmp(&ms),
+        Err(_) => std::cmp::Ordering::Less,
     }
 }
 
@@ -843,8 +904,15 @@ pub fn whole_vector(v: &Value) -> Option<Vec<f32>> {
 }
 
 /// The int `f` is, exactly: whole, and from -2^63 up to short of 2^63.
+/// `as` saturates and takes a `NaN` to 0, so the int is `f` again only
+/// where `f` is it -- or 2^63, which `i64::MAX` goes back to, held out
+/// after. Every float a group or a set files goes through this
+/// (`codec::encode_key`): `fract` asked for a `trunc`, a call into libm on
+/// x86-64 short of SSE4.1, and a range test both ways.
+#[inline]
 pub(crate) fn exact_int(f: f64) -> Option<i64> {
-    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then_some(f as i64)
+    let i = f as i64;
+    (i as f64 == f && f < I64_END).then_some(i)
 }
 
 /// The float `i` is, exactly: an int a float holds every bit of -- each
@@ -1155,6 +1223,41 @@ mod tests {
             out.push(Value::Object(vec![("k".into(), Value::Float(f))]));
         }
         out.push(Value::List(vec![Value::Int(1)]));
+        // A time's milliseconds about 2026-01-01T00:00:00Z as an int, a
+        // time and a float, and the texts that read as times -- that one,
+        // with its milliseconds and without, a day alone, the epoch --
+        // beside texts that read as none: an int was equal to a time, which
+        // was equal to a text reading as it, which ranked above the int.
+        let ms: i64 = 1_767_225_600_000;
+        for i in [ms - 1, ms, ms + 1] {
+            out.extend([
+                Value::Int(i),
+                Value::Timestamp(i),
+                Value::Float(i as f64),
+                Value::Float(i as f64 + 0.5),
+            ]);
+        }
+        let times = [
+            "1970-01-01T00:00:00Z",
+            "1970-01-01T00:00:00.003Z",
+            "2026-01-01",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00.001Z",
+            "2025-12-31T23:59:59.999Z",
+            "0000-01-01",
+        ];
+        for t in times.iter().chain(&["0", "3", "abc", "1767225600000"]) {
+            out.push(Value::Text(t.to_string()));
+        }
+        out.extend([Value::Bytes(b"a".to_vec()), Value::Bytes(Vec::new())]);
+        for v in [
+            Value::Timestamp(0),
+            Value::Int(0),
+            Value::Text(times[0].into()),
+        ] {
+            out.push(Value::List(vec![v.clone(), Value::Int(1)]));
+            out.push(Value::Object(vec![("k".into(), v)]));
+        }
         out
     }
 
@@ -1206,6 +1309,82 @@ mod tests {
         let v = |a: f32| Value::Vector(vec![a]);
         assert_eq!(v(f32::NAN).cmp_value(&v(-f32::NAN)), Equal);
         assert_eq!(v(f32::NAN).cmp_value(&v(f32::INFINITY)), Greater);
+        // A time is a number, below every text, whatever the text reads as.
+        let epoch = Value::Text("1970-01-01T00:00:00Z".into());
+        assert_eq!(Value::Timestamp(0).cmp_value(&Value::Int(0)), Equal);
+        assert_eq!(Value::Timestamp(0).cmp_value(&epoch), Less);
+        assert_eq!(epoch.cmp_value(&Value::Timestamp(i64::MAX)), Greater);
+    }
+
+    /// A comparison reads a text beside a time as the time it names, either
+    /// side, in a list and an object too, one naming none above every time;
+    /// any other two values it takes as the order does.
+    #[test]
+    fn a_comparison_reads_a_text_beside_a_time() {
+        let text = |t: &str| Value::Text(t.into());
+        let epoch = text("1970-01-01T00:00:00Z");
+        let (t0, t1) = (Value::Timestamp(0), Value::Timestamp(1));
+        assert_eq!(t0.cmp_read(&epoch), Equal);
+        assert_eq!(epoch.cmp_read(&t0), Equal);
+        assert_eq!(t1.cmp_read(&epoch), Greater);
+        assert_eq!(epoch.cmp_read(&t1), Less);
+        assert_eq!(t1.cmp_read(&text("abc")), Less);
+        assert_eq!(text("").cmp_read(&t1), Greater);
+        let list = |v: Value| Value::List(vec![Value::Int(1), v]);
+        assert_eq!(list(t0.clone()).cmp_read(&list(epoch.clone())), Equal);
+        let object = |v: Value| Value::Object(vec![("at".into(), v)]);
+        assert_eq!(object(epoch.clone()).cmp_read(&object(t0.clone())), Equal);
+        assert_eq!(list(t0.clone()).cmp_value(&list(epoch.clone())), Less);
+        for a in edges() {
+            for b in edges() {
+                let reads = matches!(
+                    (&a, &b),
+                    (Value::Timestamp(_), Value::Text(_))
+                        | (Value::Text(_), Value::Timestamp(_))
+                        | (Value::List(_), Value::List(_))
+                        | (Value::Object(_), Value::Object(_))
+                );
+                if !reads {
+                    assert_eq!(a.cmp_read(&b), a.cmp_value(&b), "{a:?} {b:?}");
+                }
+                assert_eq!(a.cmp_read(&b), b.cmp_read(&a).reverse(), "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// A group, a distinct count, a facet, a sketch and every index tell
+    /// values apart by their keys (`codec::encode_key`): two keys are equal
+    /// exactly where `cmp_value` finds the values equal -- a whole float
+    /// and the int it is, a time and its milliseconds' int, bytes and the
+    /// text of them, every `NaN`, both zeros, in a list or an object too.
+    /// A json field's `3` and `3.0` were two groups `=` found one.
+    #[test]
+    fn two_keys_are_equal_where_the_values_are() {
+        // A sparse vector holding a `NaN` or a zero, which no field holds
+        // (`sparse::normalise`), is keyed as it is.
+        let vs: Vec<Value> = edges()
+            .into_iter()
+            .filter(|v| !matches!(v, Value::Sparse(_, e) if e.iter().any(|w| w.1.is_nan() || w.1 == 0.0)))
+            .collect();
+        let key = |v: &Value| {
+            let mut out = Vec::new();
+            crate::codec::encode_key(&mut out, v);
+            out
+        };
+        let keys: Vec<Vec<u8>> = vs.iter().map(key).collect();
+        for (a, ka) in vs.iter().zip(&keys) {
+            for (b, kb) in vs.iter().zip(&keys) {
+                assert_eq!(ka == kb, a.cmp_value(b) == Equal, "{a:?} {b:?}");
+            }
+        }
+        for i in ints() {
+            for f in floats() {
+                let same = Value::Int(i).cmp_value(&Value::Float(f)) == Equal;
+                let (ki, kf) = (key(&Value::Int(i)), key(&Value::Float(f)));
+                assert_eq!(ki == kf, same, "{i} {f:e}");
+                assert_eq!(key(&Value::Timestamp(i)) == kf, same, "{i} {f:e}");
+            }
+        }
     }
 
     #[test]

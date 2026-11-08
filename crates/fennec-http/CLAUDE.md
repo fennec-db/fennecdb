@@ -283,7 +283,12 @@ client ends it; only no such thread, no room (`most_held`) or an answer not
 sent whole closes it at once. A new accept loop calls
 `accept::ready()` and `accept::widen` before its first accept. A TLS
 listener's is told `fennec_tls::REFUSAL`, an alert (`accept::refuse_tls`):
-no handshake runs on the accepting thread.
+no handshake runs on the accepting thread. A connection's place under
+`--max-connections` is an `accept::Slot`, given back by its drop before
+its socket closes, on every way out, a panic's unwinding too -- never by a
+line after the connection's work, which a panic skips; so is every count
+taken around a connection or a held request (`waits::Answering`, a
+`waits::Ticket` leaving its group).
 
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its

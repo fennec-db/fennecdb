@@ -195,7 +195,9 @@ pub struct Router {
     /// Told as a tenant's operation lets it go: what a failover on a lease
     /// waits on for a tenant it had to leave ([`Router::fail_over_held`]).
     freed: std::sync::Condvar,
-    live: AtomicUsize,
+    /// The connections served now, each a slot
+    /// (`fennec_http::accept::Slot`).
+    live: Arc<AtomicUsize>,
     /// The connections' threads a test has fail ([`Router::fail_spawns`]).
     fail_spawns: fennec_http::accept::FailSpawns,
     /// Each node's lease, under automatic failover, and the pool its grants
@@ -704,7 +706,7 @@ impl Router {
             busy: Mutex::new(HashSet::new()),
             freed: std::sync::Condvar::new(),
             marks: Mutex::new(Default::default()),
-            live: AtomicUsize::new(0),
+            live: Arc::default(),
             fail_spawns: Default::default(),
             leases: cfg
                 .auto_failover
@@ -815,9 +817,8 @@ impl Router {
         fennec_http::accept::widen(&listener);
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
-                self.live.fetch_sub(1, Ordering::SeqCst);
+            let max = self.cfg.max_connections;
+            let Some(slot) = fennec_http::accept::Slot::take(&self.live, max) else {
                 let why = fennec_http::accept::Refusal::Ceiling;
                 match self.cfg.tls {
                     // No handshake on this thread: an alert in the clear.
@@ -829,19 +830,18 @@ impl Router {
                     }
                 }
                 continue;
-            }
+            };
             let router = Arc::clone(self);
             let builder = std::thread::Builder::new().name("fennec-shard".into());
             let spawned =
                 fennec_http::accept::spawn(builder, stream, &self.fail_spawns, move |s| {
-                    router.connection(s);
-                    router.live.fetch_sub(1, Ordering::SeqCst);
+                    router.connection(s, slot);
                 });
             // No thread: answered 503 as the ceiling answers, with the
             // router's mark, where it was closed unanswered
-            // (`fennec_http::accept`'s comment).
+            // (`fennec_http::accept`'s comment). Its slot went with the
+            // closure that could not run.
             if let Err(unserved) = spawned {
-                self.live.fetch_sub(1, Ordering::SeqCst);
                 let answer = self.cfg.tls.is_none().then(|| {
                     self.cors(Response::retry_after(
                         503,
@@ -1801,13 +1801,18 @@ impl Router {
         guard
     }
 
-    fn connection(&self, stream: TcpStream) {
+    /// A client's connection, holding its `slot` under `--max-connections`
+    /// until it ends.
+    fn connection(&self, stream: TcpStream, slot: fennec_http::accept::Slot) {
         let _ = stream.set_nodelay(true);
         // The handshake, where it speaks TLS: on this, the connection's own
         // thread, as a node's.
         let Some(conn) = Conn::open(stream, self.cfg.tls.as_deref()) else {
             return;
         };
+        // Given back before the socket closes, on every way out, a panic's
+        // unwinding too, as a node's.
+        let _slot = slot;
         let _ = conn.set_read_timeout(self.cfg.idle_timeout);
         let peer = conn.peer_addr().ok();
         fennec_http::audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);

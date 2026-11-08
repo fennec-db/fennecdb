@@ -33,7 +33,7 @@ use crate::seal::{self, Key};
 use fennec_core::codec::get_uvarint;
 use fennec_core::history::History;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, Write};
+use std::io::{self, Read as _, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -108,6 +108,10 @@ pub struct Archive {
     /// taken ([`Self::consolidate`]): an archiver of many tenants looks
     /// only at those written since.
     fresh: AtomicBool,
+    /// Held through a consolidating round, and by the sweep as a writer
+    /// opens the archive ([`Self::sweep`]): the scratch files rounds left
+    /// that could not be removed, each said in the log once.
+    scratch: Mutex<Vec<String>>,
     /// Where this made its directory, its place among the directories made
     /// in `parent` (0 once synced, or not made here): until the directory
     /// it is in is synced ([`Self::sync_dir`]), a crash could lose the name
@@ -399,6 +403,7 @@ impl Archive {
             key,
             roll: AtomicBool::new(false),
             fresh: AtomicBool::new(true),
+            scratch: Mutex::new(Vec::new()),
             made: AtomicU64::new(if made { parent.made() } else { 0 }),
             parent: Arc::clone(parent),
         })
@@ -743,8 +748,16 @@ impl Archive {
     }
 
     /// Where the archive stands, opened to be written on from a stream: its
-    /// last segment's torn tail, if a crash left one, cut off.
+    /// last segment's torn tail, if a crash left one, cut off, and what
+    /// consolidating rounds left removed ([`Self::sweep`]) -- an archiver
+    /// started again, or one no write comes to, kept a database-sized
+    /// file for every sync of the archive to copy until its next round.
+    /// Not while a round runs beside it: that round's own file is there,
+    /// and the round sweeps as it begins.
     pub(crate) fn writer(&self) -> io::Result<Writer> {
+        if let Ok(mut said) = self.scratch.try_lock() {
+            self.sweep(&mut said);
+        }
         let (at, history, segment) = self.position()?;
         Ok(Writer {
             at,
@@ -1064,22 +1077,44 @@ impl Archive {
         if end <= last_image {
             return Ok(None);
         }
-        let tmp = self.dir.join("consolidating.fennec");
-        let r = self.assemble(&tmp, Target::End);
-        let image = r.and_then(|r| {
-            let db = fennec_core::fs::open_in_memory(&tmp).map_err(|e| corrupt(e.to_string()))?;
-            if db.change_seq() != r.seq {
-                return Err(corrupt(format!(
-                    "the archive's end is change {}, the database opened at {}",
-                    r.seq,
-                    db.change_seq()
-                )));
-            }
-            Ok((r.seq, db.snapshot()))
-        });
-        // Not synced: brought back by a crash, `consolidating.fennec` is no
-        // image or segment by name, and the next consolidate writes it over.
-        let _ = fs::remove_file(&tmp);
+        // The image is assembled in a file of the round's own: one name for
+        // every round, `consolidating.fennec`, was held by whatever copied
+        // the archive as a round ended -- a sync tool, an indexer, on
+        // Windows sharing no deletion (32) -- so it stayed, a sync after
+        // copied a stale database-sized file, and the next round could not
+        // write over it and took no image. What rounds before left goes
+        // first; a name one of them still holds is not taken.
+        let mut said = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        self.sweep(&mut said);
+        let tmp = self.dir.join(scratch_name(end, &said));
+        // Read back through the handle that wrote it, never opened again
+        // by its name: on Windows a copier that opened it between could
+        // hold it from being opened to write, which an open of a database
+        // asks (`fs::open_in_memory`).
+        let image = self
+            .assemble_into(&tmp, Target::End)
+            .and_then(|(r, mut f)| {
+                let mut bytes = Vec::new();
+                f.seek(SeekFrom::Start(0))?;
+                f.read_to_end(&mut bytes)?;
+                drop(f);
+                let mut db = fennec_core::engine::Database::new();
+                db.load(&bytes).map_err(|e| corrupt(e.to_string()))?;
+                drop(bytes);
+                if db.change_seq() != r.seq {
+                    return Err(corrupt(format!(
+                        "the archive's end is change {}, the database opened at {}",
+                        r.seq,
+                        db.change_seq()
+                    )));
+                }
+                Ok((r.seq, db.snapshot()))
+            });
+        // Not synced: brought back by a crash, the file is no image or
+        // segment by name, and the next round, or the next writer's open,
+        // removes it.
+        self.let_go(&tmp, &mut said);
+        drop(said);
         let (seq, bytes) = image?;
         // The segments may have gone on while this read them: the image is
         // of the change it holds, timed by that change's write.
@@ -1302,10 +1337,16 @@ impl Archive {
 
     /// The image `to` starts from and the writes after it up to there,
     /// copied into `tmp`: a fennecdb file, not yet opened.
+    fn assemble(&self, tmp: &Path, to: Target) -> io::Result<Restored> {
+        self.assemble_into(tmp, to).map(|(r, _)| r)
+    }
+
+    /// [`Self::assemble`], and `tmp` as it was written: one handle, open to
+    /// read it back, from its making to its last write.
     ///
     /// Two passes over the segments, one in memory at a time: the first
     /// finds where to stop, the second copies the writes up to there.
-    fn assemble(&self, tmp: &Path, to: Target) -> io::Result<Restored> {
+    fn assemble_into(&self, tmp: &Path, to: Target) -> io::Result<(Restored, File)> {
         let images = self.images()?;
         let segments = self.segments()?;
         let last_image = images.last().map_or(0, |i| i.0);
@@ -1371,13 +1412,19 @@ impl Archive {
 
         // The image, then the writes after it: that is a fennecdb file.
         let _ = fs::remove_file(tmp);
-        match &self.key {
-            None => {
-                fs::copy(self.image_path(image, taken), tmp)?;
+        let mut f = match &self.key {
+            None => copied(&self.image_path(image, taken), tmp)?,
+            Some(_) => {
+                let mut f = File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(tmp)?;
+                f.write_all(&self.read_whole(&self.image_path(image, taken))?)?;
+                f
             }
-            Some(_) => fs::write(tmp, self.read_whole(&self.image_path(image, taken))?)?,
-        }
-        let mut f = OpenOptions::new().append(true).open(tmp)?;
+        };
         let mut want = image + 1;
         for (k, &first) in segments.iter().enumerate() {
             let next = segments.get(k + 1).copied().unwrap_or(u64::MAX);
@@ -1407,13 +1454,107 @@ impl Archive {
             )));
         }
         f.sync_all()?;
-        drop(f);
-        Ok(Restored {
+        let r = Restored {
             seq: stop,
             image,
             time,
-        })
+        };
+        Ok((r, f))
     }
+
+    /// Removes what consolidating rounds left -- a crash's, or one a copy
+    /// of the archive held as its round ended -- and keeps in `said` the
+    /// names that would not go, each said in the log once: a name a round
+    /// does not take ([`scratch_name`]).
+    fn sweep(&self, said: &mut Vec<String>) {
+        let mut left = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_scratch(&name) {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(entry.path()) {
+                if e.kind() != io::ErrorKind::NotFound {
+                    self.unremoved(said, &name, &e);
+                    left.push(name);
+                }
+            }
+        }
+        *said = left;
+    }
+
+    /// Removes a round's own file, or says once why it stays.
+    fn let_go(&self, tmp: &Path, said: &mut Vec<String>) {
+        if let Err(e) = fs::remove_file(tmp) {
+            if e.kind() != io::ErrorKind::NotFound {
+                let name = tmp.file_name().unwrap_or_default().to_string_lossy();
+                self.unremoved(said, &name, &e);
+                said.push(name.into_owned());
+            }
+        }
+    }
+
+    fn unremoved(&self, said: &[String], name: &str, e: &io::Error) {
+        if !said.iter().any(|s| s == name) {
+            crate::log!(
+                "archive {}: {name}, a consolidating round's scratch file, could not be \
+                 removed: {e}; a copy of the archive may hold it (on Windows, 32). The next \
+                 round takes another name, and removes it once it can",
+                self.dir.display()
+            );
+        }
+    }
+}
+
+/// Whether `name` is a consolidating round's scratch file: this one's
+/// `consolidating-<end>[-<k>].fennec`, or `consolidating.fennec`, every
+/// round's before.
+fn is_scratch(name: &str) -> bool {
+    name.starts_with("consolidating") && name.ends_with(".fennec")
+}
+
+/// The file the round ending at change `end` consolidates in:
+/// `consolidating-<end>.fennec`, or where one of that name stays (`left`,
+/// a round before whose end was the same), the first
+/// `consolidating-<end>-<k>.fennec` that does not. A round never writes
+/// over a file another left, which on Windows a copier may hold.
+fn scratch_name(end: u64, left: &[String]) -> String {
+    let mut name = format!("consolidating-{end}.fennec");
+    let mut k = 1;
+    while left.contains(&name) {
+        name = format!("consolidating-{end}-{k}.fennec");
+        k += 1;
+    }
+    name
+}
+
+/// `from` copied to `to`, `to` open to read back and append to. A Unix
+/// copies by the system -- a clone on APFS, `copy_file_range` on Linux --
+/// and opens it again.
+#[cfg(not(windows))]
+fn copied(from: &Path, to: &Path) -> io::Result<File> {
+    fs::copy(from, to)?;
+    File::options().read(true).append(true).open(to)
+}
+
+/// [`copied`] on Windows: through the one handle, from the file's making
+/// on. Opened again after `CopyFileExW`, it could be held between by a
+/// copier that shares no writer (32) -- a sync tool, an indexer, `fs::copy`
+/// itself -- and the round's image refused.
+#[cfg(windows)]
+fn copied(from: &Path, to: &Path) -> io::Result<File> {
+    let out = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(to)?;
+    let mut w = io::BufWriter::with_capacity(1 << 20, out);
+    io::copy(&mut File::open(from)?, &mut w)?;
+    w.into_inner().map_err(io::IntoInnerError::into_error)
 }
 
 /// Where `verify` restores the archive's end to, a file of its own each
@@ -1545,6 +1686,35 @@ fn names_synced(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A round's file is named by its end, never by a name a file left
+    /// stays under; every round's, this one's and the one name before,
+    /// is swept, and nothing else of the archive.
+    #[test]
+    fn a_round_never_takes_a_name_a_file_stays_under() {
+        assert_eq!(scratch_name(7, &[]), "consolidating-7.fennec");
+        let left = [
+            "consolidating-7.fennec".to_string(),
+            "consolidating-7-1.fennec".into(),
+        ];
+        assert_eq!(scratch_name(7, &left), "consolidating-7-2.fennec");
+        assert_eq!(scratch_name(8, &left), "consolidating-8.fennec");
+        for name in [
+            "consolidating.fennec",
+            "consolidating-7.fennec",
+            "consolidating-7-2.fennec",
+        ] {
+            assert!(is_scratch(name), "{name}");
+        }
+        for name in [
+            "image-00000000000000000007-0000000000001.fennec",
+            "writes-00000000000000000001.log",
+            "history",
+            "consolidating-7.fennec.tmp",
+        ] {
+            assert!(!is_scratch(name), "{name}");
+        }
+    }
 
     /// A thousand calls fall in a millisecond or two: each still names a
     /// file no other verify in the process restores into.

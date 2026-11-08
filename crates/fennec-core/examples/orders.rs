@@ -2,7 +2,8 @@
 //! -p fennec-core --example orders -- MODE [N]`, one mode a process, or two
 //! builds held to each other by `make instr-compare PKG=fennec-core
 //! EXAMPLE=orders
-//! MODES=order-int,order-float,scan-float,group-float,group-int,group-list,hash-list`.
+//! MODES=order-int,order-float,scan-float,group-float,group-int,group-list,hash-list`
+//! (and `scan-expr`, `order-time`, `order-text`, `scan-time`, `group-json`).
 //!
 //! 100 000 rows of a random int `n` and a random float `f`, neither
 //! indexed, each request one statement over all of them:
@@ -15,7 +16,9 @@
 //!   * `group-float`: `get t select f, count(*) as c group f limit 1`,
 //!     every float filed by its key (`codec::encode_key`);
 //!   * `group-int`: `get t select n, count(*) as c group n limit 1`, every
-//!     int so.
+//!     int so;
+//!   * `scan-expr`: `get t where n + 1 > $1 count`, an int compared as an
+//!     expression's value (`eval`) on every row, no row passing.
 //!
 //! The list modes write 100 000 rows of another collection instead, `l`,
 //! each a random pair of floats in a `[float]` field and in one with a
@@ -25,6 +28,18 @@
 //!     every list filed by its key, its floats folded (`codec::encode_key`);
 //!   * `hash-list`: `get l where xh in $1 count`, 1 000 of the lists held,
 //!     each looked up in the `@hash` by its key (`hash_key`).
+//!
+//! The kind modes write 100 000 rows of `k` instead, each a random time
+//! from 2020 to 2030 in `at`, a random text of 16 characters in `s`, and a
+//! json number in `j` of 10 000 values, a third ints, a third the same
+//! whole numbers written as floats and a third halves:
+//!
+//!   * `order-time`: `get k select at order at`, as two timestamps;
+//!   * `order-text`: `get k select s order s`, as two texts;
+//!   * `scan-time`: `get k where at > $1 count`, a timestamp field tested
+//!     on every row against a time written as text, no row passing;
+//!   * `group-json`: `get k select j, count(*) as c group j limit 1`, every
+//!     json number filed by its key (`codec::encode_key`).
 //!
 //! It prints ns a request, the median of 9 rounds of N / 9 (N 18 unless
 //! given), and on macOS the instructions and cycles the loop retired
@@ -52,11 +67,29 @@ fn main() {
     };
     let float = |r: u64| (r >> 11) as f64 / (1u64 << 53) as f64 * 2e6 - 1e6;
     let lists = mode.ends_with("-list");
+    let kinds = ["-time", "-text", "-json"]
+        .iter()
+        .any(|k| mode.ends_with(k));
     let mut docs = Vec::with_capacity(ROWS);
     let mut held = Vec::new();
     for i in 0..ROWS {
         // An object's members ascending by key.
         docs.push(Value::Object(match lists {
+            false if kinds => {
+                let at = 1_577_836_800_000 + (next() % 315_576_000_000) as i64;
+                let s = format!("{:016x}", next());
+                let k = (next() % 10_000) as i64;
+                let j = match next() % 3 {
+                    0 => Value::Int(k),
+                    1 => Value::Float(k as f64),
+                    _ => Value::Float(k as f64 + 0.5),
+                };
+                vec![
+                    ("at".to_string(), Value::Timestamp(at)),
+                    ("j".to_string(), j),
+                    ("s".to_string(), Value::Text(s)),
+                ]
+            }
             false => {
                 let n = (next() >> 1) as i64 - (1 << 62);
                 vec![
@@ -75,6 +108,10 @@ fn main() {
         }));
     }
     let (create, put) = match lists {
+        false if kinds => (
+            "create collection k (at timestamp, s text, j json)",
+            "put k $1",
+        ),
         false => ("create collection t (n int, f float)", "put t $1"),
         true => (
             "create collection l (xs [float], xh [float] @hash)",
@@ -90,11 +127,19 @@ fn main() {
         "scan-float" => ("get t where f > $1 count", vec![Value::Float(2e6)]),
         "group-float" => ("get t select f, count(*) as c group f limit 1", vec![]),
         "group-int" => ("get t select n, count(*) as c group n limit 1", vec![]),
+        "scan-expr" => ("get t where n + 1 > $1 count", vec![Value::Int(i64::MAX)]),
         "group-list" => ("get l select xs, count(*) as c group xs limit 1", vec![]),
         "hash-list" => ("get l where xh in $1 count", vec![Value::List(held)]),
+        "order-time" => ("get k select at order at", vec![]),
+        "order-text" => ("get k select s order s", vec![]),
+        "scan-time" => (
+            "get k where at > $1 count",
+            vec![Value::Text("2031-01-01T00:00:00Z".into())],
+        ),
+        "group-json" => ("get k select j, count(*) as c group j limit 1", vec![]),
         other => panic!(
             "no mode {other}: order-int, order-float, scan-float, group-float, group-int, \
-             group-list or hash-list"
+             scan-expr, group-list, hash-list, order-time, order-text, scan-time or group-json"
         ),
     };
     let stmt = fennec_ql::parse_one(text).unwrap();

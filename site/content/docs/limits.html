@@ -389,10 +389,13 @@ what you might expect.</p>
     decoded and evaluated. <code>~</code> is unranked substring matching;
     ranked retrieval is <code>match</code> over a <code>@text</code> field,
     which does reach an index.</li>
-  <li>A <code>@hash</code> equality answers as the scan does, a float's
-    <code>-0.0</code> and <code>0.0</code> as one value. Inside a list or a
-    vector a <code>-0.0</code> keeps its own key, so an equality over a
-    hashed list or vector holding one can miss what the scan finds.</li>
+  <li>A <code>@hash</code> equality answers as the scan does: a float's
+    <code>-0.0</code> and <code>0.0</code> are one value, every
+    <code>NaN</code> one, and a whole float the int it is (a json field's
+    <code>3</code> and <code>3.0</code>), inside a list too. A time against
+    a <code>text</code> or <code>json</code> field's <code>@hash</code> is
+    left to the scan, which reads every text spelling a time as that time
+    (<a href="fennecql-schema.html#kinds">two kinds</a>).</li>
   <li>A comparison reaches an ordered index only when its literal compares
     exactly as the scan would: <code>price &lt; 12.5</code> on an
     <code>int</code> field is tested row by row; an integer no float holds
