@@ -17,7 +17,14 @@
 //! the write lock, the reader asking again within microseconds of its last
 //! answer. `ffi_bench beside` runs that part alone, three times (`beside
 //! durable` with every text fsynced), and `ffi_bench put` a buffered put of
-//! one row alone, 20 000 of them.
+//! one row alone, 20 000 of them. `ffi_bench lists` puts a row holding a
+//! list of 8 beside its 128-dim vector, 20 000 times each way, as a binding
+//! sends it once it knows the text: an `[int]` of small ints, which an
+//! `f32` holds, handed over apart (marked exact where the library reads the
+//! mark, `fennec_abi::EXACT`), and a `[float]` of tenths, which it does not
+//! hold -- apart where the library takes `f32`s, as JSON where it asks for
+//! the numbers written. Then the tenths apart and sent again as JSON where
+//! asked, a text's first call.
 
 use fennec_core::prelude::*;
 use fennec_ffi::*;
@@ -61,6 +68,11 @@ fn main() {
             us[us.len() / 2],
             mean
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("lists") {
+        lists(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
@@ -291,6 +303,99 @@ fn beside(dir: &std::path::Path, durable: bool) {
         at(&waits, 1.0) / 1e3,
         written.load(Ordering::Relaxed) as f64 / run.as_secs_f64()
     );
+}
+
+/// `ffi_bench lists`: see the head of the file. Run against main's
+/// library too, which reads no mark: it is asked first whether it does.
+fn lists(dir: &std::path::Path) {
+    let path = dir.join("lists.fennec");
+    let h = open(path.to_str().unwrap(), FENNEC_OPEN_NO_SYNC);
+    ok(
+        h,
+        "create collection t (xs [int], fs [float], e vector<128>)",
+        "[]",
+        &[],
+    );
+    let ints = "put t {xs: $1, e: $2}";
+    let tenths = "put t {fs: $1, e: $2}";
+    let xs: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let fs: Vec<f32> = (1..=8).map(|i| i as f32 / 10.0).collect();
+    let fs_json = format!(
+        "[[{}],null]",
+        (1..=8)
+            .map(|i| format!("0.{i}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let v: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+    let e = apart(1, &v);
+    // The top bit of a place marks it exact: a library before the mark
+    // reads a place past the parameters, and refuses the vectors.
+    let marked = [apart(1 << 31, &xs), e.clone()].concat();
+    let marks = !answer(h, ints, "[null,null]", &marked).contains("malformed");
+    let xs_apart = match marks {
+        true => marked,
+        false => [apart(0, &xs), e.clone()].concat(),
+    };
+    let fs_apart = [apart(0, &fs), e.clone()].concat();
+    let asks = answer(h, tenths, "[null,null]", &fs_apart).contains("\"exact\"");
+    let n = 20_000;
+    let each = |f: &mut dyn FnMut()| {
+        let mut us: Vec<f64> = (0..n)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        us.sort_by(f64::total_cmp);
+        (us[n / 2], us.iter().sum::<f64>() / n as f64)
+    };
+    for round in 0..3 {
+        let int = each(&mut || ok(h, ints, "[null,null]", &xs_apart));
+        let tenth = each(&mut || match asks {
+            true => ok(h, tenths, &fs_json, &e),
+            false => ok(h, tenths, "[null,null]", &fs_apart),
+        });
+        let first = each(&mut || {
+            if answer(h, tenths, "[null,null]", &fs_apart).contains("\"exact\"") {
+                ok(h, tenths, &fs_json, &e);
+            }
+        });
+        println!(
+            "round {round}: a buffered library put of a list of 8 and a 128-dim vector: \
+             [int] of small ints apart{} {:.2} us p50 {:.2} mean; [float] of tenths {} \
+             {:.2} us p50 {:.2} mean; tenths apart, asked again {:.2} us p50 {:.2} mean",
+            if marks { ", marked exact" } else { "" },
+            int.0,
+            int.1,
+            if asks { "as JSON" } else { "apart" },
+            tenth.0,
+            tenth.1,
+            first.0,
+            first.1
+        );
+    }
+    call(fennec_close, h);
+}
+
+/// A call's answer, whatever it is.
+fn answer(h: u64, sql: &str, params: &str, vectors: &[u8]) -> String {
+    let mut out = std::ptr::null_mut();
+    unsafe {
+        fennec_query(
+            h,
+            sql.as_ptr(),
+            sql.len(),
+            params.as_ptr(),
+            params.len(),
+            vectors.as_ptr(),
+            vectors.len(),
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    taken(out)
 }
 
 fn open(p: &str, flags: u32) -> u64 {

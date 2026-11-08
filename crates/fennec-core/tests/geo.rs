@@ -410,11 +410,11 @@ fn a_point_in_a_text_or_a_parameter_is_read_as_written() {
     // A parameter read the quick way is refused, and the statement says
     // which ones a reader must read as written.
     let stmt = fennec_ql::parse_one("get p where distance(loc, $1) <= $2").unwrap();
-    assert_eq!(db.exactly(&stmt).params, vec![0]);
+    assert_eq!(*db.exactly(&stmt).params, [0]);
     let stmt = fennec_ql::parse_one("get p where within(loc, $3) or loc = $1").unwrap();
-    assert_eq!(db.exactly(&stmt).params, vec![2, 0]);
+    assert_eq!(*db.exactly(&stmt).params, [0, 2]);
     let stmt = fennec_ql::parse_one("get p near loc $2").unwrap();
-    assert_eq!(db.exactly(&stmt).params, vec![1]);
+    assert_eq!(*db.exactly(&stmt).params, [1]);
     let exact = fennec_core::json::parse_params_exact("[[179.123456789, 0.000000001], 0]").unwrap();
     let stmt = fennec_ql::parse_one("get p where distance(loc, $1) <= $2").unwrap();
     assert_eq!(

@@ -350,6 +350,10 @@ class Changes {
 /// isolate that makes it. Open a file once in a process -- a second open is
 /// refused ([FennecCode.locked]), since two databases over one file corrupt
 /// it.
+/// The places the library asked [db] for as JSON for [text]: for the tests,
+/// which import it from here, the package exporting it not.
+Set<int>? askedPlaces(Fennec db, String text) => db._asked[text];
+
 class Fennec {
   /// Where the native library is, for a test or a desktop app: else
   /// `FENNEC_LIBRARY`, else the platform's place (see the Flutter plugin).
@@ -378,6 +382,15 @@ class Fennec {
 
   /// Writes under way, which a live query's look waits out.
   var _inflight = 0;
+
+  /// By text, the parameters the library asked to have as JSON (`exact`):
+  /// a list of numbers it keeps as written -- a json field's, an `[int]`'s,
+  /// a `[float]`'s -- goes so at once from the text's second call on, where
+  /// sent apart as `f32`s it was refused and sent again, two of the
+  /// library's calls each time: 3.38 us a put of an `[int]` of 8 beside a
+  /// 128-dim vector against 2.12 (`ffi_bench lists`). Forgotten past 256
+  /// texts, as the JavaScript client's are.
+  final _asked = <String, Set<int>>{};
   late final Lives lives = Lives(this);
 
   /// The replica's sync, when the database is one ([Fennec.openSynced]).
@@ -516,13 +529,24 @@ class Fennec {
     final values = params.map(normalize).toList();
     if (!quiet) _inflight++;
     try {
-      try {
-        return await _send(text, values, const {});
-      } on FennecException catch (e) {
-        // A json field keeps a list of numbers as written: those the
-        // library asks for go again inside the JSON.
-        if (e.exact == null) rethrow;
-        return await _send(text, values, e.exact!.toSet());
+      // Looked up only where a list of numbers is among the parameters, so
+      // a call with none pays nothing.
+      var asJson = values.any((v) => vectorOf(v) != null) ? (_asked[text] ?? const <int>{}) : const <int>{};
+      while (true) {
+        try {
+          return await _send(text, values, asJson);
+        } on FennecException catch (e) {
+          // A field keeping a list of numbers as written: those the library
+          // asks for go again inside the JSON, and so at once the next time.
+          // Never a place sent as JSON already: those it names are new, so
+          // this ends.
+          if (e.exact == null) rethrow;
+          final more = {...asJson, ...e.exact!};
+          if (more.length == asJson.length) rethrow;
+          asJson = more;
+          if (_asked.length >= 256 && !_asked.containsKey(text)) _asked.clear();
+          _asked[text] = more;
+        }
       }
     } finally {
       if (!quiet) {
@@ -551,8 +575,11 @@ class Fennec {
       final f = vectorOf(params[i]);
       if (f == null) continue;
       json[i] = null;
+      // Marked exact where each `f32` is the number handed: an `[int]` or a
+      // `[float]` takes it as it came, in one call (`fennec_abi::EXACT`).
+      final at = exactVector(params[i]) ? i | 1 << 31 : i;
       final b = ByteData(8 + 4 * f.length)
-        ..setUint32(0, i, Endian.little)
+        ..setUint32(0, at, Endian.little)
         ..setUint32(4, f.length, Endian.little);
       for (var k = 0; k < f.length; k++) {
         // A -0 goes as 0, as JSON writes it: either way, one vector.

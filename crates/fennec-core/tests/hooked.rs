@@ -184,6 +184,39 @@ fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
     assert!(e.contains("statement `stripe_paid`"), "{e}");
 }
 
+/// A webhook consumer's literal lists run as written: `[0.25, 2]` handed
+/// an `[float]` and a json field, where the quick read's `f32`s were
+/// refused at every event (`fennec_ql::stored_definition`).
+#[test]
+fn a_hook_s_body_runs_its_lists_as_written() {
+    let tap = Tap::default();
+    let mut db = orders(&tap);
+    run(
+        &mut db,
+        "create collection taken (k text, fs [float], j json)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        "create statement took($k text from event.id) on hook stripe \
+         as insert taken {k: $k, fs: [0.25, 2], j: [0.1]}",
+    )
+    .unwrap();
+    let body = paid("evt_1", "o-1", 2000);
+    assert_eq!(
+        db.take_event(&event(&body, "evt_1", 7)).unwrap(),
+        Took::Ran(1)
+    );
+    assert_eq!(
+        rows(&db, "get taken select k, fs, j"),
+        vec![vec![
+            Value::Text("evt_1".into()),
+            Value::List(vec![Value::Float(0.25), Value::Float(2.0)]),
+            Value::List(vec![Value::Float(0.1)]),
+        ]]
+    );
+}
+
 #[test]
 fn a_block_put_back_puts_back_a_hook_s_definition() {
     let tap = Tap::default();

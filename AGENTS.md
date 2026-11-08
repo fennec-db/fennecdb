@@ -118,7 +118,8 @@ a `lookup` chain at 8, `in (get ...)` or `in $n` at 100 000 values (a
 takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
-to a 32-bit `usize`.
+to a 32-bit `usize`; a list's elements too, each read as written and
+refused naming the field and the element.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -203,10 +204,6 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - A file compacts itself once half of it is dead
 - A file is compacted before it outgrows the page cache
 - File format
-
-*The engine's lock and blocks*
-- A block's documents are built beside the readers
-- A long read is pinned, and read with no lock held
 
 *Durability*
 - Buffered writes are written behind the lock
@@ -295,6 +292,14 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - `approx_count_distinct` is HyperLogLog, and `having` keeps groups
 - `bucket(at, 1d, 'Europe/Berlin')` reads a zone's clock
 
+### `crates/fennec-core/src/engine/CLAUDE.md`
+
+Covers `crates/fennec-core/src/engine/`.
+
+*The engine's lock and blocks*
+- A block's documents are built beside the readers
+- A long read is pinned, and read with no lock held
+
 ### `crates/fennec-ql/CLAUDE.md`
 
 Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind fennec-core's statements, schemas and named statements (`declared.rs`, `named.rs`, `engine/stored.rs`) and fennec-http's `/_call` too.
@@ -348,6 +353,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `/_stats/statements` counts by shape, a tenant's apart.
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
+- A text's lists are read as written at once from its second request.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
 - A connection no thread can be made for is answered 503.
@@ -399,7 +405,10 @@ Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, lea
 
 ### `crates/fennec-abi/CLAUDE.md`
 
-Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.json`, run by `web/` too.
+Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.json`, run by `web/` too; the marking of vectors binds the bindings' and `web/fennec.js`'s.
+
+*Vector parameters*
+- A vector marked exact is a list of numbers as it came.
 
 *The native library and sync*
 - A replica's sync is a state machine; the network is the binding's.

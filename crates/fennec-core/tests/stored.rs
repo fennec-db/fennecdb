@@ -1514,12 +1514,13 @@ fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
         ("b2", "`ef` is 1 to 4294967295, not 0"),
     ] {
         let why = why(&db, name);
+        let ends = format!(
+            "under grammar epoch {GRAMMAR_EPOCH}, where it was defined under 2: define it again"
+        );
         assert!(
             why.starts_with("its text no longer reads: ")
                 && why.contains(says)
-                && why.ends_with(
-                    "under grammar epoch 3, where it was defined under 2: define it again"
-                ),
+                && why.ends_with(&ends),
             "{name}: {why}"
         );
     }
@@ -1555,6 +1556,172 @@ fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
         r.rows().unwrap().rows[0].values[0],
         Value::Text("seen".into())
     );
+}
+
+/// Grammar epoch 4: a list of numbers whose `f32`s would pass for the whole
+/// numbers written where one was another reads as written, a list, where
+/// epoch 3 read `[1.00000001, 2]` into the vector `[1, 2]`. A definition an
+/// epoch-3 build stored holding one reads as another tree, and is marked
+/// broken, told to define it again; one holding whole numbers written as
+/// floats, or an embedding's fractions, reads as it did.
+#[test]
+fn a_hidden_rounding_epoch_4_marks_a_stored_definition_broken() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(&mut db, "create collection a (fs [float], e vector<2>)").unwrap();
+    let mut file = db.snapshot();
+    let hidden = "create statement hidden() public as insert a {fs: [1.00000001, 2]}";
+    // The tree epoch 3 read the text into, and so the digest it stored.
+    let mut was = fennec_ql::definition(hidden).unwrap();
+    match &mut was.body[0] {
+        Statement::Put { docs, .. } => match &mut docs[0][0].1 {
+            Expr::Lit(v) => {
+                assert_eq!(
+                    *v,
+                    Value::List(vec![Value::Float(1.00000001), Value::Int(2)])
+                );
+                *v = Value::Vector(vec![1.0, 2.0]);
+            }
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+    let whole = "create statement whole() public as insert a {fs: [1.0, 2], e: [0.1, 0.2]}";
+    let record = |name: &str, text: &str, digest: u64, change: u64| {
+        let mut body = vec![1u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, change);
+        put_uvarint(&mut body, 3);
+        body.extend_from_slice(&digest.to_le_bytes());
+        encode_str(&mut body, name);
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "a");
+        encode_str(&mut body, text);
+        let mut record = vec![13u8];
+        put_uvarint(&mut record, 0);
+        put_uvarint(&mut record, body.len() as u64);
+        record.extend_from_slice(&body);
+        record
+    };
+    let seq = db.change_seq();
+    file.extend(record("hidden", hidden, was.digest().unwrap(), seq + 1));
+    file.extend(record("whole", whole, digest(whole), seq + 2));
+    let mut db = opened(&file);
+    let s = db.statements().get("hidden").unwrap();
+    assert_eq!(
+        s.broken.as_deref(),
+        Some(
+            format!(
+                "its text reads as another statement under grammar epoch {GRAMMAR_EPOCH}, \
+                 where it was defined under 3: define it again"
+            )
+            .as_str()
+        )
+    );
+    assert!(db.statements().get("whole").unwrap().broken.is_none());
+    run(&mut db, "call whole").unwrap();
+    run(
+        &mut db,
+        &hidden.replace("statement", "or replace statement"),
+    )
+    .unwrap();
+    run(&mut db, "call hidden").unwrap();
+    let r = run(&mut db, "get a select fs order id").unwrap();
+    let fs = |xs: &[f64]| Value::List(xs.iter().map(|&x| Value::Float(x)).collect());
+    let got: Vec<Value> = r
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.values[0].clone())
+        .collect();
+    assert_eq!(got, [fs(&[1.0, 2.0]), fs(&[1.00000001, 2.0])]);
+}
+
+/// A definition runs as its text read as written, held to the digest of
+/// the tree it reads to the quick way (`fennec_ql::stored_definition`): a
+/// body's `[0.1, 2]` handed a list of numbers or a json field is the
+/// numbers written -- a call's, a binding's at each write that wakes it, a
+/// stored record's an epoch-3 build wrote, which reads to its digest still
+/// -- where the quick read's `f32`s were refused at every call and every
+/// write a binding wakes, the collection unwritable. A vector field
+/// compared with such a list matches the row holding its `f32`s.
+#[test]
+fn a_definition_runs_its_lists_as_written() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(
+        &mut db,
+        "create collection na (k text, fs [float], j json, v vector<2>);
+         create collection nlog (n int)",
+    )
+    .unwrap();
+    run(&mut db, "put na {k: 'row', v: [0.5, 2]}").unwrap();
+    let mut file = db.snapshot();
+    // The definitions each a record an epoch-3 build wrote: its digest the
+    // quick read's tree's, which the text read as written is held to.
+    let texts = [
+        (
+            "tenth",
+            "create statement tenth() public as insert na {k: 'tenth', fs: [0.5, 2], j: [0.1, 2]}",
+        ),
+        (
+            "aimed",
+            "create statement aimed() public scans as \
+             set na {fs: [0.25, 0.1]} where v = [0.5, 2] require 1",
+        ),
+    ];
+    let record = |name: &str, text: &str, change: u64| {
+        let mut body = vec![1u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, change);
+        put_uvarint(&mut body, 3);
+        body.extend_from_slice(&digest(text).to_le_bytes());
+        encode_str(&mut body, name);
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "na");
+        encode_str(&mut body, text);
+        let mut record = vec![13u8];
+        put_uvarint(&mut record, 0);
+        put_uvarint(&mut record, body.len() as u64);
+        record.extend_from_slice(&body);
+        record
+    };
+    let seq = db.change_seq();
+    for (i, (name, text)) in texts.iter().enumerate() {
+        file.extend(record(name, text, seq + 1 + i as u64));
+    }
+    // Opened from the records, and defined here.
+    let mut defined = opened(&tap.bytes());
+    for (_, text) in texts {
+        run(&mut defined, text).unwrap();
+    }
+    for mut db in [opened(&file), defined] {
+        for (name, _) in texts {
+            let s = db.statements().get(name).unwrap();
+            assert!(s.broken.is_none(), "{name}: {:?}", s.broken);
+        }
+        run(&mut db, "call tenth").unwrap();
+        run(&mut db, "call aimed").unwrap();
+        let r = run(&mut db, "get na select k, fs, j order id").unwrap();
+        let r = fennec_core::json::response_to_string(&r);
+        let want =
+            r#"[{"k":"row","fs":[0.25,0.1],"j":null},{"k":"tenth","fs":[0.5,2],"j":[0.1,2]}]"#;
+        assert!(r.contains(want), "{r}");
+    }
+    // A binding: each `insert nlog` wakes it, and lands with its row.
+    run(
+        &mut db,
+        "create statement logged after insert nlog as insert na {k: 'logged', fs: [0.25], j: [0.1]}",
+    )
+    .unwrap();
+    for n in 0..2 {
+        run(&mut db, &format!("insert nlog {{n: {n}}}")).unwrap();
+    }
+    let r = run(&mut db, "get na select fs, j where k = 'logged'").unwrap();
+    let r = fennec_core::json::response_to_string(&r);
+    let want = r#"[{"fs":[0.25],"j":[0.1]},{"fs":[0.25],"j":[0.1]}]"#;
+    assert!(r.contains(want), "{r}");
 }
 
 /// An op or an event this version does not know is refused, never read

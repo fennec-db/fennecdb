@@ -575,7 +575,10 @@ test('a number past an int\'s range is refused naming its field, in the module',
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
   db.run('create collection t (n int, xs [int])');
-  const past = (field) => new RegExp(`field \`${field}\`: an int is from -9223372036854775808 to 9223372036854775807`);
+  const past = (field, at) => {
+    const element = at === undefined ? '' : `, element ${at}`;
+    return new RegExp(`field \`${field}\`${element}: an int is from -9223372036854775808 to 9223372036854775807`);
+  };
   // JavaScript writes 2 ** 63 as 9223372036854775808, past the range, and
   // -(2 ** 63) as -9223372036854776000: an int past 2 ** 53 goes as text.
   for (const n of [1e300, -1e300, 2 ** 63, -(2 ** 63)]) {
@@ -584,19 +587,41 @@ test('a number past an int\'s range is refused naming its field, in the module',
   }
   assert.throws(() => db.run('put t {n: -1e300}'), past('n'));
   assert.throws(() => db.run('put t {n: 9223372036854775808}'), /invalid integer/);
-  // A list of numbers goes in as a vector's f32s, beside the JSON: one
-  // past 2 ** 63 is refused, and the ends, f32s of -(2 ** 63) and 2 ** 63,
-  // are kept as the ints they always were.
-  assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs'));
-  assert.throws(() => db.run('put t {xs: [-1e20]}'), past('xs'));
-  await assert.rejects(db.from('t').insert({ xs: [1e20] }), past('xs'));
+  // A list's elements are read as written and refused as a scalar is,
+  // naming the element: JavaScript holds neither end, its -(2 ** 63) and
+  // 2 ** 63 past them, where their f32s were once taken for the ends.
+  assert.throws(() => db.run('put t {xs: $1}', [[1, 1e20]]), past('xs', 1));
+  assert.throws(() => db.run('put t {xs: [-1e20]}'), past('xs', 0));
+  await assert.rejects(db.from('t').insert({ xs: [1e20] }), past('xs', 0));
+  assert.throws(() => db.run('put t {xs: $1}', [[-(2 ** 63), 2 ** 63]]), past('xs', 0));
+  assert.throws(() => db.run('put t {xs: $1}', [[1, 2 ** 63]]), past('xs', 1));
   assert.equal(db.rows('get t count')[0].count, 0);
   db.run('put t {xs: [-9223372036854775808, 9223372036854775807]}');
-  db.run('put t {xs: $1}', [[-(2 ** 63), 2 ** 63]]);
-  await db.from('t').insert({ xs: [-(2 ** 63), 2 ** 63] });
-  assert.deepEqual(db.rows('get t select xs order id').map((r) => r.xs), Array(3).fill([-(2 ** 63), 2 ** 63]));
+  assert.deepEqual(db.rows('get t select xs')[0].xs, [-(2 ** 63), 2 ** 63]);
   db.run('put t [{n: 9223372036854775807}, {n: -9223372036854775808}]');
   assert.equal(db.rows('get t where n = 9223372036854775807 or n = -9223372036854775808 count')[0].count, 2);
+  db.close();
+});
+
+test('an [int] and a [float] keep their numbers as written, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection l (xs [int], fs [float], e vector<2>)');
+  // Handed over as f32s, 16777217 was 16777216 and 0.1 0.10000000149011612:
+  // the module asks for such a list as JSON, the vector stays apart.
+  const put = 'put l {xs: $1, fs: $2, e: $3}';
+  db.run(put, [[16777217, -16777217, 2 ** 53], [0.1, 19.99], [0.5, 0.25]]);
+  db.run(put, [[1, 2], new Float64Array([0.1]), new Float32Array([0.5, 0.25])]);
+  db.run('put l {xs: [16777217], fs: [0.1]}');
+  await db.from('l').insert({ xs: [9007199254740991], fs: [0.2, 3] });
+  assert.deepEqual(db.rows('get l select xs, fs, e order id'), [
+    { xs: [16777217, -16777217, 2 ** 53], fs: [0.1, 19.99], e: [0.5, 0.25] },
+    { xs: [1, 2], fs: [0.1], e: [0.5, 0.25] },
+    { xs: [16777217], fs: [0.1], e: null },
+    { xs: [9007199254740991], fs: [0.2, 3], e: null },
+  ]);
+  assert.deepEqual(db.rows('get l select id where xs = $1', [[16777217]]).map((r) => r.id), [3]);
+  assert.deepEqual(db.rows('get l select id where fs = [0.1] order id').map((r) => r.id), [2, 3]);
   db.close();
 });
 
@@ -882,6 +907,48 @@ test('a text whose list the module asked for as JSON sends it so at once after',
   calls = 0;
   assert.deepEqual(ids('get p select id where id = $1', [16777217]), [16777217]);
   assert.equal(calls, 1);
+  db.close();
+});
+
+test('a list each of whose numbers an f32 holds goes over apart and is never asked for', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  let calls = 0;
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (src, imports) => {
+    const made = await instantiate(src, imports);
+    const real = (made instanceof WebAssembly.Instance ? made : made.instance).exports;
+    const query = real.fennec_query;
+    // Its arguments named: `run` hands vectors apart only to a
+    // `fennec_query` of more than five.
+    const exports = {
+      ...real,
+      fennec_query(a, b, c, d, e, f, g, h) {
+        calls++;
+        return query(a, b, c, d, e, f, g, h);
+      },
+    };
+    return { instance: { exports } };
+  };
+  let db;
+  try {
+    db = await Fennec.open(wasm);
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+  db.run('create collection l (xs [int], fs [float], e vector<2>)');
+  const put = 'put l {xs: $1, fs: $2, e: $3}';
+  // Marked exact, its place's top bit set, and taken as it came: one call,
+  // 2^24 an int all the same, and a vector of tenths beside it.
+  calls = 0;
+  db.run(put, [[1, -2, 16777216], new Float64Array([0.5, 0.25]), [0.1, 0.2]]);
+  assert.equal(calls, 1);
+  // One an f32 does not hold is asked for as JSON.
+  calls = 0;
+  db.run(put, [[3], [0.1], new Float32Array([1, 2])]);
+  assert.equal(calls, 2);
+  const rows = db.rows('get l select xs, fs order id');
+  assert.deepEqual(rows.map((r) => r.xs), [[1, -2, 16777216], [3]]);
+  assert.deepEqual(rows.map((r) => r.fs), [[0.5, 0.25], [0.1]]);
   db.close();
 });
 

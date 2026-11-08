@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's invariants -- storage, the engine's blocks and reads, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -50,26 +50,6 @@ refused, and the file only grows; a tool that only looks opens with
 `fs::open_read_only`, which cuts, creates and writes nothing. A new record
 kind, index kind, type tag or graph version is a number a binary from
 before refuses (a graph's, rebuilds from), never one it would misread.
-
-### The engine's lock and blocks
-
-**[A block's documents are built beside the
-readers](../../docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
-`early_put`), taken only where the collection holds the schema `Arc` they
-were built against; all else is decided under the write lock. A hook that
-may change a document keeps `Hook::rewrites` true, its payload encoded after
-it.
-
-**[A long read is pinned, and read with no lock held](../../docs/design/engine.md#pinned-reads)**
-(`Database::pin`), sharing nothing a write changes in place; it declines a
-read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
-stray read reruns under the lock. A stream's seed is one (`sse::seed`), its
-scope bound under the pin's lock and its inner `get`s answered on the pin
-(`Pinned::answer_subqueries`), the ring held back to it till the first look (`hold_changes`);
-it reads again under the lock where the ring passed it or an image was
-adopted (`Database::adoptions`), as every look reseeds. A look answering
-them again pins what they read and the rows written since alone
-(`Database::pin_lists`, `sse::look`), the shape where they moved.
 
 ### Durability
 
@@ -331,7 +311,14 @@ shortest text reading back as it (`json::num32_into`), but for
 
 **[A number is read exactly.](../../docs/design/vector-search.md#numbers-in)**
 `num::parse_f64` reads one, and natively `num::clinger` a list of numbers
-alone into `f32`s.
+alone into `f32`s. An `[int]`, `[float]` or `[timestamp]` keeps a list as
+written, as a json field does (`DataType::keeps_numbers`): a vector of
+whole `f32`s short of 2^24 is the integers written, no quick read making
+one of a list hiding a rounding (`value::quick_vector`), and any other is
+read again where `Database::exactly` names it. A filter compares a vector
+field with a list of numbers by its `f32`s (`value::compared_vector`). A
+stored statement runs its text as written, held to its quick read's digest
+(`fennec_ql::stored_definition`).
 
 **[A vector parameter goes into the module as
 `f32`s.](../../docs/design/vector-search.md#vector-parameters)** `run` hands it

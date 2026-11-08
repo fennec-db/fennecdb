@@ -214,8 +214,8 @@ fn numbers_in_the_list_are_read_as_written() {
     exec(&mut db, "put p {id: 16777217, n: 9007199254740993, x: 0.2}");
     let stmt = fennec_ql::parse_one("get p where id in $1").unwrap();
     assert_eq!(
-        db.exactly(&stmt).params,
-        vec![0],
+        *db.exactly(&stmt).params,
+        [0],
         "a list of ids is read as written"
     );
     for (sql, list, want) in [
@@ -347,7 +347,7 @@ fn a_named_statement_takes_its_list_by_name() {
     let call = fennec_ql::parse_one("call picked($1)").unwrap();
     // Read the quick way, a list argument is a vector's `f32`s: the call
     // names it, and it is read as written.
-    assert_eq!(db.exactly(&call).params, vec![0]);
+    assert_eq!(*db.exactly(&call).params, [0]);
     let params = json::parse_params_exact("[[16777217]]").unwrap();
     let got = match db.execute_with(&call, &params).unwrap() {
         Response::Rows(rs) => rs.rows.iter().map(|r| r.id).collect::<Vec<_>>(),

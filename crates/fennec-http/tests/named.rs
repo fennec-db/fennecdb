@@ -180,6 +180,34 @@ fn line(q: &str) -> String {
     body
 }
 
+/// A definition's literal lists run as written: `[0.5, 2]` handed an
+/// `[float]` and a json field, a call's by `/query` and `/_call/`, a
+/// binding's at each write that wakes it -- where the quick read's `f32`s
+/// were refused at every call, every write to the bound collection with
+/// them, in words naming an API of Rust's.
+#[test]
+fn a_definition_s_fractional_lists_run() {
+    let n = start(|_| {});
+    n.ok(ROOT, "create collection na (fs [float], j json)");
+    n.ok(ROOT, "create collection nlog (n int)");
+    n.ok(
+        ROOT,
+        "create statement tenth() public as insert na {fs: [0.5, 2], j: [0.1]}",
+    );
+    n.ok(ROOT, "call tenth");
+    let (status, body) = n.post(ROOT, "/_call/tenth", "");
+    assert_eq!(status, 200, "{body}");
+    n.ok(
+        ROOT,
+        "create statement logged after insert nlog as insert na {fs: [0.25]}",
+    );
+    n.ok(ROOT, "insert nlog {n: 1}");
+    assert_eq!(
+        n.ok(ROOT, "get na select fs, j order id").trim(),
+        r#"[{"fs":[0.5,2],"j":[0.1]},{"fs":[0.5,2],"j":[0.1]},{"fs":[0.25],"j":null}]"#
+    );
+}
+
 /// The review's transfer: granted `transfer call` and no write on
 /// `accounts`, a customer moves money it could not move with a `/batch`,
 /// and eight customers at once keep the sum as `tests/require.rs`'s

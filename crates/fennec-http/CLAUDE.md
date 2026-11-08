@@ -253,6 +253,16 @@ write.](../../docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
 copy, never the cached parse; an answer is one `writev`
 (`http::write_parts`), over TLS one plaintext whose records go in one.
 
+**[A text's lists are read as written at once from its second
+request.](../../docs/design/vector-search.md#numbers-in)** Its parse-cache
+entry, or a long text's hash (`api::HINTS`), keeps the places its last
+request read again (`Cached::hint`), held to `Database::exactly` each
+request, a whole list read so given back as the quick read's vector
+(`value::whole_vector`): no value depends on a hint, whatever text or
+tenant left it. A hint keeps at most 4 096 places, a shard of long texts'
+16 384 (`HINT_PLACES`, `HINT_BUDGET`); a page's documents' lists are read
+again alone (`fennec_ql::read_listed`).
+
 **[A chunked body grows as it comes, held to the
 ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
 read two ways is refused (`chunked_framing`, `end_refused`).

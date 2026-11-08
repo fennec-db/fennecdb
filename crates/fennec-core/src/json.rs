@@ -556,9 +556,66 @@ fn parse_exact_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
     skip_ws(s, i);
     match s.as_bytes().get(*i) {
         Some(b'[') if depth < crate::value::MAX_JSON_DEPTH => {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(v) = exact_numbers(s, i) {
+                return Ok(Value::List(v));
+            }
             Ok(Value::List(parse_array_at(s, i, depth + 1, false)?))
         }
         _ => parse_value_at(s, i, depth),
+    }
+}
+
+/// [`numbers`] as written: the array at `i` when it holds numbers alone,
+/// each the value [`parse_value_at`] makes of it -- an integer an `Int`, one
+/// written with a fraction or an exponent the `f64` it says -- and `i` past
+/// it; `None`, `i` where it was, for anything else, which the general path
+/// reads, or refuses, as it did. Read a value at a time, 1 000 parameters
+/// each a `[float]` of 16 took 17.2 M instructions to read again as
+/// written; read here, 10.7 M.
+#[cfg(not(target_arch = "wasm32"))]
+fn exact_numbers(s: &str, i: &mut usize) -> Option<Vec<Value>> {
+    let b = s.as_bytes();
+    let mut j = *i + 1;
+    let mut out = Vec::new();
+    let space = |j: &mut usize| {
+        if b.get(*j).is_some_and(|&c| c <= b' ' || c >= 0x80) {
+            skip_ws(s, j);
+        }
+    };
+    loop {
+        space(&mut j);
+        if !matches!(b.get(j), Some(b'-' | b'0'..=b'9')) {
+            return None;
+        }
+        let mut float = false;
+        out.push(match crate::num::clinger(b, &mut j, &mut float) {
+            // Clinger's path takes an integer of no more than 2^53.
+            Some(x) if !float => Value::Int(x as i64),
+            Some(x) => Value::Float(x),
+            None => {
+                let (text, is_float) = number_at(s, &mut j);
+                // An integer past an `i64` the `f64` it says, as
+                // `parse_value_at` reads it.
+                let n = match is_float {
+                    true => None,
+                    false => crate::num::parse_i64(text),
+                };
+                match n {
+                    Some(n) => Value::Int(n),
+                    None => Value::Float(crate::num::parse_f64(text)?),
+                }
+            }
+        });
+        space(&mut j);
+        match b.get(j) {
+            Some(b',') => j += 1,
+            Some(b']') => {
+                *i = j + 1;
+                return Some(out);
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -635,21 +692,17 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
                 return Ok(Value::Vector(v));
             }
             let items = parse_array_at(s, i, depth + 1, false)?;
-            // If every item is a number, read it as a vector (embedding transfer)
-            if !items.is_empty()
-                && items
-                    .iter()
-                    .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
-            {
-                return Ok(Value::Vector(
-                    items.iter().map(|v| v.as_f64().unwrap() as f32).collect(),
-                ));
+            // Numbers alone are a vector (embedding transfer), but for a
+            // list whose `f32`s would pass for the whole numbers written
+            // where one was not: that one is read as written.
+            match crate::value::quick_vector(&items) {
+                Some(v) => Ok(Value::Vector(v)),
+                None => Ok(Value::List(items)),
             }
-            Ok(Value::List(items))
         }
         // An object is a value of a `json` field: its members sorted, a key
         // given twice refused (`Value::object`).
-        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1)?)
+        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1, Places::default())?)
             .map_err(|e| Error::Query(e.to_string())),
         b'-' | b'0'..=b'9' => {
             let (text, is_float) = number_at(s, i);
@@ -718,6 +771,10 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
     let b = s.as_bytes();
     let mut j = *i + 1;
     let mut out = Vec::new();
+    // Whether a number was written with a fraction or an exponent: a list of
+    // whole `f32`s holding one may have rounded it to a whole one, and is
+    // read a value at a time, as written where it did (`quick_vector`).
+    let mut floats = false;
     // A space is looked for only where a byte could start one: a call a
     // side was an eighth of a vector's reading.
     let space = |j: &mut usize| {
@@ -730,10 +787,11 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
         if !matches!(b.get(j), Some(b'-' | b'0'..=b'9')) {
             return None;
         }
-        let x = match crate::num::clinger(b, &mut j) {
+        let x = match crate::num::clinger(b, &mut j, &mut floats) {
             Some(x) => x,
             None => {
                 let (text, is_float) = number_at(s, &mut j);
+                floats |= is_float;
                 match is_float {
                     true => crate::num::parse_f64(text)?,
                     false => crate::num::parse_i64(text)? as f64,
@@ -745,12 +803,133 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
         match b.get(j) {
             Some(b',') => j += 1,
             Some(b']') => {
+                let list = s.get(*i..j + 1).unwrap_or_default();
+                if floats
+                    && crate::value::whole_f32s(&out)
+                    && crate::num::hides_rounding(list, &out)
+                {
+                    return None;
+                }
                 *i = j + 1;
                 return Some(out);
             }
             _ => return None,
         }
     }
+}
+
+/// Steps over the value at `i`, which a reading of the same text found
+/// well formed: a string and its escapes, and every container it opens,
+/// nothing built. What a parameter read again as written passes over in the
+/// ones beside it (`exact_params`).
+fn skip_value(s: &str, i: &mut usize) -> Result<()> {
+    let b = s.as_bytes();
+    let mut depth = 0usize;
+    // To the next byte that can end the value or open or close one, in a
+    // loop of one test a byte: a byte at a time through a `match`, stepping
+    // over a page's numbers was 11 instructions a byte.
+    let mut j = *i;
+    loop {
+        let Some(at) = b.get(j..).and_then(|t| {
+            t.iter()
+                .position(|c| matches!(c, b'"' | b'[' | b']' | b'{' | b'}' | b','))
+        }) else {
+            return Err(Error::Query("unexpected end of JSON".into()));
+        };
+        j += at;
+        match b[j] {
+            b'"' => {
+                j += 1;
+                loop {
+                    match b.get(j) {
+                        None => return Err(Error::Query("unterminated JSON string".into())),
+                        Some(b'\\') => j += 2,
+                        Some(b'"') => break,
+                        _ => j += 1,
+                    }
+                }
+            }
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' | b',' if depth == 0 => break,
+            b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    *i = j;
+    Ok(())
+}
+
+/// Where the value of the member `name` of the object `s` starts, the
+/// members before it stepped over unread; `None` where it holds none.
+fn member_at(s: &str, name: &str) -> Result<Option<usize>> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    loop {
+        skip_ws(s, &mut i);
+        match b.get(i) {
+            Some(b'{' | b',') => i += 1,
+            _ => return Ok(None),
+        }
+        skip_ws(s, &mut i);
+        if b.get(i) != Some(&b'"') {
+            return Ok(None);
+        }
+        let key = parse_string(s, &mut i)?;
+        skip_ws(s, &mut i);
+        i += 1; // `:`
+        skip_ws(s, &mut i);
+        if key == name {
+            return Ok(Some(i));
+        }
+        skip_value(s, &mut i)?;
+    }
+}
+
+/// The parameters at `at`, each read as [`parse_json`] reads a value -- a
+/// list of numbers alone as written -- with its place, those beside them
+/// stepped over unread: the list `src` holds, or where `list` names one,
+/// the list that member of the object `src` holds (`POST /query`'s
+/// `params`). What `Database::exactly` names is read again so, `at`
+/// ascending as it names them, and an embedding beside it is not read a
+/// second time.
+pub fn exact_params(src: &str, list: Option<&str>, at: &[usize]) -> Result<Vec<(usize, Value)>> {
+    let s = src.trim();
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = match list {
+        Some(list) => match member_at(s, list)? {
+            Some(i) => i,
+            None => return Ok(out),
+        },
+        None => 0,
+    };
+    skip_ws(s, &mut i);
+    if b.get(i) != Some(&b'[') {
+        // A single value is the one parameter.
+        if at.first() == Some(&0) && list.is_none() {
+            out.push((0, parse_exact_at(s, &mut i, 0)?));
+        }
+        return Ok(out);
+    }
+    i += 1;
+    for place in 0.. {
+        skip_ws(s, &mut i);
+        // Past the last one asked for, the rest is left unread.
+        if matches!(b.get(i), Some(b']') | None) || !at.last().is_some_and(|&l| place <= l) {
+            break;
+        }
+        match at.binary_search(&place).is_ok() {
+            true => out.push((place, parse_exact_at(s, &mut i, 0)?)),
+            false => skip_value(s, &mut i)?,
+        }
+        skip_ws(s, &mut i);
+        match b.get(i) {
+            Some(b',') => i += 1,
+            _ => break,
+        }
+    }
+    Ok(out)
 }
 
 /// Parses an array starting at `[` element by element; it does *not* apply
@@ -772,6 +951,41 @@ fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<V
         items.push(match exact {
             true => parse_exact_at(s, i, depth)?,
             false => parse_value_at(s, i, depth)?,
+        });
+        skip_ws(s, i);
+        match b.get(*i) {
+            Some(b',') => *i += 1,
+            Some(b']') => {
+                *i += 1;
+                break;
+            }
+            _ => return Err(Error::Query("expected `,` or `]` in JSON array".into())),
+        }
+    }
+    Ok(items)
+}
+
+/// [`parse_array_at`] of a query's parameters, those at the places `at`
+/// names, ascending, read as [`parse_json`] reads a value and the rest as
+/// [`parse_value_at`] does: what [`exact_params`] would read again, read so
+/// at once.
+fn array_at_places(s: &str, i: &mut usize, at: &[usize]) -> Result<Vec<Value>> {
+    let b = s.as_bytes();
+    *i += 1; // `[`
+    let mut items = Vec::new();
+    // The next place named: they come ascending, as the elements do.
+    let mut next = at.iter().copied().peekable();
+    loop {
+        skip_ws(s, i);
+        if b.get(*i) == Some(&b']') {
+            *i += 1;
+            break;
+        }
+        let place = items.len();
+        while next.next_if(|&p| p < place).is_some() {}
+        items.push(match next.next_if_eq(&place) {
+            Some(_) => parse_exact_at(s, i, 0)?,
+            None => parse_value_at(s, i, 0)?,
         });
         skip_ws(s, i);
         match b.get(*i) {
@@ -852,20 +1066,48 @@ pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
 /// that list -- read as a vector, `[123456789]` handed the query the `f32`
 /// 123456792, and `[19.99]` 19.989999771118164.
 pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[])
+    listing(src, list, &[], Places::default())
+}
+
+/// What names the places of a listed member's elements to read as
+/// [`parse_json`] reads a value, asked once that member is reached with the
+/// members before it. The browser module names none: nothing there, not a
+/// byte.
+#[cfg(not(target_arch = "wasm32"))]
+type Places<'a> = Option<&'a mut Lister<'a>>;
+/// Handed the members before the listed one, the places of its elements to
+/// read as written, if any.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Lister<'a> = dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>> + 'a;
+#[cfg(target_arch = "wasm32")]
+type Places<'a> = std::marker::PhantomData<&'a ()>;
+
+/// [`parse_object_listing`], the listed member's elements at the places
+/// `places` names, ascending, read as [`parse_json`] reads a value -- a list
+/// of numbers alone as written -- in the one read: `POST /query`'s text
+/// comes before its parameters, and its last request named the places it
+/// read again so (`api::parse_query`). Natively alone: the browser module
+/// reads its parameters' JSON whole, again, where one is named.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_object_listing_at(
+    src: &str,
+    list: &str,
+    places: &mut Lister<'_>,
+) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[], Some(places))
 }
 
 /// [`parse_object_listing`], the listed member's elements read as
 /// [`parse_json`] reads a value: a list of numbers alone as written, where
 /// a json field is given one (`Database::exactly`).
 pub fn parse_object_listing_exact(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
-    listing(src, list, &[list])
+    listing(src, list, &[list], Places::default())
 }
 
-fn listing(src: &str, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
+fn listing(src: &str, list: &str, json: &[&str], places: Places) -> Result<Vec<(String, Value)>> {
     let s = src.trim();
     let mut i = 0;
-    let out = document(s, &mut i, list, json)?;
+    let out = document(s, &mut i, list, json, places)?;
     skip_ws(s, &mut i);
     if i != s.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -897,7 +1139,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
                     i += 1;
                     break;
                 }
-                docs.push(document(s, &mut i, "", json)?);
+                docs.push(document(s, &mut i, "", json, Places::default())?);
                 skip_ws(s, &mut i);
                 match b.get(i) {
                     Some(b',') => i += 1,
@@ -910,7 +1152,7 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
             }
             docs
         }
-        Some(b'{') => vec![document(s, &mut i, "", json)?],
+        Some(b'{') => vec![document(s, &mut i, "", json, Places::default())?],
         _ => {
             return Err(Error::Query(
                 "expected a JSON object or array of objects".into(),
@@ -926,8 +1168,14 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
 
 /// A document at `i`: the member named `list` a parameter list, and those
 /// named in `json` read as [`parse_json`] reads a value.
-fn document(s: &str, i: &mut usize, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
-    let out = parse_members(s, i, list, json, 0)?;
+fn document(
+    s: &str,
+    i: &mut usize,
+    list: &str,
+    json: &[&str],
+    places: Places,
+) -> Result<Vec<(String, Value)>> {
+    let out = parse_members(s, i, list, json, 0, places)?;
     // A repeated key is not silently overwritten: which one wins depends
     // on the parser, and that is an invisible difference. Asked here of a
     // document's fields, in the order they came; an object's members are
@@ -948,7 +1196,10 @@ fn parse_members(
     list: &str,
     json: &[&str],
     depth: usize,
+    mut places: Places,
 ) -> Result<Vec<(String, Value)>> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = &mut places;
     let b = s.as_bytes();
     skip_ws(s, i);
     if b.get(*i) != Some(&b'{') {
@@ -977,7 +1228,14 @@ fn parse_members(
         // A listed member keeps its elements' types, a parameter list's;
         // a json field's, every number.
         let value = if depth == 0 && key == list && b.get(*i) == Some(&b'[') {
-            Value::List(parse_array_at(s, i, 0, json.contains(&list))?)
+            #[cfg(not(target_arch = "wasm32"))]
+            let at = places.as_mut().and_then(|p| p(&out));
+            #[cfg(target_arch = "wasm32")]
+            let at: Option<std::sync::Arc<[usize]>> = None;
+            match at {
+                Some(at) => Value::List(array_at_places(s, i, &at)?),
+                None => Value::List(parse_array_at(s, i, 0, json.contains(&list))?),
+            }
         } else if depth == 0 && json.contains(&key.as_str()) {
             parse_exact_at(s, i, 0)?
         } else {
@@ -1089,7 +1347,8 @@ mod tests {
 
     /// An array as the general path reads it, a value at a time: a vector
     /// when every item is a number, as `parse_value` read every array
-    /// before the one-pass reader.
+    /// before the one-pass reader, but for one whose `f32`s would pass for
+    /// whole numbers one was not (`quick_vector`).
     fn a_value_at_a_time(s: &str) -> Result<Value> {
         let mut i = 0;
         skip_ws(s, &mut i);
@@ -1098,16 +1357,23 @@ mod tests {
         if i != s.len() {
             return Err(Error::Query("trailing characters after JSON".into()));
         }
-        Ok(
-            match !items.is_empty()
-                && items
-                    .iter()
-                    .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
-            {
-                true => Value::Vector(items.iter().map(|v| v.as_f64().unwrap() as f32).collect()),
-                false => Value::List(items),
-            },
-        )
+        Ok(match crate::value::quick_vector(&items) {
+            Some(v) => Value::Vector(v),
+            None => Value::List(items),
+        })
+    }
+
+    /// A list as [`parse_json`] reads it a value at a time: what the one
+    /// pass as written ([`exact_numbers`]) is held to.
+    fn exact_a_value_at_a_time(s: &str) -> Result<Value> {
+        let mut i = 0;
+        skip_ws(s, &mut i);
+        let items = parse_array_at(s, &mut i, 1, false)?;
+        skip_ws(s, &mut i);
+        if i != s.len() {
+            return Err(Error::Query("trailing characters after JSON".into()));
+        }
+        Ok(Value::List(items))
     }
 
     fn bits(v: &Result<Value>) -> Option<Vec<u32>> {
@@ -1117,11 +1383,85 @@ mod tests {
         }
     }
 
+    /// A parameter read again as written by its place is the one the whole
+    /// list read so holds there, whatever the ones stepped over beside it
+    /// hold -- strings with escaped quotes and brackets, objects, lists in
+    /// lists -- in a list alone and in `/query`'s body, its text first --
+    /// and read at once by its place, in the body's one read, too.
+    #[test]
+    fn a_parameter_read_again_by_its_place_is_the_lists() {
+        let lists = [
+            r#"[[0.1, 16777217], "a \"]\" [b", {"k": [1, {"x": "}"}]}, [[1], []], -2.5e3, null, [1.00000001]]"#,
+            r#"[[1, 2], true, "\\", [0.1]]"#,
+            "[[0.1]]",
+            "[]",
+            "[0.1, 2]",
+            "  [ [3] , [4.5] ]  ",
+        ];
+        for list in lists {
+            let whole = parse_params_exact(list).unwrap();
+            let every: Vec<usize> = (0..whole.len()).collect();
+            for at in [
+                every.clone(),
+                vec![0],
+                vec![whole.len().saturating_sub(1)],
+                vec![],
+            ] {
+                let want: Vec<(usize, Value)> = at
+                    .iter()
+                    .filter_map(|&i| Some((i, whole.get(i)?.clone())))
+                    .collect();
+                assert_eq!(
+                    exact_params(list, None, &at).unwrap(),
+                    want,
+                    "{list} {at:?}"
+                );
+                let body = format!(r#"{{"query": "get t where \"]\" = $1", "params": {list}}}"#);
+                assert_eq!(
+                    exact_params(&body, Some("params"), &at).unwrap(),
+                    want,
+                    "{body}"
+                );
+                // Read at once at those places, in the one read of the
+                // body, the rest as the quick read reads them.
+                let params = |obj: Vec<(String, Value)>| match obj.into_iter().last() {
+                    Some((k, Value::List(v))) if k == "params" => v,
+                    other => panic!("{other:?}"),
+                };
+                let quick = params(parse_object_listing(&body, "params").unwrap());
+                let hinted = params(
+                    parse_object_listing_at(&body, "params", &mut |before| {
+                        assert!(matches!(before, [(k, Value::Text(_))] if k == "query"));
+                        Some(at.clone().into())
+                    })
+                    .unwrap(),
+                );
+                assert_eq!(hinted.len(), quick.len());
+                for (i, v) in hinted.iter().enumerate() {
+                    match want.iter().find(|(j, _)| *j == i) {
+                        Some((_, w)) => assert_eq!(v, w, "{body} {i}"),
+                        None => assert_eq!(v, &quick[i], "{body} {i}"),
+                    }
+                }
+            }
+        }
+        let one = r#"{"a": [0.1, 2]}"#;
+        assert_eq!(
+            exact_params(one, None, &[0]).unwrap(),
+            [(0, parse_params_exact(one).unwrap().remove(0))]
+        );
+        assert_eq!(
+            exact_params(r#"{"query": "x"}"#, Some("params"), &[0]).unwrap(),
+            []
+        );
+    }
+
     /// The vector shortcut reads its numbers in one pass where Clinger's
     /// path takes them, and every vector -- every refusal, every list -- is
     /// the one read a value at a time, to the bit: -0 and -0.0, 19 digits
     /// and 20, exponents near and past 22, integers past 2^53 and `i64`,
-    /// and the runs of `[0-9.eE+-]` that are no number at all.
+    /// and the runs of `[0-9.eE+-]` that are no number at all. A list read
+    /// as written in one pass is too.
     #[test]
     fn a_vector_read_in_one_pass_is_the_one_read_a_value_at_a_time() {
         let mut seed = 0x2545_f491_4f6c_dd1du64;
@@ -1217,6 +1557,8 @@ mod tests {
         }
         let (mut vectors, mut refused) = (0, 0);
         for t in &texts {
+            let (one, each) = (parse_json(t), exact_a_value_at_a_time(t));
+            assert_eq!(format!("{one:?}"), format!("{each:?}"), "{t}");
             let (one, each) = (parse(t), a_value_at_a_time(t));
             assert_eq!(bits(&one), bits(&each), "{t}");
             assert_eq!(one.is_err(), each.is_err(), "{t}");

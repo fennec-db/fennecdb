@@ -852,7 +852,10 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
  * most of its time on the digits, both sides of the call. A `-0` goes over
  * as `0`, as JSON writes it, so either way stores the same vector. Those
  * at `asJson` stay in the JSON: a json field keeps a list's numbers as
- * written, which the module asks for by their places.
+ * written, which the module asks for by their places. One each of whose
+ * numbers an `f32` holds exactly -- a `Float32Array`, an int short of 2^24,
+ * `0.5`, not `0.1` -- goes marked exact, its place's top bit set, and an
+ * `[int]` or a `[float]` takes it as it came (`fennec_abi::EXACT`).
  */
 function vectorsApart(params, asJson = null) {
   const found = [];
@@ -861,10 +864,13 @@ function vectorsApart(params, asJson = null) {
     if (asJson?.includes(i)) return;
     const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
+    // A `Float32Array`'s numbers pass as they are.
+    let exact = true;
     for (let k = 0; k < list.length; k++) {
       if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
+      if (exact && Math.fround(list[k]) !== list[k]) exact = false;
     }
-    found.push(i);
+    found.push(exact ? -1 - i : i);
     size += 8 + 4 * list.length;
   });
   if (found.length === 0) return [params, null];
@@ -873,9 +879,10 @@ function vectorsApart(params, asJson = null) {
   const floats = new Float32Array(bytes.buffer);
   const json = params.slice();
   let at = 0;
-  for (const i of found) {
+  for (const f of found) {
+    const i = f < 0 ? -1 - f : f;
     const n = params[i].length;
-    words[at] = i;
+    words[at] = f < 0 ? (i | 0x80000000) >>> 0 : i;
     words[at + 1] = n;
     floats.set(params[i], at + 2);
     for (let k = at + 2; k < at + 2 + n; k++) if (floats[k] === 0) floats[k] = 0;

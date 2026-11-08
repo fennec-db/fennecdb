@@ -47,6 +47,9 @@ extern "C" {
 #define FENNEC_OPEN_IN_MEMORY 2 /* read the file into memory rather than map it */
 #define FENNEC_OPEN_NO_AUTO_COMPACT 4 /* no compact on its own once half the file is dead */
 
+/* fennec_query's vectors: a place's top bit, each f32 the number handed. */
+#define FENNEC_VECTOR_EXACT 0x80000000u
+
 /* The library's version; static, not to be freed. */
 const char *fennec_version(void);
 
@@ -64,7 +67,10 @@ int32_t fennec_close(uint64_t handle, char **out, size_t *out_len);
  * Runs FennecQL. params: a JSON array for $1, $2 ... (length 0 for none).
  * vectors: the parameters that are vectors, as f32s -- for each, its place
  * and its length as little-endian uint32s, then its values -- where the
- * JSON holds null; NULL for none. Writes the answer:
+ * JSON holds null; NULL for none. A place with its top bit set
+ * (FENNEC_VECTOR_EXACT) marks a vector each of whose f32s is the number
+ * the caller was handed: an [int], [float] or [timestamp] takes it as it
+ * came, never asking for it again. Writes the answer:
  * {"kind":"rows","result":{"columns":[...],"rows":[...]}},
  * {"kind":"affected","count":N}, {"kind":"ok","message":...} or
  * {"kind":"schemas","collections":[...]}. An error holding "exact":[places]

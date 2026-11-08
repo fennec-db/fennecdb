@@ -34,7 +34,20 @@ goes in as text with its parameters as JSON, and its answer comes back as
 the JSON the browser module answers with, from the same code
 (<code>fennec-abi</code>), so a page and an app handed the same text get the
 same bytes. A vector goes in as its <code>f32</code> bytes beside the
-JSON, never as digits. The same file can be a replica a server keeps in
+JSON, never as digits, and so does a list of numbers each of which an
+<code>f32</code> holds — a <code>[Float]</code>,
+<code>FloatArray</code> or <code>Float32List</code>, integers up to
+2<sup>24</sup>, doubles such as <code>0.5</code> — marked exact, which a
+list of numbers (<code>[int]</code>, <code>[float]</code>,
+<code>[timestamp]</code>) takes as it came: a put of an <code>[int]</code>
+of 8 beside a 128-dim vector is one call, 2.0 µs. Any other list given a
+<code>json</code> field or a list of numbers, or compared with one, the
+library names before running anything and the binding sends it again
+inside the JSON, so <code>[16777217]</code> and <code>[0.1]</code> are
+kept as the numbers written, not as <code>f32</code>s; each binding
+remembers a text's places and sends them so from its second call on, one
+call rather than two (2.4 µs a put of a <code>[float]</code> of 8 tenths,
+against 3.6 asked again). The same file can be a replica a server keeps in
 step (<a href="#sync">Sync with a server</a>), and an app can ask a server
 with no file at all (<a href="#connect">Without a file</a>).</p>
 </details>
@@ -765,7 +778,13 @@ builds the library for this machine, or <code>TARGET=...</code> for another.
 Every call returns a code -- 0, an error's kind, or the boundary's own:
 <code>FENNEC_MISUSE</code>, <code>FENNEC_LOCKED</code>,
 <code>FENNEC_PANIC</code> -- and writes its answer or its error as
-NUL-terminated JSON, freed with <code>fennec_free_string</code>.</p>
+NUL-terminated JSON, freed with <code>fennec_free_string</code>.
+<code>fennec_query</code> takes the parameters that are vectors beside the
+JSON as their <code>f32</code>s, each its place and length first; a place
+with its top bit set (<code>FENNEC_VECTOR_EXACT</code>) says each
+<code>f32</code> is the number the caller had, and a list of numbers takes
+it as it came. An error holding <code>"exact":[places]</code> asks for
+those parameters again inside the JSON.</p>
 
 <details class="deep"><summary>Handles, panics and JNI</summary>
 <p>A handle is a number, not a pointer: a handle used after its close finds

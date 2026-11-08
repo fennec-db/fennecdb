@@ -173,6 +173,18 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
     internal val inflight = AtomicInteger()
     internal val lives = Lives(this)
 
+    /**
+     * By text, the parameters the library asked to have as JSON (`exact`):
+     * a list of numbers it keeps as written -- a json field's, an
+     * `[int]`'s, a `[float]`'s -- goes so at once from the text's second
+     * call on, where sent apart as `f32`s it was refused and sent again,
+     * two of the library's calls each time: 3.38 us a put of an `[int]` of
+     * 8 beside a 128-dim vector against 2.12 (`ffi_bench lists`). Forgotten
+     * past 256 texts, as the JavaScript client's are. Internal for the
+     * tests.
+     */
+    internal val asked = java.util.concurrent.ConcurrentHashMap<String, Set<Int>>()
+
     /** The replica's sync, set once by [Fennec.Companion.sync]. */
     @Volatile internal var syncing: Replica? = null
         private set
@@ -297,13 +309,23 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
         val values = params.map { Values.normalize(it) }
         if (!quiet) inflight.incrementAndGet()
         try {
-            return try {
-                answer(text, values, emptySet())
-            } catch (e: FennecException) {
-                // A json field keeps a list of numbers as written: those the
-                // library asks for go again inside the JSON.
-                if (e.exact == null) throw e
-                answer(text, values, e.exact.toSet())
+            // Looked up only where a list of numbers is among the
+            // parameters, so a call with none pays nothing.
+            var asJson = if (values.any { Values.vector(it) != null }) asked[text] ?: emptySet() else emptySet()
+            while (true) {
+                try {
+                    return answer(text, values, asJson)
+                } catch (e: FennecException) {
+                    // A field keeping a list of numbers as written: those the
+                    // library asks for go again inside the JSON, and so at
+                    // once the next time. Never a place sent as JSON already:
+                    // those it names are new, so this ends.
+                    val more = asJson + (e.exact ?: throw e)
+                    if (more == asJson) throw e
+                    asJson = more
+                    if (asked.size >= 256 && !asked.containsKey(text)) asked.clear()
+                    asked[text] = more
+                }
             }
         } finally {
             if (!quiet) {
@@ -334,7 +356,10 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
             val f = Values.vector(p) ?: return@forEachIndexed
             json[i] = null
             val b = java.nio.ByteBuffer.allocate(8 + 4 * f.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            b.putInt(i).putInt(f.size)
+            // Marked exact where each Float is the number handed: an `[int]`
+            // or a `[float]` takes it as it came, in one call
+            // (`fennec_abi::EXACT`).
+            b.putInt(if (Values.exact(p)) i or (1 shl 31) else i).putInt(f.size)
             // A -0 goes as 0, as JSON writes it: either way, one vector.
             for (x in f) b.putFloat(if (x == 0f) 0f else x)
             vectors.write(b.array())
@@ -481,6 +506,31 @@ internal object Values {
     private fun instant(v: Any): String? {
         if (v.javaClass.name != "java.time.Instant") return null
         return Json.iso(v.javaClass.getMethod("toEpochMilli").invoke(v) as Long)
+    }
+
+    /**
+     * Whether each Float of [vector]'s is the number it was made of: a
+     * [FloatArray]'s are, an integer of at most 2^24 in size is, and a
+     * Double a Float holds is (`0.5`) -- where `0.1` and 16777217 are not.
+     */
+    fun exact(v: Any?): Boolean {
+        val whole = { l: Long -> l >= -(1L shl 24) && l <= (1L shl 24) }
+        val held = { d: Double -> d.toFloat().toDouble() == d }
+        return when (v) {
+            is FloatArray -> true
+            is DoubleArray -> v.all(held)
+            is List<*> -> v.all {
+                when (it) {
+                    is Float -> true
+                    is Double -> held(it)
+                    is Int -> whole(it.toLong())
+                    is Long -> whole(it)
+                    is Short, is Byte -> true
+                    else -> false
+                }
+            }
+            else -> false
+        }
     }
 
     /** A vector: a [FloatArray], or a list of finite numbers. */

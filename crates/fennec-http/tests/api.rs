@@ -1510,6 +1510,244 @@ fn an_int_past_its_range_is_refused_naming_the_field() {
     }
 }
 
+/// An `[int]` and a `[float]` keep their numbers as written -- a REST
+/// insert's, a PATCH's, a `/query` text's (twice, through the parse cache)
+/// and its parameters', a `/batch` line's -- where their quick read's
+/// `f32`s kept 16777216 for 16777217 and 0.10000000149011612 for 0.1; an
+/// element past an int's range is refused naming the field and the element.
+#[test]
+fn an_int_or_float_list_keeps_its_numbers() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection lists (k text, xs [int], fs [float])"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let xs = "[16777217,9007199254740993]";
+    let body = format!(r#"{{"k":"rest","xs":{xs},"fs":[0.1]}}"#);
+    let r = call(h.port, "POST", "/lists", Some(&body));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let body = format!(r#"{{"k":"patched","xs":{xs},"fs":[19.99]}}"#);
+    let r = call(h.port, "POST", "/lists", Some(r#"{"k":"patched"}"#));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = call(h.port, "PATCH", "/lists?k=eq.patched", Some(&body));
+    assert_eq!(r.status, 200, "{}", r.body);
+    for _ in 0..2 {
+        let r = q(&format!(
+            r#"{{"query":"put lists {{k: 'text', xs: {xs}, fs: [0.1]}}"}}"#
+        ));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 'params', xs: $1, fs: $2}}","params":[{xs},[0.1]]}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let line = format!(r#"{{"query":"put lists {{k: 'batch', xs: $1}}","params":[{xs}]}}"#);
+    let r = call(h.port, "POST", "/batch", Some(&line));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"get lists select k, xs, fs order id"}"#);
+    let row = |k: &str, fs: &str| format!(r#"{{"k":"{k}","xs":{xs},"fs":{fs}}}"#);
+    let want = [
+        row("rest", "[0.1]"),
+        row("patched", "[19.99]"),
+        row("text", "[0.1]"),
+        row("text", "[0.1]"),
+        row("params", "[0.1]"),
+        format!(r#"{{"k":"batch","xs":{xs},"fs":null}}"#),
+    ];
+    assert_eq!(r.body.trim(), format!("[{}]", want.join(",")));
+    let r = q(r#"{"query":"get lists select k where xs = [16777217, 9007199254740993]"}"#);
+    assert_eq!(r.body.matches("\"k\":").count(), 6, "{}", r.body);
+    let r = q(r#"{"query":"get lists select k where xs = [16777216, 9007199254740992]"}"#);
+    assert_eq!(r.body.trim(), "[]");
+    for (status, r) in [
+        (
+            400,
+            call(h.port, "POST", "/lists", Some(r#"{"xs":[1,1e20]}"#)),
+        ),
+        (
+            400,
+            q(r#"{"query":"put lists {xs: $1}","params":[[1, 1e20]]}"#),
+        ),
+    ] {
+        assert_eq!(r.status, status, "{}", r.body);
+        assert!(
+            r.body.contains("field `xs`, element 1: an int is from"),
+            "{}",
+            r.body
+        );
+    }
+}
+
+/// The parameters a statement's last request read again as written are
+/// read so at once (`api::parse_query`'s hint) -- a short text's kept on
+/// its parse-cache entry, a long one's by its hash, a `/batch` line's too
+/// -- and no answer depends on the hint: where the schema no longer keeps
+/// a field's numbers, the parameters are read the quick way again. A long
+/// text's documents' lists are read again alone (`fennec_ql::read_listed`),
+/// a short one's text as written kept beside it.
+#[test]
+fn a_hint_reads_a_list_at_once_and_changes_no_answer() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection h (k text, fs [float], xs [int], v vector<2>)"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let fs = "[0.1, 0.3333333333333333]";
+    let xs = "[16777217]";
+    let short = |k: &str| {
+        format!(
+            r#"{{"query":"put h {{k: $1, fs: $2, xs: $3, v: $4}}","params":["{k}", {fs}, {xs}, [0.5, 0.25]]}}"#
+        )
+    };
+    // A text past the parse cache's 1 024 bytes, a parameter a field.
+    let long = |k: &str| {
+        let docs: Vec<String> = (0..40)
+            .map(|d| {
+                format!(
+                    "{{k: ${}, fs: ${}, xs: ${}}}",
+                    3 * d + 1,
+                    3 * d + 2,
+                    3 * d + 3
+                )
+            })
+            .collect();
+        let params: Vec<String> = (0..40)
+            .map(|d| format!(r#""{k}{d}", {fs}, {xs}"#))
+            .collect();
+        format!(
+            r#"{{"query":"put h [{}]","params":[{}]}}"#,
+            docs.join(", "),
+            params.join(", ")
+        )
+    };
+    let text = |k: &str| {
+        let docs: Vec<String> = (0..40)
+            .map(|d| format!("{{k: '{k}{d}', fs: {fs}, xs: {xs}, v: [0.5, 0.25]}}"))
+            .collect();
+        format!(r#"{{"query":"put h [{}]"}}"#, docs.join(", "))
+    };
+    for round in 0..3 {
+        for body in [
+            short(&format!("short{round}")),
+            long(&format!("long{round}-")),
+            text(&format!("text{round}-")),
+            format!(r#"{{"query":"put h {{k: 'kept{round}', fs: {fs}, xs: {xs}}}"}}"#),
+        ] {
+            assert!(body.len() > 1024 || !body.contains("put h ["), "{body}");
+            let r = q(&body);
+            assert_eq!(r.status, 200, "{}", r.body);
+        }
+        let line =
+            format!(r#"{{"query":"put h {{k: $1, fs: $2}}","params":["batch{round}", {fs}]}}"#);
+        let r = call(h.port, "POST", "/batch", Some(&line));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(r#"{"query":"get h select k, fs, xs order k"}"#);
+    let rows = r.body.matches("\"k\":").count();
+    assert_eq!(rows, 3 * (1 + 40 + 40 + 1 + 1), "{}", r.body);
+    assert_eq!(
+        r.body.matches(r#""fs":[0.1,0.3333333333333333]"#).count(),
+        rows,
+        "{}",
+        r.body
+    );
+    assert_eq!(r.body.matches(r#""xs":[16777217]"#).count(), rows - 3);
+    // `fs` a vector now: the hint the texts left names a parameter the
+    // statement no longer reads as written, and the vector is the quick
+    // read's, as it is with no hint.
+    for alter in [
+        "alter collection h drop field fs",
+        "alter collection h add field fs vector<2>",
+    ] {
+        let r = q(&format!(r#"{{"query":"{alter}"}}"#));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(&short("vector"));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(&long("vector-"));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"get h select fs where k = 'vector'"}"#);
+    assert_eq!(r.body.trim(), r#"[{"fs":[0.1,0.33333334]}]"#);
+    let r = q(r#"{"query":"get h select fs where k = 'vector-7'"}"#);
+    assert_eq!(r.body.trim(), r#"[{"fs":[0.1,0.33333334]}]"#);
+}
+
+/// A parameter given a list of numbers and compared with a vector field
+/// answers the same with or without the hint its text's last request left,
+/// and whatever its elements: read at once as the hint asks, a list whose
+/// `f32`s are the integers written is the vector the quick read makes of
+/// it, and a vector compared with a list of numbers compares with its
+/// `f32`s -- `[0.5, 2]` finds the row holding them, as on main, and `xs`
+/// keeps the numbers written. A literal compared with a vector field
+/// matches the same whether another literal had the text read as written,
+/// and a json field's parameter too.
+#[test]
+fn a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let ok = |body: &str| {
+        let r = q(body);
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body
+    };
+    ok(r#"{"query":"create collection rh (xs [float], j json, v vector<2>)"}"#);
+    ok(r#"{"query":"put rh [{id: 1, v: [1, 2]}, {id: 2, v: [0.5, 2]}, {id: 3, v: [0.1, 2]}]"}"#);
+    let affected = |text: &str, p: &str| {
+        let b = ok(&format!(r#"{{"query":"{text}","params":[{p}]}}"#));
+        let n = b.split("\"affected\":").nth(1).unwrap_or("x");
+        n.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    // Each text fresh, then after a request of it whose list is no
+    // integers, then whose list is integers, both orders: every answer 1.
+    // The last a text too long to keep, its hint kept by its hash.
+    let long = format!("id > -2 -- {}\\n", "x".repeat(1100));
+    let orders = [
+        ("id > 0", ["[1, 2]", "[0.1, 2]", "[1, 2]"]),
+        ("id >= 0", ["[0.1, 2]", "[1, 2]", "[0.1, 2]"]),
+        ("id > -1", ["[0.5, 2]", "[0.5, 2]", "[0.5, 2]"]),
+        (&long, ["[0.1, 2]", "[1, 2]", "[0.5, 2]"]),
+    ];
+    for (cond, lists) in orders {
+        for field in ["xs", "j"] {
+            let text = format!("set rh {{{field}: $1}} where v = $1 and {cond}");
+            for p in lists {
+                assert_eq!(affected(&text, p), "1", "{text} {p}");
+            }
+        }
+    }
+    let r = ok(r#"{"query":"get rh select xs, j order id"}"#);
+    assert!(
+        r.contains(
+            r#"[{"xs":[1,2],"j":[1,2]},{"xs":[0.5,2],"j":[0.5,2]},{"xs":[0.1,2],"j":[0.1,2]}]"#
+        ),
+        "{r}"
+    );
+    // The same lists bound for `xs` alone, the hint taken at once: the
+    // numbers written either way.
+    for p in ["[0.1, 2]", "[1, 2]", "[16777217, 2]"] {
+        ok(&format!(
+            r#"{{"query":"put rh {{id: 9, xs: $1}}","params":[{p}]}}"#
+        ));
+        let r = ok(r#"{"query":"get rh select xs where id = 9"}"#);
+        assert!(
+            r.contains(&format!(r#"[{{"xs":{}}}]"#, p.replace(' ', ""))),
+            "{p}: {r}"
+        );
+    }
+    // Literals: the text read as written for `xs`, the vector compared as one.
+    for (xs, v) in [
+        ("[1]", "[0.5, 2]"),
+        ("[0.1]", "[0.5, 2]"),
+        ("[1.00000001]", "[0.1, 2]"),
+    ] {
+        let r = ok(&format!(
+            r#"{{"query":"set rh {{xs: {xs}}} where v = {v}"}}"#
+        ));
+        assert!(r.contains("\"affected\":1"), "{xs} {v}: {r}");
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

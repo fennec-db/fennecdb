@@ -17,6 +17,8 @@ pub use parser::{
     parse, parse_exact, parse_facet_list, parse_for, parse_group_list, parse_one, parse_one_for,
     parse_select_list, reading, spans, Reading, Refusal, Rest, SelectList, MAX_EXPR_DEPTH,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use parser::{parse_one_listing, read_listed, Listing};
 
 /// The grammar's epoch (`fennec_core::named::GRAMMAR_EPOCH`, beside the
 /// encoder of the tree whose digest a stored statement is held to): raised
@@ -25,12 +27,16 @@ pub use parser::{
 #[cfg(feature = "statements")]
 pub use fennec_core::named::GRAMMAR_EPOCH;
 
-/// A named statement's stored text read back into its tree: what every
-/// open, adoption and replica's apply in a process that [`install`]ed it
-/// reads a statement's record with, its digest then held to the stored one.
+/// A named statement's text read into its tree, as [`parse_one`] reads
+/// it: the tree whose digest its record holds.
 #[cfg(feature = "statements")]
 pub fn definition(text: &str) -> Result<fennec_core::named::Definition> {
-    match parse_one(text)? {
+    one_definition(parse_one(text)?)
+}
+
+#[cfg(feature = "statements")]
+fn one_definition(stmt: Statement) -> Result<fennec_core::named::Definition> {
+    match stmt {
         Statement::CreateStatement(d) => Ok(*d),
         _ => Err(fennec_core::error::Error::Query(
             "a named statement's text is its `create statement`".into(),
@@ -38,13 +44,39 @@ pub fn definition(text: &str) -> Result<fennec_core::named::Definition> {
     }
 }
 
-/// Installs [`definition`] as the process's reader of stored named
+/// A named statement's stored text read back into the tree it runs as --
+/// every list of numbers in it as written, as [`parse_exact`] reads it --
+/// and the digest of [`definition`]'s tree, which its record holds: what
+/// every definition, open, adoption and replica's apply in a process that
+/// [`install`]ed it reads a statement's record with, the digest then held
+/// to the stored one. Read the quick way, a body's `[0.5, 2]` was a
+/// vector's `f32`s, which a list of numbers or a json field it was handed
+/// refused at every call, a binding's at every write it woke; read as
+/// written, a vector field takes the list's `f32`s and `near` and a filter
+/// read it as the vector it was (`value::compared_vector`), and the digest stays
+/// the one every definition stored before holds. A text with no `[` reads
+/// alike both ways, and is read once.
+#[cfg(feature = "statements")]
+pub fn stored_definition(text: &str) -> Result<(u64, fennec_core::named::Definition)> {
+    let quick = definition(text)?;
+    let digest = quick.digest()?;
+    if !text.contains('[') {
+        return Ok((digest, quick));
+    }
+    let mut read = parse_exact(text)?;
+    match read.len() {
+        1 => Ok((digest, one_definition(read.remove(0))?)),
+        _ => Ok((digest, quick)),
+    }
+}
+
+/// Installs [`stored_definition`] as the process's reader of stored named
 /// statements (`fennec_core::named::read_with`): a server's, the shell's
 /// and the native library's first call. Without named statements it does
 /// nothing, so every binary calls it alike.
 pub fn install() {
     #[cfg(feature = "statements")]
-    fennec_core::named::read_with(definition);
+    fennec_core::named::read_with(stored_definition);
 }
 
 use fennec_core::error::Result;

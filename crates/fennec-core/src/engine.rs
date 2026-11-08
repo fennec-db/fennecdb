@@ -1756,6 +1756,13 @@ pub struct Collection {
     /// collection no statement is bound to pays a byte's look a statement,
     /// never a row's.
     pub bound: u8,
+    /// Whether a field of its schema keeps a list of numbers as written
+    /// (`DataType::keeps_numbers`), set with the schema wherever it is
+    /// ([`Self::set_schema`]): a `put` of literals and parameters into a
+    /// collection with none -- a vector's, nearly every write handing one
+    /// -- is told it needs nothing read again at a look
+    /// ([`Database::exactly_needs`]), and no walk asks its fields.
+    numbers: bool,
 }
 
 impl Collection {
@@ -1816,6 +1823,7 @@ impl Collection {
         }
         let mut store = Store::new();
         store.set_dropped(&schema.dropped);
+        let numbers = keeps_numbers(&schema);
         let mut c = Collection {
             id,
             schema: SchemaCell::new(schema),
@@ -1828,6 +1836,7 @@ impl Collection {
             geo,
             composites: Vec::new(),
             bound: 0,
+            numbers,
         };
         // A new collection's are empty, and as built as its documents.
         let Collection {
@@ -1841,6 +1850,13 @@ impl Collection {
             composites.push((comp.clone(), d));
         }
         c
+    }
+
+    /// Its schema made `schema`, and [`Self::numbers`] with it: every
+    /// change of a collection's schema but an index's goes through here.
+    fn set_schema(&mut self, schema: SchemaCell) {
+        self.numbers = keeps_numbers(&schema);
+        self.schema = schema;
     }
 
     /// Rebuilds the index structures from the schema's index definitions:
@@ -2053,7 +2069,7 @@ impl Collection {
             FIELD_ADD | FIELD_TTL => Taken::default(),
             _ => self.take_indexes(&ch.field),
         };
-        self.schema = SchemaCell::new(ch.schema.clone());
+        self.set_schema(SchemaCell::new(ch.schema.clone()));
         self.store.set_dropped(&self.schema.dropped);
         // A json field's indexes on paths go with it, by the paths the
         // schema after names, and the indexes over several fields with the
@@ -5835,7 +5851,7 @@ impl Database {
                 }
                 *f = after;
             }
-            c.schema = SchemaCell::new(ch.schema);
+            c.set_schema(SchemaCell::new(ch.schema));
             c.store.set_dropped(&c.schema.dropped);
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
@@ -5889,7 +5905,7 @@ impl Database {
                     }
                 }
             }
-            c.schema = SchemaCell::new(schema);
+            c.set_schema(SchemaCell::new(schema));
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
             for (f, ix) in kept {
@@ -6909,7 +6925,7 @@ impl Database {
             };
             self.spare.was.push(Undo::Reindexed(cid, Box::new(undo)));
         }
-        c.schema = SchemaCell::new(schema);
+        c.set_schema(SchemaCell::new(schema));
         if added {
             for (i, kind) in builds {
                 build_kind(c, i, kind)?;
@@ -7494,7 +7510,7 @@ impl Database {
                             taken,
                         } = *a;
                         c.store.set_dropped(&before.dropped);
-                        c.schema = before;
+                        c.set_schema(before);
                         match op {
                             FIELD_ADD => drop(c.take_indexes(&field)),
                             FIELD_DROP => c.put_indexes(&field, taken),
@@ -7554,7 +7570,7 @@ impl Database {
                             built,
                             kept,
                         } = *r;
-                        c.schema = before;
+                        c.set_schema(before);
                         match kept {
                             Some(ix) => c.put_all_indexes(*ix),
                             None => {
@@ -13574,16 +13590,215 @@ impl Database {
 /// this names it, and only then: a statement with no list of numbers costs
 /// the walk of its literals, and one into a collection with no json field a
 /// look at its fields.
+///
+/// A list of numbers -- `[int]`, `[float]` -- given one takes a vector of
+/// whole `f32`s short of 2^24 as the integers written, which they are: the
+/// quick read makes no such vector of a list holding another number
+/// (`value::whole_f32s`). So a literal given one is read again only where
+/// its vector is another, and a parameter given one is named in `lists`
+/// too, for [`Exactly::settle`] to drop where its value is such a vector:
+/// per literal and per parameter, by what each holds, nothing kept beside
+/// the statement.
 #[derive(Debug, Default, PartialEq)]
 pub struct Exactly {
     pub text: bool,
-    pub params: Vec<usize>,
+    /// Their places, ascending, each once.
+    pub params: Places,
+    /// Those of `params` given a list of numbers alone, ascending.
+    pub lists: Places,
+}
+
+/// Places among a statement's parameters, ascending, each once: up to
+/// [`Places::FEW`] held in place, more in a `Vec`. Every statement handing
+/// an `[int]` a parameter names it twice, in `lists` and in `params`, and
+/// is asked twice a call, by its caller and as it runs: in `Vec`s, those
+/// four allocations were most of what an app's `put` of an `[int]` beside
+/// its vector cost over one with no list, some 1 200 instructions of 2 500
+/// (`ffi_bench lists`, `tools/instr/trace.py`). A statement names more
+/// than four rarely: a `put` of rows a parameter each, which spills. The
+/// browser module keeps them in a `Vec`, as before: held in place, with
+/// `fennec_abi::exact_noting` split and `query::holds_vector` inline, they
+/// were 1.0 KB of it (`make size-report`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub struct Places {
+    /// How many of `few` hold places; none where `more` holds them.
+    n: usize,
+    few: [usize; Places::FEW],
+    /// Every place, once there are more than `FEW`.
+    more: Vec<usize>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Default)]
+pub struct Places(Vec<usize>);
+
+#[cfg(target_arch = "wasm32")]
+impl Places {
+    pub fn note(&mut self, i: usize) {
+        if let Err(at) = self.0.binary_search(&i) {
+            self.0.insert(at, i);
+        }
+    }
+
+    pub fn retain(&mut self, keep: &dyn Fn(usize) -> bool) {
+        self.0.retain(|&i| keep(i));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Deref for Places {
+    type Target = [usize];
+
+    fn deref(&self) -> &[usize] {
+        &self.0
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Places {
+    pub const FEW: usize = 4;
+
+    /// `i` among the places, ascending, once. Asked `contains` at each, a
+    /// page of 1 000 documents' parameters was quadratic; a place mostly
+    /// comes after the ones before it, and is pushed.
+    pub fn note(&mut self, i: usize) {
+        let Err(at) = self.binary_search(&i) else {
+            return;
+        };
+        if self.more.is_empty() && self.n < Places::FEW {
+            // Those past `at` a step on, none where it comes last: a loop,
+            // where `copy_within` kept a range's panic in the module.
+            let mut j = self.n;
+            while j > at {
+                self.few[j] = self.few[j - 1];
+                j -= 1;
+            }
+            self.few[at] = i;
+            self.n += 1;
+            return;
+        }
+        if self.more.is_empty() {
+            self.more.extend_from_slice(&self.few[..self.n]);
+            self.n = 0;
+        }
+        self.more.insert(at, i);
+    }
+
+    /// The places `keep` keeps, in their order: one `retain` for every
+    /// use, where each closure made a copy of its own, 185 bytes of the
+    /// browser module each.
+    pub fn retain(&mut self, keep: &dyn Fn(usize) -> bool) {
+        if self.more.is_empty() {
+            let mut n = 0;
+            for j in 0..self.n {
+                if keep(self.few[j]) {
+                    self.few[n] = self.few[j];
+                    n += 1;
+                }
+            }
+            self.n = n;
+            return;
+        }
+        self.more.retain(|&i| keep(i));
+        // Back in place where they fit: `more` is empty exactly where they
+        // are held there.
+        if self.more.len() <= Places::FEW {
+            self.n = 0;
+            for &i in &self.more {
+                self.few[self.n] = i;
+                self.n += 1;
+            }
+            self.more = Vec::new();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::ops::Deref for Places {
+    type Target = [usize];
+
+    fn deref(&self) -> &[usize] {
+        match self.more.is_empty() {
+            true => &self.few[..self.n],
+            false => &self.more,
+        }
+    }
+}
+
+impl From<&[usize]> for Places {
+    fn from(v: &[usize]) -> Places {
+        let mut out = Places::default();
+        v.iter().for_each(|&i| out.note(i));
+        out
+    }
+}
+
+impl PartialEq for Places {
+    fn eq(&self, other: &Places) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for Places {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
 }
 
 impl Exactly {
+    #[inline]
     pub fn is_needed(&self) -> bool {
         self.text || !self.params.is_empty()
     }
+
+    /// `params` less those whose value among `values` -- the parameters as
+    /// the quick read made them -- holds no vector, which is what reading
+    /// it as written makes of it (a vector is the one value the two reads
+    /// make otherwise, and one read as written is a list), and less those
+    /// of `lists` holding no vector but of whole `f32`s short of 2^24: the
+    /// numbers written, for the list of numbers given them. A vector handed
+    /// over apart as `f32`s (`fennec_abi::with_vectors`) is the `f32`s of a
+    /// number its sender may have rounded, and its caller takes it out of
+    /// `lists` first. So a parameter the server read as written at once,
+    /// as its statement's last request asked (`api::parse_query`), is not
+    /// read again. `lists` is left as it was, for a caller to tell a list
+    /// of numbers' place from another's.
+    pub fn settle(&mut self, values: &[Value]) {
+        let lists = &self.lists;
+        kept(&mut self.params, &|i| match values.get(i) {
+            Some(v) if lists.binary_search(&i).is_ok() => crate::query::holds_rounded(v),
+            Some(v) => crate::query::holds_vector(v),
+            None => false,
+        });
+    }
+
+    /// `lists` less those `apart` names: a vector handed over apart, as
+    /// `f32`s, is read again as written whatever it holds.
+    pub fn apart(&mut self, apart: &dyn Fn(usize) -> bool) {
+        kept(&mut self.lists, &|i| !apart(i));
+    }
+
+    /// `lists` among `params`, those given elsewhere too out of `lists`:
+    /// such a parameter is read as written whatever it holds.
+    fn finish(&mut self) {
+        let always = &self.params;
+        kept(&mut self.lists, &|i| always.binary_search(&i).is_err());
+        for &i in self.lists.iter() {
+            noted(&mut self.params, i);
+        }
+    }
+}
+
+/// `i` among the places `v` holds ascending, each once ([`Places::note`]).
+/// Not sorted after: a sort of `usize`s was 2 KB of the browser module.
+fn noted(v: &mut Places, i: usize) {
+    v.note(i);
+}
+
+/// The places of `v` that `keep` keeps, in their order ([`Places::retain`]).
+fn kept(v: &mut Places, keep: &dyn Fn(usize) -> bool) {
+    v.retain(keep);
 }
 
 impl Database {
@@ -13593,12 +13808,17 @@ impl Database {
     /// than those given and a comparison find none of the documents holding
     /// them -- a wrong answer believed right. A statement with no list of
     /// numbers, the one nearly every statement is, costs the walk of its
-    /// literals.
+    /// literals. A caller in Rust reads its text with `fennec_ql::parse_for`
+    /// and its parameters as JSON; the words name no API, as a server's
+    /// answer carries them (`tests/stored.rs`).
     fn refuse_inexact(&self, stmt: &Statement, params: &[Value]) -> Result<()> {
         if !stmt.reads_vectors() && !params.iter().any(crate::query::holds_vector) {
             return Ok(());
         }
-        let need = self.exactly(stmt);
+        let Some(mut need) = self.exactly_needs(stmt) else {
+            return Ok(());
+        };
+        need.settle(params);
         let param = need
             .params
             .iter()
@@ -13606,9 +13826,9 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
-                 and this one was read into a vector's f32s: read the text with \
-                 fennec_ql::parse_for, a parameter as JSON"
+                "a json field, a point, a list of numbers or an `in $n` list keeps a list of \
+                 numbers as written, and this one was handed over read into a vector's f32s: \
+                 hand it over as written"
                     .into(),
             )),
         }
@@ -13618,20 +13838,113 @@ impl Database {
     /// every collection it reads by its own schema -- an inner `get`'s at
     /// any depth, each `lookup` level's. A collection it names that is not
     /// here asks nothing: the statement is refused for it when it runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn exactly(&self, stmt: &Statement) -> Exactly {
+        self.exactly_needs(stmt).unwrap_or_default()
+    }
+
+    /// [`Self::exactly`] in the browser module, the walk's one body there:
+    /// [`Self::exactly_needs`] asks it, with no answer at a look -- one,
+    /// the walk's body moved into it and its answer made in place, was
+    /// 0.3 KB of the module (`make size-report`).
+    #[cfg(target_arch = "wasm32")]
     pub fn exactly(&self, stmt: &Statement) -> Exactly {
         let mut out = Exactly::default();
         #[cfg(feature = "statements")]
         if let Statement::Call(c) = stmt {
             self.call_exactly(c, &mut out);
+            out.finish();
             return out;
         }
-        let of = |name: &str| match self.collections.get(name) {
-            Some(c) => Known::of(&c.schema),
-            None => Known::Missing,
-        };
-        statement_needs(&of, stmt, &mut out);
+        let of = |name: &str| self.known(name);
+        statement_needs(&of, of(stmt_collection(stmt)), stmt, &mut out);
+        out.finish();
         out
     }
+
+    /// [`Self::exactly`] where it needs something, `None` where nothing:
+    /// inline, into its one caller in the module ([`Self::refuse_inexact`]).
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn exactly_needs(&self, stmt: &Statement) -> Option<Exactly> {
+        let out = self.exactly(stmt);
+        out.is_needed().then_some(out)
+    }
+
+    /// [`Self::exactly`] where it needs something, `None` where nothing:
+    /// at a look for a `put` of literals and parameters alone into a
+    /// collection none of whose fields keeps a list of numbers
+    /// ([`Collection::numbers`]) -- a vector's put, the write nearly every
+    /// vector is handed to -- with no [`Exactly`] made, walked or dropped.
+    /// A call asks twice, the library's ask (`fennec_abi::exact_noting`)
+    /// and the engine's own ([`Self::refuse_inexact`]): made each time, its
+    /// places held in place and its collection's fields asked, a native
+    /// put of a 128-dim vector took 13 825 instructions of the library's
+    /// own against main's 13 719, and this way 13 660
+    /// (`tools/instr/trace.py`). Its collection is looked up once, the
+    /// walk handed what it found, and the walk has this one body, as it
+    /// had `exactly`'s: called from a second it went out of line, 40 to 80
+    /// instructions a call more where a field keeps numbers.
+    ///
+    /// Out of line: `exactly` is its caller too.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(never)]
+    pub fn exactly_needs(&self, stmt: &Statement) -> Option<Exactly> {
+        let k = self.known(stmt_collection(stmt));
+        // One way out, the answer made where it is returned: moved out of
+        // a local, its 136 bytes were copied at each ask, some 20
+        // instructions a call where a field keeps numbers.
+        let mut out = None;
+        if !asks_nothing(k, stmt) {
+            let need = out.insert(Exactly::default());
+            match stmt {
+                #[cfg(feature = "statements")]
+                Statement::Call(c) => self.call_exactly(c, need),
+                _ => statement_needs(&|name| self.known(name), k, stmt, need),
+            }
+            need.finish();
+            if !need.is_needed() {
+                out = None;
+            }
+        }
+        out
+    }
+
+    /// What the walk knows of the collection `name` ([`Known`]): its
+    /// schema beside its [`Collection::numbers`], which a debug build holds
+    /// to the fields at every look.
+    fn known(&self, name: &str) -> Known<'_> {
+        match self.collections.get(name) {
+            Some(c) => {
+                debug_assert_eq!(c.numbers, keeps_numbers(&c.schema), "`{name}`'s numbers");
+                Known::Schema(&c.schema, c.numbers)
+            }
+            None => Known::Missing,
+        }
+    }
+}
+
+/// Whether `stmt`, over a collection known as `k`, needs nothing read as
+/// written at a look: a `put` of literals and parameters alone into a
+/// collection with no field keeping numbers, whose walk asks nothing of
+/// either ([`statement_needs`]). Native: the browser module walks it.
+#[cfg(not(target_arch = "wasm32"))]
+fn asks_nothing(k: Known<'_>, stmt: &Statement) -> bool {
+    let Statement::Put { docs, else_set, .. } = stmt else {
+        return false;
+    };
+    let plain = |pairs: &Vec<(String, Expr)>| {
+        (pairs.iter()).all(|(_, e)| matches!(e, Expr::Lit(_) | Expr::Param(_)))
+    };
+    matches!(k, Known::Schema(_, false))
+        && docs.iter().all(plain)
+        && else_set.as_ref().is_none_or(plain)
+}
+
+/// Whether a field of `schema` keeps a list of numbers as written
+/// (`DataType::keeps_numbers`): what [`Collection::numbers`] holds.
+fn keeps_numbers(schema: &Schema) -> bool {
+    schema.fields.iter().any(|f| f.ty.keeps_numbers())
 }
 
 /// What [`exactly_for`]'s walk knows of a collection a statement reads.
@@ -13650,7 +13963,7 @@ enum Known<'a> {
 
 impl<'a> Known<'a> {
     fn of(schema: &'a Schema) -> Known<'a> {
-        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+        Known::Schema(schema, keeps_numbers(schema))
     }
 
     /// Whether `name` keeps a list of numbers as written ([`names_json`]).
@@ -13659,6 +13972,41 @@ impl<'a> Known<'a> {
             Known::Schema(schema, true) => names_json(schema, name),
             Known::Unknown => true,
             _ => false,
+        }
+    }
+
+    /// What `e`, given the field `name`, needs ([`given`]): nothing where
+    /// the field keeps no list of numbers, and where it is a list of
+    /// numbers alone, which takes a vector of whole `f32`s as the integers
+    /// written (`DataType::holds_numbers`), only what holds another
+    /// ([`given_list`]). One look among the fields, asked of every `put`
+    /// handing a parameter. Out of line: inlined, the walk's closure over
+    /// a `put`'s pairs grew past what `exactly` inlined, 100 instructions
+    /// a call.
+    #[inline(never)]
+    fn give(self, name: &str, e: &Expr, out: &mut Exactly) {
+        let list = match self {
+            Known::Schema(schema, true) => {
+                // A path's field: a byte loop, where `split_once` searched;
+                // `get`, as `&name[..at]` kept a slice's panic, its
+                // formatting of a `char` and the Unicode tables it reads,
+                // 4.5 KB of the browser module.
+                let at = name.bytes().position(|b| b == b'.');
+                let field = at.and_then(|at| name.get(..at)).unwrap_or(name);
+                let Some(f) = schema.field(field) else {
+                    return;
+                };
+                if !f.ty.keeps_numbers() {
+                    return;
+                }
+                field.len() == name.len() && f.ty.holds_numbers()
+            }
+            Known::Unknown => false,
+            _ => return,
+        };
+        match list {
+            true => given_list(e, out),
+            false => given(e, out),
         }
     }
 
@@ -13702,13 +14050,20 @@ pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
         true => Known::of(schema),
         false => Known::Unknown,
     };
-    statement_needs(&of, stmt, &mut out);
+    statement_needs(&of, of(stmt_collection(stmt)), stmt, &mut out);
+    out.finish();
     out
 }
 
-/// [`exactly_for`]'s walk, each collection known through `of`.
-fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &mut Exactly) {
-    let k = of(stmt_collection(stmt));
+/// [`exactly_for`]'s walk, each collection known through `of`, the
+/// statement's own as `k` (`of(stmt_collection(stmt))`): a `get` looked its
+/// collection up twice, here and in [`select_needs`].
+fn statement_needs<'a>(
+    of: &dyn Fn(&str) -> Known<'a>,
+    k: Known<'a>,
+    stmt: &Statement,
+    out: &mut Exactly,
+) {
     if matches!(k, Known::Missing) {
         return;
     }
@@ -13719,8 +14074,8 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     // values (`Known::Schema(_, false)`), checked once.
     let any = !matches!(k, Known::Schema(_, false));
     let mut pair = |(key, e): &(String, Expr)| {
-        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
-            given(e, out);
+        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) {
+            k.give(key, e, out);
         }
         // A literal or a parameter holds no call and no inner `get`: a
         // `put`'s values, nearly all of them one, are not walked. Walked,
@@ -13747,7 +14102,7 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
             sorts_need(of, k, pick.as_deref(), out);
         }
-        Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
+        Statement::Select(s) | Statement::Explain(s) => select_needs(of, k, s, out),
         _ => {}
     }
 }
@@ -13772,8 +14127,7 @@ fn sorts_need<'a>(
 /// of its list, each `order` key -- the point of a `near` over a point,
 /// and each `lookup` level's filter by the level's own collection. An
 /// inner `get` is walked where it is met, by its own.
-fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactly) {
-    let k = of(&s.collection);
+fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, s: &Select, out: &mut Exactly) {
     if matches!(k, Known::Missing) {
         return;
     }
@@ -13828,7 +14182,7 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
             }
         }
         Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
-        Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        Expr::InSelect(_, sel) => select_needs(of, of(&sel.collection), sel, out),
         // Whatever its field: a list of ids read into `f32`s finds
         // 16777217 as 16777216, another row.
         Expr::InParam(_, i) => given(&Expr::Param(*i), out),
@@ -13850,8 +14204,21 @@ fn names_json(schema: &Schema, name: &str) -> bool {
 /// of numbers.
 fn given(e: &Expr, out: &mut Exactly) {
     match e {
-        Expr::Param(i) if !out.params.contains(i) => out.params.push(*i),
-        Expr::Param(_) => {}
+        Expr::Param(i) => noted(&mut out.params, *i),
+        e => out.text |= e.reads_vectors(),
+    }
+}
+
+/// [`given`], for a list of numbers given `e` as its value: a literal
+/// holding a vector but of whole `f32`s -- the integers written -- has the
+/// text read again, and a parameter is named in `lists` for its value to
+/// say ([`Exactly::settle`]). A comparison with such a field is no value
+/// given it: a vector compares unequal to a list, so its literal is read
+/// as written whatever it holds ([`expr_needs`]).
+fn given_list(e: &Expr, out: &mut Exactly) {
+    match e {
+        Expr::Param(i) => noted(&mut out.lists, *i),
+        Expr::Lit(v) => out.text |= crate::query::holds_rounded(v),
         e => out.text |= e.reads_vectors(),
     }
 }
@@ -13939,12 +14306,19 @@ fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<(
 /// writer to find which, where the importer names a row's field
 /// (`fennec_import::load`) and a call its argument. Out of line, on the
 /// refusal alone: a value taken goes by as it did. Joined by `cat`, 132
-/// bytes of the browser module, where a `format!` was 148.
+/// bytes of the browser module, where a `format!` was 148. A list's
+/// element is named after it, "field `xs`, element 2: ...".
 #[cold]
 #[inline(never)]
 fn in_field(name: &str, e: Error) -> Error {
     match e {
-        Error::Type(m) => Error::Type(crate::declared::cat(&["field `", name, "`: ", &m])),
+        Error::Type(m) => {
+            let by = match m.starts_with("element ") {
+                true => "`, ",
+                false => "`: ",
+            };
+            Error::Type(crate::declared::cat(&["field `", name, by, &m]))
+        }
         e => e,
     }
 }
@@ -15090,6 +15464,18 @@ impl<'q> Filter<'q> {
             Slot::At(p) => c.schema.fields[p].collate,
             Slot::Id | Slot::Path(_) => None,
         };
+        // A vector field compared with a list of numbers alone, by the
+        // list's `f32`s, once a query (`value::compared_vector`): however
+        // the statement's lists were read, `v = [0.5, 2]` finds its row.
+        let vectored = |s: Option<Slot>, v: Value| match s {
+            Some(Slot::At(p)) if matches!(c.schema.fields[p].ty, DataType::Vector(..)) => {
+                match crate::value::compared_vector(&v) {
+                    Some(f) => Value::Vector(f),
+                    None => v,
+                }
+            }
+            _ => v,
+        };
         // A `nocase` field's fold, and a value it is compared with folded,
         // once a query.
         let fold_of = |s: Option<Slot>| match s {
@@ -15125,6 +15511,7 @@ impl<'q> Filter<'q> {
                     _ => return Test::Eval(e),
                 };
                 as_field(c, s, &mut value);
+                let value = vectored(Some(s), value);
                 match (fold_of(Some(s)), value) {
                     (Some(f), v @ Value::Text(_)) => Test::Folded(
                         s,
@@ -15172,7 +15559,7 @@ impl<'q> Filter<'q> {
                 for it in items {
                     match (it.cloned(), fold) {
                         (Some(v), Some(f)) => values.push(folded(f, v)),
-                        (Some(v), None) => values.push(v),
+                        (Some(v), None) => values.push(vectored(s, v)),
                         (None, _) => return Test::Eval(e),
                     }
                 }
@@ -16354,7 +16741,34 @@ fn near_vector(v: Value) -> Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::wider;
+    use super::{wider, Places};
+
+    /// Places stay ascending and once each, in place up to four and in a
+    /// `Vec` past them, and go back in place as a `retain` leaves four.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn places_are_ascending_once_each_in_place_or_spilled() {
+        let mut p = Places::default();
+        for i in [3, 1, 3, 0, 2] {
+            p.note(i);
+        }
+        assert_eq!(*p, [0, 1, 2, 3]);
+        assert!(p.more.is_empty());
+        p.note(9);
+        p.note(5);
+        assert_eq!(*p, [0, 1, 2, 3, 5, 9]);
+        assert!(!p.more.is_empty());
+        p.retain(&|i| i != 5 && i != 0);
+        assert_eq!(*p, [1, 2, 3, 9]);
+        assert!(p.more.is_empty());
+        p.retain(&|i| i > 2);
+        assert_eq!(*p, [3, 9]);
+        p.note(4);
+        assert_eq!(*p, [3, 4, 9]);
+        assert_eq!(p, Places::from(&[9, 4, 3][..]));
+        p.retain(&|_| false);
+        assert!(p.is_empty());
+    }
 
     /// The beam widened past tombstones saturates at the most a `usize`
     /// holds: `ef 4294967295` is all a wasm32 build's holds, and one

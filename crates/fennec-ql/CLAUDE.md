@@ -73,7 +73,8 @@ A definition is record kind 13 (`engine/stored.rs`), one write `writes_in`
 counts, alone or in a block (`Undo::Statements`), kept by every image,
 `Beside` and build, applied by a replica and passed over by `/_changes`.
 With the feature an open reads its text back (`fennec_ql::install`) and
-holds its digest. A schema change's commit holds its `depends`: refused
+holds its digest, the quick read's, running the text read as written
+(`stored_definition`). A schema change's commit holds its `depends`: refused
 naming it, or marked broken (`Database::internally`, an apply, an open),
 never failing; the mark is derived, never stored. A replacement keeps the
 old tree's contract; a writing body reads through an index or says `scans`

@@ -210,6 +210,14 @@ public final class Fennec: @unchecked Sendable {
     let lives: Lives
     /// The replica's sync, set once by `Fennec.sync`.
     private var replicaSync: Replica?
+    /// By text, the parameters the library asked to have as JSON (`exact`):
+    /// a list of numbers it keeps as written -- a json field's, an
+    /// `[int]`'s, a `[float]`'s -- goes so at once from the text's second
+    /// call on, where sent apart as `f32`s it was refused and sent again,
+    /// two of the library's calls each time: 3.38 us a put of an `[int]`
+    /// of 8 beside a 128-dim vector against 2.12 (`ffi_bench lists`).
+    /// Forgotten past 256 texts, as the JavaScript client's are.
+    private var asked: [String: Set<Int>] = [:]
 
     private init(handle: UInt64) {
         self.handle = handle
@@ -301,16 +309,44 @@ public final class Fennec: @unchecked Sendable {
         if !quiet { begin() }
         defer { if !quiet { end() } }
         let handle = self.handle
-        return try await Fennec.background {
-            do {
-                return try Fennec.answer(handle: handle, text: text, params: params, asJson: [])
-            } catch let e as FennecError where e.exact != nil {
-                // A json field keeps a list of numbers as written: those
-                // the library asks for go again inside the JSON.
-                return try Fennec.answer(handle: handle, text: text, params: params, asJson: Set(e.exact!))
+        // Looked up only where a list of numbers is among the parameters,
+        // so a call with none pays nothing.
+        let known = params.contains(where: Fennec.numbers) ? places(text) : []
+        return try await Fennec.background { [self] in
+            var asJson = known
+            while true {
+                do {
+                    return try Fennec.answer(handle: handle, text: text, params: params, asJson: asJson)
+                } catch let e as FennecError where e.exact != nil {
+                    // A field keeping a list of numbers as written: those
+                    // the library asks for go again inside the JSON, and so
+                    // at once the next time. Never a place sent as JSON
+                    // already: those it names are new, so this ends.
+                    let more = asJson.union(e.exact!)
+                    if more == asJson { throw e }
+                    asJson = more
+                    remember(text, more)
+                }
             }
         }
     }
+
+    private func places(_ text: String) -> Set<Int> {
+        state.lock()
+        defer { state.unlock() }
+        return asked[text] ?? []
+    }
+
+    private func remember(_ text: String, _ places: Set<Int>) {
+        state.lock()
+        defer { state.unlock() }
+        if asked.count >= 256 && asked[text] == nil { asked.removeAll() }
+        asked[text] = places
+    }
+
+    /// The places the library asked for as JSON for `text`: internal for
+    /// the tests.
+    func askedPlaces(_ text: String) -> Set<Int> { places(text) }
 
     /// A call under way, until `end`: internal for the tests, which hold one
     /// across a burst of writes.
@@ -494,9 +530,12 @@ public final class Fennec: @unchecked Sendable {
         var json = params
         var vectors: [UInt8] = []
         for (i, p) in params.enumerated() where !asJson.contains(i) {
-            guard let f = vector(p) else { continue }
+            guard let (f, exact) = vector(p) else { continue }
             json[i] = .null
-            append(UInt32(i), &vectors)
+            // Marked exact where each `Float` is the number handed: an
+            // `[int]` or a `[float]` takes it as it came, in one call
+            // (`fennec_abi::EXACT`).
+            append(UInt32(i) | (exact ? 1 << 31 : 0), &vectors)
             append(UInt32(f.count), &vectors)
             for x in f {
                 // A -0 goes as 0, as JSON writes it: either way, one vector.
@@ -517,20 +556,46 @@ public final class Fennec: @unchecked Sendable {
         return try Fennec.decode(answer: try Value.parse(bytes: out ?? []))
     }
 
-    private static func vector(_ v: Value) -> [Float]? {
+    /// Whether `v` goes over apart as a vector (`vector`), its `f32`s
+    /// made of nothing.
+    private static func numbers(_ v: Value) -> Bool {
         switch v {
-        case .floats(let f) where !f.isEmpty: return f
+        case .floats(let f): return !f.isEmpty
+        case .array(let a):
+            return !a.isEmpty && a.allSatisfy {
+                switch $0 {
+                case .int: return true
+                case .double(let d): return d.isFinite
+                default: return false
+                }
+            }
+        default: return false
+        }
+    }
+
+    /// A vector's `Float`s, and whether each is the number it was made of:
+    /// a `[Float]`'s are, an int of at most 2^24 in size is, and a `Double`
+    /// a `Float` holds is (`0.5`) -- where `0.1` and 16777217 are not.
+    private static func vector(_ v: Value) -> ([Float], Bool)? {
+        switch v {
+        case .floats(let f) where !f.isEmpty: return (f, true)
         case .array(let a) where !a.isEmpty:
             var out: [Float] = []
             out.reserveCapacity(a.count)
+            var exact = true
             for x in a {
                 switch x {
-                case .int(let n): out.append(Float(n))
-                case .double(let d) where d.isFinite: out.append(Float(d))
+                case .int(let n):
+                    exact = exact && n.magnitude <= 1 << 24
+                    out.append(Float(n))
+                case .double(let d) where d.isFinite:
+                    let f = Float(d)
+                    exact = exact && Double(f) == d
+                    out.append(f)
                 default: return nil
                 }
             }
-            return out
+            return (out, exact)
         default: return nil
         }
     }

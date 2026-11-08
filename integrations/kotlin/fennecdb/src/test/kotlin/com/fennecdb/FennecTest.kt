@@ -78,6 +78,47 @@ class FennecTest {
         db.close()
     }
 
+    /**
+     * An `[int]` and a `[float]` keep their numbers as written: the library
+     * asks for a list sent as Floats again as JSON, and the binding sends
+     * the text's lists so at once from its second call on.
+     */
+    @Test
+    fun aListOfNumbersKeepsItsNumbersAndIsAskedForOnce() = runBlocking {
+        val db = Fennec.memory()
+        db.execute("create collection l (xs [int], fs [float], e vector<2>)")
+        val put = "put l {xs: \$1, fs: \$2, e: \$3}"
+        assertNull(db.asked[put])
+        db.execute(put, listOf(16777217, 2), listOf(0.1), floatArrayOf(0.5f, 0.25f))
+        assertEquals(setOf(0, 1), db.asked[put])
+        db.execute(put, listOf(1, 2), listOf(19.99), floatArrayOf(0.5f, 0.25f))
+        assertEquals(setOf(0, 1), db.asked[put])
+        val rows = db.query("get l select xs, fs order id")
+        assertEquals(listOf(listOf(16777217L, 2L), listOf(1L, 2L)), rows.map { it["xs"] })
+        assertEquals(listOf(listOf(0.1), listOf(19.99)), rows.map { it["fs"] })
+        db.close()
+    }
+
+    /**
+     * A list each of whose numbers a Float holds goes over apart, marked
+     * exact, and the library takes it as it came: nothing is asked for
+     * again, 2^24 an int all the same; one it does not hold is.
+     */
+    @Test
+    fun aListAFloatHoldsIsNeverAskedFor() = runBlocking {
+        val db = Fennec.memory()
+        db.execute("create collection l (xs [int], fs [float], e vector<2>)")
+        val put = "put l {xs: \$1, fs: \$2, e: \$3}"
+        db.execute(put, listOf(1, -2, 16777216), listOf(0.5, 0.25), listOf(0.1, 0.2))
+        assertNull(db.asked[put])
+        db.execute(put, listOf(3L), listOf(0.1), floatArrayOf(1f, 2f))
+        assertEquals(setOf(1), db.asked[put])
+        val rows = db.query("get l select xs, fs order id")
+        assertEquals(listOf(listOf(1L, -2L, 16777216L), listOf(3L)), rows.map { it["xs"] })
+        assertEquals(listOf(listOf(0.5, 0.25), listOf(0.1)), rows.map { it["fs"] })
+        db.close()
+    }
+
     @Test
     fun errorsCarryTheirKind() = runBlocking {
         val db = Fennec.memory()

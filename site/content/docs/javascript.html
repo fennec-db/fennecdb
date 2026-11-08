@@ -45,7 +45,7 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">10 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">279 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">282 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -858,11 +858,11 @@ version's tables is refused: its ranks would mean something else.</p>
 the rest. The release ships <code>fennec.wasm</code> alone, with every
 feature; another set is a build option.</p>
 
-<pre data-lang="bash">make wasm                              # every feature: 279 KB brotli
+<pre data-lang="bash">make wasm                              # every feature: 282 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
-make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 205 KB
-make wasm FEATURES=none SCHEMA=0       # no feature at all: 182 KB
+make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 209 KB
+make wasm FEATURES=none SCHEMA=0       # no feature at all: 185 KB
 </pre>
 
 <div class="tbl">
@@ -1238,10 +1238,17 @@ the module as its <code>f32</code>s beside the JSON rather than as text:
 200 768-dim vectors are put in 4.4 ms, against 21.9 written out as digits
 and read back. The vector stored is the same, <code>-0</code> as
 <code>0</code> as JSON writes it; over HTTP a parameter is JSON. Where such
-a parameter is given a <code>json</code> field, or compared with a path
-into one, the module names it before running anything and <code>run</code>
-sends it again as JSON, so a plain array keeps its numbers as written and a
-<code>Float32Array</code> goes as the numbers it holds.</p>
+a parameter is given a <code>json</code> field or a list of numbers
+(<code>[int]</code>, <code>[float]</code>, <code>[timestamp]</code>), or
+compared with one or with a path into a <code>json</code> field, the module
+names it before running anything and <code>run</code> sends it again as
+JSON — once a text: it remembers which parameters to send so — so a plain
+array keeps its numbers as written and a <code>Float32Array</code> goes as
+the numbers it holds. An array each of whose numbers an <code>f32</code>
+holds — integers up to 2<sup>24</sup>, <code>0.5</code>, a
+<code>Float32Array</code> — goes over marked exact, and a list of numbers
+takes it as it came, nothing sent again; <code>[0.1]</code> and
+<code>[16777217]</code> are sent again.</p>
 </details>
 
 <h2>Independent of the transport</h2>

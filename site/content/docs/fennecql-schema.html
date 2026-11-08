@@ -42,9 +42,23 @@ infinity; one reaches a field through the native APIs and the Rust crate,
 an import of PostgreSQL's (<a href="import.html#vector-columns">never
 into a vector</a>) or a SQLite text reading <code>NaN</code> into a float
 column (SQLite stores a <code>NaN</code> itself as <code>NULL</code>), or
-a vector function over an infinity (<code>dot([1e39], [0])</code>). A list of numbers given an <code>[int]</code> or a
-<code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
-2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
+a vector function over an infinity (<code>dot([1e39], [0])</code>). A list
+of numbers — an <code>[int]</code>, a <code>[float]</code>, a
+<code>[timestamp]</code> — keeps each element as written, 16777217 as
+16777217 and <code>0.1</code> as the decimal it is, whether it comes in a
+statement's text, a parameter or a JSON body; an element its type refuses is
+a type error naming the field and the element, counted from 0 —
+<code>field `xs`, element 2: an int is from -9223372036854775808 to
+9223372036854775807</code> — never clamped or rounded
+(<a href="limits.html#fixed-limits">limits</a>). A <code>[timestamp]</code>
+takes its elements as milliseconds, and <code>where xs = [1, 2]</code> finds
+the row holding that list. A row written before fennecdb read these lists
+as written keeps the <code>f32</code>s it stored —
+0.10000000149011612 for <code>0.1</code>, 16777216 for 16777217 — and
+<code>where fs = [0.1]</code> does not find it: write its numbers again to
+put it right. A vector field compared with a list of numbers compares with
+the list's <code>f32</code>s, so <code>where embed = [0.5, 2]</code> finds
+its row however the statement's lists were read.</p>
 
 <p id="kinds">Values of two kinds — a number and a text, a time and a
 text, a bool and a number — order by kind wherever values are put in
@@ -163,9 +177,14 @@ reader. Its numbers are kept as written, an integer an integer and
 parameter over HTTP and in the browser, a JSON body, a row
 <code>fennec import</code> reads. A list of numbers alone is read the quick way, into the
 <code>f32</code>s of the vector it nearly always is; where it is given a
-<code>json</code> field, or compared with a path into one, the statement's
-text or the parameter's JSON is read again as written, so
-<code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
+<code>json</code> field or a list of numbers, or compared with one or with a
+path into a <code>json</code> field, the statement's text or the
+parameter's JSON is read again as written, so <code>[0.1,
+12345678901]</code> is kept as those two numbers; a server reads such a
+parameter as written at once from a statement's second request on, and
+such lists in a page of documents written out without reading the page
+again. A list of whole numbers
+short of 2<sup>24</sup> is those numbers already, and is not read again. A vector that
 was never text — a <code>Float32Array</code> handed to the browser module,
 a vector built through the Rust API — is refused there rather than kept as
 numbers it was not given. A timestamp becomes its ISO text, as JSON writes

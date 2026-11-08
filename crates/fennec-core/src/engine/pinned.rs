@@ -518,6 +518,7 @@ impl Collection {
                 .map(|(c, _)| (c.clone(), refused()))
                 .collect(),
             bound: self.bound,
+            numbers: self.numbers,
         }
     }
 }

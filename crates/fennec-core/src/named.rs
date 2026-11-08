@@ -82,11 +82,21 @@ pub enum What {
 /// refuses every write that would wake it, until it is defined again or
 /// dropped (`tests/stored.rs`). `@hnsw(ef_construction=4)` to `7`, built
 /// as 8 before, reads as written; no definition holds a `create`.
-pub const GRAMMAR_EPOCH: u32 = 3;
+///
+/// 4: a list of numbers whose `f32`s would pass for the whole numbers
+/// written where one was another -- `[1.00000001, 2]` -- reads as written,
+/// a list, where it was the vector `[1, 2]`: a list of numbers takes a
+/// vector of whole `f32`s as the integers written (`value::whole_f32s`). A
+/// definition holding one reads as another tree, and is marked broken
+/// ("its text reads as another statement under grammar epoch 4, where it
+/// was defined under 3: define it again"); none in the repository's
+/// FennecQL holds one (`make fennecql-corpus`).
+pub const GRAMMAR_EPOCH: u32 = 4;
 
-/// What reads a named statement's stored text back into its tree: the
-/// parser's (`fennec_ql::definition`), which this crate does not hold.
-pub type Reader = fn(&str) -> Result<Definition>;
+/// What reads a named statement's stored text back into the tree it runs
+/// as, and the digest its record is held to: the parser's
+/// (`fennec_ql::stored_definition`), which this crate does not hold.
+pub type Reader = fn(&str) -> Result<(u64, Definition)>;
 
 static READER: std::sync::OnceLock<Reader> = std::sync::OnceLock::new();
 

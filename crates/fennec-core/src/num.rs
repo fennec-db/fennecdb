@@ -872,11 +872,18 @@ fn inv_pow5(i: u32) -> u128 {
 /// pass that finds its end: `-`, digits, a fraction, an exponent, and up to
 /// 19 significant digits of no more than 2^53 over a power of ten an `f64`
 /// holds exactly, which Clinger's path rounds with one multiply or divide,
-/// as `parse_f64` does. That is every component of a vector's text but the
-/// widest. `None`, and `j` where it was, for anything else. The JSON reader
+/// as `parse_f64` does -- or of more, over a power short of 10^26, which
+/// [`divided`] rounds as `parse_f64` does. That is every component of a
+/// vector's text but the widest. `None`, and `j` where it was, for anything
+/// else. The JSON reader
 /// reads a vector's numbers with it, and FennecQL's lexer a list of them.
+/// `float` is set where the number is written with a fraction or an
+/// exponent, as its loop asks of a list of whole `f32`s ([`hides_rounding`]):
+/// the flag the parse already keeps, where a test of each `f64` read cost a
+/// number its instructions.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
+#[inline(always)]
+pub fn clinger(b: &[u8], j: &mut usize, float_seen: &mut bool) -> Option<f64> {
     let mut k = *j;
     let neg = b.get(k) == Some(&b'-');
     k += neg as usize;
@@ -935,7 +942,16 @@ pub fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
     let x = if m == 0 {
         0.0
     } else if m > 1 << 53 {
-        return None;
+        // Seventeen digits, as JavaScript writes most floats, are past
+        // Clinger's 53 bits: a fraction over a power short of 10^26 is
+        // `divided` here, as `parse_f64` divides it, rather than its text
+        // scanned twice more on the general path to get there -- 250
+        // instructions a number of a `[float]`, read into a vector or as
+        // written.
+        match float && (1..STEP as i32).contains(&-e10) {
+            true => divided(m, (-e10) as usize),
+            false => return None,
+        }
     } else if (0..=22).contains(&e10) {
         m as f64 * POW10[e10 as usize]
     } else if (-22..0).contains(&e10) {
@@ -944,12 +960,99 @@ pub fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
         return None;
     };
     *j = k;
+    *float_seen |= float;
     // An integer is an `i64`, which has no -0.
     Some(if neg && (float || m != 0) { -x } else { x })
 }
 
+/// Whether `list`, the text of a list of numbers alone from its `[` to its
+/// `]`, holds one written with a fraction or an exponent that the `f32` it
+/// was read into, `v` -- each whole and short of 2^24
+/// ([`crate::value::whole_f32s`]) -- is not: `[1.00000001]` read as `[1]`,
+/// which a list of numbers would take as the integer written. Each number
+/// read again exactly; asked only of a list so read that held such a
+/// number, which no embedding is (its first `f32` is not whole), so it
+/// costs the quick read nothing. A list that does not split as it read is
+/// taken to hide one.
+pub fn hides_rounding(list: &str, v: &[f32]) -> bool {
+    // Its brackets cut by place: `trim_matches` was 324 bytes of the
+    // browser module.
+    let inner = list
+        .get(1..list.len().saturating_sub(1))
+        .unwrap_or_default();
+    let mut n = 0;
+    for part in inner.split(',') {
+        let x = parse_f64(part.trim());
+        match (x, v.get(n)) {
+            (Some(x), Some(&y)) if y as f64 == x => n += 1,
+            _ => return true,
+        }
+    }
+    n != v.len()
+}
+
 #[cfg(test)]
 mod tests {
+    /// Clinger's path, and the division it takes past 53 bits, reads a
+    /// number as `parse_f64` does, to the bit: up to 19 digits each side of
+    /// the point, every exponent near the division's 10^-26 and Clinger's
+    /// 10^±22, signed and not, and the integers it leaves to the general
+    /// path.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clinger_reads_a_number_as_parse_f64_does() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let (mut read, mut divided) = (0, 0);
+        for _ in 0..300_000 {
+            let mut t = String::new();
+            if rnd(2) == 0 {
+                t.push('-');
+            }
+            // A leading zero now and then, as JSON refuses and FennecQL reads.
+            let int = rnd(20);
+            for _ in 0..int.max(1) {
+                t.push(char::from(b'0' + rnd(10) as u8));
+            }
+            if rnd(5) > 0 {
+                t.push('.');
+                for _ in 0..1 + rnd(20) {
+                    t.push(char::from(b'0' + rnd(10) as u8));
+                }
+            }
+            if rnd(4) == 0 {
+                t.push('e');
+                t.push_str(&format!("{}", rnd(60) as i64 - 30));
+            }
+            let mut j = 0;
+            let mut float = false;
+            if let Some(v) = super::clinger(t.as_bytes(), &mut j, &mut float) {
+                assert_eq!(j, t.len(), "{t}");
+                let want = match float {
+                    true => super::parse_f64(&t).unwrap(),
+                    false => super::parse_i64(&t).unwrap() as f64,
+                };
+                assert_eq!(v.to_bits(), want.to_bits(), "{t}");
+                read += 1;
+                // Past 2^53, which only a 16-digit mantissa or longer is.
+                let mant = t
+                    .split('e')
+                    .next()
+                    .unwrap_or_default()
+                    .replace(['-', '.'], "");
+                divided +=
+                    (mant.trim_start_matches('0').parse::<u128>().unwrap_or(0) > 1 << 53) as u32;
+            }
+        }
+        // Both ways were taken, many times over.
+        assert!(read > 100_000 && divided > 10_000, "{read} {divided}");
+    }
+
     #[test]
     fn an_i64_reads_as_str_parse_reads_it() {
         let mut cases: Vec<String> = [

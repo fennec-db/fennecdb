@@ -3457,11 +3457,52 @@ pub enum Alter {
 
 /// Whether `v` is or holds a vector: what a reader with no schema makes of a
 /// list of numbers alone.
+///
+/// Inline natively, the rest out of line ([`holds_vector_within`]): asked
+/// of every literal and parameter of a statement handing a vector, nearly
+/// all a number or a vector, its call was some 20 instructions each.
+#[cfg_attr(not(target_arch = "wasm32"), inline)]
 pub fn holds_vector(v: &Value) -> bool {
     match v {
         Value::Vector(_) => true,
-        Value::List(items) => items.iter().any(holds_vector),
-        Value::Object(m) => m.iter().any(|(_, v)| holds_vector(v)),
+        Value::List(_) | Value::Object(_) => holds_vector_within(v),
+        _ => false,
+    }
+}
+
+/// [`holds_vector`] of a list's elements or an object's values. Each
+/// element's kind is asked in the loop, a call made only for one that can
+/// hold a vector: a list of numbers as written -- what a statement read so
+/// holds, walked for each write (`Database::refuse_inexact`) -- was a call
+/// an element, some 18 instructions each.
+fn holds_vector_within(v: &Value) -> bool {
+    match v {
+        Value::List(items) => nested(items.iter(), holds_vector),
+        Value::Object(m) => nested(m.iter().map(|(_, v)| v), holds_vector),
+        _ => false,
+    }
+}
+
+/// Whether `holds` holds of an element of `items` that can be or hold a
+/// vector: a loop of its own, as the closure `any` took was not inlined.
+#[inline(always)]
+fn nested<'a>(items: impl Iterator<Item = &'a Value>, holds: fn(&Value) -> bool) -> bool {
+    for v in items {
+        if matches!(v, Value::Vector(_) | Value::List(_) | Value::Object(_)) && holds(v) {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`holds_vector`], a vector of whole `f32`s short of 2^24 left out: the
+/// integers written, which a list of numbers takes as they came
+/// ([`crate::value::whole_f32s`]).
+pub fn holds_rounded(v: &Value) -> bool {
+    match v {
+        Value::Vector(f) => !crate::value::whole_f32s(f),
+        Value::List(items) => nested(items.iter(), holds_rounded),
+        Value::Object(m) => nested(m.iter().map(|(_, v)| v), holds_rounded),
         _ => false,
     }
 }
