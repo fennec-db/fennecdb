@@ -704,7 +704,7 @@ mod record {
     /// `file` alone. The id is `FileIdInfo`'s 128 bits: ReFS's ids are 128,
     /// and the 64-bit index [`id`] reads is not promised unique there. On
     /// NTFS the 128 bits are the index, widened; where a file system
-    /// answers none -- FAT32's and exFAT's driver -- the index is taken.
+    /// answers none, the index is taken.
     pub fn named(file: &File) -> std::io::Result<(u64, u128, std::time::SystemTime)> {
         let mut info = Info::default();
         // SAFETY: as in `id`.

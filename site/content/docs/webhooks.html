@@ -267,7 +267,14 @@ one put in place under a running node too, whose set in memory the
 tenant's next open puts away, an event verified against it before that
 answered 401 — which the node logs as the tenant opens
 (<code>tenant `acme`'s hook `stripe`: consumed by 1 statement, no
-secret</code>).</p>
+secret</code>). On Windows, a <code>fennec restore</code>,
+<code>unseal</code> or <code>backup --force</code> over a tenant's file run
+by another account than the node's must be able to delete
+<code>&lt;tenant&gt;.hooks</code>, whose ACL grants the node's user alone:
+it needs Full Control of the folder (a folder's Modify does not let a file
+the folder's rules do not reach be deleted) or the node's account, and is
+refused otherwise, where on Linux and macOS the folder's write permission
+is enough.</p>
 
 <p>An event is verified against the secrets in the node's memory before its
 tenant is looked up, so a forged one opens no tenant. A verified one is
