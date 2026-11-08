@@ -1400,10 +1400,13 @@ fn exactly_in(
     // as with no hint (`Exactly::settle` keeps that one), so the value is
     // the same either way, and every use of it -- `v = $1` beside `xs: $1`
     // -- answers alike. One holding another number is read as written
-    // either way.
+    // either way. The value asked first: a list of decimals, the one a hint
+    // reads at once, leaves at its first number. Its place looked up first,
+    // a page of 1 000 rows a `[float]` parameter each (`number_lists
+    // params`) took 0.36% more instructions for it.
     for &i in hint.unwrap_or_default() {
-        if need.lists.binary_search(&i).is_ok() {
-            if let Some(v) = params.get(i).and_then(fennec_core::value::whole_vector) {
+        if let Some(v) = params.get(i).and_then(fennec_core::value::whole_vector) {
+            if need.lists.binary_search(&i).is_ok() {
                 params[i] = Value::Vector(v);
             }
         }
