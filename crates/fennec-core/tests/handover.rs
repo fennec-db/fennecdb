@@ -8,7 +8,7 @@
 //! records applied by a replica. Each is held to a twin that hands nothing
 //! over.
 
-#![cfg(mapped)]
+#![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::engine::writes_in;
 use fennec_core::fs::{open_in_memory, open_mapped, open_with};

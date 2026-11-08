@@ -11,8 +11,7 @@ own. "Page cache" is the operating system's, which keeps the mapped file's
 pages and starts cold after a restart, as for any file; it was called "no page
 cache" here before, which read as nothing being cached.
 `fs::open` maps the file where the target maps files -- a 64-bit Unix or
-Windows, `cfg(mapped)`, one name for the condition, which fennec-core's
-build script sets -- so the documents stay in it and the process holds what it derived from them: the
+Windows -- so the documents stay in it and the process holds what it derived from them: the
 offset index, the hash, ordered and text indexes, the graph, and the
 documents written since the open until it hands them over to the file
 (below). A 1 GB file of 2.3 million rows with a hash and an ordered

@@ -4393,7 +4393,7 @@ pub struct Database {
     /// Whether a rewrite beside the database is writing its side file: one
     /// at a time, since the file has one name. Only where a file is mapped,
     /// the one place a rewrite writes beside it.
-    #[cfg(mapped)]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     beside: std::sync::atomic::AtomicBool,
     /// The time a read of a collection whose rows expire is answered at
     /// ([`Self::set_clock`]); the system's clock when `None`. The browser
@@ -4644,7 +4644,7 @@ impl Database {
             handover_at: HANDOVER_AT,
             #[cfg(not(target_arch = "wasm32"))]
             spill_at: SPILL_AT,
-            #[cfg(mapped)]
+            #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
             clock: None,
             #[cfg(not(target_arch = "wasm32"))]

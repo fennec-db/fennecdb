@@ -9,8 +9,8 @@ fennec-core's invariants -- storage, the engine's blocks and reads, writes, inde
 **[No buffer pool of its own, and the file is mapped.](../../docs/design/storage.md#the-mapped-file)**
 `fs::open` maps it, a read decoding over its bytes; a rewrite points the
 stores at the new file (`Database::repoint`). The mapped path is
-`cfg(mapped)` (`build.rs`: `std-fs`, a 64-bit Unix or Windows), never its
-parts spelled out. On Windows the file is views laid end to end in a
+`std-fs` on a 64-bit Unix or Windows, every condition naming it so
+(`any(unix, windows)`). On Windows the file is views laid end to end in a
 placeholder, one at the open and one each handover (`Mapping::cover`),
 and a volume without POSIX renames or a share is read into memory
 (`fs::mappable`). In code, docs and site, "page cache" is the operating

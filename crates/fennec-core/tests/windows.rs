@@ -7,7 +7,7 @@
 //! a checkpoint, a compact and a compact beside the database rename over
 //! it, and while an open finds a torn tail to cut.
 
-#![cfg(all(mapped, windows))]
+#![cfg(all(feature = "std-fs", windows, target_pointer_width = "64"))]
 
 use fennec_core::fs::{assume_room, open_in_memory, open_mapped, open_read_only};
 use fennec_core::prelude::*;

@@ -9,9 +9,9 @@
 //! Every call takes a handle std opened, never a path, so a long path is
 //! std's `\\?\` one wherever it is used.
 
-#[cfg(mapped)]
+#[cfg(target_pointer_width = "64")]
 mod map;
-#[cfg(mapped)]
+#[cfg(target_pointer_width = "64")]
 pub use map::{assume_room, placeholders, touch, Mapping};
 
 use std::ffi::c_void;
@@ -391,7 +391,7 @@ pub fn mappable(path: &Path) -> bool {
 /// (`defer_linking`, which the first load cleared). Another process's view
 /// refuses the cut, and the open fails with it: a reader held over a file
 /// whose writer crashed.
-#[cfg(mapped)]
+#[cfg(target_pointer_width = "64")]
 pub(super) fn cut_and_open(
     db: crate::engine::Database,
     deferred: bool,
