@@ -1274,6 +1274,12 @@ refuse: a Kubernetes secret volume mounts its files 0644 and Docker's
 secrets are 0444 unless told otherwise, inside a container no other user
 shares, and a server that would not start there would be worked around
 with a `chmod` in an entrypoint or a proxy's key rather than kept closed.
+On Windows a file has no mode that says it, and inherits its directory's
+ACL, which `C:\ProgramData` opens to the machine's users: the warning
+reads the key's DACL (`owner_only::open_to`), an entry letting Everyone,
+Authenticated Users or Users read it -- none denying it before -- naming
+the key and the group, never a byte of it
+([windows.md](windows.md#7-what-else-windows-differs-in), 7h).
 
 *One write.* An answer's head and body went in one `writev`
 ([Parse cache](#parse-cache)); over TLS they go into the session as one

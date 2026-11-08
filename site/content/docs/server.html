@@ -228,7 +228,12 @@ itself. No proxy goes in front.</p>
     <code>chmod 600</code> it, or <code>640</code> where root owns it and the
     server reads it as its group. The server still starts, since Kubernetes
     secret volumes (<code>0644</code>) and Docker secrets (<code>0444</code>)
-    mount keys that way by default.</li>
+    mount keys that way by default. On Windows the warning reads the key's
+    ACL instead: a key that Everyone, Authenticated Users or Users may read
+    — what a file copied into <code>C:\ProgramData</code> inherits — is
+    named with the group, and <code>icacls key.pem /inheritance:r /grant:r
+    &lt;user&gt;:R</code>, the user the server runs as, leaves it to that
+    user alone.</li>
   <li><b>The listener speaks HTTPS alone.</b> TLS 1.2 and 1.3 (rustls, with
     ring), ALPN <code>http/1.1</code>, no client certificates. A plain HTTP
     request to it is answered 400, naming <code>https://</code>, and the start

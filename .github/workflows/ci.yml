@@ -418,7 +418,7 @@ jobs:
       # lease's clock is found in, what a device's name opens in a node's
       # directory, and whom a file the temporary directory gives is open to.
       - name: The lease's clock, devices' names and a secret's DACL
-        run: cargo test -p fennec-http --lib -- --nocapture lease::tests::the_boot_clock owner_only:: tenants::tests::a_device_s_name
+        run: cargo test -p fennec-http --lib -- --nocapture lease::tests::the_boot_clock owner_only::tests tenants::tests::a_device_s_name
 
       - name: fennec-ql's and fennec-import's suites
         run: cargo test -p fennec-ql -p fennec-import --lib --tests --no-fail-fast

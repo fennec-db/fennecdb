@@ -135,7 +135,9 @@ either order keeps every node writing and failed over on its own, the late
 grant open where either side is old. The node's lease runs on the boot
 clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time` on
 Apple's systems through `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`,
-declared by hand), which counts a suspend: on `Instant`'s
+declared by hand; interrupt time on Windows, `QueryInterruptTimePrecise`
+looked up at run time, `lease/windows.rs`, [windows.md](windows.md#7-what-else-windows-differs-in)
+7i), which counts a suspend: on `Instant`'s
 (`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past its lease
 woke with the lease left as it was and wrote beside its tenants' new
 primaries. It fails closed, as std's `Instant::now` does: a boot clock that
@@ -694,7 +696,16 @@ the node did not hold it -- made again by a binary from before this one,
 which deletes the file and leaves the sidecar; restored by `fennec
 restore`; put there by hand -- is another file under an old identity, so
 the sidecar names the file it was written for, its device, inode and birth
-time (`Metadata::created`), 0 where the file system keeps none.
+time (`Metadata::created`), 0 where the file system keeps none. On Windows
+the device and inode are the file's volume serial and its index there
+(`fennec_abi::lock::file_id`, `GetFileInformationByHandle` through a
+handle opened for no access): bound by its creation time alone, as it was
+until windows.md's fourth slice, a file renamed into the place was the one
+it replaced, NTFS giving a name made again within 15 s -- a rename over it
+too -- the old file's creation time (tunneling), and `windows (http)`
+found it (`an_identity_names_its_file_and_no_other_put_there`). An index
+is 64 bits there; ReFS's file ids are 128, and its index of one is not
+promised unique, as the lock's key is not (`fennec_abi::lock`).
 
 **No birth time, the device and inode, and the sidecar put away before its
 file goes.** A review of this branch had a file system keeping no birth
