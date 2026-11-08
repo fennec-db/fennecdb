@@ -9,8 +9,7 @@
 //! A tag is a hash of the row's JSON as its reader is shown it, the very
 //! bytes `GET /<name>/<id>` answers: it changes whenever those do, it is
 //! the same on a replica and after a restart for the same row, and it says
-//! nothing of a field a read rule withholds, which those bytes hold as
-//! `null`.
+//! nothing of a field a read rule withholds, which those bytes leave out.
 
 use crate::http::{Request, Response};
 
@@ -19,14 +18,14 @@ use crate::http::{Request, Response};
 ///
 /// Not SHA-256, which `content_tag` takes for a poll's answer: in software
 /// it took 7 430 instructions a row of 66 bytes, a third of the read of
-/// that row by id (23 200), and 50 300 a row of 1 KB; this takes about
-/// four an input byte (`examples/rows.rs`'s `tag`). Its key is fixed, so
-/// the same row has the same tag on every server and after every restart;
-/// it needs no secret, since the bytes it hashes are the ones its reader
-/// is answered beside it. What a key-less hash gives up is its being no
+/// that row by id (23 200), and 50 300 a row of 1 KB; this takes about 3.3
+/// an input byte and 460 more (`examples/rows.rs`'s `tag`). Its key is
+/// fixed, so the same row has the same tag on every server and after every
+/// restart; it needs no secret, since the bytes it hashes are the ones its
+/// reader is answered beside it. What a key-less hash gives up is being a
 /// signature: no shortcut to a second row of the same tag is known for
 /// SipHash with its key known, and one would let only a writer of the row
-/// pass its own write off as unchanged -- as writing the old value back
+/// pass its own write off as no change -- as writing the old value back
 /// does.
 pub fn tag(row: &[u8]) -> Tag {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -113,6 +112,37 @@ fn rounds(v: &mut [u64; 4], n: usize) {
     }
 }
 
+/// Whether `req` sends `If-Match` or `If-None-Match`: what every REST
+/// write asks, to refuse one on a path that names no row. A look at each
+/// header's first byte, a name compared only where it is an `i`.
+pub fn asked(req: &Request) -> bool {
+    (req.headers.iter()).any(|(k, _)| starts_if(k) && which(k) != NEITHER)
+}
+
+/// Whether a header's name starts as both do, `i`: the one look every
+/// other header gets, written where it is asked.
+#[inline(always)]
+fn starts_if(name: &str) -> bool {
+    matches!(name.as_bytes().first(), Some(b'i' | b'I'))
+}
+
+const NEITHER: u8 = 0;
+const IF_MATCH: u8 = 1;
+const IF_NONE_MATCH: u8 = 2;
+
+/// Which of the two a header's name is, or neither, its length asked
+/// before its letters. Out of line, one copy for [`asked`] and
+/// [`Preconditions::of`]: the case-blind compares written into each took
+/// 700 bytes of fennec-server a copy.
+#[inline(never)]
+fn which(name: &str) -> u8 {
+    match name.len() {
+        8 if name.eq_ignore_ascii_case("if-match") => IF_MATCH,
+        13 if name.eq_ignore_ascii_case("if-none-match") => IF_NONE_MATCH,
+        _ => NEITHER,
+    }
+}
+
 /// What a request asks of the row it names before it is answered or
 /// written: `If-Match` and `If-None-Match`, the standard's names for the
 /// two, read in one pass over its headers.
@@ -125,15 +155,11 @@ pub struct Preconditions<'a> {
 impl<'a> Preconditions<'a> {
     pub fn of(req: &'a Request) -> Preconditions<'a> {
         let mut p = Preconditions::default();
-        for (k, v) in &req.headers {
-            // Both names start `if-`: one look at a byte passes over the rest.
-            if !matches!(k.as_bytes().first(), Some(b'i' | b'I')) {
-                continue;
-            }
-            if k.eq_ignore_ascii_case("if-match") {
-                p.if_match = Some(v);
-            } else if k.eq_ignore_ascii_case("if-none-match") {
-                p.if_none_match = Some(v);
+        for (k, v) in (req.headers.iter()).filter(|(k, _)| starts_if(k)) {
+            match which(k) {
+                IF_MATCH => p.if_match = Some(v),
+                IF_NONE_MATCH => p.if_none_match = Some(v),
+                _ => {}
             }
         }
         p
@@ -311,6 +337,41 @@ mod tests {
         assert_eq!(s, format!("\"{a:016x}{b:016x}\""));
         assert_ne!(t, tag(br#"{"id":1,"n":3}"#));
         assert_eq!(t, tag(row));
+    }
+
+    #[test]
+    fn a_headers_name_is_read_whatever_its_case() {
+        let req = |names: &[&str]| crate::http::Request {
+            method: crate::http::Method::Patch,
+            target: "/t/1".into(),
+            path: "/t/1".into(),
+            query: Vec::new(),
+            headers: names
+                .iter()
+                .map(|n| (n.to_string(), "\"a\"".to_string()))
+                .collect(),
+            body: Vec::new(),
+            keep_alive: true,
+        };
+        for (names, m, n) in [
+            (&["IF-MATCH"][..], true, false),
+            (&["if-none-match"][..], false, true),
+            (&["If-Match", "If-None-Match"][..], true, true),
+            (
+                &["Idempotency-Key", "if-matches", "If-Range", "Host"][..],
+                false,
+                false,
+            ),
+        ] {
+            let r = req(names);
+            let p = Preconditions::of(&r);
+            assert_eq!(
+                (p.if_match.is_some(), p.if_none_match.is_some()),
+                (m, n),
+                "{names:?}"
+            );
+            assert_eq!(asked(&r), m || n, "{names:?}");
+        }
     }
 
     #[test]

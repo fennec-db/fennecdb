@@ -2317,9 +2317,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         // `If-Match` and `If-None-Match` hold a write to the row
         // `/<name>/<id>` names, and nothing else: a write a client sent
         // as conditional is never made as one that is not.
-        let pre = conditional::Preconditions::of(req);
-        let row = api::row_name(req);
-        if pre.any() && row.is_none() {
+        if conditional::asked(req) && api::row_name(req).is_none() {
             return Response::error(
                 400,
                 "If-Match and If-None-Match hold a write to one row: PATCH, PUT or DELETE /<name>/<id>",
@@ -2337,16 +2335,16 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         // Let go of after the write lock, with the documents the put wrote.
         let mut ready = fennec_core::engine::Prepared::default();
         let early = early_put(db, req, &who, &mut ready);
-        let row = Row { name: row, pre };
-        rest_write(db, cfg, req, &who, key, early.as_ref(), &mut ready, row)
+        rest_write(db, cfg, req, &who, key, early.as_ref(), &mut ready)
     } else {
         let guard = held::read(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&path_refusal(&who, req).unwrap_or(e)),
         };
-        // `GET /<name>/<id>`: the row and its tag.
-        if let (Some(id), Some(name)) = (routed.row, api::row_name(req)) {
+        // `GET /<name>/<id>`: the row and its tag. The path is read for its
+        // name on that route alone.
+        if let Some((id, name)) = routed.row.and_then(|id| Some((id, api::row_name(req)?))) {
             let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
             let running = trace::span("execute");
             let found = row_into(&guard, &who, &routed.statement, &mut body);
@@ -2444,7 +2442,6 @@ fn own_answer(name: &str) -> Response {
 /// is the caller's, let go of after the lock with the documents the put
 /// wrote; the statement is borrowed where it was read, not moved: a
 /// `Statement` is a kilobyte, and a copy is a `memcpy` of it.
-#[allow(clippy::too_many_arguments)]
 fn rest_write(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
@@ -2453,7 +2450,6 @@ fn rest_write(
     key: Option<idempotent::Key>,
     early: Option<&Early>,
     ready: &mut fennec_core::engine::Prepared,
-    row: Row<'_>,
 ) -> Response {
     let guard = held::write(db);
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
@@ -2470,9 +2466,8 @@ fn rest_write(
             stmt: &e.stmt,
             bound: None,
             mask: e.mask.as_ref(),
-            row: None,
         };
-        return rest_run(db, cfg, who, key, guard, run, ready);
+        return rest_run(db, cfg, who, key, guard, run, ready, NoRow);
     }
     // Refused here by what the lock shows -- a collection another write
     // dropped, a field it changed -- it waits for that; refused by the
@@ -2509,21 +2504,36 @@ fn rest_write(
         stmt: &stmt,
         bound,
         mask: mask.as_ref(),
-        row: routed
-            .row
-            .zip(row.name)
-            .map(|(id, name)| (name, id, row.pre)),
     };
-    rest_run(db, cfg, who, key, guard, run, ready)
+    match routed.row {
+        None => rest_run(db, cfg, who, key, guard, run, ready, NoRow),
+        Some(id) => row_run(db, cfg, req, who, key, guard, run, ready, id),
+    }
 }
 
-/// What a REST write's path and headers say of the one row it may name,
-/// read before the lock: the collection of `/<name>/<id>`, and the
-/// request's preconditions (`conditional::Preconditions`), held on that
-/// path alone.
-struct Row<'a> {
-    name: Option<&'a str>,
-    pre: conditional::Preconditions<'a>,
+/// [`rest_run`] of a write to `/<name>/<id>`, holding the row to the
+/// request's preconditions ([`RowAsk`]); the path read for its name here,
+/// on that route alone. Out of line: a write naming no row tests the id and
+/// goes on.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn row_run(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    req: &Request,
+    who: &Who,
+    key: Option<idempotent::Key>,
+    guard: held::Writing<'_>,
+    run: Run<'_>,
+    ready: &mut fennec_core::engine::Prepared,
+    id: i64,
+) -> Response {
+    let Some(name) = api::row_name(req) else {
+        return rest_run(db, cfg, who, key, guard, run, ready, NoRow);
+    };
+    let pre = conditional::Preconditions::of(req);
+    let ask = RowAsk { name, id, pre };
+    rest_run(db, cfg, who, key, guard, run, ready, &ask)
 }
 
 /// The row `look` picks ([`api::row_select`]) as `who` is shown it --
@@ -2533,8 +2543,8 @@ struct Row<'a> {
 /// for both, so a tag is worked out of the same bytes whichever asks: the
 /// stored document written out as JSON (`Database::query_json`) where no
 /// field is withheld, else its row with the fields a read rule withholds
-/// made `null` ([`shown`]) -- which `query_json` writes byte for byte as
-/// `rows_array_into` writes rows (`tests/query_json.rs`). The server's
+/// held out of it ([`shown`]) -- `query_json` writes byte for byte what
+/// `rows_array_into` writes of rows (`tests/query_json.rs`). The server's
 /// token reads `look` as it is, which `scoped` leaves a read as it was: a
 /// copy of it moved through there was a kilobyte copied three times.
 fn row_into(
@@ -2582,17 +2592,70 @@ fn row_into(
     Ok(true)
 }
 
-/// The tag ([`conditional::tag`]) of the row `look` picks as `who` is
-/// shown it under the lock `db` is held by, written out in `buf`; none
-/// where it is shown no such row.
+/// The tag ([`conditional::tag`]) of the row `name`'s `id` as `who` is
+/// shown it under the lock `db` is held by; none where it is shown no such
+/// row. Written out in the connection's spare body, which a write's answer
+/// leaves free: grown from nothing, a row of 66 bytes was three allocations
+/// a look.
 fn row_tag(
     db: &Database,
     who: &Who,
-    look: &Statement,
-    buf: &mut String,
+    name: &str,
+    id: i64,
 ) -> fennec_core::error::Result<Option<conditional::Tag>> {
-    buf.clear();
-    Ok(row_into(db, who, look, buf)?.then(|| conditional::tag(buf.as_bytes())))
+    let mut buf = String::from_utf8(http::spare_body()).unwrap_or_default();
+    let found = row_into(db, who, &api::row_select(name, id), &mut buf);
+    let tag = matches!(found, Ok(true)).then(|| conditional::tag(buf.as_bytes()));
+    http::give_back(buf.into_bytes());
+    found.map(|_| tag)
+}
+
+/// What [`looked`] finds: whether a `PUT` makes its row, or the refusal of
+/// the write and whether it was read from the database -- boxed, the path
+/// a client asking for the check alone takes.
+type Looked = std::result::Result<bool, Box<(Response, bool)>>;
+
+/// [`rest_run`]'s look at the row a write to `/<name>/<id>` names, under
+/// the write lock `db` is held by, before the write's block opens: whether
+/// a `PUT` makes it (`put`), or the refusal of a precondition it fails --
+/// 412, read from what other writes left, so it waits for them as such a
+/// refusal does -- and whether that refusal was read from the database.
+/// Out of line, as [`tag_after`] is, and asked through [`Asks`]: written
+/// into `rest_run`, which every REST write runs, the row's statement -- a
+/// kilobyte -- and its buffer sat in the frame of a write by a filter too,
+/// which ran 324 instructions of its own code past main's in a trace of
+/// one call (150 of them the path read for a row's name, now read on that
+/// route alone); now 14, `route`'s, `handle`'s and `rest_write`'s.
+#[cold]
+#[inline(never)]
+fn looked(db: &Database, who: &Who, ask: &RowAsk<'_>, stmt: &Statement) -> Looked {
+    let put = matches!(stmt, Statement::Put { .. });
+    if !ask.pre.any() && !put {
+        return Ok(false);
+    }
+    let now = row_tag(db, who, ask.name, ask.id)
+        .map_err(|e| Box::new((error_response(&e), read_from_writes(&e))))?;
+    match ask.pre.refused(now.as_ref().map(conditional::Tag::as_str)) {
+        Some(failed) => Err(Box::new((failed, true))),
+        None => Ok(put && now.is_none()),
+    }
+}
+
+/// A conditional write's `ETag`: the row's tag as the write `stmt` left
+/// it, worked out under its lock, before another write moves it; none for
+/// a delete, or a write sent with no precondition.
+#[cold]
+#[inline(never)]
+fn tag_after(
+    db: &Database,
+    who: &Who,
+    ask: &RowAsk<'_>,
+    stmt: &Statement,
+) -> Option<conditional::Tag> {
+    if !ask.pre.any() || matches!(stmt, Statement::Delete { .. }) {
+        return None;
+    }
+    row_tag(db, who, ask.name, ask.id).ok().flatten()
 }
 
 /// `GET /<name>/<id>`'s answer, the row read as [`row_into`] found it: the
@@ -2641,13 +2704,68 @@ struct Run<'a> {
     /// rules were bound under the lock ([`scoped_under`]).
     bound: Option<Who>,
     mask: Option<&'a access::Mask>,
-    /// The row `/<name>/<id>` names, and the request's preconditions on it.
-    row: Option<(&'a str, i64, conditional::Preconditions<'a>)>,
+}
+
+/// What a write to `/<name>/<id>` asks of its row: its collection, its id
+/// and the request's preconditions on it.
+#[derive(Clone, Copy)]
+struct RowAsk<'a> {
+    name: &'a str,
+    id: i64,
+    pre: conditional::Preconditions<'a>,
+}
+
+/// What [`rest_run`] asks of the row a write names, under its lock, before
+/// the write ([`looked`]) and after it ([`tag_after`]). A type, not a
+/// value: a write naming no row -- by a filter, `/all`, a `POST` -- runs
+/// `rest_run` for [`NoRow`], which is the code it was, every look folded
+/// away. With the row's ask carried through it as an `Option`, `rest_run`
+/// ran 34 instructions of its own past main's in a trace of a write by a
+/// filter, and over eight identities a build such a write was +100,
+/// outside two standard errors; as a type, `rest_run` runs main's count
+/// and the write -1, for a second copy of `rest_run`, `row_run`'s 5.8 KB of
+/// the server.
+trait Asks: Copy {
+    /// A refusal of the write and whether it was read from the database,
+    /// or whether a `PUT` makes its row.
+    fn look(self, db: &Database, who: &Who, stmt: &Statement) -> Looked;
+    /// The `ETag` a write that was made answers.
+    fn tag(self, db: &Database, who: &Who, stmt: &Statement) -> Option<conditional::Tag>;
+}
+
+/// A write naming no row.
+#[derive(Clone, Copy)]
+struct NoRow;
+
+impl Asks for NoRow {
+    #[inline(always)]
+    fn look(self, _: &Database, _: &Who, _: &Statement) -> Looked {
+        Ok(false)
+    }
+
+    #[inline(always)]
+    fn tag(self, _: &Database, _: &Who, _: &Statement) -> Option<conditional::Tag> {
+        None
+    }
+}
+
+impl Asks for &RowAsk<'_> {
+    #[inline(always)]
+    fn look(self, db: &Database, who: &Who, stmt: &Statement) -> Looked {
+        looked(db, who, self, stmt)
+    }
+
+    #[inline(always)]
+    fn tag(self, db: &Database, who: &Who, stmt: &Statement) -> Option<conditional::Tag> {
+        tag_after(db, who, self, stmt)
+    }
 }
 
 /// [`rest_write`]'s statement run under the write lock `guard`, answered,
-/// and made durable once the lock is let go.
-fn rest_run(
+/// and made durable once the lock is let go; `ask` what it asks of the row
+/// it names ([`Asks`]).
+#[allow(clippy::too_many_arguments)]
+fn rest_run<A: Asks>(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
     who: &Who,
@@ -2655,6 +2773,7 @@ fn rest_run(
     mut guard: held::Writing<'_>,
     run: Run<'_>,
     ready: &mut fennec_core::engine::Prepared,
+    ask: A,
 ) -> Response {
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
     let Run {
@@ -2662,43 +2781,20 @@ fn rest_run(
         stmt,
         bound,
         mask,
-        row,
     } = run;
     if let Some(why) = over_ceiling(cfg.max_memory, &guard, stmt) {
         return refused(why);
     }
     // A write to `/<name>/<id>` under `If-Match` or `If-None-Match` is held
     // to the row as this write lock shows it, the lock that then writes
-    // it: no write lands between the look and the write. Refused, it was
-    // read from what other writes left, and waits for them as such a
-    // refusal does. A `PUT` looks whatever it was sent with: 201 where it
-    // makes the row.
-    let put = matches!(stmt, Statement::Put { .. });
-    let mut made = false;
-    let row = row.filter(|r| r.2.any() || put);
-    // The row's statement, built once for the look and the tag after.
-    let look = row.map(|(name, id, _)| api::row_select(name, id));
-    // The rows looked at are written out in the connection's spare body,
-    // which this answer's leaves free: grown from nothing, a row of 66
-    // bytes was three allocations a look.
-    let mut buf = match look {
-        Some(_) => String::from_utf8(http::spare_body()).unwrap_or_default(),
-        None => String::new(),
+    // it: no write lands between the look and the write ([`looked`]). A
+    // `PUT` looks whatever it was sent with: 201 where it makes the row.
+    const MADE: api::Shape = api::Shape::Affected("written", 201);
+    let shape = match ask.look(&guard, who, stmt) {
+        Ok(false) => shape,
+        Ok(true) => &MADE,
+        Err(refusal) => return refused_under(db, cfg, guard, refusal.1, refusal.0),
     };
-    if let (Some((_, _, pre)), Some(look)) = (row, &look) {
-        let now = match row_tag(&guard, who, look, &mut buf) {
-            Ok(now) => now,
-            Err(e) => {
-                let read = read_from_writes(&e);
-                return refused_under(db, cfg, guard, read, error_response(&e));
-            }
-        };
-        if let Some(failed) = pre.refused(now.as_ref().map(conditional::Tag::as_str)) {
-            http::give_back(buf.into_bytes());
-            return refused_under(db, cfg, guard, true, failed);
-        }
-        made = put && now.is_none();
-    }
     if key.is_some() {
         // Only a block left open refuses it, which reads nothing a write
         // left.
@@ -2723,28 +2819,17 @@ fn rest_run(
     {
         Ok(resp) => {
             statements::rows(counted(resp));
-            let mut out = api::render(resp, shape, fennec_core::VERSION);
-            if made && out.status == 200 {
-                out.status = 201;
-            }
-            out
+            api::render(resp, shape, fennec_core::VERSION)
         }
         Err(e) => told_response(e, bound.as_deref()),
     };
     // A conditional write's answer carries the row's tag as it left it,
     // for the client's next one: worked out under this lock, before
     // another write moves it.
-    let tagged = match (&result, row, &look) {
-        (Ok(_), Some((_, _, pre)), Some(look))
-            if pre.any() && !matches!(stmt, Statement::Delete { .. }) =>
-        {
-            row_tag(&guard, who, look, &mut buf).ok().flatten()
-        }
-        _ => None,
+    let tagged = match result.is_ok() {
+        true => ask.tag(&guard, who, stmt),
+        false => None,
     };
-    if look.is_some() {
-        http::give_back(buf.into_bytes());
-    }
     // A key keeps the answer, so it is made under the lock; without
     // one, after it, as before.
     let kept = match &key {
@@ -2770,11 +2855,13 @@ fn rest_run(
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
     }
-    let out = with_seq(kept.unwrap_or_else(|| answer(&result)), seq);
-    match tagged {
-        Some(t) => out.header("ETag", t.as_str()),
-        None => out,
+    // The tag pushed onto the answer where it lies: an answer moved
+    // through a `match` was copied whole on every write.
+    let mut out = with_seq(kept.unwrap_or_else(|| answer(&result)), seq);
+    if let Some(t) = tagged {
+        out.extra.push(("ETag".to_string(), t.as_str().to_string()));
     }
+    out
 }
 
 /// A `POST /<name>` read before the write lock: its body's documents as
@@ -5422,20 +5509,7 @@ mod tests {
                 "{change}"
             );
             let cfg = Config::default();
-            let row = Row {
-                name: None,
-                pre: conditional::Preconditions::default(),
-            };
-            let resp = rest_write(
-                &b,
-                &cfg,
-                &req,
-                &Who::Full,
-                None,
-                early.as_ref(),
-                &mut ready,
-                row,
-            );
+            let resp = rest_write(&b, &cfg, &req, &Who::Full, None, early.as_ref(), &mut ready);
             let body = String::from_utf8_lossy(&resp.body);
             assert_eq!(resp.status, 201, "{change}: {body}");
             let routed = api::route(&a, &req).unwrap();

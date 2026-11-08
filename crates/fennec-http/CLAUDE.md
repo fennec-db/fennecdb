@@ -272,6 +272,18 @@ documents.](../../docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`
 byte for byte (`tests/query_json.rs`).
 
+**[A row's tag is its JSON as its reader is shown it, and a write's
+preconditions are judged under the lock that writes it.](../../docs/design/http.md#row-tags)**
+`GET /<name>/<id>` answers `ETag`, `conditional::tag` of the bytes it
+answers, which `row_into` writes, the one way for a read and a write: a
+field a read rule withholds is in no tag. `If-Match` and `If-None-Match`
+on `PATCH`, `PUT` or `DELETE /<name>/<id>` are judged in `rest_run`
+(`looked`) under the write lock that then writes, before its block opens
+-- never on a read lock before it -- a refusal 412, nothing written,
+waiting as one read from others' writes does; on any other write they are
+refused (400), never passed over. A conditional write's `ETag` is worked
+out under the lock (`tag_after`).
+
 **[A connection no thread can be made for is answered
 503.](../../docs/design/http.md#connections-without-a-thread)** Both accept loops
 spawn through `accept::spawn`, which hands back a refused thread's stream

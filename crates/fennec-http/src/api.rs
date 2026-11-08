@@ -108,11 +108,25 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
             })
         }
         (Method::Post, [name]) => route_put(&db.collection(name)?.schema, req),
-        (Method::Patch | Method::Put, [name]) | (Method::Patch | Method::Put, [name, "all"]) => {
+        // `PATCH /<name>` and `/<name>/all`, the rows a filter or none
+        // picks, and `PATCH` and `PUT /<name>/<id>`, one row by its id.
+        (Method::Patch | Method::Put, [name]) | (Method::Patch | Method::Put, [name, _]) => {
+            let row = match seg.as_slice() {
+                [_, id] if *id != "all" => Some(row_id(req, id)?),
+                _ => None,
+            };
             let schema = &db.collection(name)?.schema;
-            let all = seg.len() == 2;
-            let filter = require_filter(schema, req, all, "an update")?;
+            let filter = match row {
+                Some(id) => Some(by_id(id)),
+                None => require_filter(schema, req, seg.len() == 2, "an update")?,
+            };
+            // The body read in one place for the three: read in each arm,
+            // `document` was no longer inlined here, and a write by a
+            // filter ran 20 instructions more.
             let set = document(schema, req)?;
+            if let (Method::Put, Some(id)) = (req.method, row) {
+                return put_row(name, id, set, req);
+            }
             if set.is_empty() {
                 return Err(Error::Query("empty body: no field to update".into()));
             }
@@ -125,7 +139,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     pick: None,
                 },
                 shape: Shape::Affected("updated", 200),
-                row: None,
+                row,
             })
         }
         (Method::Delete, [name]) | (Method::Delete, [name, "all"]) => {
@@ -155,61 +169,6 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                 row: Some(id),
             })
         }
-        (Method::Patch, [name, id]) => {
-            let id = row_id(req, id)?;
-            let schema = &db.collection(name)?.schema;
-            let set = document(schema, req)?;
-            if set.is_empty() {
-                return Err(Error::Query("empty body: no field to update".into()));
-            }
-            Ok(Routed {
-                statement: Statement::Update {
-                    collection: name.to_string(),
-                    set,
-                    filter: Some(by_id(id)),
-                    require: None,
-                    pick: None,
-                },
-                shape: Shape::Affected("updated", 200),
-                row: Some(id),
-            })
-        }
-        (Method::Put, [name, id]) => {
-            let id = row_id(req, id)?;
-            let schema = &db.collection(name)?.schema;
-            let mut doc = document(schema, req)?;
-            match doc.iter().find(|(k, _)| k == "id") {
-                Some((_, Expr::Lit(Value::Int(n)))) if *n == id => {}
-                Some((_, v)) => {
-                    return Err(Error::Query(format!(
-                        "the body's `id` is {}, the path's {id}",
-                        match v {
-                            Expr::Lit(v) => json::to_string(v),
-                            _ => "not a number".into(),
-                        }
-                    )))
-                }
-                None => doc.push(("id".to_string(), Expr::Lit(Value::Int(id)))),
-            }
-            // `If-None-Match: *`, made only where the id is free: an
-            // `insert`, which a row the writer is not shown refuses as it
-            // refuses `POST`'s (409), never writes over.
-            let insert = crate::conditional::Preconditions::of(req).only_if_absent();
-            Ok(Routed {
-                statement: Statement::Put {
-                    collection: name.to_string(),
-                    docs: vec![doc],
-                    docs_param: None,
-                    insert,
-                    if_absent: false,
-                    else_set: None,
-                    require: None,
-                    pick: None,
-                },
-                shape: Shape::Affected("written", 200),
-                row: Some(id),
-            })
-        }
         (Method::Delete, [name, id]) => {
             let id = row_id(req, id)?;
             db.collection(name)?;
@@ -228,6 +187,43 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
     }
 }
 
+/// `PUT /<name>/<id>`: the body, `doc`, written as the row of that id,
+/// whole -- a `put`, which writes over a row -- the body's `id`, where it
+/// names one, the path's. Under `If-None-Match: *` it is made only where
+/// the id is free: an `insert`, which a row the writer is not shown
+/// refuses as it refuses `POST`'s (409), never writing over it.
+#[inline(never)]
+fn put_row(name: &str, id: i64, mut doc: Vec<(String, Expr)>, req: &Request) -> Result<Routed> {
+    match doc.iter().find(|(k, _)| k == "id") {
+        Some((_, Expr::Lit(Value::Int(n)))) if *n == id => {}
+        Some((_, v)) => {
+            return Err(Error::Query(format!(
+                "the body's `id` is {}, the path's {id}",
+                match v {
+                    Expr::Lit(v) => json::to_string(v),
+                    _ => "not a number".into(),
+                }
+            )))
+        }
+        None => doc.push(("id".to_string(), Expr::Lit(Value::Int(id)))),
+    }
+    let insert = crate::conditional::Preconditions::of(req).only_if_absent();
+    Ok(Routed {
+        statement: Statement::Put {
+            collection: name.to_string(),
+            docs: vec![doc],
+            docs_param: None,
+            insert,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        },
+        shape: Shape::Affected("written", 200),
+        row: Some(id),
+    })
+}
+
 /// [`route`]'s refusal of a path no route takes.
 fn unrouted(req: &Request) -> Error {
     Error::NotFound(format!("path `{}`", req.path))
@@ -238,10 +234,15 @@ fn unrouted(req: &Request) -> Error {
 /// query string -- a `select`, a filter -- is refused rather than passed
 /// over: its tag is the whole row's.
 fn row_id(req: &Request, raw: &str) -> Result<i64> {
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+    // `num::parse_i64` reads the digits: `str::parse`'s was 300 bytes of
+    // fennec-server more for this one call.
+    let id = match raw.bytes().all(|b| b.is_ascii_digit()) {
+        true => fennec_core::num::parse_i64(raw),
+        false => None,
+    };
+    let Some(id) = id else {
         return Err(unrouted(req));
-    }
-    let id = raw.parse().map_err(|_| unrouted(req))?;
+    };
     if !req.query.is_empty() {
         return Err(Error::Query(
             "`/<name>/<id>` is the row: it takes no query string".into(),

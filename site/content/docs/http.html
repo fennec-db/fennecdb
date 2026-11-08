@@ -1,6 +1,6 @@
 <!--
 title: HTTP endpoint — fennecdb
-description: Start fennec-server over HTTP and send it FennecQL from curl, fetch or any language's standard library: REST routes derived from the schema, raw statements with parameters, batches and writes that are safe to retry.
+description: Start fennec-server over HTTP and send it FennecQL from curl, fetch or any language's standard library: REST routes derived from the schema, raw statements with parameters, batches, writes that are safe to retry and writes held to the row they read (If-Match).
 -->
 
 {{moved_script}}
@@ -10,8 +10,8 @@ description: Start fennec-server over HTTP and send it FennecQL from curl, fetch
 any standard library — no driver needed.</p>
 
 <p>This page is the way in: start a server, send it statements, write in
-batches and retry safely. Every route, the filter syntax, the statuses and the
-streams are in the <a href="http-reference.html">HTTP reference</a>, and tokens
+batches, retry safely and write over only the row you read. Every route,
+the filter syntax, the statuses and the streams are in the <a href="http-reference.html">HTTP reference</a>, and tokens
 and policies in <a href="http-access.html">HTTP security and scoped access</a>.</p>
 
 <h2>Start it</h2>
@@ -306,6 +306,40 @@ waits for it as after the first answer.</p>
 <p>A write without a key costs what it did; with one, 16 200 single puts a
 second over HTTP against 18 300 without.</p>
 </details>
+
+
+<h2 id="optimistic">Optimistic concurrency</h2>
+
+<p>Two clients read a row, each changes it and writes it back: the second
+write silently undoes the first. Read the row by its id and it comes with an
+<code>ETag</code>; send that tag back in <code>If-Match</code> and the write
+is made only if the row is still the one you read — otherwise
+<code>412</code>, nothing written, and you read it again.</p>
+
+<pre data-lang="bash">curl -si http://127.0.0.1:8080/articles/3
+# ETag: "9f2c51e0b7a64d38c1e5a20f3b9d7e64"
+# {"id":3,"title":"newer","year":2026,"tags":null}
+
+curl -X PATCH http://127.0.0.1:8080/articles/3 \
+  -H 'If-Match: "9f2c51e0b7a64d38c1e5a20f3b9d7e64"' -d '{"year":2027}'
+# {"updated":1}, or 412 if another write changed the row first
+</pre>
+
+<ul>
+  <li><b>No race between the check and the write.</b> The server compares
+    the tag under the same write lock that makes the write.</li>
+  <li><b><code>If-None-Match: *</code></b> with <code>PUT
+    /&lt;name&gt;/&lt;id&gt;</code> makes the row only if there is none;
+    <code>If-Match: *</code> writes only if it is there.</li>
+  <li><b><code>If-None-Match</code> with the tag on a <code>GET</code></b>
+    answers <code>304</code> while the row is unchanged.</li>
+  <li><b>Retry with both.</b> An <code>Idempotency-Key</code> beside
+    <code>If-Match</code> makes a retry of a write that was made answer as
+    the first time rather than 412.</li>
+</ul>
+
+<p>The headers, a scoped token's tags and every status are in the <a
+href="http-reference.html#conditional">HTTP reference</a>.</p>
 
 
 <h2 id="where-next">Where next</h2>
