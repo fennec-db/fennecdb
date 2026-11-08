@@ -836,8 +836,19 @@ fn vector_list(v: &[f32], l: &[Value]) -> std::cmp::Ordering {
 /// at once (`fennec_http::api`'s hint) is the value it would have been
 /// read again as -- the integers the vector is, a list a number past them.
 pub fn whole_vector(v: &Value) -> Option<Vec<f32>> {
+    // Each a whole number short of 2^24, an `f32` holding it and hiding no
+    // rounding: asked before the vector is made, a list of decimals -- the
+    // one a hint reads at once -- leaves at its first number, nothing set
+    // aside.
+    let whole = |x: &Value| match *x {
+        Value::Int(i) => i.unsigned_abs() < 1 << 24,
+        Value::Float(f) => f.abs() < 16_777_216.0 && (f as i32) as f64 == f,
+        _ => false,
+    };
     match v {
-        Value::List(items) => quick_vector(items).filter(|q| whole_f32s(q)),
+        Value::List(items) if !items.is_empty() && items.iter().all(whole) => {
+            quick_vector(items)
+        }
         _ => None,
     }
 }
@@ -948,6 +959,53 @@ impl Document {
 mod tests {
     use super::*;
     use std::cmp::Ordering::{self, *};
+
+    /// `whole_vector` is the quick read's vector where its `f32`s are the
+    /// integers written, and nothing else: asked without making the vector
+    /// first, it answers as `quick_vector` and `whole_f32s` together do.
+    #[test]
+    fn a_whole_vector_is_the_quick_read_s_where_it_is_whole() {
+        let (i, f) = (Value::Int, Value::Float);
+        let lists = [
+            vec![i(1), i(-2)],
+            vec![f(1.0), i(2)],
+            vec![f(-0.0)],
+            vec![f(0.5), i(2)],
+            vec![f(1.00000001), i(2)],
+            vec![i(16_777_215), i(-16_777_215)],
+            vec![i(16_777_216)],
+            vec![f(16_777_216.0)],
+            vec![f(1e-50)],
+            vec![i(1), Value::Text("a".into())],
+            vec![],
+        ];
+        for items in lists {
+            let want = quick_vector(&items).filter(|v| whole_f32s(v));
+            let got = whole_vector(&Value::List(items.clone()));
+            assert_eq!(
+                got.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+                want.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+                "{items:?}"
+            );
+        }
+        assert_eq!(whole_vector(&Value::Vector(vec![1.0])), None);
+    }
+
+    /// A vector compares with a list of numbers alone by the `f32`s the
+    /// quick read makes of it, either side, and ranks before any other list.
+    #[test]
+    fn a_vector_compares_with_a_list_of_numbers_by_its_f32s() {
+        let v = Value::Vector(vec![0.1, 2.0]);
+        let l = |xs: Vec<Value>| Value::List(xs);
+        let tenth = l(vec![Value::Float(0.1), Value::Int(2)]);
+        assert_eq!(v.cmp_value(&tenth), Equal);
+        assert_eq!(tenth.cmp_value(&v), Equal);
+        assert_eq!(v.cmp_value(&l(vec![Value::Float(0.2), Value::Int(2)])), Less);
+        assert_eq!(l(vec![Value::Float(0.2)]).cmp_value(&v), Greater);
+        assert_eq!(v.cmp_value(&l(vec![Value::Float(0.1)])), Greater);
+        assert_eq!(v.cmp_value(&l(vec![Value::Text("a".into())])), Less);
+        assert_eq!(l(vec![Value::Text("a".into())]).cmp_value(&v), Greater);
+    }
 
     /// An int against a float worked out in `i128`, which holds every int
     /// and the floor of every float short of 2^127 exactly.
