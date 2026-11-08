@@ -19,7 +19,7 @@ show that your install lacks is in the next one, and
 <thead><tr><th>Way</th><th>Gives you</th><th>On</th></tr></thead>
 <tbody>
 <tr><td><a href="#install-script">The install script</a></td><td><code>fennec-server</code> and <code>fennec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
-<tr><td><a href="#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64</td></tr>
+<tr><td><a href="#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64 and arm64</td></tr>
 <tr><td><a href="#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
 <tr><td><a href="#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
@@ -67,12 +67,12 @@ that puts the directory on your <code>PATH</code> and leaves that to you.</p>
 
 <pre data-lang="powershell">irm https://fennecdb.com/install.ps1 | iex</pre>
 
-<p>Releases after 0.1.12 carry a Windows build,
-<code>fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip</code>: a folder holding
-<code>fennec-server.exe</code> and <code>fennec.exe</code> for x86_64, which an
-arm64 Windows 11 runs under its emulation. Before the first of them, the
-script says the latest release has no build for Windows and installs
-nothing. The programs need nothing installed beside them, the C runtime
+<p>Releases after 0.1.12 carry a Windows build for x86_64 and one for arm64,
+<code>fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip</code> and
+<code>fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip</code>: a folder holding
+<code>fennec-server.exe</code> and <code>fennec.exe</code>. The script takes
+the machine's. Before the first of them, the script says the latest release
+has no build for Windows and installs nothing. The programs need nothing installed beside them, the C runtime
 built in: unzipped anywhere, they run from there.</p>
 
 <ul>
@@ -222,7 +222,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-m
 
 <p>On Windows, the zip's sum beside its line in <code>SHA256SUMS</code>:</p>
 
-<pre data-lang="powershell">$zip = 'fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip'
+<pre data-lang="powershell">$zip = 'fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip'   # or aarch64-pc-windows-msvc
 (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Select-String -SimpleMatch $zip SHA256SUMS</pre>
 

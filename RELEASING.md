@@ -29,8 +29,9 @@ nothing reaches a registry before the notes have had a read.
    the same commit and named by nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
-   `release.yml` builds the binaries for Linux and macOS, the Windows zip
-   (`fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `tools/windows-zip.sh`: the
+   `release.yml` builds the binaries for Linux and macOS, the Windows zips
+   (`fennec-vX.Y.Z-<arch>-pc-windows-msvc.zip` for x86_64 and aarch64, each
+   on a runner of its architecture, `tools/windows-zip.sh`: the
    C runtime linked in, installed through `install.ps1` from the folder it
    was made in and run before it is kept, `tools/windows-zip-check.ps1`),
    the `fennec-web`
@@ -269,7 +270,7 @@ field of it is read another way.
 | `fennecdb` in the Homebrew tap `fennec-db/homebrew-tap` | `packaging/homebrew`, `tools/homebrew-formula.py` | the formula: `fennec` and `fennec-server` from the release's tarballs, by platform, each with its SHA-256 |
 | `fennecdb_X.Y.Z-1_<arch>.deb`, `fennecdb-X.Y.Z-1.<arch>.rpm` on the release | `packaging/nfpm.yaml`, `tools/linux-packages.sh` | `/usr/bin/fennec` and `/usr/bin/fennec-server` from the musl tarballs, for amd64 and arm64; no dependencies |
 | `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; deployed with the site, not with a release |
-| `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
+| `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
 | `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; deployed with the site, not with a release |
 
 ## Once: the desktop app's signing Environment
