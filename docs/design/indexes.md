@@ -324,8 +324,10 @@ sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
 `0.0`), `null` is held apart below every key, and `NaN` apart from both: it
 compares equal to everything, so it matches every inclusive comparison and no
 strict one, and an index holding one is never walked for `order`. A literal the
-key space cannot express exactly (`12.5` against an `int`, an int past 2^53
-against a `timestamp`) is left out of the range and evaluated per row. One of
+key space cannot express exactly (`12.5` against an `int`) is left out of the
+range and evaluated per row; an int no float holds against a `float` or a json
+path (2^53 + 1) lies between two keys with none between them, and is said by
+them (`SortedIndex::beside`, below). One of
 another kind than a typed field's, which `cmp_value` orders the field's values
 against by kind alone (`level > true`, `level < ""`, `t >= ""` where `""` reads
 as no time), is true of every value or of none (`SortedIndex::by_kind`), so it
@@ -360,6 +362,186 @@ every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built when a statement first reads
 it after an open (below), never in the file.
 
+**Numbers of two kinds compare by their true values** (`Value::cmp_value`,
+`value::tie`), and every index's keys with them. Met as two `f64`s alone, as
+they were, the ints 2^60 and 2^60 + 1 each equalled the float 2^60 and not
+each other: `n = 1152921504606846976.0` found one row through `@hash` and
+`@unique`, which key the int exactly, and through the scan and `@sorted`
+every one rounding to it, from 2^60 - 64 to 2^60 + 128; a sort over such
+values had no order to keep, and the float 2^63 equalled `i64::MAX`. Rounding to the
+nearest float is monotonic, so where two numbers' `f64`s differ they order
+the numbers; where they are equal short of 2^53, where every int is a float,
+the numbers are equal; and past it a tie of two kinds is told apart as two
+ints, 2^63 past every int (`tie`, out of line). A timestamp is its
+milliseconds' int, against an int too. So a whole float short of 2^63 either
+side is the one int it is, and a key says only that: `Value::key_as` hands a
+`@hash` lookup or a `lookup`'s probe the number itself or nothing (-2^63
+finds `i64::MIN`, 2^63 nothing, 2^53 + 1 no `float`; `NaN`, equal to every
+value, goes to the scan, where the bucket of its bits had found none of the
+rows the scan finds), `hash_key` files a whole float under its int up to
+2^63 (a path's `@unique` refuses 2^60.0 beside 2^60), `SortedIndex::bound`
+and `CompositeIndex::literal` key an int against a `float` only where a
+float holds it, and a json index keys every int a float holds as that
+float, holding apart only those none holds. The indexes are derived, so no
+file changes. Two floats have an arm of their own, and the mixed kinds go
+through the last arm, as they did, the tie looked at again there: arms of
+their own for the mixed kinds lengthened every comparison's dispatch, an
+order of 100 000 rows by a float 2.0% more instructions and by an int 0.6%.
+This way, against the build before (in-loop instructions, `proc_pid_rusage`,
+seven alternating runs and fifteen more for the orders, the 1-minute load
+under 6): an order by a float 1.5% fewer, by an int 0.6% fewer, a filter
+scan by an int 0.2% fewer with an int parameter and 0.3% more with a float
+one -- the mixed comparison -- a float field's scan 0.5% fewer with a float
+parameter and 0.4% more with an int one, an `@sorted` range the same; the
+orders' paired cycles moved +0.2%, inside their runs' spread. The browser
+module grew 330 bytes, 141 gzip and 55 brotli at `-q 11` -- inside the 0.3
+KB brotli moves by with the layout alone -- `tie` 317 of them. `tests/mixed_numbers.rs`
+holds every index, `lookup`, `in`, `order`, `min`, `max`, `having` and a
+json `@unique` to the scan near 2^53 to 2^63, random ints and literals among
+them, and `value::tests` the comparison to one worked out in `i128`.
+
+An int no float holds -- 2^53 + 1 -- has no key in a float's key space, so
+the first version of this rule left `xs > 9007199254740993` to be tested row
+by row over every row, where `as` had made it 2^53's key before. It lies
+between two adjacent floats (`value::floats_beside`), and every comparison
+with it is said by one of them as strict or inclusive as it was -- `>` and
+`<=` by the one below, `>=` and `<` by the one above, `=` by both, a range
+of no key (`Range::narrow_beside`) -- so a `NaN` row, equal to every value,
+is taken or left as the literal would take it. A float field's `@sorted`, a
+json path's (whose numbers are keyed as floats) and an index over several
+fields with a float or json part (`CompositeIndex::beside`, through its
+`literal` of each float) answer it so, natively: the browser module tests
+such a comparison row by row, as it did, as it does a literal of another
+kind (`by_kind`) -- with the bounds it grew 960 bytes more. A facet's
+ranges by such an int are counted row by row, as they were: the key above
+it would have answered them, for 160 bytes of the module no one asked for.
+A `lookup` whose parent key is `NaN` finds no child: it is no key
+(`Value::key_as`), where it had looked in the bucket of `NaN`'s bits and
+found children holding the same bits, though the scan's `=` finds every
+row equal to `NaN`. A `@hash` over a float field still files a `NaN` row in
+the bucket of its bits, where `x = 5.0` does not look, though the scan's `=`
+takes it -- as it did before; the random test holds `@hash` to a twin
+holding no `NaN`.
+
+**A value read back through JSON is the value it was.** `json::num_into`
+writes a whole float short of 2^63 either side as every digit of the int it
+is, which reads back as that int -- equal to the float -- and JavaScript as
+the same double; it wrote the shortest digits from 1e15 up, and 2^60 went
+out as `1152921504606847000`, read back as that int: `get` printed digits a
+statement or a parameter could not find the row by, and the router, which
+reads its tenants' rows back from their JSON and checks their order with
+`cmp_value` (`fanout::value_of`), named a tenant holding the float 2^60 and
+the int 2^60 + 1 out of order. From 2^63 on the shortest digits are past an
+`i64`, so a reader takes them back as the float itself
+(`a_whole_float_reads_back_as_itself`). The shell prints such a float so
+too. The clients follow: JavaScript's `JSON.stringify` and Go's
+`encoding/json` write a whole number from 2^53 on as its shortest digits.
+What a server is sent goes through `web/builder.js`'s `jsonOf`
+(`FennecHttp`'s bodies, the sync layer's batch lines) and Go's `exactly`,
+which write every digit of it instead. `JSON.stringify` cannot write a
+number's text from a replacer, so `jsonOf` marks such a number
+(`\u0000fennec-int:` and its digits, as a text) and replaces the mark, only
+where the value holds one: a request's parameters, every `FennecHttp`
+body's, are noted as they are normalized (`bodyOf`, through `counted`, its
+own copy of `normalize`'s walk), and a sync layer's line is told by the
+replica (below); a line no one told is walked, after a first
+`JSON.stringify` has refused a cycle the walk would follow. A text or
+a key that already starts with the mark -- written by no one but on purpose
+-- leaves the text as `JSON.stringify` writes it, the number with its
+shortest digits. The module's parameters go by `JSON.stringify` as they always did: a parameter
+there is a JavaScript value, and no JavaScript value is an int no double
+holds, so `fennec-wasm` reads such an int as the double it rounds to, the
+int that double is (`as_double`), and only for a text whose reading met an
+int past 2^53 (`json::wide`). Measured in Node over the module, a `run`
+putting 1 000 documents took a look at the page's values first 2.3% longer
+(a walk of them), a look for 16 digits in a row in its text 30% longer
+(every long fraction, `i / 3`, a match, and the text a quarter of
+`JSON.stringify`'s time to scan where none was), and `as_double` over
+every parameter 1.5% longer. Counted by the reader, against main
+(whole-process instructions, `/usr/bin/time -l`, seven alternating runs,
+the 1-minute load under 3): that `run` 40.42M -> 40.44M instructions a put
+(+0.06%), its cycles +0.3% (paired -0.4% to +1.2%, as much as without the
+reader's count) and its time -1.0% (inside its runs' 2%), the builder's
+insert of the documents 72.92M -> 72.95M (+0.03%), a small `get` 780 482
+-> 780 548. A note kept by `normalize` itself had cost that insert 0.2%, so
+the builder's own parameters are not noted; a request's body of 1 000
+documents takes 1% longer to make (`normalizeAll` then, a `WeakMap` telling
+`jsonOf` what it had found), where a walk of it after had taken 8.7%. The
+client ships as source, so a comment is bytes every page loads: these
+reasons are here, and `web/builder.js` keeps a line or three a function.
+`bodyOf` hands `jsonOf` its note as an argument instead of the `WeakMap`.
+Counted so, a call less a run doing nothing (seven alternating runs, the
+load under 3, one run over it discarded), against main: that body 13.68M
+-> 13.60M instructions (-0.6%, inside its runs' spread), a sync line of the
+same documents 2.21M -> 3.32M (+50%: the walk), the module's `run`, insert
+and `get` within 0.4%. A note kept by `normalize` itself, measured again,
+cost the insert 0.2% and the body 1.9%; `holdsWide` by `some` cost a line
+12% more and by `Object.values` 87%. The client grew 2 633 bytes, 903
+gzip, 798 brotli (`web/fennec.js` and its modules, as served), and
+`@fennecdb/web/client` in an app's bundle (esbuild, minified) 902, 297 and
+265; with these reasons in its comments it had grown 5 074, 1 694 and
+1 408, and 1 074, 359 and 339. `as_double` is 159 bytes of the module, which with
+it grew 649 bytes in all, 336 gzip, 305 brotli; it leaves an int an int --
+changing the kind cost 126 bytes of drop glue -- as no text
+`JSON.stringify` writes is an int rounding to 2^63. Natively, by `make
+instr-compare` (eight identities a build, seven runs each, the load under
+4), `query_json`'s `get` of 1 000 rows of four float columns, half the rows
+whole and half with a fraction (`examples/json_numbers.rs`): whole floats
+in [1e15, 1e16) 3.820M -> 3.488M instructions (-8.7%), in [2^53, 9e18)
+4.046M -> 3.592M (-11.2%), under a million -3.3%, none whole -0.5%, int
+columns -14.7%. `int_into` writes its digits and sign with one `push_str`,
+as `num::f64_into` does; pushed a `char` at a time, as it had been, the
+first two were +2.6% and +1.0% against main. A plain `/query` put
+(`replays`): +75 and +22 instructions (22 017 -> 22 092, 22 060 -> 22 081)
+in two sets, the second inside two standard errors, and one traced call of
+`handle` 4 instructions more of its own code (`Collection::index_scalar`
+and `Value::coerce_as` 2 each), the rest the allocator's draw. Python,
+.NET, Swift, Kotlin and Dart write such a double with a point or an
+exponent, which the server reads as the float it is; a Go struct document goes through `encoding/json` whole,
+so there such a number belongs in an `int64`, as the languages page says.
+`tests/mixed_numbers.rs` (`a_number_read_back_through_json_finds_its_row`)
+reads every kind of field's numbers back from the JSON a server answers and
+finds each row by them, the router's `a_json_column_of_large_numbers_merges_in_their_true_order`
+merges two tenants' engine-written rows, and `web/fennec.test.js`,
+`web/fennec.sync.test.js` and Go's `TestAWholeFloat64From2To53FindsItsRows`
+find 2^60's rows by the number each language holds.
+
+**A sync line is told by the replica's run of its write.** `FennecSync`
+runs a page's write on its replica before it queues the lines, and the
+module's reader counts every int past 2^53 it reads (`json::wide`, which
+`as_double` already reads): `write` reads the count (`fennec_wide`) before
+and after `#apply`, and a write whose path marks it `ran` -- an insert or
+an upsert the replica made under its ids, an update, a delete -- hands
+`jsonOf` whether it moved, so its lines are never walked. Every value such
+a line sends was read by that run: the replica's documents are the line's
+with ids put in (temporary ones from 2^52, below the count's 2^53, or ids
+the replica holds), an update's or a delete's statement is the line, and
+the second line naming rows by their key sends the same patch and the
+keys as text. A list of numbers the page's run sent apart as `f32`s
+(`vectorsApart`) is not read as JSON, but the server reads it as `f32`s
+too unless the statement needs it exact (`exactly`), and there the module
+asks for it as JSON first (`res.exact`) and reads it: the count moves
+where the server would read the digits. A false move -- an id the replica
+holds past 2^53 -- costs the slow path, no more. An insert into a shape
+with no key whose documents name no id, and an upsert with neither, are
+sent unrun and walked; a module from before the export tells nothing and
+every line is walked. When told one is there, `jsonOf` skips its first
+`JSON.stringify` and writes the marked text alone. Counted as the table
+above (a call less a run doing nothing, whole-process instructions, seven
+alternating runs, the 1-minute load under 2.5), a line putting 1 000
+documents of two texts, two floats with fractions and a small int: main
+1 143 556, walked 1 351 164 (+18.2%), told 1 144 686 (+0.1%, inside the
+runs' spread of 0.6% to 1.1%; the two reads of the count included). Every document
+holding an int past 2^53: walked 11.01M, told 9.60M (-12.8%; main's
+1.44M wrote the wrong digits). `bodyOf` with them 18.42M -> 16.52M
+(-10.3%), without them +0.03%; the module's `run`, insert and small `get`
+within 0.2%. The narrower look at the text, a whole number of 16 digits
+or more neither after a `.` or a digit nor before a `.`, `e` or a digit
+(`/(?<![.\d])\d{16,}(?![.\deE])/`), matches no fraction, but scanning the
+117 KB line cost 4.17M against `JSON.stringify`'s 1.14M (+265%), its scan
+looking at every character. The export is 23 bytes of the
+module, 19 gzip, 44 brotli; the client 452 bytes, 139 gzip, 101 brotli.
+
 ## Composite indexes
 
 **An index over several fields is its parts' bytes laid end to end**
@@ -376,9 +558,11 @@ text escaped (`00` as `00 FF`) and ended (`00 01`), a json number as its
 `f64` below json text -- null a tag below every value, a descending part's
 bytes inverted; a collated text is kept as written behind a tag naming the
 collation, and an index holding one compares part by part (`cmp_keys`),
-the rest as bytes. A float's `NaN` and a json bool, list, object or int past
-2^53 are apart: their codec bytes are their part (a unique index finds them
-by them), the rows are listed, and while one is no walk answers and a
+the rest as bytes. A float's `NaN` and a json bool, list, object or int no
+`f64` holds exactly (2^53 + 1; one a float holds is keyed as that float,
+which `cmp_value` finds it equal to) are apart: their codec bytes are their
+part (a unique index finds them by them), the rows are listed, and while
+one is no walk answers and a
 filter's run takes them as candidates to test. Entries are `(KeyBytes,
 DocId)` in the ordered index's `Chunked`, a key of up to 22 bytes held in the
 32-byte entry (an int and a time are 18), longer on the heap, two held ones

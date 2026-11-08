@@ -708,6 +708,11 @@ CLAIMS = [
     (BENCH_SIZE,
      r'the client</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_client_br", 0),
+    # Its gzip cell, which no claim held: it said 60 KB while the client
+    # grew to 66.
+    (BENCH_SIZE,
+     r'the client</td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_client_gz", 0),
     (BENCH_SIZE,
      r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
     # The comparison pages set the module beside another engine's files.

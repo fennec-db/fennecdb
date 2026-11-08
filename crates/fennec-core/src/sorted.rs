@@ -48,8 +48,8 @@ pub enum SortedIndex {
 }
 
 /// The entries of a [`SortedIndex::Json`]. A number of either kind is keyed
-/// as an `f64`, which is how `cmp_value` meets an int and a float; an int
-/// past 2^53 has no exact place there and is held apart, as is a `true` or
+/// as an `f64`, exact for an int a float holds; an int no float holds
+/// (2^53 + 1) has no exact place there and is held apart, as is a `true` or
 /// `false`, a list and an object -- each orders against the rest by its
 /// kind and within it by its contents, which no key here says. While any
 /// value is held apart the index answers nothing and the scan does: a
@@ -646,30 +646,50 @@ impl SortedIndex {
             (DataType::Text, Value::Text(t)) if fold.is_some() => {
                 Some(Key::Text(crate::case::fold(t, fold?).into()))
             }
-            (DataType::Int, Value::Int(i)) => Some(Key::Num(int_key(*i))),
-            (DataType::Timestamp, Value::Timestamp(ms)) => Some(Key::Num(int_key(*ms))),
-            // `cmp_value` meets a timestamp and an int as two f64s, exact
-            // only up to 2^53.
-            (DataType::Timestamp, Value::Int(ms)) if ms.unsigned_abs() <= 1 << 53 => {
-                Some(Key::Num(int_key(*ms)))
+            // `cmp_value` meets a timestamp and an int as two ints.
+            (DataType::Int, Value::Int(i))
+            | (DataType::Timestamp, Value::Timestamp(i) | Value::Int(i)) => {
+                Some(Key::Num(int_key(*i)))
             }
             (DataType::Timestamp, Value::Text(t)) => {
                 crate::time::parse(t).ok().map(|ms| Key::Num(int_key(ms)))
             }
-            // `cmp_value` compares an int against a float as two f64s, and so
-            // does this key.
+            // `cmp_value` compares an int against a float by their true
+            // values: an int a float holds is that float's key, and one it
+            // does not -- 2^53 + 1 -- lies between two keys, tested row by
+            // row.
             (DataType::Float, Value::Float(f)) if !f.is_nan() => Some(Key::Num(float_key(*f))),
-            (DataType::Float, Value::Int(i)) => Some(Key::Num(float_key(*i as f64))),
+            (DataType::Float, Value::Int(i)) => {
+                crate::value::exact_float(*i).map(|f| Key::Num(float_key(f)))
+            }
             (DataType::Text, Value::Text(t)) => Some(Key::Text(t.as_str().into())),
-            // A json path's numbers are keyed as `f64`s, exact for an int
-            // up to 2^53; text by its bytes. A literal of another kind --
-            // a timestamp, which compares against text by parsing it --
-            // is evaluated row by row.
+            // A json path's numbers are keyed as `f64`s, an int only where
+            // a float holds it exactly; text by its bytes. A literal of
+            // another kind -- a timestamp, which compares against text by
+            // parsing it -- is evaluated row by row.
             (DataType::Json, v) => match json_slot(Some(v)) {
                 JsonSlot::Num(k) => Some(Key::Num(k)),
                 JsonSlot::Text(t) => Some(Key::Text(t)),
                 _ => None,
             },
+            _ => None,
+        }
+    }
+
+    /// The keys either side of an int no float holds -- 2^53 + 1 -- where
+    /// [`Self::bound`] has none: against a `float` field, or a json path
+    /// whose numbers are keyed as floats, it lies between two keys with no
+    /// key between them, which a comparison with it is said by
+    /// ([`Range::narrow_beside`]). Tested row by row, `xs > 9007199254740993`
+    /// read every row.
+    pub fn beside(ty: &DataType, v: &Value) -> Option<(Key, Key)> {
+        match (ty, v) {
+            (DataType::Float | DataType::Json, Value::Int(i))
+                if crate::value::exact_float(*i).is_none() =>
+            {
+                let (below, above) = crate::value::floats_beside(*i);
+                Some((Key::Num(float_key(below)), Key::Num(float_key(above))))
+            }
             _ => None,
         }
     }
@@ -872,13 +892,17 @@ pub(crate) enum JsonSlot {
     Apart,
 }
 
-/// Where a json value goes in its index. An int is keyed as the `f64` it
-/// is, which `cmp_value` meets a float as; past 2^53 two ints share an `f64`
-/// that `cmp_value` tells apart, so it goes apart, as a `NaN` does.
+/// Where a json value goes in its index. An int a float holds exactly is
+/// keyed as that float, which `cmp_value` finds it equal to and orders it
+/// as against every number; one no float holds -- 2^53 + 1 -- would share
+/// a key with ints and a float `cmp_value` tells it apart from, so it
+/// goes apart, as a `NaN` does.
 pub(crate) fn json_slot(v: Option<&Value>) -> JsonSlot {
-    const EXACT: u64 = 1 << 53;
     match v {
-        Some(Value::Int(i)) if i.unsigned_abs() <= EXACT => JsonSlot::Num(float_key(*i as f64)),
+        Some(Value::Int(i)) => match crate::value::exact_float(*i) {
+            Some(f) => JsonSlot::Num(float_key(f)),
+            None => JsonSlot::Apart,
+        },
         Some(Value::Float(f)) if !f.is_nan() => JsonSlot::Num(float_key(*f)),
         Some(Value::Text(t)) => JsonSlot::Text(t.as_str().into()),
         None | Some(Value::Null) => JsonSlot::Null,
@@ -1169,6 +1193,25 @@ impl Range {
             Lt => {
                 self.strict = true;
                 self.tighten_hi(Bound::Excluded(key));
+            }
+            Ne => {}
+        }
+    }
+
+    /// Narrows the range by `field <op> v`, a value lying between the keys
+    /// `below` and `above` with no key between them
+    /// ([`SortedIndex::beside`]): `>` and `<=` said by the key below, `>=`
+    /// and `<` by the one above, as strict or inclusive as they were, so a
+    /// `NaN` row -- equal to every value -- is taken as `v` would take it;
+    /// `=` by both, a range of no key.
+    pub fn narrow_beside(&mut self, op: crate::query::CmpOp, below: Key, above: Key) {
+        use crate::query::CmpOp::*;
+        match op {
+            Gt | Le => self.narrow(op, below),
+            Ge | Lt => self.narrow(op, above),
+            Eq => {
+                self.narrow(Ge, above);
+                self.narrow(Le, below);
             }
             Ne => {}
         }

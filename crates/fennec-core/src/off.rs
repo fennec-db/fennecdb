@@ -395,6 +395,9 @@ impl SortedIndex {
     pub fn by_kind(ty: &DataType, op: crate::query::CmpOp, v: &Value) -> Option<bool> {
         None
     }
+    pub fn beside(ty: &DataType, v: &Value) -> Option<(Key, Key)> {
+        None
+    }
     pub fn range_ids(&self, r: &Range, cap: usize) -> Option<Vec<DocId>> {
         match *self {}
     }

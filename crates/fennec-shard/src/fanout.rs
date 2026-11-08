@@ -2396,6 +2396,53 @@ mod tests {
         assert!(keyed("tenant", &[wrong], &text, &rows).is_err());
     }
 
+    /// A json column holding the float 2^60 and the int 2^60 + 1 is in the
+    /// order its tenant put it: the float goes out as every digit of the
+    /// int it is, which reads back equal to it. Written as its shortest
+    /// digits, `1152921504606847000`, it read back as an int above 2^60 +
+    /// 1, and the tenant was named out of order.
+    #[test]
+    fn a_json_column_of_large_numbers_merges_in_their_true_order() {
+        let p60 = 1i64 << 60;
+        let tenant = |values: &[Value]| {
+            let mut db = Database::new();
+            db.execute(&fennec_ql::parse_one("create collection c (m json)").unwrap())
+                .unwrap();
+            let put = fennec_ql::parse_one("put c {m: $1}").unwrap();
+            for v in values {
+                db.execute_with(&put, std::slice::from_ref(v)).unwrap();
+            }
+            let mut out = String::new();
+            let get = fennec_ql::parse_one("get c select id, m order m").unwrap();
+            assert!(db.query_json(&get, &[], &mut out).unwrap().is_some());
+            out
+        };
+        let acme = tenant(&[
+            Value::Int(p60 + 1),
+            Value::Float(p60 as f64),
+            Value::Float((p60 + 256) as f64),
+        ]);
+        let beta = tenant(&[Value::Int(p60 + 255), Value::Int(p60 - 1), Value::Int(p60)]);
+        assert!(acme.contains("1152921504606846976"), "{acme}");
+        let a = ask(r#"{"order":["m","id"]}"#);
+        let Merge::Order { keys, limit } = &a.merge else {
+            panic!()
+        };
+        let (r, f) = read(&a, &[("acme", &acme), ("beta", &beta)]);
+        assert!(f.is_empty(), "{}", f[0].why);
+        let out = ordered("tenant", keys, *limit, &r);
+        let rows = fennec_core::json::parse_documents(&out).unwrap();
+        let ms: Vec<Value> = rows
+            .iter()
+            .map(|r| r.iter().find(|(k, _)| k == "m").unwrap().1.clone())
+            .collect();
+        let want = [p60 - 1, p60, p60, p60 + 1, p60 + 255, p60 + 256];
+        assert_eq!(ms.len(), want.len(), "{out}");
+        for (m, w) in ms.iter().zip(want) {
+            assert_eq!(m.cmp_value(&Value::Int(w)), Order::Equal, "{out}");
+        }
+    }
+
     #[test]
     fn a_request_says_each_thing_once_and_nothing_else() {
         let l = Limits::default();

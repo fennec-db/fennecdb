@@ -287,24 +287,31 @@ impl Value {
     /// list->vector conversion included). Schema validation funnels
     /// through this single point.
     pub fn coerce(self, ty: &DataType) -> Result<Value> {
-        self.coerce_as(ty, false)
+        self.coerce_as(ty, Fit::Write)
     }
 
-    /// [`Value::coerce`], but the float ±2^63 going into an `int` is that
-    /// int's end, which a write refuses, since its text may have been past
-    /// it ([`I64_END`]). For a key looked up by: `=` finds the row holding
-    /// `i64::MIN` by the float -2^63, which it is, and the one holding
-    /// `i64::MAX` by 2^63, which `cmp_value` compares it as, so a `lookup`'s
-    /// parent holding the float finds that child too. And for an `[int]`'s
-    /// `f32`s, where ±2^63 is what its ends were read as.
-    pub(crate) fn coerce_ends(self, ty: &DataType) -> Result<Value> {
-        self.coerce_as(ty, true)
+    /// The value of a field of type `ty` that `=` finds equal to this one,
+    /// as an index files it, or `None` where it is no value of that type
+    /// -- for a key looked up by: an `=` through a `@hash`, a `lookup`'s
+    /// probe. A number goes over only as the number it is, since
+    /// `cmp_value` compares an int and a float by their true values: the
+    /// float -2^63 finds the row holding `i64::MIN`, which it is, and 2^63
+    /// nothing, which no int is; 2^53 + 1 finds no `float`, which none
+    /// holds, where `as` would have made it 2^53. `NaN` is no key: `=`
+    /// finds it equal to every value, which no bucket holds -- a filter's
+    /// is answered by the scan, and the bucket of its bits, which a float
+    /// field's `@hash` looked in, found none of the rows the scan finds.
+    pub(crate) fn key_as(self, ty: &DataType) -> Option<Value> {
+        match self {
+            Value::Float(f) if f.is_nan() => None,
+            v => v.coerce_as(ty, Fit::Key).ok(),
+        }
     }
 
-    /// The one body of [`Value::coerce`] and [`Value::coerce_ends`]: a
-    /// function of its own taking the ends and moving the value on into
-    /// `coerce` was 102 bytes more of the browser module.
-    fn coerce_as(self, ty: &DataType, ends: bool) -> Result<Value> {
+    /// The one body of [`Value::coerce`] and [`Value::key_as`], a number
+    /// taken in as `fit` says: a function of its own for the ends, moving
+    /// the value on into `coerce`, was 102 bytes more of the browser module.
+    fn coerce_as(self, ty: &DataType, fit: Fit) -> Result<Value> {
         if self.is_null() {
             return Ok(Value::Null);
         }
@@ -316,13 +323,23 @@ impl Value {
             // only a float takes this arm -- an integer written as one is
             // read as an `i64` and never meets the test.
             (DataType::Int, Value::Float(f)) if f.fract() == 0.0 => {
-                match f.abs() < I64_END || ends && f.abs() == I64_END {
+                let fits = match fit {
+                    Fit::Write => f.abs() < I64_END,
+                    Fit::Key => (-I64_END..I64_END).contains(&f),
+                    Fit::F32 => f.abs() <= I64_END,
+                };
+                match fits {
                     true => Ok(Value::Int(f as i64)),
                     false => Err(past_int()),
                 }
             }
             (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
-            (DataType::Float, Value::Int(i)) => Ok(Value::Float(i as f64)),
+            // A key no float holds is none (`expected float` below, which
+            // its callers drop): rounded, 2^53 + 1 found the rows holding
+            // 2^53, which `=` does not.
+            (DataType::Float, Value::Int(i)) if fit != Fit::Key || exact_float(i).is_some() => {
+                Ok(Value::Float(i as f64))
+            }
             (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
             (DataType::Bytes, Value::Bytes(b)) => Ok(Value::Bytes(b)),
             (DataType::Bytes, Value::Text(s)) => Ok(Value::Bytes(s.into_bytes())),
@@ -389,19 +406,19 @@ impl Value {
             // Nor does an `f32` tell an int's ends from past them: 2^63 is
             // where every number from 2^63 - 2^38 to 2^63 + 2^39 lands,
             // i64::MAX among them, so an `[int]` takes ±2^63 as its ends, as
-            // it always did ([`Value::coerce_ends`]), and refuses an `f32`
-            // past them, which only a number past 2^63 + 2^39 is.
+            // it always did ([`Fit::F32`]), and refuses an `f32` past them,
+            // which only a number past 2^63 + 2^39 is.
             (DataType::List(inner), Value::Vector(v)) => {
                 let mut out = Vec::with_capacity(v.len());
                 for f in v {
-                    out.push(Value::Float(f as f64).coerce_as(inner, true)?);
+                    out.push(Value::Float(f as f64).coerce_as(inner, Fit::F32)?);
                 }
                 Ok(Value::List(out))
             }
             (DataType::List(inner), Value::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
-                    out.push(it.coerce_as(inner, ends)?);
+                    out.push(it.coerce_as(inner, fit)?);
                 }
                 Ok(Value::List(out))
             }
@@ -449,6 +466,13 @@ impl Value {
             // compared equal, and an ordered index, which keys ints exactly,
             // would then disagree with the scan about their order.
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            // `NaN` equal to every float. An arm of its own, so two floats
+            // never ask whether a tie needs a second look (below): through
+            // the last arm, as they went before, an order by a float took
+            // 0.3% more instructions for that; this way 1.5% fewer than
+            // before, and an order by an int 0.6% fewer, the dispatch laid
+            // out anew.
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
@@ -510,8 +534,23 @@ impl Value {
                 }
                 a.len().cmp(&b.len())
             }
+            // Numbers of two kinds -- an int, a float, a timestamp -- by their
+            // true values, as two ints are: met as two f64s alone, 2^60 and
+            // 2^60 + 1 each equalled the float 2^60 and not each other, so a
+            // `@hash`, keying the int exactly, found one row where the scan
+            // found every int rounding to 2^60, a sort had no order to keep,
+            // and 2^63 equalled `i64::MAX`. The f64s still order them
+            // wherever they differ ([`tie`] says why), and are equal only
+            // where the numbers are, short of 2^53, where every int is a
+            // float; a tie past it is looked at again. Arms of their own for
+            // the mixed kinds made every comparison's dispatch longer: an
+            // order by a float took 2% more instructions, one by an int 0.6%.
             _ => match (self.as_f64(), other.as_f64()) {
-                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+                (Some(a), Some(b)) => match a.partial_cmp(&b) {
+                    Some(Ordering::Equal) if a.abs() >= EVERY_INT => tie(self, other),
+                    Some(o) => o,
+                    None => Ordering::Equal,
+                },
                 // Incomparable types fall back to type rank. This used to
                 // return Equal: `year = "abc"` matched every row.
                 _ => self.type_rank().cmp(&other.type_rank()),
@@ -598,8 +637,88 @@ fn not_bytes() -> Error {
 /// JSON integer past `i64::MIN` is read as the float it rounds to
 /// (`-9223372036854775809` is -2^63 exactly), and there the text that
 /// said it is gone. `i64::MIN` written as an integer is an `i64` and taken,
-/// and a key looked up by ±2^63 is the int's end ([`Value::coerce_ends`]).
+/// and a key looked up by -2^63 is that int ([`Value::key_as`]).
 const I64_END: f64 = 9_223_372_036_854_775_808.0;
+
+/// How [`Value::coerce_as`] takes a number into an `int` or a `float`.
+#[derive(Clone, Copy, PartialEq)]
+enum Fit {
+    /// As a write files it: a whole float short of 2^63 either side into
+    /// an `int`, an int into a `float` as the nearest float.
+    Write,
+    /// As a key `=` finds rows by: only the number it is, -2^63 the int
+    /// `i64::MIN` and 2^63 none, an int no float holds no `float`.
+    Key,
+    /// An `[int]`'s element read as an `f32`, where ±2^63 is what its ends
+    /// were read as.
+    F32,
+}
+
+/// 2^53: every int short of it either side is a float, so two numbers
+/// whose f64s are equal and short of it are equal. 2^53 + 1 is not one,
+/// and its f64 is 2^53.
+const EVERY_INT: f64 = 9_007_199_254_740_992.0;
+
+/// Two numbers of two kinds whose f64s are equal, at or past 2^53, by
+/// their true values -- an int or a timestamp (its milliseconds' int)
+/// against a float or against each other. Rounding to the
+/// nearest float is monotonic, so where the f64s of two numbers differ so
+/// do the numbers, the same way, and `cmp_value` takes the f64s' answer
+/// there; where they are equal a float among them is a whole one from
+/// -2^63 to 2^63, the nearest to the int, and the two are told apart as
+/// ints: 2^63 is past every int, and anything short of it is exactly an
+/// `i64`. Out of line: only a tie past 2^53 comes here.
+#[inline(never)]
+fn tie(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let whole = |i: i64, f: f64| match f < I64_END {
+        true => i.cmp(&(f as i64)),
+        false => Ordering::Less,
+    };
+    match (a, b) {
+        (Value::Int(i) | Value::Timestamp(i), Value::Int(j) | Value::Timestamp(j)) => i.cmp(j),
+        (Value::Int(i) | Value::Timestamp(i), Value::Float(f)) => whole(*i, *f),
+        (Value::Float(f), Value::Int(i) | Value::Timestamp(i)) => whole(*i, *f).reverse(),
+        _ => Ordering::Equal,
+    }
+}
+
+/// The int `f` is, exactly: whole, and from -2^63 up to short of 2^63.
+pub(crate) fn exact_int(f: f64) -> Option<i64> {
+    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then_some(f as i64)
+}
+
+/// The float `i` is, exactly: an int a float holds every bit of -- each
+/// up to 2^53, and past it those whose bits below the float's 53 are
+/// zero. `i64::MAX` rounds to 2^63, which `as` takes back to it, so
+/// 2^63 is held out first.
+pub(crate) fn exact_float(i: i64) -> Option<f64> {
+    let f = i as f64;
+    (f < I64_END && f as i64 == i).then_some(f)
+}
+
+/// The two floats `i` lies between, an int no float holds ([`exact_float`]
+/// none), with no float between them: an ordered index keying floats says
+/// `x > i` as `x > below` and `x >= i` as `x >= above`, where no key says
+/// `i`. `i as f64` is the nearer one, either side; `i64::MAX`'s is 2^63.
+/// The other is a step in its bits -- toward zero or away, the bits
+/// holding the magnitude -- as every float past 2^53 is whole and
+/// finite: `next_up` and `next_down`, which mind the rest, were 249
+/// bytes of the browser module.
+#[cfg(feature = "sorted")]
+pub(crate) fn floats_beside(i: i64) -> (f64, f64) {
+    let f = i as f64;
+    let above = f >= I64_END || f as i64 > i;
+    let bits = f.to_bits();
+    let g = f64::from_bits(match above == (f > 0.0) {
+        true => bits - 1,
+        false => bits + 1,
+    });
+    match above {
+        true => (g, f),
+        false => (f, g),
+    }
+}
 
 /// The refusal of a whole float at or past [`I64_END`] going into an `int`,
 /// which a document's write names the field of (`engine::in_field`). Out of
@@ -650,5 +769,146 @@ impl Document {
         } else {
             self.fields.push((name.to_string(), value));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering::{self, *};
+
+    /// An int against a float worked out in `i128`, which holds every int
+    /// and the floor of every float short of 2^127 exactly.
+    fn by_i128(i: i64, f: f64) -> Ordering {
+        let far = 2f64.powi(127);
+        if f.is_nan() {
+            return Equal;
+        }
+        if f >= far {
+            return Less;
+        }
+        if f <= -far {
+            return Greater;
+        }
+        let floor = f.floor();
+        match (i as i128).cmp(&(floor as i128)) {
+            Equal if f > floor => Less,
+            o => o,
+        }
+    }
+
+    /// Ints at the edges a float's precision changes at, and either side.
+    fn ints() -> Vec<i64> {
+        let mut out = vec![0, 1, -1, 3, i64::MAX, i64::MIN];
+        for e in [24, 52, 53, 54, 60, 62, 63] {
+            let p = 1i128 << e;
+            for d in [
+                -257, -256, -129, -128, -127, -2, -1, 0, 1, 2, 127, 128, 129, 255, 256, 257,
+            ] {
+                for x in [p + d, -p + d] {
+                    if let Ok(x) = i64::try_from(x) {
+                        out.push(x);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Each int's nearest float, the floats either side of it and halves.
+    fn floats() -> Vec<f64> {
+        let mut out = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            1e300,
+            -1e300,
+            f64::MIN_POSITIVE,
+        ];
+        for i in ints() {
+            let f = i as f64;
+            out.extend([f, f + 0.5, f - 0.5]);
+            let bits = f.to_bits();
+            out.extend([
+                f64::from_bits(bits + 1),
+                f64::from_bits(bits.saturating_sub(1)),
+            ]);
+        }
+        out
+    }
+
+    #[test]
+    fn an_int_and_a_float_compare_by_their_true_values() {
+        for i in ints() {
+            for f in floats() {
+                let want = by_i128(i, f);
+                let (int, float) = (Value::Int(i), Value::Float(f));
+                assert_eq!(int.cmp_value(&float), want, "{i} {f:e}");
+                assert_eq!(float.cmp_value(&int), want.reverse(), "{f:e} {i}");
+                assert_eq!(Value::Timestamp(i).cmp_value(&float), want, "{i} {f:e}");
+            }
+            for j in ints() {
+                assert_eq!(Value::Int(i).cmp_value(&Value::Timestamp(j)), i.cmp(&j));
+                assert_eq!(Value::Timestamp(i).cmp_value(&Value::Int(j)), i.cmp(&j));
+            }
+        }
+        let p60 = 1i64 << 60;
+        let f60 = Value::Float(p60 as f64);
+        assert_eq!(Value::Int(p60).cmp_value(&f60), Equal);
+        assert_eq!(Value::Int(p60 + 1).cmp_value(&f60), Greater);
+        assert_eq!(Value::Int(p60 - 1).cmp_value(&f60), Less);
+        assert_eq!(Value::Int(i64::MAX).cmp_value(&Value::Float(I64_END)), Less);
+        assert_eq!(
+            Value::Int(i64::MIN).cmp_value(&Value::Float(-I64_END)),
+            Equal
+        );
+    }
+
+    #[test]
+    fn a_number_is_exactly_the_other_kind_or_none() {
+        for i in ints() {
+            match exact_float(i) {
+                Some(f) => assert_eq!(by_i128(i, f), Equal, "{i}"),
+                None => assert_ne!(by_i128(i, i as f64), Equal, "{i}"),
+            }
+        }
+        for f in floats() {
+            match exact_int(f) {
+                Some(i) => assert_eq!(by_i128(i, f), Equal, "{f:e}"),
+                None => {
+                    let whole = f.fract() == 0.0 && (-I64_END..I64_END).contains(&f);
+                    assert!(!whole, "{f:e}");
+                }
+            }
+        }
+        let (int, float) = (DataType::Int, DataType::Float);
+        let key = |v: Value, ty: &DataType| v.key_as(ty);
+        assert_eq!(
+            key(Value::Float(-I64_END), &int),
+            Some(Value::Int(i64::MIN))
+        );
+        assert_eq!(key(Value::Float(I64_END), &int), None);
+        assert_eq!(key(Value::Float(2.5), &int), None);
+        assert_eq!(key(Value::Float(f64::NAN), &float), None);
+        assert_eq!(key(Value::Int((1 << 53) + 1), &float), None);
+        let f60 = Value::Float((1u64 << 60) as f64);
+        assert_eq!(key(Value::Int(1 << 60), &float), Some(f60));
+        assert_eq!(key(Value::Int(i64::MAX), &float), None);
+        // A write rounds an int into a float field, and refuses -2^63 into
+        // an int one, whose text may have been past it.
+        #[cfg(feature = "sorted")]
+        for i in ints().into_iter().filter(|&i| exact_float(i).is_none()) {
+            let (below, above) = floats_beside(i);
+            assert_eq!(by_i128(i, below), Greater, "{i}");
+            assert_eq!(by_i128(i, above), Less, "{i}");
+            assert_eq!(below.next_up(), above, "{i}");
+        }
+        let rounded = Value::Int((1 << 53) + 1).coerce(&float).unwrap();
+        assert_eq!(rounded, Value::Float(9_007_199_254_740_992.0));
+        assert!(Value::Float(-I64_END).coerce(&int).is_err());
     }
 }

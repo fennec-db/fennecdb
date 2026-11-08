@@ -854,11 +854,12 @@ filter at all. A path's index is a field of its own beside the fields
 (`Schema::paths`), written inside its json field's schema entry, and kept up
 from `Document::at`; `Collection::fit_paths` makes the structures match the
 schema after an alter or an undo, unbuilt, rather than move them by name.
-`@hash` files a whole float as the int it equals (`hash_key`), and a lookup
-over json takes only what a bucket answers exactly (`lookup_key`: not an int
-past 2^53, not a timestamp); `@sorted` keys numbers as `f64`s and text by its
-bytes, numbers first, and holds apart what it cannot order -- a boolean, a
-list, an object, an int past 2^53 -- answering nothing while it holds one
+`@hash` files a whole float as the int it is (`hash_key`), up to 2^63 either
+side, and a lookup over json takes only what a bucket answers exactly
+(`lookup_key`: not `NaN`, not a timestamp, not a list or an object);
+`@sorted` keys numbers as `f64`s and text by its bytes, numbers first, and
+holds apart what it cannot order -- a boolean, a list, an object, an int no
+`f64` holds exactly (2^53 + 1) -- answering nothing while it holds one
 (`SortedIndex::answers`); `tests/json.rs` holds both to a twin collection
 row for row. Nesting is 64 levels and a path 64 keys, refused past either
 (`MAX_JSON_DEPTH`, `MAX_PATH_KEYS`), the JSON reader's recursion bounded

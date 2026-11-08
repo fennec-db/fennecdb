@@ -35,6 +35,7 @@ import {
   from,
   ident,
   isSpec,
+  jsonOf,
   nameOf,
   rowsOf,
   statementOf,
@@ -66,6 +67,8 @@ const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 let sibling;
 /** A database made empty again, its handle a new one (`Fennec`'s static block). */
 let emptied;
+/** The ints past 2^53 a database's module read (`Fennec`'s static block). */
+let met;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -118,6 +121,7 @@ export class Fennec {
       f.#wasm.fennec_close(f.#handle);
       f.#handle = f.#wasm.fennec_open();
     };
+    met = (f) => f.#wasm.fennec_wide?.();
   }
 
   /**
@@ -239,6 +243,8 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
+    // Not `jsonOf`: the module reads an int no double holds as the double
+    // it rounds to (`as_double`), and a look here cost every `run`.
     const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
     let out;
@@ -1864,7 +1870,10 @@ export class FennecSync {
   async write(verb, q, arg, opts) {
     let applied;
     const wait = this.#optimistic(() => {
+      const was = met(this.#local);
       applied = this.#apply(verb, q, arg, opts);
+      // `ran`: the replica's run read every value its lines send.
+      if (applied?.ran && was !== undefined) applied.wide = met(this.#local) !== was;
     });
     if (wait) await wait;
     if (!applied) return 0;
@@ -1936,7 +1945,7 @@ export class FennecSync {
       });
       this.#local.run(...from(c)[write](local, required));
       this.#nextTemp = next;
-      return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
+      return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length, ran: true };
     }
     if (verb === 'upsert') return this.#applyUpsert(c, base, key, arg, opts);
     const stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
@@ -1957,7 +1966,7 @@ export class FennecSync {
       const k = from(c).where(key, 'in', keys);
       lines.push(verb === 'update' ? k.toUpdate(arg) : k.toDelete());
     }
-    return { lines, undo: { c, del: [], put: JSON.stringify(before) }, temps: [], count };
+    return { lines, undo: { c, del: [], put: JSON.stringify(before) }, temps: [], count, ran: true };
   }
 
   /**
@@ -2009,7 +2018,7 @@ export class FennecSync {
     const before = held.size ? this.#local.run(...from(c).where('id', 'in', [...held]).toFennecQL()).rows ?? [] : [];
     const count = this.#local.run(...from(c).toUpsert(local, patch, required)).count ?? 0;
     this.#nextTemp = next;
-    return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count };
+    return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count, ran: true };
   }
 
   /**
@@ -2023,7 +2032,7 @@ export class FennecSync {
     const op = {
       n,
       path: lines.length === 1 ? '/query' : '/batch',
-      body: lines.map(ndjson).join('\n'),
+      body: applied.flatMap((a) => a.lines.map((l) => ndjson(l, a.wide))).join('\n'),
       key: `fennec-${newKey()}`,
       undo: JSON.stringify(applied.map((a) => a.undo)),
       label: lines[0][0].slice(0, 500),
@@ -2912,8 +2921,8 @@ function wire(op) {
 }
 
 /** A batch line: each line is exactly a `POST /query` body. */
-function ndjson([sql, params]) {
-  return JSON.stringify({ query: sql, params });
+function ndjson([sql, params], wide) {
+  return jsonOf({ query: sql, params }, wide);
 }
 
 function normalizeShape(raw, url) {

@@ -279,10 +279,12 @@ endif
 ## runs as UUIDS (8) copies under random UUIDs, signed again, ROUNDS (7) runs
 ## each, and is read as the mean of their medians. EXAMPLE (replays) of PKG
 ## (fennec-http), MODES (put,keyed) a run each, ARGS after the mode, PATTERN
-## the figure's line; TRACE=fennec_http::handle also counts one call (HIT, the
-## 30th) by function under lldb, the program's own code apart from the
-## allocator's. UUIDS=0 for plain pairs. Each run once the 1-minute load is
-## under QUIET (4); results to OUT (target/instr/results.txt), scratch in WORK
+## the figure's line (PKG=fennec-core EXAMPLE=json_numbers
+## MODES=e15,wide,small,frac,ints: a page of numbers written as JSON);
+## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
+## function under lldb, the program's own code apart from the allocator's.
+## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET
+## (4); results to OUT (target/instr/results.txt), scratch in WORK
 ## (target/instr): the binaries removed unless KEEP=1, BASE's worktree and
 ## build unless KEEP_BASE=1 (tools/instr/compare.py;
 ## docs/design/benchmarks.md#instruction-counts)

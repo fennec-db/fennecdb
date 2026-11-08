@@ -31,3 +31,15 @@ refusing `restore`.
 **[A live query learns what changed from the change
 ring.](../docs/design/js-client.md#live-queries)** `Query.reads` names each
 collection read (`Lives`), `fennec_changes` those written.
+
+**[A number from 2^53 on goes out as every
+digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
+server as JSON -- `FennecHttp`'s bodies, the sync layer's lines -- writes
+them through `jsonOf`, never `JSON.stringify`, whose shortest digits the
+server reads as another int: a request's body by `bodyOf`, which notes
+them as it normalizes the parameters, and a sync line told by the
+module's count of such ints read (`fennec_wide`) around the replica's run
+of its write -- so a write marked `ran` sends no value that run did not
+read -- the rest walked. The module's parameters go by `JSON.stringify`,
+which it reads as JavaScript's doubles (`as_double`). `normalize` itself
+notes nothing: the module's builder runs through it.

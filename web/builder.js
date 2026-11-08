@@ -266,6 +266,85 @@ export function normalize(v, what = 'value') {
   throw new FennecError(`this object cannot be used as a fennecdb value (${what})`);
 }
 
+/**
+ * A `/query` body or a `/batch` line, its parameters normalized, each
+ * `wide` number noted as they are made: `jsonOf` then walks no body holding
+ * none (docs/design/indexes.md#sorted weighs the ways).
+ */
+export function bodyOf(sql, params) {
+  const seen = { wide: false };
+  return jsonOf({ query: sql, params: params.map((p) => counted(p, seen)) }, seen.wide);
+}
+
+/**
+ * `normalize`'s value, a `wide` number noted in `seen`: a walk of its own,
+ * as a note kept by `normalize` cost the module's builder.
+ */
+function counted(v, seen) {
+  if (typeof v === 'number') {
+    if (wide(v)) seen.wide = true;
+    return v;
+  }
+  if (Array.isArray(v)) return v.map((x) => counted(x, seen));
+  if (v !== null && typeof v === 'object') {
+    const proto = Object.getPrototypeOf(v);
+    if (proto === Object.prototype || proto === null) {
+      const out = {};
+      for (const [k, x] of Object.entries(v)) {
+        if (x !== undefined) out[k] = counted(x, seen);
+      }
+      return out;
+    }
+  }
+  const out = normalize(v);
+  return Array.isArray(out) ? counted(out, seen) : out;
+}
+
+/** 2^53 <= |x| < 2^63, whole: a number whose shortest digits fennecdb reads as another int. */
+const wide = (x) => (x = Math.abs(x)) >= 2 ** 53 && x < 2 ** 63;
+
+/**
+ * Whether `v`, an array or an object, holds a `wide` number: a loop each,
+ * as `some` cost a sync line 12%.
+ */
+function holdsWide(v) {
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      const x = v[i];
+      if (typeof x === 'number' ? wide(x) : x !== null && typeof x === 'object' && holdsWide(x)) return true;
+    }
+    return false;
+  }
+  for (const k in v) {
+    const x = v[k];
+    if (typeof x === 'number' ? wide(x) : x !== null && typeof x === 'object' && holdsWide(x)) return true;
+  }
+  return false;
+}
+
+const MARK = '\u0000fennec-int:';
+const MARKED = /"\\u0000fennec-int:(-?\d+)"/g;
+
+/**
+ * `v` as `JSON.stringify` writes it, but a `wide` number as every digit of
+ * its int: what a server is sent. `holds` says whether `v` has one; else it
+ * is walked, once `JSON.stringify` has refused a cycle. A replacer cannot
+ * write a number's text, so it writes a mark the text then loses; a text or
+ * a key starting with the mark keeps `JSON.stringify`'s text.
+ */
+export function jsonOf(v, holds) {
+  if (!holds) {
+    const text = JSON.stringify(v);
+    if (holds === false || !holdsWide([v])) return text;
+  }
+  let clash = false;
+  const marked = JSON.stringify(v, (k, x) => {
+    if (k.startsWith(MARK) || (typeof x === 'string' && x.startsWith(MARK))) clash = true;
+    return typeof x === 'number' && wide(x) ? MARK + BigInt(x) : x;
+  });
+  return clash ? JSON.stringify(v) : marked.replace(MARKED, '$1');
+}
+
 export function isSpec(v) {
   return (
     v !== null &&

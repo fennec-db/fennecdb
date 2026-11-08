@@ -79,34 +79,75 @@ fn needs_escape(w: u64) -> bool {
 /// `n` in decimal: `to_string` allocated a `String` for every int a row
 /// held, and copied it.
 pub fn int_into(out: &mut String, n: i64) {
-    let mut digits = [0u8; 20];
-    let mut at = digits.len();
+    // `i64::MIN`'s 19 digits and its sign.
+    let mut text = [0u8; 20];
+    let mut at = text.len();
     let mut m = n.unsigned_abs();
     loop {
         at -= 1;
-        digits[at] = b'0' + (m % 10) as u8;
+        text[at] = b'0' + (m % 10) as u8;
         m /= 10;
         if m == 0 {
             break;
         }
     }
     if n < 0 {
-        out.push('-');
+        at -= 1;
+        text[at] = b'-';
     }
-    for &d in &digits[at..] {
-        out.push(d as char);
-    }
+    // One `push_str`, as `num::f64_into` writes. Pushed a `char` at a time,
+    // a `get` of 1 000 rows of four float columns, half whole from 1e15 up
+    // -- each going out as every digit of its int (`num_into`) -- took 2.6%
+    // more instructions than their shortest digits had; this way 8.7%
+    // fewer, and int columns 14.7% fewer (`examples/json_numbers.rs`).
+    // SAFETY: every byte is a digit or `-`, ASCII.
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&text[at..]) });
 }
 
+/// A float: a whole one short of 2^63 either side as the int it is, every
+/// digit, which a reader takes back as that int -- equal to the float, as
+/// `cmp_value` compares an int and a float by their true values -- and
+/// JavaScript as the same double. The shortest digits reading back as the
+/// float, which it wrote from 1e15 up, are another number past 2^53: 2^60
+/// went out as `1152921504606847000`, read back as that int, which neither
+/// equals 2^60 nor finds it through an index. From 2^63 on (and at -2^63)
+/// the shortest digits are past an `i64`, so a reader takes them back as
+/// the float itself (`a_whole_float_reads_back_as_itself`).
 fn num_into(out: &mut String, f: f64) {
     if f.is_finite() {
-        if f.fract() == 0.0 && f.abs() < 1e15 {
+        if f.fract() == 0.0 && f.abs() < 9_223_372_036_854_775_808.0 {
             int_into(out, f as i64);
         } else {
             crate::num::f64_into(out, f);
         }
     } else {
         out.push_str("null");
+    }
+}
+
+/// How many ints past 2^53 the browser module's reader has met: a page's
+/// parameters are JavaScript values, and `fennec-wasm` looks through those
+/// of a text whose reading met none no further (`as_double`), where a look
+/// through every one cost a `run` putting 1 000 documents 1.5%; a sync's
+/// line is told by it whether to look (`fennec_wide`). Natively none is
+/// counted, and none asked for.
+pub mod wide {
+    #[cfg(target_arch = "wasm32")]
+    static MET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    pub(crate) fn met() {
+        use std::sync::atomic::Ordering::Relaxed;
+        MET.store(MET.load(Relaxed).wrapping_add(1), Relaxed);
+    }
+
+    /// The count so far: a reading that met one moved it.
+    pub fn count() -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        return MET.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        0
     }
 }
 
@@ -594,7 +635,13 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
                 // writer writes a float that large without an exponent:
                 // refused, `1e300` written out did not read back.
                 match crate::num::parse_i64(text) {
-                    Some(n) => Ok(Value::Int(n)),
+                    Some(n) => {
+                        #[cfg(target_arch = "wasm32")]
+                        if n.unsigned_abs() > 1 << 53 {
+                            wide::met();
+                        }
+                        Ok(Value::Int(n))
+                    }
                     None => crate::num::parse_f64(text)
                         .map(Value::Float)
                         .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),
@@ -1304,6 +1351,97 @@ mod tests {
         assert_eq!(
             parse_object_listing_exact(body, "params").unwrap()[1].1,
             Value::List(vec![Value::List(vec![Value::Float(19.99), Value::Int(1)])])
+        );
+    }
+
+    /// `int_into` writes what `to_string` does, the sign and `i64::MIN`'s
+    /// 19 digits within its buffer, onto what `out` held.
+    #[test]
+    fn an_int_is_written_as_to_string_writes_it() {
+        let mut ints = vec![0, 1, -1, 9, -9, 10, -10, i64::MAX, i64::MIN, i64::MIN + 1];
+        let mut p = 1i64;
+        while let Some(q) = p.checked_mul(10) {
+            ints.extend([p - 1, p, p + 1, -p, -(p - 1), q / 10 * 7]);
+            p = q;
+        }
+        for n in ints {
+            let mut out = String::from("x");
+            int_into(&mut out, n);
+            assert_eq!(out, format!("x{n}"));
+        }
+    }
+
+    /// Every whole float written out reads back as a number `cmp_value`
+    /// finds equal to it -- the int it is, every digit, short of 2^63
+    /// either side, the float itself from there on -- and a float with a
+    /// fraction as itself, whichever reader reads it.
+    #[test]
+    fn a_whole_float_reads_back_as_itself() {
+        use std::cmp::Ordering::Equal;
+        let end = 9_223_372_036_854_775_808.0f64;
+        let mut floats = vec![
+            0.0,
+            -0.0,
+            1e15,
+            1e300,
+            -1e300,
+            f64::MAX,
+            f64::MIN,
+            end,
+            -end,
+        ];
+        for e in 50..=66 {
+            let p = 2f64.powi(e);
+            for f in [p, -p] {
+                let bits = f.to_bits();
+                for d in 0..40u64 {
+                    floats.extend([
+                        f64::from_bits(bits + d),
+                        f64::from_bits(bits.saturating_sub(d)),
+                    ]);
+                }
+            }
+        }
+        // Whole floats of every size, from a fixed generator.
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..20_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let f = f64::from_bits(s).trunc();
+            if f.is_finite() {
+                floats.push(f);
+            }
+        }
+        for f in floats {
+            let (v, text) = (Value::Float(f), to_string(&Value::Float(f)));
+            for back in [parse(&text).unwrap(), parse_json(&text).unwrap()] {
+                assert_eq!(back.cmp_value(&v), Equal, "{f:e} wrote {text}");
+                match (back, f.fract() == 0.0 && f.abs() < end) {
+                    (Value::Int(i), true) => assert_eq!(i as f64, f, "{text}"),
+                    (Value::Float(g), false) => assert_eq!(g.to_bits(), (f + 0.0).to_bits()),
+                    (b, _) => panic!("{f:e} wrote {text}, read back as {b:?}"),
+                }
+            }
+            // A member of a json field's object, and a document's.
+            let object = Value::object(vec![("x".into(), v.clone())]).unwrap();
+            let back = parse_json(&to_string(&object)).unwrap();
+            assert_eq!(back.cmp_value(&object), Equal, "{f:e} wrote {text}");
+            let doc = parse_documents(&format!("[{{\"x\": {text}}}]")).unwrap();
+            assert_eq!(doc[0][0].1.cmp_value(&v), Equal, "{f:e} wrote {text}");
+        }
+        // 2^60, as fennecdb wrote it and as JavaScript's `JSON.stringify`
+        // writes it: the shortest digits are another int.
+        let p60 = Value::Float(2f64.powi(60));
+        assert_eq!(to_string(&p60), "1152921504606846976");
+        let shortest = parse_json("1152921504606847000").unwrap();
+        assert_ne!(shortest.cmp_value(&p60), Equal);
+        // From 2^63 on the shortest digits, past an `i64`: the float again.
+        assert_eq!(to_string(&Value::Float(end)), "9223372036854776000");
+        assert_eq!(to_string(&Value::Float(-end)), "-9223372036854776000");
+        assert_eq!(
+            parse_json("-9223372036854776000").unwrap(),
+            Value::Float(-end)
         );
     }
 
