@@ -1,0 +1,6 @@
+# Text is checked out with LF on every system, Windows too, whatever
+# `core.autocrlf` says: a test comparing a golden file byte for byte passes
+# in a developer's checkout as on CI (docs/design/windows.md, decision 8).
+* text=auto eol=lf
+# The font's licence holds CRLF as its authors wrote it, kept as it is.
+site/fonts/OFL-IBMPlexMono.txt -text

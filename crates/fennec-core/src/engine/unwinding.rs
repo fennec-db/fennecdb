@@ -189,6 +189,7 @@ mod on_file {
             assert_eq!(db.change_seq(), seq + landed + 1, "{at}: no number twice");
             drop(db);
             let _ = std::fs::remove_file(&path);
+            #[cfg(unix)]
             let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         }
     }
@@ -400,6 +401,7 @@ mod torn {
     /// rows 1 and 2.
     fn made(path: &Path) -> Database {
         let _ = std::fs::remove_file(path);
+        #[cfg(unix)]
         let _ = std::fs::remove_file(crate::synclog::path_for(path));
         let mut db = made_on(crate::fs::open(path).expect("open"));
         db.sync().expect("sync");
@@ -918,6 +920,7 @@ mod torn {
         assert_eq!(state(&db), *after, "{tag}: the file");
         drop(db);
         let _ = std::fs::remove_file(&path);
+        #[cfg(unix)]
         let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         reached
     }
@@ -1080,6 +1083,7 @@ mod torn {
                     }
                     PANIC_AT.with(|p| p.set(None));
                     let _ = std::fs::remove_file(&path);
+                    #[cfg(unix)]
                     let _ = std::fs::remove_file(crate::synclog::path_for(&path));
                 }
             }

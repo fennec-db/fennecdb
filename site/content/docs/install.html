@@ -32,8 +32,15 @@ show that your install lacks is in the next one, and
 <p>There is no Windows build of the programs yet: run the image, or the script
 inside WSL. Built <a href="#source">from source</a> on Windows, they take a
 file's lock as everywhere else, so a second process over a served file is
-refused there too; the server reads its file into memory rather than mapping
-it. The clients run anywhere their language does.</p>
+refused there too, and a checkpoint's or a compact's rename is made durable
+as on Linux and macOS, the file and its directory flushed. That rename
+replaces a file other programs hold open on NTFS and ReFS; FAT32 and exFAT
+have no such rename, so a checkpoint there fails and writes stop, which the
+server says as it starts. Keep a database out of a folder OneDrive, Dropbox
+or a backup agent reads: one holding the file can refuse the rename, which
+is tried again for a second before writes stop. The server reads its file
+into memory rather than mapping it. The clients run anywhere their language
+does.</p>
 
 <h2 id="install-script">The install script</h2>
 

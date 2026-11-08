@@ -13,7 +13,16 @@ fails reads or a network file system -- and a mapped file is only ever
 replaced by rename: a copy over it in place took a server down. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fennec-server` under `--sync always` reports it (500) instead of the success it
-had not yet sent. That fsync runs *outside* the exclusive lock: under it a
+had not yet sent. A refused rename is not such a failure: it wrote
+nothing. On Windows another process's handle opened without
+`FILE_SHARE_DELETE` -- an indexer's, a backup agent's, a synced folder's --
+refuses a rename over the file (std's rename answers
+`ERROR_ACCESS_DENIED`, the POSIX call `ERROR_SHARING_VIOLATION`; both are
+taken), so `swap_in` tries it, and the open after it, again within one
+second, a millisecond's wait doubling up to 50, before it fails the sink as
+any failed rename does (`fs::windows::swap`,
+[windows.md](windows.md#7-what-else-windows-differs-in), held by
+`a_rename_another_handle_refuses_is_tried_again` on CI's Windows job). That fsync runs *outside* the exclusive lock: under it a
 write only calls `Database::flush`, which hands back a `Durability` to run once
 the lock is released, and `FileSink` writes the bytes there as well (a `write`
 under the lock waited out concurrent fsyncs on macOS). The writes the lock
@@ -228,7 +237,9 @@ is not written over at the next. Everything that renames a file into a
 database's place removes the log first and makes the removal durable --
 `swap_in` after syncing the file it replaces, a restore, a backup
 unsealed, a tenant's import (`fs::forget_sync_log`) -- and syncs the
-directory after the rename (`fs::sync_dir`), which a tenant's import
+directory after the rename (`fs::sync_dir`; on Windows, which keeps no
+log, the renamed file flushed and then its directory,
+[windows.md](windows.md#3-durability-on-ntfs)), which a tenant's import
 missed until the #495 review, as a tenant's create missed fsyncing the
 file its open made (`tenants.md`); a clean close syncs
 the file and removes it, so a node keeps none beside a closed tenant, and

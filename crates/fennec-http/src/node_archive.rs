@@ -145,9 +145,9 @@ fn note(dir: &Path, gone: bool, at: u64) -> io::Result<()> {
     text.push_str(&format!("{} {at}\n", if gone { "gone" } else { "back" }));
     put(&dir.join("presence"), text.as_bytes())?;
     // The rename durable too: lost in a crash, a deleted tenant came back
-    // at a restore.
-    #[cfg(unix)]
-    fs::File::open(dir)?.sync_all()?;
+    // at a restore. On Windows the renamed file is flushed as well as the
+    // directory (`renamed_in`).
+    renamed_in(dir, "presence")?;
     Ok(())
 }
 
@@ -853,6 +853,24 @@ fn restore_line(
         Ok(r) => Restoring::Restored(r.seq, line.label.clone()),
         Err(e) => Restoring::Failed(format!("{}: {e}", line.label)),
     }
+}
+
+/// `dir` made durable after `name` was renamed into it: its `fsync` on a
+/// Unix; on Windows fennec-core's `sync_dir`, the renamed file flushed and
+/// then the directory, NTFS writing its log lazily (docs/design/windows.md).
+#[cfg(unix)]
+fn renamed_in(dir: &Path, _name: &str) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(windows)]
+fn renamed_in(dir: &Path, name: &str) -> io::Result<()> {
+    fennec_core::fs::sync_dir(&dir.join(name)).map_err(|e| io::Error::other(e.to_string()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn renamed_in(_: &Path, _: &str) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

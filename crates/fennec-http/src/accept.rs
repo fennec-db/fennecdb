@@ -285,7 +285,7 @@ pub fn widen(listener: &std::net::TcpListener) {
         unsafe { listen(listener.as_raw_fd(), BACKLOG) };
     }
     #[cfg(not(unix))]
-    let _ = listener;
+    let _ = (listener, BACKLOG);
 }
 
 /// How long a refused connection is held after its answer for its client

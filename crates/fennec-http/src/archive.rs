@@ -405,14 +405,14 @@ impl Archive {
     }
 
     /// Makes every file made, renamed in or removed in the archive's
-    /// directory so far durable (`fennec_core::fs::sync_dir`), and the
-    /// directory's own name where this made it ([`Parent::sync`]). Until
-    /// then a crash can lose a name or bring one back, in any order on some
-    /// file systems, so it runs before a step that stands on the ones
-    /// before it rather than after each (docs/design/replication.md, "A
-    /// node's archive").
+    /// directory so far durable ([`names_synced`]), and the directory's
+    /// own name where this made it ([`Parent::sync`]). Until then a crash
+    /// can lose a name or bring one back, in any order on some file
+    /// systems, so it runs before a step that stands on the ones before it
+    /// rather than after each (docs/design/replication.md, "A node's
+    /// archive").
     fn sync_dir(&self) -> io::Result<()> {
-        sync_dir_of(&self.dir.join("history"))?;
+        names_synced(&self.dir.join("history"))?;
         let n = self.made.load(Ordering::SeqCst);
         if n != 0 {
             self.parent.sync(&self.dir, n)?;
@@ -511,9 +511,9 @@ impl Archive {
     }
 
     /// Writes `bytes` under `path` whole or not at all: a side file,
-    /// fsynced, then renamed over. The rename is not synced: what depends
-    /// on the name syncs the directory first ([`Self::sync_dir`]): an fsync
-    /// more a tenant made a node's first pass 44% longer (`keep_began`).
+    /// fsynced, then renamed over ([`renamed`]), the directory not synced:
+    /// what depends on the name syncs it first ([`Self::sync_dir`]): an
+    /// fsync more a tenant made a node's first pass 44% longer (`keep_began`).
     fn put(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let tmp = path.with_extension("tmp");
         let mut f = File::create(&tmp)?;
@@ -522,7 +522,7 @@ impl Archive {
             None => f.write_all(bytes)?,
         }
         f.sync_all()?;
-        fs::rename(&tmp, path)
+        renamed(&f, &tmp, path)
     }
 
     /// When its oldest image was taken, ms since the epoch: nothing before
@@ -558,7 +558,7 @@ impl Archive {
         let mut f = File::create(&tmp)?;
         f.write_all(format!("{first}\n").as_bytes())?;
         f.sync_all()?;
-        fs::rename(&tmp, &began)
+        renamed(&f, &tmp, &began)
     }
 
     /// Adds a base image of the database at change `seq`. Taking one now and
@@ -1496,6 +1496,36 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     fs::rename(&tmp, out)?;
     sync_dir_of(out)?;
     Ok(seq)
+}
+
+/// `tmp`, written through `f` and fsynced, renamed to `to`. On Windows `f`
+/// flushes the file again once it is renamed, as fennec-core's `sync_dir`
+/// flushes a renamed file before its directory (docs/design/windows.md,
+/// decision 3); [`names_synced`] then flushes the directory alone, once
+/// for every name renamed in before it, as a Unix's directory fsync does.
+#[cfg(not(windows))]
+fn renamed(_f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(tmp, to)
+}
+
+#[cfg(windows)]
+fn renamed(f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(tmp, to)?;
+    f.sync_all()
+}
+
+/// The names made, renamed or removed in the archive's directory made
+/// durable, `path` any name in it: its fsync on a Unix (`sync_dir`); on
+/// Windows its flush alone, each file renamed in flushed by [`renamed`] --
+/// `sync_dir` would flush whatever `path` names besides.
+#[cfg(not(windows))]
+fn names_synced(path: &Path) -> io::Result<()> {
+    sync_dir_of(path)
+}
+
+#[cfg(windows)]
+fn names_synced(path: &Path) -> io::Result<()> {
+    fennec_core::fs::sync_dir_alone(path)
 }
 
 #[cfg(test)]
