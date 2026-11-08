@@ -184,8 +184,10 @@ fn key() -> u64 {
 }
 
 /// A fresh 64 bits: SplitMix64's finalizer over a key and the thread's
-/// count, as a made request id is -- distinct within a process, as
-/// unguessable as the key, no system call.
+/// count, as a made request id is -- distinct within a process, no system
+/// call. Distinct is all that holds, the key being the clock's where the
+/// system gives no randomness; nothing needs an id unguessable, a client
+/// sending its own `traceparent`.
 fn fresh() -> u64 {
     let n = NEXT.with(|n| {
         let v = n.get();

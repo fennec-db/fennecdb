@@ -16,9 +16,11 @@
 //! A made id is 16 hex characters: 64 bits of a bijective mix
 //! (SplitMix64's finalizer) of a key read from the system once a process,
 //! the thread's number and its count of requests -- distinct within a
-//! process while it has made fewer than 2^24 threads, as unguessable as the
-//! key, and 15 ns to make (12 to keep a client's), where reading
-//! `/dev/urandom` for each was a system call a request.
+//! process while it has made fewer than 2^24 threads, and 15 ns to make (12
+//! to keep a client's), where reading `/dev/urandom` for each was a system
+//! call a request. Only that they are distinct holds: the key falls back to
+//! the clock where the system gives no randomness (`crypto::id_u64`), and
+//! no id need be unguessable, as a client may send its own.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;

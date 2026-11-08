@@ -7,8 +7,9 @@
 //! descriptor: a server at its limit (EMFILE) read none, and the nonces
 //! fell back to the clock -- two frames of a sealed archive sealed in one
 //! tick could share one. `/dev/urandom` is read only where the call is
-//! missing: a Linux kernel before 3.17 (ENOSYS), and a Unix neither Linux
-//! nor macOS, which no release is built for.
+//! missing or denied: a Linux kernel before 3.17 (ENOSYS), a seccomp filter
+//! refusing it (EPERM), and a Unix neither Linux nor macOS, which no
+//! release is built for.
 
 /// Fills `buf` with the system's randomness; `false` where it gave none.
 #[cfg(target_os = "linux")]
@@ -33,7 +34,13 @@ pub(super) fn fill(buf: &mut [u8]) -> bool {
         }
         match std::io::Error::last_os_error().kind() {
             ErrorKind::Interrupted => {}
-            ErrorKind::Unsupported => return urandom(rest),
+            // ENOSYS: a kernel before 3.17. EPERM: a seccomp filter that
+            // denies the call with an errno (an older container runtime's
+            // profile, a sandbox) while `/dev/urandom` stays readable, which
+            // a reviewer reproduced in Docker; std and the getrandom crate
+            // read both as the call missing. Where the file cannot be read
+            // either, `urandom` refuses: never the clock.
+            ErrorKind::Unsupported | ErrorKind::PermissionDenied => return urandom(rest),
             _ => return false,
         }
     }

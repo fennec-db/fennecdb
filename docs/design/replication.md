@@ -529,8 +529,11 @@ one call where it was an open, a read and a close: 1.0-1.2 us against
 10.7-13.8 on an M1, 200 000 draws three rounds each. A test runs
 it with every descriptor taken, and with the system refusing
 (`crypto::without_randomness`). `/dev/urandom` stays only where the call is
-missing: a kernel before 3.17 (ENOSYS), and a Unix neither Linux nor macOS,
-which no release is built for. Only ids, which must be unique and need not
+missing or denied: a kernel before 3.17 (ENOSYS), a seccomp filter that
+answers `getrandom` with EPERM while the file stays readable (reproduced in
+Docker with a profile returning errno 1; std and the getrandom crate read
+EPERM as ENOSYS too), and a Unix neither Linux nor macOS, which no release
+is built for; where the file cannot be read either, the seal is refused. Only ids, which must be unique and need not
 be secret -- request and trace ids, a hook set's version -- may take the
 clock where the system gives nothing (`crypto::id_u64`, a count of the
 process's own in place of the one that began again).
