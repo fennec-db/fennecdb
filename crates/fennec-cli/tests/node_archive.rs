@@ -23,6 +23,43 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
+/// `fennec`, on Windows in a process group of its own: Ctrl+Break, its
+/// SIGTERM there, goes to a group ([`ask_to_stop`]).
+fn fennec_in_its_group() -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP: the child heads a group, its id the child's.
+        cmd.creation_flags(0x0000_0200);
+    }
+    cmd
+}
+
+/// Asks `child` to stop as a supervisor does: SIGTERM, and on Windows,
+/// which has no signals, Ctrl+Break to the group [`fennec_in_its_group`]
+/// made, through the console this process shares with it.
+fn ask_to_stop(child: &std::process::Child) -> bool {
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
+        }
+        // SAFETY: no pointers; CTRL_BREAK_EVENT to the child's own group.
+        unsafe { GenerateConsoleCtrlEvent(1, child.id()) != 0 }
+    }
+}
+
 fn exec(t: &Tenant, sql: &str) {
     let durable = {
         let mut g = t.db.write().unwrap();
@@ -103,7 +140,7 @@ fn a_node_restored_from_its_archive_holds_every_archived_write() {
     // second beside the stream.
     let root = d.join("root");
     let log = std::fs::File::create(d.join("archiver.log")).unwrap();
-    let mut archiver = Command::new(env!("CARGO_BIN_EXE_fennec"))
+    let mut archiver = fennec_in_its_group()
         .args(["archive", "--tenants", &url, root.to_str().unwrap()])
         .args(["--token", REPL, "--image-every", "1s"])
         .stdout(Stdio::null())
@@ -187,11 +224,7 @@ fn a_node_restored_from_its_archive_holds_every_archived_write() {
         fennec_http::node_archive::gone_at(&root.join("doomed")).is_some()
     });
     // Interrupted, the archiver syncs and ends.
-    let term = Command::new("kill")
-        .args(["-TERM", &archiver.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(term.success());
+    assert!(ask_to_stop(&archiver));
     let ended = archiver.wait().unwrap();
     assert!(
         ended.success(),
@@ -264,7 +297,7 @@ fn every_tenant_restores_to_a_moment() {
     exec(&a, "create collection notes (title text, n int @hash)");
     exec(&a, "put notes {title: \"early\", n: 1}");
     let root = d.join("root");
-    let mut archiver = Command::new(env!("CARGO_BIN_EXE_fennec"))
+    let mut archiver = fennec_in_its_group()
         .args([
             "archive",
             "--tenants",
@@ -307,9 +340,7 @@ fn every_tenant_restores_to_a_moment() {
                 .is_ok_and(|r| r.seq >= seq)
         });
     }
-    let _ = Command::new("kill")
-        .args(["-TERM", &archiver.id().to_string()])
-        .status();
+    let _ = ask_to_stop(&archiver);
     assert!(archiver.wait().unwrap().success());
 
     let out = d.join("then");

@@ -502,12 +502,12 @@ fn main() {
     // its tree, its digest checked.
     fennec_http::install_statement_reader();
     // Said at the start, as a server told no JWT demands says it takes every
-    // token: what a Unix gives and Windows does not yet (docs/design/windows.md).
+    // token: what a Unix gives and Windows does not yet (docs/design/windows.md)
+    // -- but by a server, never by `--version`, `--help` or `--ping`, whose
+    // output is theirs (`say_what_windows_lacks`, below the code a Unix build
+    // compiles, so no line of that code moves).
     #[cfg(windows)]
-    fennec_http::log!(
-        "windows: a rename is made durable, the file and its directory flushed; \
-         no mapped file yet"
-    );
+    say_what_windows_lacks();
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
     let mut stdin_close = false;
@@ -1644,5 +1644,19 @@ fn say_volume(path: &str) {
             v.file_system
         ),
         Err(e) => fennec_http::log!("windows: the volume {path} is on could not be read: {e}"),
+    }
+}
+
+/// What a Unix gives and Windows does not yet, said at the start -- unless
+/// the arguments ask for the version, the usage or a probe, which print
+/// their own output and end: `--version`'s stderr is empty there too.
+#[cfg(windows)]
+fn say_what_windows_lacks() {
+    let ends_at_once = |a: &str| matches!(a, "--version" | "-V" | "--help" | "-h" | "--ping");
+    if !std::env::args().skip(1).any(|a| ends_at_once(&a)) {
+        fennec_http::log!(
+            "windows: a rename is made durable, the file and its directory flushed; \
+             no mapped file yet"
+        );
     }
 }

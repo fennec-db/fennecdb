@@ -506,8 +506,8 @@ pub fn open_in_place(
     true
 }
 
-/// Randomness from the system alone: a key must not come from the clock,
-/// as [`random_bytes`] falls back to.
+/// The system's randomness alone, never the clock [`random_bytes`] may use.
+#[cfg(not(windows))]
 pub fn system_random(n: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut buf = vec![0u8; n];
@@ -520,8 +520,8 @@ pub fn system_random(n: usize) -> Option<Vec<u8>> {
 
 // ------------------------------------------------------------------- random
 
-/// Cryptographic randomness. `/dev/urandom` on Unix; when that cannot be
-/// read, the clock, the process id and a stack address are mixed with SHA-256.
+/// `/dev/urandom`, else the clock, pid and a stack address through SHA-256.
+#[cfg(not(windows))]
 pub fn random_bytes(n: usize) -> Vec<u8> {
     use std::io::Read;
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
@@ -722,6 +722,15 @@ impl RsaKey {
         ct_eq(&got, &want)
     }
 }
+
+// The system's randomness on Windows, which has no `/dev/urandom`. Below the
+// code a Unix build compiles, so its lines -- a panic's location among them
+// -- stay where they were (docs/design/windows.md, 7l).
+#[cfg(windows)]
+#[path = "crypto/windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{random_bytes, system_random};
 
 #[cfg(test)]
 mod tests {

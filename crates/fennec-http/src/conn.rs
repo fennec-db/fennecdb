@@ -301,11 +301,12 @@ mod open {
         let open = open();
         let mut wakers = Vec::new();
         for (fd, wake) in open.iter() {
-            // SAFETY: the descriptor is open while it is listed, and is let
-            // go of under this lock before it closes; `ManuallyDrop` keeps
-            // it from being closed here.
+            // SAFETY: open while it is listed, let go of under this lock
+            // before it closes; `ManuallyDrop` keeps it from closing here.
             let s = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(*fd) });
             let _ = s.shutdown(std::net::Shutdown::Read);
+            #[cfg(windows)]
+            super::sock::cancel_reads(&s);
             wakers.extend(wake.clone());
         }
         wakers
@@ -318,7 +319,6 @@ mod open {
 
     #[cfg(not(any(unix, windows)))]
     pub(super) fn note(_: &TcpStream) {}
-
     #[cfg(not(any(unix, windows)))]
     pub(super) fn forget(_: &TcpStream) {}
 }
