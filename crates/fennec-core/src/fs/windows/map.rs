@@ -393,17 +393,20 @@ impl Mapping {
                     return Err(io::Error::last_os_error());
                 }
             }
-            // SAFETY: the placeholder at `at` is `piece` bytes, the view
-            // replaces it exactly, from the page of the file at `mapped`,
-            // which the section holds since the file is `len` long; it is
-            // unmapped in `drop`.
+            // SAFETY: the placeholder at `at` is `piece` bytes, which the
+            // view of the file from `mapped` to its end, `len`, fills to
+            // the page, replacing it; it is unmapped in `drop`. Its size is
+            // the file's bytes, not the page-rounded `piece` the page asks
+            // for: a view past a section's end is refused, and the system
+            // rounds it to the page and matches the placeholder by its
+            // pages (`a_view_replaces_a_placeholder_at_the_file_s_length`).
             let view = unsafe {
                 (calls.map)(
                     section.0,
                     GetCurrentProcess(),
                     at,
                     v.mapped as u64,
-                    piece,
+                    len - v.mapped,
                     MEM_REPLACE_PLACEHOLDER,
                     PAGE_READONLY,
                     std::ptr::null_mut(),
@@ -634,18 +637,19 @@ pub(in crate::fs) mod tests {
     }
 
     /// Which `ViewSize` replaces a placeholder over a file not a whole
-    /// number of pages long: the placeholder's, page-rounded past the
-    /// section's end, as the page asks -- what [`Mapping::grow`] passes.
-    /// Printed beside what the section's exact length and 0 do.
+    /// number of pages long: the page asks for the placeholder's own,
+    /// page-rounded, which `windows-latest` refuses past the section's end
+    /// (5, access denied), as it refuses 0 (87); the file's length is what
+    /// it takes -- what [`Mapping::grow`] passes. Each printed.
     #[test]
-    fn a_view_replaces_a_placeholder_page_rounded() {
+    fn a_view_replaces_a_placeholder_at_the_file_s_length() {
         let calls = calls().unwrap();
         let dir = scratch("view-size");
         let path = dir.join("odd.fennec");
         std::fs::write(&path, bytes(0, 5000)).unwrap();
         let file = File::open(&path).unwrap();
         let mut said = Vec::new();
-        let mut rounded = false;
+        let mut exact = false;
         for (name, size) in [("page-rounded", 8192), ("exact", 5000), ("zero", 0)] {
             // SAFETY: a placeholder of two pages, replaced by a view or
             // freed, the view unmapped.
@@ -679,13 +683,13 @@ pub(in crate::fs) mod tests {
                     let read = std::slice::from_raw_parts(view as *const u8, 5000);
                     assert_eq!(read, &bytes(0, 5000)[..]);
                     said.push(format!("{name}: mapped"));
-                    rounded |= name == "page-rounded";
+                    exact |= name == "exact";
                     UnmapViewOfFile(view);
                 }
             }
         }
         println!("a view over a placeholder, ViewSize {}", said.join("; "));
-        assert!(rounded, "{said:?}");
+        assert!(exact, "{said:?}");
         drop(file);
         let _ = std::fs::remove_dir_all(&dir);
     }

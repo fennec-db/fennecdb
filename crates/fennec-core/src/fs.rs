@@ -1230,12 +1230,15 @@ fn open_mapped_into(
     // points the stores at the file it wrote. Left out, a new file, a new
     // tenant and a replica taking its first image kept everything in
     // memory until the process restarted.
-    let whole = db.load_mapped(mapping)?;
     // Windows cuts no file a view maps (`ERROR_USER_MAPPED_FILE`): the
-    // database and its views go, the file is cut, and it opens again.
+    // database and its views go, the file is cut, and it opens again, as
+    // this one was set up -- which the load forgets.
+    #[cfg(windows)]
+    let deferred = db.defer_links;
+    let whole = db.load_mapped(mapping)?;
     #[cfg(windows)]
     if whole < len {
-        return windows::cut_and_open(db, sink, whole, wrap);
+        return windows::cut_and_open(db, deferred, sink, whole, wrap);
     }
     if whole < len {
         // The pages past the cut stay mapped and are never read: no record

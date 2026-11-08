@@ -190,14 +190,16 @@ refused for access taken as nothing to flush, as `fsync` of the directory
 gives on a Unix. A rename another
 process's handle refuses -- one opened without `FILE_SHARE_DELETE` -- is
 tried again, with the open after it, within one second before the sink
-fails (`fs::windows::swap`). What Windows lacks besides, none of it the single
-writer's: the mapped file (`fs::open` reads the file into memory there; a
-view refuses no rename over the file, so mapping needs no other swap),
-the sync log (Linux and Android alone by design), the page cache's room
-(`cache::room`, so `CompactPolicy::memory` never fires), `fennec backup`'s
-key file made `0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is the CRT's
-`SIGINT`, the one shutdown), and a release build. Their design, in
-slices, is [windows.md](windows.md).
+fails (`fs::windows::swap`). The file is mapped there since windows.md's
+second slice, in views laid end to end in a placeholder, and a view
+refuses no rename over its file, so mapping needed no other swap; a
+compact and a `create index` run beside the database there too
+(`Database::maintain`), and the page cache's room is
+`GlobalMemoryStatusEx`'s. What Windows lacks besides, none of it the
+single writer's: the sync log (Linux and Android alone by design),
+`fennec backup`'s key file made `0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is
+the CRT's `SIGINT`, the one shutdown), and a release build. Their design,
+in slices, is [windows.md](windows.md).
 
 `fennec restore` and `fennec backup` into a file renamed theirs over
 whatever had the name, a database written since included, and exited 0:

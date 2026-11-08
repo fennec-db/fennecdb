@@ -386,17 +386,19 @@ pub fn mappable(path: &Path) -> bool {
 /// maps (`SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`), and the open maps
 /// before it reads where the records end, so the database and its views
 /// go, the file is cut to the `whole` bytes its records fill, and it opens
-/// again -- a crash's tail costs a second open, as a server sets it up
-/// (`defer_linking`). Another process's view refuses the cut, and the open
-/// fails with it: a reader held over a file whose writer crashed.
+/// again -- a crash's tail costs a second open -- as the first was set up:
+/// `deferred`, a server's, its vectors left to link beside the queries
+/// (`defer_linking`, which the first load cleared). Another process's view
+/// refuses the cut, and the open fails with it: a reader held over a file
+/// whose writer crashed.
 #[cfg(mapped)]
 pub(super) fn cut_and_open(
     db: crate::engine::Database,
+    deferred: bool,
     mut sink: super::FileSink,
     whole: usize,
     wrap: Box<super::Wrap<'_>>,
 ) -> crate::error::Result<crate::engine::Database> {
-    let deferred = db.defer_links;
     drop(db);
     sink.mapping = None;
     sink.cut(whole)?;
@@ -1188,11 +1190,11 @@ pub(super) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A server's open (`open_serving`) that finds a torn tail cuts it by
-    /// a second open, which is a server's too: its vectors left for the
-    /// linker beside the queries, as the first open would have left them.
+    /// An open that finds a torn tail cuts it by a second open, every
+    /// record before it read (a server's, whose vectors the second leaves
+    /// to the linker too, is `tests/windows.rs`').
     #[test]
-    fn a_torn_tail_opens_again_as_the_server_set_it_up() {
+    fn a_torn_tail_is_cut_by_a_second_open() {
         let dir = scratch("torn");
         let path = dir.join("torn.fennec");
         let mut db = super::super::open(&path).unwrap();
@@ -1204,7 +1206,6 @@ pub(super) mod tests {
         drop(f);
         let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
-        assert!(db.defer_links, "the second open is not a server's");
         assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);

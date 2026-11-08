@@ -214,24 +214,39 @@ fn a_rewrite_renames_over_a_file_another_process_maps() {
 
 /// A torn tail is cut by a second open, once the first's views are gone
 /// (`ERROR_USER_MAPPED_FILE` otherwise), every record before it read and
-/// the writes after it kept. Another process mapping the file refuses the
-/// cut, and the open fails rather than write past a tail it left.
+/// the writes after it kept -- a server's open's second open a server's
+/// too, its vectors left to link beside the queries. Another process
+/// mapping the file refuses the cut, and the open fails rather than write
+/// past a tail it left.
 #[test]
 fn a_torn_tail_is_cut_by_a_second_open() {
     let path = tmp("torn");
     {
         let mut db = open_mapped(&path).unwrap();
-        run(&mut db, "create collection docs (n int, body text)");
-        fill(&mut db, 0, 30);
+        run(
+            &mut db,
+            "create collection docs (n int, body text, v vector<4> @hnsw(cosine, m=8))",
+        );
+        for i in 0..30 {
+            let v = [(i % 7) as f32, (i % 5) as f32, (i % 3) as f32, 1.0];
+            run(
+                &mut db,
+                &format!(
+                    "put docs {{n: {i}, body: \"row {i}\", v: [{}, {}, {}, {}]}}",
+                    v[0], v[1], v[2], v[3]
+                ),
+            );
+        }
         db.sync().unwrap();
     }
     let whole = std::fs::metadata(&path).unwrap().len();
-    let torn = |path: &Path| {
-        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-        // A data record promising 100 bytes, 4 of them there.
-        f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
-    };
-    torn(&path);
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    // A data record promising 100 bytes, 4 of them there.
+    f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
+    drop(f);
 
     let (mut child, _said, seen) = read_elsewhere(&path);
     assert_eq!(seen, 30);
@@ -247,6 +262,7 @@ fn a_torn_tail_is_cut_by_a_second_open() {
         let mut db = fennec_core::fs::open_serving(&path, true, Box::new(Ok)).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
         assert_eq!(count(&db), 30);
+        assert_eq!(db.link_pending(0), 30, "the second open linked them");
         fill(&mut db, 30, 5);
         db.sync().unwrap();
     }
