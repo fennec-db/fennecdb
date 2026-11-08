@@ -355,14 +355,25 @@ no `f32` holds, 2.33 to 2.38 us sent as JSON from a text's second call,
 against 1.92 to 1.96.
 Before the mark the `[int]` took 3.38 us asked again each call, 2.12 us
 sent as JSON at once. One `fennec_query` call traced (`trace.py`, the
-program's own code; the allocations alike, 30 a call): the marked `[int]`
-16 622 instructions against main's 16 426, a 128-dim vector's put into a
-collection with no list field 13 871 against 13 765, into one with an
-`[int]` 14 687 against 14 389 -- what asking a field holding a list of
-numbers whether a parameter is given it costs (`Known::give`).
+program's own code, a run's 200th call): a 128-dim vector's put (`put t
+{n: 0, e: $1}`) into a collection with no list field 13 660 instructions
+against main's 13 719, into one with an `[int]` field too 14 285 against
+14 006 -- what asking a field holding a list of numbers whether a
+parameter is given it costs (`Known::give`) -- and the marked `[int]` of
+`ffi_bench lists` 16 219 against 16 058.
 
-What brought it there, the trace read function by function: `Exactly`'s
-places held in place, up to four (`engine::Places`) -- in `Vec`s a list's place
+What brought it there, the trace read function by function: whether a
+field of a collection keeps numbers a flag of the collection, set with
+its schema wherever that changes (`Collection::numbers`, `set_schema`; a
+debug build holds it to the fields at every look), so a `put` of literals
+and parameters into one with none is answered at a look, no `Exactly`
+made (`Database::exactly_needs`) -- made, walked and dropped by the
+library's ask and again by the engine's own, a vector's put took 13 825
+instructions, 106 over main's; the walk inlined into that one body, its
+answer made where it is returned -- a second caller put the walk out of
+line, and the answer moved out of a local copied its 136 bytes, together
+70 to 100 instructions a call where a field keeps numbers;
+`Exactly`'s places held in place, up to four (`engine::Places`) -- in `Vec`s a list's place
 was two allocations a walk, and a call walks twice, the library's ask and
 the engine's own (`refuse_inexact`), with the binding's place one more,
 five allocations and some 1 200 instructions with the allocator's; a lone
@@ -375,7 +386,9 @@ tokens (`Tok::Values` an index into `Noting::listed`), where in the token
 every token's drop walked a `Value`'s kinds, some 170 instructions a parse
 of a short `put`. The browser module keeps `Places` a `Vec`,
 `exact_noting` one body and `holds_vector` a call: as natively they were
-1.0 KB of it (`make size-report`).
+1.0 KB of it (`make size-report`). It keeps the flag, which spares the
+walk its look at the fields, but not the answer at a look: `exactly` is
+the walk's body there, and `exactly_needs` asks it -- as natively, 0.3 KB.
 
 ## Quantized indexes
 

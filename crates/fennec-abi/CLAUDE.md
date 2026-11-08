@@ -17,6 +17,10 @@ a json field, an `in $n` or a path are asked for as JSON (`Refused::Exact`).
 A binding marks only a typed `f32` array, ints of at most 2^24 and doubles
 an `f32` holds (Swift's `Fennec.vector`, Kotlin's `Values.exact`, Dart's
 `exactVector`, `vectorsApart`), or a list stores a rounding as written.
+Whether a collection's fields keep numbers is its flag, set with its
+schema wherever that changes (`Collection::numbers`, `set_schema`; a debug
+build holds it to the fields at every look): natively a `put` into one
+with none is answered at a look (`Database::exactly_needs`).
 
 ### The native library and sync
 

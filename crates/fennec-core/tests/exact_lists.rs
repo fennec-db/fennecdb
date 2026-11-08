@@ -370,3 +370,47 @@ fn a_vector_made_a_list_is_its_f32s() {
         }
     }
 }
+
+/// Whether a field keeps a list of numbers is its collection's, kept with
+/// its schema (`Database::exactly_needs`): a collection gaining an `[int]`
+/// by `alter collection` after statements ran asks of a text parsed
+/// before, as of one parsed after, and refuses its quick read; one losing
+/// it, or a block putting the field back out, asks nothing again.
+#[test]
+fn a_list_of_numbers_added_or_dropped_is_asked_of_at_once() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(&mut db, "create collection p (n int, e vector<3>)", "").unwrap();
+    let vector = fennec_ql::parse_one("put p {n: 1, e: $1}").unwrap();
+    let list = fennec_ql::parse_one("put p {xs: $1}").unwrap();
+    let quick = json::parse_params("[[16777217]]").unwrap();
+    let asked = |db: &Database, stmt: &Statement| db.exactly_needs(stmt).map(|n| n.lists.to_vec());
+    let embedding = json::parse_params("[[0.1, 0.2, 0.3]]").unwrap();
+    db.execute_with(&vector, &embedding).unwrap();
+    assert_eq!(asked(&db, &vector), None);
+    assert_eq!(asked(&db, &list), None);
+    // Gained, in a block put back: asked of in it, and not after.
+    db.begin().unwrap();
+    run(&mut db, "alter collection p add field xs [int]", "").unwrap();
+    assert_eq!(asked(&db, &list), Some(vec![0]));
+    db.rollback();
+    assert_eq!(asked(&db, &list), None);
+    // Gained for good: the text parsed before asks, its quick read refused.
+    run(&mut db, "alter collection p add field xs [int]", "").unwrap();
+    assert_eq!(asked(&db, &vector), None);
+    assert_eq!(asked(&db, &list), Some(vec![0]));
+    let e = db.execute_with(&list, &quick).unwrap_err();
+    assert!(e.to_string().contains("as written"), "{e}");
+    db.execute_with(&list, &[ints(&[16_777_217])]).unwrap();
+    db.execute_with(&vector, &embedding).unwrap();
+    let xs: Vec<Value> = match run(&mut db, "get p select xs order id", "").unwrap() {
+        Response::Rows(rs) => rs.rows.iter().map(|r| r.values[0].clone()).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(xs, [Value::Null, ints(&[16_777_217]), Value::Null]);
+    // Lost: nothing asked of either again.
+    run(&mut db, "alter collection p drop field xs", "").unwrap();
+    assert_eq!(asked(&db, &list), None);
+    assert_eq!(asked(&db, &vector), None);
+    db.execute_with(&vector, &embedding).unwrap();
+}

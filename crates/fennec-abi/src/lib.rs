@@ -168,19 +168,18 @@ pub fn exact_noting(
     }
     // A statement alone, as nearly every call is, asked here natively:
     // where it needs nothing read again, as a vector's put does, that is
-    // all, and the rest is out of line. Inline whole it grew the native
-    // library's call past what its caller inlined, some 80 instructions a
-    // call (`tools/instr/trace.py`). The browser module keeps one body
-    // (`engine::Places` says what the split cost it).
+    // all -- at a look into a collection with no list of numbers
+    // (`Database::exactly_needs`) -- and the rest is out of line. Inline
+    // whole it grew the native library's call past what its caller
+    // inlined, some 80 instructions a call (`tools/instr/trace.py`). The
+    // browser module keeps one body (`engine::Places` says what the split
+    // cost it).
     #[cfg(not(target_arch = "wasm32"))]
     let first = match p.stmts.as_slice() {
-        [s] => {
-            let need = db.exactly(s);
-            if !need.is_needed() {
-                return Ok(());
-            }
-            Some(need)
-        }
+        [s] => match db.exactly_needs(s) {
+            None => return Ok(()),
+            need => need,
+        },
         _ => None,
     };
     #[cfg(target_arch = "wasm32")]
@@ -887,6 +886,39 @@ mod tests {
             &vector(EXACT, &[1.0, 0.5]),
         );
         assert!(r.contains("field `xs`, element 1"), "{r}");
+    }
+
+    /// A collection gaining an `[int]` by `alter collection` after a text
+    /// ran asks for that text's list as JSON at its next call, the answer
+    /// at a look gone with it (`Database::exactly_needs`); losing it, the
+    /// vector beside it goes over apart again, nothing asked.
+    #[test]
+    fn a_list_of_numbers_added_or_dropped_is_asked_of_at_once() {
+        let mut db = Database::new();
+        run(&mut db, "create collection t (n int, e vector<2>)", "", &[]);
+        let vector = |at: u32, v: &[f32]| {
+            let mut b = [at.to_le_bytes(), (v.len() as u32).to_le_bytes()].concat();
+            v.iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let affected = r#"{"kind":"affected","count":1}"#;
+        let (put, list) = ("put t {n: 1, e: $1}", "put t {e: $1, xs: $2}");
+        let both = [vector(0, &[0.5, 0.25]), vector(1, &[3.0])].concat();
+        let asked = r#"{"kind":"error","message":"a field keeping numbers as written is handed a list of them sent over as f32s","exact":[1]}"#;
+        assert_eq!(run(&mut db, put, "[null]", &both[..16]), affected);
+        // No such field yet: refused as it runs, nothing asked for.
+        let unknown = |r: String| r.contains(r#""kind":"error""#) && !r.contains("exact");
+        assert!(unknown(run(&mut db, list, "[null, null]", &both)));
+        run(&mut db, "alter collection t add field xs [int]", "", &[]);
+        assert_eq!(run(&mut db, list, "[null, null]", &both), asked);
+        let marked = [vector(0, &[0.5, 0.25]), vector(1 | EXACT, &[3.0])].concat();
+        assert_eq!(run(&mut db, list, "[null, null]", &marked), affected);
+        assert_eq!(run(&mut db, put, "[null]", &both[..16]), affected);
+        run(&mut db, "alter collection t drop field xs", "", &[]);
+        assert!(unknown(run(&mut db, list, "[null, null]", &both)));
+        assert_eq!(run(&mut db, put, "[null]", &both[..16]), affected);
+        let r = run(&mut db, "get t select n order id", "", &[]);
+        assert!(r.contains(r#"[{"n":1},{"n":null},{"n":1},{"n":1}]"#), "{r}");
     }
 
     /// A number past an int's range is refused naming its field, never

@@ -1756,6 +1756,13 @@ pub struct Collection {
     /// collection no statement is bound to pays a byte's look a statement,
     /// never a row's.
     pub bound: u8,
+    /// Whether a field of its schema keeps a list of numbers as written
+    /// (`DataType::keeps_numbers`), set with the schema wherever it is
+    /// ([`Self::set_schema`]): a `put` of literals and parameters into a
+    /// collection with none -- a vector's, nearly every write handing one
+    /// -- is told it needs nothing read again at a look
+    /// ([`Database::exactly_needs`]), and no walk asks its fields.
+    numbers: bool,
 }
 
 impl Collection {
@@ -1816,6 +1823,7 @@ impl Collection {
         }
         let mut store = Store::new();
         store.set_dropped(&schema.dropped);
+        let numbers = keeps_numbers(&schema);
         let mut c = Collection {
             id,
             schema: SchemaCell::new(schema),
@@ -1828,6 +1836,7 @@ impl Collection {
             geo,
             composites: Vec::new(),
             bound: 0,
+            numbers,
         };
         // A new collection's are empty, and as built as its documents.
         let Collection {
@@ -1841,6 +1850,13 @@ impl Collection {
             composites.push((comp.clone(), d));
         }
         c
+    }
+
+    /// Its schema made `schema`, and [`Self::numbers`] with it: every
+    /// change of a collection's schema but an index's goes through here.
+    fn set_schema(&mut self, schema: SchemaCell) {
+        self.numbers = keeps_numbers(&schema);
+        self.schema = schema;
     }
 
     /// Rebuilds the index structures from the schema's index definitions:
@@ -2053,7 +2069,7 @@ impl Collection {
             FIELD_ADD | FIELD_TTL => Taken::default(),
             _ => self.take_indexes(&ch.field),
         };
-        self.schema = SchemaCell::new(ch.schema.clone());
+        self.set_schema(SchemaCell::new(ch.schema.clone()));
         self.store.set_dropped(&self.schema.dropped);
         // A json field's indexes on paths go with it, by the paths the
         // schema after names, and the indexes over several fields with the
@@ -5835,7 +5851,7 @@ impl Database {
                 }
                 *f = after;
             }
-            c.schema = SchemaCell::new(ch.schema);
+            c.set_schema(SchemaCell::new(ch.schema));
             c.store.set_dropped(&c.schema.dropped);
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
@@ -5889,7 +5905,7 @@ impl Database {
                     }
                 }
             }
-            c.schema = SchemaCell::new(schema);
+            c.set_schema(SchemaCell::new(schema));
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
             for (f, ix) in kept {
@@ -6909,7 +6925,7 @@ impl Database {
             };
             self.spare.was.push(Undo::Reindexed(cid, Box::new(undo)));
         }
-        c.schema = SchemaCell::new(schema);
+        c.set_schema(SchemaCell::new(schema));
         if added {
             for (i, kind) in builds {
                 build_kind(c, i, kind)?;
@@ -7494,7 +7510,7 @@ impl Database {
                             taken,
                         } = *a;
                         c.store.set_dropped(&before.dropped);
-                        c.schema = before;
+                        c.set_schema(before);
                         match op {
                             FIELD_ADD => drop(c.take_indexes(&field)),
                             FIELD_DROP => c.put_indexes(&field, taken),
@@ -7554,7 +7570,7 @@ impl Database {
                             built,
                             kept,
                         } = *r;
-                        c.schema = before;
+                        c.set_schema(before);
                         match kept {
                             Some(ix) => c.put_all_indexes(*ix),
                             None => {
@@ -13793,10 +13809,9 @@ impl Database {
         if !stmt.reads_vectors() && !params.iter().any(crate::query::holds_vector) {
             return Ok(());
         }
-        let mut need = self.exactly(stmt);
-        if !need.is_needed() {
+        let Some(mut need) = self.exactly_needs(stmt) else {
             return Ok(());
-        }
+        };
         need.settle(params);
         let param = need
             .params
@@ -13817,6 +13832,16 @@ impl Database {
     /// every collection it reads by its own schema -- an inner `get`'s at
     /// any depth, each `lookup` level's. A collection it names that is not
     /// here asks nothing: the statement is refused for it when it runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn exactly(&self, stmt: &Statement) -> Exactly {
+        self.exactly_needs(stmt).unwrap_or_default()
+    }
+
+    /// [`Self::exactly`] in the browser module, the walk's one body there:
+    /// [`Self::exactly_needs`] asks it, with no answer at a look -- one,
+    /// the walk's body moved into it and its answer made in place, was
+    /// 0.3 KB of the module (`make size-report`).
+    #[cfg(target_arch = "wasm32")]
     pub fn exactly(&self, stmt: &Statement) -> Exactly {
         let mut out = Exactly::default();
         #[cfg(feature = "statements")]
@@ -13825,14 +13850,95 @@ impl Database {
             out.finish();
             return out;
         }
-        let of = |name: &str| match self.collections.get(name) {
-            Some(c) => Known::of(&c.schema),
-            None => Known::Missing,
-        };
-        statement_needs(&of, stmt, &mut out);
+        let of = |name: &str| self.known(name);
+        statement_needs(&of, of(stmt_collection(stmt)), stmt, &mut out);
         out.finish();
         out
     }
+
+    /// [`Self::exactly`] where it needs something, `None` where nothing:
+    /// inline, into its one caller in the module ([`Self::refuse_inexact`]).
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn exactly_needs(&self, stmt: &Statement) -> Option<Exactly> {
+        let out = self.exactly(stmt);
+        out.is_needed().then_some(out)
+    }
+
+    /// [`Self::exactly`] where it needs something, `None` where nothing:
+    /// at a look for a `put` of literals and parameters alone into a
+    /// collection none of whose fields keeps a list of numbers
+    /// ([`Collection::numbers`]) -- a vector's put, the write nearly every
+    /// vector is handed to -- with no [`Exactly`] made, walked or dropped.
+    /// A call asks twice, the library's ask (`fennec_abi::exact_noting`)
+    /// and the engine's own ([`Self::refuse_inexact`]): made each time, its
+    /// places held in place and its collection's fields asked, a native
+    /// put of a 128-dim vector took 13 825 instructions of the library's
+    /// own against main's 13 719, and this way 13 660
+    /// (`tools/instr/trace.py`). Its collection is looked up once, the
+    /// walk handed what it found, and the walk has this one body, as it
+    /// had `exactly`'s: called from a second it went out of line, 40 to 80
+    /// instructions a call more where a field keeps numbers.
+    ///
+    /// Out of line: `exactly` is its caller too.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(never)]
+    pub fn exactly_needs(&self, stmt: &Statement) -> Option<Exactly> {
+        let k = self.known(stmt_collection(stmt));
+        // One way out, the answer made where it is returned: moved out of
+        // a local, its 136 bytes were copied at each ask, some 20
+        // instructions a call where a field keeps numbers.
+        let mut out = None;
+        if !asks_nothing(k, stmt) {
+            let need = out.insert(Exactly::default());
+            match stmt {
+                #[cfg(feature = "statements")]
+                Statement::Call(c) => self.call_exactly(c, need),
+                _ => statement_needs(&|name| self.known(name), k, stmt, need),
+            }
+            need.finish();
+            if !need.is_needed() {
+                out = None;
+            }
+        }
+        out
+    }
+
+    /// What the walk knows of the collection `name` ([`Known`]): its
+    /// schema beside its [`Collection::numbers`], which a debug build holds
+    /// to the fields at every look.
+    fn known(&self, name: &str) -> Known<'_> {
+        match self.collections.get(name) {
+            Some(c) => {
+                debug_assert_eq!(c.numbers, keeps_numbers(&c.schema), "`{name}`'s numbers");
+                Known::Schema(&c.schema, c.numbers)
+            }
+            None => Known::Missing,
+        }
+    }
+}
+
+/// Whether `stmt`, over a collection known as `k`, needs nothing read as
+/// written at a look: a `put` of literals and parameters alone into a
+/// collection with no field keeping numbers, whose walk asks nothing of
+/// either ([`statement_needs`]). Native: the browser module walks it.
+#[cfg(not(target_arch = "wasm32"))]
+fn asks_nothing(k: Known<'_>, stmt: &Statement) -> bool {
+    let Statement::Put { docs, else_set, .. } = stmt else {
+        return false;
+    };
+    let plain = |pairs: &Vec<(String, Expr)>| {
+        (pairs.iter()).all(|(_, e)| matches!(e, Expr::Lit(_) | Expr::Param(_)))
+    };
+    matches!(k, Known::Schema(_, false))
+        && docs.iter().all(plain)
+        && else_set.as_ref().is_none_or(plain)
+}
+
+/// Whether a field of `schema` keeps a list of numbers as written
+/// (`DataType::keeps_numbers`): what [`Collection::numbers`] holds.
+fn keeps_numbers(schema: &Schema) -> bool {
+    schema.fields.iter().any(|f| f.ty.keeps_numbers())
 }
 
 /// What [`exactly_for`]'s walk knows of a collection a statement reads.
@@ -13851,7 +13957,7 @@ enum Known<'a> {
 
 impl<'a> Known<'a> {
     fn of(schema: &'a Schema) -> Known<'a> {
-        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+        Known::Schema(schema, keeps_numbers(schema))
     }
 
     /// Whether `name` keeps a list of numbers as written ([`names_json`]).
@@ -13938,14 +14044,20 @@ pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
         true => Known::of(schema),
         false => Known::Unknown,
     };
-    statement_needs(&of, stmt, &mut out);
+    statement_needs(&of, of(stmt_collection(stmt)), stmt, &mut out);
     out.finish();
     out
 }
 
-/// [`exactly_for`]'s walk, each collection known through `of`.
-fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &mut Exactly) {
-    let k = of(stmt_collection(stmt));
+/// [`exactly_for`]'s walk, each collection known through `of`, the
+/// statement's own as `k` (`of(stmt_collection(stmt))`): a `get` looked its
+/// collection up twice, here and in [`select_needs`].
+fn statement_needs<'a>(
+    of: &dyn Fn(&str) -> Known<'a>,
+    k: Known<'a>,
+    stmt: &Statement,
+    out: &mut Exactly,
+) {
     if matches!(k, Known::Missing) {
         return;
     }
@@ -13984,7 +14096,7 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
             sorts_need(of, k, pick.as_deref(), out);
         }
-        Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
+        Statement::Select(s) | Statement::Explain(s) => select_needs(of, k, s, out),
         _ => {}
     }
 }
@@ -14009,8 +14121,7 @@ fn sorts_need<'a>(
 /// of its list, each `order` key -- the point of a `near` over a point,
 /// and each `lookup` level's filter by the level's own collection. An
 /// inner `get` is walked where it is met, by its own.
-fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactly) {
-    let k = of(&s.collection);
+fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, s: &Select, out: &mut Exactly) {
     if matches!(k, Known::Missing) {
         return;
     }
@@ -14065,7 +14176,7 @@ fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &
             }
         }
         Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
-        Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        Expr::InSelect(_, sel) => select_needs(of, of(&sel.collection), sel, out),
         // Whatever its field: a list of ids read into `f32`s finds
         // 16777217 as 16777216, another row.
         Expr::InParam(_, i) => given(&Expr::Param(*i), out),
