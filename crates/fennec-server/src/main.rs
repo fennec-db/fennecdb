@@ -502,12 +502,12 @@ fn main() {
     // its tree, its digest checked.
     fennec_http::install_statement_reader();
     // Said at the start, as a server told no JWT demands says it takes every
-    // token: what a Unix gives and Windows does not yet (docs/design/windows.md).
+    // token: what Windows does with a rename (docs/design/windows.md) -- but
+    // by a server, never by `--version`, `--help` or `--ping`, whose output
+    // is theirs (`say_windows_renames`, below the code a Unix build compiles,
+    // so no line of that code moves).
     #[cfg(windows)]
-    fennec_http::log!(
-        "windows: a rename is made durable, the file and its directory flushed; \
-         no SIGTERM yet"
-    );
+    say_windows_renames();
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
     let mut stdin_close = false;
@@ -1595,9 +1595,15 @@ fn serve_dir(
     let tick = sync.tick();
     loop {
         if !durability::wait_tick(tick, durability::shutdown_flag()) {
+            // Windows' close, a user's logoff and its shutdown end the
+            // process 5 s after: the tenants synced before each wait.
+            #[cfg(windows)]
+            durability::before_the_deadline(|| tenants.sync_dirty());
             fennec_http::waits::end_all(durability::HELD_GRACE);
             // Each TLS connection ends with its `close_notify`.
             fennec_http::conn::end_all(fennec_http::conn::END_GRACE);
+            #[cfg(windows)]
+            durability::before_the_deadline(|| tenants.sync_dirty());
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fennec_http::trace::flush(Duration::from_secs(2));
@@ -1661,6 +1667,19 @@ fn say_volume(path: &str, mmap: bool) {
         Err(e) => fennec_http::log!(
             "windows: the volume {path} is on could not be read ({e}): the file is {held}"
         ),
+    }
+}
+
+/// What Windows does with a rename, said at the start -- unless the
+/// arguments ask for the version, the usage or a probe, which print their
+/// own output and end: `--version`'s stderr is empty there too. Nothing a
+/// Unix gives is left to say Windows lacks: slice 2 mapped the file, slice
+/// 3 took the console's events (docs/design/windows.md).
+#[cfg(windows)]
+fn say_windows_renames() {
+    let ends_at_once = |a: &str| matches!(a, "--version" | "-V" | "--help" | "-h" | "--ping");
+    if !std::env::args().skip(1).any(|a| ends_at_once(&a)) {
+        fennec_http::log!("windows: a rename is made durable, the file and its directory flushed");
     }
 }
 

@@ -267,12 +267,12 @@ fn alert(stream: &mut TcpStream) -> bool {
 /// is taken: std's `TcpListener::bind` asks 128.
 const BACKLOG: i32 = 1024;
 
-/// Asks the system for a queue of [`BACKLOG`] connections on `listener`,
-/// listening on it again, which changes the queue's length alone (Linux and
-/// macOS alike): each system holds it to its own ceiling --
-/// `net.core.somaxconn`, 4 096 on Linux since 5.4, `kern.ipc.somaxconn`,
-/// 128 on macOS. Past the queue Linux drops a connection's handshake
-/// (`ListenOverflows`), its client trying again after a second.
+/// Asks the system for a queue of [`BACKLOG`] on `listener` by listening on
+/// it again, which changes the queue's length alone, each system holding it
+/// to its ceiling: `net.core.somaxconn`, 4 096 on Linux since 5.4, and
+/// `kern.ipc.somaxconn`, 128 on macOS. Winsock answers a second `listen` and
+/// keeps the queue (fennec-server's `tests/windows.rs`): std's 128 there.
+/// Past the queue Linux drops a handshake, its client trying again in 1 s.
 pub fn widen(listener: &std::net::TcpListener) {
     #[cfg(unix)]
     {

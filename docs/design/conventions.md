@@ -73,7 +73,12 @@ A server a test or a harness starts listens on port 0 (`--http
 the `listening on: http://<address>` line on stderr of fennec-server and
 fennec-shard (their usage names it, `fennec-shard`'s `tests/listen.rs` holds
 it): a fixed port, or one found free and handed over, met another suite's
-server. A router is told its nodes by the addresses they said. Only a site
+server. A router is told its nodes by the addresses they said. A test
+stops a server as a supervisor does, with `SIGTERM`, on Windows with
+Ctrl+Break to its process group -- the harness starts each in a group of
+its own (`CREATE_NEW_PROCESS_GROUP`), on the console it shares with them
+-- and kills one with `SIGKILL`, on Windows `TerminateProcess`
+(fennec-server's `support::Server::signal`). Only a site
 whose address is needed before it binds -- a Next.js build renders it, the
 database's CORS names it -- takes a port the system picks, held by a
 stand-in listener until the moment it starts (`examples/shop`,

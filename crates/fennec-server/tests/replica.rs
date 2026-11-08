@@ -216,7 +216,7 @@ fn replication_refuses_what_it_cannot_do() {
 fn a_server_with_no_stderr_still_stops() {
     use std::io::BufRead;
     let path = tmp("replica", "deaf.fennec");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fennec-server"))
+    let mut child = support::own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
         .args(["--http", "127.0.0.1:0", "--file"])
         .arg(&path)
         .stdout(Stdio::null())
@@ -231,10 +231,7 @@ fn a_server_with_no_stderr_still_stops() {
     }
     // Nobody reads its stderr any more.
     drop(err);
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    unsafe { kill(child.id() as i32, SIGTERM) };
+    support::ask_to_stop(&mut child);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
