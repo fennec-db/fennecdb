@@ -2526,7 +2526,7 @@ impl Tenants {
         Ok(())
     }
 
-    /// Every tenant on disk, sorted.
+    /// Every tenant on disk, sorted; a device's name passed over, said.
     pub fn names(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
@@ -2534,7 +2534,7 @@ impl Tenants {
                 let file = e.file_name();
                 let Some(file) = file.to_str() else { continue };
                 if let Some(name) = file.strip_suffix(".fennec") {
-                    if check_name(name).is_ok() {
+                    if listed(name, &self.dir, file) {
                         out.push(name.to_string());
                     }
                 }
@@ -2890,16 +2890,24 @@ pub fn check_name(name: &str) -> std::result::Result<(), Refused> {
             format!("invalid tenant name `{name}`: [a-z0-9_-], 1 to {MAX_NAME} characters"),
         ));
     }
-    if a_device(name) {
-        return Err(Refused(
-            400,
-            format!(
-                "invalid tenant name `{name}`: a device's name on Windows (con, prn, aux, nul, \
-                 com1 to com9, lpt1 to lpt9), refused on every system"
-            ),
-        ));
+    no_device(name)
+}
+
+/// [`check_name`]'s device half, out of line with its refusal: inlined, it
+/// was 16 to 100 bytes more in each of the twenty-odd callers `check_name`
+/// is inlined into, and `a_device` 852 bytes of its own. Each pays a call.
+#[inline(never)]
+fn no_device(name: &str) -> std::result::Result<(), Refused> {
+    if !a_device(name) {
+        return Ok(());
     }
-    Ok(())
+    Err(Refused(
+        400,
+        format!(
+            "invalid tenant name `{name}`: a device's name on Windows (con, prn, aux, nul, com1 \
+             to com9, lpt1 to lpt9), refused on every system"
+        ),
+    ))
 }
 
 /// `[a-z0-9_-]`, 1 to [`MAX_NAME`] characters: a tenant's name's shape,
@@ -2921,13 +2929,69 @@ pub fn shaped(name: &str) -> bool {
 /// its archive made on Linux restore on any Windows, the naming page's
 /// rule the one to hold. The superscript digits Windows reads as digits
 /// too (`com¹`) are no tenant's: [`shaped`] refuses them.
+///
+/// The stem -- what comes before the first `.` -- lowercased into four
+/// bytes and matched: a stem of three ends in a NUL there, which no name
+/// [`shaped`] holds and at which Windows ends a name. Split and compared
+/// word by word, it was 852 bytes of the server.
 pub fn a_device(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or_default().as_bytes();
-    let is = |word: &str| stem.eq_ignore_ascii_case(word.as_bytes());
-    let numbered = stem.len() == 4
-        && (stem[..3].eq_ignore_ascii_case(b"com") || stem[..3].eq_ignore_ascii_case(b"lpt"))
-        && matches!(stem[3], b'1'..=b'9');
-    is("con") || is("prn") || is("aux") || is("nul") || numbered
+    let mut stem = [0u8; 4];
+    for (i, &b) in name.as_bytes().iter().enumerate() {
+        if b == b'.' {
+            break;
+        }
+        if i == stem.len() {
+            return false;
+        }
+        stem[i] = b.to_ascii_lowercase();
+    }
+    matches!(
+        &stem,
+        b"con\0"
+            | b"prn\0"
+            | b"aux\0"
+            | b"nul\0"
+            | [b'c', b'o', b'm', b'1'..=b'9']
+            | [b'l', b'p', b't', b'1'..=b'9']
+    )
+}
+
+/// Whether `name`, read off `file` in `dir` -- a node's directory or an
+/// archive's -- is a tenant's to list: [`check_name`]'s rule, no refusal
+/// written. A device's name, which a node on a Unix took before the rule,
+/// is passed over and said ([`passed_over`]): its tenant is out of reach
+/// until renamed by hand, and a node that only skipped it said nothing.
+pub fn listed(name: &str, dir: &Path, file: &str) -> bool {
+    if !shaped(name) {
+        return false;
+    }
+    if a_device(name) {
+        passed_over(dir, file, name);
+        return false;
+    }
+    true
+}
+
+/// Says a device-named `file` in `dir` is passed over, once a process: the
+/// listings it is met by run at every stats request and archive round.
+#[cold]
+#[inline(never)]
+fn passed_over(dir: &Path, file: &str, name: &str) {
+    static SAID: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let path = dir.join(file);
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.contains(&path) {
+        return;
+    }
+    crate::log!(
+        "{}: `{name}` is a device's name on Windows, no tenant's on any system since: passed \
+         over, its tenant out of reach. With the server stopped, rename it and whatever beside \
+         it is named `{name}.*` by hand to a name a tenant may take, and remove \
+         `schedules.hint` beside it if there is one, for the node to learn its schedules again \
+         (docs: sharding-reference.html)",
+        path.display()
+    );
+    said.push(path);
 }
 
 #[cfg(test)]
@@ -3455,6 +3519,41 @@ mod tests {
             assert!(check_name(tenant).is_ok(), "{tenant}");
         }
         assert!(!a_device("") && !a_device("."));
+        for not in [
+            "co",
+            "con1.x",
+            "co.n",
+            "comx",
+            "com1x",
+            "xcon",
+            "c",
+            "nul\u{0}x",
+        ] {
+            assert!(!a_device(not), "{not:?}");
+        }
+        assert!(a_device("con.") && a_device("NUL.tar.gz") && a_device("Lpt9"));
+    }
+
+    /// A tenant a node on a Unix took before the rule -- `con.fennec` --
+    /// is passed over by the listings, said, and refused as a request's;
+    /// the tenants beside it are listed still. Made on a Unix alone: a
+    /// Windows before 11 opens the console for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_s_file_from_before_the_rule_is_passed_over() {
+        let dir = scratch("device-file");
+        let reg = Tenants::new(&dir).unwrap();
+        drop(reg.create("acme").unwrap());
+        std::fs::write(dir.join("con.fennec"), b"").unwrap();
+        for _ in 0..2 {
+            assert_eq!(reg.names(), ["acme"]);
+        }
+        assert!(listed("acme", &dir, "acme.fennec"));
+        assert!(!listed("con", &dir, "con.fennec") && !listed("con", &dir, "con.hooks"));
+        assert!(!listed("Acme", &dir, "Acme.fennec"));
+        assert_eq!(reg.get("con").map(|_| ()).unwrap_err().0, 400);
+        assert!(dir.join("con.fennec").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// What Windows makes of a device's name, printed for the design to

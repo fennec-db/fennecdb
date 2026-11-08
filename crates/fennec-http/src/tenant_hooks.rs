@@ -158,9 +158,9 @@ impl Verified {
 impl Store {
     /// The node's store over `dir`, each `<tenant>.hooks` there read and
     /// held to the file it names: one naming another, or none, put away and
-    /// logged, and a sidecar a crash left half written removed. Refused
-    /// where the system's randomness cannot be read: a stand-in key is
-    /// never the clock's.
+    /// logged, a sidecar a crash left half written removed, a device's name
+    /// passed over, said. Refused where the system's randomness cannot be
+    /// read: a stand-in key is never the clock's.
     pub fn open(dir: &Path) -> io::Result<Store> {
         let key = hooks::stand_in().map_err(io::Error::other)?;
         let store = Store {
@@ -182,7 +182,7 @@ impl Store {
             // Cut short by a crash before its rename: secrets no set holds,
             // which nothing would take away after.
             if let Some(name) = file.strip_suffix(".hooks.writing") {
-                if crate::tenants::check_name(name).is_ok() {
+                if crate::tenants::listed(name, dir, file) {
                     let _ = std::fs::remove_file(e.path());
                 }
                 continue;
@@ -190,7 +190,7 @@ impl Store {
             let Some(name) = file.strip_suffix(".hooks") else {
                 continue;
             };
-            if crate::tenants::check_name(name).is_err() {
+            if !crate::tenants::listed(name, dir, file) {
                 continue;
             }
             match store.read(name) {
@@ -300,7 +300,7 @@ impl Store {
         if first.next() != Some(LAYOUT) {
             return Err("are of a layout this node does not read");
         }
-        let mut n = || first.next()?.parse::<u64>().ok();
+        let mut n = || first.next()?.parse::<instance::Word>().ok();
         let (Some(dev), Some(ino), Some(born)) = (n(), n(), n()) else {
             return Err("name no file");
         };

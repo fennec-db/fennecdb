@@ -89,8 +89,15 @@ pub(crate) fn path(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// What names the file a sidecar was written for: its device and inode (on
-/// Windows its volume and index), its birth time in ns, 0 where none kept.
-pub(crate) type Binding = (u64, u64, u64);
+/// Windows its volume and id), its birth time in ns, 0 where none kept.
+pub(crate) type Binding = (Word, Word, Word);
+
+/// A binding's number: 64 bits, on Windows 128 -- a file's id there is
+/// `FileIdInfo`'s, ReFS's ids 128 bits (`fennec_abi::lock::file_id`).
+#[cfg(not(windows))]
+pub(crate) type Word = u64;
+#[cfg(windows)]
+pub(crate) type Word = u128;
 
 /// A file's birth time in nanoseconds, 0 where its file system keeps none
 /// -- and on Linux wherever std asks no `statx`, which it asks under glibc
@@ -109,12 +116,20 @@ fn birth(created: io::Result<std::time::SystemTime>) -> u64 {
         .map_or(0, ns)
 }
 
-/// `file`'s binding as it stands: one `stat`, on Windows and an open for
-/// its index. `Unsupported` where neither an inode nor a birth time is
-/// kept, which would name every file.
+/// `file`'s binding as it stands: one `stat`, on Windows one open, its id
+/// and creation time read through it. `Unsupported` where neither an inode
+/// nor a birth time is kept, which would name every file.
 pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
+    #[cfg(not(windows))]
     let m = std::fs::metadata(file)?;
+    #[cfg(not(windows))]
     let born = birth(m.created());
+    // `metadata` there was an open of its own, and `file_id` another.
+    #[cfg(windows)]
+    let (dev, ino, born) = {
+        let (volume, id, created) = fennec_abi::lock::file_id(file)?;
+        (Word::from(volume), id, Word::from(birth(Ok(created))))
+    };
     #[cfg(test)]
     let born = if tests::NO_BIRTH.with(|c| c.get()) {
         0
@@ -126,8 +141,6 @@ pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
         use std::os::unix::fs::MetadataExt;
         (m.dev(), m.ino())
     };
-    #[cfg(windows)]
-    let (dev, ino) = fennec_abi::lock::file_id(file)?;
     if ino == 0 && born == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -151,7 +164,7 @@ fn read(dir: &Path, name: &str) -> Option<(u64, Binding, bool)> {
         return None;
     }
     let id = parse(f.next()?)?;
-    let mut n = || f.next()?.parse::<u64>().ok();
+    let mut n = || f.next()?.parse::<Word>().ok();
     // Neither an inode nor a birth time names every file ([`binding`]).
     let bound = Some((n()?, n()?, n()?)).filter(|b| b.1 != 0 || b.2 != 0)?;
     let following = match f.next()? {

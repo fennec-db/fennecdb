@@ -37,7 +37,7 @@
 use crate::archive::{Archive, Parent, Took, Writer};
 use crate::replication::{self, read_head, read_message, u64_at, Upstream, MESSAGE};
 use crate::seal::Key;
-use crate::tenants::check_name;
+use crate::tenants::{a_device, shaped};
 use fennec_core::history::History;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -82,7 +82,7 @@ pub fn lines(root: &Path) -> io::Result<Vec<Line>> {
             Some((t, rest)) if !rest.is_empty() => (t.to_string(), false),
             Some(_) => continue,
         };
-        if check_name(&tenant).is_ok() {
+        if crate::tenants::listed(&tenant, root, &label) {
             out.push(Line {
                 tenant,
                 dir: e.path(),
@@ -332,6 +332,16 @@ impl NodeArchive {
                 return Ok(());
             }
             match rx.receive()? {
+                // A node from before the rule holding a tenant named like a
+                // device: passed over, as a broken archive's tenant is.
+                NodeMessage::Hello { name, .. } if a_device(&name) && !broken.contains(&name) => {
+                    report(&format!(
+                        "tenant `{name}`: a device's name on Windows, no tenant's on any system \
+                         since: not archived; its node is from before the rule, and reaches it \
+                         once renamed by hand (docs: sharding-reference.html)"
+                    ));
+                    broken.insert(name);
+                }
                 NodeMessage::Hello {
                     name,
                     seq,
@@ -646,7 +656,12 @@ impl Receiver {
             let n = *body.first().ok_or_else(bad)? as usize;
             let name = body.get(1..1 + n).ok_or_else(bad)?;
             let name = std::str::from_utf8(name).map_err(|_| bad())?;
-            check_name(name).map_err(|_| bad())?;
+            // Shaped, no path's escape. A device's name -- a tenant of a
+            // node from before the rule -- the loop passes over: refused
+            // here, it ended the stream of every tenant.
+            if !shaped(name) {
+                return Err(bad());
+            }
             Ok((name.to_string(), 1 + n))
         };
         Ok(match tag {
@@ -898,5 +913,30 @@ mod tests {
         assert_eq!(away_at(&dir, 400), None);
         assert_eq!(gone_at(&dir), None);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An archive root holding a tenant named like a device, archived
+    /// before the rule: its lines passed over, said, the rest listed. Made
+    /// on a Unix alone, a Windows before 11 reading `con` as the console.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_s_archive_is_passed_over() {
+        let root = std::env::temp_dir().join(format!(
+            "fennec-archive-lines-{}-{}",
+            std::process::id(),
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        for d in [
+            "acme",
+            "acme.00000000000000ff",
+            "con",
+            "con.00000000000000ff",
+            "Bad",
+        ] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let read: Vec<String> = lines(&root).unwrap().into_iter().map(|l| l.label).collect();
+        assert_eq!(read, ["acme", "acme.00000000000000ff"]);
+        let _ = fs::remove_dir_all(root);
     }
 }

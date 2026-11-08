@@ -86,7 +86,7 @@
 
 use crate::http::{Method, Request, Response};
 use crate::replication::{message, u64s, Feed, Next, ALIVE, MESSAGE, SILENCE, VERSION};
-use crate::tenants::{check_name, Refused, Seen, Tenant, Tenants};
+use crate::tenants::{a_device, check_name, shaped, Refused, Seen, Tenant, Tenants};
 use fennec_core::history::History;
 use fennec_core::prelude::Database;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -430,6 +430,11 @@ fn places(body: &[u8]) -> Result<HashMap<String, Followed>, String> {
         else {
             return Err(bad());
         };
+        // An archiver's place for a tenant named like a device, kept from a
+        // node before the rule: none here. Refused, it ended every tenant's.
+        if shaped(name) && a_device(name) {
+            continue;
+        }
         check_name(name).map_err(|e| e.1)?;
         let followed = Followed {
             cursor: since.parse().map_err(|_| bad())?,
@@ -1069,9 +1074,20 @@ mod tests {
             b"Acme 1 ff 0",
             b"../x 1 ff 0",
             b"acme 1 ff 0 extra",
+            b"Con 1 ff 0",
         ] {
             assert!(places(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+        // An archiver's place for a device-named tenant of a node from
+        // before the rule: none here, and the rest are read.
+        let p = places(
+            b"con 3 ff 0
+acme 41 ff 0
+lpt1 1 ff 1
+",
+        )
+        .unwrap();
+        assert_eq!(p.keys().collect::<Vec<_>>(), ["acme"]);
     }
 
     fn record() -> Vec<u8> {
