@@ -1967,12 +1967,21 @@ impl Router {
                 Some(&"_metrics") => {
                     answer(&mut out, Route::Metrics, self.cors(self.metrics(&req)))
                 }
+                // The OpenAPI document of what a tenant's client calls
+                // through the router, its routes the nodes'. The binary's,
+                // the same for every router, so it asks no token, as the
+                // studio's files ask none.
+                Some(&"_openapi.json") if fennec_http::openapi::asked(&req) => {
+                    use fennec_http::openapi::{answer as document, Kind};
+                    let resp = self.cors(document(Kind::Router, &req));
+                    answer(&mut out, Route::Other, resp)
+                }
                 _ => answer(
                     &mut out,
                     Route::Other,
                     self.cors(Response::error(
                         404,
-                        "the router serves /t/<tenant>/..., /_shard/ and /_metrics",
+                        "the router serves /t/<tenant>/..., /_shard/, /_metrics and /_openapi.json",
                     )),
                 ),
             };

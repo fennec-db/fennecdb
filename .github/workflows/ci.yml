@@ -191,6 +191,15 @@ jobs:
       - name: Test
         run: make test
 
+      # fennec-server's OpenAPI document (`GET /_openapi.json`), as a file's
+      # server, a tenant node and a router serve it, read by an OpenAPI
+      # linter against the specification: the tests hold it to the routes
+      # and to its own `$ref`s, this to OpenAPI 3.1's schema. The test it
+      # runs first is make test's, already built.
+      - name: The OpenAPI document lints
+        if: matrix.os == 'ubuntu-latest'
+        run: make openapi-lint
+
       # A node measures its lease on the boot clock (fennec-http's
       # `lease::Moment`), which counts the time a machine was suspended. No
       # runner suspends, so its boot and monotonic clocks read alike and no
