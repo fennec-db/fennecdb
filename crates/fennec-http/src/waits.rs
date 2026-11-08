@@ -380,6 +380,7 @@ impl Drop for Answering {
         OPEN.fetch_sub(1, Ordering::AcqRel);
     }
 }
+
 /// Set once the server is going down: a held request is answered at once,
 /// and none is held from then on.
 static ENDING: AtomicBool = AtomicBool::new(false);
@@ -839,8 +840,8 @@ fn resign(st: &mut State, me: &Arc<Turn>) {
 }
 
 /// A held request's place in its group, from its first run that wrote
-/// nothing until it is answered -- or, where a panic unwinds the thread
-/// holding it, until it is dropped ([`Ticket::leave`]'s `Drop`).
+/// nothing until it is answered ([`Ticket::leave`]) -- or, where a panic
+/// unwinds the thread holding it, until it is dropped.
 pub struct Ticket<'h> {
     hub: &'h Arc<Hub>,
     group: u64,

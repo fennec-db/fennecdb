@@ -1471,12 +1471,12 @@ impl Archive {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
             if !is_scratch(&name) {
                 continue;
             }
-            if let Err(e) = fs::remove_file(e.path()) {
+            if let Err(e) = fs::remove_file(entry.path()) {
                 if e.kind() != io::ErrorKind::NotFound {
                     self.unremoved(said, &name, &e);
                     left.push(name);
