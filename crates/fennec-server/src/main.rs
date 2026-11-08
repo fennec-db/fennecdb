@@ -505,8 +505,8 @@ fn main() {
     // token: what a Unix gives and Windows does not yet (docs/design/windows.md).
     #[cfg(windows)]
     fennec_http::log!(
-        "windows: a rename is made durable, the file and its directory flushed; \
-         no mapped file and no SIGTERM yet"
+        "windows: a rename is made durable, the file and its directory flushed, and the \
+         file mapped; no SIGTERM yet"
     );
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
@@ -1251,7 +1251,7 @@ fn main() {
                 Ok(db) => {
                     fennec_http::log!("opened: {path}");
                     #[cfg(windows)]
-                    say_volume(path);
+                    say_volume(path, mmap);
                     db
                 }
                 Err(e) => {
@@ -1506,7 +1506,7 @@ fn serve_dir(
         tenants.names().len()
     );
     #[cfg(windows)]
-    say_volume(dir);
+    say_volume(dir, mmap);
     {
         use fennec_http::quota::Kind;
         let n = |k| match quota.get(k) {
@@ -1626,23 +1626,43 @@ fn serve_dir(
 }
 
 /// Says what the volume a served file or a node's directory is on does with
-/// a rename (docs/design/windows.md, decision 3): NTFS and ReFS replace a
-/// file other handles hold open, as a checkpoint and a compact need; FAT32
-/// and exFAT have no such rename, and std's falls back to the classic one,
-/// which the server's own handle on the file refuses.
+/// a rename, and how the file is held (docs/design/windows.md, decisions 1
+/// and 3): NTFS and ReFS replace a file other handles hold open, as a
+/// checkpoint and a compact need, and their files are mapped; FAT32 and
+/// exFAT have no such rename, and std's falls back to the classic one,
+/// which the server's own handle on the file refuses, so a file there is
+/// read into memory, as one on a share is.
 #[cfg(windows)]
-fn say_volume(path: &str) {
+fn say_volume(path: &str, mmap: bool) {
+    let held = if !mmap {
+        "read into memory (--no-mmap)"
+    } else if !fennec_core::fs::mappable(std::path::Path::new(path)) {
+        "read into memory"
+    } else if fennec_core::fs::placeholders() {
+        "mapped, a view laid past the last at each handover"
+    } else {
+        "mapped whole and anew at each handover: this Windows lays no views in a \
+         placeholder (Windows 10 1803 and later do)"
+    };
     match fennec_core::fs::volume(std::path::Path::new(path)) {
+        Ok(v) if v.remote => fennec_http::log!(
+            "windows: {path} is on a share ({}): the file is {held}, a share's read error \
+             ending the process through a view",
+            v.file_system
+        ),
         Ok(v) if v.posix_renames() => fennec_http::log!(
-            "windows: {path} is on {}, whose renames replace a file other handles hold open",
+            "windows: {path} is on {}, whose renames replace a file other handles hold open; \
+             the file is {held}",
             v.file_system
         ),
         Ok(v) => fennec_http::log!(
-            "windows: {path} is on {}, which has no POSIX renames: a checkpoint or a compact \
-             there fails while the file is open, and stops the writes -- serve it from NTFS \
-             or ReFS",
+            "windows: {path} is on {}, which has no POSIX renames: the file is {held}, and a \
+             checkpoint or a compact there fails while the file is open, and stops the writes \
+             -- serve it from NTFS or ReFS",
             v.file_system
         ),
-        Err(e) => fennec_http::log!("windows: the volume {path} is on could not be read: {e}"),
+        Err(e) => fennec_http::log!(
+            "windows: the volume {path} is on could not be read ({e}): the file is {held}"
+        ),
     }
 }

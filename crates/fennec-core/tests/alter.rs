@@ -342,7 +342,7 @@ fn compact_takes_the_dropped_places_out_of_every_document() {
     every_reopen(&tap, &want);
 }
 
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 #[test]
 fn compact_over_a_mapped_file_takes_them_out_too() {
     let dir = std::env::temp_dir().join(format!("fennecdb-alter-{}", std::process::id()));

@@ -5,7 +5,7 @@
 //! compacted holds it, and each compact has to bring the file back to what
 //! it holds, but for what the writes it met wrote over.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(mapped)]
 
 use fennec_core::engine::{compact_when_due, CompactPolicy, Compactor, Garbage, Memory};
 use fennec_core::prelude::*;

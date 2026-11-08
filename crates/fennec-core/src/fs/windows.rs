@@ -1,11 +1,18 @@
 //! What a file's sink does differently on Windows (docs/design/windows.md,
-//! decisions 2, 3 and 7e): a rename made durable -- the renamed file
-//! flushed, then its directory -- a rename another handle refuses tried
-//! again for a bounded time, a file fennec makes kept out of the search
-//! indexer, and the volume a file is on named. kernel32's calls are
-//! declared here, as `fennec_abi::lock` declares its own: the crates take
-//! no `windows-sys`. Every call takes a handle std opened, never a path, so
-//! a long path is std's `\\?\` one wherever it is used.
+//! decisions 1, 2, 3 and 7e): the file mapped in views laid end to end
+//! ([`map`]), a torn tail cut once its views are gone, a rename made
+//! durable -- the renamed file flushed, then its directory -- a rename
+//! another handle refuses tried again for a bounded time, a file fennec
+//! makes kept out of the search indexer, and the volume a file is on named,
+//! which says whether it is mapped. kernel32's calls are declared here, as
+//! `fennec_abi::lock` declares its own: the crates take no `windows-sys`.
+//! Every call takes a handle std opened, never a path, so a long path is
+//! std's `\\?\` one wherever it is used.
+
+#[cfg(mapped)]
+mod map;
+#[cfg(mapped)]
+pub use map::{assume_room, placeholders, touch, Mapping};
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -54,6 +61,12 @@ extern "system" {
         file: *mut c_void,
         class: i32,
         info: *const c_void,
+        len: u32,
+    ) -> i32;
+    fn GetFileInformationByHandleEx(
+        file: *mut c_void,
+        class: i32,
+        info: *mut c_void,
         len: u32,
     ) -> i32;
 }
@@ -275,6 +288,9 @@ pub struct Volume {
     pub file_system: String,
     /// The volume's flags, `FILE_SUPPORTS_*`.
     pub flags: u32,
+    /// Reached through a network redirector -- an SMB share, a mapped
+    /// drive -- which names the server's file system and flags as its own.
+    pub remote: bool,
 }
 
 impl Volume {
@@ -331,7 +347,66 @@ pub fn volume(path: &Path) -> io::Result<Volume> {
     Ok(Volume {
         file_system: String::from_utf16_lossy(&name[..len]),
         flags,
+        remote: remote(&f),
     })
+}
+
+/// `GetFileInformationByHandleEx`'s class for `FILE_REMOTE_PROTOCOL_INFO`.
+const FILE_REMOTE_PROTOCOL_INFO: i32 = 13;
+
+/// Whether `f` is reached through a network redirector: only there does
+/// the system answer `FILE_REMOTE_PROTOCOL_INFO` (180 bytes), a local file
+/// system refusing the class (`a_local_volume_is_not_remote`).
+fn remote(f: &File) -> bool {
+    let mut info = [0u32; 45];
+    // SAFETY: the handle is open across the call, and `info` is the
+    // struct's 180 bytes, 4-aligned, as the class asks.
+    unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle(),
+            FILE_REMOTE_PROTOCOL_INFO,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+        ) != 0
+    }
+}
+
+/// Whether a database's file at `path` is mapped (decision 1): where its
+/// volume renames over a file other handles hold open, NTFS and ReFS, and
+/// is not a share. Elsewhere it is read into memory, as `--no-mmap` reads
+/// it: on FAT32 or exFAT a view would refuse a rename over its file as a
+/// handle does, and a share's read error is the process's end through a
+/// view (`EXCEPTION_IN_PAGE_ERROR`) where a read answers it as an error. A
+/// volume that cannot be asked is not mapped either.
+pub fn mappable(path: &Path) -> bool {
+    volume(path).is_ok_and(|v| v.posix_renames() && !v.remote)
+}
+
+/// A mapped open that found a torn tail: Windows cuts no file a view of it
+/// maps (`SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`), and the open maps
+/// before it reads where the records end, so the database and its views
+/// go, the file is cut to the `whole` bytes its records fill, and it opens
+/// again -- a crash's tail costs a second open, as a server sets it up
+/// (`defer_linking`). Another process's view refuses the cut, and the open
+/// fails with it: a reader held over a file whose writer crashed.
+#[cfg(mapped)]
+pub(super) fn cut_and_open(
+    db: crate::engine::Database,
+    mut sink: super::FileSink,
+    whole: usize,
+    wrap: Box<super::Wrap<'_>>,
+) -> crate::error::Result<crate::engine::Database> {
+    let deferred = db.defer_links;
+    drop(db);
+    sink.mapping = None;
+    sink.cut(whole)?;
+    let path = sink.path().to_path_buf();
+    drop(sink);
+    let mut db = crate::engine::Database::new();
+    if deferred {
+        db.defer_linking();
+    }
+    super::open_mapped_into(db, path, wrap)
 }
 
 #[cfg(test)]
@@ -1110,6 +1185,62 @@ pub(super) mod tests {
         drop(held);
         let done = flush_parent(&path, Instant::now() + REFUSED_FOR).unwrap();
         assert_eq!(done, Flushed::Done, "the directory let go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server's open (`open_serving`) that finds a torn tail cuts it by
+    /// a second open, which is a server's too: its vectors left for the
+    /// linker beside the queries, as the first open would have left them.
+    #[test]
+    fn a_torn_tail_opens_again_as_the_server_set_it_up() {
+        let dir = scratch("torn");
+        let path = dir.join("torn.fennec");
+        let mut db = super::super::open(&path).unwrap();
+        db.fork(7).unwrap();
+        drop(db);
+        let whole = std::fs::metadata(&path).unwrap().len();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
+        drop(f);
+        let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        assert!(db.defer_links, "the second open is not a server's");
+        assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A thousand handovers lay a thousand views end to end in the one
+    /// placeholder, each record read back where it was written; a rewrite
+    /// maps the file it renamed into place again in one.
+    #[test]
+    fn a_rewrite_maps_the_file_again_in_one_view() {
+        let dir = scratch("views");
+        let path = dir.join("views.fennec");
+        let (mut sink, _) = super::super::FileSink::open(&path).unwrap();
+        let first = sink.remapped().unwrap();
+        let mut written = super::super::MAGIC.to_vec();
+        for i in 0..1000u32 {
+            let record = vec![(i % 251) as u8; 4096 + 7 * i as usize % 4096];
+            sink.append(&record).unwrap();
+            written.extend_from_slice(&record);
+            let base = sink.written_through().unwrap().unwrap();
+            assert!(std::sync::Arc::ptr_eq(&base, &first), "mapped anew");
+        }
+        let views = sink.mapping.as_ref().unwrap().views();
+        println!("a thousand handovers: {views} views");
+        assert!(views > 1000, "{views}");
+        assert!(
+            (*first).as_ref() == &written[..],
+            "the views read otherwise"
+        );
+        drop(first);
+
+        sink.rewrite(&written).unwrap();
+        let again = sink.remapped().unwrap();
+        assert_eq!(sink.mapping.as_ref().unwrap().views(), 1);
+        assert!((*again).as_ref() == &written[..]);
+        drop((again, sink));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

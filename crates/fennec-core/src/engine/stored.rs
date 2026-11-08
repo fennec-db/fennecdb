@@ -751,7 +751,7 @@ impl Statements {
     /// database asks at its swap, the marks it writes then
     /// ([`super::Database::last_marks`]). A version names a definition's
     /// text, and a mark of broken never reaches a record.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     pub(super) fn defines_as(&self, other: &Statements) -> bool {
         self.all.len() == other.all.len()
             && (self.all.iter().zip(&other.all))
@@ -1079,7 +1079,7 @@ impl super::Database {
     /// Each scheduled statement's last mark, as a compact beside the
     /// database writes them at its swap, after the definitions its side
     /// file wrote as they stood: each handed to `write` as it is made.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     pub(super) fn last_marks(&self, write: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
         for s in self.statements.iter() {
             #[cfg(feature = "statements")]

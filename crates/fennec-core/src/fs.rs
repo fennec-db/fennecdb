@@ -57,7 +57,7 @@ pub struct FileSink {
     /// stores read from and take the records appended since in from
     /// ([`Sink::written_through`]). Let go of when a rewrite puts another
     /// file in its place.
-    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     mapping: Option<Arc<Mapping>>,
     /// Whether a caller writes the buffer once it has let go of the
     /// database ([`Sink::write_behind`]): an append then leaves it for that
@@ -498,7 +498,7 @@ impl FileSink {
                 tail: Tail::new(&path, end),
             })),
             path,
-            #[cfg(all(unix, target_pointer_width = "64"))]
+            #[cfg(mapped)]
             mapping: None,
             behind: false,
         }
@@ -605,7 +605,7 @@ impl Sink for FileSink {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
-        #[cfg(all(unix, target_pointer_width = "64"))]
+        #[cfg(mapped)]
         {
             self.mapping = None;
         }
@@ -623,7 +623,7 @@ impl Sink for FileSink {
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
-        #[cfg(all(unix, target_pointer_width = "64"))]
+        #[cfg(mapped)]
         {
             self.mapping = None;
         }
@@ -633,7 +633,7 @@ impl Sink for FileSink {
     /// what a mapped database points its stores at after a rewrite. The
     /// mapping it had covers the file the rename replaced, which is
     /// unlinked and goes when the last location pointing into it does.
-    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     fn remapped(&mut self) -> Option<crate::store::Base> {
         let disk = lock(&self.disk);
         let len = disk.file.metadata().ok()?.len() as usize;
@@ -650,7 +650,7 @@ impl Sink for FileSink {
     /// -- and hands back the file mapped as far as it now goes: the mapping
     /// the stores read from, grown over the appends, or where they outgrew
     /// its room a new one.
-    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     fn written_through(&mut self) -> Result<Option<crate::store::Base>> {
         let mut disk = lock(&self.disk);
         disk.write_pending(&self.pending)?;
@@ -800,7 +800,7 @@ impl Drop for FileSink {
 /// ([`Database::hand_over`]) rather than through a new mapping, whose pages
 /// every reader would fault in again -- and the old one's torn down under
 /// the write lock.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 pub struct Mapping {
     ptr: *mut u8,
     /// What is mapped: the file's length when it was, and the room.
@@ -813,16 +813,16 @@ pub struct Mapping {
 /// length, and a gigabyte at the least. It is address space alone, of which
 /// a 64-bit process has terabytes, and it is taken again, twice the file's
 /// length, only when the file outgrows it.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 const ROOM: usize = 1 << 30;
 
 // The pages are read-only and shared by nothing but readers.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 unsafe impl Send for Mapping {}
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 unsafe impl Sync for Mapping {}
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
@@ -831,14 +831,14 @@ extern "C" {
 
 /// `madvise`'s "the pages will be needed": the kernel reads them in ahead
 /// of the faults. 3 on Linux and on macOS.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 const MADV_WILLNEED: i32 = 3;
 
 /// How much of a file [`touch`] asks for at a time.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 const TOUCH_STEP: usize = 16 << 20;
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 impl Mapping {
     /// The first `len` bytes of `file`. A mapping cannot be empty; a file
     /// always holds at least the magic by then.
@@ -900,7 +900,7 @@ impl Mapping {
 /// ones gone again by the swap: the 2 s after it ran at 21-39k. Asked for
 /// first, the kernel reads a step in large requests: 0.6 to 0.8 s, and
 /// 90-150k a second after the swap (`make compact-bench`).
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 pub fn touch(m: &crate::store::Base) {
     let bytes: &[u8] = (**m).as_ref();
     let mut sum = 0u8;
@@ -924,7 +924,7 @@ pub fn touch(m: &crate::store::Base) {
     std::hint::black_box(sum);
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 impl AsRef<[u8]> for Mapping {
     fn as_ref(&self) -> &[u8] {
         let len = self.len.load(std::sync::atomic::Ordering::Relaxed);
@@ -932,7 +932,7 @@ impl AsRef<[u8]> for Mapping {
     }
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 impl Drop for Mapping {
     fn drop(&mut self) {
         unsafe { munmap(self.ptr, self.reserved) };
@@ -943,7 +943,7 @@ impl Drop for Mapping {
 /// the image with no lock held, and then, under the write lock, the writes
 /// made meanwhile, before the sink takes it in place of the database's file
 /// ([`Sink::adopt`]). Removed when dropped unless it was adopted.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 pub struct SideFile {
     path: PathBuf,
     out: FileImage,
@@ -961,14 +961,10 @@ pub struct SideFile {
 /// synced and its pages let go of, on Linux: the pages of a written file
 /// stay in the cache until they are on disk, so they go a stretch at a
 /// time rather than all at the end.
-#[cfg(all(
-    unix,
-    target_pointer_width = "64",
-    any(target_os = "linux", target_os = "android")
-))]
+#[cfg(all(mapped, unix, any(target_os = "linux", target_os = "android")))]
 const PAST_STEP: u64 = 64 << 20;
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(mapped, unix))]
 extern "C" {
     #[cfg(target_vendor = "apple")]
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -976,9 +972,13 @@ extern "C" {
     fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 impl SideFile {
     pub fn create(path: &Path) -> Result<SideFile> {
+        // One a failed rewrite left, which a view may still map: Windows
+        // refuses its truncation (`ERROR_USER_MAPPED_FILE`), not its delete.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(path);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1058,7 +1058,7 @@ impl SideFile {
     }
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 impl ImageOut for SideFile {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.out.write(bytes)?;
@@ -1076,7 +1076,7 @@ impl ImageOut for SideFile {
     }
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 impl Drop for SideFile {
     fn drop(&mut self) {
         if !self.adopted {
@@ -1115,8 +1115,10 @@ pub fn sync_dir(_path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 mod windows;
+#[cfg(all(mapped, windows))]
+pub use windows::{assume_room, placeholders, touch, Mapping};
 #[cfg(windows)]
-pub use windows::{sync_dir_alone, volume, Volume};
+pub use windows::{mappable, sync_dir_alone, volume, Volume};
 
 /// What wraps a file's sink before the database takes it: a primary's
 /// `Tee` (fennec-http) goes around it here, fsyncing what the file already
@@ -1157,8 +1159,14 @@ fn open_into(
     mapped: bool,
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
-    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[cfg(all(mapped, unix))]
     if mapped {
+        return open_mapped_into(db, path, wrap);
+    }
+    // A volume whose renames another handle refuses, or a share whose read
+    // errors a view would make the process's end, opens read into memory.
+    #[cfg(all(mapped, windows))]
+    if mapped && windows::mappable(path.as_ref()) {
         return open_mapped_into(db, path, wrap);
     }
     let _ = mapped;
@@ -1201,12 +1209,12 @@ fn open_in_memory_into(
 ///
 /// This is what [`open`] does where the target maps files, which is every
 /// one fennecdb serves from.
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
     open_mapped_into(Database::new(), path, Box::new(Ok))
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(mapped)]
 fn open_mapped_into(
     mut db: Database,
     path: impl AsRef<Path>,
@@ -1223,6 +1231,12 @@ fn open_mapped_into(
     // tenant and a replica taking its first image kept everything in
     // memory until the process restarted.
     let whole = db.load_mapped(mapping)?;
+    // Windows cuts no file a view maps (`ERROR_USER_MAPPED_FILE`): the
+    // database and its views go, the file is cut, and it opens again.
+    #[cfg(windows)]
+    if whole < len {
+        return windows::cut_and_open(db, sink, whole, wrap);
+    }
     if whole < len {
         // The pages past the cut stay mapped and are never read: no record
         // points there.
@@ -1247,7 +1261,16 @@ fn open_mapped_into(
 /// server or the library opens it again, may lack the last durable writes.
 pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
     let mut db = Database::new();
-    #[cfg(all(unix, target_pointer_width = "64"))]
+    // Where a server would not map the file, neither does a reader: a
+    // share's read error would end it, and on FAT32 its view refuses the
+    // server's rename.
+    #[cfg(all(mapped, windows))]
+    if !windows::mappable(path.as_ref()) {
+        db.load(&std::fs::read(path)?)?;
+        db.set_sink(Box::new(ReadOnly));
+        return Ok(db);
+    }
+    #[cfg(mapped)]
     {
         let file = File::open(path)?;
         let len = file.metadata()?.len() as usize;
@@ -1258,7 +1281,7 @@ pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
         }
         db.load_mapped(Arc::new(Mapping::of(&file, len)?))?;
     }
-    #[cfg(not(all(unix, target_pointer_width = "64")))]
+    #[cfg(not(mapped))]
     db.load(&std::fs::read(path)?)?;
     db.set_sink(Box::new(ReadOnly));
     Ok(db)

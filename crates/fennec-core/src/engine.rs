@@ -4366,7 +4366,7 @@ pub struct Database {
     adoptions: u64,
     /// Whether the next load leaves the vectors it would link into a graph
     /// for [`Database::link_pending`] (see [`Database::defer_linking`]).
-    defer_links: bool,
+    pub(crate) defer_links: bool,
     /// The bytes of the file as this database has written it: what it
     /// opened, and every record appended since. An atomic because a graph
     /// record is appended under the read lock ([`Database::save_graphs`]).
@@ -4393,7 +4393,7 @@ pub struct Database {
     /// Whether a rewrite beside the database is writing its side file: one
     /// at a time, since the file has one name. Only where a file is mapped,
     /// the one place a rewrite writes beside it.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(mapped)]
     beside: std::sync::atomic::AtomicBool,
     /// The time a read of a collection whose rows expire is answered at
     /// ([`Self::set_clock`]); the system's clock when `None`. The browser
@@ -4644,7 +4644,7 @@ impl Database {
             handover_at: HANDOVER_AT,
             #[cfg(not(target_arch = "wasm32"))]
             spill_at: SPILL_AT,
-            #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+            #[cfg(mapped)]
             beside: std::sync::atomic::AtomicBool::new(false),
             clock: None,
             #[cfg(not(target_arch = "wasm32"))]

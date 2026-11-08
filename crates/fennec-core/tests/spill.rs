@@ -6,7 +6,7 @@
 //! as the one block it would have been. Each is held to a twin that never
 //! spills.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(mapped)]
 
 use fennec_core::engine::{landed_block, writes_in};
 use fennec_core::fs::{open_in_memory, open_mapped, open_with};
