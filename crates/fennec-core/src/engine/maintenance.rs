@@ -37,7 +37,7 @@ impl Tails {
     /// The ids written under the maintenance `token` since it was watched or
     /// last drained, taken out of its tail; `None` once its collection's
     /// schema changed or it is gone, which the maintenance will refuse.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     fn drain(&mut self, token: u64) -> Option<Vec<DocId>> {
         let t = self.list.iter_mut().find(|t| t.token == token)?;
         (!t.schema).then(|| std::mem::take(&mut t.ids))
@@ -146,7 +146,7 @@ impl Drop for Watching<'_> {
 /// and under the write lock only the writes made meanwhile added to it
 /// before it takes the file's place. Written under the lock, 2.1 s of a
 /// 1 GB file's compact held every writer out.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 struct Beside {
     side: crate::fs::SideFile,
     /// Whether the stores read their records from the mapped file, and are
@@ -181,7 +181,7 @@ struct Beside {
 }
 
 /// One collection of a [`Beside`], as it stood.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 struct BesidePart {
     token: u64,
     cid: u32,
@@ -200,10 +200,10 @@ struct BesidePart {
 
 /// Lets the next rewrite beside the database go ahead however this one
 /// ends.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 struct Rewriting<'a>(&'a RwLock<Database>);
 
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 impl Drop for Rewriting<'_> {
     fn drop(&mut self) {
         read(self.0)
@@ -846,7 +846,7 @@ impl Database {
     /// graphs' records, written here, as `save_graphs` writes them, with
     /// the writers held off. `None` where the sink has no file to write
     /// beside, and the rewrite holds the write lock instead.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     fn begin_beside(&self, which: Option<&str>) -> Result<Option<Beside>> {
         self.may_write(true)?;
         let Some(path) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).side() else {
@@ -910,7 +910,7 @@ impl Database {
     /// takes the file's place and each collection the store pointed at it.
     /// A collection created, dropped or altered meanwhile leaves the image
     /// not fitting, and the compact says so rather than put it in place.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     fn finish_beside(&mut self, mut b: Beside) -> Result<(Response, Vec<Store>)> {
         let began = std::time::Instant::now();
         let tails: Vec<Option<Tail>> = b.parts.iter().map(|p| self.unwatch(p.token)).collect();
@@ -1017,7 +1017,7 @@ impl Database {
 /// after its copy is in the tail again, for the next round. How many ids it
 /// copied; the next round takes those written meanwhile, and the write lock
 /// only the last few.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
     let drained: Vec<Option<Vec<DocId>>> = {
         let g = read(db);
@@ -1054,7 +1054,7 @@ fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
 /// to the side file: inside the image, where the counter's header says it
 /// stands. The store holds those frames alone in memory, and hands them
 /// over as the ones of a record appended later ([`Database::hand_over`]).
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 fn copy_writes(
     p: &mut BesidePart,
     docs: &crate::store::Snapshot,
@@ -1080,7 +1080,7 @@ fn copy_writes(
     Ok(())
 }
 
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 impl Beside {
     /// Hands the frames the catch-up copied into each store over to the
     /// side file, as the database hands its own over to its file, with no
@@ -1392,15 +1392,15 @@ fn compact_online(
 /// Rounds of catching up with the writes made meanwhile before the write
 /// lock is taken for the rest; each takes those written during the one
 /// before, and a round under `CATCH_UP_DONE` ids ends them.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 const CATCH_UP_ROUNDS: usize = 16;
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 const CATCH_UP_DONE: usize = 1_000;
 /// The documents a catch-up looks up under one hold of the read lock, and
 /// copies after it: 4 096, held 95 to 245 us at the median and 3.1 ms at
 /// the most, where copied under it they held it about 6 ms, and up to 291
 /// with their pages read from the disk.
-#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 const CATCH_UP_CHUNK: usize = 4_096;
 
 /// The rewrite a compact of a mapped file ends with: the live records
@@ -1413,7 +1413,7 @@ fn rewrite_beside(
     which: Option<&str>,
     during: &mut dyn FnMut(),
 ) -> Result<Response> {
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     {
         use std::sync::atomic::Ordering::AcqRel;
         if read(db).beside.swap(true, AcqRel) {

@@ -38,8 +38,11 @@ replaces a file other programs hold open on NTFS and ReFS; FAT32 and exFAT
 have no such rename, so a checkpoint there fails and writes stop, which the
 server says as it starts. Keep a database out of a folder OneDrive, Dropbox
 or a backup agent reads: one holding the file can refuse the rename, which
-is tried again for a second before writes stop. The server reads its file
-into memory rather than mapping it. The clients run anywhere their language
+is tried again for a second before writes stop. On NTFS and ReFS the file
+is mapped, as on Linux and macOS, in views Windows 10 1803 and later lay end
+to end (an earlier Windows maps it anew as it grows); on FAT32, exFAT or a
+network share it is read into memory, as <code>--no-mmap</code> reads it,
+which the server says as it starts. The clients run anywhere their language
 does.</p>
 
 <h2 id="install-script">The install script</h2>

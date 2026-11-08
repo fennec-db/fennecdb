@@ -10,14 +10,20 @@ bytes -- there is no eviction policy, no dirty pages and no cache of fennecdb's
 own. "Page cache" is the operating system's, which keeps the mapped file's
 pages and starts cold after a restart, as for any file; it was called "no page
 cache" here before, which read as nothing being cached.
-`fs::open` maps the file where the target maps files (unix, 64-bit), so the
-documents stay in it and the process holds what it derived from them: the
+`fs::open` maps the file where the target maps files -- a 64-bit Unix or
+Windows -- so the documents stay in it and the process holds what it derived from them: the
 offset index, the hash, ordered and text indexes, the graph, and the
 documents written since the open until it hands them over to the file
 (below). A 1 GB file of 2.3 million rows with a hash and an ordered
 index holds 188 MB that way against 1 095 read into memory, and its
 `compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
-machine, which read it cannot. `fs::open_in_memory` (`fennec-server --no-mmap`,
+machine, which read it cannot. On Windows a file is mapped where its
+volume renames over a file other handles hold open (NTFS, ReFS) and is no
+share (`fs::mappable`); on FAT32, exFAT or a share it is read into memory,
+a view there refusing the rename a rewrite makes, or a read error through
+one ending the process
+([windows.md](windows.md#1-the-mapped-file-on-windows)).
+`fs::open_in_memory` (`fennec-server --no-mmap`,
 which reaches a replicated file and a `--dir` node's tenants as well) is the
 other way, for a network file system or to have `--max-memory` cover the
 data. In the browser `store::Base` is the image a load was handed
@@ -70,7 +76,18 @@ is mapped with room past its end (`Mapping::with_room`: its length again, a
 gigabyte at the least, address space alone) and the mapping grows over the
 appends, which Linux and macOS both show through a mapping made before them,
 so readers keep the pages they touched; only a file outgrowing it is mapped
-anew. Whether the heap goes back to the system is the allocator's call:
+anew. Windows maps no room past a file -- a section keeps the size it was
+made at, and a read-only one is no larger than its file -- so the room is a
+placeholder (`VirtualAlloc2`) the file's views are laid in end to end: the
+open's, then at each handover past them the file's pages from the page the
+last one ends at (`Mapping::cover`: the placeholder split, a section and a
+view, `MapViewOfFile3`), the stores' addresses kept and a view's last page
+showing what later writes put there, CI found; where the system has no
+placeholders, before Windows 10 1803, the file is mapped whole and anew at
+each handover, as one outgrowing its room is; and a mapping of more than 16
+views dropped lets them go on a thread of its own, an `UnmapViewOfFile`
+each, rather than under the write lock (`map::Teardown`,
+[windows.md](windows.md#built-in-slice-2)). Whether the heap goes back to the system is the allocator's call:
 musl's and glibc's unmap a large block when it is freed, so the process
 holds what the engine counts (250 000 x 768 with no graph: 6 MB of
 anonymous memory against 777), while macOS's keeps hundreds of megabytes of
@@ -191,7 +208,7 @@ second ran at 1.5-37k through the worst 100 ms of a 1.2 GB file's compact,
 handed over to the side file before the swap (`Beside::hand_over`; left to
 the first write after it, 400 MB under the write lock, 158 ms), every page
 of the new file is asked for 16 MB at a time ahead of its reads and read in
-before it (`fs::touch`, `MADV_WILLNEED`: a fault at a time a 1.2 GB file
+before it (`fs::touch`, `MADV_WILLNEED`, Windows' `PrefetchVirtualMemory`: a fault at a time a 1.2 GB file
 took 3.0-3.3 s on this 8 GB Mac, the writer beside it at 11-15k, and its
 pages were out of memory again by the swap, the 2 s after it at 21-39k;
 asked for, 0.6-0.8 s and 90-150k; left to the readers, the read p50 went 2
@@ -241,7 +258,12 @@ what the group holds that is not file pages, from its own group up -- and
 not on macOS, whose figure (physical memory less the apps', wired and
 compressed pages) grows under the pressure as it compresses the apps:
 2.4-2.9 GB while a 1.5 GB file was read from the disk at 5-7k faults a
-second. The faults are the macOS half: beside the ballast, the rule
+second. On Windows it is `GlobalMemoryStatusEx`'s available memory, the
+standby list among it as `MemAvailable` counts the cache, and a job's
+memory limit at most, a container's; Windows counts no fault that waited
+for the disk apart from the rest, so `cache::faulting` says `false` there
+and the room alone decides
+([windows.md](windows.md#7-what-else-windows-differs-in), 7j). The faults are the macOS half: beside the ballast, the rule
 without them took 226-361 s, with them 191-260. A compact's own
 faults -- the old file's records read, the new file read in -- are
 forgotten once it is done (`cache::forget_faults`): counted, the next
@@ -250,7 +272,8 @@ compacted every 6 s. A compact whose old and new files would not fit
 together, or that starts while the process faults, writes the new one past
 the cache (`SideFile::past_cache`: `F_NOCACHE`, or synced and
 `POSIX_FADV_DONTNEED` every 64 MB, since written pages stay until they are
-on disk) and reads it in after the swap rather than before: through the
+on disk; none on Windows, whose `FILE_FLAG_NO_BUFFERING` asks for writes
+the image's writer does not align) and reads it in after the swap rather than before: through the
 cache its pages pushed out the old file's, which the reads need until the
 swap, and the writer ran at 5-6k updates a second through a compact, 8k
 with the pages dropped once the image was written, 18-25k dropped as it
@@ -292,7 +315,9 @@ once the live records outgrow memory, and E's scans want id order).
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
 record kind. A last record a crash cut short is cut off the file on open
-(`Database::load` says where, `fs::open` and `replication::open` cut): only
+(`Database::load` says where, `fs::open` and `replication::open` cut; on
+Windows, which cuts no file a view maps, the open lets the database and its
+views go, cuts and opens again, `fs::windows::cut_and_open`): only
 skipped, it swallowed the next append, an acknowledged write lost on the open
 after. Only past the checkpoint image, though: an image is renamed into place
 whole, so a record cut short inside it -- or an image longer than the file --

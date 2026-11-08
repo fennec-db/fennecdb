@@ -82,6 +82,7 @@ mod unique;
 mod unwinding;
 mod upsert;
 mod wakes;
+mod windows;
 mod within;
 mod writes;
 #[cfg(feature = "analytics")]
