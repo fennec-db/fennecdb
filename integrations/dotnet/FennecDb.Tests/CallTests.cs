@@ -228,21 +228,27 @@ public sealed class CallTests(Servers servers)
         Assert.Equal(90, Balance(await db.CallAsync(transfer, new { from = 1, to = 2, amount = 10 })));
     }
 
+    // A job is ready by an instant the test holds, not by now(): a lease of now() + a minute runs out whenever a
+    // minute passes between two claims (an iOS simulator's run of the Swift twin once stalled 75 s between them),
+    // the later claim taking a job the first held. now() writes the leases still, every one of them past that
+    // instant.
     [Fact]
     public async Task AHeldCallWaitsForTheWritesItsBodyCanMake()
     {
         using var db = Root();
         var jobs = Fresh("jobs");
         var claim = Fresh("claim");
+        // Past every job's run_at (milliseconds since the epoch).
+        const int readyBy = 1000;
         await db.ExecAsync($"create collection {jobs} (kind text, run_at timestamp @sorted, owner text)");
         await db.ExecAsync($"create statement {claim}($w text) public as set {jobs} {{owner: $w, run_at: now() + 60000}} "
-            + "where run_at <= now() order run_at limit 1 returning kind");
+            + $"where run_at <= {readyBy} order run_at limit 1 returning kind");
         var held = db.CallAsync(claim, new { w = "w1" }, wait: TimeSpan.FromSeconds(10));
         await Task.Delay(200);
         await db.From(jobs).InsertAsync(new Dictionary<string, object?>
         {
             ["kind"] = "mail",
-            ["run_at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ["run_at"] = 1,
         });
         var got = await held.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("mail", got.Rows!.Single().GetProperty("kind").GetString());

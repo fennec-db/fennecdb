@@ -192,6 +192,11 @@ public sealed class ClientTests(Servers servers)
 
     // A job queue's claim: Order and Limit pick the rows UpdateAsync writes, and returning hands them back in
     // ExecResult.Rows; an ack by another owner is 412.
+    //
+    // A job is ready by an instant the test holds, not by now(): a lease of now() + a minute runs out whenever a
+    // minute passes between two claims (an iOS simulator's run of the Swift twin once stalled 75 s between them),
+    // the later claim taking a job the first held. now() writes the leases still, every one of them past that
+    // instant.
     [Fact]
     public async Task AClaimAnswersTheRowsItTook()
     {
@@ -201,8 +206,10 @@ public sealed class ClientTests(Servers servers)
         var jobs = db.From(name);
         for (var n = 1; n <= 3; n++)
             await jobs.InsertAsync(new Dictionary<string, object?> { ["n"] = n, ["run_at"] = n, ["attempts"] = 0 });
+        // Past every job's run_at (milliseconds since the epoch).
+        const int readyBy = 1000;
         Task<ExecResult> Claim(string owner, int limit) =>
-            jobs.Where(Cond.Raw("run_at <= now()")).Order("run_at").Limit(limit).UpdateAsync(
+            jobs.Where(Cond.Raw("run_at <= ?", readyBy)).Order("run_at").Limit(limit).UpdateAsync(
                 new Dictionary<string, object?>
                 {
                     ["owner"] = owner,
@@ -227,15 +234,18 @@ public sealed class ClientTests(Servers servers)
     }
 
     // A claim held until a job comes (WithWait): taken once a job is enqueued, ended on time with no row,
-    // and given up by its token.
+    // and given up by its token. A job is ready by an instant the test holds, not by now(): see
+    // AClaimAnswersTheRowsItTook.
     [Fact]
     public async Task AHeldClaimTakesTheJobEnqueuedMeanwhile()
     {
         using var db = Root();
         var name = Fresh("held");
         await db.ExecAsync($"create collection {name} (kind text, run_at timestamp @sorted, owner text)");
+        // Past every job's run_at (milliseconds since the epoch).
+        const int readyBy = 1000;
         Task<ExecResult> Claim(FennecClient c, string owner, CancellationToken ct = default) =>
-            c.From(name).Where(Cond.Raw("run_at <= now()")).Order("run_at").Limit(1).UpdateAsync(
+            c.From(name).Where(Cond.Raw("run_at <= ?", readyBy)).Order("run_at").Limit(1).UpdateAsync(
                 new Dictionary<string, object?> { ["owner"] = owner, ["run_at"] = Computed.Expr("now() + ?", 60000) },
                 returning: ["kind"], cancellationToken: ct);
         var held = Claim(db.WithWait(TimeSpan.FromSeconds(10)), "w1");
@@ -243,7 +253,7 @@ public sealed class ClientTests(Servers servers)
         await db.From(name).InsertAsync(new Dictionary<string, object?>
         {
             ["kind"] = "mail",
-            ["run_at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ["run_at"] = 1,
         });
         var got = await held.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("mail", got.Rows!.Single().GetProperty("kind").GetString());

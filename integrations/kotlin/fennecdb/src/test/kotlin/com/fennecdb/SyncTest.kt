@@ -419,18 +419,24 @@ class SyncTest {
         assertEquals(listOf<Any?>(422, null), listOf(reused.status, reused.at))
     }
 
-    /** A claim held at the server until a job comes ([FennecRemote.withWait]): taken once one is enqueued, ended on time with no row, and given up by cancelling its coroutine. */
+    /**
+     * A claim held at the server until a job comes ([FennecRemote.withWait]): taken once one is enqueued, ended on time with no row, and given up by cancelling its coroutine.
+     *
+     * A job is ready by an instant the test holds, not by now(): a lease of now() + a minute runs out whenever a minute passes between two claims, and an iOS simulator's run of the Swift twin once stalled 75 s between them, the second claim taking a job the first held. now() writes the leases still, every one of them past that instant.
+     */
     @Test
     fun connectHoldsAClaimUntilAJobComes() = runBlocking {
         val s = server("held")
         s.run("create collection jobs (kind text, run_at timestamp @sorted, owner text)")
         val db = Fennec.connect(s.url)
-        suspend fun claim(c: FennecRemote, owner: String) = c.from("jobs").where(Cond.raw("run_at <= now()"))
+        // Past every job's run_at (milliseconds since the epoch).
+        val ready = 1000
+        suspend fun claim(c: FennecRemote, owner: String) = c.from("jobs").where(Cond.raw("run_at <= ?", ready))
             .order("run_at").limit(1)
             .updateReturning(mapOf("owner" to owner, "run_at" to Computed.expr("now() + ?", 60000)), returning = listOf("kind"))
         val held = async(Dispatchers.Default) { claim(db.withWait(10_000), "w1") }
         delay(200)
-        db.execute("put jobs {kind: \"mail\", run_at: $1}", System.currentTimeMillis())
+        db.execute("put jobs {kind: \"mail\", run_at: 1}")
         assertEquals(listOf("mail"), withTimeout(5_000) { held.await() }.map { it.string("kind") })
         val began = System.nanoTime()
         assertTrue(claim(db.withWait(300), "w2").isEmpty())

@@ -377,18 +377,26 @@
         /// A claim held at the server until a job comes (`withWait`): taken
         /// once one is enqueued, ended on time with no row, and given up by
         /// cancelling its task.
+        ///
+        /// A job is ready by an instant the test holds, not by now(): a lease
+        /// of now() + a minute runs out whenever a minute passes between two
+        /// claims, and an iOS simulator's run once stalled 75 s between them,
+        /// the second claim taking a job the first held. now() writes the
+        /// leases still, every one of them past that instant.
         @Test func connectHoldsAClaimUntilAJobComes() async throws {
             let s = try await Server("held")
             defer { s.stop() }
             try await s.run("create collection jobs (kind text, run_at timestamp @sorted, owner text)")
             let db = Fennec.connect(url: s.url)
+            // Past every job's run_at (milliseconds since the epoch).
+            let ready = 1000
             @Sendable func claim(_ c: FennecRemote, _ owner: String) async throws -> [Row] {
-                try await c.from("jobs").where(.raw("run_at <= now()")).order("run_at").limit(1)
+                try await c.from("jobs").where(.raw("run_at <= ?", ready)).order("run_at").limit(1)
                     .updateReturning(["owner": .string(owner), "run_at": .expr("now() + ?", 60000)] as Value, returning: ["kind"])
             }
             let held = Task { try await claim(db.withWait(10), "w1") }
             try await Task.sleep(nanoseconds: 200_000_000)
-            try await db.execute(#"put jobs {kind: "mail", run_at: now()}"#)
+            try await db.execute(#"put jobs {kind: "mail", run_at: 1}"#)
             #expect(try await held.value.compactMap { $0["kind"]?.string } == ["mail"])
             #expect(try await claim(db.withWait(0.3), "w2").isEmpty)
             let given = Task { try await claim(db.withWait(10), "w3") }
