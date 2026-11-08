@@ -46,6 +46,22 @@ a vector function over an infinity (<code>dot([1e39], [0])</code>). A list of nu
 <code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
 2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 
+<p id="kinds">Values of two kinds — a number and a text, a time and a
+text, a bool and a number — order by kind, as an <code>order</code> over a
+json field or an expression meets them: <code>null</code> first, then
+booleans, numbers, texts and bytes, vectors, lists, sparse vectors and
+objects; a value of one kind equals none of another. The numbers are one
+kind — an int, a float and a <a href="#time">time</a>, which is its epoch
+milliseconds, compared by their values — and a text and bytes compare by
+their bytes. A text written beside a time is read as the time it names
+(<a href="#time">Time</a>). What <code>=</code> finds equal is one value
+wherever values are told apart: one <code>group</code>, one value of
+<code>count(distinct …)</code>, <code>approx_count_distinct</code> and
+<code>facet</code>, one <code>@unique</code> value — a json field's
+<code>3</code> and <code>3.0</code> are one group, and so are
+<code>[3]</code> and <code>[3.0]</code>, shown as the first row holding
+it wrote it.</p>
+
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fennec&gt; create collection people (name text collate tr @sorted, email text nocase @unique, meta json);
@@ -163,10 +179,11 @@ field. A filter binds a path once a query, as it binds a field, and walks
 its keys over each row's bytes, passing the members before the key without
 decoding them. An aggregate and <code>group</code> read a field, not a
 path; a <code>lookup</code>'s keys are fields too. Comparisons are the
-ones every value already has: an int and a float by their true values,
-<code>3</code> equal to <code>3.0</code>, every number below every text,
-text below a list and a list below an object, and <code>null</code> equal
-only to <code>null</code>.</p>
+ones every value already has (<a href="#kinds">above</a>): an int and a
+float by their true values, <code>3</code> equal to <code>3.0</code> and one
+group with it, every number below every text, text below a list and a list
+below an object, and <code>null</code> equal only to <code>null</code>. A
+path's ISO text is a text: no time equals it.</p>
 
 <p>An index on a path is a field of its own beside the fields, named by the
 path, and its kind is the field's: <code>@hash</code> keys a value as a
@@ -257,10 +274,22 @@ put events {name: "logout", t: 1758285296000}        -- epoch ms
 get events where t >= "2026-01-01" and t < now()
 </pre>
 
+<p>A text written beside a time — a literal or a parameter,
+<code>t &gt;= "2026-01-01"</code>, <code>t = $1</code>, an item of
+<code>in</code> or <code>has</code> — is read as the time it names before
+any row is compared, as PostgreSQL reads a literal by what it is compared
+with, and every index reads it so; a text naming no time stays a text,
+above every time. A text read off a row is not: compared with a json
+field's ISO text, or ordered beside one
+(<code>order coalesce(t, meta.at)</code>), a time is a number beside a
+text, below it and never equal (<a href="#kinds">two kinds</a>). Keep the
+times you compare as times in a <code>timestamp</code> field.</p>
+
 <details class="deep"><summary>Why timestamp is a type of its own</summary>
 <p><code>timestamp</code> holds UTC epoch milliseconds as an
-<code>i64</code>. Writes accept both text and numbers; a text literal in a
-comparison is parsed.</p>
+<code>i64</code>. Writes accept both text and numbers; a text literal or
+parameter beside one in a comparison is read as a time, once a query
+where a field meets it.</p>
 
 <p>The representation is always ISO-8601
 (<code>2026-09-19T12:34:56.789Z</code>), in JSON and in FennecQL alike. The calendar conversion is

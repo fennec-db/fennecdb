@@ -231,7 +231,10 @@ matched, or inside a call there, is not. Folding a call over claims alone
 at bind was the other way, not taken: the functions are the database's,
 plugins among them, and a mixed one (`least(level, ...)`) would be refused
 anyway. Times: a text claim that reads as a time is a time's kind too, as
-`cmp_value` compares a time with a text by reading it, so its lower edge
+a text written beside a time -- a claim is a parameter -- is read as the
+time it names before rows are compared (the engine's `as_field` and
+`query::read_beside`; `cmp_value` itself orders a time below every text, as it
+orders any two kinds, indexes.md), so its lower edge
 must take a time from year 0 (`"0000-01-01"`) as well as every text --
 with `""` alone no time passed, `at <= $jwt.until` given
 `"2026-07-01T00:00:00Z"` matching nothing, and with `"0000-01-01"` alone a

@@ -434,10 +434,13 @@ impl Value {
         }
     }
 
-    /// Backstop of the total ordering for types that cannot be compared.
-    /// Numeric types form a single group (Int <-> Float convert), and so do
-    /// Text and Bytes -- since the schema coerces a `text` value into a
-    /// `bytes` field, the two are compared within the same group.
+    /// The order of the kinds, which values of two kinds take
+    /// ([`Value::cmp_value`]). The numbers are one group, an int, a float
+    /// and a timestamp (its milliseconds' int) compared by their true
+    /// values, and so are Text and Bytes -- since the schema coerces a
+    /// `text` value into a `bytes` field, the two are compared by their
+    /// bytes. Any other two kinds order by this alone: a time is below
+    /// every text.
     fn type_rank(&self) -> u8 {
         match self {
             Value::Null => 0,
@@ -454,6 +457,8 @@ impl Value {
     /// Total ordering for sorting/comparison. Null counts as the smallest;
     /// a `NaN` equals a `NaN`, whatever its bits, and is greater than every
     /// other number, `+inf` included: PostgreSQL's order ([`floats`]).
+    /// Values of two kinds order by kind ([`Value::type_rank`]), but for
+    /// the numbers, and a text and bytes, each group compared as one.
     pub fn cmp_value(&self, other: &Value) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (self, other) {
@@ -474,17 +479,22 @@ impl Value {
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-            // A timestamp must be comparable with a text literal: the write
-            // path parses the text, so `where created_at >= "2026-01-01"`
-            // must agree. Unparseable text falls back to type rank.
-            (Value::Timestamp(a), Value::Text(b)) => match crate::time::parse(b) {
-                Ok(ms) => a.cmp(&ms),
-                Err(_) => Ordering::Less,
-            },
-            (Value::Text(a), Value::Timestamp(b)) => match crate::time::parse(a) {
-                Ok(ms) => ms.cmp(b),
-                Err(_) => Ordering::Greater,
-            },
+            // A time and a text order by kind, the time below, as any two
+            // kinds do (`type_rank`). A text that read as a time equalled
+            // it here, so `Timestamp(0)` equalled "1970-01-01T00:00:00Z",
+            // which the int 0, equal to the time, ranked below: no order,
+            // and `order coalesce(t, j)` over a time field and a json one
+            // holding ints and ISO texts panicked in the standard library's
+            // sort in 3 of 117 runs. A text written beside a time -- a
+            // literal, a parameter: `where t >= "2026-01-01"` -- is read as
+            // the time it names before a row is compared, PostgreSQL's
+            // literal of no type taking the type of what it meets
+            // (`Filter::bind`, `query::read_beside`), as every index reads it.
+            // Arms of their own, as the reading had: left to the last arm,
+            // the dispatch laid out anew took an order by an int 0.5% more
+            // instructions.
+            (Value::Timestamp(_), Value::Text(_)) => Ordering::Less,
+            (Value::Text(_), Value::Timestamp(_)) => Ordering::Greater,
             // A `bytes` field must be comparable with a text literal: the
             // write path turns Text into Bytes, so the read path must agree.
             (Value::Text(a), Value::Bytes(b)) => a.as_bytes().cmp(&b[..]),
@@ -709,8 +719,15 @@ fn tie(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 /// The int `f` is, exactly: whole, and from -2^63 up to short of 2^63.
+/// `as` saturates and takes a `NaN` to 0, so the int is `f` again only
+/// where `f` is it -- or 2^63, which `i64::MAX` goes back to, held out
+/// after. Every float a group or a set files goes through this
+/// (`codec::encode_key`): `fract` asked for a `trunc`, a call into libm on
+/// x86-64 short of SSE4.1, and a range test both ways.
+#[inline]
 pub(crate) fn exact_int(f: f64) -> Option<i64> {
-    (f.fract() == 0.0 && (-I64_END..I64_END).contains(&f)).then_some(f as i64)
+    let i = f as i64;
+    (i as f64 == f && f < I64_END).then_some(i)
 }
 
 /// The float `i` is, exactly: an int a float holds every bit of -- each
@@ -954,6 +971,41 @@ mod tests {
             out.push(Value::Object(vec![("k".into(), Value::Float(f))]));
         }
         out.push(Value::List(vec![Value::Int(1)]));
+        // A time's milliseconds about 2026-01-01T00:00:00Z as an int, a
+        // time and a float, and the texts that read as times -- that one,
+        // with its milliseconds and without, a day alone, the epoch --
+        // beside texts that read as none: an int was equal to a time, which
+        // was equal to a text reading as it, which ranked above the int.
+        let ms: i64 = 1_767_225_600_000;
+        for i in [ms - 1, ms, ms + 1] {
+            out.extend([
+                Value::Int(i),
+                Value::Timestamp(i),
+                Value::Float(i as f64),
+                Value::Float(i as f64 + 0.5),
+            ]);
+        }
+        let times = [
+            "1970-01-01T00:00:00Z",
+            "1970-01-01T00:00:00.003Z",
+            "2026-01-01",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00.001Z",
+            "2025-12-31T23:59:59.999Z",
+            "0000-01-01",
+        ];
+        for t in times.iter().chain(&["0", "3", "abc", "1767225600000"]) {
+            out.push(Value::Text(t.to_string()));
+        }
+        out.extend([Value::Bytes(b"a".to_vec()), Value::Bytes(Vec::new())]);
+        for v in [
+            Value::Timestamp(0),
+            Value::Int(0),
+            Value::Text(times[0].into()),
+        ] {
+            out.push(Value::List(vec![v.clone(), Value::Int(1)]));
+            out.push(Value::Object(vec![("k".into(), v)]));
+        }
         out
     }
 
@@ -1005,6 +1057,46 @@ mod tests {
         let v = |a: f32| Value::Vector(vec![a]);
         assert_eq!(v(f32::NAN).cmp_value(&v(-f32::NAN)), Equal);
         assert_eq!(v(f32::NAN).cmp_value(&v(f32::INFINITY)), Greater);
+        // A time is a number, below every text, whatever the text reads as.
+        let epoch = Value::Text("1970-01-01T00:00:00Z".into());
+        assert_eq!(Value::Timestamp(0).cmp_value(&Value::Int(0)), Equal);
+        assert_eq!(Value::Timestamp(0).cmp_value(&epoch), Less);
+        assert_eq!(epoch.cmp_value(&Value::Timestamp(i64::MAX)), Greater);
+    }
+
+    /// A group, a distinct count, a facet, a sketch and every index tell
+    /// values apart by their keys (`codec::encode_key`): two keys are equal
+    /// exactly where `cmp_value` finds the values equal -- a whole float
+    /// and the int it is, a time and its milliseconds' int, bytes and the
+    /// text of them, every `NaN`, both zeros, in a list or an object too.
+    /// A json field's `3` and `3.0` were two groups `=` found one.
+    #[test]
+    fn two_keys_are_equal_where_the_values_are() {
+        // A sparse vector holding a `NaN` or a zero, which no field holds
+        // (`sparse::normalise`), is keyed as it is.
+        let vs: Vec<Value> = edges()
+            .into_iter()
+            .filter(|v| !matches!(v, Value::Sparse(_, e) if e.iter().any(|w| w.1.is_nan() || w.1 == 0.0)))
+            .collect();
+        let key = |v: &Value| {
+            let mut out = Vec::new();
+            crate::codec::encode_key(&mut out, v);
+            out
+        };
+        let keys: Vec<Vec<u8>> = vs.iter().map(key).collect();
+        for (a, ka) in vs.iter().zip(&keys) {
+            for (b, kb) in vs.iter().zip(&keys) {
+                assert_eq!(ka == kb, a.cmp_value(b) == Equal, "{a:?} {b:?}");
+            }
+        }
+        for i in ints() {
+            for f in floats() {
+                let same = Value::Int(i).cmp_value(&Value::Float(f)) == Equal;
+                let (ki, kf) = (key(&Value::Int(i)), key(&Value::Float(f)));
+                assert_eq!(ki == kf, same, "{i} {f:e}");
+                assert_eq!(key(&Value::Timestamp(i)) == kf, same, "{i} {f:e}");
+            }
+        }
     }
 
     #[test]

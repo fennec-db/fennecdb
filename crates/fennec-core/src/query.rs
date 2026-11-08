@@ -1112,6 +1112,7 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
         Expr::IsNull(a) => Value::Bool(eval(a, row, ctx)?.is_null()),
         Expr::Cmp(op, a, b) => {
             let (l, r) = (eval(a, row, ctx)?, eval(b, row, ctx)?);
+            let (l, r) = (&l, &r);
             let field = |e: &Expr| match e {
                 Expr::Field(name) => row.text_order(name),
                 _ => TextOrder::BYTES,
@@ -1122,13 +1123,14 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
                 o => o,
             };
             // A `nocase` field's text equals any text that folds to it.
-            if let (CmpOp::Eq | CmpOp::Ne, Value::Text(x), Value::Text(y)) = (op, &l, &r) {
+            if let (CmpOp::Eq | CmpOp::Ne, Value::Text(x), Value::Text(y)) = (op, l, r) {
                 if let Some(f) = order().fold {
                     let eq = crate::case::eq_folded(x, y, f);
                     return Ok(Value::Bool(eq == (*op == CmpOp::Eq)));
                 }
             }
-            Value::Bool(compare(*op, &l, &r, &order))
+            // A text written beside a time is read as one ([`read_beside`]).
+            Value::Bool(compare_beside(*op, l, r, &order, Some((a, b))))
         }
         Expr::Like(a, b) => {
             let l = eval(a, row, ctx)?;
@@ -1145,16 +1147,17 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             }
         }
         // `has` and `in` equality must read from the same definition as `=`:
-        // `cmp_value` also works across types (`Int(3)` ~ `Float(3.0)`,
-        // `Timestamp` ~ ISO text), while the derived `==` only matches the
-        // same variant. It showed: `year = $1` matched, `year in [$1]` did not.
+        // `cmp_value` also works across types (`Int(3)` ~ `Float(3.0)`),
+        // and a text written beside a time is read as one ([`read_beside`]),
+        // while the derived `==` only matches the same variant. It showed:
+        // `year = $1` matched, `year in [$1]` did not.
         Expr::Has(a, b) => {
             let l = eval(a, row, ctx)?;
             let r = eval(b, row, ctx)?;
             match l {
-                Value::List(items) => {
-                    Value::Bool(items.iter().any(|i| i.cmp_value(&r) == Ordering::Equal))
-                }
+                Value::List(items) => Value::Bool(items.iter().any(|i| {
+                    i.cmp_value(&r) == Ordering::Equal || (written(b) && same_read(None, i, &r))
+                })),
                 _ => Value::Bool(false),
             }
         }
@@ -1167,7 +1170,8 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             };
             let mut found = false;
             for it in items {
-                if in_same(fold, &eval(it, row, ctx)?, &l) {
+                let v = eval(it, row, ctx)?;
+                if in_same(fold, &v, &l) || (written(it) && same_read(fold, &l, &v)) {
                     found = true;
                     break;
                 }
@@ -1183,7 +1187,10 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
                 Value::Text(_) => folded(&*row, a),
                 _ => None,
             };
-            Value::Bool(list.iter().any(|v| in_same(fold, v, &l)))
+            Value::Bool(
+                list.iter()
+                    .any(|v| in_same(fold, v, &l) || same_read(fold, &l, v)),
+            )
         }
         // Answered before the query runs, as the list it becomes: one met
         // here is in a filter evaluated on its own.
@@ -1230,6 +1237,89 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
     })
 }
 
+/// Whether `e` is written in the statement -- a literal or a parameter --
+/// rather than read off a row or worked out.
+#[inline]
+fn written(e: &Expr) -> bool {
+    matches!(e, Expr::Lit(_) | Expr::Param(_))
+}
+
+/// Whether `w`, written beside `v`, may hold a text where `v` holds a
+/// time, for [`read_beside`] to read: the one look a comparison pays,
+/// inlined, two lists looked into only there.
+#[inline]
+fn reads_time(v: &Value, w: &Value) -> bool {
+    matches!(
+        (v, w),
+        (Value::Timestamp(_), Value::Text(_)) | (Value::List(_), Value::List(_))
+    )
+}
+
+/// `w`, written in the statement beside `v` -- a literal, a parameter --
+/// read in place as `v`'s kind reads it: a text beside a time as the time
+/// it names ([`read_time`]), a list's items each beside the item at its
+/// place. PostgreSQL types a literal of no type by what it is compared
+/// with, so `where t >= '2026-01-01'` compares two times; `Value::cmp_value`
+/// orders a time below every text, as it orders any two kinds, so a text
+/// read off a row -- a json field's ISO text -- is a text beside a time.
+/// The engine's bound filter reads one so by the field's type, once a
+/// query (`Filter::bind`'s `as_field`); this is `eval`'s, by the value the
+/// other side has. Out of line: a comparison meets it only where
+/// [`reads_time`] says it may.
+#[cold]
+#[inline(never)]
+fn read_beside(v: &Value, w: &mut Value) {
+    match (v, w) {
+        (Value::Timestamp(_), w) => read_time(w),
+        (Value::List(vs), Value::List(ws)) => {
+            for (v, w) in vs.iter().zip(ws.iter_mut()) {
+                read_beside(v, w);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`read_beside`] for a comparison's two sides `l` and `r`, of `a` and
+/// `b`: the side written in the statement read beside the other. Out of
+/// line: `eval` asks only whether the two values' kinds may need it.
+#[cold]
+#[inline(never)]
+fn cmp_read(a: &Expr, b: &Expr, l: &Value, r: &Value) -> Ordering {
+    let (mut l, mut r) = (l.clone(), r.clone());
+    if written(b) {
+        read_beside(&l, &mut r);
+    } else if written(a) {
+        read_beside(&r, &mut l);
+    }
+    l.cmp_value(&r)
+}
+
+/// Whether `w`, written beside `v` and read so ([`read_beside`]), is `v`
+/// as [`in_same`] finds it: an item of `in` or `has` where the item is not
+/// `v` as written.
+#[cold]
+#[inline(never)]
+fn same_read(fold: Option<crate::case::CaseFold>, v: &Value, w: &Value) -> bool {
+    if !reads_time(v, w) {
+        return false;
+    }
+    let mut w = w.clone();
+    read_beside(v, &mut w);
+    in_same(fold, &w, v)
+}
+
+/// A text, in place, as the time it names, as a `timestamp` field reads
+/// one written to it (`Value::coerce`); one naming none stays a text,
+/// above every time.
+pub(crate) fn read_time(w: &mut Value) {
+    if let Value::Text(t) = w {
+        if let Ok(ms) = crate::time::parse(t) {
+            *w = Value::Timestamp(ms);
+        }
+    }
+}
+
 /// Whether `v`, an item of an `in` list, is `l`: by the fold `l`'s field
 /// compares by, else as any two values compare.
 fn in_same(fold: Option<crate::case::CaseFold>, v: &Value, l: &Value) -> bool {
@@ -1258,6 +1348,21 @@ fn folded(row: &dyn RowAccess, e: &Expr) -> Option<crate::case::CaseFold> {
 /// went 1.55 -> 1.66 ms.
 #[inline]
 pub(crate) fn compare(op: CmpOp, l: &Value, r: &Value, order: &dyn Fn() -> TextOrder) -> bool {
+    compare_beside(op, l, r, order, None)
+}
+
+/// [`compare`], with `eval`'s two sides where a text written beside a time
+/// is read as one ([`read_sides`]): asked here, where the nulls' test has
+/// the two kinds at hand -- asked before, an expression's comparison over
+/// 100 000 rows took 0.7% more instructions.
+#[inline]
+fn compare_beside(
+    op: CmpOp,
+    l: &Value,
+    r: &Value,
+    order: &dyn Fn() -> TextOrder,
+    sides: Option<(&Expr, &Expr)>,
+) -> bool {
     if l.is_null() || r.is_null() {
         return match op {
             CmpOp::Eq => l.is_null() && r.is_null(),
@@ -1265,9 +1370,11 @@ pub(crate) fn compare(op: CmpOp, l: &Value, r: &Value, order: &dyn Fn() -> TextO
             _ => false,
         };
     }
-    let ord = match (op, l, r) {
+    let ord = match (op, l, r, sides) {
+        (_, Value::Timestamp(_), Value::Text(_), Some((a, b)))
+        | (_, Value::Text(_), Value::Timestamp(_), Some((a, b))) => cmp_read(a, b, l, r),
         (CmpOp::Eq | CmpOp::Ne, ..) => l.cmp_value(r),
-        (_, Value::Text(x), Value::Text(y)) => match order() {
+        (_, Value::Text(x), Value::Text(y), _) => match order() {
             o if o.is_bytes() => l.cmp_value(r),
             o => o.compare(x, y),
         },

@@ -67,7 +67,9 @@ fn main() {
     };
     let float = |r: u64| (r >> 11) as f64 / (1u64 << 53) as f64 * 2e6 - 1e6;
     let lists = mode.ends_with("-list");
-    let kinds = ["-time", "-text", "-json"].iter().any(|k| mode.ends_with(k));
+    let kinds = ["-time", "-text", "-json"]
+        .iter()
+        .any(|k| mode.ends_with(k));
     let mut docs = Vec::with_capacity(ROWS);
     let mut held = Vec::new();
     for i in 0..ROWS {

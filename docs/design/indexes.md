@@ -444,8 +444,8 @@ widen to. Every key files every `NaN` as one, whatever its sign or payload
 ordered index's and a composite part's `float_key` is `u64::MAX`, past
 `+inf`'s (a positive `NaN`'s bits already ordered there, a negative one's
 below `-inf`), and `hash_key` and the keys a group, a distinct count, a
-facet and a sketch count by take `f64::NAN`'s bytes (`codec::key_float`,
-beside `-0.0`'s fold) -- inside a list, an object or a vector too
+facet and a sketch count by take `f64::NAN`'s bytes (`codec::key_number`
+now, `-0.0` keyed as the int 0, below) -- inside a list, an object or a vector too
 (`codec::encode`'s key copy, the `f32`s as `f32::NAN`'s, which `hash_key`
 reaches through `encode_key`): filed by their floats' bits, a
 `[float]` field's `@hash` answered `xs = [NaN]` with one of the two rows
@@ -518,7 +518,7 @@ sketches and `@unique` to one value
 (`a_list_or_a_vector_holds_one_nan_and_one_zero`), and a refusal to name
 a `NaN` as itself (`a_unique_refusal_names_a_nan_as_it_is`);
 `value::tests` holds `cmp_value` antisymmetric and transitive over every
-triple of 67 edge values of every kind.
+triple of 67 edge values of every kind (98 since, below).
 
 *What a file written before meets.* No record changes -- every key is
 derived, built at the first read -- but three answers move with the order,
@@ -534,6 +534,103 @@ with one made after, an approximate count may be one more. And a scoped
 token's rule compares by the order too: `x <= $jwt.max` admitted a `NaN`
 row, equal to every claim, and admits none now, where `x > $jwt.min`
 admits every one (`http-access.html` says so).
+
+**Values of two kinds order by kind, but for the numbers, and a text and
+bytes** (`Value::type_rank`): `null`, a bool, a number -- an int, a float
+and a time, its milliseconds' int, by their true values (above) -- a text
+or bytes by their bytes, a vector, a list, a sparse vector, an object. The
+last cross-kind equality that was no order went with #520's review:
+`cmp_value` read a text beside a time as the time it named, so
+`Timestamp(0)` equalled `"1970-01-01T00:00:00Z"`, which the int 0, equal to
+the time, ranked below as a text. No field holds the three -- a json field
+never holds a time, `json_value` writing it as ISO text -- but an
+expression does: `order coalesce(t, j)`, `t` a time field and `j` a json
+one holding ints and ISO texts, panicked in the standard library's sort
+(`smallsort.rs`, its total-order check) in 3 of 117 runs of 1 191 to 2 530
+rows, and otherwise put the rows in no order. A server's connection
+unwinds such a panic; the shell, `panic = abort`, died. Now a time and a
+text order by kind, the time below, in `cmp_value` and every key alike,
+and a text *written* beside a time -- a literal, a parameter, an item of
+`in` or `has`, a claim -- is read as the time it names before a row is
+compared, PostgreSQL's rule: a literal of no type takes the type of what
+it meets (`where t >= '2026-01-01'` casts the text), and two values of
+two types meet by an operator or not at all. A bound filter reads it so
+once a query by the field's type (`Filter::bind`'s `as_field`: a
+`timestamp` field, an item of a `[timestamp]` one), the one every index
+already read (`Value::key_as`, `SortedIndex::bound`,
+`CompositeIndex::literal`); `eval` reads it by the other side's value
+(`query::compare_beside`, `read_beside`, `same_read`), for a comparison
+of an expression --
+`t + 0 >= $1`, a `case`, `having max(t) > '...'`. A text naming no time
+stays a text, above every time, as `SortedIndex::by_kind` ranks it. Every
+index answered `t = '2026-...'` and `t > $1` as it does now; what moved is
+what was never a literal: a json field's ISO text against a time -- `t =
+j`, `j.at > now() - 1d`, an `order` or a `group` mixing them -- is a text
+beside a number, never equal, the time below. A main-branch scan of
+100 000 times against a text parameter read the text again every row
+(`time::parse` in `cmp_value`): 172.5 M instructions a scan, 45.1 M now
+(-73.9%). Rejected: reading in
+`cmp_value` a text that names a time as that time against every kind
+makes it a number -- `"2026-01-01"` below `"10"` and `"abc"` above, two
+texts no longer in their bytes' order -- and breaks a text field's
+`@sorted`; refusing a time beside a text, as PostgreSQL's operator lookup
+does, would refuse every filter over a json field holding both, which
+`where j > 5` reads now; and ordering every two kinds by kind, the
+literal too, would leave `where t >= "2026-01-01"` no row.
+
+**A key is equal exactly where `cmp_value` is** (`codec::encode_key`), so
+a group, a distinct count, `approx_count_distinct`, a facet, a sketch, a
+`@hash` bucket, a `@unique` value and an index over several fields part
+only the values `=` does: a whole float short of 2^63 either side,
+`-0.0` among them, and a time are keyed as the int they are
+(`key_number`, through `value::exact_int`), bytes that are UTF-8 as that
+text, every `NaN` as one, in a list or an object too (the key copy of
+`codec::encode`). #511 gave `hash_key` the whole float's fold alone, so a
+json field's `3` and `3.0` were one bucket but two groups, two distinct
+values, two facet values and two sketched, and `[3]` beside `[3.0]` two
+`@unique` values -- `=` finds each pair equal. `hash_key` is `encode_key`
+now, one copy of the fold. A key is never read back but where an index
+names a value off it: a facet over a `@hash` time field reads its keys'
+ints back as times (`Database::facet`), and `create index ... @unique`
+names the value as the first holder wrote it, not off the key.
+`exact_int` is a cast there and back (`f as i64 as f64 == f`, 2^63 held
+out) where it asked `fract`, a `trunc` -- libm's call on x86-64 short of
+SSE4.1 -- and a range both ways; the whole int's key is out of line, and
+a float's tag and bytes go in one write, so a group by a float field pays
+nothing for the test. `value::tests` holds two
+keys equal exactly where `cmp_value` is over every pair of the edge values
+and every int against every float, and `cmp_value` antisymmetric and
+transitive over every triple of 98 of them, times about a time's
+milliseconds and texts reading as times among them; `tests/kinds.rs`
+holds the order over `coalesce(t, j)` to one worked out apart in 60 runs
+(on main the sort panicked, or put the rows in no order), a text written
+beside a time to the time through the scan, a `@hash`, a `@sorted`, an
+index over several fields and an expression, `in`, `has`, a long list, a
+parameter either side, and a json field's ISO text to no time, and one
+group, one distinct value, one sketch, one facet value and one `@unique`
+value for `3` and `3.0`, `[3]` and `[3.0]`, a time and its int, bytes and
+their text. Against the build before (`make instr-compare PKG=fennec-core
+EXAMPLE=orders`, the base the example's new modes on main, 8 identities a
+build, 7 rounds, every run started under a 1-minute load of 4 and ending
+at most at 4.06): an order by an int +0.03%, by a float, a time or a text
+0.00%; a float field's scan -0.38% and an expression's comparison's
+-0.67% -- the reading is asked in `compare_beside`, beside the nulls'
+test, where the kinds are at hand: asked before it in `eval`, the
+expression's scan took 0.7% more -- and a time field's by a text
+parameter -73.9%; a group by a float -0.03%, by an int 0.00%, by a
+`[float]` pair +0.07% (its two floats' test) and 1 000 lookups of such
+pairs in a `@hash` +0.83%, inside 2 SE (+0.26% in plain runs); a group by
+a json number of which a third are whole floats -15.3%, a group fewer for
+each. The time and text arms stay in `cmp_value`, returning the kinds'
+order: left to its last arm, the dispatch laid out anew took an order by
+an int 0.5% more. The browser module grew 1 024 bytes, 479 gzip and 138 brotli at
+`-q 11` (inside the 0.3 KB brotli moves by), the test build without the
+indexes 1 024, 648 and 465. *What a file written before meets*: no record
+changes; a `@unique` json field or index over several fields holding
+`[3]` beside `[3.0]` holds one value twice now, every `set` of either row
+refused until one changes; a sketch `hll_accumulate` stored before hashed
+a whole float, a time and UTF-8 bytes by their own kinds, so combined with
+one made after an approximate count may count such a value twice.
 
 **A value read back through JSON is the value it was.** `json::num_into`
 writes a whole float short of 2^63 either side as every digit of the int it

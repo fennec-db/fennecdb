@@ -592,10 +592,11 @@ impl CompositeIndex {
     /// part's (as `SortedIndex::bound` has it), and `null`.
     pub fn literal(&self, part: usize, v: &Value) -> Option<Vec<u8>> {
         let p = self.parts.get(part)?;
-        // An int and a timestamp meet as two ints; a timestamp meets a
-        // text it parses; a float meets an int by their true values, the
-        // int keyed as the float it is where a float holds it -- as
-        // `cmp_value` has them, and `SortedIndex::bound`.
+        // An int and a timestamp meet as two ints; a text written beside a
+        // timestamp is read as the time it names, as the scan reads it
+        // (`Filter::bind`'s `as_field`); a float meets an int by their true
+        // values, the int keyed as the float it is where a float holds it
+        // -- as `cmp_value` has them, and `SortedIndex::bound`.
         let v = match (p.kind, v) {
             (Kind::Int | Kind::Time, Value::Int(_) | Value::Timestamp(_)) => v.clone(),
             (Kind::Time, Value::Text(t)) => Value::Timestamp(crate::time::parse(t).ok()?),
