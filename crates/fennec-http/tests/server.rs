@@ -1690,6 +1690,12 @@ fn stripe_hooks() -> Arc<fennec_http::hooks::Hooks> {
 /// The orders, and the statement taking hook `stripe`'s payments that
 /// pays one, defined over `db`.
 fn hooked(db: &mut Database) {
+    // A definition is read back into its tree by the process's reader,
+    // which `Server::new` installs only once `db` is defined: without one
+    // here, `paid` is held unread and every event 409 with no fsync. Run
+    // alone, the tests over a slow disk failed so on every system, an
+    // earlier test in the binary having installed it in the suite.
+    fennec_ql::install();
     db.allow_hooks();
     for q in [
         "create collection orders (ref text @hash, status text, intent text)",
