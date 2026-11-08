@@ -1145,15 +1145,16 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             }
         }
         // `has` and `in` equality must read from the same definition as `=`:
-        // `cmp_value` also works across types (`Int(3)` ~ `Float(3.0)`,
-        // `Timestamp` ~ ISO text), while the derived `==` only matches the
-        // same variant. It showed: `year = $1` matched, `year in [$1]` did not.
+        // `cmp_read` also works across types (`Int(3)` ~ `Float(3.0)`, a
+        // time and the text naming it), while the derived `==` only matches
+        // the same variant. It showed: `year = $1` matched, `year in [$1]`
+        // did not.
         Expr::Has(a, b) => {
             let l = eval(a, row, ctx)?;
             let r = eval(b, row, ctx)?;
             match l {
                 Value::List(items) => {
-                    Value::Bool(items.iter().any(|i| i.cmp_value(&r) == Ordering::Equal))
+                    Value::Bool(items.iter().any(|i| i.cmp_read(&r) == Ordering::Equal))
                 }
                 _ => Value::Bool(false),
             }
@@ -1230,12 +1231,26 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
     })
 }
 
+/// A text, in place, as the time it names, as a `timestamp` field reads
+/// one written to it (`Value::coerce`) and a comparison reads one beside a
+/// time (`Value::cmp_read`); one naming none stays a text, above every
+/// time. The bound filter's, once a query, for a value written beside a
+/// time field (`Filter::bind`'s `as_field`): read so, a row's time meets a
+/// time and never parses the text again.
+pub(crate) fn read_time(w: &mut Value) {
+    if let Value::Text(t) = w {
+        if let Ok(ms) = crate::time::parse(t) {
+            *w = Value::Timestamp(ms);
+        }
+    }
+}
+
 /// Whether `v`, an item of an `in` list, is `l`: by the fold `l`'s field
-/// compares by, else as any two values compare.
+/// compares by, else as any two values compare (`Value::cmp_read`).
 fn in_same(fold: Option<crate::case::CaseFold>, v: &Value, l: &Value) -> bool {
     match (fold, v, l) {
         (Some(f), Value::Text(x), Value::Text(y)) => crate::case::eq_folded(x, y, f),
-        _ => v.cmp_value(l) == Ordering::Equal,
+        _ => v.cmp_read(l) == Ordering::Equal,
     }
 }
 
@@ -1255,7 +1270,8 @@ fn folded(row: &dyn RowAccess, e: &Expr) -> Option<crate::case::CaseFold> {
 /// a `nocase` field's is asked before (`eval`, `Filter`'s `Folded`) -- asked
 /// here, every text `=` of a bound filter called for the order it had no
 /// use for, and the browser module's count by one text over 20 000 rows
-/// went 1.55 -> 1.66 ms.
+/// went 1.55 -> 1.66 ms. A text beside a time is read as the time it
+/// names, whichever side either came from (`Value::cmp_read`).
 #[inline]
 pub(crate) fn compare(op: CmpOp, l: &Value, r: &Value, order: &dyn Fn() -> TextOrder) -> bool {
     if l.is_null() || r.is_null() {
@@ -1266,12 +1282,12 @@ pub(crate) fn compare(op: CmpOp, l: &Value, r: &Value, order: &dyn Fn() -> TextO
         };
     }
     let ord = match (op, l, r) {
-        (CmpOp::Eq | CmpOp::Ne, ..) => l.cmp_value(r),
+        (CmpOp::Eq | CmpOp::Ne, ..) => l.cmp_read(r),
         (_, Value::Text(x), Value::Text(y)) => match order() {
             o if o.is_bytes() => l.cmp_value(r),
             o => o.compare(x, y),
         },
-        _ => l.cmp_value(r),
+        _ => l.cmp_read(r),
     };
     match op {
         CmpOp::Eq => ord == Ordering::Equal,

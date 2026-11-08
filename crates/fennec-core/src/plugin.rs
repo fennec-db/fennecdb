@@ -370,11 +370,17 @@ pub mod builtins {
     }
 
     // As PostgreSQL's: nulls are passed over, and null only when every
-    // value is. One function for both, the order its one difference.
+    // value is. One function for both, the order its one difference. They
+    // choose as a comparison does (`cmp_read`), a text beside a time read
+    // as the time it names, not by kind as `order` and `max` do: a
+    // statement keeps a row's latest time with `set q {at: greatest(at,
+    // $1)}`, `$1` an ISO text (examples/analytics's quotes), and by kind
+    // the text always won, the time going back when a batch came out of
+    // order. No sort meets the choice, so no total order is owed it.
     fn extreme(a: &[Value], larger: bool) -> Value {
         let mut best: Option<&Value> = None;
         for v in a.iter().filter(|v| !v.is_null()) {
-            let o = best.map(|b| v.cmp_value(b));
+            let o = best.map(|b| v.cmp_read(b));
             let want = if larger {
                 std::cmp::Ordering::Greater
             } else {

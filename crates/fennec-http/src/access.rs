@@ -2081,7 +2081,7 @@ const EARLIEST: &str = "0000-01-01";
 /// (a vector literal, the next kind, is refused beside a json field).
 ///
 /// A text claim that reads as a time is a time's kind as well, as
-/// `cmp_value` compares a time with a text by reading it: its lower edge
+/// `cmp_read` compares a time with a text by reading it: its lower edge
 /// is `>= ""` for a text and [`EARLIEST`] for a time, `other >= "" or
 /// other >= "0000-01-01"`. A time and an int order alike against every
 /// value but such a text, so no edge ANDed in says both: `>= "0000-01-01"`

@@ -38,6 +38,7 @@ mod in_param;
 mod insert;
 mod int_range;
 mod json;
+mod kinds;
 mod language_file;
 mod limit;
 mod lookup;
