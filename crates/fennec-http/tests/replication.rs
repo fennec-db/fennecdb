@@ -208,15 +208,18 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
 /// Linux's, kept here by the test thread) -- through its `Tee`, which sends
 /// a write once its durability ran -- are its file's again after the
 /// machine lost the file's tail, and a replica started after is sent every
-/// one of them.
-#[cfg(unix)]
+/// one of them. Windows keeps no sync log (docs/design/windows.md, 3): a
+/// durability flushes the file itself, so the machine loses none of what
+/// one covered, and the primary comes back over the file as it was.
 #[test]
 fn a_primary_back_from_a_power_loss_holds_what_its_log_made_durable() {
     let d = dir("power");
     let file = d.join("p.fennec");
     let path = file.to_str().unwrap();
+    #[cfg(unix)]
     fennec_core::fs::keep_sync_log(true);
     let (mut db, feed) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
+    #[cfg(unix)]
     fennec_core::fs::keep_sync_log(false);
     db.fork(fresh_id()).unwrap();
     let durable = |db: &mut Database, sql: &str| {
@@ -233,14 +236,16 @@ fn a_primary_back_from_a_power_loss_holds_what_its_log_made_durable() {
         );
     }
     let at_crash = db.change_seq();
-    let log = std::fs::read(fennec_core::fs::beside(&file, "sync")).unwrap();
-    assert_eq!(&log[..8], b"FENECSYN");
-    let synced = u64::from_le_bytes(log[24..32].try_into().unwrap());
     std::mem::forget(db);
     std::mem::forget(feed);
-    let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
-    f.set_len(synced).unwrap();
-    drop(f);
+    #[cfg(unix)]
+    {
+        let log = std::fs::read(fennec_core::fs::beside(&file, "sync")).unwrap();
+        assert_eq!(&log[..8], b"FENECSYN");
+        let synced = u64::from_le_bytes(log[24..32].try_into().unwrap());
+        let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.set_len(synced).unwrap();
+    }
 
     let p = primary(&file, replication::DEFAULT_BUFFER);
     assert_eq!(seq(&p), at_crash);

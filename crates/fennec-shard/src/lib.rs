@@ -3627,7 +3627,15 @@ impl Router {
     }
 
     fn set_node(&self, name: &str, body: &[(String, Value)]) -> Outcome<Response> {
-        fennec_http::tenants::check_name(name).map_err(|r| Fail(r.0, r.1))?;
+        if !fennec_http::tenants::shaped(name) {
+            return Err(Fail(
+                400,
+                format!(
+                    "invalid node name `{name}`: [a-z0-9_-], 1 to {} characters",
+                    fennec_http::tenants::MAX_NAME
+                ),
+            ));
+        }
         let (Some(addr), Some(token)) = (field(body, "addr"), field(body, "token")) else {
             return Err(Fail(
                 400,
@@ -6430,16 +6438,17 @@ pub(crate) fn node_addr(addr: &str) -> std::result::Result<String, String> {
 }
 
 /// A region's or a zone's name in a body, where it has one: a tenant's
-/// name's rule, so it goes into a message, a label and a log as it is.
+/// name's shape, so it goes into a message, a label and a log as it is --
+/// a device's name too, which names no file here.
 /// `""` is the unnamed region (or zone), which the nodes of a directory
 /// that names none are in.
 fn place_field<'a>(body: &'a [(String, Value)], key: &str) -> Outcome<Option<&'a str>> {
     match body.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Text(s)) if s.is_empty() => Ok(Some("")),
-        Some(Value::Text(s)) => match fennec_http::tenants::check_name(s) {
-            Ok(()) => Ok(Some(s)),
-            Err(_) => Err(Fail(
+        Some(Value::Text(s)) => match fennec_http::tenants::shaped(s) {
+            true => Ok(Some(s)),
+            false => Err(Fail(
                 400,
                 format!(
                     "invalid {key} `{s}`: [a-z0-9_-], 1 to {} characters",

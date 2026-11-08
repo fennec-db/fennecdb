@@ -2880,22 +2880,54 @@ fn frozen(name: &str) -> Refused {
     )
 }
 
-/// `[a-z0-9_-]{1,64}`: safe as a file name everywhere, no traversal, and
-/// the same name on a case-insensitive file system.
+/// `[a-z0-9_-]{1,64}`, and no device's name ([`a_device`]): safe as a file
+/// name everywhere, no traversal, and the same name on a case-insensitive
+/// file system.
 pub fn check_name(name: &str) -> std::result::Result<(), Refused> {
-    let ok = !name.is_empty()
+    if !shaped(name) {
+        return Err(Refused(
+            400,
+            format!("invalid tenant name `{name}`: [a-z0-9_-], 1 to {MAX_NAME} characters"),
+        ));
+    }
+    if a_device(name) {
+        return Err(Refused(
+            400,
+            format!(
+                "invalid tenant name `{name}`: a device's name on Windows (con, prn, aux, nul, \
+                 com1 to com9, lpt1 to lpt9), refused on every system"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `[a-z0-9_-]`, 1 to [`MAX_NAME`] characters: a tenant's name's shape,
+/// and the whole rule for a region's and a zone's, which name no file.
+pub fn shaped(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= MAX_NAME
         && name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    if ok {
-        Ok(())
-    } else {
-        Err(Refused(
-            400,
-            format!("invalid tenant name `{name}`: [a-z0-9_-], 1 to {MAX_NAME} characters"),
-        ))
-    }
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Whether a Win32 path reads `name` as a device rather than a file: `con`,
+/// `prn`, `aux`, `nul`, `com1` to `com9` and `lpt1` to `lpt9`, in any case,
+/// and on releases before Windows 11 with any extension too -- `nul.txt`
+/// and `nul.tar.gz` are `nul` (the naming page's words). `T\con.fennec`
+/// would be the console, `T\com1.hooks` a serial port, and an archive's
+/// `con\` no directory. Refused on every system, not on Windows alone: a
+/// node's directory and its archive made on Linux restore on Windows
+/// (docs/design/windows.md, 7b). The superscript digits Windows reads as
+/// digits too (`com¹`) are no tenant's: [`shaped`] refuses them.
+pub fn a_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().as_bytes();
+    let is = |word: &str| stem.eq_ignore_ascii_case(word.as_bytes());
+    let numbered = stem.len() == 4
+        && (stem[..3].eq_ignore_ascii_case(b"com") || stem[..3].eq_ignore_ascii_case(b"lpt"))
+        && matches!(stem[3], b'1'..=b'9');
+    is("con") || is("prn") || is("aux") || is("nul") || numbered
 }
 
 #[cfg(test)]
@@ -2904,9 +2936,9 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-registry-{tag}-{}-{:?}",
+            "fennec-registry-{tag}-{}-{}",
             std::process::id(),
-            Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
@@ -3319,17 +3351,39 @@ mod tests {
     /// A delete whose file could not be removed is no departure: noted as
     /// one, the archive said the tenant went and came back 62 ms later, and
     /// a restore to a moment between left out a tenant that never left.
-    #[cfg(unix)]
+    /// Failed on a Unix by the directory's mode 0555; on Windows, where a
+    /// directory's read-only attribute keeps no file in it, by a handle on
+    /// the file that does not share its deletion -- an indexer's, a backup
+    /// agent's.
     #[test]
     fn a_delete_that_fails_is_no_departure() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = scratch("delete-fails");
         let reg = replicating(&dir);
         drop(reg.create("t").unwrap());
-        let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m));
+        #[cfg(unix)]
+        let mode = |m| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m))
+        };
+        #[cfg(unix)]
         mode(0o555).unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE: the tenant's own handles
+        // write, and a removal asks a share of deletion.
+        #[cfg(windows)]
+        let held = std::os::windows::fs::OpenOptionsExt::share_mode(
+            std::fs::OpenOptions::new().read(true),
+            1 | 2,
+        )
+        .open(dir.join("t.fennec"))
+        .unwrap();
         let deleted = reg.delete("t");
+        #[cfg(unix)]
         mode(0o755).unwrap();
+        #[cfg(windows)]
+        {
+            drop(held);
+            assert!(deleted.is_err(), "removed under a handle not sharing it");
+        }
         // Run as root, the directory refuses nothing: no failure to hold.
         if deleted.is_err() {
             assert!(dir.join("t.fennec").exists());
@@ -3347,5 +3401,117 @@ mod tests {
         assert!(check_name("a/b").is_err());
         assert!(check_name("Acme").is_err());
         assert!(check_name(&"a".repeat(MAX_NAME + 1)).is_err());
+    }
+
+    /// A device's name is refused as a tenant's on every system, the rule
+    /// in any case and with any extension, as Windows reads one; a name
+    /// that only begins or ends like one is a tenant's. A region and a zone
+    /// name no file, and keep the shape alone.
+    #[test]
+    fn a_device_s_name_is_no_tenant_s() {
+        let mut devices = vec!["con", "prn", "aux", "nul"];
+        let numbered: Vec<String> = ["com", "lpt"]
+            .iter()
+            .flat_map(|p| (1..=9).map(move |n| format!("{p}{n}")))
+            .collect();
+        devices.extend(numbered.iter().map(String::as_str));
+        assert_eq!(devices.len(), 22);
+        for d in &devices {
+            let refused = check_name(d).unwrap_err();
+            assert_eq!(refused.0, 400);
+            assert!(
+                refused.1.contains("a device's name on Windows"),
+                "{}",
+                refused.1
+            );
+            assert!(shaped(d), "{d}");
+            for spelled in [
+                d.to_uppercase(),
+                format!("{d}.fennec"),
+                format!("{d}.tar.gz"),
+            ] {
+                assert!(a_device(&spelled), "{spelled}");
+                assert!(check_name(&spelled).is_err(), "{spelled}");
+            }
+        }
+        for tenant in [
+            "console",
+            "conf",
+            "co",
+            "nul-1",
+            "auxiliary",
+            "prn_",
+            "com",
+            "com0",
+            "com10",
+            "lpt0",
+            "lpt10",
+            "lptx",
+            "acom1",
+            "con1",
+            "xnul",
+        ] {
+            assert!(!a_device(tenant), "{tenant}");
+            assert!(check_name(tenant).is_ok(), "{tenant}");
+        }
+        assert!(!a_device("") && !a_device("."));
+    }
+
+    /// What Windows makes of a device's name in a node's directory, printed
+    /// and asserted: `T\<name>` opens the device, or fails, and makes no
+    /// file -- `con` the console, `nul` nothing, a port the runner has not
+    /// -- which is why the name is refused. With `.fennec` after it, the
+    /// naming page says the same; Windows 11 made such names files, which
+    /// the line says of the runner's Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_device_s_name_makes_no_file_on_windows() {
+        let dir = scratch("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        let names: Vec<String> = ["con", "prn", "aux", "nul"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(
+                ["com", "lpt"]
+                    .iter()
+                    .flat_map(|p| (1..=9).map(move |n| format!("{p}{n}"))),
+            )
+            .collect();
+        let listed = |name: &str| {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .any(|e| e.unwrap().file_name().eq_ignore_ascii_case(name))
+        };
+        let mut said = Vec::new();
+        for name in &names {
+            for form in [name.clone(), format!("{name}.fennec")] {
+                let opened = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(dir.join(&form));
+                let file = listed(&form);
+                said.push(format!(
+                    "{form}: {}",
+                    match (&opened, file) {
+                        (_, true) => "a file".to_string(),
+                        (Ok(_), false) => "opened, no file".to_string(),
+                        (Err(e), false) => format!("refused, no file ({e})"),
+                    }
+                ));
+                drop(opened);
+                if file {
+                    std::fs::remove_file(dir.join(&form)).unwrap();
+                }
+                if form == *name {
+                    assert!(!file, "{form} made a file");
+                }
+            }
+        }
+        println!(
+            "a device's name in a directory on this Windows:\n{}",
+            said.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

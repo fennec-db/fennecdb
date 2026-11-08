@@ -851,9 +851,9 @@ fn under_load_every_job_is_claimed_once_and_none_before_its_time() {
 fn a_held_claim_holds_no_tenant_against_a_freeze() {
     fennec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
-        "fennec-held-tenant-{}-{:?}",
+        "fennec-held-tenant-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let tenants = Arc::new(fennec_http::tenants::Tenants::new(&dir).unwrap());
     tenants.create("acme").unwrap();

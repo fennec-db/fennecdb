@@ -414,11 +414,17 @@ jobs:
       - name: Build the suites
         run: cargo test -p fennec-http -p fennec-ql -p fennec-import --lib --tests --no-run
 
-      - name: fennec-http's suite
-        run: cargo test -p fennec-http --lib --tests --no-fail-fast
+      # What the design left to Windows itself, printed: the module the
+      # lease's clock is found in, what a device's name opens in a node's
+      # directory, and whom a file the temporary directory gives is open to.
+      - name: The lease's clock, devices' names and a secret's DACL
+        run: cargo test -p fennec-http --lib -- --nocapture lease::tests::the_boot_clock owner_only:: tenants::tests::a_device_s_name
 
       - name: fennec-ql's and fennec-import's suites
         run: cargo test -p fennec-ql -p fennec-import --lib --tests --no-fail-fast
+
+      - name: fennec-http's suite
+        run: cargo test -p fennec-http --lib --tests --no-fail-fast
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,

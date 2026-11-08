@@ -103,18 +103,18 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
   A duration is a number and s, m, h or d: 90s, 30m, 6h, 7d.
 "#;
 
-/// Writes `text` into a new file only its owner can read.
+/// Writes `text` into a new file only its owner can read: a DACL on Windows.
 fn write_private(path: &str, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    #[cfg(windows)]
+    fennec_http::owner_only::options(&mut opts);
     let mut f = opts.open(path)?;
-    f.write_all(text.as_bytes())?;
+    #[cfg(windows)]
+    fennec_http::owner_only::restrict(&f)?;
+    std::io::Write::write_all(&mut f, text.as_bytes())?;
     f.sync_all()
 }
 

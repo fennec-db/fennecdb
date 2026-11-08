@@ -91,6 +91,23 @@ fn refused(out: &Output, path: &str, holder: &str, what: &str) {
     assert!(!text(&out.stdout).contains("records"), "{what}: wrote");
 }
 
+/// A symbolic link at `at` to the file `to`. On Windows a file's link needs
+/// `SeCreateSymbolicLinkPrivilege`, which CI's account holds and a
+/// developer's without Developer Mode may not: there the test says so and
+/// passes over, `false` (docs/design/windows.md, 7c).
+fn symlink(to: &str, at: &str) -> bool {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(to, at).unwrap();
+    #[cfg(windows)]
+    if let Err(e) = std::os::windows::fs::symlink_file(to, at) {
+        // ERROR_PRIVILEGE_NOT_HELD
+        assert_eq!(e.raw_os_error(), Some(1314), "{e}");
+        eprintln!("passed over: no symbolic link made here, the privilege not held: {e}");
+        return false;
+    }
+    true
+}
+
 /// `fennec-server`, built beside the shell by a `cargo test` of the
 /// workspace, as CI's, or of both crates. A test of this crate alone may
 /// find none: the test says so and passes over the server's half, the
@@ -118,7 +135,6 @@ impl Server {
     }
 
     /// A `--dir` node over `dir`, its admin token `adm`.
-    #[cfg(unix)]
     fn node(bin: &Path, dir: &str) -> Server {
         Server::spawn(bin, &["--dir", dir, "--admin-token", "adm"])
     }
@@ -325,7 +341,6 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
 /// own name after a compact, and a checkpoint at the server's stop and the
 /// shell's `.checkpoint` keep it so, every row in the one file.
 #[test]
-#[cfg(unix)]
 fn a_file_served_through_a_link_stays_one_file_across_a_compact() {
     let Some(bin) = server_bin() else {
         eprintln!("passed over: no fennec-server beside {BIN}");
@@ -333,7 +348,9 @@ fn a_file_served_through_a_link_stays_one_file_across_a_compact() {
     };
     let d = Dir::new("served-link");
     let (real, link) = (d.file("real.fennec"), d.file("link.fennec"));
-    std::os::unix::fs::symlink("real.fennec", &link).unwrap();
+    if !symlink("real.fennec", &link) {
+        return;
+    }
     let is_link = || {
         std::fs::symlink_metadata(&link)
             .unwrap()
@@ -391,7 +408,6 @@ fn a_file_served_through_a_link_stays_one_file_across_a_compact() {
 /// open and a delete, while a shell has it; each goes on once the other let
 /// go, the file whole.
 #[test]
-#[cfg(unix)]
 fn a_tenant_s_file_is_held_by_its_node_and_refused_to_it() {
     let Some(bin) = server_bin() else {
         eprintln!("passed over: no fennec-server beside {BIN}");
@@ -413,7 +429,9 @@ fn a_tenant_s_file_is_held_by_its_node_and_refused_to_it() {
     let put = format!(r#"put notes {{id: 2, body: "{}"}}"#, "x".repeat(300));
     refused(&fennec(&[&p, "-c", &put]), &p, &pid, "-c");
     let link = d.file("acme-link.fennec");
-    std::os::unix::fs::symlink(&p, &link).unwrap();
+    if !symlink(&p, &link) {
+        return;
+    }
     refused(&fennec(&[&link, "-c", &put]), &link, &pid, "through a link");
     for id in [3, 4] {
         let (status, body) = node.run("/t/acme/query", &format!("put notes {{id: {id}}}"));

@@ -42,8 +42,8 @@
 //!
 //! **It is measured on the boot clock** (`Moment`): `CLOCK_BOOTTIME` on
 //! Linux, `mach_continuous_time` on Apple's systems (through
-//! `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), which count the time the
-//! machine was suspended. On `Instant`'s clock, which does not, a node
+//! `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), interrupt time on Windows,
+//! which count the time the machine was suspended. On `Instant`'s, a node
 //! suspended while its lease ran woke with the lease left as it was and
 //! wrote beside its tenants' new primaries until it ran out.
 //!
@@ -165,13 +165,13 @@ impl Moment {
 }
 
 /// The boot clock, declared by hand as the crate declares its other system
-/// calls (it takes no `libc`): a clock that counts the time the machine was
-/// suspended, and at the rate `Instant`'s does. It fails closed, as std's
+/// calls (no `libc`), Windows' in `lease/windows.rs`: it counts the time the
+/// machine was suspended, at `Instant`'s rate. It fails closed, as std's
 /// `Instant::now` does: a boot clock that stops answering ends the process
 /// rather than hand the lease a moment of another clock -- read in turn
 /// from two clocks, a lease is measured across both, and a timebase guessed
-/// at 1 / 1 on Apple silicon, whose ticks are 125 / 3 ns, made one 41.7
-/// times as long.
+/// at 1 / 1 on Apple silicon, ticks of 125 / 3 ns, made one 41.7 times as long.
+#[cfg(not(windows))]
 mod boot {
     /// `clock_gettime(CLOCK_BOOTTIME)`: `CLOCK_MONOTONIC` and the time spent
     /// suspended, the same clock otherwise. Read through the vDSO as the
@@ -617,6 +617,13 @@ fn take_list(s: &mut State, epoch: &str, primaries: Option<Vec<String>>) {
         s.epoch = Some(epoch.to_string());
     }
 }
+
+// Windows' boot clock, interrupt time (lease/windows.rs). Below the code a
+// Unix build compiles, so its lines -- a panic's location among them --
+// stay where they were (docs/design/windows.md, 7l).
+#[cfg(windows)]
+#[path = "lease/windows.rs"]
+mod boot;
 
 #[cfg(test)]
 mod tests {
@@ -1172,6 +1179,35 @@ mod tests {
             assert!(
                 c0 <= boot + 1_000 && boot <= c1 + 1_000,
                 "the boot clock reads {boot} ns, mach_continuous_time {c0} and {c1}"
+            );
+        }
+        // Windows: interrupt time, never behind the unbiased count, which
+        // leaves the time asleep out, and with `GetTickCount64`, the
+        // milliseconds since the system started, sleep among them -- each
+        // advanced a clock tick at a time, up to 15.6 ms, so a second
+        // apart at most, where `Instant` counted from the first read
+        // would be the machine's uptime apart.
+        #[cfg(windows)]
+        {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn QueryUnbiasedInterruptTime(count: *mut u64) -> i32;
+                fn GetTickCount64() -> u64;
+            }
+            let from = boot::from().expect("QueryInterruptTimePrecise, Windows 10's");
+            let mut unbiased = 0u64;
+            assert_ne!(unsafe { QueryUnbiasedInterruptTime(&mut unbiased) }, 0);
+            let boot = Moment::now().0;
+            let ticks = unsafe { GetTickCount64() };
+            println!(
+                "the boot clock is {from}'s QueryInterruptTimePrecise: {boot} ns, \
+                 the unbiased count {} ns, GetTickCount64 {ticks} ms",
+                unbiased * 100
+            );
+            assert!(unbiased * 100 <= boot, "{boot} behind {}", unbiased * 100);
+            assert!(
+                (boot / 1_000_000).abs_diff(ticks) < 1_000,
+                "{boot} ns, {ticks} ms"
             );
         }
         let b0 = Moment::now();

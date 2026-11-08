@@ -609,6 +609,58 @@ impl FailSpawns {
     }
 }
 
+/// Whether `c`'s connection is over -- its end acknowledged, or reset --
+/// on Windows: a test's question, as a refusal's tests ask it. A Unix
+/// socket has no peer then; Winsock names the peer of one whose connection
+/// ended (`a_refusal_ends_the_connection_after_its_answer` waited out its
+/// 30 s on Windows CI), so its TCP state is asked (`SIO_TCP_INFO`, Windows
+/// 10 1703): closed or in `TIME_WAIT`, or none left to ask.
+#[doc(hidden)]
+#[cfg(windows)]
+pub fn ended(c: &TcpStream) -> bool {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawSocket;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAIoctl(
+            socket: usize,
+            code: u32,
+            input: *const c_void,
+            input_len: u32,
+            output: *mut c_void,
+            output_len: u32,
+            returned: *mut u32,
+            overlapped: *mut c_void,
+            routine: *mut c_void,
+        ) -> i32;
+    }
+    /// `_WSAIORW(IOC_VENDOR, 39)`.
+    const SIO_TCP_INFO: u32 = 0xD800_0027;
+    /// `TCPSTATE_CLOSED` and `TCPSTATE_TIME_WAIT`.
+    const CLOSED: u32 = 0;
+    const TIME_WAIT: u32 = 10;
+    let version = 0u32;
+    // `TCP_INFO_v0`, its state first, in room to spare.
+    let mut info = [0u32; 32];
+    let mut returned = 0u32;
+    // SAFETY: the stream's own socket; a version and an answer the call
+    // reads and writes within the lengths given, no overlapped.
+    let asked = unsafe {
+        WSAIoctl(
+            c.as_raw_socket() as usize,
+            SIO_TCP_INFO,
+            (&version as *const u32).cast(),
+            4,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    asked != 0 || info[0] == CLOSED || info[0] == TIME_WAIT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,12 +680,13 @@ mod tests {
         let Err(back) = spawn(Builder::new(), s, &fail, |_| panic!("never run")) else {
             panic!("the spawn made to fail ran");
         };
-        assert_eq!(
-            back.error.kind(),
-            io::ErrorKind::WouldBlock,
-            "{}",
-            back.error
-        );
+        // EAGAIN on a Unix, as at the limit; Windows' `CreateThread` takes
+        // a stack no address space holds for a bad parameter (87).
+        let refused = match cfg!(windows) {
+            true => io::ErrorKind::InvalidInput,
+            false => io::ErrorKind::WouldBlock,
+        };
+        assert_eq!(back.error.kind(), refused, "{}", back.error);
         let mut s = back.stream.expect("the stream given back");
         s.write_all(b"x").unwrap();
         let mut one = [0u8; 1];
@@ -656,9 +709,17 @@ mod tests {
         // Refused where a reset came first: the reset is what is asked.
         let _ = c.shutdown(Shutdown::Write);
         let by = Instant::now() + Duration::from_secs(30);
-        while c.peer_addr().is_ok() {
+        #[cfg(unix)]
+        let ended = |c: &TcpStream| c.peer_addr().is_err();
+        while !ended(c) {
             assert!(Instant::now() < by, "the connection never ended");
             std::thread::sleep(Duration::from_millis(1));
+        }
+        // Winsock tells a reset to the next read: past the end it read
+        // already, a graceful end reads nothing more.
+        #[cfg(windows)]
+        if let Err(e) = Read::read(&mut &*c, &mut [0u8; 1]) {
+            return Some(format!("after the end: {e}"));
         }
         match c.take_error() {
             Ok(None) => None,

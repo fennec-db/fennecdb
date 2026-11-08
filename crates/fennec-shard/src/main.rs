@@ -270,7 +270,7 @@ fn main() {
             "--replicas" => cfg.replicas = true,
             "--default-region" => {
                 let r = next(&mut i, "--default-region");
-                if fennec_http::tenants::check_name(&r).is_err() {
+                if !fennec_http::tenants::shaped(&r) {
                     fail(&format!(
                         "--default-region `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
                         fennec_http::tenants::MAX_NAME
@@ -341,7 +341,7 @@ fn main() {
             "--promote" => promote = true,
             "--region" => {
                 let r = next(&mut i, "--region");
-                if fennec_http::tenants::check_name(&r).is_err() {
+                if !fennec_http::tenants::shaped(&r) {
                     fail(&format!(
                         "--region `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
                         fennec_http::tenants::MAX_NAME
@@ -360,7 +360,7 @@ fn main() {
             "--global-directory" => global_path = Some(next(&mut i, "--global-directory")),
             "--near" => {
                 let r = next(&mut i, "--near");
-                if fennec_http::tenants::check_name(&r).is_err() {
+                if !fennec_http::tenants::shaped(&r) {
                     fail(&format!(
                         "--near `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
                         fennec_http::tenants::MAX_NAME

@@ -684,6 +684,19 @@ mod record {
     }
 }
 
+/// The file at `path` as Windows names it -- its volume's serial and its
+/// index there -- where a Unix reads a device and an inode, through a
+/// handle opened for no access, which no other handle's sharing refuses.
+/// A tenant's identity binds its file by it (`fennec_http::instance`): a
+/// creation time alone names no file on NTFS, which gives a name made
+/// again within 15 s, a rename over it too, its old file's (tunneling).
+#[cfg(windows)]
+pub fn file_id(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().access_mode(0).open(path)?;
+    record::id(&file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,23 +836,36 @@ mod tests {
     /// A link to a database -- absolute, relative, a link to a link, one
     /// whose file is not made yet -- and a directory reached through a
     /// link take the target's lock: named as written, a shell through a
-    /// link wrote beside a server.
-    #[cfg(unix)]
+    /// link wrote beside a server. On Windows a link is a file's or a
+    /// directory's, and making one needs `SeCreateSymbolicLinkPrivilege`,
+    /// which CI's account holds and a developer's without Developer Mode
+    /// may not: there the test says so (docs/design/windows.md, 7c).
     #[test]
     fn a_file_through_a_link_takes_its_targets_lock() {
-        use std::os::unix::fs::symlink;
+        #[cfg(unix)]
+        use std::os::unix::fs::{symlink, symlink as symlink_dir};
+        #[cfg(windows)]
+        use std::os::windows::fs::{symlink_dir, symlink_file as symlink};
         let p = scratch("target.fennec");
         std::fs::write(&p, b"").unwrap();
         let dir = std::path::Path::new(&p).parent().unwrap().to_path_buf();
         let at = |n: &str| dir.join(n);
         let links = ["link.fennec", "relative.fennec", "chain.fennec"];
-        for n in links.iter().chain(&["linked-dir", "dangling.fennec"]) {
+        for n in links.iter().chain(&["dangling.fennec"]) {
             let _ = std::fs::remove_file(at(n));
         }
-        symlink(&p, at("link.fennec")).unwrap();
+        // A link to a directory is a file on a Unix, a directory on Windows.
+        let _ = std::fs::remove_file(at("linked-dir"));
+        let _ = std::fs::remove_dir(at("linked-dir"));
+        if let Err(e) = symlink(&p, at("link.fennec")) {
+            // ERROR_PRIVILEGE_NOT_HELD
+            assert!(cfg!(windows) && e.raw_os_error() == Some(1314), "{e}");
+            println!("no symbolic link made here, the privilege not held: {e}");
+            return;
+        }
         symlink("target.fennec", at("relative.fennec")).unwrap();
         symlink("link.fennec", at("chain.fennec")).unwrap();
-        symlink(&dir, at("linked-dir")).unwrap();
+        symlink_dir(&dir, at("linked-dir")).unwrap();
         symlink("not-yet.fennec", at("dangling.fennec")).unwrap();
         for n in links {
             assert_eq!(lock_path(at(n)), lock_path(&p), "{n}");

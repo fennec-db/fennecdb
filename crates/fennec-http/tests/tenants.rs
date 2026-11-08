@@ -28,9 +28,9 @@ impl Drop for Node {
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "fennec-tenants-{tag}-{}-{:?}",
+        "fennec-tenants-{tag}-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     dir

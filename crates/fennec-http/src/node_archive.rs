@@ -882,9 +882,9 @@ mod tests {
     #[test]
     fn presence_is_read_past_a_clock_set_back() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-presence-{}-{:?}",
+            "fennec-presence-{}-{}",
             std::process::id(),
-            Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
         for (gone, at) in [(true, 100), (false, 300), (true, 250), (false, 260)] {

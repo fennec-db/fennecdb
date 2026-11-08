@@ -1189,9 +1189,9 @@ mod tests {
     #[test]
     fn a_tenant_made_as_a_stream_joins_is_looked_at() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-node-stream-begin-{}-{:?}",
+            "fennec-node-stream-begin-{}-{}",
             std::process::id(),
-            Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let tenants = Tenants::new(&dir)

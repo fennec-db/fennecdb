@@ -323,8 +323,7 @@ impl Store {
         }
     }
 
-    /// The sidecar's text for a set of `version`, `json` as it is
-    /// exported, bound to `bound`.
+    /// The sidecar's text for a set of `version`, `json` as exported, bound to `bound`.
     fn text(bound: Binding, version: u64, json: &str) -> String {
         format!(
             "{LAYOUT} {} {} {}\nversion {version:016x}\n{json}\n",
@@ -347,8 +346,9 @@ impl Store {
                 .truncate(true)
                 .mode_private()
                 .open(&tmp)?;
-            use std::io::Write;
-            f.write_all(text.as_bytes())?;
+            #[cfg(windows)]
+            crate::owner_only::restrict(&f)?;
+            std::io::Write::write_all(&mut f, text.as_bytes())?;
             f.sync_all()?;
             std::fs::rename(&tmp, &path)?;
             fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string()))
@@ -917,8 +917,8 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// A file opened readable by its owner alone, where the system has modes:
-/// the sidecar holds secrets.
+/// A file opened readable by its owner alone -- mode 0600, on Windows a
+/// DACL set before a byte is written (`owner_only`): the sidecar holds secrets.
 trait Private {
     fn mode_private(&mut self) -> &mut Self;
 }
@@ -929,9 +929,9 @@ impl Private for std::fs::OpenOptions {
         use std::os::unix::fs::OpenOptionsExt;
         self.mode(0o600)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     fn mode_private(&mut self) -> &mut Self {
-        self
+        crate::owner_only::options(self)
     }
 }
 

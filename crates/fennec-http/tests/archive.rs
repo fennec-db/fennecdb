@@ -176,11 +176,12 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
 
     // To the moment: the twenty notes, nothing after. A sync log a file of
     // that name left (`fennec_core::fs`) is another file's, and goes before
-    // the restored one is renamed into the place.
+    // the restored one is renamed into the place -- where the system keeps
+    // logs: Windows keeps and reads none (docs/design/windows.md, 3).
     let stale = fennec_core::fs::beside(&d.join("moment.fennec"), "sync");
     std::fs::write(&stale, b"FENECSYN another file's log").unwrap();
     let (db, r) = restored(&arch, &d.join("moment.fennec"), Target::Time(moment));
-    assert!(!stale.exists());
+    assert_eq!(stale.exists(), cfg!(windows));
     assert_eq!(r.seq, early);
     assert!(r.time.unwrap() <= moment);
     assert_eq!(rows(&db, "get notes"), early_rows);

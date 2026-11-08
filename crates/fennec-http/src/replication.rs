@@ -2194,9 +2194,9 @@ mod tests {
     #[test]
     fn the_syncers_durability_waits_for_no_stream() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-unwaited-{}-{:?}",
+            "fennec-unwaited-{}-{}",
             std::process::id(),
-            Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.fennec");
