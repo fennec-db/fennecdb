@@ -359,6 +359,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A connection no thread can be made for is answered 503.
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
+- The OpenAPI document is held to the routes.
 
 *Held writes*
 - `Fennec-Wait` holds a `set` or a `del` that writes nothing until it can

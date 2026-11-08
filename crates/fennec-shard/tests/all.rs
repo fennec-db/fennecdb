@@ -12,6 +12,7 @@ mod hooks;
 mod leases;
 mod listen;
 mod no_thread;
+mod openapi;
 mod region_leases;
 mod regions;
 mod replicas;

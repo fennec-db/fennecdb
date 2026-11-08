@@ -69,6 +69,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod node_archive;
 pub mod node_stream;
+pub mod openapi;
 pub mod quota;
 pub mod replication;
 pub mod request_id;
@@ -871,6 +872,24 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             && cors_allows(cfg, &req)
         {
             let resp = cors(Response::empty(204), cfg);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
+        // The OpenAPI document of the routes below (`openapi.rs`): the
+        // binary's, the same for every server of its kind, so it asks no
+        // token, as the health check asks none, and takes no lock. Its path
+        // is compared whole, before a segment is made: every other request
+        // pays a length compare. After the preflight, which is every path's:
+        // above it, a page's preflight for the document was its 405.
+        if openapi::asked(&req) && !matches!(backend, Backend::Metrics { .. }) {
+            let kind = match backend {
+                Backend::Tenants(_) => openapi::Kind::Node,
+                _ => openapi::Kind::File,
+            };
+            let resp = cors(openapi::answer(kind, &req), cfg);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
