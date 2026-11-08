@@ -241,7 +241,8 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
             try {
                 Get-FennecFile "$base/download/v$version/SHA256SUMS" $sumsFile
             } catch {
-                throw "could not download $base/download/v$version/SHA256SUMS: is there a release v$version? ($($_.Exception.Message))"
+                # ${version}: PowerShell reads `$version?` as a variable named "version?".
+                throw "could not download $base/download/v$version/SHA256SUMS: is there a release v${version}? ($($_.Exception.Message))"
             }
         }
     } else {
