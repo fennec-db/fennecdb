@@ -388,6 +388,38 @@ jobs:
       - name: fennec-abi's, fennec's and the native library's suites
         run: cargo test -p fennec-abi -p fennec-cli -p fennec-ffi
 
+  # docs/design/windows.md, slice 4: fennec-http's suite on Windows -- its
+  # servers run in the tests' own process, over files mapped as slice 2
+  # maps them -- beside fennec-ql's and fennec-import's. The doc tests and
+  # the examples are the Linux job's: platform-free, and minutes here.
+  windows-http:
+    name: windows (http)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: windows-latest-http-
+
+      - name: Build the suites
+        run: cargo test -p fennec-http -p fennec-ql -p fennec-import --lib --tests --no-run
+
+      - name: fennec-http's suite
+        run: cargo test -p fennec-http --lib --tests --no-fail-fast
+
+      - name: fennec-ql's and fennec-import's suites
+        run: cargo test -p fennec-ql -p fennec-import --lib --tests --no-fail-fast
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
