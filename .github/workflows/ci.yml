@@ -280,7 +280,7 @@ jobs:
       # what a read-only view refuses, in this process and another, on each
       # volume -- held to what Windows did, its answers printed.
       - name: The file layer, and what a view of a file refuses
-        run: cargo test -p fennec-core --lib fs:: -- --nocapture
+        run: cargo test -p fennec-core --lib 'fs::' -- --nocapture
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
