@@ -506,53 +506,83 @@ pub fn open_in_place(
     true
 }
 
-/// Randomness from the system alone: a key must not come from the clock,
-/// as [`random_bytes`] falls back to.
-pub fn system_random(n: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut buf = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")
-        .ok()?
-        .read_exact(&mut buf)
-        .ok()?;
-    Some(buf)
-}
-
 // ------------------------------------------------------------------- random
 
-/// Cryptographic randomness. `/dev/urandom` on Unix; when that cannot be
-/// read, the clock, the process id and a stack address are mixed with SHA-256.
-pub fn random_bytes(n: usize) -> Vec<u8> {
-    use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let mut buf = vec![0u8; n];
-        if f.read_exact(&mut buf).is_ok() {
-            return buf;
-        }
+// `getrandom` on Linux, `getentropy` on macOS: no file descriptor to run
+// out of (crypto/unix.rs).
+#[cfg(unix)]
+#[path = "crypto/unix.rs"]
+mod os;
+
+/// Elsewhere no randomness of the system's is read yet: none, so a key, a
+/// seal or a SCRAM nonce is refused there, never made of the clock.
+#[cfg(not(unix))]
+mod os {
+    pub(super) fn fill(_buf: &mut [u8]) -> bool {
+        false
     }
-    let mut out = Vec::with_capacity(n);
-    let mut counter: u64 = 0;
-    while out.len() < n {
-        let mut h = Sha256::new();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        h.update(&now.to_le_bytes());
-        h.update(&std::process::id().to_le_bytes());
-        h.update(&counter.to_le_bytes());
-        let stack = &counter as *const u64 as usize;
-        h.update(&stack.to_le_bytes());
-        out.extend_from_slice(&h.finish());
-        counter += 1;
-    }
-    out.truncate(n);
-    out
 }
 
-/// A SCRAM nonce: a string in the base64 alphabet containing no `,` or `=`.
-pub fn nonce(len: usize) -> String {
-    b64_encode(&random_bytes(len)).replace('=', "")
+/// The system's randomness, `None` where it gives none. Every key and
+/// nonce is made of it alone and refused without it: the clock, read twice
+/// in one tick, is one nonce twice -- ChaCha20's keystream and Poly1305's
+/// key used twice under one archive key. Ids, which are no secret, are
+/// [`id_u64`]'s.
+pub fn system_random(n: usize) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if REFUSED.with(|r| r.get()) {
+        return None;
+    }
+    let mut buf = vec![0u8; n];
+    os::fill(&mut buf).then_some(buf)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the system refuses its randomness, on a test's thread.
+    static REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f` run with the system refusing its randomness on this thread.
+#[cfg(test)]
+pub(crate) fn without_randomness<T>(f: impl FnOnce() -> T) -> T {
+    struct Back;
+    impl Drop for Back {
+        fn drop(&mut self) {
+            REFUSED.with(|r| r.set(false));
+        }
+    }
+    REFUSED.with(|r| r.set(true));
+    let _back = Back;
+    f()
+}
+
+/// 64 bits for an id -- a request's, a trace's, a hook set's version --
+/// which must be unique and need not be secret: the system's randomness,
+/// else the clock, the process id and the process's count of these through
+/// SHA-256, so a server the system refuses still names its requests.
+/// Never a key or a nonce: those are [`system_random`]'s alone.
+pub fn id_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAWN: AtomicU64 = AtomicU64::new(0);
+    if let Some(Ok(b)) = system_random(8).map(<[u8; 8]>::try_from) {
+        return u64::from_le_bytes(b);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut h = Sha256::new();
+    h.update(&now.to_le_bytes());
+    h.update(&std::process::id().to_le_bytes());
+    h.update(&DRAWN.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    let d = h.finish();
+    u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
+}
+
+/// A SCRAM nonce: a string in the base64 alphabet containing no `,` or `=`,
+/// `None` where the system gives no randomness.
+pub fn nonce(len: usize) -> Option<String> {
+    Some(b64_encode(&system_random(len)?).replace('=', ""))
 }
 
 /// An RSA public key, for RS256 tokens an identity provider signs: the
@@ -918,8 +948,67 @@ mod tests {
 
     #[test]
     fn random_is_not_constant() {
-        assert_ne!(random_bytes(16), random_bytes(16));
-        let n = nonce(18);
+        assert_ne!(system_random(16), system_random(16));
+        assert_eq!(system_random(0), Some(Vec::new()));
+        // Past getentropy's 256 bytes a call, and getrandom's short reads.
+        let long = system_random(1000).unwrap();
+        assert!(long[256..].iter().any(|&b| b != 0));
+        let n = nonce(18).unwrap();
         assert!(!n.contains(',') && !n.contains('='));
+        assert_ne!(id_u64(), id_u64());
+    }
+
+    /// Without the system's randomness a nonce is refused, never made of the
+    /// clock; an id, which is no secret, still comes, and twice in one tick
+    /// is two ids.
+    #[test]
+    fn no_randomness_refuses_nonces_and_names_ids() {
+        without_randomness(|| {
+            assert_eq!(system_random(12), None);
+            assert_eq!(nonce(24), None);
+            let ids: std::collections::HashSet<u64> = (0..1000).map(|_| id_u64()).collect();
+            assert_eq!(ids.len(), 1000);
+        });
+        assert!(nonce(24).is_some());
+    }
+
+    /// Descriptors run out -- EMFILE, a busy server at its limit -- and the
+    /// system's randomness is still read: getrandom and getentropy take none.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn randomness_needs_no_descriptor() {
+        // Run again in a child of 64 descriptors at most, which it uses up:
+        // this binary's other tests keep theirs.
+        if std::env::var_os("FENNEC_NO_FDS_CHILD").is_none() {
+            let me = std::env::current_exe().unwrap();
+            let out = std::process::Command::new("/bin/sh")
+                .args(["-c", "ulimit -Sn 64 && exec \"$0\" \"$@\""])
+                .arg(me)
+                .args(["--exact", "crypto::tests::randomness_needs_no_descriptor"])
+                .args(["--nocapture", "--test-threads=1"])
+                .env("FENNEC_NO_FDS_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "{said}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(said.contains("descriptors gone, randomness read"), "{said}");
+            return;
+        }
+        let mut held = Vec::new();
+        while let Ok(f) = std::fs::File::open("/dev/null") {
+            held.push(f);
+            assert!(held.len() <= 64, "the limit of 64 descriptors was not met");
+        }
+        assert!(std::fs::File::open("/dev/urandom").is_err());
+        let a = system_random(32).expect("the system's randomness without a descriptor");
+        let b = system_random(32).unwrap();
+        assert_ne!(a, b);
+        assert!(nonce(24).is_some());
+        drop(held);
+        println!("descriptors gone, randomness read");
     }
 }

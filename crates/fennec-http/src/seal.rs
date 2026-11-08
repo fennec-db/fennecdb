@@ -10,13 +10,14 @@
 //! [plaintext length u32][nonce 12][ciphertext][tag 16]
 //! ```
 //!
-//! Each frame's nonce is random, and its tag covers its place in the file
-//! and whether it is the last: a frame moved, dropped, repeated or taken
-//! from another file does not open, nor does one byte changed, nor a file
-//! cut short where a whole one was sealed (`open_whole`). A segment is
-//! appended a frame at a time, each holding whole records, so a crash
-//! leaves at most its last frame cut short, which is cut off as a torn
-//! record is in a plain one (`open_appended`).
+//! Each frame's nonce is the system's randomness -- a seal is refused
+//! without it, never given the clock's -- and its tag covers its place in
+//! the file and whether it is the last: a frame moved, dropped, repeated
+//! or taken from another file does not open, nor does one byte changed,
+//! nor a file cut short where a whole one was sealed (`open_whole`). A
+//! segment is appended a frame at a time, each holding whole records, so a
+//! crash leaves at most its last frame cut short, which is cut off as a
+//! torn record is in a plain one (`open_appended`).
 
 use crate::crypto;
 use std::io;
@@ -59,8 +60,8 @@ impl Key {
         Some(Key(k))
     }
 
-    /// A new key from the system's randomness, as hexadecimal: never the
-    /// clock, which `crypto::random_bytes` falls back to.
+    /// A new key from the system's randomness, as hexadecimal; `None`
+    /// without it.
     pub fn generate() -> Option<String> {
         let k = crypto::system_random(32)?;
         Some(k.iter().map(|b| format!("{b:02x}")).collect())
@@ -79,32 +80,44 @@ fn aad(index: u64, last: bool) -> [u8; 9] {
     a
 }
 
-/// Frame `index` of `plain`, appended to `out`.
-pub fn seal_frame(key: &Key, index: u64, last: bool, plain: &[u8], out: &mut Vec<u8>) {
-    let nonce: [u8; 12] = crypto::random_bytes(12).try_into().unwrap_or([0; 12]);
+/// Frame `index` of `plain`, appended to `out`. Its nonce is the system's
+/// randomness and nothing else: a nonce used twice under a key gives away
+/// both frames' keystream and lets their tags be forged, so without the
+/// randomness the seal is refused, `out` as it was.
+pub fn seal_frame(
+    key: &Key,
+    index: u64,
+    last: bool,
+    plain: &[u8],
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
+    let nonce: [u8; 12] = crypto::system_random(12)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| io::Error::other("no randomness from the system for a seal's nonce"))?;
     out.extend_from_slice(&(plain.len() as u32).to_le_bytes());
     out.extend_from_slice(&nonce);
     let at = out.len();
     out.extend_from_slice(plain);
     let tag = crypto::seal_in_place(&key.0, &nonce, &aad(index, last), &mut out[at..]);
     out.extend_from_slice(&tag);
+    Ok(())
 }
 
 /// `plain` sealed whole: the magic, then frames of a mebibyte, the last
 /// flagged as the last.
-pub fn seal_whole(key: &Key, plain: &[u8]) -> Vec<u8> {
+pub fn seal_whole(key: &Key, plain: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(plain.len() + plain.len() / FRAME * 32 + 64);
     out.extend_from_slice(MAGIC);
     let mut chunks = plain.chunks(FRAME).peekable();
     if chunks.peek().is_none() {
-        seal_frame(key, 0, true, &[], &mut out);
+        seal_frame(key, 0, true, &[], &mut out)?;
     }
     let mut index = 0;
     while let Some(c) = chunks.next() {
-        seal_frame(key, index, chunks.peek().is_none(), c, &mut out);
+        seal_frame(key, index, chunks.peek().is_none(), c, &mut out)?;
         index += 1;
     }
-    out
+    Ok(out)
 }
 
 /// The frames of `bytes` past the magic: each whole one opened, until one
@@ -181,7 +194,7 @@ mod tests {
         let k = key(7);
         for len in [0, 1, FRAME - 1, FRAME, FRAME + 1, 3 * FRAME + 5] {
             let plain: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
-            let sealed = seal_whole(&k, &plain);
+            let sealed = seal_whole(&k, &plain).unwrap();
             assert_eq!(open_whole(&k, &sealed).unwrap(), plain, "{len}");
             assert!(open_whole(&key(8), &sealed).is_err(), "another key");
             let mut flipped = sealed.clone();
@@ -201,7 +214,7 @@ mod tests {
     fn frames_out_of_place_do_not_open() {
         let k = key(1);
         let plain = vec![9u8; 2 * FRAME + 10];
-        let sealed = seal_whole(&k, &plain);
+        let sealed = seal_whole(&k, &plain).unwrap();
         let frame = HEAD + FRAME + TAG;
         let (a, b) = (MAGIC.len(), MAGIC.len() + frame);
         let mut swapped = sealed.clone();
@@ -215,14 +228,57 @@ mod tests {
         let k = key(3);
         let mut file = MAGIC.to_vec();
         for i in 0..5u64 {
-            seal_frame(&k, i, false, &[i as u8; 40], &mut file);
+            seal_frame(&k, i, false, &[i as u8; 40], &mut file).unwrap();
         }
         let whole = file.len();
-        seal_frame(&k, 5, false, &[5; 40], &mut file);
+        seal_frame(&k, 5, false, &[5; 40], &mut file).unwrap();
         let cut = &file[..file.len() - 3];
         let (plain, end, frames) = open_appended(&k, cut).unwrap();
         assert_eq!((plain.len(), end, frames), (200, whole, 5));
         // Sealed whole, a file is no appended one.
-        assert!(open_appended(&k, &seal_whole(&k, b"x")).is_err());
+        assert!(open_appended(&k, &seal_whole(&k, b"x").unwrap()).is_err());
+    }
+
+    fn nonce_of(frame: &[u8]) -> [u8; 12] {
+        frame[4..HEAD].try_into().unwrap()
+    }
+
+    /// Without the system's randomness a seal is refused -- nothing
+    /// appended, no frame under a nonce of the clock's -- and a key is
+    /// made by none.
+    #[test]
+    fn no_randomness_refuses_a_seal() {
+        let k = key(4);
+        crypto::without_randomness(|| {
+            let mut out = MAGIC.to_vec();
+            assert!(seal_frame(&k, 0, false, b"secret", &mut out).is_err());
+            assert_eq!(out, MAGIC, "a refused seal appends nothing");
+            assert!(seal_whole(&k, b"secret").is_err());
+            assert!(seal_whole(&k, b"").is_err());
+            assert!(Key::generate().is_none());
+        });
+        assert!(seal_whole(&k, b"secret").is_ok());
+    }
+
+    /// Frames sealed back to back, in one tick of the clock, never share a
+    /// nonce: a smoke test of the source, which a clock's fallback failed.
+    #[test]
+    fn frames_sealed_back_to_back_take_their_own_nonces() {
+        let k = key(5);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..10_000u64 {
+            let mut frame = Vec::new();
+            seal_frame(&k, i, false, b"", &mut frame).unwrap();
+            assert!(
+                seen.insert(nonce_of(&frame)),
+                "frame {i}'s nonce came again"
+            );
+        }
+        let sealed = seal_whole(&k, &vec![1u8; 3 * FRAME]).unwrap();
+        let frame = HEAD + FRAME + TAG;
+        let nonces: std::collections::HashSet<_> = (0..3)
+            .map(|i| nonce_of(&sealed[MAGIC.len() + i * frame..]))
+            .collect();
+        assert_eq!(nonces.len(), 3);
     }
 }

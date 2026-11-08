@@ -16,9 +16,11 @@
 //! A made id is 16 hex characters: 64 bits of a bijective mix
 //! (SplitMix64's finalizer) of a key read from the system once a process,
 //! the thread's number and its count of requests -- distinct within a
-//! process while it has made fewer than 2^24 threads, as unguessable as the
-//! key, and 15 ns to make (12 to keep a client's), where reading
-//! `/dev/urandom` for each was a system call a request.
+//! process while it has made fewer than 2^24 threads, and 15 ns to make (12
+//! to keep a client's), where reading `/dev/urandom` for each was a system
+//! call a request. Only that they are distinct holds: the key falls back to
+//! the clock where the system gives no randomness (`crypto::id_u64`), and
+//! no id need be unguessable, as a client may send its own.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -42,11 +44,10 @@ thread_local! {
     static NEXT: Cell<u64> = Cell::new(THREADS.fetch_add(1, Ordering::Relaxed) << 40);
 }
 
+/// Drawn once a process: an id needs to be unique, not secret, so the
+/// clock's stands in where the system gives no randomness (`id_u64`).
 fn key() -> u64 {
-    *KEY.get_or_init(|| {
-        let b = crate::crypto::random_bytes(8);
-        u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))
-    })
+    *KEY.get_or_init(crate::crypto::id_u64)
 }
 
 /// SplitMix64's finalizer: a bijection, so distinct inputs give distinct ids.

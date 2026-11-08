@@ -686,7 +686,10 @@ impl Client {
     /// travel. The server signature is verified too, which proves the other
     /// side really knows the password.
     fn scram(&mut self, password: &str) -> Result<()> {
-        let cnonce = nonce(24);
+        // The system's randomness or no sign-in: a nonce of the clock's could
+        // come again, and a proof with it.
+        let cnonce =
+            nonce(24).ok_or_else(|| io("no randomness from the system for SCRAM's nonce"))?;
         let client_first_bare = format!("n=,r={cnonce}");
         let initial = format!("n,,{client_first_bare}");
         let mut w = Writer::new();
