@@ -514,9 +514,9 @@ pub fn open_in_place(
 #[path = "crypto/unix.rs"]
 mod os;
 
-/// Elsewhere no randomness of the system's is read yet: none, so a key, a
-/// seal or a SCRAM nonce is refused there, never made of the clock.
-#[cfg(not(unix))]
+/// Neither Unix nor Windows (`os` below): no randomness of the system's is
+/// read, so a key, a seal or a SCRAM nonce is refused, never the clock's.
+#[cfg(not(any(unix, windows)))]
 mod os {
     pub(super) fn fill(_buf: &mut [u8]) -> bool {
         false
@@ -752,6 +752,13 @@ impl RsaKey {
         ct_eq(&got, &want)
     }
 }
+
+// `BCryptGenRandom` on Windows (crypto/windows.rs). Below the code a Unix
+// build compiles, so its lines -- a panic's location among them -- stay
+// where they were (docs/design/windows.md, 7l).
+#[cfg(windows)]
+#[path = "crypto/windows.rs"]
+mod os;
 
 #[cfg(test)]
 mod tests {

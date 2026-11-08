@@ -522,6 +522,11 @@ func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
 	}
 }
 
+// A job is ready by an instant the test holds, not by now(): a lease of
+// now() + a minute runs out whenever a minute passes between two claims
+// (an iOS simulator's run of the Swift twin once stalled 75 s between
+// them), the later claim taking a job the first held. now() writes the
+// leases still, every one of them past that instant.
 func TestAClaimAnswersTheRowsItTook(t *testing.T) {
 	ctx := context.Background()
 	db := root()
@@ -531,8 +536,10 @@ func TestAClaimAnswersTheRowsItTook(t *testing.T) {
 	for n := 1; n <= 3; n++ {
 		must(jobs.Insert(ctx, fennecdb.D("n", n, "run_at", n, "attempts", 0))).of(t)
 	}
+	// Past every job's run_at (milliseconds since the epoch).
+	const readyBy = 1000
 	claim := func(owner string, limit int) fennecdb.Result {
-		return must(jobs.WhereCond(fennecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(limit).Update(ctx,
+		return must(jobs.WhereCond(fennecdb.Raw("run_at <= ?", readyBy)).Order("run_at", "asc").Limit(limit).Update(ctx,
 			fennecdb.D("owner", owner, "run_at", fennecdb.Expr("now() + ?", 60000), "attempts", fennecdb.Inc(1)),
 			fennecdb.Returning("id", "n", "attempts"))).of(t)
 	}
@@ -561,13 +568,18 @@ func TestAClaimAnswersTheRowsItTook(t *testing.T) {
 
 // A claim held until a job comes (Wait): taken once a job is enqueued,
 // ended on time with no row, and given up by its context.
+//
+// A job is ready by an instant the test holds, not by now(): see
+// TestAClaimAnswersTheRowsItTook.
 func TestAHeldClaimTakesTheJobEnqueuedMeanwhile(t *testing.T) {
 	ctx := context.Background()
 	db := root()
 	name := fresh("held")
 	must(db.Exec(ctx, "create collection "+name+" (kind text, run_at timestamp @sorted, owner text)")).of(t)
+	// Past every job's run_at (milliseconds since the epoch).
+	const readyBy = 1000
 	claim := func(c *fennecdb.Client, ctx context.Context, owner string) (fennecdb.Result, error) {
-		return c.From(name).WhereCond(fennecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(1).Update(ctx,
+		return c.From(name).WhereCond(fennecdb.Raw("run_at <= ?", readyBy)).Order("run_at", "asc").Limit(1).Update(ctx,
 			fennecdb.D("owner", owner, "run_at", fennecdb.Expr("now() + ?", 60000)), fennecdb.Returning("kind"))
 	}
 	got := make(chan fennecdb.Result, 1)
@@ -579,7 +591,7 @@ func TestAHeldClaimTakesTheJobEnqueuedMeanwhile(t *testing.T) {
 		got <- r
 	}()
 	time.Sleep(200 * time.Millisecond)
-	must(db.From(name).Insert(ctx, fennecdb.D("kind", "mail", "run_at", time.Now().UnixMilli()))).of(t)
+	must(db.From(name).Insert(ctx, fennecdb.D("kind", "mail", "run_at", 1))).of(t)
 	select {
 	case r := <-got:
 		if len(r.Rows) != 1 || r.Rows[0]["kind"] != "mail" {

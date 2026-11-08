@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
@@ -167,7 +168,14 @@ fn trial(dir: &Path, sync: &str, run: Duration) -> (usize, usize, usize) {
         })
     };
     std::thread::sleep(run);
-    unsafe { kill(primary.child.id() as i32, 9) };
+    #[cfg(unix)]
+    unsafe {
+        kill(primary.child.id() as i32, 9)
+    };
+    // `cargo test` builds this on Windows too, which `make replica-bench`
+    // does not run it on: `TerminateProcess` is its SIGKILL.
+    #[cfg(not(unix))]
+    let _ = primary.child.kill();
     let _ = primary.child.wait();
     stop.store(true, Ordering::SeqCst);
     let _ = writer.join();
@@ -193,7 +201,12 @@ fn trial(dir: &Path, sync: &str, run: Duration) -> (usize, usize, usize) {
     let lost = acked.iter().filter(|n| !held.contains(n)).count();
     let unanswered = held.len() + lost - acked.len();
     let mut replica = replica;
-    unsafe { kill(replica.child.id() as i32, 15) };
+    #[cfg(unix)]
+    unsafe {
+        kill(replica.child.id() as i32, 15)
+    };
+    #[cfg(not(unix))]
+    let _ = replica.child.kill();
     let _ = replica.child.wait();
     (acked.len(), lost, unanswered)
 }

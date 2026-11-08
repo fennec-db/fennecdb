@@ -5,6 +5,11 @@
 //! shutdown ends in `process::exit` and its flag is the whole process's.
 //! So the binary runs, on a port it picks, and is asked over HTTP as any
 //! client asks it.
+//!
+//! It is stopped as a supervisor stops it: `SIGTERM`, and on Windows, which
+//! has no signals, Ctrl+Break to the process group each server is started
+//! in ([`own_group`], docs/design/windows.md, decision 4); killed with
+//! `SIGKILL`, on Windows `TerminateProcess`.
 
 #![allow(dead_code)]
 
@@ -16,11 +21,132 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // libc's `kill`, declared as the server declares `signal`: no dependency.
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 pub const SIGKILL: i32 = 9;
 pub const SIGTERM: i32 = 15;
+
+/// Asks `child` to stop as a supervisor does: `SIGTERM`, on Windows
+/// Ctrl+Break to its process group, which [`own_group`] made.
+pub fn ask_to_stop(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        kill(child.id() as i32, SIGTERM);
+    }
+    #[cfg(windows)]
+    windows::ctrl_break(child);
+}
+
+/// `cmd` started in a process group of its own, on Windows, where the
+/// group is what Ctrl+Break is sent to ([`ask_to_stop`]): sent to the
+/// harness's own group, it would stop the harness and every server beside
+/// the one meant. Unix sends a signal to a process, and changes nothing.
+pub fn own_group(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    windows::own_group(cmd);
+    cmd
+}
+
+/// Windows' half of stopping a server: Ctrl+Break, and the console it is
+/// sent through.
+#[cfg(windows)]
+pub mod windows {
+    use std::process::{Child, Command};
+    use std::sync::OnceLock;
+
+    const CTRL_BREAK_EVENT: u32 = 1;
+    /// winbase.h's: the child heads a process group of its own, its id the
+    /// child's.
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
+        fn GetConsoleProcessList(pids: *mut u32, len: u32) -> u32;
+        fn AllocConsole() -> i32;
+        fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+        fn SetStdHandle(which: u32, handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    /// Whether this process had a console of its own before the first
+    /// server started, or [`console`] made one: what the runner's step
+    /// gives a test is the design's question (3), which
+    /// `tests/windows.rs` prints.
+    static HAD_ONE: OnceLock<bool> = OnceLock::new();
+
+    /// The processes attached to this process's console, none where it has
+    /// none.
+    pub fn console_processes() -> Vec<u32> {
+        let mut pids = vec![0u32; 64];
+        loop {
+            // SAFETY: a buffer of `pids.len()` ids.
+            let n = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+            if (n as usize) <= pids.len() {
+                pids.truncate(n as usize);
+                return pids;
+            }
+            pids.resize(n as usize, 0);
+        }
+    }
+
+    /// Makes sure this process has a console its servers share, which
+    /// `GenerateConsoleCtrlEvent` asks: it sends to processes of the
+    /// caller's console alone. A process without one is given one
+    /// (`AllocConsole`), its standard handles kept as they were -- cargo's
+    /// pipes, where its output goes. Whether one was there: [`had_one`].
+    pub fn console() -> bool {
+        *HAD_ONE.get_or_init(|| {
+            if !console_processes().is_empty() {
+                return true;
+            }
+            // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE.
+            let which = [-10i32 as u32, -11i32 as u32, -12i32 as u32];
+            // SAFETY: the process's own standard handles, read and put back.
+            unsafe {
+                let kept = which.map(|w| GetStdHandle(w));
+                assert_ne!(AllocConsole(), 0, "{}", std::io::Error::last_os_error());
+                for (w, h) in which.iter().zip(kept) {
+                    SetStdHandle(*w, h);
+                }
+            }
+            false
+        })
+    }
+
+    /// Whether the harness had a console before its first server: `None`
+    /// until one started.
+    pub fn had_one() -> Option<bool> {
+        HAD_ONE.get().copied()
+    }
+
+    pub fn own_group(cmd: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        console();
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    /// Ctrl+Break to `child`'s group, as `kill` sends `SIGTERM`: nothing to
+    /// a child that has ended. The call refuses a group no process of the
+    /// console is in, so a refusal is the test's error unless the child
+    /// ended meanwhile; its id names no other process while `Child` holds
+    /// its handle.
+    pub fn ctrl_break(child: &mut Child) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // SAFETY: no pointers; the group is the child's own, made by
+        // `own_group`.
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
+        if sent == 0 {
+            let e = std::io::Error::last_os_error();
+            if !matches!(child.try_wait(), Ok(Some(_))) {
+                panic!("Ctrl+Break to {} was refused: {e}", child.id());
+            }
+        }
+    }
+}
 
 /// A fresh path under a directory of this test process's own.
 pub fn tmp(tag: &str, name: &str) -> PathBuf {
@@ -81,6 +207,7 @@ pub fn start_piped(args: &[&str]) -> Server {
 /// [`try_start_env`] with `stdin` as the server's stdin.
 pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
+    own_group(&mut cmd);
     cmd.envs(env.iter().copied());
     if !args.contains(&"--http") {
         cmd.args(["--http", "127.0.0.1:0"]);
@@ -144,9 +271,21 @@ impl Server {
     }
 
     /// Sends `sig`, waits for the process to end; its exit code and
-    /// everything it logged.
+    /// everything it logged. On Windows `SIGTERM` is Ctrl+Break to the
+    /// server's process group and `SIGKILL` is `TerminateProcess`, a crash.
     pub fn signal(mut self, sig: i32) -> (i32, String) {
-        unsafe { kill(self.child.id() as i32, sig) };
+        #[cfg(unix)]
+        unsafe {
+            kill(self.child.id() as i32, sig)
+        };
+        #[cfg(windows)]
+        match sig {
+            SIGTERM => windows::ctrl_break(&mut self.child),
+            SIGKILL => {
+                let _ = self.child.kill();
+            }
+            _ => panic!("signal {sig}: Windows has Ctrl+Break and TerminateProcess alone"),
+        }
         let status = self.child.wait().expect("could not wait for the process");
         // The reader thread takes the last lines as the pipe closes.
         std::thread::sleep(Duration::from_millis(100));
@@ -396,7 +535,7 @@ pub fn ended(mut child: Child, within: Duration) -> (i32, String) {
 /// `/dev/null` and stderr piped: for a start that must end of its own
 /// accord ([`ended`]).
 pub fn command(args: &[&str]) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_fennec-server"))
+    own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
