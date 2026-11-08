@@ -205,10 +205,6 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - A file is compacted before it outgrows the page cache
 - File format
 
-*The engine's lock and blocks*
-- A block's documents are built beside the readers
-- A long read is pinned, and read with no lock held
-
 *Durability*
 - Buffered writes are written behind the lock
 - A durable write syncs a log beside the file, not the file
@@ -295,6 +291,14 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - An item of a select list is an expression, and an aggregate folds one
 - `approx_count_distinct` is HyperLogLog, and `having` keeps groups
 - `bucket(at, 1d, 'Europe/Berlin')` reads a zone's clock
+
+### `crates/fennec-core/src/engine/CLAUDE.md`
+
+Covers `crates/fennec-core/src/engine/`.
+
+*The engine's lock and blocks*
+- A block's documents are built beside the readers
+- A long read is pinned, and read with no lock held
 
 ### `crates/fennec-ql/CLAUDE.md`
 
