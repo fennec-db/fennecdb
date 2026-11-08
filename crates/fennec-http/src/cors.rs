@@ -38,7 +38,11 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         // marks its reads for a replica near it with `Fennec-Read`, which
         // refused, went home every time. A router's 503 for a request it
         // never got to the node says so (`Fennec-Unsent`), which a page
-        // reads to send an unkeyed write again.
+        // reads to send an unkeyed write again. A deprecated route's
+        // answer says so in RFC 9745's `Deprecation`, RFC 8594's `Sunset`
+        // and its `Link` (`openapi::Deprecated`), none of them safelisted:
+        // unexposed, a page's client could not warn of a route going. The
+        // list is one constant, written as it is on every answer.
         (
             "Access-Control-Allow-Headers",
             "content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, \
@@ -47,7 +51,7 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         (
             "Access-Control-Expose-Headers",
             "fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, \
-             fennec-quota, retry-after, fennec-unsent",
+             fennec-quota, retry-after, fennec-unsent, deprecation, sunset, link",
         ),
         ("Access-Control-Max-Age", "600"),
         ("Vary", "Origin"),
@@ -117,5 +121,30 @@ mod tests {
             .collect();
         assert_eq!(head, from_resp);
         assert!(apply(Response::empty(204), None).extra.is_empty());
+    }
+
+    /// A page on another origin reads what a deprecated route answers
+    /// (`openapi::Deprecated::headers`), each name as it writes it.
+    #[test]
+    fn a_deprecations_headers_are_exposed() {
+        let resp = apply(Response::empty(204), Some("https://app.example"));
+        let exposed = resp
+            .extra
+            .iter()
+            .find(|(k, _)| k == "Access-Control-Expose-Headers")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        let names: Vec<&str> = exposed.split(", ").collect();
+        let marked = crate::openapi::Deprecated {
+            since: 1_794_096_000,
+            sunset: Some(1_809_734_400),
+            link: "https://fennecdb.com/docs/http-reference#compatibility",
+        };
+        for (name, _) in marked.headers() {
+            assert!(
+                names.contains(&name.to_ascii_lowercase().as_str()),
+                "{name} is not exposed: {exposed}"
+            );
+        }
     }
 }

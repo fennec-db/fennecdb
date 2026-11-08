@@ -187,13 +187,20 @@ openapi-lint:
 	  target/tmp/openapi/file.json target/tmp/openapi/node.json target/tmp/openapi/router.json
 
 ## The REST API only grows: the three documents held to the baseline in
-## integrations/openapi/ and to BASE's (origin/main) -- an operation, a
-## status, a field or a way in removed, a parameter or field made required,
-## a request type narrowed or a token asked where none was fails, unless
-## tools/openapi_compat.py's BREAKS names it (docs/design/http.md#compatibility)
+## integrations/openapi/ by this checkout's checker, and to BASE's (origin/main)
+## by BASE's checker, as CI holds them -- an operation, a status, a field or a
+## way in removed, a parameter or field made required, a request type narrowed
+## or a token asked where none was fails, unless tools/openapi_compat.py's
+## BREAKS names it (docs/design/http.md#compatibility)
 openapi-check:
 	$(CARGO) test -p fennec-server --test all openapi::
-	python3 tools/openapi_compat.py --base-ref '$(or $(BASE),origin/main)'
+	python3 tools/openapi_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/openapi_compat.py" 2>/dev/null; then \
+	  git show "$$base:tools/openapi_compat.py" > target/tmp/openapi/compat-base.py && \
+	  python3 -I target/tmp/openapi/compat-base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/openapi_compat.py; \
+	else echo "$$base has no tools/openapi_compat.py yet: no base pass"; fi
 
 ## integrations/openapi/ written again from the documents the server serves,
 ## refused where they break what the baseline holds and BREAKS names not

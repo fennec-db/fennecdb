@@ -24,8 +24,9 @@ spec.loader.exec_module(compat)
 
 def document():
     """A document as the server writes one, cut down: a read with query
-    parameters and a header, a write with a body, a stream, an operation
-    asking no token, the shared components behind `$ref`s."""
+    parameters and a header, a write with a body, an operation asking no
+    token, one served under a flag, a refusal whose body requires a field
+    through an `allOf`, the shared components behind `$ref`s."""
     return {
         "openapi": "3.1.0",
         "info": {"title": "t", "version": "1"},
@@ -47,6 +48,7 @@ def document():
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Read"}}},
                         },
                         "401": {"description": "No token"},
+                        "503": {"$ref": "#/components/responses/Unavailable"},
                         "default": {"description": "A refusal"},
                     },
                 },
@@ -73,14 +75,56 @@ def document():
                     "responses": {"200": {"description": "Counts"}},
                 },
             },
+            "/_changes/consumers/{consumer}": {
+                "parameters": [{"$ref": "#/components/parameters/consumer"}],
+                "patch": {
+                    "operationId": "moveConsumer",
+                    "x-fennec-flag": "--cdc",
+                    "security": [{"token": []}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Since"}}},
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Moved",
+                            "headers": {"Fennec-Seq": {"$ref": "#/components/headers/FennecSeq"}},
+                        }
+                    },
+                },
+            },
         },
         "components": {
+            "securitySchemes": {
+                "token": {"type": "http", "scheme": "bearer"},
+                "jwt": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+                "admin": {"type": "http", "scheme": "bearer"},
+            },
             "parameters": {
                 "collection": {"name": "collection", "in": "path", "required": True, "schema": {"type": "string"}},
+                "consumer": {"name": "consumer", "in": "path", "required": True, "schema": {"type": "string"}},
                 "Limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 0}},
                 "Order": {"name": "order", "in": "query", "schema": {"type": "string"}},
             },
+            "headers": {"FennecSeq": {"schema": {"type": "integer"}}},
+            "responses": {
+                "Unavailable": {
+                    "description": "Come back later",
+                    "headers": {"Retry-After": {"schema": {"type": "integer"}}},
+                    "content": {
+                        "application/json": {
+                            "schema": {"allOf": [{"$ref": "#/components/schemas/Error"}, {"required": ["retry_after"]}]}
+                        }
+                    },
+                }
+            },
             "schemas": {
+                "Error": {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {"error": {"type": "string"}, "retry_after": {"type": "integer"}},
+                },
+                "Since": {"type": "object", "properties": {"since": {"type": "integer", "minimum": 0}}},
                 "Document": {"type": "object", "additionalProperties": True},
                 "Rows": {"type": "array", "items": {"$ref": "#/components/schemas/Document"}},
                 "Faceted": {
@@ -103,6 +147,10 @@ def document():
                         "fuzzy": {"oneOf": [{"type": "boolean"}, {"type": "integer", "maximum": 2}]},
                         "mode": {"type": "string", "enum": ["fast", "exact"]},
                         "where": {"type": "string"},
+                        "ef": {"type": "integer", "format": "int32", "minimum": 0},
+                        "weight": {"type": "number", "format": "float", "multipleOf": 0.5},
+                        "candidates": {"allOf": [{"type": "integer", "minimum": 1}, {"maximum": 10000}]},
+                        "filter": {"type": "object", "properties": {"year": {"type": "integer"}}},
                     },
                 },
             },
@@ -310,6 +358,249 @@ class Breaking(unittest.TestCase):
 
         self.assertEqual(changes(edit), [("GET /{collection}", "security jwt removed"), ("POST /{collection}", "security jwt removed")])
 
+    def test_a_flag_added_or_grown(self):
+        # An operation every server served now asks a flag: a server started
+        # without it answers 404, the operation gone for it.
+        def always(d):
+            path(d, "/_health")["get"]["x-fennec-flag"] = "--studio"
+
+        old = document()
+        new = copy.deepcopy(old)
+        always(new)
+        [(op, change, detail)] = compat.breaks(old, new)
+        self.assertEqual((op, change), ("GET /_health", "flag added"))
+        self.assertIn("served under every server", detail)
+        self.assertIn("without --studio answers 404", detail)
+
+        # A flag grown: served under --cdc, now under --cdc and --lease.
+        def grown(d):
+            path(d, "/_changes/consumers/{consumer}")["patch"]["x-fennec-flag"] = "--cdc --lease"
+
+        self.assertEqual(changes(grown), [("PATCH /_changes/consumers/{consumer}", "flag added")])
+
+        # One flag for another.
+        def other(d):
+            path(d, "/_changes/consumers/{consumer}")["patch"]["x-fennec-flag"] = "--changes"
+
+        self.assertEqual(changes(other), [("PATCH /_changes/consumers/{consumer}", "flag added")])
+
+    def test_a_response_field_no_longer_required(self):
+        # Unavailable's retry_after, required through its allOf: an answer
+        # may now leave it out.
+        def edit(d):
+            d["components"]["responses"]["Unavailable"]["content"]["application/json"]["schema"] = {
+                "$ref": "#/components/schemas/Error"
+            }
+
+        self.assertEqual(changes(edit), [("GET /{collection}", "response 503 field retry_after no longer required")])
+
+        # The body's own required field, through the $ref.
+        def own(d):
+            schemas(d)["Error"]["required"] = []
+
+        self.assertEqual(changes(own), [("GET /{collection}", "response 503 field error no longer required")])
+
+    def test_a_path_parameter_narrowed(self):
+        cases = {
+            "type": {"type": "integer"},
+            "enum": {"type": "string", "enum": ["a", "b"]},
+            "pattern": {"type": "string", "pattern": "^[a-z]+$"},
+            "maxLength": {"type": "string", "maxLength": 64},
+            "minLength": {"type": "string", "minLength": 1},
+        }
+        for what, schema in cases.items():
+            with self.subTest(what):
+
+                def edit(d):
+                    d["components"]["parameters"]["collection"]["schema"] = schema
+
+                self.assertEqual(
+                    changes(edit),
+                    [
+                        ("GET /{collection}", "parameter path collection narrowed"),
+                        ("POST /{collection}", "parameter path collection narrowed"),
+                    ],
+                )
+
+    def test_a_path_parameter_renamed(self):
+        # The same route to a client filling it by place; a generated one
+        # names its argument by it.
+        def edit(d):
+            item = d["paths"].pop("/{collection}")
+            item["parameters"] = [{"$ref": "#/components/parameters/name"}]
+            d["paths"]["/{name}"] = item
+            d["components"]["parameters"]["name"] = {
+                "name": "name",
+                "in": "path",
+                "required": True,
+                "schema": {"type": "string"},
+            }
+
+        old = document()
+        new = copy.deepcopy(old)
+        edit(new)
+        found = compat.breaks(old, new)
+        self.assertEqual(
+            [(op, c) for op, c, _ in found],
+            [
+                ("GET /{collection}", "parameter path collection renamed"),
+                ("POST /{collection}", "parameter path collection renamed"),
+            ],
+        )
+        self.assertIn("{collection} -> {name}", found[0][2])
+
+    def test_an_operation_id_renamed(self):
+        def edit(d):
+            path(d, "/_health")["get"]["operationId"] = "live"
+
+        old = document()
+        new = copy.deepcopy(old)
+        edit(new)
+        [(op, change, detail)] = compat.breaks(old, new)
+        self.assertEqual((op, change), ("GET /_health", "operationId renamed"))
+        self.assertIn("health -> live", detail)
+
+    def test_additional_properties_closed_or_given_a_schema(self):
+        # Absent (any field taken) to false.
+        def closed(d):
+            schemas(d)["Near"]["additionalProperties"] = False
+
+        self.assertEqual(changes(closed), [("POST /{collection}", "request body narrowed")])
+
+        # Absent to a schema: a field beyond those listed held to it.
+        def typed(d):
+            schemas(d)["Near"]["additionalProperties"] = {"type": "string"}
+
+        self.assertEqual(changes(typed), [("POST /{collection}", "request field * narrowed")])
+
+        # true to a schema, within a field.
+        def nested(d):
+            schemas(d)["Near"]["properties"]["filter"]["additionalProperties"] = {"type": "integer"}
+
+        old = document()
+        schemas(old)["Near"]["properties"]["filter"]["additionalProperties"] = True
+        new = copy.deepcopy(old)
+        nested(new)
+        self.assertEqual(
+            [(op, c) for op, c, _ in compat.breaks(old, new)],
+            [("POST /{collection}", "request field filter.* narrowed")],
+        )
+
+    def test_every_part_of_an_all_of_is_held(self):
+        # A tighter bound in the second part counts, as one in the first.
+        def later(d):
+            schemas(d)["Near"]["properties"]["candidates"]["allOf"][1]["maximum"] = 100
+
+        self.assertEqual(changes(later), [("POST /{collection}", "request field candidates narrowed")])
+
+        # A part added, bounding what the first took.
+        def added(d):
+            schemas(d)["Near"]["properties"]["candidates"]["allOf"].append({"minimum": 10})
+
+        self.assertEqual(changes(added), [("POST /{collection}", "request field candidates narrowed")])
+
+        # A field both parts list is held to both.
+        def both(d):
+            schemas(d)["Near"] = {"allOf": [schemas(d)["Near"], {"properties": {"limit": {"maximum": 50}}}]}
+
+        self.assertEqual(changes(both), [("POST /{collection}", "request field limit narrowed")])
+
+    def test_a_security_schemes_definition_changed(self):
+        # A client authenticates by the definition, not the name: one entry
+        # a scheme, whichever operations ask it.
+        def edit(d):
+            d["components"]["securitySchemes"]["token"] = {"type": "apiKey", "in": "header", "name": "X-Token"}
+
+        old = document()
+        new = copy.deepcopy(old)
+        edit(new)
+        found = compat.breaks(old, new)
+        self.assertEqual({(op, c) for op, c, _ in found}, {("securitySchemes token", "definition changed")})
+        self.assertIn("type 'http' -> 'apiKey'", "\n".join(d for _, _, d in found))
+
+        # Its scheme's case is not a change; a scheme no operation uses
+        # changes nothing.
+        def case(d):
+            d["components"]["securitySchemes"]["token"]["scheme"] = "Bearer"
+            d["components"]["securitySchemes"]["unused"] = {"type": "http", "scheme": "basic"}
+
+        self.assertEqual(changes(case), [])
+
+    def test_a_ways_scopes_grown_or_an_oauth_flow_changed(self):
+        old = document()
+        old["components"]["securitySchemes"]["oauth"] = {
+            "type": "oauth2",
+            "flows": {
+                "clientCredentials": {"tokenUrl": "https://id.example/token", "scopes": {"read": "", "write": ""}}
+            },
+        }
+        path(old, "/_health")["get"]["security"] = [{"oauth": ["read"]}]
+        new = copy.deepcopy(old)
+        path(new, "/_health")["get"]["security"] = [{"oauth": ["read", "write"]}]
+        self.assertEqual(
+            [(op, c) for op, c, _ in compat.breaks(old, new)], [("GET /_health", "security oauth scopes added")]
+        )
+        # Fewer scopes asked takes every caller it took.
+        fewer = copy.deepcopy(old)
+        path(fewer, "/_health")["get"]["security"] = [{"oauth": []}]
+        self.assertEqual(compat.breaks(old, fewer), [])
+        # A flow's URL moved, a scope gone.
+        moved = copy.deepcopy(old)
+        flow = moved["components"]["securitySchemes"]["oauth"]["flows"]["clientCredentials"]
+        flow["tokenUrl"] = "https://id.example/v2/token"
+        del flow["scopes"]["write"]
+        found = compat.breaks(old, moved)
+        self.assertEqual({(op, c) for op, c, _ in found}, {("securitySchemes oauth", "definition changed")})
+        self.assertEqual(len(found), 2)
+
+    def test_a_response_headers_schema_changed(self):
+        def edit(d):
+            d["components"]["headers"]["FennecSeq"]["schema"] = {"type": "string"}
+
+        self.assertEqual(
+            changes(edit),
+            [("PATCH /_changes/consumers/{consumer}", "response 200 header Fennec-Seq type changed")],
+        )
+
+        def unavailable(d):
+            d["components"]["responses"]["Unavailable"]["headers"]["Retry-After"]["schema"] = {"type": "string"}
+
+        self.assertEqual(changes(unavailable), [("GET /{collection}", "response 503 header Retry-After type changed")])
+
+        # A header that was required no longer is.
+        old = document()
+        old["components"]["responses"]["Unavailable"]["headers"]["Retry-After"]["required"] = True
+        self.assertEqual(
+            [(op, c) for op, c, _ in compat.breaks(old, document())],
+            [("GET /{collection}", "response 503 header Retry-After no longer required")],
+        )
+
+    def test_a_default_changed(self):
+        # The documents write none; one written is held.
+        old = document()
+        old["components"]["parameters"]["Limit"]["schema"]["default"] = 100
+        new = copy.deepcopy(old)
+        new["components"]["parameters"]["Limit"]["schema"]["default"] = 10
+        self.assertEqual(
+            [(op, c) for op, c, _ in compat.breaks(old, new)],
+            [("GET /{collection}", "parameter query limit default changed")],
+        )
+        del new["components"]["parameters"]["Limit"]["schema"]["default"]
+        self.assertEqual(
+            [(op, c) for op, c, _ in compat.breaks(old, new)],
+            [("GET /{collection}", "parameter query limit default changed")],
+        )
+
+    def test_a_pattern_changed_says_a_loosened_one_is_named_too(self):
+        old = document()
+        schemas(old)["Near"]["properties"]["where"]["pattern"] = "^[a-z]{1,8}$"
+        new = copy.deepcopy(old)
+        schemas(new)["Near"]["properties"]["where"]["pattern"] = "^[a-z]+$"
+        [(_, change, detail)] = compat.breaks(old, new)
+        self.assertEqual(change, "request field where narrowed")
+        self.assertIn("cannot be told", detail)
+        self.assertIn("named in BREAKS too", detail)
+
 
 class Additive(unittest.TestCase):
     """What a client relying on the old document still finds passes."""
@@ -351,8 +642,23 @@ class Additive(unittest.TestCase):
                 deprecated=True, **{"x-fennec-sunset": "2027-05-08T00:00:00Z"}
             ),
             "a description": lambda d: d["info"].update(description="more words"),
-            "a placeholder renamed": lambda d: d["paths"].update({"/{name}": d["paths"].pop("/{collection}")}),
+            "a format widened to int64": lambda d: schemas(d)["Near"]["properties"]["ef"].update(format="int64"),
+            "a format widened to double": lambda d: schemas(d)["Near"]["properties"]["weight"].update(format="double"),
+            "a format dropped": lambda d: schemas(d)["Near"]["properties"]["ef"].pop("format"),
+            "a multipleOf by a divisor": lambda d: schemas(d)["Near"]["properties"]["weight"].update(multipleOf=0.25),
+            "a status taken into its range": lambda d: path(d, "/_health")["get"].update(
+                responses={"2XX": {"description": "Up"}}
+            ),
+            "a flag dropped": lambda d: path(d, "/_changes/consumers/{consumer}")["patch"].pop("x-fennec-flag"),
+            "a response field made required": lambda d: schemas(d)["Error"]["required"].append("retry_after"),
+            "an allOf's bound loosened": lambda d: schemas(d)["Near"]["properties"]["candidates"]["allOf"][1].update(
+                maximum=20000
+            ),
+            "additionalProperties opened": lambda d: schemas(d)["Near"]["properties"]["filter"].update(
+                additionalProperties=True
+            ),
             "the version": lambda d: d["info"].update(version="2"),
+            "a scheme's case": lambda d: d["components"]["securitySchemes"]["jwt"].update(scheme="Bearer"),
         }
         for what, edit in edits.items():
             with self.subTest(what):
@@ -421,6 +727,46 @@ class Gate(unittest.TestCase):
         failures, said = gate(document(), new, [entry(kind, version="2") for kind in compat.KINDS])
         self.assertEqual(failures, 3)
         self.assertIn('"version": "3"', said)
+
+    def test_a_version_moved_back_reopens_no_old_entry(self):
+        # main is at 3; BREAKS's entry of 2 is history. A pull request
+        # setting the version back to 2 and breaking what 2 broke fails.
+        old = document()
+        old["info"]["version"] = "3"
+        new = removed()
+        new["info"]["version"] = "2"
+        failures, said = gate(old, new, [entry(kind, version="2") for kind in compat.KINDS])
+        self.assertIn("went back from 3 to 2", said)
+        self.assertIn("not past the baseline's 3", said)
+        self.assertEqual(failures, 3 + 3)
+
+    def test_a_version_moved_back_with_nothing_broken_fails(self):
+        old = document()
+        old["info"]["version"] = "3"
+        new = document()
+        new["info"]["version"] = "2"
+        failures, said = gate(old, new)
+        self.assertIn("only moves forward", said)
+        # Each kind: its version, and its baseline left behind.
+        self.assertEqual(failures, 3 + 3)
+
+    def test_a_version_is_a_whole_number(self):
+        new = removed()
+        new["info"]["version"] = "2-beta"
+        failures, said = gate(document(), new, [entry(kind, version="2-beta") for kind in compat.KINDS])
+        self.assertIn("not a whole number", said)
+        self.assertNotIn("allowed by BREAKS", said)
+        self.assertEqual(
+            compat.well_formed([entry(version="2-beta")]), ["BREAKS[0]: version '2-beta' is not a whole number's text"]
+        )
+
+    def test_a_version_moved_past_by_more_than_one_passes(self):
+        new = removed()
+        new["info"]["version"] = "10"
+        allowed = [entry(kind, version="10") for kind in compat.KINDS]
+        failures, said = gate(document(), new, allowed)
+        self.assertNotIn("BREAKING", said)
+        self.assertIn("allowed by BREAKS", said)
 
     def test_an_entry_names_its_kind_and_change(self):
         failures, _ = gate(document(), removed(), [entry("file"), entry("node", change="security added")])
@@ -506,6 +852,58 @@ class Writing(unittest.TestCase):
         code, kept = self.run_write(document(), removed())
         self.assertEqual(code, 1)
         self.assertEqual(kept, document())
+
+
+class BreaksFrom(unittest.TestCase):
+    """main's checker reads a pull request's BREAKS as data, never running
+    its code, and holds the documents by them (CI's base pass)."""
+
+    def checker(self, tmp, text, name="openapi_compat.py"):
+        path = os.path.join(tmp, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_breaks_are_read_as_a_literal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            listed = self.checker(tmp, 'import sys\nBREAKS = [{"version": "2", "kind": "file"}]\nsys.exit(9)\n')
+            self.assertEqual(compat.breaks_in(listed), [{"version": "2", "kind": "file"}])
+            # Code, never run: refused.
+            run = self.checker(tmp, "BREAKS = __import__('os').listdir('.')\n", "run.py")
+            with self.assertRaises(ValueError):
+                compat.breaks_in(run)
+            with self.assertRaises(ValueError):
+                compat.breaks_in(self.checker(tmp, "OTHER = []\n", "other.py"))
+
+    def test_the_pass_holds_the_documents_by_the_breaks_it_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            built, baseline = os.path.join(tmp, "built"), os.path.join(tmp, "baseline")
+            os.makedirs(built)
+            os.makedirs(baseline)
+            for kind in compat.KINDS:
+                with open(os.path.join(built, f"{kind}.json"), "w") as f:
+                    json.dump(removed(), f)
+                with open(os.path.join(baseline, f"{kind}.json"), "w") as f:
+                    f.write(compat.written(document()))
+            args = ["--built", built, "--baseline", baseline]
+            quiet = contextlib.redirect_stdout(io.StringIO())
+            # This checker's own BREAKS name no such break.
+            with quiet:
+                self.assertEqual(compat.main(args), 1)
+            # The pull request's do: the break passes, and its baseline is
+            # behind.
+            pr = self.checker(tmp, f"BREAKS = {[entry(kind) for kind in compat.KINDS]!r}\n")
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said):
+                self.assertEqual(compat.main(args + ["--breaks-from", pr]), 1)
+            self.assertIn("allowed by BREAKS", said.getvalue())
+            self.assertNotIn("BREAKING", said.getvalue())
+            # None to read is no pass at all.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(compat.main(args + ["--breaks-from", os.path.join(tmp, "none.py")]), 2)
+
+    def test_the_committed_breaks_are_a_literal(self):
+        self.assertEqual(compat.breaks_in(os.path.join(HERE, "openapi_compat.py")), compat.BREAKS)
 
 
 class Committed(unittest.TestCase):

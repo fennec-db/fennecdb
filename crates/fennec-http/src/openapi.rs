@@ -186,6 +186,8 @@ enum Body {
     Optional(&'static str),
     /// One `{query, params}` a line (`/batch`).
     Lines,
+    /// Plain text, required: the schema, a string's (`/_replication/tenants`).
+    Text(&'static str),
     /// A database image.
     Image,
 }
@@ -341,7 +343,7 @@ const OPS: &[Op] = &[
         id: "updateRows",
         summary: "Set the body's fields on the rows the filter matches (a filter is required)",
         params: &["Filter", "Where", "IdempotencyKey"],
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -351,7 +353,7 @@ const OPS: &[Op] = &[
         id: "updateRowsPut",
         summary: "PATCH /{collection}, under PUT",
         params: &["Filter", "Where", "IdempotencyKey"],
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -370,7 +372,7 @@ const OPS: &[Op] = &[
         id: "updateAll",
         summary: "Set the body's fields on every row: no filter, deliberately explicit",
         params: WRITE,
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -380,7 +382,7 @@ const OPS: &[Op] = &[
         id: "updateAllPut",
         summary: "PATCH /{collection}/all, under PUT",
         params: WRITE,
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -476,7 +478,7 @@ const OPS: &[Op] = &[
             "HubSignature",
             "GitHubDelivery",
         ],
-        body: Body::Json("{}"),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Event"}"##),
         answer: Answer::Json(200, OBJECT, "Taken, durable"),
         ..DEFAULT
     },
@@ -628,7 +630,9 @@ const OPS: &[Op] = &[
         summary: "Every tenant of the node over one stream, from the places the body lists",
         flag: "--replication-token",
         auth: Auth::Replication,
-        body: Body::Json(OBJECT),
+        body: Body::Text(
+            r#"{"type":"string","description":"A line a tenant the client holds: <tenant> <since> <history, hex> <image 0|1>."}"#,
+        ),
         answer: Answer::Stream,
         ..DEFAULT
     },
@@ -883,7 +887,7 @@ const OPS: &[Op] = &[
         summary: "Set a hook's scheme and secrets, kept beside the tenant's file",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Hook"}"##),
         ..DEFAULT
     },
     Op {
@@ -916,7 +920,7 @@ const OPS: &[Op] = &[
         summary: "Install a tenant's hook secrets whole, their version kept",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/HookSecrets"}"##),
         ..DEFAULT
     },
     Op {
@@ -953,7 +957,7 @@ const OPS: &[Op] = &[
         summary: "Remove a tenant's file only where it carries one of the instances named",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Reclaim"}"##),
         ..DEFAULT
     },
     Op {
@@ -1021,7 +1025,7 @@ const OPS: &[Op] = &[
         summary: "This node's copy of a tenant takes its writes",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Optional(OBJECT),
+        body: Body::Optional(r##"{"$ref":"#/components/schemas/Promote"}"##),
         ..DEFAULT
     },
     Op {
@@ -1033,7 +1037,7 @@ const OPS: &[Op] = &[
         summary: "Follow the tenant's primary at `from`, or this node's upstream",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Optional(OBJECT),
+        body: Body::Optional(r##"{"$ref":"#/components/schemas/Follow"}"##),
         ..DEFAULT
     },
     Op {
@@ -1045,7 +1049,7 @@ const OPS: &[Op] = &[
         summary: "A router's grant of the node's lease",
         flag: "--admin-token --lease",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/LeaseGrant"}"##),
         ..DEFAULT
     },
     Op {
@@ -1338,6 +1342,7 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
             "application/x-ndjson",
             r#"{"type":"string","description":"One {\"query\", \"params\"} object a line"}"#,
         )),
+        Body::Text(s) => Some((true, "text/plain", s)),
         Body::Image => Some((
             true,
             "application/octet-stream",
@@ -1567,7 +1572,18 @@ const COMPONENTS: &str = r##"{
 "RetryAfter":{"description":"Seconds to wait before coming back.","schema":{"type":"integer"}}},
 "schemas":{
 "Error":{"type":"object","required":["error"],"properties":{"error":{"type":"string"},"retry_after":{"type":"integer","description":"Seconds to wait, as Retry-After says."},"retry_after_ms":{"type":"integer","description":"A quota's wait, to the millisecond."},"quota":{"type":"string","description":"The quota refused."},"reason":{"type":"string","description":"A require's else words."},"at":{"type":"integer","description":"The statement of a batch that stopped."},"completed":{"type":"integer"},"binding":{"type":"string"},"outcome":{"type":"string","enum":["unknown"],"description":"A write whose outcome the server cannot know."},"seq":{"type":"integer"},"history":{"type":"string"}}},
-"Document":{"type":"object","description":"A document: its fields, id among them.","additionalProperties":true},
+"Document":{"type":"object","description":"A document: its fields, id among them. Open on purpose: any field is taken, the collection's schema (GET /_schema) holding each it declares to its type.","additionalProperties":true},
+"Fields":{"type":"object","minProperties":1,"description":"The fields to set on each row it reaches, each to its value, the rest left as they are. Open on purpose: any of the collection's fields, the schema (GET /_schema) saying which.","additionalProperties":true},
+"Event":{"type":"object","description":"The sender's event as it signed it, read only once its signature verifies. Open on purpose: any JSON object its sender sends; a Stripe event names its id, which keys it.","additionalProperties":true},
+"Instance":{"type":"string","pattern":"^[0-9a-fA-F]{16}$","description":"A file's identity on its node, 16 hex digits."},
+"Instances":{"description":"The identities a file may carry: a list, or one.","oneOf":[{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/Instance"}},{"$ref":"#/components/schemas/Instance"}]},
+"Lineage":{"type":"string","pattern":"^[0-9a-fA-F]{8}$","description":"The lineage a tenant's history is of, 8 hex digits."},
+"Reclaim":{"type":"object","required":["instances"],"properties":{"instances":{"$ref":"#/components/schemas/Instances"}}},
+"Promote":{"type":"object","description":"What the router knows of the tenant, which the copy is held to (409 where it differs); left out, nothing is said.","properties":{"lineage":{"$ref":"#/components/schemas/Lineage"},"history":{"type":"string","pattern":"^[0-9a-fA-F]{16}$","description":"The history its primary forked at its last failover."},"force":{"type":"boolean","description":"Promote it whatever it holds."}}},
+"Follow":{"type":"object","description":"Whom the tenant follows; left out, this node's upstream.","properties":{"from":{"type":"string","description":"The node to follow, its address."},"lineage":{"$ref":"#/components/schemas/Lineage"},"instances":{"$ref":"#/components/schemas/Instances"},"reader":{"type":"boolean","description":"A read replica's copy, which no hook's answer waits for."}}},
+"LeaseGrant":{"type":"object","required":["ms","epoch"],"properties":{"ms":{"type":"integer","minimum":1,"description":"How long it runs, from when the node answered the grant acked names."},"epoch":{"type":"string","description":"The list's: a node holding another answers 412, to be sent primaries."},"primaries":{"type":"array","items":{"type":"string"},"description":"The tenants the node is primary of."},"authority":{"type":"string","description":"Who grants it."},"term":{"type":"integer","minimum":0},"history":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$"},"grant":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"This grant's number."},"acked":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"The grant it acknowledges, sent beside grant."}}},
+"Hook":{"type":"object","required":["scheme","secrets"],"additionalProperties":false,"description":"A hook's scheme and secrets, refused (400) as a hooks file's line is.","properties":{"scheme":{"type":"string","enum":["stripe","github","standard"]},"secrets":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"},"description":"Its secret as its sender shows it, or two while one rolls."},"keep":{"type":["string","null"],"pattern":"^\\S+$","description":"How long an event's key is kept: 30d."},"tolerance":{"type":["string","null"],"pattern":"^\\S+$","description":"How far an event's time may be from the server's, 1s to 1h: 5m."},"key":{"type":["string","null"],"enum":["body","delivery",null],"description":"A github hook's: its events keyed by their body or by X-GitHub-Delivery."},"max_body":{"type":["string","null"],"pattern":"^\\S+$","description":"The most bytes an event takes: 64k."}}},
+"HookSecrets":{"type":"object","additionalProperties":false,"description":"A tenant's hook secrets whole, as GET .../hook-secrets answers them: a set holding a hook names its version.","properties":{"version":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{16}$"},"hooks":{"type":"object","additionalProperties":{"type":"object","required":["scheme","secrets"],"additionalProperties":false,"properties":{"scheme":{"type":"string","enum":["stripe","github","standard"]},"secrets":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"}},"keep":{"type":["string","null"],"pattern":"^\\S+$"},"tolerance":{"type":["string","null"],"pattern":"^\\S+$"},"key":{"type":["string","null"],"enum":["body","delivery",null]},"max_body":{"type":["string","null"],"pattern":"^\\S+$"},"set":{"type":"integer","description":"When it was set, in ms since the epoch; left out, now."}}}},"tenant":{"description":"The answer's own, taken and not read."}}},
 "Documents":{"oneOf":[{"$ref":"#/components/schemas/Document"},{"type":"array","items":{"$ref":"#/components/schemas/Document"}}]},
 "Rows":{"type":"array","items":{"$ref":"#/components/schemas/Document"}},
 "Faceted":{"type":"object","properties":{"rows":{"$ref":"#/components/schemas/Rows"},"count":{"type":"integer"},"facets":{"type":"object","additionalProperties":{"type":"array","items":{"type":"object","properties":{"value":{},"count":{"type":"integer"}}}}}}},
@@ -1881,13 +1897,52 @@ mod tests {
                 );
             }
         }
-        // Nothing in the table is deprecated yet: the served documents say
-        // nothing of it.
+        // The served documents and the test's mark exactly the rows their
+        // table deprecates, whichever those are -- none of `OPS` yet.
         for kind in [Kind::File, Kind::Node, Kind::Router] {
-            let src = std::str::from_utf8(document(kind)).unwrap();
-            assert!(!src.contains("\"deprecated\""), "{kind:?}");
-            assert!(!src.contains("Deprecation"), "{kind:?}");
+            let served = std::str::from_utf8(document(kind)).unwrap();
+            marks_as_its_table(served, kind, OPS);
+            marks_as_its_table(&build_of(kind, DEPRECATING), kind, DEPRECATING);
         }
+    }
+
+    /// Every operation of `src`, the document of `kind` written from
+    /// `table`, is `deprecated`, its answer listing `Deprecation`, where
+    /// its row is deprecated, and neither where it is not; and no
+    /// operation but those says either.
+    fn marks_as_its_table(src: &str, kind: Kind, table: &'static [Op]) {
+        let doc = fennec_core::json::parse_json(src).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        let paths = get(&doc, "paths").expect("paths");
+        let mut listed = 0;
+        for l in operations_of(kind, table) {
+            let item = get(paths, &l.path).unwrap_or_else(|| panic!("{kind:?}: no {}", l.path));
+            let methods = match l.op.head {
+                true => vec![l.op.method, "head"],
+                false => vec![l.op.method],
+            };
+            for method in methods {
+                let op = get(item, method).unwrap_or_else(|| panic!("{method} {}", l.path));
+                let marked = l.op.deprecated.is_some();
+                let said = get(op, "deprecated") == Some(&Value::Bool(true));
+                let answered = members(get(op, "responses")).iter().any(|(_, r)| {
+                    get(r, "headers").is_some_and(|h| get(h, "Deprecation").is_some())
+                });
+                assert_eq!(said, marked, "{kind:?}: {method} {}: deprecated", l.path);
+                assert_eq!(
+                    answered, marked,
+                    "{kind:?}: {method} {}: Deprecation",
+                    l.path
+                );
+                listed += usize::from(marked);
+            }
+        }
+        // Each mark is an operation's: as many as the rows deprecate.
+        assert_eq!(
+            src.matches("\"deprecated\":true").count(),
+            listed,
+            "{kind:?}"
+        );
+        assert_eq!(src.matches("\"Deprecation\":{").count(), listed, "{kind:?}");
     }
 
     /// A deprecation says when, a sunset comes after it, and its link is a

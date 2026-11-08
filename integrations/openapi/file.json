@@ -468,7 +468,7 @@
      "content": {
       "application/json": {
        "schema": {
-        "$ref": "#/components/schemas/Document"
+        "$ref": "#/components/schemas/Fields"
        }
       }
      }
@@ -528,7 +528,7 @@
      "content": {
       "application/json": {
        "schema": {
-        "$ref": "#/components/schemas/Document"
+        "$ref": "#/components/schemas/Fields"
        }
       }
      }
@@ -639,7 +639,7 @@
      "content": {
       "application/json": {
        "schema": {
-        "$ref": "#/components/schemas/Document"
+        "$ref": "#/components/schemas/Fields"
        }
       }
      }
@@ -693,7 +693,7 @@
      "content": {
       "application/json": {
        "schema": {
-        "$ref": "#/components/schemas/Document"
+        "$ref": "#/components/schemas/Fields"
        }
       }
      }
@@ -1154,7 +1154,9 @@
      "required": true,
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/Event"
+       }
       }
      }
     },
@@ -2693,8 +2695,286 @@
    },
    "Document": {
     "type": "object",
-    "description": "A document: its fields, id among them.",
+    "description": "A document: its fields, id among them. Open on purpose: any field is taken, the collection's schema (GET /_schema) holding each it declares to its type.",
     "additionalProperties": true
+   },
+   "Fields": {
+    "type": "object",
+    "minProperties": 1,
+    "description": "The fields to set on each row it reaches, each to its value, the rest left as they are. Open on purpose: any of the collection's fields, the schema (GET /_schema) saying which.",
+    "additionalProperties": true
+   },
+   "Event": {
+    "type": "object",
+    "description": "The sender's event as it signed it, read only once its signature verifies. Open on purpose: any JSON object its sender sends; a Stripe event names its id, which keys it.",
+    "additionalProperties": true
+   },
+   "Instance": {
+    "type": "string",
+    "pattern": "^[0-9a-fA-F]{16}$",
+    "description": "A file's identity on its node, 16 hex digits."
+   },
+   "Instances": {
+    "description": "The identities a file may carry: a list, or one.",
+    "oneOf": [
+     {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+       "$ref": "#/components/schemas/Instance"
+      }
+     },
+     {
+      "$ref": "#/components/schemas/Instance"
+     }
+    ]
+   },
+   "Lineage": {
+    "type": "string",
+    "pattern": "^[0-9a-fA-F]{8}$",
+    "description": "The lineage a tenant's history is of, 8 hex digits."
+   },
+   "Reclaim": {
+    "type": "object",
+    "required": [
+     "instances"
+    ],
+    "properties": {
+     "instances": {
+      "$ref": "#/components/schemas/Instances"
+     }
+    }
+   },
+   "Promote": {
+    "type": "object",
+    "description": "What the router knows of the tenant, which the copy is held to (409 where it differs); left out, nothing is said.",
+    "properties": {
+     "lineage": {
+      "$ref": "#/components/schemas/Lineage"
+     },
+     "history": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{16}$",
+      "description": "The history its primary forked at its last failover."
+     },
+     "force": {
+      "type": "boolean",
+      "description": "Promote it whatever it holds."
+     }
+    }
+   },
+   "Follow": {
+    "type": "object",
+    "description": "Whom the tenant follows; left out, this node's upstream.",
+    "properties": {
+     "from": {
+      "type": "string",
+      "description": "The node to follow, its address."
+     },
+     "lineage": {
+      "$ref": "#/components/schemas/Lineage"
+     },
+     "instances": {
+      "$ref": "#/components/schemas/Instances"
+     },
+     "reader": {
+      "type": "boolean",
+      "description": "A read replica's copy, which no hook's answer waits for."
+     }
+    }
+   },
+   "LeaseGrant": {
+    "type": "object",
+    "required": [
+     "ms",
+     "epoch"
+    ],
+    "properties": {
+     "ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How long it runs, from when the node answered the grant acked names."
+     },
+     "epoch": {
+      "type": "string",
+      "description": "The list's: a node holding another answers 412, to be sent primaries."
+     },
+     "primaries": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "The tenants the node is primary of."
+     },
+     "authority": {
+      "type": "string",
+      "description": "Who grants it."
+     },
+     "term": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "history": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$"
+     },
+     "grant": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$",
+      "description": "This grant's number."
+     },
+     "acked": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$",
+      "description": "The grant it acknowledges, sent beside grant."
+     }
+    }
+   },
+   "Hook": {
+    "type": "object",
+    "required": [
+     "scheme",
+     "secrets"
+    ],
+    "additionalProperties": false,
+    "description": "A hook's scheme and secrets, refused (400) as a hooks file's line is.",
+    "properties": {
+     "scheme": {
+      "type": "string",
+      "enum": [
+       "stripe",
+       "github",
+       "standard"
+      ]
+     },
+     "secrets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+       "type": "string"
+      },
+      "description": "Its secret as its sender shows it, or two while one rolls."
+     },
+     "keep": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "How long an event's key is kept: 30d."
+     },
+     "tolerance": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "How far an event's time may be from the server's, 1s to 1h: 5m."
+     },
+     "key": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "body",
+       "delivery",
+       null
+      ],
+      "description": "A github hook's: its events keyed by their body or by X-GitHub-Delivery."
+     },
+     "max_body": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "The most bytes an event takes: 64k."
+     }
+    }
+   },
+   "HookSecrets": {
+    "type": "object",
+    "additionalProperties": false,
+    "description": "A tenant's hook secrets whole, as GET .../hook-secrets answers them: a set holding a hook names its version.",
+    "properties": {
+     "version": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^[0-9a-fA-F]{16}$"
+     },
+     "hooks": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "object",
+       "required": [
+        "scheme",
+        "secrets"
+       ],
+       "additionalProperties": false,
+       "properties": {
+        "scheme": {
+         "type": "string",
+         "enum": [
+          "stripe",
+          "github",
+          "standard"
+         ]
+        },
+        "secrets": {
+         "type": "array",
+         "minItems": 1,
+         "maxItems": 2,
+         "items": {
+          "type": "string"
+         }
+        },
+        "keep": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "tolerance": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "key": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "enum": [
+          "body",
+          "delivery",
+          null
+         ]
+        },
+        "max_body": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "set": {
+         "type": "integer",
+         "description": "When it was set, in ms since the epoch; left out, now."
+        }
+       }
+      }
+     },
+     "tenant": {
+      "description": "The answer's own, taken and not read."
+     }
+    }
    },
    "Documents": {
     "oneOf": [
