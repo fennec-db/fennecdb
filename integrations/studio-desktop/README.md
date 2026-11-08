@@ -13,8 +13,9 @@ new file, `fennec backup` takes an image, `fennec restore` makes a file of one.
 Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.dev)
 2.0.4 (a Bun main process and the system's WKWebView); its build tool ships no
 Intel Mac build, and its Windows and Linux paths are not used here yet (no file
-associations, no save dialog, a Windows lock for `fennec-server` that does not
-exist). Not signed or notarized until a maintainer adds the secrets
+associations, no save dialog, no credential store in the Keychain's place;
+`fennec-server` takes its lock and ships for Windows, docs/design/windows.md).
+Not signed or notarized until a maintainer adds the secrets
 ([below](#signing-and-notarization)). An app you build here opens as it is; a
 build you *downloaded* unsigned (the CI's artifact) is quarantined by the
 browser and opens after `xattr -cr "fennec studio.app"` or *Open Anyway* in
@@ -614,9 +615,12 @@ which needs the signing identity and bundle id to stay fixed.
 
 * Updates: Electrobun makes bsdiff patches against a release it can download,
   and nothing is published; a new version is a new DMG.
-* Intel Macs, Windows and Linux. Windows also needs `fennec_abi::lock` to take a
-  lock there (`record::take` is Unix only), a Windows target in the release
-  matrix, and a signing hook (Hutch does not sign on Windows).
+* Intel Macs, Windows and Linux. Windows has `fennec_abi::lock` (`LockFileEx`)
+  and the release's zip of `fennec-server.exe` and `fennec.exe` (unsigned);
+  the app there needs Electrobun's WebView2 path, file associations and a save
+  dialog, the system's credential store in the Keychain's place, and a signing
+  hook (Hutch does not sign on Windows): a project of its own after the
+  release (docs/design/windows.md, the owner's tenth decision).
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.

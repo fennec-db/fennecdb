@@ -432,6 +432,85 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test -p fennec-http --features tls --lib --tests --no-fail-fast
 
+  # docs/design/windows.md, slice 5: the Windows release's zip, made as
+  # release.yml makes it on a tag (tools/windows-zip.sh: the release and cli
+  # profiles, the C runtime linked in), installed through site/install.ps1
+  # and run as the release runs it before keeping it
+  # (tools/windows-zip-check.ps1), and the installer's own test against it
+  # (site/test_install.ps1), the release served from localhost and read from
+  # a folder: nothing is fetched from a published release, and a tag meets
+  # no step of the Windows release this job has not run. Cached apart from
+  # the other Windows jobs, whose targets hold debug and test builds.
+  windows-release:
+    name: windows (release zip, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { arch: aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # Before the build, so a script that does not read fails in seconds:
+      # install.ps1 under Windows PowerShell 5.1, which `irm | iex` runs on
+      # a Windows 10, and PowerShell 7; the tests under 7, which runs them.
+      # Then what makes running install.ps1 through `iex` safe, held by
+      # PowerShell's parser under both (tools/install-ps1-check.ps1): only
+      # functions and its one last call at the top level, no expression
+      # invoked anywhere in it. site/build.py runs the same check before the
+      # site ships the file.
+      - name: The PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $parse = '$bad = 0; foreach ($f in $args) { $t = $null; $e = $null; [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path, [ref]$t, [ref]$e); foreach ($x in $e) { Write-Host ($f + '':'' + $x.Extent.StartLineNumber + '': '' + $x.Message); $bad++ } }; Write-Host ($PSVersionTable.PSVersion.ToString() + '': '' + ($args -join '' '') + '', '' + $bad + '' errors''); exit $bad'
+          $script = Join-Path $env:RUNNER_TEMP 'parse.ps1'
+          Set-Content -LiteralPath $script -Value $parse
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script site/install.ps1
+          if ($LASTEXITCODE) { exit 1 }
+          pwsh -NoProfile -NonInteractive -File $script site/install.ps1 site/test_install.ps1 tools/windows-zip-check.ps1
+          if ($LASTEXITCODE) { exit 1 }
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/install-ps1-check.ps1 site/install.ps1
+          if ($LASTEXITCODE) { exit 1 }
+          pwsh -NoProfile -NonInteractive -File tools/install-ps1-check.ps1 site/install.ps1
+          if ($LASTEXITCODE) { exit 1 }
+
+      # The arm64 runner's image holds rustup and the clang ring builds its C
+      # with for aarch64-pc-windows-msvc, as the x64 one does.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-release-zip-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-release-zip-
+
+      - name: The zip, as release.yml makes it
+        run: tools/windows-zip.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
+
+      - name: Installed through install.ps1 and run, as release.yml checks it before keeping it
+        shell: pwsh
+        run: |
+          $zip = Get-Item dist/*.zip
+          ./tools/windows-zip-check.ps1 -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1') -Zip $zip.FullName
+
+      - name: The installer, its checksum, its refusals and the mark of the web
+        shell: pwsh
+        run: |
+          $zip = Get-Item dist/*.zip
+          ./site/test_install.ps1 -Zip $zip.FullName -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1')
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
@@ -887,7 +966,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh

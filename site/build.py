@@ -1972,6 +1972,43 @@ def install_script():
     shutil.copy(src, os.path.join(OUT, "install.sh"))
 
 
+def install_ps1():
+    """dist/install.ps1: the Windows installer `irm https://fennecdb.com/install.ps1
+    | iex` runs, as the repository has it. `iex` runs a text in the caller's
+    session, so what makes that safe -- outside its functions only the one
+    last call, `Install-Fennec @args`, so a download cut short defines some
+    functions at most and runs nothing, and no expression invoked anywhere in
+    it -- is held by PowerShell's own parser, tools/install-ps1-check.ps1 (a
+    line-by-line reading of the text was let through by a quote inside a
+    string and by a `}; command` on a function's last line). Run in the
+    caller's session it defines its fennec-named functions there and
+    assigns no variable. What this holds itself is exact: the text is
+    ASCII, which Windows PowerShell 5.1 reads a file with no byte order mark
+    as (docs/design/windows.md, decision 6); _headers below serves it as
+    text/plain."""
+    src = os.path.join(ROOT, "install.ps1")
+    raw = open(src, "rb").read()
+    if any(b > 0x7E or (b < 0x20 and b not in (0x0A, 0x0D)) for b in raw):
+        raise SystemExit("  site/install.ps1 must be printable ASCII")
+    check = os.path.join(ROOT, "..", "tools", "install-ps1-check.ps1")
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        done = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-File", check, src],
+            capture_output=True, text=True)
+        if done.returncode != 0:
+            raise SystemExit("  tools/install-ps1-check.ps1 refuses site/install.ps1:\n"
+                             + (done.stdout + done.stderr).rstrip())
+    elif os.environ.get("CI"):
+        # pwsh is on the runners that build the site (ubuntu-latest); without
+        # it the file would ship unparsed.
+        raise SystemExit("  pwsh not found: site/install.ps1 cannot be checked (CI)")
+    else:
+        print("  (pwsh not found: site/install.ps1 not checked with "
+              "tools/install-ps1-check.ps1 here; CI parses it)")
+    shutil.copy(src, os.path.join(OUT, "install.ps1"))
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -2210,13 +2247,15 @@ def build():
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
     for stable in CLIENT_MODULES + ("fennec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
-    # The installer, served as plain text: a browser shows it, which is how
-    # someone reads it before `curl | sh`, where a .sh would be saved. Five
-    # minutes, so a fix reaches the next install and not a day's.
-    rules += ["/install.sh",
-              "  Content-Type: text/plain; charset=utf-8",
-              "  Cache-Control: public, max-age=300, must-revalidate",
-              ""]
+    # The installers, served as plain text: a browser shows them, which is
+    # how someone reads one before `curl | sh` or `irm | iex`, where a .sh or
+    # a .ps1 would be saved, and `irm` reads the text as text. Five minutes,
+    # so a fix reaches the next install and not a day's.
+    for script in ("/install.sh", "/install.ps1"):
+        rules += [script,
+                  "  Content-Type: text/plain; charset=utf-8",
+                  "  Cache-Control: public, max-age=300, must-revalidate",
+                  ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 
     # Every module a script imports by name is a file of the build: a name
@@ -2231,6 +2270,7 @@ def build():
                 raise SystemExit(f"  {name} imports {dep}, which the build did not write")
 
     install_script()
+    install_ps1()
 
     brief, full = llms_texts()
     open(os.path.join(OUT, "llms.txt"), "w", encoding="utf-8").write(brief)

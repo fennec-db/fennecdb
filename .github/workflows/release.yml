@@ -17,9 +17,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Reads the tag and builds: it writes no release and no package, so the
+  # workflow's write permissions are not its token's, and the checkout does
+  # not leave the token in .git/config for the dependencies' build scripts
+  # (ring, cc, ...) to find. The artifact upload needs no token of the
+  # repository's.
   binaries:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +49,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       # rust-toolchain.toml also asks for wasm32, which this job does not need
       # but which costs one small download; the channel pin is worth keeping.
@@ -85,6 +93,76 @@ jobs:
         with:
           name: dist-${{ matrix.name }}
           path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # The Windows zip (docs/design/windows.md, decision 6): fennec.exe and
+  # fennec-server.exe with the C runtime linked in, a fresh Windows having
+  # no Visual C++ redistributable to lend them (tools/windows-zip.sh, under
+  # the runner's bash as the tarballs' build is), then installed through
+  # site/install.ps1 from the folder it was made in and run -- each
+  # program's version, a row written into a file and read back -- before it
+  # is kept (tools/windows-zip-check.ps1), as a .deb and an .rpm are. CI's
+  # `windows (release zip)` job runs the same two scripts on every change,
+  # so a tag meets no step here CI has not run. Unsigned, and named by its
+  # checksum in SHA256SUMS with the rest. x86_64 and aarch64, each on a
+  # runner of its own architecture, which runs what it built. A tag from
+  # before the scripts -- a dispatch for an older one -- builds none, and
+  # says so.
+  #
+  # Read-only, its checkout keeping no token: the crates' build scripts (ring,
+  # cc, windows_aarch64_msvc) run here, and the workflow's contents: write
+  # and packages: write are for the jobs that publish.
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { name: aarch64-windows, os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Whether the tag builds for Windows
+        id: has
+        run: |
+          if [ -f tools/windows-zip.sh ]; then
+            echo "zip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG is from before the Windows release (docs/design/windows.md): no zip"
+          fi
+
+      - name: Install the pinned toolchain
+        if: steps.has.outputs.zip == '1'
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - name: Build the zip
+        if: steps.has.outputs.zip == '1'
+        run: tools/windows-zip.sh "${TAG#v}" ${{ matrix.target }} dist
+
+      - name: Install it through install.ps1 and run it
+        if: steps.has.outputs.zip == '1'
+        shell: pwsh
+        run: ./tools/windows-zip-check.ps1 -Version ($env:TAG -replace '^v', '') -Zip (Get-Item dist/*.zip).FullName
+
+      - uses: actions/upload-artifact@v7
+        if: steps.has.outputs.zip == '1'
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*.zip
           if-no-files-found: error
 
   wasm:
@@ -350,7 +428,7 @@ jobs:
 
   publish:
     name: publish the release
-    needs: [binaries, wasm, apple, android, linux-packages]
+    needs: [binaries, windows, wasm, apple, android, linux-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -403,12 +481,13 @@ jobs:
           # when one already exists, so an existing release is updated in
           # place instead: a draft's assets are replaced.
           #
-          # A published release's are not. The tarballs and SHA256SUMS are
-          # what the Homebrew formula, install.sh and the packages name by
-          # checksum, and a rebuild is not byte for byte the first build: a
-          # replaced tarball would fail every `brew install` and every
-          # checksum already taken from the old SHA256SUMS. So a published
-          # release only gets the files it has no asset of.
+          # A published release's are not. The tarballs, the Windows zip and
+          # SHA256SUMS are what the Homebrew formula, install.sh, install.ps1
+          # and the packages name by checksum, and a rebuild is not byte for
+          # byte the first build: a replaced tarball would fail every `brew
+          # install` and every checksum already taken from the old
+          # SHA256SUMS. So a published release only gets the files it has no
+          # asset of.
           if gh release view "$tag" >/dev/null 2>&1; then
             if [ "$(gh release view "$tag" --json isDraft -q .isDraft)" = true ]; then
               gh release upload "$tag" dist/* --clobber

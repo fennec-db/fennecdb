@@ -104,7 +104,7 @@ optional behind `tls`; the trees of `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm` and `fennec-ffi`, every feature on, reaching
 outside the workspace or `fennec-tls`; or `fennec-tls`'s own tree, normal
 and build edges as Cargo.lock resolves them for the shipped targets,
-differing from `TLS_TREE`, its sixteen crates by name and version. Naming
+differing from `TLS_TREE`, its sixteen crates by name and version, or a target's own tree from that and `TLS_EXTRA`'s: ring's `windows-sys` crates are allowed in `aarch64-pc-windows-msvc`'s tree alone. Naming
 only the two direct dependencies held nothing: a rustls feature turned on
 (`aws-lc-rs`, `brotli`) or a `cargo update` brings crates in, or moves
 them, without a line of any Cargo.toml changing, so the check fails and

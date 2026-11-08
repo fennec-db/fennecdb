@@ -174,7 +174,7 @@ EOF
 chmod 755 "$work/shim/uname"
 install windows PATH="$work/shim:$PATH" FAKE_OS=MINGW64_NT-10.0 FAKE_CPU=x86_64
 expect "windows: fails" failing windows
-expect "windows: points to Docker or WSL" contains "$work/windows.out" "WSL"
+expect "windows: points to install.ps1" contains "$work/windows.out" "https://fennecdb.com/install.ps1"
 expect "windows: installs nothing" absent "$work/windows-inst"
 install freebsd PATH="$work/shim:$PATH" FAKE_OS=FreeBSD FAKE_CPU=amd64
 expect "freebsd: fails" failing freebsd
