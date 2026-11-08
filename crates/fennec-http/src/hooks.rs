@@ -402,14 +402,12 @@ fn standby_holds(feed: Option<&Feed>, upto: u64) -> bool {
 }
 
 /// A key of the process's own for a secret that is not there, made from
-/// the system's randomness -- never the clock's, which `random_bytes` falls
-/// back to: no signature anyone sent can match it. Refused where the
-/// randomness cannot be read, and the server with it.
+/// the system's randomness -- never the clock's: no signature anyone sent
+/// can match it. Refused where the randomness cannot be read, and the
+/// server with it.
 pub(crate) fn stand_in() -> std::result::Result<HmacKey, String> {
-    // Named as each system has it, `/dev/urandom` or `BCryptGenRandom`
-    // (`UNREAD`, below the code a Unix build compiles, so its lines stay
-    // where they were: docs/design/windows.md, 7l).
-    let seed = crate::crypto::system_random(32).ok_or(UNREAD)?;
+    let seed = crate::crypto::system_random(32)
+        .ok_or("the hooks' stand-in key needs the system's randomness, which could not be read")?;
     Ok(HmacKey::new(&seed))
 }
 
@@ -1569,14 +1567,6 @@ pub fn after_change<'a>(
         log_unheld(hooks, db);
     }
 }
-
-/// What a stand-in key refused for want of randomness says ([`stand_in`]).
-#[cfg(not(windows))]
-const UNREAD: &str =
-    "the hooks' stand-in key needs the system's randomness (/dev/urandom), which could not be read";
-#[cfg(windows)]
-const UNREAD: &str = "the hooks' stand-in key needs the system's randomness (BCryptGenRandom), \
-     which refused";
 
 #[cfg(test)]
 mod tests {

@@ -512,6 +512,32 @@ disk to encrypt. A checksum a record was measured and not taken: hardware
 CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
 lock, and the browser has no hardware CRC.
 
+**A frame's nonce is the system's randomness, never a fallback**
+(`crypto::system_random`), and so is every key and nonce fennecdb makes:
+`fennec key`'s, the hooks' stand-in key, SCRAM's client nonce. Each was
+read from `/dev/urandom`, and where its open failed -- at a busy server's
+descriptor limit, EMFILE -- the nonces fell back to SHA-256 of the clock,
+the process id, a stack address and a count that began again at each call:
+two frames sealed in one tick under one key could take one nonce, which
+gives away the XOR of their plaintexts and Poly1305's one-time key, so
+both tags could be forged. The randomness is now read with no descriptor
+(`crypto/unix.rs`) -- `getrandom` on Linux (glibc 2.25, musl, the kernel's
+3.17), `getentropy` on macOS, 256 bytes a call -- and where the system
+gives none a seal fails as a write does (`seal_frame`'s error, the
+archive's), a key is not made and a SCRAM sign-in is refused. A nonce is
+one call where it was an open, a read and a close: 1.0-1.2 us against
+10.7-13.8 on an M1, 200 000 draws three rounds each. A test runs
+it with every descriptor taken, and with the system refusing
+(`crypto::without_randomness`). `/dev/urandom` stays only where the call is
+missing or denied: a kernel before 3.17 (ENOSYS), a seccomp filter that
+answers `getrandom` with EPERM while the file stays readable (reproduced in
+Docker with a profile returning errno 1; std and the getrandom crate read
+EPERM as ENOSYS too), and a Unix neither Linux nor macOS, which no release
+is built for; where the file cannot be read either, the seal is refused. Only ids, which must be unique and need not
+be secret -- request and trace ids, a hook set's version -- may take the
+clock where the system gives nothing (`crypto::id_u64`, a count of the
+process's own in place of the one that began again).
+
 ## follow
 
 **`--follow` confirms nothing that is not on disk.** `fennec import --follow`

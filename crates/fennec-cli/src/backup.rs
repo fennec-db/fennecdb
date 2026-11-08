@@ -211,7 +211,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             ));
         }
         let Some(hex) = Key::generate() else {
-            fail(NO_RANDOMNESS);
+            fail("no randomness from the system to make a key with");
         };
         return match write_private(path, &format!("{hex}\n")) {
             Ok(()) => {
@@ -558,12 +558,3 @@ fn every_tenant(
         _ => fail(&format!("`fennec {command}` takes no --tenants\n{USAGE}")),
     }
 }
-
-// What `fennec key` says where the system gave no randomness, named as each
-// system has it. Below the code a Unix build compiles, so its lines -- a
-// panic's location among them -- stay where they were
-// (docs/design/windows.md, 7l).
-#[cfg(not(windows))]
-const NO_RANDOMNESS: &str = "no randomness from the system (/dev/urandom) to make a key with";
-#[cfg(windows)]
-const NO_RANDOMNESS: &str = "no randomness from the system (BCryptGenRandom) to make a key with";

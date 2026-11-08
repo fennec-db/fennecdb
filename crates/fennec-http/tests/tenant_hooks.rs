@@ -715,7 +715,11 @@ fn a_file_put_in_place_under_a_running_node_is_armed_by_no_secret_before_it() {
     let key = fennec_http::seal::Key::from_hex(&key_hex).unwrap();
     let sealed = n.dir.join("acme.sealed");
     let plain = std::fs::read(&file).unwrap();
-    std::fs::write(&sealed, fennec_http::seal::seal_whole(&key, &plain)).unwrap();
+    std::fs::write(
+        &sealed,
+        fennec_http::seal::seal_whole(&key, &plain).unwrap(),
+    )
+    .unwrap();
     fennec_http::archive::unseal(&sealed, &key, &file).unwrap();
     assert!(!sidecar.exists(), "put away beside the file it replaced");
     assert!(
