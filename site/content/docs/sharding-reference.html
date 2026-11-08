@@ -113,8 +113,9 @@ they become file names, and that set means the same thing on every file
 system. Windows' device names — <code>con</code>, <code>prn</code>,
 <code>aux</code>, <code>nul</code>, <code>com1</code> to <code>com9</code>,
 <code>lpt1</code> to <code>lpt9</code> — are refused (400) on every system,
-since a path there reads <code>con.fennec</code> as the console: a node's
-directory and its archive restore on any.</p>
+since a Windows before 11 reads <code>con.fennec</code> as the console, and
+every one reads <code>nul</code> as nothing: a node's directory and its
+archive restore on any.</p>
 </details>
 
 <h2>The router: <code>fennec-shard</code></h2>

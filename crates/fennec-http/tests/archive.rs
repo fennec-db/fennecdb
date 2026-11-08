@@ -690,7 +690,19 @@ fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
             while go.load(Ordering::SeqCst) {
                 p.exec(&format!("put notes {{n: {i}, title: \"note {i}\"}}"));
                 if i % 150 == 149 {
-                    a.consolidate().unwrap();
+                    // On Windows a copier that shares no writer -- `fs::copy`
+                    // is `CopyFileExW` -- may hold the image being read back,
+                    // `consolidating.fennec` (32, `windows (http)`): that
+                    // round's image is refused and said, as `keep_up` and a
+                    // node's archiver say it, and the next round takes it.
+                    match a.consolidate() {
+                        Err(e) if cfg!(windows) && e.to_string().contains("(os error 32)") => {
+                            eprintln!("an image refused while a copy read it: {e}")
+                        }
+                        r => {
+                            r.unwrap();
+                        }
+                    }
                 }
                 i += 1;
             }

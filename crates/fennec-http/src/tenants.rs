@@ -2912,15 +2912,15 @@ pub fn shaped(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// Whether a Win32 path reads `name` as a device rather than a file: `con`,
+/// Whether Windows may read `name` as a device rather than a file: `con`,
 /// `prn`, `aux`, `nul`, `com1` to `com9` and `lpt1` to `lpt9`, in any case,
-/// and on releases before Windows 11 with any extension too -- `nul.txt`
-/// and `nul.tar.gz` are `nul` (the naming page's words). `T\con.fennec`
-/// would be the console, `T\com1.hooks` a serial port, and an archive's
-/// `con\` no directory. Refused on every system, not on Windows alone: a
-/// node's directory and its archive made on Linux restore on Windows
-/// (docs/design/windows.md, 7b). The superscript digits Windows reads as
-/// digits too (`com¹`) are no tenant's: [`shaped`] refuses them.
+/// with any extension before Windows 11 (`T\con.fennec` the console there,
+/// `T\com1.hooks` a serial port). Server 2025 reads a name alone so, and in
+/// a full path `nul` alone (docs/design/windows.md, 7b, settled on CI).
+/// Refused on every system, not on Windows alone: a node's directory and
+/// its archive made on Linux restore on any Windows, the naming page's
+/// rule the one to hold. The superscript digits Windows reads as digits
+/// too (`com¹`) are no tenant's: [`shaped`] refuses them.
 pub fn a_device(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or_default().as_bytes();
     let is = |word: &str| stem.eq_ignore_ascii_case(word.as_bytes());
