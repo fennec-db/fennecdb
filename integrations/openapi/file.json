@@ -776,6 +776,327 @@
     }
    }
   },
+  "/{collection}/{id}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/collection"
+    },
+    {
+     "$ref": "#/components/parameters/id"
+    }
+   ],
+   "get": {
+    "operationId": "readRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The row of that id, its tag in ETag; 304 where If-None-Match names that tag, 412 where If-Match names another, 404 where there is no such row",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The row",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Document"
+        }
+       }
+      }
+     },
+     "304": {
+      "$ref": "#/components/responses/RowNotModified"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "readRowHead",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The GET's head: The row of that id, its tag in ETag; 304 where If-None-Match names that tag, 412 where If-Match names another, 404 where there is no such row",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The row",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       }
+      }
+     },
+     "304": {
+      "$ref": "#/components/responses/RowNotModified"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "putRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Write the body as the row of that id, whole: 201 where it made it, 200 over it; under If-Match only over the row tagged, under If-None-Match: * only where there is none (412 else, nothing written)",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Document"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Written over the row; a conditional write's ETag is the row's new tag",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "201": {
+      "$ref": "#/components/responses/RowMade"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "updateRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Set the body's fields on the row of that id; under If-Match only where it is the row tagged (* any), else 412 and nothing written",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Document"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated; a conditional write's ETag is the row's new tag",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "deleteRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Delete the row of that id; under If-Match only where it is the row tagged (* any), else 412 and nothing deleted",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "How many were deleted",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
   "/{collection}/near": {
    "parameters": [
     {
@@ -2320,6 +2641,16 @@
      "type": "string"
     }
    },
+   "id": {
+    "name": "id",
+    "in": "path",
+    "required": true,
+    "description": "A row's id: digits alone.",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
    "tenant": {
     "name": "tenant",
     "in": "path",
@@ -2561,6 +2892,22 @@
      "type": "string"
     }
    },
+   "IfMatch": {
+    "name": "If-Match",
+    "in": "header",
+    "description": "The row's ETag (a list of them), or *: answered or written only where the row is one tagged (* any row there), compared strongly, under the write lock that writes it; else 412 and nothing written.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "IfNoneMatchRow": {
+    "name": "If-None-Match",
+    "in": "header",
+    "description": "A read: the row's last ETag, 304 while it is that row. A write: *, made only where there is no such row (a PUT's create), or tags it must not be; else 412 and nothing written.",
+    "schema": {
+     "type": "string"
+    }
+   },
    "StripeSignature": {
     "name": "Stripe-Signature",
     "in": "header",
@@ -2639,6 +2986,21 @@
     "description": "Seconds to wait before coming back.",
     "schema": {
      "type": "integer"
+    }
+   },
+   "ETag": {
+    "description": "The row's tag: a hash of the row as the token is shown it, the same on every server for the same row. On a write, where it was sent with a precondition: the row's tag as the write left it.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "NoTransform": {
+    "description": "no-transform, beside a row's ETag: a proxy compressing the answer would weaken the tag, which If-Match compares strongly.",
+    "schema": {
+     "type": "string",
+     "enum": [
+      "no-transform"
+     ]
     }
    }
   },
@@ -3456,6 +3818,59 @@
      "ETag": {
       "schema": {
        "type": "string"
+      }
+     }
+    }
+   },
+   "RowNotModified": {
+    "description": "The row is the one the If-None-Match tag names: no body.",
+    "headers": {
+     "ETag": {
+      "$ref": "#/components/headers/ETag"
+     },
+     "Cache-Control": {
+      "$ref": "#/components/headers/NoTransform"
+     }
+    }
+   },
+   "RowMade": {
+    "description": "The row was made: there was none of that id. Its ETag where the PUT was sent with a precondition.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     },
+     "Fennec-Seq": {
+      "$ref": "#/components/headers/FennecSeq"
+     },
+     "Fennec-History": {
+      "$ref": "#/components/headers/FennecHistory"
+     },
+     "ETag": {
+      "$ref": "#/components/headers/ETag"
+     },
+     "Cache-Control": {
+      "$ref": "#/components/headers/NoTransform"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Outcome"
+      }
+     }
+    }
+   },
+   "PreconditionFailed": {
+    "description": "If-Match or If-None-Match did not hold for the row as the write lock found it: nothing written.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
       }
      }
     }

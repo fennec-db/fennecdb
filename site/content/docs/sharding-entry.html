@@ -75,6 +75,18 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     region down, a path refused — carry no CORS headers, and a page reads them
     as the network failing. The entry says so in its log once it sees the
     routers send them.</li>
+  <li id="strong-tags"><b>A row's <code>ETag</code> stays strong.</b>
+    Cloudflare makes a strong <code>ETag</code> weak (<code>W/"…"</code>) on
+    an answer it compresses, and a weak tag names no row for
+    <code>If-Match</code>: a page writing <a
+    href="http-reference.html#conditional">over the row it read</a> would be
+    refused (412) every time. A node sends <code>Cache-Control:
+    no-transform</code> beside every row's tag, which Cloudflare does not
+    compress (<a href="https://developers.cloudflare.com/speed/optimization/content/compression/">Content
+    compression</a>); the zone's <b>Respect Strong ETags</b>, a cache rule
+    (<a href="https://developers.cloudflare.com/cache/reference/etag-headers/">ETag
+    headers</a>), keeps every strong tag as sent, and Rocket Loader and
+    Email Obfuscation, which rewrite a body, belong on no API's zone.</li>
 </ul>
 
 <details class="deep"><summary>How the entry finds a home, what it passes on, and what it costs</summary>

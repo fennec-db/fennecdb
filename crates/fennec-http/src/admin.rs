@@ -214,6 +214,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             seq: None,
             history: None,
             version: None,
+            no_transform: false,
         }),
         // A router recording the lineage of a tenant made before it kept
         // any, to bind its read replicas to, or asking the primary it

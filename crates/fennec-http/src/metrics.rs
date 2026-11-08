@@ -478,6 +478,7 @@ pub(crate) fn handle(cfg: &Config, req: &Request, source: Source) -> Response {
         seq: None,
         history: None,
         version: None,
+        no_transform: false,
     }
 }
 

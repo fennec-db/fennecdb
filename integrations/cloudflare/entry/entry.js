@@ -211,9 +211,9 @@ const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 't
 export function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, fennec-read, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
+      'content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, fennec-read, if-match, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
     'Access-Control-Expose-Headers':
       'fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, fennec-quota, retry-after, fennec-unsent, deprecation, sunset, link',
     'Access-Control-Max-Age': '600',

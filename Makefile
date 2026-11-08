@@ -318,7 +318,9 @@ endif
 ## MODES=e15,wide,small,frac,ints: a page of numbers written as JSON;
 ## PKG=fennec-core EXAMPLE=orders MODES=order-int,order-float,scan-float,
 ## group-float,group-int,group-list,hash-list: values compared and keyed
-## over 100 000 rows, a list's in a group and a `@hash` too);
+## over 100 000 rows, a list's in a group and a `@hash` too; EXAMPLE=rows
+## MODES=get,row,patch,patch-row,if-match: a row by id read and written
+## over REST, by a filter and by its path, and under `If-Match`);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET

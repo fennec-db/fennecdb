@@ -26,6 +26,10 @@ PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
 DELETE /&lt;name&gt;?&lt;filter&gt;
 PATCH  /&lt;name&gt;/all              no filter — deliberately explicit
 DELETE /&lt;name&gt;/all
+GET    /&lt;name&gt;/&lt;id&gt;             the row, its tag in ETag (<a href="#conditional">If-None-Match</a>: 304)
+PUT    /&lt;name&gt;/&lt;id&gt;             body: {...} -- the row written whole: 201 made, 200 over it
+PATCH  /&lt;name&gt;/&lt;id&gt;             body: {...} -- If-Match: only over the row tagged, else 412
+DELETE /&lt;name&gt;/&lt;id&gt;
 POST   /&lt;name&gt;/near             body: {"vector":[...], "limit":10}
 GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental diff
 POST   /query                   body: {"query":"&lt;FennecQL&gt;","params":[...]}
@@ -141,8 +145,10 @@ route above: its parameters, the query string's clauses, each body, each
 answer and its status, the refusal's <code>{"error": ...}</code> and a
 503's <code>retry_after</code>, the headers that carry meaning
 (<code>Idempotency-Key</code>, <code>Fennec-Wait</code>,
-<code>Fennec-After</code>, <code>Fennec-Read</code>,
-<code>X-Request-Id</code>, <code>Retry-After</code>), the tokens a route
+<code>Fennec-After</code>, <code>Fennec-Read</code>, <code>If-Match</code>,
+<code>If-None-Match</code>, <code>ETag</code>,
+<code>X-Request-Id</code>, <code>Retry-After</code>) and a row's 304 and
+412, the tokens a route
 takes — the server's, a scoped JSON Web Token, a node's admin token, the
 replication token, a router's <code>--token</code> — and a subscription as
 <code>text/event-stream</code>. It asks no token: it is the binary's, the
@@ -459,6 +465,96 @@ arguments takes no body.</p>
     under the route <code>call</code>, never its name.</li>
 </ul>
 
+<h2 id="conditional">Writing over the row you read</h2>
+
+<p><code>GET /&lt;name&gt;/&lt;id&gt;</code> answers the row as an object and
+its tag in <code>ETag</code>. Send the tag back with a write to that row in
+<code>If-Match</code> and the write is made only if the row is still the one
+you read; if another write changed it since, the answer is <code>412
+Precondition Failed</code> and nothing is written. HTTP's own headers, as
+RFC 9110 has them: any client, proxy or generated SDK knows them.</p>
+
+<pre data-lang="bash">curl -si http://127.0.0.1:8080/orders/42
+# HTTP/1.1 200 OK
+# ETag: "5c0e4a91d27b3f6e8a1c2d9b0e7f4a35"
+# {"id":42,"status":"open","total":129.5}
+
+curl -si -X PATCH http://127.0.0.1:8080/orders/42 \
+  -H 'If-Match: "5c0e4a91d27b3f6e8a1c2d9b0e7f4a35"' -d '{"status":"paid"}'
+# HTTP/1.1 200 OK
+# ETag: "a8d2f17c03b94e5d6c1e0f2a9b8d7c64"   the row's tag after the write
+# {"updated":1}
+
+# the same request again: the row moved on, so nothing is written
+# HTTP/1.1 412 Precondition Failed
+# {"error":"If-Match: the row is not the one tagged, it changed since"}
+</pre>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><b><code>If-Match: "&lt;tag&gt;"</code></b></td><td>on <code>PATCH</code>, <code>PUT</code> or <code>DELETE</code>: written only over the row of that tag (a list of tags: any of them); else 412. A weak tag (<code>W/"…"</code>) names no row for a write.</td></tr>
+<tr><td><b><code>If-Match: *</code></b></td><td>written only where the row is there; a missing row is 412, and a <code>PUT</code> makes none</td></tr>
+<tr><td><b><code>If-None-Match: *</code></b></td><td>on <code>PUT</code>: the row is made only where there is none of that id, else 412 — a create that never writes over</td></tr>
+<tr><td><b><code>If-None-Match: "&lt;tag&gt;"</code></b></td><td>on <code>GET</code> or <code>HEAD</code>: 304, no body, while the row is the one tagged; on a write, 412 where it is</td></tr>
+<tr><td><b><code>ETag</code></b></td><td>on every <code>GET</code> of a row, and on a <code>PATCH</code> or <code>PUT</code> sent with a precondition: the row's tag as the write left it, for the next one. <code>Cache-Control: no-transform</code> beside it, so a proxy that compresses the answer leaves the tag strong</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>The look and the write are one step.</b> The server reads the
+    row's tag under the write lock that then makes the write, so no write
+    lands between them: of clients sending a write under one tag at once,
+    exactly one is made and every other is 412.</li>
+  <li><b>A tag is the row's content</b>: a hash of the row as the token is
+    shown it, the bytes the <code>GET</code> answers. It changes whenever
+    the row does, and is the same on a replica and after a restart for the
+    same row. A write that leaves the row as it was leaves its tag, so a
+    write under it after that is made — it loses nothing.</li>
+  <li><b>A scoped token's tag is of what it is shown.</b> A field a read
+    rule withholds is not in its row, and not in its tag: a change to that
+    field alone leaves the token's tag as it was, its writes under it go on,
+    and the tag tells nothing of the field.</li>
+  <li><b>On no other route.</b> <code>If-Match</code> or
+    <code>If-None-Match</code> on a write to a filter, <code>/all</code>,
+    <code>POST /&lt;name&gt;</code> or <code>/_schema</code> is refused (400),
+    never passed over: a write sent as conditional is never made as one that
+    is not. <code>/query</code>, <code>/batch</code> and
+    <code>/_call</code> refuse <code>If-Match</code> whatever they run, and
+    <code>If-None-Match</code> on a write; on a read it is the <a
+    href="#polling">poll's</a>.</li>
+  <li><b>A header sent on several lines is one list</b>, as RFC 9110 has
+    it: <code>If-Match</code> holds where any line names the row, and
+    <code>If-None-Match</code> refuses where any line does.</li>
+  <li><b>A scoped token writes over the row it read with
+    <code>PATCH</code> or <code>DELETE</code></b> under
+    <code>If-Match</code>. <code>PUT</code> names the row's id, which a
+    scoped token never writes — it could write over a row the token cannot
+    see — so it is 403 whatever its preconditions: the server's token's
+    alone. A row a token's rules hide from it is answered as one that is not
+    there, the same 404 and the same 412.</li>
+  <li><b>With an <code>Idempotency-Key</code></b> a conditional write sent
+    again after it was made is answered as the first time (its status and
+    body, not its <code>ETag</code>), never 412; a refused one keeps no
+    key.</li>
+  <li><b><code>/&lt;name&gt;/&lt;id&gt;</code> is the row</b>: an id is digits
+    alone, and the route takes no query string (400) — the tag is the whole
+    row's. A missing row, or one past its <code>@ttl</code>, is 404 to a
+    <code>GET</code>, whatever its preconditions; without a precondition, a
+    <code>PATCH</code> of one answers <code>{"updated":0}</code> and a
+    <code>DELETE</code> <code>{"deleted":0}</code>, as the filter routes do.
+    <code>PUT</code> writes the body as the row, a field it leaves out gone,
+    and a body's <code>id</code> other than the path's is 400.</li>
+  <li><b>Behind Cloudflare</b>, or any proxy that compresses: a compressed
+    answer's strong <code>ETag</code> is made weak (<code>W/"…"</code>),
+    which names no row for <code>If-Match</code>, so every conditional write
+    would be 412. A row's answer says <code>Cache-Control:
+    no-transform</code>, which Cloudflare does not compress; see <a
+    href="sharding-entry.html#strong-tags">the global entry</a>.</li>
+</ul>
+
+
 <h2 id="wait">Holding a write until it can write</h2>
 
 <p>Send <code>Fennec-Wait: &lt;ms&gt;</code> with a <code>set</code> or a
@@ -608,13 +704,13 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <table>
 <thead><tr><th>Status</th><th>Means</th><th>What to do</th></tr></thead>
 <tbody>
-<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>)</td><td>fix the request</td></tr>
+<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>); <code>If-Match</code> or <code>If-None-Match</code> off a row's route (<a href="#conditional">Writing over the row you read</a>)</td><td>fix the request</td></tr>
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
-<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
+<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole, a <code>PUT /&lt;name&gt;/&lt;id&gt;</code> — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists; a <code>/batch</code> holding a <code>compact</code> that <code>--call-rate</code> stopped after statements of it landed — never a 429 or 503 then, which say nothing ran</td><td>a lost race for a value; for the batch, send the statements from <code>at</code> on, alone</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
-<tr><td class="n">412</td><td>a <code>require</code> not met, its batch put back; <code>reason</code> where its <code>else '…'</code> gave one</td><td>read again, decide again; tell refusals apart by <code>reason</code>, not <code>at</code></td></tr>
+<tr><td class="n">412</td><td>a <code>require</code> not met, its batch put back; <code>reason</code> where its <code>else '…'</code> gave one. A row's <code>If-Match</code> or <code>If-None-Match</code> that did not hold, nothing written (<a href="#conditional">Writing over the row you read</a>)</td><td>read again, decide again; tell refusals apart by <code>reason</code>, not <code>at</code></td></tr>
 <tr><td class="n">413</td><td>a body past the ceiling, 64 MB, by its length or its chunks</td><td>send less at once</td></tr>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
 <tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>held</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>retry_after_ms</code></td></tr>

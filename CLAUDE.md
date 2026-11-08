@@ -357,6 +357,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A text's lists are read as written at once from its second request.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
+- A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
 - A connection no thread can be made for is answered 503.
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.

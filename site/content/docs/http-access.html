@@ -161,7 +161,12 @@ fennec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":18
     refused with 403. A put that leaves out a field the filter pins to a claim
     gets the claim's value, so <code>{"title":"a"}</code> is alice's. A scoped
     put names no <code>id</code>, which could overwrite a row the token cannot
-    see, and a scoped token changes no schema and runs no maintenance.</li>
+    see — so <code>PUT /&lt;name&gt;/&lt;id&gt;</code>, which names one, is
+    403 whatever its preconditions; a scoped token holds a write to the row
+    it read with <code>PATCH</code> or <code>DELETE /&lt;name&gt;/&lt;id&gt;</code>
+    under <code>If-Match</code> (<a href="http-reference.html#conditional">Writing
+    over the row you read</a>) — and a scoped token changes no schema and runs
+    no maintenance.</li>
   <li><b><code>returning</code></b> answers what the write wrote, so the
     rows it answers are held to the read rules: a <code>set</code>'s as it
     wrote them, a <code>del</code>'s as they were. A row the read rules

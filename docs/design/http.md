@@ -714,6 +714,249 @@ in-process counts through `handle` now stand for the HTTP path, whose
 stack above the handler differs. Natively alone (`query_json` is not built
 for wasm32).
 
+## Row tags
+
+**A row's tag is its JSON as its reader is shown it, and a write's
+preconditions are judged under the lock that writes it** (`conditional.rs`,
+`row_into`, `rest_run`). `GET /<name>/<id>` answers the row as an object
+and its tag in `ETag`; a `PATCH`, `PUT` or `DELETE` of `/<name>/<id>`
+sent with `If-Match` or `If-None-Match` (RFC 9110, section 13) is written
+only where the row meets them, else 412 and nothing written. Before, no
+route read or wrote a row by its id: a client read `?id=eq.<id>`, wrote
+by the same filter, and the last writer won -- a second client's write
+from what it had read silently undid the first's. HTTP's own header names,
+as the owner's rule for headers has them: a proxy, a browser's cache and a
+generated client know them, where a `Fennec-` header of our own would mean
+the same to nothing.
+
+*Atomic: the look and the write are under one lock.* `rest_write` takes
+the write lock, the replay of an `Idempotency-Key` is asked first -- a
+retry of a conditional write that was made is answered as the first time,
+never the 412 its own write would now earn -- and `rest_run` then reads the
+row's tag under that lock, before a keyed write's block opens, and runs the
+write under the same guard: no write lands between the look and the
+write. Of eight clients sending a write under one tag at once, exactly one
+is made, round after round (`of_writes_under_one_tag_at_once_one_is_made`).
+A refusal is read from what other writes left, so under `--sync always` it
+waits for their fsync as such a refusal does (`refused_under`), and keeps
+no key. Two other ways were weighed. A look under the read lock before the
+write lock is a race: a write lands between. The engine's own parts -- the
+write's `where` naming every field as it was read, `require 1` making its
+count the condition -- say the same only where an equality compares as
+the row's bytes do -- a float's `-0` and `0` are one key, a `NaN` equals a
+`NaN` whatever its bits, a vector is compared by its `f32`s -- and a field
+a read rule withholds from a token cannot be named in its `where` at all;
+the `GET` would still need a tag to hand out. One read of the row by id
+under the lock (`looked`) costs what a read by id costs, and asks nothing
+new of the engine.
+
+*What the tag is: the row's JSON as the reader is shown it.* It must change
+whenever the row does and be the same on a replica and after a restart for
+the same row. No change number is kept by row: the store keeps a location
+(`Loc`, 12 bytes) by id, a change number would be 8 bytes more a row in
+memory, and would be the same on a replica only if an image carried one a
+row -- an image's rows hold none, and a replica made from one would tag
+every row by the image's change. A hash of the content is the same wherever
+the content is. Of the stored document's bytes it would hold what the
+reader is not shown: a field a read rule withholds -- whose change would
+move the tag, telling the token of a write to it, and whose value a token
+could guess offline against the tag where it has few values (a status, a
+flag, a small number) -- and a field `alter collection drop field` left in
+every row until it is written again. So the tag hashes the very bytes the
+`GET` answers beside it, `row_into`'s, one function for the read and for
+the write's look: the stored document written out as JSON
+(`Database::query_json`) for a token no field is withheld from, else the
+row with the withheld fields held out (`shown`), which `query_json` writes
+as `rows_array_into` does, byte for byte (`tests/query_json.rs`). A scoped
+token's tag is of its own view: a write to a field withheld from it leaves
+its tag as it was, and its writes under it go on
+(`a_scoped_tag_tells_nothing_of_a_withheld_field`) -- its writes reach no
+field it is not shown (`fields::write`), so no write of another to such a
+field is lost by it. Refusing to tag where a field is withheld was the
+other way, and kept the feature from every such token for nothing. A
+change of what a row is shown as with no write -- a field added, `null` in
+the rows before it -- moves its tag, and a client's next write is 412 and
+reads it again. A content's tag lets a write that leaves the row as it was
+leave its tag: a write under that tag after it is made, and loses nothing
+(`a_write_leaving_the_row_as_it_was_leaves_its_tag`).
+
+*SipHash-2-4, 128 bits, a fixed key.* SHA-256, which a poll's scoped tag
+takes (`content_tag`), cost 7 430 instructions a row of 66 bytes in
+software -- a third of the read of that row by id, 23 200 -- and 50 300 a
+row of 1 KB (`examples/rows.rs`'s `sha`). SipHash-2-4 with its 128-bit
+output costs about 3.3 instructions a byte and 460 more (`tag`: 676 a row
+of 66 bytes, 3 797 one of 1 026, the loop's own work in both), written on
+the stack (`Tag`): first written into a `String` a digit at a time through
+`char::from_digit`, it took 1 900 instructions of its 2 200. Its key is the
+reference implementation's test key, fixed, so a row has one tag on every
+server and after every restart, and the vectors it is tested against are
+the reference's (`siphash128_holds_to_the_reference_vectors`, its rounds
+held to std's SipHash-2-4 besides). It needs no secret: what it hashes is
+what its reader is answered beside it. What a key-less hash gives up is
+being a signature: a writer of the row could look for a content of the
+same tag -- no shortcut is known for SipHash with its key known, a
+collision of 128 bits is 2^64 tries -- and so pass its own write off as no
+change, which writing the old value back does too. Working the tag out only
+where a request asks for it (`If-None-Match`) was the other way to keep its
+cost off a read, and leaves a client nothing to send in `If-Match`.
+
+*The rest of the routes' answers.* A missing row is 404 to a `GET` whatever
+its preconditions, as RFC 9110 (13.2.1) has a server answer what it would
+without them where that is no success; a write's 2xx without them is
+judged, so `If-Match: *` on a missing row is 412. A row a token's rules
+hide from it, and a row past its `@ttl`, which every read leaves out, are
+answered as a missing one -- the same 404, the same 412 and its words
+(`a_row_a_rule_hides_is_answered_as_a_missing_one`,
+`a_row_past_its_ttl_is_no_row`): the look reads the row as the `GET`
+does. Without a precondition, a `PATCH` of a missing row answers
+`{"updated":0}` and a `DELETE` `{"deleted":0}`, as the filter's routes
+do. A `PUT` writes the body as the row (`put`), a field it leaves out
+gone, and always looks: 201 where it made the row, 200 over it; under
+`If-None-Match: *` it is an `insert`, which the look before it refuses
+(412) where the row is there, so it never writes over one -- of eight
+clients making one row so at once, one is made, every other 412
+(`of_puts_making_one_row_at_once_one_is_made`), as of eight deleting one
+under its tag one deletes it (`of_deletes_under_one_tag_at_once_one_is_made`).
+A conditional `PATCH` or `PUT` answers the row's tag as the write left it,
+worked out under the lock -- after it, another write could have moved it,
+and the client's next write would carry a tag it never read -- a second
+read by id; a delete answers none. A replay of a keyed one answers the
+first try's status and body, which `_idempotency` keeps, not its `ETag`.
+`/<name>/<id>` takes no query string, its tag the whole row's, and an id
+is digits alone, so `/all`, `/near` and `/changes` stay the routes they
+were. The router forwards both headers as any other; CORS lets a page send
+`If-Match` and `PUT`.
+
+*A scoped token's conditional write is a `PATCH` or a `DELETE`.* A `PUT`
+names its row's id, and a scoped token never puts one (`access`'s `put`:
+an insert without `id` alone), since a put writes over a row, every field
+it leaves out gone, a row the token cannot see among them. So a scoped
+token's `PUT /<name>/<id>` is 403 whatever its preconditions, over a row
+and a missing one alike, refused as the statement is scoped, before the
+look (`a_scoped_put_is_refused_whatever_its_precondition`), its words
+naming the routes it has (`put_row_refused`). A first draft of this
+section had it 409 under `If-None-Match: *`, which no scoped token ever
+reached. Letting a scoped `PUT` through where its row is one the token may
+update and every field it would drop is one it may write was the other
+way: a second rule of what a put may do, for a route `PATCH` already
+serves -- a `PATCH` naming every field is the same write.
+
+*Nowhere else.* `If-Match` and `If-None-Match` hold a write to the row
+`/<name>/<id>` names; a write that names none is never made as though it
+were held. On a write by a filter, `/all` or `POST /<name>`, either is
+400, read before the lock in one pass over the headers (`asked`); a
+`/_schema` plan or apply too. `/query`, `/batch` and `/_call` returned
+before that check, so `POST /query` with a `set` under `If-Match: "nope"`
+wrote: they refuse `If-Match` whatever they run, and `If-None-Match`
+where they write -- on a read it is the poll's (`content_tag`, `etag`),
+which a call that reads answers too. One pass over the headers at the top
+of each (`Preconditions::of`), a byte of each header looked at, its
+result the read's poll asks again instead of a second scan
+(`a_precondition_on_a_statement_is_refused`).
+
+*Every line of a header is read.* RFC 9110 (5.3) reads a field sent on
+several lines as their values joined by commas, and a proxy may split a
+list so or join one. Kept by its last line, `If-Match: "<the row's tag>"`
+then `If-Match: "x"` was 412 over the very row it named, and
+`If-None-Match` naming the row on its first line let a write over it.
+`Preconditions` keeps which of the two were sent and reads every line of
+one where it judges it (`every_line_of_a_precondition_counts`).
+
+*`Cache-Control: no-transform` beside a row's tag.* A proxy compressing an
+answer changes its bytes, and Cloudflare's edge weakens a strong `ETag` it
+compresses to `W/"..."` unless the zone's Respect Strong ETags, a cache
+rule, is on. `If-Match` compares strongly, so a page behind the entry
+Worker read a weak tag and was refused (412) every conditional write. Every
+answer carrying a row's tag -- the `GET`'s 200 and 304, a conditional
+write's -- says `no-transform`, which Cloudflare does not compress
+(its *Content compression* page). Accepting a weak tag for `If-Match` was
+the other way, and is what RFC 9110 forbids: a weak tag names a body only
+as equivalent, and a write held to one could pass over a change. The
+header is a flag of `Response` (`no_transform`), in the padding after
+`status`, written as `seq` is: an `extra` was two allocations an answer.
+
+*What it costs, and what it cost nothing.* Counted in process through
+`handle` (`make instr-compare EXAMPLE=rows MODES=get,row,patch,patch-row,if-match`,
+`examples/rows.rs`: 500 rows of an int and a 40-byte text, 20 000 requests
+a run; each build -- main at `66f3e8eb` with the example copied in, and
+this branch -- over 8 identities of 7 runs each, `--bin`, loads under 4),
+in instructions a request:
+
+| | main | branch | |
+| --- | ---: | ---: | --- |
+| `GET /t?id=eq.<id>` | 24 549 | 24 586 | +37, inside two standard errors |
+| `PATCH /t?id=eq.<id>` | 29 101 | 29 100 | -1, inside two standard errors |
+| a row by id: `GET /t/<id>`, main's `?id=eq.<id>` | 24 597 | 19 288 | -21.6%, the tag in it |
+| `PATCH /t/<id>`, main's `?id=eq.<id>` | 29 125 | 27 599 | -5.2% |
+| `PATCH /t/<id>` under `If-Match`, main's plain | 29 124 | 48 822 | +19 698: two reads under the lock |
+
+With a text of 1 000 bytes, a row of 1 026: `?id=eq.<id>` 28 033 against
+27 980 (inside two standard errors), the row by its path 28 000 -> 25 949
+(-7.3%, its tag 3 800 of it), and a write under `If-Match` 66 914 against
+main's plain 34 546. A row's read is cheaper by its path than by a filter
+(no query string read into a filter, the document written as JSON where
+it lies, `query_json`, rather than decoded and rendered), and that pays for
+its tag. The routes cost the paths before them nothing: a trace of one
+call of each (`TRACE`, `trace.py diff`) has a read by a filter 13
+instructions of its own code past main's, a write by a filter 14 --
+`route`'s test of a second segment, `handle`'s of the headers for a
+precondition, one byte of each, and `rest_write`'s of the row a write
+names. They cost that only once these were out of the way: the path read
+on every write for a row's name (`api::row_name`, 150 instructions) is
+read on the row's route alone; the look and the tag after are out of line
+(`looked`, `tag_after`), where in `rest_run` a write by a filter carried
+the row's statement, a kilobyte, in its frame; the body is read in one
+place for the three writes that take one, where read in each arm
+`document` was no longer inlined into `route` (+20); the tag is pushed onto
+the answer where it lies, not moved through a `match`; and `rest_run` is
+generic over what it asks of a row (`Asks`), a write naming none running
+it for `NoRow`, every look folded away -- the row's ask carried through it
+as an `Option` left `rest_run` 34 instructions of its own past main's, and
+a write by a filter +100 over eight identities a build, outside two
+standard errors. Before those, over the same eight identities, a write by
+a filter was +480 instructions (+1.65%) and a read by one +344 (+1.41%). A
+conditional write is the two reads of its row under the write lock, a look
+and a tag, opt-in: the write lock is held that much longer, which a client
+asking for the check pays and no other write does.
+
+*Its size.* fennec-server's release binary, stripped, 6 792 432 bytes on
+main and 6 809 024 here: +16 592 (+0.24%; macOS arm64, its text in 16 KiB
+pages). Its code, by symbol, +18 496 bytes: the second copy of `rest_run`,
+the row's (`row_run`, 5 780 -- the price of a write by a filter costing
+nothing), the row's read and tag (`row_into` 1 852, `row_read` 988,
+`row_tag` 932), the hash (`conditional::tag` 1 116), the precondition
+lists and headers (`listed` 948, `which` 668), `PUT`'s route (`put_row`
+1 032), the look (`looked` 848) and the OpenAPI rows (756). Two cuts
+held it there: one header scan out of line for both asks (`which`, 700
+bytes a copy) and the id read by `num::parse_i64` rather than
+`str::parse` (300).
+
+*What the second pass cost* -- the statement routes' refusal, every line
+read, `no-transform`. Three builds side by side through `handle`
+(`compare.py --bin`, 8 identities of 7 runs each, loads under 4): main at
+`b361a668` (the rows example copied in, its `tag` mode taken out), this
+section's first version (`78c35fdd`) and this one, in instructions a
+request:
+
+| | main | first | now | |
+| --- | ---: | ---: | ---: | --- |
+| `GET /t/<id>`, main's `?id=eq.<id>` | 24 613 | 19 350 | 19 297 | -21.6% on main, -53 on the first: inside two standard errors |
+| `PATCH /t/<id>`, main's `?id=eq.<id>` | 29 176 | 27 560 | 27 544 | -5.6% on main |
+| `PATCH /t/<id>` under `If-Match`, main's plain | 29 104 | 48 734 | 48 898 | +164 on the first (+0.34%), at two standard errors: the lines read again where judged |
+| `put` through `/query` (`replays.rs`) | 21 167 | 21 112 | 21 159 | -7 on main, inside two standard errors |
+| `put` under an `Idempotency-Key` | 83 701 | 83 626 | 83 759 | +58 on main, inside two standard errors |
+
+The `/query` and `/batch` look is one pass over the headers, a byte of
+each and a name compared where it is an `i` -- `Idempotency-Key` among
+them -- and a `/query` read asks its poll's header only where that pass
+found it, a scan fewer. `no-transform` is a flag set where the tag is
+pushed; its 29 bytes are written into the head with the answer, past
+`handle`, beside the tag's own. fennec-server's release binary is
+6 809 024 bytes in both versions, the same 16 KiB pages: its `__text`
++1 280 bytes (`put_row_refused`, `off_row`, the line scans), its
+`__const` +4 096 (the refusals' words and the OpenAPI document's headers,
+some 1 200 bytes, the rest the section's alignment).
+
 ## Connections without a thread
 
 **A connection no thread can be made for is answered 503, as one past the

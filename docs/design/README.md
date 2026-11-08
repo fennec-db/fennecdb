@@ -16,7 +16,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
+- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`

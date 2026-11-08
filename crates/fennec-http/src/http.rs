@@ -646,6 +646,14 @@ pub struct Response {
     /// `X-Fennecdb-Version`, which every statement's answer carries: a field
     /// as `seq` is, where an `extra` was two allocations an answer.
     pub version: Option<&'static str>,
+    /// `Cache-Control: no-transform`, on an answer carrying a row's `ETag`
+    /// (`crate::conditional`): a proxy that compresses an answer weakens
+    /// its strong tag -- Cloudflare's edge does, the zone's Respect Strong
+    /// ETags off -- and `If-Match` compares strongly, so a page behind it
+    /// was refused (412) every conditional write. `no-transform` keeps the
+    /// body, and the tag of it, as sent. A flag in the padding after
+    /// `status`, as `seq` is a field: an `extra` was two allocations.
+    pub no_transform: bool,
 }
 
 impl Response {
@@ -658,6 +666,7 @@ impl Response {
             seq: None,
             history: None,
             version: None,
+            no_transform: false,
         }
     }
 
@@ -694,6 +703,7 @@ impl Response {
             seq: None,
             history: None,
             version: None,
+            no_transform: false,
         }
     }
 
@@ -752,6 +762,9 @@ impl Response {
             head.push_str("Fennec-History: ");
             push_history(&mut head, history);
             head.push_str("\r\n");
+        }
+        if self.no_transform {
+            head.push_str("Cache-Control: no-transform\r\n");
         }
         crate::request_id::with(|id| {
             if !id.is_empty() {
