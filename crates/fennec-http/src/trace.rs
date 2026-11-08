@@ -176,16 +176,18 @@ pub fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
+/// Drawn once a process: a trace's and a span's ids need to be unique, not
+/// secret, so the clock's stands in where the system gives no randomness
+/// (`id_u64`).
 fn key() -> u64 {
-    *KEY.get_or_init(|| {
-        let b = crate::crypto::random_bytes(8);
-        u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))
-    })
+    *KEY.get_or_init(crate::crypto::id_u64)
 }
 
 /// A fresh 64 bits: SplitMix64's finalizer over a key and the thread's
-/// count, as a made request id is -- distinct within a process, as
-/// unguessable as the key, no system call.
+/// count, as a made request id is -- distinct within a process, no system
+/// call. Distinct is all that holds, the key being the clock's where the
+/// system gives no randomness; nothing needs an id unguessable, a client
+/// sending its own `traceparent`.
 fn fresh() -> u64 {
     let n = NEXT.with(|n| {
         let v = n.get();

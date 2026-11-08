@@ -897,11 +897,11 @@ pub fn version_text(v: Option<u64>) -> String {
 }
 
 /// A version minted at random, never 0: two sets the node made are two
-/// versions, so a copy holding one holds that set.
+/// versions, so a copy holding one holds that set. A version names a set
+/// and guards nothing, so it is an id's draw (`id_u64`), unique without
+/// the system's randomness too.
 fn fresh_version() -> u64 {
-    let bytes = crate::crypto::random_bytes(8);
-    let v = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([1; 8]));
-    v.max(1)
+    crate::crypto::id_u64().max(1)
 }
 
 fn now_ms() -> i64 {

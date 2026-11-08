@@ -40,7 +40,10 @@ after `Fennec-Wait` (30 s at most), never before. Every wait comes after
 its token (`admitted`), a stream's before its head.
 
 **[An archive and a backup can be sealed](../../docs/design/replication.md#sealed-archives)**
-(`seal.rs`, `--key-file`), never the live file.
+(`seal.rs`, `--key-file`), never the live file. A frame's nonce, as every
+key and nonce, is the system's randomness (`crypto::system_random`, read
+with no descriptor), the seal refused without it: never the clock, which
+only an id may fall back to (`crypto::id_u64`).
 
 ### Access
 
