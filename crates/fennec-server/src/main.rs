@@ -502,12 +502,12 @@ fn main() {
     // its tree, its digest checked.
     fennec_http::install_statement_reader();
     // Said at the start, as a server told no JWT demands says it takes every
-    // token: what a Unix gives and Windows does not yet (docs/design/windows.md)
-    // -- but by a server, never by `--version`, `--help` or `--ping`, whose
-    // output is theirs (`say_what_windows_lacks`, below the code a Unix build
-    // compiles, so no line of that code moves).
+    // token: what Windows does with a rename (docs/design/windows.md) -- but
+    // by a server, never by `--version`, `--help` or `--ping`, whose output
+    // is theirs (`say_windows_renames`, below the code a Unix build compiles,
+    // so no line of that code moves).
     #[cfg(windows)]
-    say_what_windows_lacks();
+    say_windows_renames();
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
     let mut stdin_close = false;
@@ -1251,7 +1251,7 @@ fn main() {
                 Ok(db) => {
                     fennec_http::log!("opened: {path}");
                     #[cfg(windows)]
-                    say_volume(path);
+                    say_volume(path, mmap);
                     db
                 }
                 Err(e) => {
@@ -1506,7 +1506,7 @@ fn serve_dir(
         tenants.names().len()
     );
     #[cfg(windows)]
-    say_volume(dir);
+    say_volume(dir, mmap);
     {
         use fennec_http::quota::Kind;
         let n = |k| match quota.get(k) {
@@ -1632,37 +1632,70 @@ fn serve_dir(
 }
 
 /// Says what the volume a served file or a node's directory is on does with
-/// a rename (docs/design/windows.md, decision 3): NTFS and ReFS replace a
-/// file other handles hold open, as a checkpoint and a compact need; FAT32
-/// and exFAT have no such rename, and std's falls back to the classic one,
-/// which the server's own handle on the file refuses.
+/// a rename, and how the file is held (docs/design/windows.md, decisions 1
+/// and 3): NTFS and ReFS replace a file other handles hold open, as a
+/// checkpoint and a compact need, and their files are mapped; FAT32 and
+/// exFAT have no such rename, and std's falls back to the classic one,
+/// which the server's own handle on the file refuses, so a file there is
+/// read into memory, as one on a share is.
 #[cfg(windows)]
-fn say_volume(path: &str) {
+fn say_volume(path: &str, mmap: bool) {
+    let held = if !mmap {
+        "read into memory (--no-mmap)"
+    } else if !fennec_core::fs::mappable(std::path::Path::new(path)) {
+        "read into memory"
+    } else {
+        mapped_as()
+    };
     match fennec_core::fs::volume(std::path::Path::new(path)) {
+        Ok(v) if v.remote => fennec_http::log!(
+            "windows: {path} is on a share ({}): the file is {held}, since a share's read \
+             error would end the process through a view",
+            v.file_system
+        ),
         Ok(v) if v.posix_renames() => fennec_http::log!(
-            "windows: {path} is on {}, whose renames replace a file other handles hold open",
+            "windows: {path} is on {}, whose renames replace a file other handles hold open; \
+             the file is {held}",
             v.file_system
         ),
         Ok(v) => fennec_http::log!(
-            "windows: {path} is on {}, which has no POSIX renames: a checkpoint or a compact \
-             there fails while the file is open, and stops the writes -- serve it from NTFS \
-             or ReFS",
+            "windows: {path} is on {}, which has no POSIX renames: the file is {held}, and a \
+             checkpoint or a compact there fails while the file is open, and stops the writes \
+             -- serve it from NTFS or ReFS",
             v.file_system
         ),
-        Err(e) => fennec_http::log!("windows: the volume {path} is on could not be read: {e}"),
+        Err(e) => fennec_http::log!(
+            "windows: the volume {path} is on could not be read ({e}): the file is {held}"
+        ),
     }
 }
 
-/// What a Unix gives and Windows does not yet, said at the start -- unless
-/// the arguments ask for the version, the usage or a probe, which print
-/// their own output and end: `--version`'s stderr is empty there too.
+/// What Windows does with a rename, said at the start -- unless the
+/// arguments ask for the version, the usage or a probe, which print their
+/// own output and end: `--version`'s stderr is empty there too. Nothing a
+/// Unix gives is left to say Windows lacks: slice 2 mapped the file, slice
+/// 3 took the console's events (docs/design/windows.md).
 #[cfg(windows)]
-fn say_what_windows_lacks() {
+fn say_windows_renames() {
     let ends_at_once = |a: &str| matches!(a, "--version" | "-V" | "--help" | "-h" | "--ping");
     if !std::env::args().skip(1).any(|a| ends_at_once(&a)) {
-        fennec_http::log!(
-            "windows: a rename is made durable, the file and its directory flushed; \
-             no mapped file yet"
-        );
+        fennec_http::log!("windows: a rename is made durable, the file and its directory flushed");
     }
+}
+
+/// How [`say_volume`] says a file it may map is held: a 32-bit build maps
+/// none (`fennec_core::fs::open`).
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn mapped_as() -> &'static str {
+    if fennec_core::fs::placeholders() {
+        "mapped, a view laid past the last at each handover"
+    } else {
+        "mapped whole and anew at each handover: this Windows lays no views in a \
+         placeholder (Windows 10 1803 and later do)"
+    }
+}
+
+#[cfg(all(windows, not(target_pointer_width = "64")))]
+fn mapped_as() -> &'static str {
+    "read into memory, as a 32-bit build reads every file"
 }

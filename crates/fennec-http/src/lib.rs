@@ -5160,10 +5160,6 @@ mod tests {
     /// before; taken as it was read, the statement would hand the json field
     /// the vector's `f32`s, which it refuses for the numbers as written.
     #[test]
-    // `open_mapped` is Unix's until Windows maps its files
-    // (docs/design/windows.md, slice 2): Windows CI builds these tests for
-    // `crypto::` alone.
-    #[cfg(unix)]
     fn a_rest_insert_whose_schema_moved_before_the_lock_is_read_again() {
         let changes = [
             "alter collection ev add field extra text",

@@ -20,8 +20,8 @@
 /// machine has, less what the processes hold and the kernel keeps for
 /// itself -- on Linux the smaller of the system's `MemAvailable` and what
 /// the process's cgroup leaves (a container's `--memory`), on macOS and
-/// iOS the physical memory less the apps' memory, the wired pages and the
-/// compressor's. `None` where the system does not say.
+/// iOS the physical memory less the apps', the wired and the compressed,
+/// on Windows the available memory, a job's limit at most. `None` elsewhere.
 pub fn room() -> Option<u64> {
     if let Some(assumed) = ASSUMED.with(|a| a.get()) {
         return assumed;
@@ -323,10 +323,128 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
 mod imp {
     pub fn room() -> Option<u64> {
         None
+    }
+}
+
+/// Windows' (docs/design/windows.md, 7j): `GlobalMemoryStatusEx`'s available
+/// physical memory -- the standby list among it, the cached pages the
+/// system takes back as readily as free ones, as Linux's `MemAvailable`
+/// counts its cache -- and no more than a job's memory limit where the
+/// process is in a job that sets one, a container's. A job's limit is on
+/// what its processes commit, which a file's cached pages are not, so it
+/// bounds the room rather than being subtracted from: a container's
+/// process compacts as one held to its memory would. Windows counts a
+/// process's faults soft and hard together (`GetProcessMemoryInfo`), with
+/// no count of the ones that waited for the disk, so [`super::faulting`]
+/// says `false` there and the room alone decides.
+#[cfg(windows)]
+mod imp {
+    use std::ffi::c_void;
+
+    /// `MEMORYSTATUSEX`.
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+
+    /// `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, its basic limits first.
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobLimits {
+        per_process_time: i64,
+        per_job_time: i64,
+        flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_processes: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+        io: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process_memory: usize,
+        peak_job_memory: usize,
+    }
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x100;
+    const JOB_OBJECT_LIMIT_JOB_MEMORY: u32 = 0x200;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        fn QueryInformationJobObject(
+            job: *mut c_void,
+            class: i32,
+            info: *mut c_void,
+            len: u32,
+            returned: *mut u32,
+        ) -> i32;
+    }
+
+    pub fn room() -> Option<u64> {
+        let mut s = MemoryStatus {
+            length: std::mem::size_of::<MemoryStatus>() as u32,
+            load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        // SAFETY: the call fills the struct, whose length it is told.
+        if unsafe { GlobalMemoryStatusEx(&mut s) } == 0 || s.avail_phys == 0 {
+            return None;
+        }
+        Some(job_limit().map_or(s.avail_phys, |l| l.min(s.avail_phys)))
+    }
+
+    /// The least memory limit the job the process is in sets, if it is in
+    /// one that sets any: the query of no job answers for the process's
+    /// own, and fails where it is in none.
+    fn job_limit() -> Option<u64> {
+        let mut info = JobLimits::default();
+        // SAFETY: the struct is the class's, its length passed; no handle
+        // asks for the process's own job.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                std::ptr::null_mut(),
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&mut info as *mut JobLimits).cast(),
+                std::mem::size_of::<JobLimits>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let process = (info.flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY != 0)
+            .then_some(info.process_memory as u64);
+        let job = (info.flags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0).then_some(info.job_memory as u64);
+        match (process, job) {
+            (Some(p), Some(j)) => Some(p.min(j)),
+            (p, j) => p.or(j),
+        }
     }
 }
 
@@ -336,7 +454,7 @@ mod tests {
     /// machine.
     #[test]
     fn the_room_is_some_of_the_machine() {
-        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_vendor = "apple", target_os = "linux", windows))]
         {
             let r = super::room().expect("the system says");
             assert!(r > 0 && r < 1 << 50, "{r}");

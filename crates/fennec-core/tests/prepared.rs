@@ -9,7 +9,7 @@
 //! at all, and never one put back; and the buffer written behind the lock
 //! (`Database::write_behind`) leaves the file what it was.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::fs::open_mapped;
 use fennec_core::plugin::{Hook, Plugin, Registry, WriteOp};

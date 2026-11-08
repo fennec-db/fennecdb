@@ -8,13 +8,19 @@ fennec-core's invariants -- storage, the engine's blocks and reads, writes, inde
 
 **[No buffer pool of its own, and the file is mapped.](../../docs/design/storage.md#the-mapped-file)**
 `fs::open` maps it, a read decoding over its bytes; a rewrite points the
-stores at the new file (`Database::repoint`). In code, docs and site,
-"page cache" is the operating system's, a "buffer pool" a database's own,
-which fennecdb has none of.
+stores at the new file (`Database::repoint`). The mapped path is
+`std-fs` on a 64-bit Unix or Windows, every condition naming it so
+(`any(unix, windows)`). On Windows the file is views laid end to end in a
+placeholder, one at the open and one each handover (`Mapping::cover`),
+and a volume without POSIX renames or a share is read into memory
+(`fs::mappable`). In code, docs and site, "page cache" is the operating
+system's, a "buffer pool" a database's own, which fennecdb has none of.
 
 **[Writes are handed over to the mapped file.](../../docs/design/storage.md#handover)**
 Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the
-stores at it, never with a block open, the file the same byte for byte.
+stores at it, never with a block open, the file the same byte for byte; on
+Windows at a view laid past the last, a mapping of many views let go of
+on a thread, not under the write lock (`map::Teardown`).
 
 **[A block past 16 MB spills into the file before it lands.](../../docs/design/storage.md#spills)**
 A spill (kind 10) counts only where a land (kind 11) names it; the feed
@@ -38,8 +44,9 @@ reached `ROOM_SHARE` of that room or the process faults
 **[File format](../../docs/design/storage.md#file-format):** a record is
 `[kind][collection-id][length][body]`, its length read even when empty;
 `head` writes a head (the counter's `image_head` aside), `record_at` reads
-it, `Walk` walks them. A torn tail is cut on open, a torn image refused,
-and the file only grows; a tool that only looks opens with
+it, `Walk` walks them. A torn tail is cut on open (on Windows by a second
+open, the first's views gone: `fs::windows::cut_and_open`), a torn image
+refused, and the file only grows; a tool that only looks opens with
 `fs::open_read_only`, which cuts, creates and writes nothing. A new record
 kind, index kind, type tag or graph version is a number a binary from
 before refuses (a graph's, rebuilds from), never one it would misread.

@@ -6,7 +6,7 @@
 //! answers is not pinned, and one that reached for an index all the same is
 //! answered `None`, for the caller to run under the lock.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::prelude::*;
 use std::path::PathBuf;

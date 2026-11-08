@@ -226,7 +226,7 @@ impl Database {
     /// Whether a `create index` or a `compact` is running beside the
     /// database: a host's compact waits for the next look.
     pub fn maintaining(&self) -> bool {
-        #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+        #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
         if self.beside.load(Relaxed) {
             return true;
         }

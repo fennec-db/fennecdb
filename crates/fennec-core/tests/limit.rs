@@ -4,7 +4,7 @@
 //! take the file past it is refused before any of it is written; a block
 //! that only takes away always lands; a spill is asked before it is written.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::engine::{Landing, Limit};
 use fennec_core::fs::open_mapped;

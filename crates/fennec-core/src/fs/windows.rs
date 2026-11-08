@@ -1,11 +1,19 @@
 //! What a file's sink does differently on Windows (docs/design/windows.md,
-//! decisions 2, 3 and 7e): a rename made durable -- the renamed file
-//! flushed, then its directory -- a rename another handle refuses tried
-//! again for a bounded time, a file fennec makes kept out of the search
-//! indexer, and the volume a file is on named. kernel32's calls are
-//! declared here, as `fennec_abi::lock` declares its own: the crates take
-//! no `windows-sys`. Every call takes a handle std opened, never a path, so
-//! a long path is std's `\\?\` one wherever it is used.
+//! decisions 1, 2, 3 and 7e): the file mapped in views laid end to end
+//! ([`map`]), a torn tail cut once its views are gone, a rename made
+//! durable -- the renamed file flushed, then its directory -- a rename
+//! another handle refuses tried again for a bounded time, a file fennec
+//! makes kept out of the search indexer, and the volume a file is on named,
+//! which says whether it is mapped. kernel32's calls, and ntdll's one,
+//! are declared here, as `fennec_abi::lock` declares its own: the crates
+//! take no `windows-sys`.
+//! Every call takes a handle std opened, never a path, so a long path is
+//! std's `\\?\` one wherever it is used.
+
+#[cfg(target_pointer_width = "64")]
+mod map;
+#[cfg(target_pointer_width = "64")]
+pub use map::{assume_room, placeholders, touch, Mapping};
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -54,6 +62,12 @@ extern "system" {
         file: *mut c_void,
         class: i32,
         info: *const c_void,
+        len: u32,
+    ) -> i32;
+    fn GetFileInformationByHandleEx(
+        file: *mut c_void,
+        class: i32,
+        info: *mut c_void,
         len: u32,
     ) -> i32;
 }
@@ -275,6 +289,9 @@ pub struct Volume {
     pub file_system: String,
     /// The volume's flags, `FILE_SUPPORTS_*`.
     pub flags: u32,
+    /// Reached through a network redirector -- an SMB share, a mapped
+    /// drive -- which names the server's file system and flags as its own.
+    pub remote: bool,
 }
 
 impl Volume {
@@ -331,7 +348,161 @@ pub fn volume(path: &Path) -> io::Result<Volume> {
     Ok(Volume {
         file_system: String::from_utf16_lossy(&name[..len]),
         flags,
+        remote: remote(&f),
     })
+}
+
+/// `GetFileInformationByHandleEx`'s class for `FILE_REMOTE_PROTOCOL_INFO`.
+const FILE_REMOTE_PROTOCOL_INFO: i32 = 13;
+/// `NtQueryVolumeInformationFile`'s class for `FILE_FS_DEVICE_INFORMATION`.
+const FILE_FS_DEVICE_INFORMATION: i32 = 4;
+/// A device's characteristic: a network file system's, the redirector's.
+const FILE_REMOTE_DEVICE: u32 = 0x10;
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryVolumeInformationFile(
+        file: *mut c_void,
+        status: *mut [usize; 2],
+        info: *mut c_void,
+        len: u32,
+        class: i32,
+    ) -> i32;
+}
+
+/// Whether `f` is reached through a network redirector -- an SMB share,
+/// a mapped drive: where the device its volume is on says it is remote,
+/// or the redirector answers `FILE_REMOTE_PROTOCOL_INFO`, a local file
+/// system refusing the class. The device first: on `windows-latest` the
+/// handle `volume` opened through `\\localhost\C$` was refused the class
+/// in one run, and every handle answered it in the next, where the device
+/// said remote each time (`a_file_is_mapped_where_its_volume_allows`).
+fn remote(f: &File) -> bool {
+    remote_device(f) || remote_protocol(f).is_ok()
+}
+
+/// Whether the device `f`'s volume is on is a network file system's
+/// (`FILE_FS_DEVICE_INFORMATION`'s `FILE_REMOTE_DEVICE`): the I/O manager
+/// answers it from the device, asking no server.
+fn remote_device(f: &File) -> bool {
+    let mut status = [0usize; 2];
+    let mut info = [0u32; 2];
+    // SAFETY: the handle is open across the call; `status` is an
+    // `IO_STATUS_BLOCK`, two pointers wide, and `info` the class's struct,
+    // a device type and its characteristics.
+    let done = unsafe {
+        NtQueryVolumeInformationFile(
+            f.as_raw_handle(),
+            &mut status,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            FILE_FS_DEVICE_INFORMATION,
+        )
+    };
+    done >= 0 && info[1] & FILE_REMOTE_DEVICE != 0
+}
+
+/// `FILE_REMOTE_PROTOCOL_INFO`, 116 bytes, where the redirector answers it.
+fn remote_protocol(f: &File) -> io::Result<[u32; 29]> {
+    let mut info = [0u32; 29];
+    // SAFETY: the handle is open across the call, and `info` is the
+    // struct's 116 bytes, 4-aligned, as the class asks.
+    let done = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle(),
+            FILE_REMOTE_PROTOCOL_INFO,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    };
+    if done == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info)
+}
+
+/// Whether a database's file at `path` is mapped (decision 1): where its
+/// volume renames over a file other handles hold open, NTFS and ReFS, and
+/// is not a share. Elsewhere it is read into memory, as `--no-mmap` reads
+/// it: on FAT32 or exFAT a view would refuse a rename over its file as a
+/// handle does, and a share's read error is the process's end through a
+/// view (`EXCEPTION_IN_PAGE_ERROR`) where a read answers it as an error. A
+/// volume that cannot be asked is not mapped either.
+pub fn mappable(path: &Path) -> bool {
+    volume(path).is_ok_and(|v| v.posix_renames() && !v.remote)
+}
+
+/// A mapped open that found a torn tail: Windows cuts no file a view of it
+/// maps (`SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`), and the open maps
+/// before it reads where the records end, so the database and its views
+/// go, the file is cut to the `whole` bytes its records fill, and it opens
+/// again -- a crash's tail costs a second open -- as the first was set up:
+/// `deferred`, a server's, its vectors left to link beside the queries
+/// (`defer_linking`, which the first load cleared). Another view of the
+/// file refuses the cut, and the open fails with it, saying so, until the
+/// view goes: another process's -- a reader held over a file whose writer
+/// crashed -- or this one's, a stream or a pinned read still reading the
+/// database a storage error stopped, a `--dir` tenant opened again. Once
+/// an open: the second open finding a tail to cut fails rather than cut
+/// again.
+#[cfg(target_pointer_width = "64")]
+pub(super) fn cut_and_open(
+    db: crate::engine::Database,
+    deferred: bool,
+    mut sink: super::FileSink,
+    whole: usize,
+    wrap: Box<super::Wrap<'_>>,
+) -> crate::error::Result<crate::engine::Database> {
+    drop(db);
+    sink.mapping = None;
+    if CUTTING.with(|c| c.get()) {
+        return Err(crate::error::Error::Io(
+            "the file's last record was cut short again after its torn tail was cut".into(),
+        ));
+    }
+    // The mappings this process let go of before, whose views a thread
+    // may still be letting go ([`map::unmapped`]).
+    map::unmapped();
+    // Through the sink's handle, as its `cut` does after, for the error's
+    // number: the system's words for it name no view.
+    let cut = super::lock(&sink.disk).file.set_len(whole as u64);
+    if let Err(e) = cut {
+        return Err(match e.raw_os_error() {
+            Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
+                "the file's last record was cut short, and Windows cuts no file a view \
+                 maps: another process maps it, or a stream or a pinned read of this one \
+                 still reads it, and it opens once they let it go ({e})"
+            )),
+            _ => e.into(),
+        });
+    }
+    sink.cut(whole)?;
+    let path = sink.path().to_path_buf();
+    drop(sink);
+    let mut db = crate::engine::Database::new();
+    if deferred {
+        db.defer_linking();
+    }
+    // Set across the second open, whatever it ends in.
+    struct Cutting;
+    impl Drop for Cutting {
+        fn drop(&mut self) {
+            CUTTING.with(|c| c.set(false));
+        }
+    }
+    CUTTING.with(|c| c.set(true));
+    let _cutting = Cutting;
+    super::open_mapped_into(db, path, wrap)
+}
+
+/// `SetEndOfFile`'s refusal of a file a view maps.
+#[cfg(target_pointer_width = "64")]
+const ERROR_USER_MAPPED_FILE: i32 = 1224;
+
+#[cfg(target_pointer_width = "64")]
+thread_local! {
+    /// Set while [`cut_and_open`] opens the file it cut.
+    static CUTTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1110,6 +1281,179 @@ pub(super) mod tests {
         drop(held);
         let done = flush_parent(&path, Instant::now() + REFUSED_FOR).unwrap();
         assert_eq!(done, Flushed::Done, "the directory let go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An open that finds a torn tail cuts it by a second open, every
+    /// record before it read (a server's, whose vectors the second leaves
+    /// to the linker too, is `tests/windows.rs`').
+    #[test]
+    fn a_torn_tail_is_cut_by_a_second_open() {
+        let dir = scratch("torn");
+        let path = dir.join("torn.fennec");
+        let mut db = super::super::open(&path).unwrap();
+        db.fork(7).unwrap();
+        drop(db);
+        let whole = std::fs::metadata(&path).unwrap().len();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
+        drop(f);
+        let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `path` through its drive's administrative share,
+    /// `\\localhost\C$\...`, which the runner's account, an
+    /// administrator's, reaches: the file as a share serves it.
+    fn shared(path: &Path) -> PathBuf {
+        use std::path::{Component, Prefix};
+        let mut out = PathBuf::new();
+        for c in std::fs::canonicalize(path).unwrap().components() {
+            match c {
+                Component::Prefix(p) => match p.kind() {
+                    Prefix::VerbatimDisk(d) | Prefix::Disk(d) => {
+                        out.push(format!(r"\\localhost\{}$\", d as char))
+                    }
+                    other => panic!("{other:?}: not on a drive"),
+                },
+                Component::RootDir => {}
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// `mappable`, which every open of a server's file asks on Windows:
+    /// true on the runner's NTFS and the job's ReFS, false on its FAT32 and
+    /// through a share -- the temporary directory through its drive's
+    /// administrative share, the one place the network redirector answers
+    /// `FILE_REMOTE_PROTOCOL_INFO`. The mapped path's other tests open
+    /// through `open_mapped`, which asks nothing: had `remote` said yes on
+    /// NTFS, every Windows server would read its file into memory with them
+    /// green. Each answer printed.
+    #[test]
+    fn a_file_is_mapped_where_its_volume_allows() {
+        let dir = scratch("mappable");
+        let file = dir.join("new.fennec");
+        let local = volume(&file).unwrap();
+        println!(
+            "{}: {}, remote {}, mappable {}",
+            dir.display(),
+            local.file_system,
+            local.remote,
+            mappable(&file)
+        );
+        assert!(
+            !local.remote,
+            "the runner's {} taken for a share",
+            local.file_system
+        );
+        assert!(
+            mappable(&file),
+            "a file on the runner's {}",
+            local.file_system
+        );
+
+        if let Some(more) = std::env::var_os(VOLUMES) {
+            let mut seen = Vec::new();
+            for root in std::env::split_paths(&more).filter(|p| !p.as_os_str().is_empty()) {
+                let v = volume(&root).unwrap();
+                let m = mappable(&root.join("new.fennec"));
+                println!(
+                    "{}: {}, remote {}, mappable {m}",
+                    root.display(),
+                    v.file_system,
+                    v.remote
+                );
+                assert!(!v.remote, "{} taken for a share", v.file_system);
+                assert_eq!(m, v.posix_renames(), "{}", v.file_system);
+                seen.push((v.file_system, m));
+            }
+            assert!(seen.contains(&("ReFS".into(), true)), "{seen:?}");
+            assert!(seen.contains(&("FAT32".into(), false)), "{seen:?}");
+        }
+
+        // Each way `remote` asks, on the share's first handle -- the one a
+        // server's open makes -- and on later ones, each answer printed.
+        let share = shared(&dir);
+        let mut said = format!("{}:", share.display());
+        for _ in 0..3 {
+            let open = OpenOptions::new()
+                .access_mode(0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&share)
+                .unwrap();
+            let device = remote_device(&open);
+            let protocol = match remote_protocol(&open) {
+                Ok(info) => format!(
+                    "version {}, {} bytes, protocol {:#x}",
+                    info[0] & 0xffff,
+                    info[0] >> 16,
+                    info[1]
+                ),
+                Err(e) => format!("refused: {e}"),
+            };
+            said.push_str(&format!(
+                "\n    a remote device {device}; FILE_REMOTE_PROTOCOL_INFO {protocol}"
+            ));
+            assert!(device, "{said}");
+        }
+        let v = volume(&share.join("new.fennec")).unwrap();
+        said.push_str(&format!(
+            "\n    {}, remote {}, mappable {}",
+            v.file_system,
+            v.remote,
+            mappable(&share.join("new.fennec"))
+        ));
+        println!("{said}");
+        assert!(v.remote, "{} not taken for a share", share.display());
+        assert!(!mappable(&share.join("new.fennec")));
+        // Neither way says the runner's own NTFS is a share.
+        let open = OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
+        assert!(!remote_device(&open), "{}", dir.display());
+        assert!(remote_protocol(&open).is_err(), "{}", dir.display());
+        drop(open);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A thousand handovers lay a thousand views end to end in the one
+    /// placeholder, each record read back where it was written; a rewrite
+    /// maps the file it renamed into place again in one.
+    #[test]
+    fn a_rewrite_maps_the_file_again_in_one_view() {
+        let dir = scratch("views");
+        let path = dir.join("views.fennec");
+        let (mut sink, _) = super::super::FileSink::open(&path).unwrap();
+        let first = sink.remapped().unwrap();
+        let mut written = super::super::MAGIC.to_vec();
+        for i in 0..1000u32 {
+            let record = vec![(i % 251) as u8; 4096 + 7 * i as usize % 4096];
+            sink.append(&record).unwrap();
+            written.extend_from_slice(&record);
+            let base = sink.written_through().unwrap().unwrap();
+            assert!(std::sync::Arc::ptr_eq(&base, &first), "mapped anew");
+        }
+        let views = sink.mapping.as_ref().unwrap().views();
+        println!("a thousand handovers: {views} views");
+        assert!(views > 1000, "{views}");
+        assert!(
+            (*first).as_ref() == &written[..],
+            "the views read otherwise"
+        );
+        drop(first);
+
+        sink.rewrite(&written).unwrap();
+        let again = sink.remapped().unwrap();
+        assert_eq!(sink.mapping.as_ref().unwrap().views(), 1);
+        assert!((*again).as_ref() == &written[..]);
+        drop((again, sink));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

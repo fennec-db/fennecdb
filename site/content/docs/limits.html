@@ -157,7 +157,10 @@ right; so does going past the two <code>json</code> depths.</p>
 
 <p>The documents stay in the file and the indexes are held in memory, so a
 server's memory follows its indexes, not its data. The largest of them is
-usually the vectors.</p>
+usually the vectors. The file is mapped on Linux, macOS and Windows; on
+Windows its volume must be NTFS or ReFS and not a network share, or it is
+read into memory and the documents count too, as with
+<code>--no-mmap</code>.</p>
 
 <ul>
   <li><b>A 1 GB file</b> of 2.3 million rows with two indexes holds 188 MB
