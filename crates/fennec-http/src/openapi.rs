@@ -23,6 +23,11 @@
 //! caller could not read in the source. A route served only under a flag
 //! names it (`x-fennec-flag`); a node's admin routes are described, marked
 //! with the admin token they take, not hidden.
+//!
+//! The documents only grow: `tools/openapi_compat.py` holds them to the
+//! baseline in `integrations/openapi/`, a break made on purpose named in
+//! its `BREAKS` and moving `DOCUMENT_VERSION`; a route on its way out is
+//! [`Deprecated`] first (docs/design/http.md#compatibility).
 
 use crate::http::{Method, Request, Response};
 use std::sync::OnceLock;
@@ -65,6 +70,76 @@ pub fn answer(kind: Kind, req: &Request) -> Response {
         _ => Response::error(405, "the OpenAPI document is read with GET")
             .header("Allow", "GET, HEAD"),
     }
+}
+
+// ------------------------------------------------------------ deprecation
+
+/// An operation its callers are told to leave before it goes: its row's
+/// `deprecated`, written into the document as `deprecated: true` (and
+/// `x-fennec-sunset`), and answered by its route with RFC 9745's
+/// `Deprecation`, RFC 8594's `Sunset` where a date is given, and a `Link`
+/// to the page saying what replaces it (`rel="deprecation"`).
+///
+/// The dispatcher reads no table, so a deprecated route's handler marks its
+/// own answer ([`Deprecated::mark`]) with the `const` its row names: no
+/// other route looks for a mark or pays for one. fennec-server's and
+/// fennec-shard's `tests/openapi.rs` hold the two together: an operation
+/// the document marks answers `Deprecation`, and no other does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deprecated {
+    /// When it was deprecated, in seconds since the epoch: `Deprecation:
+    /// @<seconds>`, RFC 9745's structured date.
+    pub since: i64,
+    /// When it may go, in seconds since the epoch: `Sunset` as an
+    /// IMF-fixdate. `None` where no date is promised yet.
+    pub sunset: Option<i64>,
+    /// The page saying what replaces it, under `https://fennecdb.com/docs/`.
+    pub link: &'static str,
+}
+
+impl Deprecated {
+    /// The headers its route answers with, in order.
+    pub fn headers(&self) -> Vec<(&'static str, String)> {
+        let mut out = vec![("Deprecation", format!("@{}", self.since))];
+        if let Some(at) = self.sunset {
+            out.push(("Sunset", http_date(at)));
+        }
+        out.push((
+            "Link",
+            format!("<{}>; rel=\"deprecation\"; type=\"text/html\"", self.link),
+        ));
+        out
+    }
+
+    /// `r` with [`Deprecated::headers`]: what a deprecated route's handler
+    /// answers with.
+    pub fn mark(&self, mut r: Response) -> Response {
+        for (name, value) in self.headers() {
+            r = r.header(name, &value);
+        }
+        r
+    }
+}
+
+/// An IMF-fixdate (RFC 9110, 5.6.7), as `Sunset` is written:
+/// `Sun, 06 Nov 1994 08:49:37 GMT`.
+fn http_date(secs: i64) -> String {
+    // 1970-01-01 was a Thursday.
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = fennec_core::time::civil_from_days(day);
+    format!(
+        "{}, {d:02} {} {y:04} {:02}:{:02}:{:02} GMT",
+        DAYS[day.rem_euclid(7) as usize],
+        MONTHS[m as usize - 1],
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 // ----------------------------------------------------------------- the table
@@ -111,6 +186,8 @@ enum Body {
     Optional(&'static str),
     /// One `{query, params}` a line (`/batch`).
     Lines,
+    /// Plain text, required: the schema, a string's (`/_replication/tenants`).
+    Text(&'static str),
     /// A database image.
     Image,
 }
@@ -163,6 +240,10 @@ struct Op {
     params: &'static [&'static str],
     body: Body,
     answer: Answer,
+    /// Callers are told to leave it: a `pub const` [`Deprecated`] its
+    /// handler marks its answer with too. Its removal comes later, past
+    /// its sunset, named in `tools/openapi_compat.py`'s `BREAKS`.
+    deprecated: Option<Deprecated>,
 }
 
 const DEFAULT: Op = Op {
@@ -179,6 +260,7 @@ const DEFAULT: Op = Op {
     params: &[],
     body: Body::None,
     answer: Answer::Json(200, OBJECT, ""),
+    deprecated: None,
 };
 
 const OBJECT: &str = r#"{"type":"object"}"#;
@@ -261,7 +343,7 @@ const OPS: &[Op] = &[
         id: "updateRows",
         summary: "Set the body's fields on the rows the filter matches (a filter is required)",
         params: &["Filter", "Where", "IdempotencyKey"],
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -271,7 +353,7 @@ const OPS: &[Op] = &[
         id: "updateRowsPut",
         summary: "PATCH /{collection}, under PUT",
         params: &["Filter", "Where", "IdempotencyKey"],
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -290,7 +372,7 @@ const OPS: &[Op] = &[
         id: "updateAll",
         summary: "Set the body's fields on every row: no filter, deliberately explicit",
         params: WRITE,
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -300,7 +382,7 @@ const OPS: &[Op] = &[
         id: "updateAllPut",
         summary: "PATCH /{collection}/all, under PUT",
         params: WRITE,
-        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Fields"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were updated"),
         ..DEFAULT
     },
@@ -396,7 +478,7 @@ const OPS: &[Op] = &[
             "HubSignature",
             "GitHubDelivery",
         ],
-        body: Body::Json("{}"),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Event"}"##),
         answer: Answer::Json(200, OBJECT, "Taken, durable"),
         ..DEFAULT
     },
@@ -548,7 +630,9 @@ const OPS: &[Op] = &[
         summary: "Every tenant of the node over one stream, from the places the body lists",
         flag: "--replication-token",
         auth: Auth::Replication,
-        body: Body::Json(OBJECT),
+        body: Body::Text(
+            r#"{"type":"string","description":"A line a tenant the client holds: <tenant> <since> <history, hex> <image 0|1>."}"#,
+        ),
         answer: Answer::Stream,
         ..DEFAULT
     },
@@ -803,7 +887,7 @@ const OPS: &[Op] = &[
         summary: "Set a hook's scheme and secrets, kept beside the tenant's file",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Hook"}"##),
         ..DEFAULT
     },
     Op {
@@ -836,7 +920,7 @@ const OPS: &[Op] = &[
         summary: "Install a tenant's hook secrets whole, their version kept",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/HookSecrets"}"##),
         ..DEFAULT
     },
     Op {
@@ -873,7 +957,7 @@ const OPS: &[Op] = &[
         summary: "Remove a tenant's file only where it carries one of the instances named",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Reclaim"}"##),
         ..DEFAULT
     },
     Op {
@@ -941,7 +1025,7 @@ const OPS: &[Op] = &[
         summary: "This node's copy of a tenant takes its writes",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Optional(OBJECT),
+        body: Body::Optional(r##"{"$ref":"#/components/schemas/Promote"}"##),
         ..DEFAULT
     },
     Op {
@@ -953,7 +1037,7 @@ const OPS: &[Op] = &[
         summary: "Follow the tenant's primary at `from`, or this node's upstream",
         flag: "--admin-token",
         auth: Auth::Admin,
-        body: Body::Optional(OBJECT),
+        body: Body::Optional(r##"{"$ref":"#/components/schemas/Follow"}"##),
         ..DEFAULT
     },
     Op {
@@ -965,7 +1049,7 @@ const OPS: &[Op] = &[
         summary: "A router's grant of the node's lease",
         flag: "--admin-token --lease",
         auth: Auth::Admin,
-        body: Body::Json(OBJECT),
+        body: Body::Json(r##"{"$ref":"#/components/schemas/LeaseGrant"}"##),
         ..DEFAULT
     },
     Op {
@@ -990,7 +1074,14 @@ struct Listed {
 }
 
 /// Every operation of the document of `kind`.
+#[cfg(test)]
 fn operations(kind: Kind) -> Vec<Listed> {
+    operations_of(kind, OPS)
+}
+
+/// Every operation `table` gives the document of `kind`: [`OPS`], or a
+/// test's own rows.
+fn operations_of(kind: Kind, table: &'static [Op]) -> Vec<Listed> {
     let mut out = Vec::new();
     // A node's and a router's own routes come first, then each tenant's
     // under its prefix.
@@ -999,7 +1090,7 @@ fn operations(kind: Kind) -> Vec<Listed> {
         Kind::Node => (NODE, TENANT),
         Kind::Router => (ROUTER, TENANT),
     };
-    for op in OPS.iter().filter(|op| op.at & root != 0) {
+    for op in table.iter().filter(|op| op.at & root != 0) {
         out.push(Listed {
             path: op.path.to_string(),
             id: op.id.to_string(),
@@ -1007,7 +1098,7 @@ fn operations(kind: Kind) -> Vec<Listed> {
             op,
         });
     }
-    for op in OPS.iter().filter(|op| op.at & under != 0) {
+    for op in table.iter().filter(|op| op.at & under != 0) {
         let path = match op.path {
             "/" => "/t/{tenant}".to_string(),
             p => format!("/t/{{tenant}}{p}"),
@@ -1029,6 +1120,10 @@ fn operations(kind: Kind) -> Vec<Listed> {
 // ------------------------------------------------------------- the writing
 
 fn build(kind: Kind) -> String {
+    build_of(kind, OPS)
+}
+
+fn build_of(kind: Kind, table: &'static [Op]) -> String {
     let mut o = String::with_capacity(64 * 1024);
     o.push_str(r#"{"openapi":"3.1.0","info":{"title":"#);
     str_into(
@@ -1063,7 +1158,7 @@ fn build(kind: Kind) -> String {
     o.push_str(r#","license":{"name":"Apache-2.0","identifier":"Apache-2.0"}}"#);
     o.push_str(r#","externalDocs":{"url":"https://fennecdb.com/docs/http-reference"}"#);
     o.push_str(r#","servers":[{"url":"/"}],"security":[{"token":[]},{"jwt":[]}],"tags":["#);
-    let ops = operations(kind);
+    let ops = operations_of(kind, table);
     let mut tags: Vec<&str> = Vec::new();
     for l in &ops {
         if !tags.contains(&l.op.tag) {
@@ -1128,7 +1223,9 @@ fn build(kind: Kind) -> String {
     o
 }
 
-/// `info.version`: the document's, not the binary's (see [`build`]).
+/// `info.version`: the document's, not the binary's (see [`build`]). A
+/// break made on purpose moves it, its `BREAKS` entry in
+/// `tools/openapi_compat.py` naming the version it went out in.
 const DOCUMENT_VERSION: &str = "1";
 
 const ABOUT: &str = " A request takes `Authorization: Bearer` with the server's token \
@@ -1204,6 +1301,15 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
         o.push_str(r#","x-fennec-flag":"#);
         str_into(o, l.flag);
     }
+    if let Some(d) = &op.deprecated {
+        // OpenAPI's own mark, what a generator and Swagger UI show; the
+        // date is the server's extension, as `Sunset` says it.
+        o.push_str(r#","deprecated":true"#);
+        if let Some(at) = d.sunset {
+            o.push_str(r#","x-fennec-sunset":"#);
+            str_into(o, &fennec_core::time::format_iso(at * 1000));
+        }
+    }
     let security = match op.auth {
         Auth::Token => None,
         Auth::Full => Some(r#"[{"token":[]}]"#),
@@ -1236,6 +1342,7 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
             "application/x-ndjson",
             r#"{"type":"string","description":"One {\"query\", \"params\"} object a line"}"#,
         )),
+        Body::Text(s) => Some((true, "text/plain", s)),
         Body::Image => Some((
             true,
             "application/octet-stream",
@@ -1252,7 +1359,7 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
         o.push_str("}}}");
     }
     o.push_str(r#","responses":{"#);
-    answer_into(o, op.answer, head);
+    answer_into(o, op.answer, op.deprecated.as_ref(), head);
     if op.params.contains(&"IfNoneMatch") {
         // A read polled with If-None-Match is answered so while nothing
         // it reads was written.
@@ -1269,7 +1376,7 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
     o.push_str(r##","default":{"$ref":"#/components/responses/Refused"}}}"##);
 }
 
-fn answer_into(o: &mut String, answer: Answer, head: bool) {
+fn answer_into(o: &mut String, answer: Answer, deprecated: Option<&Deprecated>, head: bool) {
     const ID: &str = r##""X-Request-Id":{"$ref":"#/components/headers/RequestId"}"##;
     const SEQ: &str = r##","Fennec-Seq":{"$ref":"#/components/headers/FennecSeq"},"Fennec-History":{"$ref":"#/components/headers/FennecHistory"}"##;
     let (status, what, media, schema, seq) = match answer {
@@ -1288,6 +1395,7 @@ fn answer_into(o: &mut String, answer: Answer, head: bool) {
             str_into(o, what);
             o.push_str(r#","headers":{"#);
             o.push_str(ID);
+            deprecation_into(o, deprecated);
             o.push_str("}}");
             return;
         }
@@ -1347,6 +1455,7 @@ fn answer_into(o: &mut String, answer: Answer, head: bool) {
             o.push_str(r##","Fennec-Next":{"$ref":"#/components/headers/FennecNext"}"##);
         }
     }
+    deprecation_into(o, deprecated);
     if head {
         o.push_str("}}");
         return;
@@ -1356,6 +1465,39 @@ fn answer_into(o: &mut String, answer: Answer, head: bool) {
     o.push_str(r#":{"schema":"#);
     o.push_str(schema);
     o.push_str("}}}");
+}
+
+/// A deprecated operation's answer's headers, each saying its value:
+/// written inline, so a document deprecating nothing is what it was.
+fn deprecation_into(o: &mut String, deprecated: Option<&Deprecated>) {
+    let Some(d) = deprecated else {
+        return;
+    };
+    let iso = |secs: i64| fennec_core::time::format_iso(secs * 1000);
+    o.push_str(r#","Deprecation":{"description":"#);
+    str_into(
+        o,
+        &format!(
+            "RFC 9745: this operation is deprecated, since {} (@{}).",
+            iso(d.since),
+            d.since
+        ),
+    );
+    o.push_str(r#","schema":{"type":"string"}}"#);
+    if let Some(at) = d.sunset {
+        o.push_str(r#","Sunset":{"description":"#);
+        str_into(
+            o,
+            &format!("RFC 8594: it may go after {} ({}).", iso(at), http_date(at)),
+        );
+        o.push_str(r#","schema":{"type":"string"}}"#);
+    }
+    o.push_str(r#","Link":{"description":"#);
+    str_into(
+        o,
+        &format!("rel=\"deprecation\": {}, what replaces it.", d.link),
+    );
+    o.push_str(r#","schema":{"type":"string"}}"#);
 }
 
 /// The `{name}`s of a path template, in order.
@@ -1430,7 +1572,18 @@ const COMPONENTS: &str = r##"{
 "RetryAfter":{"description":"Seconds to wait before coming back.","schema":{"type":"integer"}}},
 "schemas":{
 "Error":{"type":"object","required":["error"],"properties":{"error":{"type":"string"},"retry_after":{"type":"integer","description":"Seconds to wait, as Retry-After says."},"retry_after_ms":{"type":"integer","description":"A quota's wait, to the millisecond."},"quota":{"type":"string","description":"The quota refused."},"reason":{"type":"string","description":"A require's else words."},"at":{"type":"integer","description":"The statement of a batch that stopped."},"completed":{"type":"integer"},"binding":{"type":"string"},"outcome":{"type":"string","enum":["unknown"],"description":"A write whose outcome the server cannot know."},"seq":{"type":"integer"},"history":{"type":"string"}}},
-"Document":{"type":"object","description":"A document: its fields, id among them.","additionalProperties":true},
+"Document":{"type":"object","description":"A document: its fields, id among them. Open on purpose: any field is taken, the collection's schema (GET /_schema) holding each it declares to its type.","additionalProperties":true},
+"Fields":{"type":"object","minProperties":1,"description":"The fields to set on each row it reaches, each to its value, the rest left as they are. Open on purpose: any of the collection's fields, the schema (GET /_schema) saying which.","additionalProperties":true},
+"Event":{"type":"object","description":"The sender's event as it signed it, read only once its signature verifies. Open on purpose: any JSON object its sender sends; a Stripe event names its id, which keys it.","additionalProperties":true},
+"Instance":{"type":"string","pattern":"^[0-9a-fA-F]{16}$","description":"A file's identity on its node, 16 hex digits."},
+"Instances":{"description":"The identities a file may carry: a list, or one.","oneOf":[{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/Instance"}},{"$ref":"#/components/schemas/Instance"}]},
+"Lineage":{"type":"string","pattern":"^[0-9a-fA-F]{8}$","description":"The lineage a tenant's history is of, 8 hex digits."},
+"Reclaim":{"type":"object","required":["instances"],"properties":{"instances":{"$ref":"#/components/schemas/Instances"}}},
+"Promote":{"type":"object","description":"What the router knows of the tenant, which the copy is held to (409 where it differs); left out, nothing is said.","properties":{"lineage":{"$ref":"#/components/schemas/Lineage"},"history":{"type":"string","pattern":"^[0-9a-fA-F]{16}$","description":"The history its primary forked at its last failover."},"force":{"type":"boolean","description":"Promote it whatever it holds."}}},
+"Follow":{"type":"object","description":"Whom the tenant follows; left out, this node's upstream.","properties":{"from":{"type":"string","description":"The node to follow, its address."},"lineage":{"$ref":"#/components/schemas/Lineage"},"instances":{"$ref":"#/components/schemas/Instances"},"reader":{"type":"boolean","description":"A read replica's copy, which no hook's answer waits for."}}},
+"LeaseGrant":{"type":"object","required":["ms","epoch"],"properties":{"ms":{"type":"integer","minimum":1,"description":"How long it runs, from when the node answered the grant acked names."},"epoch":{"type":"string","description":"The list's: a node holding another answers 412, to be sent primaries."},"primaries":{"type":"array","items":{"type":"string"},"description":"The tenants the node is primary of."},"authority":{"type":"string","description":"Who grants it."},"term":{"type":"integer","minimum":0},"history":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$"},"grant":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"This grant's number."},"acked":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"The grant it acknowledges, sent beside grant."}}},
+"Hook":{"type":"object","required":["scheme","secrets"],"additionalProperties":false,"description":"A hook's scheme and secrets, refused (400) as a hooks file's line is.","properties":{"scheme":{"type":"string","enum":["stripe","github","standard"]},"secrets":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"},"description":"Its secret as its sender shows it, or two while one rolls."},"keep":{"type":["string","null"],"pattern":"^\\S+$","description":"How long an event's key is kept: 30d."},"tolerance":{"type":["string","null"],"pattern":"^\\S+$","description":"How far an event's time may be from the server's, 1s to 1h: 5m."},"key":{"type":["string","null"],"enum":["body","delivery",null],"description":"A github hook's: its events keyed by their body or by X-GitHub-Delivery."},"max_body":{"type":["string","null"],"pattern":"^\\S+$","description":"The most bytes an event takes: 64k."}}},
+"HookSecrets":{"type":"object","additionalProperties":false,"description":"A tenant's hook secrets whole, as GET .../hook-secrets answers them: a set holding a hook names its version.","properties":{"version":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{16}$"},"hooks":{"type":"object","additionalProperties":{"type":"object","required":["scheme","secrets"],"additionalProperties":false,"properties":{"scheme":{"type":"string","enum":["stripe","github","standard"]},"secrets":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"}},"keep":{"type":["string","null"],"pattern":"^\\S+$"},"tolerance":{"type":["string","null"],"pattern":"^\\S+$"},"key":{"type":["string","null"],"enum":["body","delivery",null]},"max_body":{"type":["string","null"],"pattern":"^\\S+$"},"set":{"type":"integer","description":"When it was set, in ms since the epoch; left out, now."}}}},"tenant":{"description":"The answer's own, taken and not read."}}},
 "Documents":{"oneOf":[{"$ref":"#/components/schemas/Document"},{"type":"array","items":{"$ref":"#/components/schemas/Document"}}]},
 "Rows":{"type":"array","items":{"$ref":"#/components/schemas/Document"}},
 "Faceted":{"type":"object","properties":{"rows":{"$ref":"#/components/schemas/Rows"},"count":{"type":"integer"},"facets":{"type":"object","additionalProperties":{"type":"array","items":{"type":"object","properties":{"value":{},"count":{"type":"integer"}}}}}}},
@@ -1604,6 +1757,214 @@ mod tests {
                     l.id
                 );
             }
+        }
+    }
+
+    /// 2026-11-08 and 2027-05-08, 00:00 UTC.
+    const SINCE: i64 = 1_794_096_000;
+    const SUNSET: i64 = 1_809_734_400;
+
+    /// The row a test deprecates, beside one it does not: nothing in
+    /// [`OPS`] is deprecated yet.
+    const OLD: Deprecated = Deprecated {
+        since: SINCE,
+        sunset: Some(SUNSET),
+        link: "https://fennecdb.com/docs/http-reference#compatibility",
+    };
+    const DEPRECATING: &[Op] = &[
+        Op {
+            path: "/{collection}/old",
+            id: "readOld",
+            head: true,
+            summary: "A read callers are told to leave",
+            answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Rows"}"##, "The rows"),
+            deprecated: Some(OLD),
+            ..DEFAULT
+        },
+        Op {
+            method: "delete",
+            path: "/{collection}/old",
+            id: "deleteOld",
+            summary: "A write callers are told to leave, no date given",
+            answer: Answer::Empty(204, "Deleted"),
+            deprecated: Some(Deprecated {
+                sunset: None,
+                ..OLD
+            }),
+            ..DEFAULT
+        },
+        Op {
+            path: "/{collection}/new",
+            id: "readNew",
+            summary: "What replaces it",
+            ..DEFAULT
+        },
+    ];
+
+    /// The headers a deprecated route answers with are RFC 9745's and
+    /// RFC 8594's to the byte, and `mark` puts them on an answer.
+    #[test]
+    fn a_deprecated_route_answers_the_rfcs_headers() {
+        // RFC 9110's own example of an IMF-fixdate, and the epoch.
+        assert_eq!(http_date(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
+        assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date(SUNSET), "Sat, 08 May 2027 00:00:00 GMT");
+        assert_eq!(http_date(951_782_400), "Tue, 29 Feb 2000 00:00:00 GMT");
+        let link = "<https://fennecdb.com/docs/http-reference#compatibility>; \
+                    rel=\"deprecation\"; type=\"text/html\"";
+        assert_eq!(
+            OLD.headers(),
+            vec![
+                ("Deprecation", "@1794096000".to_string()),
+                ("Sunset", "Sat, 08 May 2027 00:00:00 GMT".to_string()),
+                ("Link", link.to_string()),
+            ]
+        );
+        // No date promised: no `Sunset`.
+        let open = Deprecated {
+            sunset: None,
+            ..OLD
+        };
+        let names: Vec<&str> = open.headers().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["Deprecation", "Link"]);
+        let r = OLD.mark(Response::json(200, "[]"));
+        assert_eq!(r.status, 200);
+        assert_eq!(
+            r.extra,
+            vec![
+                ("Deprecation".to_string(), "@1794096000".to_string()),
+                (
+                    "Sunset".to_string(),
+                    "Sat, 08 May 2027 00:00:00 GMT".to_string()
+                ),
+                ("Link".to_string(), link.to_string()),
+            ]
+        );
+    }
+
+    /// A row marked deprecated is `deprecated: true` in every document
+    /// listing it -- a tenant's copy below `/t/{tenant}` too, and its HEAD --
+    /// with its sunset and the headers its answer carries; a row not
+    /// marked says nothing of it, so a document deprecating nothing is the
+    /// one it was.
+    #[test]
+    fn a_deprecated_row_is_marked_in_the_document() {
+        for (kind, prefix) in [(Kind::File, ""), (Kind::Node, "/t/{tenant}")] {
+            let src = build_of(kind, DEPRECATING);
+            let doc = fennec_core::json::parse_json(&src)
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}\n{src}"));
+            let item = |p: &str| {
+                get(get(&doc, "paths").unwrap(), &format!("{prefix}{p}"))
+                    .unwrap_or_else(|| panic!("{kind:?}: no {prefix}{p}"))
+                    .clone()
+            };
+            let old = item("/{collection}/old");
+            for (method, status, sunset) in [
+                ("get", "200", true),
+                ("head", "200", true),
+                ("delete", "204", false),
+            ] {
+                let op = get(&old, method).unwrap_or_else(|| panic!("{method}"));
+                assert_eq!(get(op, "deprecated"), Some(&Value::Bool(true)), "{method}");
+                let headers = get(
+                    get(get(op, "responses").unwrap(), status).unwrap(),
+                    "headers",
+                )
+                .unwrap();
+                assert!(get(headers, "Deprecation").is_some(), "{method}");
+                assert!(get(headers, "Link").is_some(), "{method}");
+                assert_eq!(get(headers, "Sunset").is_some(), sunset, "{method}");
+                match sunset {
+                    true => assert_eq!(text(get(op, "x-fennec-sunset")), "2027-05-08T00:00:00Z"),
+                    false => assert!(get(op, "x-fennec-sunset").is_none()),
+                }
+            }
+            let new = item("/{collection}/new");
+            let op = get(&new, "get").unwrap();
+            assert!(get(op, "deprecated").is_none());
+            let headers = get(
+                get(get(op, "responses").unwrap(), "200").unwrap(),
+                "headers",
+            )
+            .unwrap();
+            assert!(get(headers, "Deprecation").is_none());
+            let mut all = Vec::new();
+            refs(&doc, &mut all);
+            for r in all {
+                assert!(
+                    resolve(&doc, r).is_some(),
+                    "{kind:?}: {r} resolves to nothing"
+                );
+            }
+        }
+        // The served documents and the test's mark exactly the rows their
+        // table deprecates, whichever those are -- none of `OPS` yet.
+        for kind in [Kind::File, Kind::Node, Kind::Router] {
+            let served = std::str::from_utf8(document(kind)).unwrap();
+            marks_as_its_table(served, kind, OPS);
+            marks_as_its_table(&build_of(kind, DEPRECATING), kind, DEPRECATING);
+        }
+    }
+
+    /// Every operation of `src`, the document of `kind` written from
+    /// `table`, is `deprecated`, its answer listing `Deprecation`, where
+    /// its row is deprecated, and neither where it is not; and no
+    /// operation but those says either.
+    fn marks_as_its_table(src: &str, kind: Kind, table: &'static [Op]) {
+        let doc = fennec_core::json::parse_json(src).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        let paths = get(&doc, "paths").expect("paths");
+        let mut listed = 0;
+        for l in operations_of(kind, table) {
+            let item = get(paths, &l.path).unwrap_or_else(|| panic!("{kind:?}: no {}", l.path));
+            let methods = match l.op.head {
+                true => vec![l.op.method, "head"],
+                false => vec![l.op.method],
+            };
+            for method in methods {
+                let op = get(item, method).unwrap_or_else(|| panic!("{method} {}", l.path));
+                let marked = l.op.deprecated.is_some();
+                let said = get(op, "deprecated") == Some(&Value::Bool(true));
+                let answered = members(get(op, "responses")).iter().any(|(_, r)| {
+                    get(r, "headers").is_some_and(|h| get(h, "Deprecation").is_some())
+                });
+                assert_eq!(said, marked, "{kind:?}: {method} {}: deprecated", l.path);
+                assert_eq!(
+                    answered, marked,
+                    "{kind:?}: {method} {}: Deprecation",
+                    l.path
+                );
+                listed += usize::from(marked);
+            }
+        }
+        // Each mark is an operation's: as many as the rows deprecate.
+        assert_eq!(
+            src.matches("\"deprecated\":true").count(),
+            listed,
+            "{kind:?}"
+        );
+        assert_eq!(src.matches("\"Deprecation\":{").count(), listed, "{kind:?}");
+    }
+
+    /// A deprecation says when, a sunset comes after it, and its link is a
+    /// page of the docs: the table's rows (none yet) and the test's.
+    #[test]
+    fn every_deprecation_is_whole() {
+        let rows = OPS.iter().chain(DEPRECATING);
+        for op in rows {
+            let Some(d) = op.deprecated else {
+                continue;
+            };
+            // 2026-11-01: no deprecation comes before the mechanism.
+            assert!(d.since >= 1_793_491_200, "{}: since {}", op.id, d.since);
+            if let Some(at) = d.sunset {
+                assert!(at > d.since, "{}: its sunset before it", op.id);
+            }
+            assert!(
+                d.link.starts_with("https://fennecdb.com/docs/"),
+                "{}: {}",
+                op.id,
+                d.link
+            );
         }
     }
 

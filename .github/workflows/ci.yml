@@ -58,6 +58,12 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/http.md#compatibility: the checker the test job runs on
+      # the served documents finds each kind of break, lets each addition
+      # through, and holds BREAKS and the committed baseline.
+      - name: tools/openapi_compat.py finds every break and passes every addition
+        run: python3 tools/test_openapi_compat.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -199,6 +205,27 @@ jobs:
       - name: The OpenAPI document lints
         if: matrix.os == 'ubuntu-latest'
         run: make openapi-lint
+
+      # docs/design/http.md#compatibility: the REST API only grows. The
+      # documents the lint read, held by this checkout's checker to
+      # integrations/openapi/ -- an addition the baseline lacks is written
+      # into it -- and by main's checker to main's copy of it, so neither a
+      # baseline written again past a break nor a checker changed to see
+      # less lets one through. main's reads the pull request's BREAKS as
+      # data (`--breaks-from`, a literal, never run): a break on purpose is
+      # named there. Until main has a checker, its pass holds nothing.
+      - name: The REST API only grows
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          python3 tools/openapi_compat.py
+          if git cat-file -e FETCH_HEAD:tools/openapi_compat.py; then
+            git show FETCH_HEAD:tools/openapi_compat.py > "$RUNNER_TEMP/openapi_compat_main.py"
+            python3 -I "$RUNNER_TEMP/openapi_compat_main.py" --root "$PWD" --base-ref FETCH_HEAD \
+              --breaks-from tools/openapi_compat.py
+          else
+            echo "main has no tools/openapi_compat.py yet: no base pass"
+          fi
 
       # A node measures its lease on the boot clock (fennec-http's
       # `lease::Moment`), which counts the time a machine was suspended. No
