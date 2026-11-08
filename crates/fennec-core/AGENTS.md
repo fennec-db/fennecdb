@@ -73,7 +73,7 @@ them again pins what they read and the rows written since alone
 (Linux and Android, `synclog.rs`). Whatever renames a file into a
 database's place removes the log first, durably (`fs::forget_sync_log`),
 and syncs the directory after (`fs::sync_dir`, which on Windows flushes
-the directory and the renamed file).
+the renamed file, then its directory).
 
 ### The HNSW graph
 

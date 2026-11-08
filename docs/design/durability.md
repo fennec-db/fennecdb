@@ -18,9 +18,9 @@ nothing. On Windows another process's handle opened without
 `FILE_SHARE_DELETE` -- an indexer's, a backup agent's, a synced folder's --
 refuses a rename over the file (std's rename answers
 `ERROR_ACCESS_DENIED`, the POSIX call `ERROR_SHARING_VIOLATION`; both are
-taken), so `swap_in` tries it
-again for a second, a millisecond's wait doubling up to 50, before it fails
-the sink as any failed rename does (`fs::windows::swap`,
+taken), so `swap_in` tries it, and the open after it, again within one
+second, a millisecond's wait doubling up to 50, before it fails the sink as
+any failed rename does (`fs::windows::swap`,
 [windows.md](windows.md#7-what-else-windows-differs-in), held by
 `a_rename_another_handle_refuses_is_tried_again` on CI's Windows job). That fsync runs *outside* the exclusive lock: under it a
 write only calls `Database::flush`, which hands back a `Durability` to run once

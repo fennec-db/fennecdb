@@ -102,6 +102,17 @@ jobs:
       - run: cargo clippy -p fennec-core --no-default-features --features std-fs,language --all-targets -- -D warnings
       - run: cargo clippy -p fennec-core --no-default-features --features std-fs --all-targets -- -D warnings
 
+      # What only Windows compiles -- fs/windows.rs, the lock's kernel32
+      # calls, the archive's flushes -- and what it compiles out, linted
+      # here, a check needing no Windows linker: the libraries, and
+      # fennec-core's and fennec-abi's unit tests. fennec-core's integration
+      # tests do not build there yet (docs/design/windows.md, slice 2), and
+      # fennec-http's unit tests need ring's C, which wants MSVC.
+      - run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo clippy -p fennec-core -p fennec-abi -p fennec-http --lib --target x86_64-pc-windows-msvc -- -D warnings
+          cargo clippy -p fennec-core -p fennec-abi --lib --profile test --target x86_64-pc-windows-msvc -- -D warnings
+
       # The native library with the JNI functions the Kotlin binding calls,
       # which the workspace's run builds without.
       - run: cargo clippy -p fennec-ffi --features jni --all-targets -- -D warnings
@@ -248,7 +259,8 @@ jobs:
       # docs/design/windows.md, decision 2's experiment, run on the
       # runner's NTFS and on a ReFS and a FAT32 volume, each a VHD diskpart
       # makes here (the runner's account is an administrator). A volume
-      # that could not be made is named below and left out of the test.
+      # that could not be made is named, and fails the step: left out, the
+      # experiment's assertions would pass without it, saying nothing.
       - name: A ReFS and a FAT32 volume, each a VHD
         shell: pwsh
         run: |
@@ -272,6 +284,10 @@ jobs:
             else { Write-Output "no $fs volume: diskpart could not make one here" }
           }
           "FENNEC_TEST_VOLUMES=$($made -join ';')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($made.Count -lt 2) {
+            Write-Output "::error::$($made.Count) of 2 volumes made: diskpart failed on this runner image"
+            exit 1
+          }
           exit 0
 
       # fennec-core's file layer: a rename made durable (the renamed file

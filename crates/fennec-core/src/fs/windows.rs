@@ -1,11 +1,11 @@
 //! What a file's sink does differently on Windows (docs/design/windows.md,
-//! decisions 2, 3 and 7e): a rename made durable -- the directory flushed
-//! and the renamed file -- a rename another handle refuses tried again for
-//! a bounded time, a file fennec makes kept out of the search indexer, and
-//! the volume a file is on named. kernel32's calls are declared here, as
-//! `fennec_abi::lock` declares its own: the crates take no `windows-sys`.
-//! Every call takes a handle std opened, never a path, so a long path is
-//! std's `\\?\` one wherever it is used.
+//! decisions 2, 3 and 7e): a rename made durable -- the renamed file
+//! flushed, then its directory -- a rename another handle refuses tried
+//! again for a bounded time, a file fennec makes kept out of the search
+//! indexer, and the volume a file is on named. kernel32's calls are
+//! declared here, as `fennec_abi::lock` declares its own: the crates take
+//! no `windows-sys`. Every call takes a handle std opened, never a path, so
+//! a long path is std's `\\?\` one wherever it is used.
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -25,11 +25,14 @@ const FILE_SUPPORTS_POSIX_UNLINK_RENAME: u32 = 0x400;
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// How long a rename another handle refuses -- an indexer's, a backup
-/// agent's, an antivirus's, a cloud folder's sync, opened without
-/// `FILE_SHARE_DELETE` -- is tried again before it fails the sink as any
-/// failed rename does. A second: such a handle is held while a file is
-/// read, and a write waiting on a checkpoint waits that long at most.
+/// How long one swap, or one `sync_dir`, tries again what another handle
+/// refuses -- an indexer's, a backup agent's, an antivirus's, a cloud
+/// folder's sync, opened without `FILE_SHARE_DELETE` or `FILE_SHARE_WRITE`
+/// -- before a swap fails the sink as any failed rename does: one deadline
+/// for every try of the call, the rename's, the open's after it and the
+/// flushes' opens, so a write waiting on a checkpoint waits about a second
+/// at most, never a second a try. Such a handle is held while a file is
+/// read.
 pub(crate) const REFUSED_FOR: Duration = Duration::from_secs(1);
 
 /// The longest wait between two tries.
@@ -66,18 +69,25 @@ fn refused(e: &io::Error) -> bool {
     )
 }
 
-/// `op` tried again while another handle refuses it, for [`REFUSED_FOR`]
-/// at most, waiting a millisecond and then twice as long each time, up to
-/// [`RETRY_AT_MOST`]: the error once the time is out.
-fn tried_again<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let start = Instant::now();
+/// `op` tried again while another handle refuses it, until `until`, waiting
+/// a millisecond and then twice as long each time, up to [`RETRY_AT_MOST`]
+/// and never past `until`: the error once the time is out. A caller making
+/// several calls passes each the one deadline, so they share
+/// [`REFUSED_FOR`] rather than take it each.
+fn tried_again<T>(until: Instant, mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    #[cfg(test)]
+    tests::DEADLINES.with(|d| d.borrow_mut().push(until));
     let mut wait = Duration::from_millis(1);
     loop {
         match op() {
-            Err(e) if refused(&e) && start.elapsed() < REFUSED_FOR => {
+            Err(e) if refused(&e) => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(e);
+                }
                 #[cfg(test)]
                 tests::REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                std::thread::sleep(wait);
+                std::thread::sleep(wait.min(left));
                 wait = (wait * 2).min(RETRY_AT_MOST);
             }
             done => return done,
@@ -85,8 +95,8 @@ fn tried_again<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     }
 }
 
-/// What a flush did: flushed, or refused for access and taken as nothing
-/// to flush -- as Lucene.NET and OpenJDK take a directory's.
+/// What a flush did: flushed, or not run because its open, or a
+/// directory's flush, was refused -- taken as nothing to flush.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum Flushed {
     Done,
@@ -95,37 +105,58 @@ pub(super) enum Flushed {
 
 /// Opens `path` -- a file or a directory -- to flush it: write access,
 /// which `FlushFileBuffers` asks, every share mode, as std's opens keep;
-/// `None` where the open is refused for access: nothing to flush.
-fn flushable(path: &Path) -> io::Result<Option<File>> {
-    let opened = OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path);
+/// tried again while another handle refuses it for sharing, until `until`.
+/// `None` where it is refused all the same: for access -- a directory some
+/// systems will not open for write, a read-only file -- or for sharing by
+/// a handle that does not share write, as many a reader opens one. Neither
+/// is a storage error: nothing was written, nothing dropped, and before
+/// slice 1 nothing was flushed there at all. So the flush is skipped, as
+/// a refusal for access is, rather than another process's reader failing
+/// a tenant's create or a sidecar's write.
+fn flushable(path: &Path, until: Instant) -> io::Result<Option<File>> {
+    let opened = tried_again(until, || {
+        match OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+        {
+            // Not worth a second try: a handle or an ACL, not a moment.
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Ok(None),
+            opened => opened.map(Some),
+        }
+    });
     match opened {
-        Ok(f) => Ok(Some(f)),
-        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Ok(None),
-        Err(e) => Err(e),
+        Err(e) if refused(&e) => Ok(None),
+        opened => opened,
     }
 }
 
-/// `FlushFileBuffers` (std's `sync_all`), a refusal for access taken as
-/// nothing to flush; any other error is the storage error it is.
+/// `FlushFileBuffers` (std's `sync_all`). A refusal for access is taken as
+/// nothing to flush where `f` is a directory, as Lucene.NET and OpenJDK
+/// take one (decision 3); a file, which the handle may write, has no such
+/// leave: there it is the file's own failure, which the sink's next flush
+/// through it would meet, and the storage error it is.
 fn flush(f: &File) -> io::Result<Flushed> {
     match f.sync_all() {
         Ok(()) => Ok(Flushed::Done),
-        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Ok(Flushed::Refused),
+        Err(e)
+            if e.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+                && f.metadata().is_ok_and(|m| m.is_dir()) =>
+        {
+            Ok(Flushed::Refused)
+        }
         Err(e) => Err(e),
     }
 }
 
 /// The directory `path` is in, flushed: where NTFS keeps the name a rename
 /// gave, which its lazily written log could otherwise lose to a power cut.
-pub(super) fn flush_parent(path: &Path) -> io::Result<Flushed> {
+fn flush_parent(path: &Path, until: Instant) -> io::Result<Flushed> {
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     };
-    let flushed = match flushable(dir)? {
+    let flushed = match flushable(dir, until)? {
         Some(d) => flush(&d)?,
         None => Flushed::Refused,
     };
@@ -134,10 +165,10 @@ pub(super) fn flush_parent(path: &Path) -> io::Result<Flushed> {
     Ok(flushed)
 }
 
-/// `path` itself flushed, where it is there and the open is not refused:
-/// the renamed file, which `MOVEFILE_WRITE_THROUGH` flushes once it has
-/// moved it. No page says which of the two flushes carries NTFS's log for
-/// a rename, so both run -- once a rename, never a write.
+/// The renamed file flushed through a handle open for write, which
+/// `MOVEFILE_WRITE_THROUGH` does once it has moved it. No page says which
+/// of the two flushes carries NTFS's log for a rename, so both run -- once
+/// a rename, never a write.
 fn flush_renamed(f: &File) -> io::Result<Flushed> {
     let flushed = flush(f)?;
     #[cfg(test)]
@@ -146,25 +177,38 @@ fn flush_renamed(f: &File) -> io::Result<Flushed> {
 }
 
 /// `fs::sync_dir` on Windows: the renamed file at `path` flushed, where it
-/// is there -- a removal's is not -- and then its directory. Its open is
-/// tried again while another handle refuses it for sharing, as a rename is.
+/// is there -- a removal's is not -- and its open is not refused
+/// ([`flushable`]), and then its directory, both opens held to one
+/// deadline.
 pub(super) fn sync_dir(path: &Path) -> io::Result<()> {
-    let opened = tried_again(|| match flushable(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        opened => opened,
-    })?;
+    let until = Instant::now() + REFUSED_FOR;
+    let opened = match flushable(path, until) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        opened => opened?,
+    };
     if let Some(f) = opened {
         flush_renamed(&f)?;
     }
-    flush_parent(path)?;
+    flush_parent(path, until)?;
+    Ok(())
+}
+
+/// The directory `path` is in flushed, and not `path`: `fs::sync_dir` for
+/// a caller that flushed each file it renamed there through the handle it
+/// wrote it with -- fennec-http's archive, whose renames one flush of the
+/// directory covers before what stands on them.
+pub fn sync_dir_alone(path: &Path) -> io::Result<()> {
+    flush_parent(path, Instant::now() + REFUSED_FOR)?;
     Ok(())
 }
 
 /// A rewrite's image renamed over the database's file -- std's rename,
 /// which replaces it with POSIX semantics where the volume has them --
-/// tried again while another handle refuses it, then opened to be appended
-/// to, flushed through that handle, and its directory flushed: what
-/// `swap_in` does on a Unix with `rename`, `sync_dir` and an open.
+/// then opened to be appended to, flushed through that handle, and its
+/// directory flushed: what `swap_in` does on a Unix with `rename`,
+/// `sync_dir` and an open. The rename, the open after it and the
+/// directory's open are tried again while another handle refuses them,
+/// within one [`REFUSED_FOR`] for all three.
 pub(super) fn swap(from: &Path, to: &Path) -> io::Result<File> {
     if let Ok(image) = OpenOptions::new()
         .access_mode(FILE_RW_ATTRIBUTES)
@@ -172,10 +216,11 @@ pub(super) fn swap(from: &Path, to: &Path) -> io::Result<File> {
     {
         mark_unindexed(&image);
     }
-    tried_again(|| std::fs::rename(from, to))?;
-    let f = tried_again(|| OpenOptions::new().read(true).write(true).open(to))?;
+    let until = Instant::now() + REFUSED_FOR;
+    tried_again(until, || std::fs::rename(from, to))?;
+    let f = tried_again(until, || OpenOptions::new().read(true).write(true).open(to))?;
     flush_renamed(&f)?;
-    flush_parent(to)?;
+    flush_parent(to, until)?;
     Ok(f)
 }
 
@@ -305,6 +350,9 @@ pub(super) mod tests {
     pub(in crate::fs) static REFUSALS: AtomicUsize = AtomicUsize::new(0);
 
     thread_local! {
+        /// The deadline of each [`tried_again`] this thread ran, in turn.
+        pub(in crate::fs) static DEADLINES: std::cell::RefCell<Vec<Instant>> =
+            const { std::cell::RefCell::new(Vec::new()) };
         /// Flushes this thread ran: of a renamed file's directory, and of
         /// the renamed file.
         pub(in crate::fs) static FLUSHES: std::cell::Cell<(usize, usize)> =
@@ -348,6 +396,8 @@ pub(super) mod tests {
     /// `FILE_SHARE_READ | FILE_SHARE_WRITE`: an opener that refuses others
     /// a delete or a rename.
     const SHARE_NO_DELETE: u32 = 0x3;
+    /// `FILE_SHARE_READ` alone: a reader that refuses others a write too.
+    const SHARE_READ: u32 = 0x1;
 
     /// Roots of other volumes to run [`the_experiment_on_each_volume`] on as
     /// well, `;`-separated: CI's ReFS and FAT32 VHDs.
@@ -807,7 +857,7 @@ pub(super) mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let dir = std::fs::canonicalize(&dir).unwrap();
             let vol = volume(&dir).unwrap();
-            let dir_flush = match flush_parent(&dir.join("x")) {
+            let dir_flush = match flush_parent(&dir.join("x"), Instant::now() + REFUSED_FOR) {
                 Ok(f) => format!("{f:?}"),
                 Err(e) => format!("e{}", e.raw_os_error().unwrap_or(-1)),
             };
@@ -988,6 +1038,78 @@ pub(super) mod tests {
         db.checkpoint().unwrap();
         assert!(unindexed(&path), "a checkpoint's image");
         drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One swap holds its rename, the open after it and its directory's
+    /// open to one deadline, and one `sync_dir` its two opens: a stall
+    /// under the write lock is about [`REFUSED_FOR`] whatever refuses what,
+    /// never that a try. A deadline already out is tried once, and no more.
+    #[test]
+    fn one_deadline_holds_every_try_of_a_call() {
+        let dir = scratch("deadline");
+        let (file, image) = (dir.join("db.fennec"), dir.join("db.fennec.compacting"));
+        std::fs::write(&file, OLD).unwrap();
+        std::fs::write(&image, NEW).unwrap();
+        let taken = || DEADLINES.with(|d| d.take());
+        taken();
+        let start = Instant::now();
+        drop(swap(&image, &file).unwrap());
+        let seen = taken();
+        assert_eq!(seen.len(), 3, "the rename, the open, the directory's open");
+        assert!(seen.iter().all(|&u| u == seen[0]), "{seen:?}");
+        assert!(seen[0] >= start + REFUSED_FOR);
+        super::super::sync_dir(&file).unwrap();
+        let seen = taken();
+        assert_eq!(seen.len(), 2, "the file's open, the directory's");
+        assert_eq!(seen[0], seen[1]);
+
+        let mut tries = 0;
+        let e = tried_again(Instant::now(), || {
+            tries += 1;
+            Err::<(), _>(io::Error::from_raw_os_error(ERROR_SHARING_VIOLATION))
+        })
+        .unwrap_err();
+        assert_eq!(
+            (tries, e.raw_os_error()),
+            (1, Some(ERROR_SHARING_VIOLATION))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A flush's open another handle refuses for sharing -- a reader not
+    /// sharing write -- is tried again until the deadline and then taken as
+    /// nothing to flush, as a refusal for access is: `sync_dir` answers
+    /// `Ok`, the directory still flushed where the file was held, and the
+    /// file still flushed where the directory was.
+    #[test]
+    fn a_flush_another_handle_refuses_is_nothing_to_flush() {
+        let dir = scratch("unshared");
+        let path = dir.join("read.fennec");
+        std::fs::write(&path, OLD).unwrap();
+        let flushes = || FLUSHES.with(|n| n.get());
+
+        let reader = opened(&path, SHARE_READ);
+        let (before, start) = (flushes(), Instant::now());
+        super::super::sync_dir(&path).unwrap();
+        assert!(start.elapsed() >= REFUSED_FOR, "{:?}", start.elapsed());
+        assert_eq!(flushes(), (before.0 + 1, before.1), "the directory alone");
+        drop(reader);
+
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
+        let refused = flush_parent(&path, Instant::now()).unwrap();
+        assert_eq!(refused, Flushed::Refused, "the directory held");
+        let before = flushes();
+        super::super::sync_dir(&path).unwrap();
+        assert_eq!(flushes(), (before.0 + 1, before.1 + 1), "the file's flush");
+        drop(held);
+        let done = flush_parent(&path, Instant::now() + REFUSED_FOR).unwrap();
+        assert_eq!(done, Flushed::Done, "the directory let go");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

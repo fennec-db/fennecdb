@@ -184,11 +184,13 @@ asserted on CI). `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` refuses a
 target open elsewhere, and a checkpoint refused would stop every write.
 Its `MOVEFILE_WRITE_THROUGH` is what `sync_dir` gives on Windows since
 windows.md's first slice: the renamed file flushed and then its directory,
-each through a handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, a refusal
-for access taken as nothing to flush, as `fsync` of the directory gives on
-a Unix. A rename another process's handle refuses -- one opened without
-`FILE_SHARE_DELETE` -- is tried again for a second before the sink fails
-(`fs::windows::swap`). What Windows lacks besides, none of it the single
+each through a handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, an open
+refused for access, or for sharing past a second, and a directory's flush
+refused for access taken as nothing to flush, as `fsync` of the directory
+gives on a Unix. A rename another
+process's handle refuses -- one opened without `FILE_SHARE_DELETE` -- is
+tried again, with the open after it, within one second before the sink
+fails (`fs::windows::swap`). What Windows lacks besides, none of it the single
 writer's: the mapped file (`fs::open` reads the file into memory there; a
 view refuses no rename over the file, so mapping needs no other swap),
 the sync log (Linux and Android alone by design), the page cache's room

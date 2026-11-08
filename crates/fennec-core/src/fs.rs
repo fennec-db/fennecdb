@@ -1116,7 +1116,7 @@ pub fn sync_dir(_path: &Path) -> Result<()> {
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{volume, Volume};
+pub use windows::{sync_dir_alone, volume, Volume};
 
 /// What wraps a file's sink before the database takes it: a primary's
 /// `Tee` (fennec-http) goes around it here, fsyncing what the file already
