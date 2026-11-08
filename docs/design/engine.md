@@ -189,7 +189,8 @@ mapping waits on a swap that unmaps first), the sync log (Linux and Android
 alone by design), the page cache's room (`cache::room`, so
 `CompactPolicy::memory` never fires), `fennec backup`'s key file made
 `0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is the CRT's `SIGINT`, the one
-shutdown), and a release build.
+shutdown), and a release build. Their design, in slices, is
+[windows.md](windows.md).
 
 `fennec restore` and `fennec backup` into a file renamed theirs over
 whatever had the name, a database written since included, and exited 0:
