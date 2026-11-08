@@ -176,21 +176,26 @@ fennec opens setting `share_mode`, so each keeps std's
 
 That rename is std's, which on Windows replaces the target with POSIX
 semantics where the file system has them (NTFS, ReFS; FAT32 and exFAT
-have none, so a compact or a checkpoint there fails, loudly), so a handle open on
-the old file -- the sink's own, a `--read-only` reader's -- does not refuse
-it. `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` refuses a target open
-elsewhere, and a checkpoint refused would stop every write; its
-`MOVEFILE_WRITE_THROUGH` is the durability `sync_dir` gives on a Unix,
-which on Windows is still a no-op. What Windows lacks besides, none of it
-the single writer's: `sync_dir` (a rename or a removal is durable once
-NTFS writes its log), the mapped file (`fs::open` reads the file into
-memory there; a mapped view would refuse a rename over the file, so
-mapping waits on a swap that unmaps first), the sync log (Linux and Android
-alone by design), the page cache's room (`cache::room`, so
-`CompactPolicy::memory` never fires), `fennec backup`'s key file made
-`0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is the CRT's `SIGINT`, the one
-shutdown), and a release build. Their design, in slices, is
-[windows.md](windows.md).
+have none, so a compact or a checkpoint there fails, loudly, and the
+server's start says so, `fs::volume`), so a handle open on the old file --
+the sink's own, a `--read-only` reader's -- does not refuse it, nor does a
+read-only view of it, in this process or another (windows.md's experiment,
+asserted on CI). `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` refuses a
+target open elsewhere, and a checkpoint refused would stop every write.
+Its `MOVEFILE_WRITE_THROUGH` is what `sync_dir` gives on Windows since
+windows.md's first slice: the renamed file flushed and then its directory,
+each through a handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, a refusal
+for access taken as nothing to flush, as `fsync` of the directory gives on
+a Unix. A rename another process's handle refuses -- one opened without
+`FILE_SHARE_DELETE` -- is tried again for a second before the sink fails
+(`fs::windows::swap`). What Windows lacks besides, none of it the single
+writer's: the mapped file (`fs::open` reads the file into memory there; a
+view refuses no rename over the file, so mapping needs no other swap),
+the sync log (Linux and Android alone by design), the page cache's room
+(`cache::room`, so `CompactPolicy::memory` never fires), `fennec backup`'s
+key file made `0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is the CRT's
+`SIGINT`, the one shutdown), and a release build. Their design, in
+slices, is [windows.md](windows.md).
 
 `fennec restore` and `fennec backup` into a file renamed theirs over
 whatever had the name, a database written since included, and exited 0:
