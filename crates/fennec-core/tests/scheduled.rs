@@ -839,6 +839,29 @@ fn stamped(db: &Database) -> Vec<(Value, Value)> {
         .collect()
 }
 
+/// A scheduled body's literal lists run as written: `[0.25, 2]` handed an
+/// `[float]` and a json field, where the quick read's `f32`s were refused
+/// at every slot (`fennec_ql::stored_definition`).
+#[test]
+fn a_scheduled_body_runs_its_lists_as_written() {
+    let tap = Tap::default();
+    let mut db = holds(&tap);
+    run(&mut db, "create collection ticks (fs [float], j json)").unwrap();
+    run(
+        &mut db,
+        "create statement tick every 15m as insert ticks {fs: [0.25, 2], j: [0.1]}",
+    )
+    .unwrap();
+    let late = t0() + HOUR;
+    let slot = due(&db, late).run.unwrap().0;
+    db.begin().unwrap();
+    db.run_slot("tick", slot, late).unwrap();
+    db.commit().unwrap();
+    let r = run(&mut db, "get ticks select fs, j").unwrap();
+    let r = fennec_core::json::response_to_string(&r);
+    assert!(r.contains(r#"[{"fs":[0.25,2],"j":[0.1]}]"#), "{r}");
+}
+
 /// A run's body reads `now()` as the run's start, once a run, and
 /// `slot()` as its slot -- `Database::run_slot`, in the block its runner
 /// opened, with its mark -- the database's own clock as it was after.
