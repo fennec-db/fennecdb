@@ -32,8 +32,8 @@ EXEMPT = {
 CLOSED = ("fennec-core", "fennec-ql", "fennec-abi", "fennec-wasm", "fennec-ffi")
 
 # fennec-tls's whole tree, normal and build edges, as Cargo.lock resolves it
-# for the targets the binaries ship for (TLS_TARGETS; Windows takes the same
-# less libc). Its Cargo.toml names two crates; these are what they bring, and
+# for the targets the binaries ship for (TLS_TARGETS; the Windows zip's takes
+# the same less libc). Its Cargo.toml names two crates; these are what they bring, and
 # a rustls feature turned on (aws-lc-rs, brotli), a default moved or a
 # `cargo update` changes them without a line of any Cargo.toml changing. A
 # difference fails the check: read what came in or moved (what it is, who
@@ -62,6 +62,7 @@ TLS_TARGETS = (
     "aarch64-apple-darwin",
     "aarch64-linux-android",
     "aarch64-apple-ios",
+    "x86_64-pc-windows-msvc",
 )
 
 

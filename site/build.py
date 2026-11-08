@@ -1972,6 +1972,51 @@ def install_script():
     shutil.copy(src, os.path.join(OUT, "install.sh"))
 
 
+def install_ps1():
+    """dist/install.ps1: the Windows installer `irm https://fennecdb.com/install.ps1
+    | iex` runs, as the repository has it, held to what makes running it
+    through `iex` safe: outside its functions -- each `function Verb-Noun {`
+    at the margin to the `}` at the margin -- only comments and blank lines,
+    and the one thing that runs is `Install-Fennec @args` on the last line,
+    so a download cut short defines some functions at most and runs nothing.
+    Run in the caller's session, it assigns nothing there. Its code invokes
+    no expression, and its text is ASCII, which Windows PowerShell 5.1 reads
+    a file with no byte order mark as (docs/design/windows.md, decision 6)."""
+    src = os.path.join(ROOT, "install.ps1")
+    raw = open(src, "rb").read()
+    if any(b > 0x7E or (b < 0x20 and b not in (0x0A, 0x0D)) for b in raw):
+        raise SystemExit("  site/install.ps1 must be printable ASCII")
+    text = raw.decode("ascii")
+    lines = text.splitlines()
+    if [l for l in lines if l.strip()][-1] != "Install-Fennec @args":
+        raise SystemExit("  site/install.ps1 must end by calling Install-Fennec @args")
+    if text.count("Install-Fennec @args") != 1:
+        raise SystemExit("  site/install.ps1 calls Install-Fennec once")
+    # The code, without its comments and the text of its strings: what is
+    # quoted is said, not run (the usage names `irm ... | iex`).
+    code = "\n".join(l for l in lines if not l.lstrip().startswith("#"))
+    code = re.sub(r"'(?:[^']|'')*'", "''", code)
+    code = re.sub(r'"(?:[^"`]|`.)*"', '""', code)
+    if re.search(r"(?i)\b(invoke-expression|iex|invoke-command|add-type)\b|\[scriptblock\]::create", code):
+        raise SystemExit("  site/install.ps1 invokes no expression")
+    inside = False
+    for n, line in enumerate(lines, 1):
+        if inside:
+            inside = line != "}"
+        elif not line.strip() or line.startswith("#") or line == "Install-Fennec @args":
+            continue
+        elif re.fullmatch(r"function [A-Z][A-Za-z]*-[A-Z][A-Za-z]*(\([^)]*\))? \{", line):
+            inside = True
+        else:
+            raise SystemExit(
+                f"  site/install.ps1:{n}: outside a function, only comments come before "
+                f"Install-Fennec @args: {line!r}"
+            )
+    if inside:
+        raise SystemExit("  site/install.ps1 ends inside a function")
+    shutil.copy(src, os.path.join(OUT, "install.ps1"))
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -2210,13 +2255,15 @@ def build():
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
     for stable in CLIENT_MODULES + ("fennec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
-    # The installer, served as plain text: a browser shows it, which is how
-    # someone reads it before `curl | sh`, where a .sh would be saved. Five
-    # minutes, so a fix reaches the next install and not a day's.
-    rules += ["/install.sh",
-              "  Content-Type: text/plain; charset=utf-8",
-              "  Cache-Control: public, max-age=300, must-revalidate",
-              ""]
+    # The installers, served as plain text: a browser shows them, which is
+    # how someone reads one before `curl | sh` or `irm | iex`, where a .sh or
+    # a .ps1 would be saved, and `irm` reads the text as text. Five minutes,
+    # so a fix reaches the next install and not a day's.
+    for script in ("/install.sh", "/install.ps1"):
+        rules += [script,
+                  "  Content-Type: text/plain; charset=utf-8",
+                  "  Cache-Control: public, max-age=300, must-revalidate",
+                  ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 
     # Every module a script imports by name is a file of the build: a name
@@ -2231,6 +2278,7 @@ def build():
                 raise SystemExit(f"  {name} imports {dep}, which the build did not write")
 
     install_script()
+    install_ps1()
 
     brief, full = llms_texts()
     open(os.path.join(OUT, "llms.txt"), "w", encoding="utf-8").write(brief)

@@ -51,8 +51,8 @@ Install fennecdb (fennec, the shell, and fennec-server) from a release.
   FENNEC_VERSION  X.Y.Z; the latest release when unset
   FENNEC_INSTALL  installs into $FENNEC_INSTALL/bin; default ~/.fennecdb
 
-macOS and Linux on arm64 and x86_64. On Windows, use the Docker image
-(ghcr.io/fennec-db/fennec-server) or run this inside WSL.
+macOS and Linux on arm64 and x86_64. On Windows, PowerShell installs the
+zip: irm https://fennecdb.com/install.ps1 | iex (or run this inside WSL).
 EOF
 }
 
@@ -79,7 +79,9 @@ detect_target() {
             target="$arch-unknown-linux-musl"
             ;;
         MINGW* | MSYS* | CYGWIN* | Windows_NT)
-            die "fennecdb does not run on Windows yet. Use the Docker image (docker run ghcr.io/fennec-db/fennec-server) or run this script inside WSL."
+            # Git Bash, MSYS and Cygwin are not where the Windows zip goes:
+            # PowerShell, which every Windows has, installs it.
+            die "this script installs on macOS and Linux. On Windows, in PowerShell: irm https://fennecdb.com/install.ps1 | iex (or run this script inside WSL)."
             ;;
         *) die "no fennecdb release for '$os' (macOS and Linux only). The Docker image, ghcr.io/fennec-db/fennec-server, runs anywhere Docker does." ;;
     esac
