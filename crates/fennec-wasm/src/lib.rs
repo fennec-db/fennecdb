@@ -371,6 +371,16 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
     }
 }
 
+/// How many ints past 2^53 the reader has met (`json::wide`). A sync's
+/// replica runs a page's write before it is sent, and its count moving is
+/// what tells the line it must write such a number as every digit: a walk
+/// of the line's values for it cost a line of 1 000 documents 18%
+/// (`jsonOf`, docs/design/indexes.md#sorted).
+#[no_mangle]
+pub extern "C" fn fennec_wide() -> u32 {
+    json::wide::count()
+}
+
 // -------------------------------------------------------------- schema
 
 /// Compares the database with a schema declared in code -- a description,

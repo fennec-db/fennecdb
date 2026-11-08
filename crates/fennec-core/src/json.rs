@@ -128,8 +128,9 @@ fn num_into(out: &mut String, f: f64) {
 /// How many ints past 2^53 the browser module's reader has met: a page's
 /// parameters are JavaScript values, and `fennec-wasm` looks through those
 /// of a text whose reading met none no further (`as_double`), where a look
-/// through every one cost a `run` putting 1 000 documents 1.5%. Natively
-/// none is counted, and none asked for.
+/// through every one cost a `run` putting 1 000 documents 1.5%; a sync's
+/// line is told by it whether to look (`fennec_wide`). Natively none is
+/// counted, and none asked for.
 pub mod wide {
     #[cfg(target_arch = "wasm32")]
     static MET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

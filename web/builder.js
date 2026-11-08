@@ -333,14 +333,16 @@ const MARKED = /"\\u0000fennec-int:(-?\d+)"/g;
  * a key starting with the mark keeps `JSON.stringify`'s text.
  */
 export function jsonOf(v, holds) {
-  const text = JSON.stringify(v);
-  if (!(holds ?? holdsWide([v]))) return text;
+  if (!holds) {
+    const text = JSON.stringify(v);
+    if (holds === false || !holdsWide([v])) return text;
+  }
   let clash = false;
   const marked = JSON.stringify(v, (k, x) => {
     if (k.startsWith(MARK) || (typeof x === 'string' && x.startsWith(MARK))) clash = true;
     return typeof x === 'number' && wide(x) ? MARK + BigInt(x) : x;
   });
-  return clash ? text : marked.replace(MARKED, '$1');
+  return clash ? JSON.stringify(v) : marked.replace(MARKED, '$1');
 }
 
 export function isSpec(v) {

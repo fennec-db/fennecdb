@@ -443,8 +443,9 @@ number's text from a replacer, so `jsonOf` marks such a number
 (`\u0000fennec-int:` and its digits, as a text) and replaces the mark, only
 where the value holds one: a request's parameters, every `FennecHttp`
 body's, are noted as they are normalized (`bodyOf`, through `counted`, its
-own copy of `normalize`'s walk), and the sync layer's lines walked, after a
-first `JSON.stringify` has refused a cycle the walk would follow. A text or
+own copy of `normalize`'s walk), and a sync layer's line is told by the
+replica (below); a line no one told is walked, after a first
+`JSON.stringify` has refused a cycle the walk would follow. A text or
 a key that already starts with the mark -- written by no one but on purpose
 -- leaves the text as `JSON.stringify` writes it, the number with its
 shortest digits. The module's parameters go by `JSON.stringify` as they always did: a parameter
@@ -504,6 +505,42 @@ finds each row by them, the router's `a_json_column_of_large_numbers_merges_in_t
 merges two tenants' engine-written rows, and `web/fennec.test.js`,
 `web/fennec.sync.test.js` and Go's `TestAWholeFloat64From2To53FindsItsRows`
 find 2^60's rows by the number each language holds.
+
+**A sync line is told by the replica's run of its write.** `FennecSync`
+runs a page's write on its replica before it queues the lines, and the
+module's reader counts every int past 2^53 it reads (`json::wide`, which
+`as_double` already reads): `write` reads the count (`fennec_wide`) before
+and after `#apply`, and a write whose path marks it `ran` -- an insert or
+an upsert the replica made under its ids, an update, a delete -- hands
+`jsonOf` whether it moved, so its lines are never walked. Every value such
+a line sends was read by that run: the replica's documents are the line's
+with ids put in (temporary ones from 2^52, below the count's 2^53, or ids
+the replica holds), an update's or a delete's statement is the line, and
+the second line naming rows by their key sends the same patch and the
+keys as text. A list of numbers the page's run sent apart as `f32`s
+(`vectorsApart`) is not read as JSON, but the server reads it as `f32`s
+too unless the statement needs it exact (`exactly`), and there the module
+asks for it as JSON first (`res.exact`) and reads it: the count moves
+where the server would read the digits. A false move -- an id the replica
+holds past 2^53 -- costs the slow path, no more. An insert into a shape
+with no key whose documents name no id, and an upsert with neither, are
+sent unrun and walked; a module from before the export tells nothing and
+every line is walked. When told one is there, `jsonOf` skips its first
+`JSON.stringify` and writes the marked text alone. Counted as the table
+above (a call less a run doing nothing, whole-process instructions, seven
+alternating runs, the 1-minute load under 2.5), a line putting 1 000
+documents of two texts, two floats with fractions and a small int: main
+1 143 556, walked 1 351 164 (+18.2%), told 1 144 686 (+0.1%, inside the
+runs' spread of 0.6% to 1.1%; the two reads of the count included). Every document
+holding an int past 2^53: walked 11.01M, told 9.60M (-12.8%; main's
+1.44M wrote the wrong digits). `bodyOf` with them 18.42M -> 16.52M
+(-10.3%), without them +0.03%; the module's `run`, insert and small `get`
+within 0.2%. The narrower look at the text, a whole number of 16 digits
+or more neither after a `.` or a digit nor before a `.`, `e` or a digit
+(`/(?<![.\d])\d{16,}(?![.\deE])/`), matches no fraction, but scanning the
+117 KB line cost 4.17M against `JSON.stringify`'s 1.14M (+265%), its scan
+looking at every character. The export is 23 bytes of the
+module, 19 gzip, 44 brotli; the client 452 bytes, 139 gzip, 101 brotli.
 
 ## Composite indexes
 
