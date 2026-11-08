@@ -1123,6 +1123,13 @@ impl Drop for Ticket<'_> {
                 g.now = true;
             }
         }
+        // A head's run was put back, so the row it ran for is there to be
+        // taken: the next head looks at once, not at the next write.
+        if let Some(g) = st.groups.iter_mut().find(|g| g.id == self.group) {
+            if g.queue.front().is_some_and(|t| Arc::ptr_eq(t, &self.turn)) {
+                g.now = true;
+            }
+        }
         resign(&mut st, &self.turn);
         self.part(&mut st, false);
     }

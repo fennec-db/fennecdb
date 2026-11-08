@@ -790,6 +790,46 @@ fn a_held_claim_whose_run_panics_leaves_its_group() {
     assert_eq!(int(&got[0]["id"]), id);
 }
 
+/// The claim held behind one whose run panics takes the job that run put
+/// back, at once: the row is there again, so its group looks without
+/// waiting for the next write.
+#[test]
+fn a_claim_behind_a_panicked_run_takes_the_job_it_put_back() {
+    let mut db = Database::new();
+    db.registry_mut().register_hook(Arc::new(Boom));
+    let node = start_on(db, None);
+    let port = node.port;
+    let mut panicking = Conn::open(port);
+    panicking.send(
+        "/query",
+        &line(CLAIM, "[\"w1\"]"),
+        &[("Fennec-Wait", "60000")],
+    );
+    until_held(&node, 1);
+    // Held after w1, of its shape: second in its group. Its wait is the
+    // bound on what must happen; a later write would wake it anyway, so
+    // none is made.
+    let behind = std::thread::spawn(move || Conn::open(port).claim("w2", 20_000));
+    until_held(&node, 2);
+    let id = put(port, "mail", now_ms() - 1);
+    let mut line_read = String::new();
+    let read = panicking.r.read_line(&mut line_read);
+    assert!(
+        matches!(read, Ok(0)),
+        "closed unanswered: {read:?} {line_read:?}"
+    );
+    let a = behind.join().unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
+    let got = rows(&a.body);
+    assert_eq!(
+        got.len(),
+        1,
+        "the put-back job, not the end of the wait: {}",
+        a.body
+    );
+    assert_eq!(int(&got[0]["id"]), id);
+}
+
 /// Many held workers, producers enqueueing ready and delayed jobs, and
 /// workers that die holding a job: every job is acked exactly once, a
 /// delayed one claimed no earlier than its time, a dead worker's job again
