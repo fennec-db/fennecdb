@@ -14,7 +14,21 @@ what a field holds, how it compares and which indexes it takes:
 64 bits, -9223372036854775808 to 9223372036854775807, and takes a float
 where it is whole (<code>20.0</code>); a value its type refuses is a type
 error naming the field, and a number past an int's range is one too, never
-clamped to its end. A list of numbers given an <code>[int]</code> or a
+clamped to its end. An int and a float compare by their true values,
+wherever two numbers are compared — <code>where</code>, every index,
+<code>lookup</code>, <code>order</code>, <code>min</code> and
+<code>max</code>: the float 1152921504606846976.0 (2<sup>60</sup>) equals
+the int 1152921504606846976 and is below 1152921504606846977, though the
+nearest float to that is 2<sup>60</sup> too, and 2<sup>63</sup> is above
+every int. So a whole float goes out in JSON as every digit of the int it
+is, up to 2<sup>63</sup> either side — 2<sup>60</sup> as
+1152921504606846976, not the shortest digits 1152921504606847000, another
+int — and read back, or sent again as a parameter, it finds its rows; the
+JavaScript and Go clients send a number of 2<sup>53</sup> and up so too
+(<a href="languages.html">languages</a>). A float's <code>NaN</code>
+equals every value where it is compared, but is no key: <code>= NaN</code>
+is answered by the scan, and a <code>lookup</code> whose parent holds
+<code>NaN</code> finds no child. A list of numbers given an <code>[int]</code> or a
 <code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
 2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 
@@ -135,24 +149,26 @@ field. A filter binds a path once a query, as it binds a field, and walks
 its keys over each row's bytes, passing the members before the key without
 decoding them. An aggregate and <code>group</code> read a field, not a
 path; a <code>lookup</code>'s keys are fields too. Comparisons are the
-ones every value already has: <code>3</code> equals <code>3.0</code>,
-every number orders below every text, text below a list and a list below
-an object, and <code>null</code> is equal only to <code>null</code>.</p>
+ones every value already has: an int and a float by their true values,
+<code>3</code> equal to <code>3.0</code>, every number below every text,
+text below a list and a list below an object, and <code>null</code> equal
+only to <code>null</code>.</p>
 
 <p>An index on a path is a field of its own beside the fields, named by the
 path, and its kind is the field's: <code>@hash</code> keys a value as a
 typed field's does, a whole float filed as the int it equals so that
-<code>3</code> and <code>3.0</code> share a bucket; an equality or an
-<code>in</code> reaches it with null, a boolean, text and a number an
-<code>f64</code> holds exactly, and anything else — an int past
-2<sup>53</sup>, which equals floats near it that no bucket holds — is
-answered by the scan. <code>@unique</code> refuses a value held twice as a
-field's does, <code>3</code> and <code>3.0</code> the same value.
+<code>3</code> and <code>3.0</code> share a bucket, as do the int and the
+float 2<sup>60</sup>; an equality or an <code>in</code> reaches it with null, a
+boolean, text and a number, and anything else — a list, an object, a
+timestamp, which equals the text it reads as, a float's <code>NaN</code>,
+which equals every value — is answered by the scan. <code>@unique</code> refuses a value held twice as a field's does,
+<code>3</code> and <code>3.0</code> the same value.
 <code>@sorted</code> orders the numbers as <code>f64</code>s and the text by
 its bytes, every number before every text; a value it has no place for —
-<code>true</code> or <code>false</code>, a list, an object, an int past
-2<sup>53</sup> — is held apart, and while the index holds one it answers
-nothing and the scan does: a wrong order is never what an index costs.
+<code>true</code> or <code>false</code>, a list, an object, an int no
+<code>f64</code> holds exactly (2<sup>53</sup> + 1) — is held apart, and
+while the index holds one it answers nothing and the scan does: a wrong
+order is never what an index costs.
 <code>tests/json.rs</code> holds both to a twin collection without them,
 every filter, order and page, through writes and a reopen. Text, vector
 and sparse indexes stay on the fields that declare their type. On a server

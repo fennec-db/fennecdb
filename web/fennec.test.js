@@ -600,6 +600,59 @@ test('a number past an int\'s range is refused naming its field, in the module',
   db.close();
 });
 
+test('an int and a float compare by their true values, through every index, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, h int @hash, u int @unique, s int @sorted, a int, z int, m json, @sorted(a, z))');
+  db.run('create index on t (m.h) @hash');
+  // 2^60 - 1, 2^60, 2^60 + 1 and 2^60 + 128 each round to the float 2^60,
+  // which equals only the second: written as text, as JavaScript cannot
+  // hold them.
+  for (const n of ['1152921504606846975', '1152921504606846976', '1152921504606846977', '1152921504606847104']) {
+    db.run(`put t {n: ${n}, h: ${n}, u: ${n}, s: ${n}, a: ${n}, z: 0, m: {h: ${n}}}`);
+  }
+  const ids = (sql) => db.rows(sql).map((r) => r.id);
+  for (const field of ['n', 'h', 'u', 's', 'a', 'm.h']) {
+    assert.deepEqual(ids(`get t select id where ${field} = 1152921504606846976.0`), [2], field);
+    assert.deepEqual(ids(`get t select id where ${field} > 1152921504606846976.0 order id`), [3, 4], field);
+    assert.deepEqual(ids(`get t select id where ${field} in [1152921504606846976.0, 7.5] order id`), [2], field);
+    // 2^63 is past every int, -2^63 the least of them.
+    assert.equal(db.rows(`get t where ${field} >= 9223372036854775808.0 count`)[0].count, 0, field);
+    assert.equal(db.rows(`get t where ${field} > -9223372036854775808.0 count`)[0].count, 4, field);
+  }
+  // A json field holding both kinds is put in their true order, and its
+  // greatest is the int past the float.
+  db.run('create collection o (v json)');
+  db.run('put o [{v: 1152921504606846977}, {v: 1152921504606846976.0}, {v: 1152921504606846975}]');
+  assert.deepEqual(ids('get o select id order v'), [3, 2, 1]);
+  assert.equal(db.rows('get o where v > 1152921504606846976.0 count')[0].count, 1);
+  db.close();
+});
+
+test('a number from 2^53 on is read by the module as the double it is, and finds its rows', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection f (x float, xh float @hash, xs float @sorted, m json)');
+  db.run('create index on f (m.h) @hash');
+  db.run('create index on f (m.s) @sorted');
+  // The float 2^60, twice: written as a float, and through a parameter.
+  db.run('put f {x: 1152921504606846976.0, xh: 1152921504606846976.0, xs: 1152921504606846976.0, m: {h: 1152921504606846976.0, s: 1152921504606846976.0}}');
+  db.run('put f {x: $1, xh: $1, xs: $1, m: $2}', [2 ** 60, { h: 2 ** 60, s: 2 ** 60 }]);
+  await db.from('f').insert({ x: -(2 ** 60), xh: -(2 ** 60), xs: -(2 ** 60), m: { h: -(2 ** 60), s: -(2 ** 60) } });
+  for (const field of ['x', 'xh', 'xs', 'm.h', 'm.s']) {
+    // `JSON.stringify(2 ** 60)` is `1152921504606847000`: read as that
+    // int, it found neither row; the module reads it as the double.
+    assert.equal(db.rows(`get f where ${field} = $1 count`, [2 ** 60])[0].count, 2, field);
+    assert.equal(db.rows(`get f where ${field} = $1 count`, [-(2 ** 60)])[0].count, 1, field);
+    assert.equal(await db.from('f').where(field, 2 ** 60).count(), 2, field);
+    // A row read back finds itself.
+    for (const row of db.rows(`get f select ${field} as v`)) {
+      assert.ok(db.rows(`get f where ${field} = $1 count`, [row.v])[0].count >= 1, `${field} ${row.v}`);
+    }
+  }
+  db.close();
+});
+
 test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

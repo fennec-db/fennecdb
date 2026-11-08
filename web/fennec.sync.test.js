@@ -1110,6 +1110,85 @@ test('connect compares, and migrates only when asked', opts, async () => {
   }
 });
 
+// A number from 2^53 on goes over HTTP as every digit of it: written by
+// `JSON.stringify`, 2^60 was `1152921504606847000`, which the server reads
+// as that int and found none of 2^60's rows.
+test('a number from 2^53 on goes to the server as every digit, and finds its rows', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  try {
+    const db = client.connect(s.url);
+    await db.run('create collection f (x float, xh float @hash, xs float @sorted, m json)');
+    await db.run('create index on f (m.h) @hash');
+    await db.run('create index on f (m.s) @sorted');
+    await s.run('put f {x: 1152921504606846976.0, xh: 1152921504606846976.0, xs: 1152921504606846976.0, m: {h: 1152921504606846976.0, s: 1152921504606846976.0}}');
+    await db.run('put f {x: $1, xh: $1, xs: $1, m: $2}', [2 ** 60, { h: 2 ** 60, s: 2 ** 60 }]);
+    await db.from('f').insert({ x: -(2 ** 60), xh: -(2 ** 60), xs: -(2 ** 60), m: { h: -(2 ** 60), s: -(2 ** 60) } });
+    const count = async (text, params) => (await db.run(text, params)).rows[0].count;
+    for (const field of ['x', 'xh', 'xs', 'm.h', 'm.s']) {
+      assert.equal(await count(`get f where ${field} = $1 count`, [2 ** 60]), 2, field);
+      assert.equal(await count(`get f where ${field} = $1 count`, [-(2 ** 60)]), 1, field);
+      assert.equal((await db.from('f').where(field, 2 ** 60).count()), 2, field);
+      const [batched] = (await db.batch([[`get f where ${field} = $1 count`, [2 ** 60]]])).results;
+      assert.equal(batched.rows[0].count, 2, field);
+      // A row read back finds itself.
+      for (const row of (await db.run(`get f select ${field} as v`)).rows) {
+        assert.ok((await count(`get f where ${field} = $1 count`, [row.v])) >= 1, `${field} ${row.v}`);
+      }
+    }
+  } finally {
+    s.close();
+  }
+});
+
+// A replica's writes go out as every digit too: those it ran told so by the
+// module's count of what it read (`fennec_wide`) -- a number, one in a json
+// value, one in a list a json field reads as written, an update's and an
+// upsert's -- and one it waits for the server on walked. Written by
+// `JSON.stringify`, the server held 1152921504606847000.
+test('a number from 2^53 on goes from a replica to the server as every digit, ran here or not', opts, async () => {
+  const s = await server();
+  await s.run('create collection w (key text @unique, n int, m json)');
+  await s.run('create collection u (n int, m json)');
+  const db = await sync({
+    url: s.url,
+    local: await Fennec.open(wasm),
+    leader: false,
+    shapes: [{ collection: 'w', key: 'key' }, { collection: 'u' }],
+  });
+  // The server's own text: JSON.parse would read either form as 2^60.
+  const text = async (query) => {
+    const res = await fetch(`${s.url}/query`, { method: 'POST', body: JSON.stringify({ query }) });
+    return res.text();
+  };
+  try {
+    await db.ready();
+    await db.from('w').insert({ key: 'a', n: 2 ** 60 });
+    await db.from('w').insert({ key: 'b', m: { h: -(2 ** 60) } });
+    await db.from('w').insert({ key: 'c', m: [2 ** 60 + 256, 1] });
+    await db.from('w').insert({ key: 'd', n: 1 });
+    await db.from('w').where('key', 'd').update({ n: -(2 ** 60) });
+    await db.from('w').upsert({ key: 'e', n: 1 }, { n: 1 });
+    await db.from('w').upsert({ key: 'e', n: 1 }, { n: 2 ** 60 + 256 });
+    await db.from('u').insert({ n: 2 ** 60, m: { h: 2 ** 60 } });
+    await db.pushed();
+    const w = await text('get w select key, n, m order key');
+    assert.doesNotMatch(w, /1152921504606847000|1152921504606847200/, w);
+    for (const [key, n, m] of [
+      ['a', '1152921504606846976', 'null'],
+      ['b', 'null', '{"h":-1152921504606846976}'],
+      ['c', 'null', '[1152921504606847232,1]'],
+      ['d', '-1152921504606846976', 'null'],
+      ['e', '1152921504606847232', 'null'],
+    ]) {
+      assert.match(w, new RegExp(`"key":"${key}","n":${n},"m":${m.replace(/[[\]{}]/g, '\\$&')}`), key);
+    }
+    assert.match(await text('get u select n, m'), /"n":1152921504606846976,"m":\{"h":1152921504606846976\}/);
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 // `@fennecdb/web/client`: no module at all, the queries run on the server
 // and a live query follows its subscriptions.
 test("a live query over HTTP follows the server's writes, with no module", { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {

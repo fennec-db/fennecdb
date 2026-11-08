@@ -1108,6 +1108,13 @@ fn cell(v: &Value) -> String {
         Value::Text(s) => s.clone(),
         Value::Int(i) => i.to_string(),
         Value::Timestamp(ms) => fennec_core::time::format_iso(*ms),
+        // A whole float past 2^53 as the int it is, every digit: `{}`
+        // writes the shortest digits reading back as it, 2^60 as
+        // 1152921504606847000, which a statement reads as another number
+        // (`json::num_into` writes it so too). From 2^63 on, past an int.
+        Value::Float(f) if f.fract() == 0.0 && f.abs() < 9_223_372_036_854_775_808.0 => {
+            (*f as i64).to_string()
+        }
         Value::Float(f) => format!("{f}"),
         Value::Bool(b) => (if *b { "true" } else { "false" }).into(),
         Value::Bytes(b) => format!("<{} bytes>", b.len()),

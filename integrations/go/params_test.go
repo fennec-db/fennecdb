@@ -1,7 +1,9 @@
 package fennecdb
 
 import (
+	"bytes"
 	"math"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -76,5 +78,29 @@ func TestEveryF32ReadsBackThroughAnF64(t *testing.T) {
 		if !math.IsNaN(float64(f)) && !math.IsInf(float64(f), 0) {
 			check(f)
 		}
+	}
+}
+
+// A float64 from 2^53 on goes as every digit of the int it is, in a list
+// and a map too: encoding/json writes 2^60 as 1152921504606847000, which
+// the server reads as another number. Short of 2^53 and from 2^63 on, as
+// encoding/json writes it.
+func TestAWholeFloatFrom2To53GoesAsEveryDigit(t *testing.T) {
+	var buf bytes.Buffer
+	p60 := math.Ldexp(1, 60)
+	doc := map[string]any{"a": p60, "b": []any{-p60, 1.5}, "c": map[string]any{"d": math.Ldexp(1, 53)}}
+	params := []any{p60, -p60, math.Ldexp(1, 63), -math.Ldexp(1, 63), math.Ldexp(1, 53) - 1, 0.5, doc, []any{p60}, "x"}
+	if err := writeBody(&buf, "q", params); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"query":"q","params":[1152921504606846976,-1152921504606846976,9223372036854776000,-9223372036854776000,9007199254740991,0.5,` +
+		`{"a":1152921504606846976,"b":[-1152921504606846976,1.5],"c":{"d":9007199254740992}},[1152921504606846976],"x"]}`
+	if buf.String() != want {
+		t.Fatalf("got  %s\nwant %s", buf.String(), want)
+	}
+	// A map holding none is sent as it is, not copied.
+	plain := map[string]any{"a": 1.5, "b": []any{2.5}}
+	if reflect.ValueOf(exactly(plain)).Pointer() != reflect.ValueOf(plain).Pointer() {
+		t.Fatal("a map holding no such number was copied")
 	}
 }

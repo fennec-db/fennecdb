@@ -205,6 +205,15 @@ reader that takes a number as an <code>f64</code> and rounds it to
 the one <code>f32</code> an <code>f64</code> would round away,
 <code>7.038531e-26</code>, is written as its <code>f64</code>.</p>
 
+<p>Any other float is its <code>f64</code>'s shortest decimal, but a whole
+one short of 2<sup>63</sup> either side, which is every digit of the int it
+is: the float 2<sup>60</sup> is <code>1152921504606846976</code>, not
+<code>1152921504606847000</code>, which the server reads back as another
+int — an int and a float compare by their true values — so a number read
+from an answer and sent back as a parameter finds the row it came from. A
+client sending a whole number of 2<sup>53</sup> or more writes every digit
+of it the same way.</p>
+
 <p>A <code>"match"</code> makes it hybrid: BM25 over the collection's
 <code>@text</code> field ranks the same request, and the two rankings are
 fused by reciprocal rank (<a href="fennecql-search.html#hybrid">fuse</a>).

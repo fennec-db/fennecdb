@@ -223,9 +223,20 @@ reads another collection.
 
 **[`@sorted` must give the scan's answer, row for
 row.](../../docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,
+which compares an int and a float by their true values (`value::tie`),
+never as two `f64`s alone, every index's keys and `Value::key_as` with it;
 `null` and `NaN` apart, ties in id order; a literal of another kind than a
 typed field's -- or part's -- is no bound or none (`SortedIndex::by_kind`),
 and a time claim's `or` edge is folded by the field's type (`fold_kinds`).
+
+**[A whole float goes out as every digit of the int it
+is.](../../docs/design/indexes.md#sorted)** JSON writes one short of 2^63
+either side so (`json::num_into`), never its shortest digits, which past
+2^53 read back as another int: a value read back finds its row
+(`a_number_read_back_through_json_finds_its_row`), the router's order check
+with it. The browser module reads an int no double holds in a parameter as
+the double JavaScript wrote, where its reader met one (`json::wide`,
+`fennec-wasm`'s `as_double`).
 
 **[An index over several fields is its parts' bytes laid end to
 end](../../docs/design/indexes.md#composite-indexes)** (`composite.rs`), a part's
