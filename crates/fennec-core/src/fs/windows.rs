@@ -4,8 +4,9 @@
 //! durable -- the renamed file flushed, then its directory -- a rename
 //! another handle refuses tried again for a bounded time, a file fennec
 //! makes kept out of the search indexer, and the volume a file is on named,
-//! which says whether it is mapped. kernel32's calls are declared here, as
-//! `fennec_abi::lock` declares its own: the crates take no `windows-sys`.
+//! which says whether it is mapped. kernel32's calls, and ntdll's one,
+//! are declared here, as `fennec_abi::lock` declares its own: the crates
+//! take no `windows-sys`.
 //! Every call takes a handle std opened, never a path, so a long path is
 //! std's `\\?\` one wherever it is used.
 
@@ -353,22 +354,70 @@ pub fn volume(path: &Path) -> io::Result<Volume> {
 
 /// `GetFileInformationByHandleEx`'s class for `FILE_REMOTE_PROTOCOL_INFO`.
 const FILE_REMOTE_PROTOCOL_INFO: i32 = 13;
+/// `NtQueryVolumeInformationFile`'s class for `FILE_FS_DEVICE_INFORMATION`.
+const FILE_FS_DEVICE_INFORMATION: i32 = 4;
+/// A device's characteristic: a network file system's, the redirector's.
+const FILE_REMOTE_DEVICE: u32 = 0x10;
 
-/// Whether `f` is reached through a network redirector: only there does
-/// the system answer `FILE_REMOTE_PROTOCOL_INFO` (116 bytes), a local file
-/// system refusing the class (`a_file_is_mapped_where_its_volume_allows`).
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryVolumeInformationFile(
+        file: *mut c_void,
+        status: *mut [usize; 2],
+        info: *mut c_void,
+        len: u32,
+        class: i32,
+    ) -> i32;
+}
+
+/// Whether `f` is reached through a network redirector -- an SMB share,
+/// a mapped drive: where the device its volume is on says it is remote,
+/// or the redirector answers `FILE_REMOTE_PROTOCOL_INFO`, a local file
+/// system refusing the class. The device first: on `windows-latest` the
+/// first handle through `\\localhost\C$` was refused the class, a later
+/// one answered (`a_file_is_mapped_where_its_volume_allows`).
 fn remote(f: &File) -> bool {
+    remote_device(f) || remote_protocol(f).is_ok()
+}
+
+/// Whether the device `f`'s volume is on is a network file system's
+/// (`FILE_FS_DEVICE_INFORMATION`'s `FILE_REMOTE_DEVICE`): the I/O manager
+/// answers it from the device, asking no server.
+fn remote_device(f: &File) -> bool {
+    let mut status = [0usize; 2];
+    let mut info = [0u32; 2];
+    // SAFETY: the handle is open across the call; `status` is an
+    // `IO_STATUS_BLOCK`, two pointers wide, and `info` the class's struct,
+    // a device type and its characteristics.
+    let done = unsafe {
+        NtQueryVolumeInformationFile(
+            f.as_raw_handle(),
+            &mut status,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            FILE_FS_DEVICE_INFORMATION,
+        )
+    };
+    done >= 0 && info[1] & FILE_REMOTE_DEVICE != 0
+}
+
+/// `FILE_REMOTE_PROTOCOL_INFO`, 116 bytes, where the redirector answers it.
+fn remote_protocol(f: &File) -> io::Result<[u32; 29]> {
     let mut info = [0u32; 29];
     // SAFETY: the handle is open across the call, and `info` is the
     // struct's 116 bytes, 4-aligned, as the class asks.
-    unsafe {
+    let done = unsafe {
         GetFileInformationByHandleEx(
             f.as_raw_handle(),
             FILE_REMOTE_PROTOCOL_INFO,
             info.as_mut_ptr().cast(),
             std::mem::size_of_val(&info) as u32,
-        ) != 0
+        )
+    };
+    if done == 0 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(info)
 }
 
 /// Whether a database's file at `path` is mapped (decision 1): where its
@@ -1326,38 +1375,49 @@ pub(super) mod tests {
             assert!(seen.contains(&("FAT32".into(), false)), "{seen:?}");
         }
 
+        // Each way `remote` asks, on the share's first handle -- the one a
+        // server's open makes -- and on later ones, each answer printed.
         let share = shared(&dir);
-        let v = volume(&share.join("new.fennec"))
-            .unwrap_or_else(|e| panic!("{}: {e}", share.display()));
+        let mut said = format!("{}:", share.display());
+        for _ in 0..3 {
+            let open = OpenOptions::new()
+                .access_mode(0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&share)
+                .unwrap();
+            let device = remote_device(&open);
+            let protocol = match remote_protocol(&open) {
+                Ok(info) => format!(
+                    "version {}, {} bytes, protocol {:#x}",
+                    info[0] & 0xffff,
+                    info[0] >> 16,
+                    info[1]
+                ),
+                Err(e) => format!("refused: {e}"),
+            };
+            said.push_str(&format!(
+                "\n    a remote device {device}; FILE_REMOTE_PROTOCOL_INFO {protocol}"
+            ));
+            assert!(device, "{said}");
+        }
+        let v = volume(&share.join("new.fennec")).unwrap();
+        said.push_str(&format!(
+            "\n    {}, remote {}, mappable {}",
+            v.file_system,
+            v.remote,
+            mappable(&share.join("new.fennec"))
+        ));
+        println!("{said}");
+        assert!(v.remote, "{} not taken for a share", share.display());
+        assert!(!mappable(&share.join("new.fennec")));
+        // Neither way says the runner's own NTFS is a share.
         let open = OpenOptions::new()
             .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(&share)
+            .open(&dir)
             .unwrap();
-        let mut info = [0u32; 29];
-        // SAFETY: the handle is open across the call, `info` the struct's
-        // 116 bytes.
-        let answered = unsafe {
-            GetFileInformationByHandleEx(
-                open.as_raw_handle(),
-                FILE_REMOTE_PROTOCOL_INFO,
-                info.as_mut_ptr().cast(),
-                std::mem::size_of_val(&info) as u32,
-            )
-        } != 0;
-        println!(
-            "{}: {}, remote {}, mappable {}; FILE_REMOTE_PROTOCOL_INFO answered {answered}, \
-             version {}, {} bytes, protocol {:#x}",
-            share.display(),
-            v.file_system,
-            v.remote,
-            mappable(&share.join("new.fennec")),
-            info[0] & 0xffff,
-            info[0] >> 16,
-            info[1],
-        );
-        assert!(v.remote, "{} not taken for a share", share.display());
-        assert!(!mappable(&share.join("new.fennec")));
+        assert!(!remote_device(&open), "{}", dir.display());
+        assert!(remote_protocol(&open).is_err(), "{}", dir.display());
         drop(open);
         let _ = std::fs::remove_dir_all(&dir);
     }
