@@ -901,7 +901,13 @@ wait before the 503. Both accept loops listen again with a queue of 1 024
 (`accept::widen`), which each system holds to its own ceiling:
 `net.core.somaxconn`, 4 096 on Linux since 5.4, and `kern.ipc.somaxconn`,
 128 on macOS, where nothing changes unless it is raised. The same runs
-overflowed it none. A flood past the queue is the kernel's to answer
+overflowed it none. Winsock answers a second `listen` with success and
+leaves the queue as it was, as its page says: of 300 connections made at
+once to a listener nothing accepts, 128 or 129 were queued behind std's
+`listen` and one more after a second one of 1 024 on the runner (fennec-server's
+`tests/windows.rs`, [windows.md](windows.md#7-what-else-windows-differs-in)),
+so `widen` listens again on Unix alone and a Windows listener keeps std's
+128. A flood past the queue is the kernel's to answer
 (SYN cookies). What remains a reset: past 512 held, a refusal with no
 lingering thread or whose answer did not go out whole, a body past 1 MiB
 or a client still writing after 2 s -- and a node from before this, in a
@@ -1246,7 +1252,12 @@ its own `close_notify`, its session its own, and the shutdown waits up to
 descriptor, each let go of under the list's lock before it closes, so a
 shutdown never shuts a descriptor a new connection took
 (`every_tls_end_is_a_close_notify_the_shutdown_s_too`). Before, only a
-refused request's end sent one.
+refused request's end sent one. On Windows the list keys a socket's
+`SOCKET` (`conn/windows.rs`), and a shut read side wakes no thread blocked
+reading it -- a connection waiting for its request was cut by the exit
+with a reset -- so its reads are cancelled after the shutdown
+(`CancelIoEx`; std makes every socket overlapped), the read after it
+meeting the shut side ([windows.md](windows.md#7-what-else-windows-differs-in), 7g).
 
 *The key's file.* On Unix a key file open to more than its owner is said
 at the start, its path and mode, never a byte of it (`conn::warn_if_open`),
