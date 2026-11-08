@@ -38,7 +38,7 @@
     "eslint-plugin-react-hooks": "^7.1.0",
     "eslint-webpack-plugin": "^5.0.0",
     "fork-ts-checker-webpack-plugin": "^9.1.0",
-    "glob": "^11.1.0",
+    "glob": "^14.0.4",
     "identity-obj-proxy": "^3.0.0",
     "imports-loader": "^5.0.0",
     "intersection-observer": "^0.12.2",
@@ -76,5 +76,10 @@
   },
   "packageManager": "npm@11.19.0",
   "description": "fennecdb's data source for Grafana: FennecQL with Grafana's time range and variables as parameters",
-  "private": true
+  "private": true,
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.5"
+    }
+  }
 }
