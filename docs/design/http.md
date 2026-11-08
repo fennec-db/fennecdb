@@ -931,6 +931,32 @@ held it there: one header scan out of line for both asks (`which`, 700
 bytes a copy) and the id read by `num::parse_i64` rather than
 `str::parse` (300).
 
+*What the second pass cost* -- the statement routes' refusal, every line
+read, `no-transform`. Three builds side by side through `handle`
+(`compare.py --bin`, 8 identities of 7 runs each, loads under 4): main at
+`b361a668` (the rows example copied in, its `tag` mode taken out), this
+section's first version (`78c35fdd`) and this one, in instructions a
+request:
+
+| | main | first | now | |
+| --- | ---: | ---: | ---: | --- |
+| `GET /t/<id>`, main's `?id=eq.<id>` | 24 613 | 19 350 | 19 297 | -21.6% on main, -53 on the first: inside two standard errors |
+| `PATCH /t/<id>`, main's `?id=eq.<id>` | 29 176 | 27 560 | 27 544 | -5.6% on main |
+| `PATCH /t/<id>` under `If-Match`, main's plain | 29 104 | 48 734 | 48 898 | +164 on the first (+0.34%), at two standard errors: the lines read again where judged |
+| `put` through `/query` (`replays.rs`) | 21 167 | 21 112 | 21 159 | -7 on main, inside two standard errors |
+| `put` under an `Idempotency-Key` | 83 701 | 83 626 | 83 759 | +58 on main, inside two standard errors |
+
+The `/query` and `/batch` look is one pass over the headers, a byte of
+each and a name compared where it is an `i` -- `Idempotency-Key` among
+them -- and a `/query` read asks its poll's header only where that pass
+found it, a scan fewer. `no-transform` is a flag set where the tag is
+pushed; its 29 bytes are written into the head with the answer, past
+`handle`, beside the tag's own. fennec-server's release binary is
+6 809 024 bytes in both versions, the same 16 KiB pages: its `__text`
++1 280 bytes (`put_row_refused`, `off_row`, the line scans), its
+`__const` +4 096 (the refusals' words and the OpenAPI document's headers,
+some 1 200 bytes, the rest the section's alignment).
+
 ## Connections without a thread
 
 **A connection no thread can be made for is answered 503, as one past the

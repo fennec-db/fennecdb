@@ -652,9 +652,9 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <table>
 <thead><tr><th>Status</th><th>Means</th><th>What to do</th></tr></thead>
 <tbody>
-<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>)</td><td>fix the request</td></tr>
+<tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>); <code>If-Match</code> or <code>If-None-Match</code> off a row's route (<a href="#conditional">Writing over the row you read</a>)</td><td>fix the request</td></tr>
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
-<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
+<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole, a <code>PUT /&lt;name&gt;/&lt;id&gt;</code> — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists</td><td>a lost race for a value</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
