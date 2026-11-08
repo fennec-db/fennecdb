@@ -305,6 +305,15 @@ class Check:
         for e in self.ev:
             if e["ev"] == "fail":
                 self.fail(f"the server refused a write before the cut: {e['op']} {e['status']} {e['body'][:200]}")
+            # A connection the server dropped while it ran stops its thread
+            # and leaves its write in flight to the end: run 2's cut 1 lost a
+            # thread so at its first request, unexplained, and passed.
+            elif e["ev"] == "error" and self.cut_at is not None and e["t"] < self.cut_at:
+                sent = self.sent.get(e["q"], {})
+                self.fail(
+                    f"a connection failed {self.cut_at - e['t']:.3f} s before the cut, "
+                    f"{e['t'] - sent.get('t', e['t']):.3f} s after its write was sent: {e['op']} q={e['q']} {e['what']}"
+                )
         self.describe_load()
         found = {}
         found["docs"] = self.docs()
