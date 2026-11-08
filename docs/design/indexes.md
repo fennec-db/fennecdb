@@ -552,16 +552,27 @@ sort (`smallsort.rs`, its total-order check) in 3 of 117 runs of 1 191 to
 unwinds such a panic; the shell, `panic = abort`, died.
 
 Now the order and the comparison are two. The order -- `cmp_value`, which
-`order`, `min`, `max`, `greatest`, `least`, a sort's keys and every key a
-group, a distinct count, a facet or an index files take -- puts a time
-below every text, as any two kinds. A comparison -- `=`, `<`, `in`, `has`,
-a filter's, a `case`'s, a `having`'s, an aggregate's `filter`, an access
-rule's -- reads a text beside a time as the time it names, whichever side
+`order`, `min`, `max`, a sort's keys and every key a group, a distinct
+count, a facet or an index files take -- puts a time below every text, as
+any two kinds. A comparison -- `=`, `<`, `in`, `has`, a filter's, a
+`case`'s, a `having`'s, an aggregate's `filter`, an access rule's, and
+`greatest` and `least`'s choice -- reads a text beside a time as the time
+it names, whichever side
 either came from, as main's `cmp_value` did: `j.at > now() - 1d` over a
 json field's ISO times compares two times. It is `cmp_read`, a copy of
 `cmp_value`'s body (`cmp_kinds::<READ>`) whose arms where a time meets a
 text parse the text, so no comparison of two other kinds pays for it; a
 comparison needs no order, its values met two at a time and never sorted.
+
+`greatest` and `least` choose as a comparison does (`plugin::extreme`):
+they pick one of a row's values and sort none, and a statement keeps a
+row's latest time with `set q {at: greatest(at, $2)}`, `$2` an ISO text --
+`examples/analytics`'s quotes. Chosen by kind, as #529's first build did,
+the text always won: `at` went back when a batch came out of order, and
+the next batch's `case when at <= $2` took a stale price (CI's `examples
+(analytics)`, `kinds.rs`'s `greatest_and_least_read_a_text_beside_a_time`).
+Over a time, its ISO text and the int equal to it the choice follows the
+arguments' order, as main's did; no sort meets it.
 
 The first try read only a text *written* beside a time -- a literal, a
 parameter -- as PostgreSQL types a literal of no type by what it meets,
@@ -591,7 +602,8 @@ json `@hash` and `@sorted` keep no key for a time (`lookup_key`,
 `SortedIndex::bound`), nor an index over several fields for a text or
 json part (`CompositeIndex::literal`).
 
-What users meet: no answer of a comparison moved from main. An `order`
+What users meet: no answer of a comparison, `greatest` or `least` moved
+from main. An `order`
 and a `group` over an expression mixing a time with a text go by kind --
 `order coalesce(t, j.at)` puts every time before every text, `group` keeps
 a time and its ISO text apart -- and `order timestamp(j.at)` orders ISO

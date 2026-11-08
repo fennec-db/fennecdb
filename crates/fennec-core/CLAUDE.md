@@ -234,9 +234,10 @@ row.](../../docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,
 which compares an int, a float and a time by their true values
 (`value::tie`), never as two `f64`s alone, every index's keys and
 `Value::key_as` with it, and any other two kinds by kind (`type_rank`), a
-time below every text; a comparison reads a text beside a time as the
-time it names, either side (`Value::cmp_read`), never the order, an index
-stepping aside where its keys cannot say it (`key_as`, `lookup_key`). A
+time below every text; a comparison, `greatest` and `least` read a text
+beside a time as the time it names, either side (`Value::cmp_read`), never
+the order, an index stepping aside where its keys cannot say it
+(`key_as`, `lookup_key`). A
 `NaN` equals a `NaN` and is above every other number, `+inf` included --
 PostgreSQL's order (`value::floats`), never equal to everything -- every
 `NaN` one key whatever its bits, `-0.0` that of `0.0`, in a list or a

@@ -634,3 +634,78 @@ fn a_text_field_meets_a_time_alike_through_every_index() {
         }
     }
 }
+
+/// `greatest` and `least` choose as a comparison does: a text beside a
+/// time is the time it names, as main chose. examples/analytics keeps a
+/// symbol's latest quote with this `set`, `$2` the tick's time as ISO
+/// text; chosen by kind, the text always won, `at` went back when a batch
+/// came out of order, and the next batch's `case when at <= $2` took a
+/// stale price.
+#[test]
+fn greatest_and_least_read_a_text_beside_a_time() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection q (sym text @unique, px float, at timestamp, since timestamp, j json)",
+    );
+    let at = |m: i64| MS + m * 60_000;
+    let iso = |m: i64| Value::Text(format_iso(at(m)));
+    let first = "put q {sym: 'A', px: 10.0, at: $1, since: $1, j: $2}";
+    with(&mut db, first, &[Value::Timestamp(at(10)), iso(10)]).unwrap();
+    let tick = "set q {px: case when at <= $2 then $3 else px end, at: greatest(at, $2), \
+                since: least(since, $2)} where sym = $1";
+    let quote = |db: &Database| {
+        answer(db, "get q select px, at, since", &[]).rows[0]
+            .values
+            .clone()
+    };
+    // Ticks of minutes 8, 9, 11 and 10, each its minute's price: the two
+    // before the first and the last come out of order and leave the price
+    // and the time as they were, the earliest kept by `least`.
+    let ticks = [
+        (8, 10.0, 10, 8),
+        (9, 10.0, 10, 8),
+        (11, 11.0, 11, 8),
+        (10, 11.0, 11, 8),
+    ];
+    for (m, px, latest, earliest) in ticks {
+        let p = [Value::Text("A".into()), iso(m), Value::Float(m as f64)];
+        with(&mut db, tick, &p).unwrap();
+        let want = [
+            Value::Float(px),
+            Value::Timestamp(at(latest)),
+            Value::Timestamp(at(earliest)),
+        ];
+        assert_eq!(quote(&db), want, "the tick of minute {m}");
+    }
+    // Beside a row's time, an ISO text is the time it names; one naming no
+    // time stays a text, above every time; a tie keeps the first; a null
+    // is passed over. A json field's ISO text beside a time is read alike.
+    let pick = "get q select greatest(at, $1) as a, least(at, $1) as b, greatest(j, $2) as c, \
+                least(j, $2) as d";
+    let t = Value::Timestamp;
+    let cases = [
+        (iso(5), t(at(12)), [t(at(11)), iso(5), t(at(12)), iso(10)]),
+        (iso(20), t(at(3)), [iso(20), t(at(11)), iso(10), t(at(3))]),
+        (iso(11), t(at(10)), [t(at(11)), t(at(11)), iso(10), iso(10)]),
+        (
+            Value::Text("abc".into()),
+            Value::Null,
+            [Value::Text("abc".into()), t(at(11)), iso(10), iso(10)],
+        ),
+    ];
+    for (p1, p2, want) in cases {
+        let got = answer(&db, pick, &[p1.clone(), p2.clone()]).rows[0]
+            .values
+            .clone();
+        assert_eq!(got, want, "{p1:?} {p2:?}");
+    }
+    // Two texts still go by their bytes; `order`, `min` and `max` over
+    // rows go by kind (`an_order_over_a_time_and_json_texts_is_one_order`).
+    let texts = "get q select greatest('b', 'a') as a, least('b', 'a') as b";
+    assert_eq!(
+        answer(&db, texts, &[]).rows[0].values,
+        [Value::Text("b".into()), Value::Text("a".into())]
+    );
+}
