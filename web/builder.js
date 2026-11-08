@@ -1648,11 +1648,19 @@ export class Query {
 }
 
 /**
+ * The mark of a read the builder made itself (`READ`, a batch of queries
+ * alone): a `get` whatever the caller says, which `FennecHttp` may send
+ * again after a reset. A caller's `{ read: true }` is a claim no one checks
+ * at home, and grants no resend (docs/design/js-client.md#retries).
+ */
+export const BUILT = Symbol('built');
+
+/**
  * What a query's reads hand `exec` beside their text: they only read, which
  * `FennecHttp.run` marks for a read replica near the client. A database in
  * the page, which has no other copy, passes it over.
  */
-const READ = Object.freeze({ read: true });
+const READ = Object.freeze({ read: true, [BUILT]: true });
 
 /** A write's `{ wait, signal }` for `FennecHttp.run`, null without either. */
 function heldOf(opts) {

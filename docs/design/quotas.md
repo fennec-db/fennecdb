@@ -154,3 +154,30 @@ stream's 503 from a standby router. Every SDK's error carried a body's
 real node and read it. A page on another origin reads the router's own
 answers -- a standby's 503, a 404, a 502 -- once the router has
 `--http-cors` (below).
+
+**Nothing that landed is told to come back.** A 503, and a 429 naming its
+wait, say nothing ran: the JS and Python clients send such a request again
+whatever it is ([js-client.md](js-client.md#retries)), as a proxy or a
+retry policy may. A `/batch` holding a `compact` runs a statement at a
+time, so its stop may come after statements landed, and two answers told
+such a batch to come back: `answered_under_lease` turned a stop's 403 into
+the move's 503 while the tenant was frozen -- `freeze_as` sets the flag
+before it waits for the requests in flight, the batch among them -- and
+`batch_stop` answered `--call-rate`'s 429 with its `Retry-After` beside
+`completed`. Sent again whole, the first statements were made twice. A 403
+is the 503 now only where nothing landed (`wrote`, the lapsed lease's
+check), the stop answered as it stands otherwise: the freeze waits for the
+request, and the move takes what it wrote. And `batch_stop` answers a 429
+or a 503 stop after a statement was applied as a 409 naming no wait, its
+words saying the statements from `at` on were not made and are to be sent
+alone. A 409 rather than the 429 without its header, since a 429 is a
+come-back to the retry policies that read one, a header or not (urllib3's
+`status_forcelist`, `go-retryablehttp`'s default), where none resends a
+409. `--call-rate` charges a scoped token's runs alone, and a scoped
+token's batch is one block, put back whole: no stop of its has a landing
+before it today, and the 409 is the rule's, for one that comes to. The
+clients hold to the rule from their side too, never sending again a 429 or
+a 503 whose body says `completed` is above 0. `lib.rs`'s
+`a_frozen_tenant_tells_a_refusal_to_come_back_only_where_nothing_landed`
+and `a_batch_stopped_after_a_landing_is_never_told_to_come_back` hold the
+server to it.

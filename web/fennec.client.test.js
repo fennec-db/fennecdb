@@ -91,8 +91,8 @@ function scripted(rows) {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
-const until = async (f) => {
-  for (let i = 0; i < 200 && !f(); i++) await tick();
+const until = async (f, tries = 200) => {
+  for (let i = 0; i < tries && !f(); i++) await tick();
   assert.ok(f(), 'timed out');
 };
 
@@ -328,3 +328,279 @@ test('a query from an endpoint carries it, for useLiveQuery to find', () => {
   const db = client.connect('http://db.test', { fetch: scripted(() => []).fetch });
   assert.equal(db.from('docs').context, db);
 });
+
+// ------------------------------------------------------ retries and timeouts
+//
+// The client sends again only what cannot have run -- an answer naming a
+// wait, a connection refused -- or may run twice -- a read the builder made
+// or sent near, a write under a key -- and bounds every request in time
+// (docs/design/js-client.md#retries).
+
+/**
+ * A server answering from `plan`, one item a request: a `Response`; 'reset',
+ * a connection dropped after the request went; 'refused', one refused before
+ * anything was sent; 'hang', no answer until the request's signal aborts it;
+ * 'stall', a head and then a body that never ends; 'trickle', a head and
+ * then `[{"id":1}]` a byte every 20 ms. Each request is noted with the time
+ * it came, the key it carried and its signal.
+ */
+function planned(...plan) {
+  const calls = [];
+  const failed = (code) => new TypeError('fetch failed', { cause: Object.assign(new Error(code), { code }) });
+  function fetch(url, init = {}) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    calls.push({ url, at: performance.now(), key: init.headers?.['idempotency-key'], signal: init.signal });
+    const next = plan.shift();
+    const aborted = (no) => init.signal?.addEventListener('abort', () => no(init.signal.reason));
+    if (next === 'reset') return Promise.reject(failed('ECONNRESET'));
+    if (next === 'refused') return Promise.reject(failed('ECONNREFUSED'));
+    if (next === 'hang') return new Promise((_, no) => aborted(no));
+    if (next === 'stall') {
+      const body = new ReadableStream({ start: (c) => aborted((e) => c.error(e)) });
+      return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    }
+    if (next === 'trickle') {
+      const bytes = new TextEncoder().encode('[{"id":1}]');
+      let i = 0;
+      const body = new ReadableStream({
+        start: (c) => aborted((e) => c.error(e)),
+        pull: async (c) => {
+          await new Promise((r) => setTimeout(r, 20));
+          if (i < bytes.length) c.enqueue(bytes.subarray(i, ++i));
+          else c.close();
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
+    return Promise.resolve(next);
+  }
+  return { fetch, calls };
+}
+
+const answer = (status, body, headers = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+
+test('a 503 naming its wait is sent again, no sooner than the wait', async () => {
+  const server = planned(
+    answer(503, { error: 'the tenant is being moved; retry shortly', retry_after: 1 }, { 'retry-after': '1' }),
+    answer(200, { affected: 1 }),
+  );
+  const db = client.connect('http://db.test', { fetch: server.fetch });
+  // A write without a key: nothing ran, so it goes again all the same.
+  assert.deepEqual(await db.run('put notes {n: 1}'), { kind: 'affected', count: 1, seq: null, replayed: false });
+  assert.equal(server.calls.length, 2);
+  // `Retry-After: 1`. Node's timers count from the loop's time, taken as
+  // its turn began: one may fire a few ms before a second by the clock.
+  const took = server.calls[1].at - server.calls[0].at;
+  assert.ok(took >= 990, `${took} ms`);
+  // A quota's 429 says it to the millisecond, before its whole seconds.
+  const quota = planned(
+    answer(429, { error: 'past its quota of 2 writes a second', quota: 'writes', retry_after: 1, retry_after_ms: 300 }, { 'retry-after': '1' }),
+    answer(200, { affected: 1 }),
+  );
+  await client.connect('http://db.test', { fetch: quota.fetch }).run('put notes {n: 2}');
+  assert.equal(quota.calls.length, 2);
+  const ms = quota.calls[1].at - quota.calls[0].at;
+  assert.ok(ms >= 290, `${ms} ms`);
+});
+
+test('a refusal naming no wait is never sent again', async () => {
+  // A quota waiting makes no room for -- `held`'s 429, a 507 -- a 4xx, a
+  // write's unknown outcome, and a 503 that names no wait.
+  for (const refusal of [
+    answer(429, { error: 'past its quota of 4 held requests', quota: 'held' }),
+    answer(507, { error: 'past its quota of 5 rows', quota: 'rows' }),
+    answer(409, { error: 'a value taken' }),
+    answer(500, { error: 'the write landed', outcome: 'unknown', seq: 7 }),
+    answer(503, { error: 'no wait named' }),
+  ]) {
+    const server = planned(refusal, answer(200, []));
+    const err = await client.connect('http://db.test', { fetch: server.fetch }).from('docs').rows().catch((e) => e);
+    assert.ok(err instanceof client.FennecError, `${refusal.status}`);
+    assert.equal(err.status, refusal.status);
+    assert.equal(server.calls.length, 1, `${refusal.status} sent again`);
+  }
+});
+
+test('a write is sent again after a dropped connection only under a key; a read where the builder made it or it went near', async () => {
+  const bare = planned('reset', answer(200, { affected: 1 }));
+  const err = await client.connect('http://db.test', { fetch: bare.fetch }).run('put notes {n: 1}').catch((e) => e);
+  assert.equal(err.cause.code, 'ECONNRESET', 'the network error, as fetch threw it');
+  assert.equal(bare.calls.length, 1, 'a write that may have landed is never made twice');
+  assert.equal(bare.calls[0].key, undefined, 'the client makes no key of its own');
+
+  const keyed = planned('reset', answer(200, { affected: 1 }, { 'idempotent-replayed': 'true' }));
+  const k = client.connect('http://db.test', { fetch: keyed.fetch });
+  assert.equal((await k.run('put notes {n: 1}', [], { idempotencyKey: 'n-1' })).replayed, true);
+  assert.deepEqual(keyed.calls.map((c) => c.key), ['n-1', 'n-1']);
+  const copy = planned('reset', answer(200, { affected: 1 }));
+  await client.connect('http://db.test', { fetch: copy.fetch }).withIdempotencyKey('n-2').from('notes').insert({ n: 2 });
+  assert.deepEqual(copy.calls.map((c) => c.key), ['n-2', 'n-2']);
+
+  // A read the builder made goes again, a batch of its queries alone too.
+  // A text, said to read or not, is the caller's: said home, it is a claim
+  // nothing checks -- a call to `history` stops being a read once the
+  // statement is made to log a row -- and goes once.
+  const reads = planned(
+    'reset',
+    answer(200, [{ id: 1 }]),
+    'reset',
+    answer(200, { results: [{ rows: [] }] }),
+    'reset',
+    'reset',
+    'reset',
+  );
+  const r = client.connect('http://db.test', { fetch: reads.fetch });
+  assert.deepEqual(await r.from('docs').rows(), [{ id: 1 }]);
+  assert.equal((await r.batch([r.from('docs')])).results.length, 1);
+  assert.equal(await r.rows('get docs').catch((e) => e.cause.code), 'ECONNRESET');
+  assert.equal(await r.run('get docs', [], { read: true }).catch((e) => e.cause.code), 'ECONNRESET');
+  assert.equal(await r.call('history', {}, { read: true }).catch((e) => e.cause.code), 'ECONNRESET');
+  assert.equal(reads.calls.length, 7);
+
+  // Said to read on a client reading near, a text goes marked
+  // (`Fennec-Read: replica`), which every server runs read-only: it goes
+  // again.
+  const near = planned('reset', answer(200, [{ id: 2 }]));
+  const n = client.connect('http://db.test', { fetch: near.fetch, reads: 'nearest' });
+  assert.deepEqual((await n.run('get docs', [], { read: true })).rows, [{ id: 2 }]);
+  assert.equal(near.calls.length, 2);
+
+  // A connection refused sent nothing: any request goes again.
+  const refused = planned('refused', answer(200, { affected: 1 }));
+  assert.equal((await client.connect('http://db.test', { fetch: refused.fetch }).run('put notes {n: 3}')).count, 1);
+  assert.equal(refused.calls.length, 2);
+});
+
+test('the tries are bounded: attempts, and their waits within maxWait', async () => {
+  const busy = () => answer(503, { error: 'too many connections', retry_after: 1, retry_after_ms: 5 });
+  const server = planned(busy(), busy(), busy(), busy(), answer(200, []));
+  const err = await client.connect('http://db.test', { fetch: server.fetch }).from('docs').rows().catch((e) => e);
+  assert.equal(server.calls.length, 3, 'three tries unless told');
+  // The last answer, with what the server said.
+  assert.equal(err.status, 503);
+  assert.equal(err.retryAfter, 0.005);
+
+  const four = planned(busy(), busy(), busy(), answer(200, [{ id: 1 }]));
+  const db = client.connect('http://db.test', { fetch: four.fetch, retry: { attempts: 4 } });
+  assert.deepEqual(await db.from('docs').rows(), [{ id: 1 }]);
+  assert.equal(four.calls.length, 4);
+
+  // A wait past what is left of maxWait is not waited: the refusal at once.
+  const long = planned(answer(429, { error: 'past', quota: 'writes', retry_after_ms: 5000 }), answer(200, []));
+  const late = await client
+    .connect('http://db.test', { fetch: long.fetch, retry: { maxWait: 1000 } })
+    .run('put notes {n: 1}')
+    .catch((e) => e);
+  assert.equal(late.retryAfter, 5);
+  assert.equal(long.calls.length, 1);
+
+  // Off: one try whatever the answer.
+  const off = planned(busy(), answer(200, []));
+  const once = await client.connect('http://db.test', { fetch: off.fetch, retry: false }).from('docs').rows().catch((e) => e);
+  assert.equal(once.status, 503);
+  assert.equal(off.calls.length, 1);
+  assert.throws(() => client.connect('http://db.test', { fetch: off.fetch, retry: { attempts: 0 } }), /retry/);
+  assert.throws(() => client.connect('http://db.test', { fetch: off.fetch, timeout: 0 }), /timeout/);
+});
+
+test('a request is given up at its timeout and never sent again; its body is timed between its pieces', async () => {
+  const hung = planned('hang', answer(200, { affected: 1 }));
+  const db = client.connect('http://db.test', { fetch: hung.fetch, timeout: 50 });
+  const t0 = performance.now();
+  const err = await db.run('put notes {n: 1}').catch((e) => e);
+  assert.equal(err.name, 'TimeoutError');
+  assert.match(err.message, /no answer within 50 ms/);
+  assert.ok(performance.now() - t0 >= 40);
+  assert.equal(hung.calls.length, 1, 'a write with no key that timed out may have landed');
+
+  // Past the client's own timeout a request may still run -- a `compact`, a
+  // `create index` -- and three tries of a long read ran it three times:
+  // a read the builder made is not sent again either, nor a write under a
+  // key.
+  const read = planned('hang', answer(200, [{ id: 1 }]));
+  const late = await client.connect('http://db.test', { fetch: read.fetch, timeout: 50 }).from('docs').rows().catch((e) => e);
+  assert.equal(late.name, 'TimeoutError');
+  assert.equal(read.calls.length, 1);
+  const keyed = planned('hang', answer(200, { affected: 1 }));
+  const k = client.connect('http://db.test', { fetch: keyed.fetch, timeout: 50 });
+  assert.equal((await k.run('put notes {n: 1}', [], { idempotencyKey: 'n-1' }).catch((e) => e)).name, 'TimeoutError');
+  assert.equal(keyed.calls.length, 1);
+
+  // A head that came, and a body that stops: given up the timeout after its
+  // last piece.
+  const stalled = planned('stall', answer(200, [{ id: 1 }]));
+  const r = client.connect('http://db.test', { fetch: stalled.fetch, timeout: 50 });
+  assert.equal((await r.from('docs').rows().catch((e) => e)).name, 'TimeoutError');
+  assert.equal(stalled.calls.length, 1);
+  assert.ok(stalled.calls[0].signal.aborted);
+
+  // A body that keeps coming is read for as long as it does: 10 pieces 20
+  // ms apart, 200 ms whole against a timeout of 50.
+  const slow = planned('trickle');
+  const t1 = performance.now();
+  const rows = await client.connect('http://db.test', { fetch: slow.fetch, timeout: 50 }).from('docs').rows();
+  assert.deepEqual(rows, [{ id: 1 }]);
+  assert.ok(performance.now() - t1 >= 150, 'read whole, past the timeout');
+  assert.equal(slow.calls.length, 1);
+});
+
+test('a batch whose statements landed is never sent again whole, whatever its stop says', async () => {
+  // A batch holding a `compact` runs a statement at a time; a stop after
+  // one landed, sent again whole, made it twice. The server answers such a
+  // stop with neither, and the client holds to it whatever it is told.
+  for (const stop of [
+    answer(503, { error: 'the tenant is being moved; retry shortly', completed: 1, at: 1, retry_after: 1 }, { 'retry-after': '1' }),
+    answer(429, { error: 'too many runs', completed: 2, at: 2, retry_after: 1 }, { 'retry-after': '1' }),
+  ]) {
+    const server = planned(stop, answer(200, { results: [] }));
+    const db = client.connect('http://db.test', { fetch: server.fetch });
+    const err = await db.batch(['compact notes', 'put notes {n: 1}', 'put notes {n: 2}']).catch((e) => e);
+    assert.equal(err.status, stop.status);
+    assert.ok(err.completed > 0);
+    assert.equal(server.calls.length, 1, `${stop.status} after a landing sent again`);
+  }
+});
+
+test("the caller's signal gives a request up, never sent again", async () => {
+  const hung = planned('hang', answer(200, []));
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 20);
+  const err = await client
+    .connect('http://db.test', { fetch: hung.fetch })
+    .run('get docs', [], { read: true, signal: stop.signal })
+    .catch((e) => e);
+  assert.equal(err.name, 'AbortError');
+  assert.equal(hung.calls.length, 1, 'a read the caller gave up is not sent again');
+
+  // Given up as it waits to go again.
+  const busy = planned(answer(503, { error: 'moved', retry_after: 5 }), answer(200, []));
+  const quit = new AbortController();
+  setTimeout(() => quit.abort(), 20);
+  const late = await client
+    .connect('http://db.test', { fetch: busy.fetch })
+    .run('get docs', [], { read: true, signal: quit.signal })
+    .catch((e) => e);
+  assert.equal(late.name, 'AbortError');
+  assert.equal(busy.calls.length, 1);
+});
+
+test('a stream is timed to its head, and opened again no sooner than a 503 says', async () => {
+  // 800 ms, past the 500 its second try's backoff would wait.
+  const server = planned('hang', answer(503, { error: 'too many subscriptions', retry_after: 1, retry_after_ms: 800 }), 'stall');
+  const db = client.connect('http://db.test', { fetch: server.fetch, timeout: 50 });
+  const errors = [];
+  const stop = db.subscribe('tasks', {}, () => {}, { onError: (e) => errors.push(e) });
+  await until(() => server.calls.length === 3, 2000);
+  assert.equal(errors[0].name, 'TimeoutError', 'no head within the timeout');
+  assert.equal(errors[1].status, 503);
+  const took = server.calls[2].at - server.calls[1].at;
+  assert.ok(took >= 790, `${took} ms`);
+  // Open, and quiet past the timeout: a stream's body is not timed.
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(server.calls[2].signal.aborted, false);
+  assert.equal(errors.length, 2);
+  stop();
+  await until(() => server.calls[2].signal.aborted);
+});
+

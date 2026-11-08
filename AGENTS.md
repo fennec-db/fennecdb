@@ -425,7 +425,7 @@ Covers `crates/fennec-ffi/`.
 
 ### `web/CLAUDE.md`
 
-Covers `web/`.
+Covers `web/`; its retry rule binds Python's clients (`integrations/python/`) too.
 
 *The JS client and Cloudflare*
 - One module and a client entry, by where the queries run.
@@ -433,6 +433,7 @@ Covers `web/`.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
 - A number from 2^53 on goes out as every digit.
+- A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 
 ### `studio/CLAUDE.md`
 

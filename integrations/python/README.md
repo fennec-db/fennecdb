@@ -97,6 +97,25 @@ db.with_idempotency_key(order_id).collection("orders").insert({"item": 1})
 db.seq                                        # the change the last write left the database at
 ```
 
+The client makes that retry itself where it is safe: a request the server
+says ran nothing -- a 503, or a 429 naming its wait -- goes again after that
+wait and never sooner, as does one whose connection was refused; a read the
+builder made or sent near, or a write under a key, goes again after a
+dropped connection too. A refusal naming no wait never does, nor a write
+without a key once it may have landed, nor a text given `read=True` and
+sent home, a claim nothing checks. `timeout` (seconds, 30 unless given)
+bounds the wait for an answer's head and between the pieces of its body,
+and nothing goes again after it, since the server may still be running the
+request: give a `compact` or a `create index` a client with a longer one.
+
+```python
+from fennecdb import Client, Retry
+
+db = Client(url, timeout=10, retry=Retry(attempts=5, max_wait=30))
+db = Client(url, retry=False)                 # one try, whatever the answer
+maintenance = Client(url, timeout=600)        # a compact runs long before it answers
+```
+
 One value in two places is one parameter with `param`, so the amount a
 write takes and the amount its filter checks cannot drift apart: each use
 of the same `param` writes the same `$n`, where two equal values are two:

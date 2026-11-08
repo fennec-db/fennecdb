@@ -80,6 +80,16 @@ all or none -- a <code>FennecError</code> that stops it says which
 <code>with_idempotency_key(key)</code> for every write of a copy, makes a
 write once however often it is sent (<code>db.replayed</code>), and
 <code>db.seq</code> is the change the last write left the database at.
+A request goes again only where that is safe: one the server says ran
+nothing -- a 503, or a 429 naming its wait -- after that wait, and one whose
+connection was refused; a read the builder made or sent near, or a write
+under a key, after a dropped connection too, and nothing after the
+client's own timeout (<a href="http.html#idempotency">Retrying a
+write</a>). <code>Client(url, timeout=10, retry=Retry(attempts=5,
+max_wait=30))</code> sets the bounds -- <code>timeout</code> seconds to an
+answer's head and between the pieces of its body, 30 unless given, longer
+for a <code>compact</code>; three tries and 10 s of waits --
+and <code>retry=False</code> turns it off.
 <code>AsyncClient</code> does the same in an event loop, the endpoints of
 its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>

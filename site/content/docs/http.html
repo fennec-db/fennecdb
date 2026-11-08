@@ -233,6 +233,16 @@ says what it left behind, because a silent error would
 permanently separate a client's optimistic local state from the
 server's.</p>
 
+<p>A stop after statements were applied is answered with that statement's
+own refusal, <code>completed</code> and <code>at</code> beside it — the
+statements before <code>at</code> made, it and those after it not — and
+never with a 503 or a 429 naming a wait, which say nothing ran and invite
+the whole batch again: sent again, its first statements would be made
+twice. A tenant being moved does not turn such a stop into its 503, and a
+stop by <code>--call-rate</code>, a 429 before anything landed, is a
+<b>409</b> naming no wait after: send the statements from <code>at</code>
+on, alone.</p>
+
 <p>The body is NDJSON rather than a JSON array because fennecdb's JSON parser
 deliberately does not accept nested objects, so
 <code>{"statements":[{...}]}</code> could not be parsed anyway. Instead of
@@ -255,7 +265,64 @@ after a timeout cannot write it twice: a repeat gets the first answer back.</p>
   <li><b>One key per write.</b> The same key with a different request is
     refused (422).</li>
   <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
+  <li><b>The JavaScript and Python clients retry for you, by one rule:</b>
+    a request goes again only where it ran nothing — a 503, or a quota's
+    429, naming its wait, sent after that wait and never sooner; a
+    connection refused — or where running it twice is harmless: a read the
+    builder made or sent near, or a write under a key, after a dropped
+    connection too. A write without a key is never sent again once it may
+    have landed, nor anything after the client's own timeout.</li>
 </ul>
+
+<details class="deep"><summary>What the clients send again, how often, and when they give a request up</summary>
+<p>The rule is the router's, which sends a request on to a node again only
+where the node cannot have run it or may run it twice. A refusal that names
+no wait — a quota waiting makes no room for, such as a full file's 507 or
+<code>held</code>'s 429, and every other 4xx — is the caller's at once, and
+so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
+503 or 429 whose body says statements of a batch were made
+(<code>completed</code>), which the server never answers so
+(<a href="#batches">Batches</a>).</p>
+<ul>
+  <li><b>Reads the client knows to be reads:</b> one the builder made —
+    marked by the builder itself — and one sent near, marked
+    <code>Fennec-Read: replica</code>, which every server runs read-only.
+    A text given <code>{ read: true }</code> (<code>read=True</code>) and
+    sent home is a claim nothing checks: a call to <code>history</code>
+    stops being a read once the statement is made to log a row, so it goes
+    once, as a write without a key does.</li>
+</ul>
+<ul>
+  <li><b>Bounded:</b> three tries at most and 10 s of waits between them:
+    the server's wait — <code>retry_after_ms</code>, to the millisecond,
+    before <code>Retry-After</code> — or 250 ms doubling where it names
+    none, with up to 30% jitter on top. A wait past what is left of the 10
+    s is not waited: the refusal is thrown at once, its
+    <code>retryAfter</code> (<code>retry_after</code> in Python) saying
+    when to come back. Past the tries, the last error, with what the server
+    said.</li>
+  <li><b>A timeout bounds the wait for an answer's head</b>, 30 s unless
+    given, a held write's <code>wait</code> on top, <b>and each wait between
+    the pieces of its body</b>: a long answer is read for as long as it
+    keeps coming, one that stops is given up. A stream's
+    (<code>live</code>, <code>subscribe</code>) is timed to its head alone.
+    Past the timeout the server may still be running the request, so
+    nothing goes again after it: give a statement that runs long before it
+    answers — a <code>compact</code>, a <code>create index</code> — a
+    client with a longer <code>timeout</code>. A JavaScript caller's
+    <code>signal</code> still gives a request up sooner, and nothing it gave
+    up is sent again.</li>
+  <li><b>The client makes no key:</b> a write goes again after a dropped
+    connection only under the <code>idempotencyKey</code>
+    (<code>idempotency_key</code>) its caller passed, one it can send again
+    after a restart too.</li>
+  <li><b>Off, or wider:</b> <code>{ retry: false }</code> and
+    <code>retry=False</code> send nothing again; <code>{ retry: { attempts,
+    maxWait } }</code> and <code>Retry(attempts, max_wait)</code> set the
+    bounds. The Go, .NET, Swift, Kotlin and Dart clients do not retry yet:
+    they hand every answer and error to the caller as before.</li>
+</ul>
+</details>
 
 <details class="deep"><summary>How an Idempotency-Key replays, and what it costs</summary>
 <p>A <code>put</code> with no id makes a row each time it runs, so a client

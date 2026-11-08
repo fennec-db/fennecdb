@@ -356,7 +356,14 @@ to the new primary, anything else 502 saying it may have run, the rule
 `replayable` already was; a held request by the same rule with what is
 left of its wait (the router cannot tell one held from one the node had
 just run as it died, and a claim run twice takes two jobs) -- and a
-stream ends for its client to open it again. An answer begun is never
+stream ends for its client to open it again. A request cut again on the
+copy it went on to is judged again, `CUT_TRIES` (3) cuts at most; past
+them it is the router's 503 to come back, unless its last cut came after
+it went out whole and it is not `replayable`: then too the 502
+(`may_have_run`). The limit's `break` skipped that judgement once, and a
+put cut twice before its last byte and once after it was told to come back
+-- by the clients that send a 503 naming its wait again, made twice
+(`a_write_whose_last_cut_went_whole_is_a_502_at_the_cut_limit`). An answer begun is never
 cut: the swap to `ANSWERING` and the cut's from `WAITING` are one word's,
 so the first wins whole, and macOS's `shutdown` drops what the socket had
 read but not handed over (a cut stream's last events, which its client's

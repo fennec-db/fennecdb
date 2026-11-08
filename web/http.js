@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fennecdb/web/client`).
 
-import { FennecError, Query, bodyOf, call, checked, declared, ident, nameOf, rowsOf, statementOf, whole } from './builder.js';
+import { BUILT, FennecError, Query, bodyOf, call, checked, declared, ident, nameOf, rowsOf, statementOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -24,6 +24,8 @@ export class FennecHttp {
   #url;
   #token;
   #fetch;
+  #timeout;
+  #retry;
 
   /**
    * Where a live query's error goes when it was given no `onError` of its
@@ -35,6 +37,11 @@ export class FennecHttp {
   #last;
   #reads;
 
+  /**
+   * `{ timeout }`: ms to an answer's head (30 000), a `{ wait }` on top,
+   * and between the pieces of its body. `{ retry }`: `false`, or `{
+   * attempts: 3, maxWait: 10000 }`, by which `#ask` sends a request again.
+   */
   constructor(url, opts = {}) {
     this.#url = String(url).replace(/\/+$/, '');
     this.#token = opts.token ?? null;
@@ -53,6 +60,12 @@ export class FennecHttp {
     if (typeof this.#fetch !== 'function') {
       throw new FennecError('fetch not found: pass one via opts.fetch');
     }
+    // `fetch` bounds nothing: a request the network lost waited for good.
+    this.#timeout = opts.timeout ?? 30000;
+    if (!(this.#timeout > 0)) throw new FennecError(`bad timeout: ${this.#timeout}`);
+    const r = opts.retry ?? true;
+    this.#retry = r && { attempts: 3, maxWait: 10000, ...r };
+    if (r && !(this.#retry.attempts >= 1 && this.#retry.maxWait >= 0)) throw new FennecError('bad retry');
   }
 
   /**
@@ -78,6 +91,8 @@ export class FennecHttp {
       fetch: this.#fetch,
       idempotencyKey: key,
       reads: this.#reads,
+      timeout: this.#timeout,
+      retry: this.#retry,
       [LAST]: this.#last,
     });
     // The schema `connect` checked, and its relations, go with it.
@@ -97,7 +112,8 @@ export class FennecHttp {
    * it up, as any `fetch`. `{ read: true }`: the text only reads, and goes
    * near on a client reading near, as the builder's reads do; its answer's
    * `seq` is then where the copy that answered stood as it read -- maybe a
-   * replica behind home -- which moves nothing of this client's.
+   * replica behind home -- which moves nothing of this client's. Home, it
+   * is a claim nothing checks, and a reset never sends the text again.
    */
   async run(sql, params = [], opts = {}) {
     const { body, seq, replayed } = await this.#send(
@@ -134,7 +150,8 @@ export class FennecHttp {
    * `{ idempotencyKey, wait, signal }` as `run`'s. `{ read: true }`: the
    * statement only reads, and goes near on a client reading near, after
    * this client's writes -- one that writes is refused there (403), never
-   * landed. `{ claims }` is `as {...}`, the claims the call is made with:
+   * landed; home, nothing checks it, and a reset never sends the call
+   * again. `{ claims }` is `as {...}`, the claims the call is made with:
    * the server's token alone may say them, a scoped token's are its own.
    */
   async call(name, args, opts = {}) {
@@ -174,14 +191,14 @@ export class FennecHttp {
       const [sql, params] = statementOf(item, i);
       return bodyOf(sql, params);
     });
-    const read = opts.read ?? items.every((item) => item instanceof Query);
+    const built = items.every((item) => item instanceof Query);
     const { body, seq, replayed } = await this.#send(
       '/batch',
       'application/x-ndjson',
       lines.join('\n'),
       opts.idempotencyKey ?? this.#key,
       [],
-      { ...opts, read },
+      { ...opts, read: opts.read ?? built, [BUILT]: built },
     );
     return { results: body?.results ?? [], seq, replayed };
   }
@@ -196,6 +213,63 @@ export class FennecHttp {
     return fetch(url, init);
   }
 
+  /**
+   * A request and its answer's text, its head within the timeout (a held
+   * write's wait on top) and each piece of its body within the timeout of
+   * the last, sent again by the router's rule
+   * (docs/design/js-client.md#retries): what ran nothing -- a 503 or 429
+   * naming its wait, after it, unless statements of a batch landed
+   * (`completed`); a connection refused -- and, where `twice` (a read the
+   * builder made or sent near, a write under a key), after a reset too.
+   * Never after the client's own timeout, which a request may still run
+   * past, nor at the caller's abort.
+   */
+  async #ask(url, init, twice) {
+    const { signal } = init;
+    const r = this.#retry;
+    const ms = this.#timeout;
+    for (let n = 0, waited = 0; ; n++) {
+      const c = bounded(signal, ms + (Number(init.headers?.['fennec-wait']) || 0));
+      let res, text, err;
+      let wait = 0;
+      try {
+        res = await this.#request(url, { ...init, signal: c.signal });
+        text = await textOf(res, c, ms);
+        if (res.status === 503 || res.status === 429) {
+          const b = parsed(text);
+          if (!(b?.completed > 0)) wait = waitOf(res, b) * 1000 || 0;
+        }
+        if (!wait) return { res, text };
+      } catch (e) {
+        if (signal?.aborted || c.late) throw c.late ?? e;
+        err = e;
+        if (!twice && e?.cause?.code !== 'ECONNREFUSED') throw e;
+      } finally {
+        c.end();
+      }
+      // 250 ms doubling, or the server's wait; 30% jitter on top, so a
+      // server back up is not met by every client at once.
+      const base = Math.max(wait, 250 * 2 ** n);
+      if (!r || n + 1 >= r.attempts || waited + base > r.maxWait) {
+        if (err) throw err;
+        return { res, text };
+      }
+      const w = Math.min(base * (1 + Math.random() * 0.3), r.maxWait - waited);
+      waited += w;
+      await pause(w, signal);
+    }
+  }
+
+  /** A stream's head within the timeout, `c`'s clock stopped there. */
+  async #open(url, headers, c, collection) {
+    const res = await this.#request(url, { headers, signal: c.signal }).catch((e) => {
+      throw c.late ?? e;
+    });
+    if (!res.ok || !res.body) throw await refusal(res, collection);
+    c.end(true);
+    return res;
+  }
+
   /** A POST's JSON answer; a status but `ok` among `also` is an error. */
   async #post(path, payload, also = []) {
     return (await this.#send(path, 'application/json', JSON.stringify(payload), null, also)).body;
@@ -205,7 +279,7 @@ export class FennecHttp {
    * A POST: its JSON answer, the change a write left the database at, and
    * whether the answer is the one kept for `key`.
    */
-  async #send(path, type, payload, key, also = [], { wait, signal, read, [AFTER]: after } = {}) {
+  async #send(path, type, payload, key, also = [], { wait, signal, read, [AFTER]: after, [BUILT]: built } = {}) {
     const headers = { 'content-type': type };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (key) headers['idempotency-key'] = key;
@@ -231,7 +305,12 @@ export class FennecHttp {
     }
     const init = { method: 'POST', headers, body: payload };
     if (signal) init.signal = signal;
-    let res = await this.#request(`${this.#url}${path}`, init);
+    // What may run twice: a read the builder made, one sent near, which
+    // every server runs read-only (`Fennec-Read`), and a write under a key.
+    // The caller's `read` is a claim nothing checks at home: a call it names
+    // may have been made to write since.
+    const ask = () => this.#ask(`${this.#url}${path}`, init, !!(built || key || headers['fennec-read']));
+    let { res, text } = await ask();
     // 504: no copy holds that write in the wait -- home had none either,
     // lost in a failover. Home says where it stands, which the client
     // takes as its position, lower or not; asked home again with no mark,
@@ -245,7 +324,7 @@ export class FennecHttp {
     // waited its whole wait for good. Whichever the read was sent after,
     // the client's or a live query's, is the one set back.
     if (near && res.status === 504 && headers['fennec-after']) {
-      const told = await res.json().catch(() => null);
+      const told = parsed(text);
       let took = false;
       if (told && Number.isSafeInteger(told.seq)) {
         const p = position(told.seq, typeof told.history === 'string' ? told.history : null);
@@ -256,24 +335,19 @@ export class FennecHttp {
       if (after && took) {
         at = of.at;
         mark();
-        res = await this.#request(`${this.#url}${path}`, init);
+        ({ res, text } = await ask());
       }
       if (res.status === 504) {
         delete headers['fennec-read'];
         delete headers['fennec-after'];
         delete headers['fennec-history'];
         if (after) delete headers['fennec-wait'];
-        res = await this.#request(`${this.#url}${path}`, init);
+        ({ res, text } = await ask());
         near = false;
       }
     }
-    const text = await res.text();
-    let body;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      throw new FennecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
-    }
+    const body = text ? parsed(text) : null;
+    if (body === undefined) throw new FennecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
     if (!res.ok && !also.includes(res.status)) {
       // The status is the refusal's kind: 412 a write's `require` not met,
       // 409 a value taken, 403 outside the token's rules, 422 a key sent
@@ -361,7 +435,8 @@ export class FennecHttp {
     let rows;
     let reads;
     if (query instanceof Query) {
-      const bound = query.plain().bind((sql, params) => this.run(sql, params, marked));
+      // The builder's mark kept: its run may go again after a reset.
+      const bound = query.plain().bind((sql, params, h) => this.run(sql, params, { ...h, ...marked }));
       rows = () => bound.rows();
       reads = query.reads;
     } else {
@@ -412,9 +487,10 @@ export class FennecHttp {
       const url = `${this.#url}/${encodeURIComponent(collection)}/changes?select=id&where=false`;
       let seeded = false;
       for (let attempt = 0; !stop.signal.aborted; attempt++) {
+        const c = bounded(stop.signal, this.#timeout);
+        let wait = 0;
         try {
-          const res = await this.#request(url, { headers, signal: stop.signal });
-          if (!res.ok || !res.body) throw await refusal(res, collection);
+          const res = await this.#open(url, headers, c, collection);
           // The history each event's `seq` is of, as the head names it;
           // the seed's `seq` is at or past the head's `Fennec-Seq`.
           const history = res.headers.get('fennec-history');
@@ -437,15 +513,19 @@ export class FennecHttp {
             if (unseeded === 0) run();
           }
         } catch (err) {
+          wait = err?.retryAfter * 1000 || 0;
           report(err);
           // A token refused -- or lapsed under an open stream, which the
           // server ends at its `exp` -- is refused again however often it
           // is sent, and each refusal waits longer: the live query stops
           // there, for the app to open it again with a fresh token.
           if (err?.status === 401) return stop.abort();
+        } finally {
+          c.end();
         }
         if (stop.signal.aborted) return;
-        await new Promise((r) => setTimeout(r, Math.min(15000, 250 * 2 ** attempt)));
+        // Never sooner than the server said (`Retry-After`): nothing ran.
+        await pause(Math.max(wait, Math.min(15000, 250 * 2 ** attempt)));
       }
     };
     for (const c of collections) follow(c);
@@ -488,9 +568,10 @@ export class FennecHttp {
     const stop = new AbortController();
     (async () => {
       for (let attempt = 0; !stop.signal.aborted; attempt++) {
+        const b = bounded(stop.signal, this.#timeout);
+        let wait = 0;
         try {
-          const res = await this.#request(url, { headers, signal: stop.signal });
-          if (!res.ok || !res.body) throw await refusal(res, c);
+          const res = await this.#open(url, headers, b, c);
           for await (const ev of sseEvents(res)) {
             if (stop.signal.aborted) return;
             if (ev.name === 'error') throw streamError(ev.data);
@@ -505,14 +586,17 @@ export class FennecHttp {
           }
         } catch (err) {
           if (stop.signal.aborted) return;
+          wait = err?.retryAfter * 1000 || 0;
           if (onError) onError(err);
           else Promise.reject(err);
           // A token refused is refused again: stopped, for a fresh one.
           if (err?.status === 401) return stop.abort();
+        } finally {
+          b.end();
         }
         if (stop.signal.aborted) return;
         opts.onState?.('retry');
-        await new Promise((r) => setTimeout(r, Math.min(15000, 250 * 2 ** attempt)));
+        await pause(Math.max(wait, Math.min(15000, 250 * 2 ** attempt)));
       }
     })();
     return () => stop.abort();
@@ -544,14 +628,15 @@ export class FennecHttp {
     let tag = '"0"';
     const round = async () => {
       try {
-        const res = await this.#request(`${this.#url}/query`, {
-          method: 'POST',
-          headers: { ...headers, 'if-none-match': tag },
-          body,
-          signal: stop.signal,
-        });
+        // A builder's read goes again after a reset, before the next
+        // round, as any it made does; a text, the caller's, does not.
+        const { res, text } = await this.#ask(
+          `${this.#url}/query`,
+          { method: 'POST', headers: { ...headers, 'if-none-match': tag }, body, signal: stop.signal },
+          query instanceof Query,
+        );
         if (res.status === 304) return;
-        const got = await res.json();
+        const got = JSON.parse(text);
         if (!res.ok) throw refused(res, got);
         tag = res.headers.get('etag') ?? '"0"';
         if (!stop.signal.aborted) cb(rowsOf(Array.isArray(got) ? { rows: got } : got));
@@ -566,7 +651,7 @@ export class FennecHttp {
     (async () => {
       while (!stop.signal.aborted) {
         await round();
-        await new Promise((r) => setTimeout(r, every));
+        await pause(every);
       }
     })();
     return () => stop.abort();
@@ -581,19 +666,9 @@ export class FennecHttp {
 /** Why a subscription could not open: the server's words, and its status. */
 async function refusal(res, collection) {
   const text = await res.text().catch(() => '');
-  let said = text;
-  try {
-    said = JSON.parse(text)?.error ?? text;
-  } catch {
-    // not JSON: the text as it came
-  }
-  let body = null;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    // no JSON to read a quota from
-  }
-  return refused(res, body, `could not open the subscription to \`${collection}\`: ${said || `HTTP ${res.status}`}`);
+  // Not JSON: the text as it came, and no quota to read.
+  const body = parsed(text);
+  return refused(res, body, `could not open the subscription to \`${collection}\`: ${body?.error ?? (text || `HTTP ${res.status}`)}`);
 }
 
 /**
@@ -617,16 +692,104 @@ function refused(res, body, message) {
   if (typeof body?.completed === 'number') e.completed = body.completed;
   const quota = body?.quota ?? res.headers?.get?.('fennec-quota');
   if (quota) e.quota = quota;
-  // The wait to the millisecond where the body says it: `Retry-After` is
-  // whole seconds, and a bucket of 600 rows a second refills a row in 1.7 ms.
-  const ms = Number(body?.retry_after_ms);
-  const wait = Number.isFinite(ms) && ms > 0
-    ? ms / 1000
-    : Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
-  if (Number.isFinite(wait) && wait > 0) e.retryAfter = wait;
+  const wait = waitOf(res, body);
+  if (wait) e.retryAfter = wait;
   // Answered after its lease lapsed: its position, never the client's.
   if (body?.outcome === 'unknown') Object.assign(e, { outcome: 'unknown', seq: body.seq, history: body.history });
   return e;
+}
+
+/**
+ * The seconds an answer asks a client to wait, where it names any: to the
+ * millisecond where the body says it -- `Retry-After` is whole seconds, and
+ * a bucket of 600 rows a second refills a row in 1.7 ms -- then the header,
+ * then the body's, for a page whose CORS exposes no header.
+ */
+function waitOf(res, body) {
+  const ms = Number(body?.retry_after_ms);
+  const wait = ms > 0 ? ms / 1000 : Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
+  return wait > 0 && wait < Infinity ? wait : undefined;
+}
+
+/** `text` as JSON, or undefined where it is none. */
+function parsed(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // none
+  }
+}
+
+/**
+ * One request's signal: aborted at `signal`'s abort and once `ms` pass
+ * with its clock running (`late`, a `TimeoutError` as
+ * `AbortSignal.timeout`'s, which cannot be stopped at a stream's head nor
+ * started again at a piece of a body; `AbortSignal.any` is Safari 17.4's).
+ * `tick(ms)` starts the clock again; `end(true)` stops it alone, `end()`
+ * lets `signal` go too: a live query opens one at each stream, which would
+ * each stay listening on it.
+ */
+function bounded(signal, ms) {
+  const c = new AbortController();
+  const pass = () => c.abort(signal.reason);
+  if (signal?.aborted) pass();
+  else signal?.addEventListener('abort', pass);
+  // The clock runs to `end`, which a tick moves on; its timer, due no
+  // later, sets itself again for what is left as it fires. A timer set
+  // again at each piece cost a request 0.4 us, 7% of a `run` over a
+  // `fetch` answering in-process.
+  let t, end, due;
+  const fire = (w = end - performance.now()) => {
+    if (!(w > 0)) return c.signal.aborted || c.abort((c.late = new DOMException(`no answer within ${ms} ms`, 'TimeoutError')));
+    clearTimeout(t);
+    due = performance.now() + w;
+    if (w < 2 ** 31) t = setTimeout(fire, w);
+  };
+  c.tick = (w) => {
+    end = performance.now() + (ms = w);
+    if (!(due <= end)) fire(w);
+  };
+  c.tick(ms);
+  c.end = (clock) => {
+    clearTimeout(t);
+    if (!clock) signal?.removeEventListener('abort', pass);
+  };
+  return c;
+}
+
+/**
+ * `res`'s body as text, each piece within `ms` of the last (`c`'s clock):
+ * a long answer is read for as long as it comes, one that stops is given
+ * up. Bounded whole, a long read failed at the timeout however steadily it
+ * came.
+ */
+async function textOf(res, c, ms) {
+  const r = res.body?.getReader();
+  if (!r) return c.tick(ms), res.text();
+  const d = new TextDecoder();
+  let s = '';
+  for (;;) {
+    c.tick(ms);
+    const { done, value } = await r.read();
+    if (done) return s + d.decode();
+    s += d.decode(value, { stream: true });
+  }
+}
+
+/** `ms` waited, or rejected at `signal`'s abort. */
+function pause(ms, signal) {
+  return new Promise((ok, no) => {
+    const stop = () => {
+      clearTimeout(t);
+      no(signal.reason);
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', stop);
+      ok();
+    }, ms);
+    if (signal?.aborted) stop();
+    else signal?.addEventListener('abort', stop);
+  });
 }
 
 /**

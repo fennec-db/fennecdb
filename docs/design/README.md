@@ -25,7 +25,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [indexes.md](indexes.md) -- `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
-- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms
+- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms, and what the HTTP clients send again
 - [text.md](text.md) -- collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
@@ -195,3 +195,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 150. [Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero](text.md#match-as-a-filter) (added after the move, under *Text*)
 151. [A collection whose name starts with `_` is the server's, out of every rule's reach](access.md#the-servers-own-collections) (added after the move, under *Access*)
 152. [The OpenAPI document is held to the routes](http.md#openapi) (added after the move, under *The HTTP server*)
+153. [A client sends a request again only where it cannot have run or may run twice, and bounds every request in time](js-client.md#retries) (added after the move, under *The JS client and Cloudflare*)
