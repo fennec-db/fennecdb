@@ -548,7 +548,7 @@ impl Value {
                     Some(Ordering::Equal) if a.abs() >= EVERY_INT => tie(self, other),
                     Some(o) => o,
                     // A `NaN`, which only a float is: above the other.
-                    None => a.is_nan().cmp(&b.is_nan()),
+                    None => nan_order(a, b),
                 },
                 // Incomparable types fall back to type rank. This used to
                 // return Equal: `year = "abc"` matched every row.
@@ -571,8 +571,17 @@ impl Value {
 fn floats(a: f64, b: f64) -> std::cmp::Ordering {
     match a.partial_cmp(&b) {
         Some(o) => o,
-        None => a.is_nan().cmp(&b.is_nan()),
+        None => nan_order(a, b),
     }
+}
+
+/// [`floats`] where a `NaN` is met. Out of line and cold: inlined, its
+/// test was folded into the `>` path, and an order of 100 000 rows by a
+/// float took 1.8% more instructions.
+#[cold]
+#[inline(never)]
+fn nan_order(a: f64, b: f64) -> std::cmp::Ordering {
+    a.is_nan().cmp(&b.is_nan())
 }
 
 /// `v` as a `json` field holds it: what JSON can say, nested no deeper

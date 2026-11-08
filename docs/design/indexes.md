@@ -454,7 +454,16 @@ router merging tenants' rows reads them from JSON, where a `NaN` is `null`
 and orders first, so a tenant whose ordered rows end in one is named out of
 order, never merged wrong -- as one ending in `+inf` was. A held write's
 rank by an expression (`waits::rank`) leaves a non-finite key to the
-arrival's order, as before. `tests/nan.rs` holds every index -- `@hash`,
+arrival's order, as before. The `NaN` test is out of line and cold
+(`value::nan_order`): inlined, it was folded into the `>` path, and an
+order of 100 000 rows by a float took 1.8% more instructions. This way,
+against the build before (`make instr-compare PKG=fennec-core
+EXAMPLE=orders`, each build under 8 UUIDs, 7 rounds, the 1-minute load at
+most 4.2): an order by an int +0.01%, by a float -0.54%, a float field's
+scan -0.19%, a group by a float +0.03% -- the key's `NaN` test, under one
+instruction a row. The browser module is 1 399 bytes smaller, 507 gzip and
+274 brotli (inside the 0.3 KB brotli moves by), 1 081 of them the ordered
+index's. `tests/nan.rs` holds every index -- `@hash`,
 `@sorted`, an index over several fields either way, a json path's, an
 int's and a timestamp's against a `NaN` literal -- to the scan and the
 scan to PostgreSQL's order over random edges (`NaN`s of four bit patterns,
