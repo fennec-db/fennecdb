@@ -351,12 +351,19 @@ def _jobs(client):
 
 
 def test_a_held_claim_takes_the_job_enqueued_meanwhile(client):
+    """A job is ready by an instant the test holds, not by now(): a lease of
+    now() + a minute runs out whenever a minute passes between two claims
+    (an iOS simulator's run of the Swift twin once stalled 75 s between
+    them), the later claim taking a job the first held. now() writes the
+    leases still, every one of them past that instant."""
     import threading
     import time
 
     name = _jobs(client)
+    # Past every job's run_at (milliseconds since the epoch).
+    ready_by = 1000
     try:
-        jobs = client.collection(name).where(raw("run_at <= now()")).order("run_at").limit(1)
+        jobs = client.collection(name).where(raw("run_at <= ?", ready_by)).order("run_at").limit(1)
 
         def lease(owner):
             return {"owner": owner, "run_at": expr("now() + ?", 60000)}
@@ -365,13 +372,13 @@ def test_a_held_claim_takes_the_job_enqueued_meanwhile(client):
 
         def worker():
             got["rows"] = Client(URL, TOKEN).collection(name).where(
-                raw("run_at <= now()")
+                raw("run_at <= ?", ready_by)
             ).order("run_at").limit(1).update(lease("w1"), returning=["kind"], wait=10)
 
         t = threading.Thread(target=worker)
         t.start()
         time.sleep(0.3)
-        client.collection(name).insert({"kind": "mail", "run_at": int(time.time() * 1000)})
+        client.collection(name).insert({"kind": "mail", "run_at": 1})
         t.join(10)
         assert got["rows"] == [{"kind": "mail"}]
         # Nothing to take: the wait ends on time, with no row.

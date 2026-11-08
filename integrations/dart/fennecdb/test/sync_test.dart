@@ -653,12 +653,19 @@ void main() {
     await db.close();
   });
 
+  // A job is ready by an instant the test holds, not by now(): a lease of
+  // now() + a minute runs out whenever a minute passes between two claims,
+  // and an iOS simulator's run of the Swift twin once stalled 75 s between
+  // them, the second claim taking a job the first held. now() writes the
+  // leases still, every one of them past that instant.
   test('a claim held at the server takes the job enqueued meanwhile, and ends on time', () async {
     final s = await server('held');
     await s.run('create collection jobs (kind text, run_at timestamp @sorted, owner text)');
     final db = Fennec.connect(s.url);
+    // Past every job's run_at (milliseconds since the epoch).
+    const ready = 1000;
     Future<Rows> claim(FennecRemote c, String owner) =>
-        c.from('jobs').where(Cond.raw('run_at <= now()')).order('run_at').limit(1).updateReturning({
+        c.from('jobs').where(Cond.raw('run_at <= ?', [ready])).order('run_at').limit(1).updateReturning({
           'owner': owner,
           'run_at': Computed.expr('now() + ?', [60000])
         }, returning: [
@@ -666,7 +673,7 @@ void main() {
         ]);
     final held = claim(db.withWait(const Duration(seconds: 10)), 'w1');
     await Future<void>.delayed(const Duration(milliseconds: 200));
-    await db.execute('put jobs {kind: "mail", run_at: \$1}', [DateTime.now().millisecondsSinceEpoch]);
+    await db.execute('put jobs {kind: "mail", run_at: 1}');
     expect([for (final r in await held.timeout(const Duration(seconds: 5))) r['kind']], ['mail']);
     final began = DateTime.now();
     expect(await claim(db.withWait(const Duration(milliseconds: 300)), 'w2'), isEmpty);
