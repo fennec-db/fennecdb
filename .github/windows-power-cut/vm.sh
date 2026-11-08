@@ -241,6 +241,20 @@ fennec() {
     "${CLIENT[@]}" setup
 }
 
+# The server that opened the file after the cut holds its lock: a second
+# one over the file is refused, naming it. Bounded: one that is not refused
+# would serve.
+lock_held() {
+    local out
+    out=$(timeout 60 sshpass -p "$PW" ssh "${SSHO[@]}" -p 2222 Administrator@127.0.0.1 \
+        'C:\ci\fennec-server.exe --file C:\d\t.fennec --http 127.0.0.1:0' 2>&1 | tr -d '\r' || true)
+    if ! grep -q 'it is open already' <<< "$out"; then
+        echo "LOCK $1: a second server over the file was not refused: $out"
+        return 1
+    fi
+    say "LOCK $1: a second server over the file refused: $out"
+}
+
 # The disk as of the last flush cut N's log holds: an overlay on the image
 # the logged boot began from, the log replayed into it through qemu-nbd.
 lost_disk() {
@@ -269,12 +283,22 @@ boot_check() {
     start_vm "$disk" "$log"
     wait_ssh 600 10 "boot$n-$label" 240 60
     say "TIMING cut${n}_${label}_boot_to_first_command=$(( $(now) - t0 ))s"
-    gssh 'dir C:\d' | tr -d '\r' | grep -E 't\.fennec' | sed "s/^ */FILES cut $n $label: /" || true
+    # What the cut left beside the file: its lock, and the image a compact
+    # it stopped was writing (`.beside`, which the next compact writes
+    # anew). Windows keeps no sync log (docs/design/windows.md, decision 3),
+    # so nothing else.
+    gssh 'dir /b C:\d' | tr -d '\r' | grep -v '^$' > "$VM/files-$n-$label.txt"
+    say "FILES cut $n $label: $(tr '\n' ' ' < "$VM/files-$n-$label.txt")"
+    if grep -v -x -E 't\.fennec|t\.fennec\.lock|t\.fennec\.beside' "$VM/files-$n-$label.txt"; then
+        echo "a file the server does not keep is beside the database"
+        return 1
+    fi
     serve "$n-$label"
+    lock_held "$n-$label"
     t0=$(now)
-    "${CLIENT[@]}" check --cut "$n" --label "$label" --cut-time "$(cat "$VM/cut-$n.time")" $commit |
+    "${CLIENT[@]}" check --cut "$n" --label "$label" --cut-time "$(tr '\n' ' ' < "$VM/cut-$n.time")" $commit |
         tee "$VM/check-$n-$label.log"
-    grep -E '^(VERDICT|DOCS|CHURN|SPILL|IDEM|LOAD|BATCH|INFLIGHT)' "$VM/check-$n-$label.log" >> "$VM/summary.txt"
+    grep -E '^(VERDICT|DOCS|CHURN|SPILL|IDEM|LOAD|BATCH|INFLIGHT|PROBE)' "$VM/check-$n-$label.log" >> "$VM/summary.txt"
     say "TIMING cut${n}_${label}_check=$(( $(now) - t0 ))s"
 }
 
@@ -302,6 +326,8 @@ power_cut() {
     say "CUT $n ($mode) ${delay}s into the writes (seed $SEED, a window of ${WINDOW_LO} to ${WINDOW_HI}s)"
     sleep "$delay"
     date +%s.%N > "$VM/cut-$n.time"
+    kill -9 "$(cat "$VM/qemu.pid")"
+    date +%s.%N >> "$VM/cut-$n.time"
     qemu_kill
     # The load's threads each stop at their first error, which the cut is.
     for _ in $(seq 1 120); do kill -0 "$lp" 2>/dev/null || break; sleep 0.5; done

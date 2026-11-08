@@ -13,7 +13,8 @@ runner beside QEMU.
 `load` writes until the server stops answering -- the cut -- with a thread
 each: single puts, `/batch`es of 8 with an `Idempotency-Key`'d write between
 them, a document written over and over, a `/batch` past 16 MiB (a spill)
-written over every few seconds, and a `compact` every second and a half.
+written over 2 s after the last, and a `compact` half a second after the
+last.
 Every write is logged before it is sent and again once a 2xx answers it, a
 line each, flushed: DIR/events-N.jsonl, the host's record of what the server
 acknowledged, kept outside the guest.
@@ -46,8 +47,12 @@ CHURN_LEN = 2048
 # block spills (kind 10) before it lands (kind 11).
 SPILL_DOCS = 40
 SPILL_LEN = 512 * 1024
-SPILL_EVERY = 5.0
-COMPACT_EVERY = 1.5
+# Paced so that most cuts land in a compact (about 2 s each, half a second
+# apart) and many in a spill (1.4 to 5.4 s each, 2 s apart): run 1 had a
+# compact in flight at two cuts of five with 1.5 s between, a spill at none
+# with 5 s.
+SPILL_EVERY = 2.0
+COMPACT_EVERY = 0.5
 IDEM_EVERY = 3  # an Idempotency-Key'd write after every third batch
 BASE = 10_000_000  # a cut's ids and versions: N * BASE + its own count
 
@@ -280,7 +285,11 @@ class Check:
         self.ev = events(args.state, args.cut)
         self.sent = {e["q"]: e for e in self.ev if e["ev"] == "send"}
         self.acked = {e["q"]: e for e in self.ev if e["ev"] == "ack"}
-        self.cut_at = float(args.cut_time) if args.cut_time else None
+        # The host's clock just before `kill -9` and just after: a write
+        # sent before the second may have reached the guest.
+        self.cut_at = self.killed = None
+        if args.cut_time:
+            self.cut_at, self.killed = (float(t) for t in args.cut_time.split())
 
     def fail(self, what):
         self.bad.append(what)
@@ -345,8 +354,10 @@ class Check:
                 e = self.sent[q]
                 if e["t"] <= self.cut_at:
                     print(f"INFLIGHT {names[e['op']]} q={q}, sent {self.cut_at - e['t']:.3f} s before the cut")
+                elif e["t"] <= self.killed:
+                    print(f"INFLIGHT {names[e['op']]} q={q}, sent as QEMU was killed")
                 else:
-                    print(f"AFTER {names[e['op']]} q={q}, tried {e['t'] - self.cut_at:.3f} s after the cut")
+                    print(f"AFTER {names[e['op']]} q={q}, tried {e['t'] - self.killed:.3f} s after the cut")
 
     def docs(self):
         committed = {int(k): v for k, v in self.state["docs"].items()}
