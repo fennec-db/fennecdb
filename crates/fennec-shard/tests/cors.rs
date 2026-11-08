@@ -246,6 +246,27 @@ fn the_routers_own_answers_tell_an_allowed_page() {
     assert!(!r.head.contains(EVIL), "{}", r.head);
 }
 
+/// `/_openapi.json` (fennec-http's `openapi.rs`): what a tenant's client
+/// calls through the router, each tenant's routes below `/t/{tenant}`,
+/// served with no token and told to an allowed page, as Swagger UI on
+/// another origin reads it. The node's administration is not in it.
+#[test]
+fn the_router_serves_the_openapi_document_of_a_tenants_routes() {
+    use fennec_http::openapi::{document, Kind};
+    let port = router(Directory::in_memory(), Some(APP), 0);
+    let r = ask(port, "GET", "/_openapi.json", Some(APP), "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.tells(APP);
+    assert_eq!(r.body.as_bytes(), document(Kind::Router));
+    assert!(r.body.starts_with(r#"{"openapi":"3.1.0""#), "{}", r.body);
+    for path in [r#""/t/{tenant}/query""#, r#""/t/{tenant}/{collection}""#] {
+        assert!(r.body.contains(path), "{path}");
+    }
+    assert!(!r.body.contains(r#""/_admin/"#));
+    assert_eq!(ask(port, "HEAD", "/_openapi.json", None, "").status, 200);
+    assert_eq!(ask(port, "POST", "/_openapi.json", None, "").status, 405);
+}
+
 #[test]
 fn a_node_the_router_cannot_reach_is_a_503_a_page_reads() {
     let port = router(placed_at(&dead_addr()), Some(APP), 0);

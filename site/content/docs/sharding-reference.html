@@ -174,6 +174,7 @@ does not return them.</p>
 <tr><td><code>GET /_shard/tenants/&lt;t&gt;/hooks</code></td><td>what the node lists, and the copies behind; never a secret</td></tr>
 <tr><td><code>POST /_shard/query</code></td><td>one read on every tenant, or those named, the answers merged as the request says (<a href="sharding-tenants.html#across-tenants">A query across tenants</a>)</td></tr>
 <tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
+<tr><td><code>GET /_openapi.json</code></td><td>the OpenAPI 3.1 document of what a tenant's client calls through the router, each tenant's routes below <code>/t/{tenant}</code>, and the router's own <code>/_metrics</code>, <code>/_studio/</code> and <code>/_replication</code>, with no token; the <code>/_shard/</code> routes of this table are not in it (<a href="http-reference.html#openapi">The OpenAPI document</a>)</td></tr>
 </tbody>
 </table>
 </div>

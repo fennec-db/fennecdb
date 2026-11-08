@@ -16,7 +16,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed
+- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
@@ -194,4 +194,5 @@ A proposal holds no invariant until it is built, and is listed apart:
 149. [Every HTTP dial takes HTTPS by its URL](http.md#dialing-https) (added after the move, under *The HTTP server*)
 150. [Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero](text.md#match-as-a-filter) (added after the move, under *Text*)
 151. [A collection whose name starts with `_` is the server's, out of every rule's reach](access.md#the-servers-own-collections) (added after the move, under *Access*)
-152. [A client sends a request again only where it cannot have run or may run twice, and bounds every request in time](js-client.md#retries) (added after the move, under *The JS client and Cloudflare*)
+152. [The OpenAPI document is held to the routes](http.md#openapi) (added after the move, under *The HTTP server*)
+153. [A client sends a request again only where it cannot have run or may run twice, and bounds every request in time](js-client.md#retries) (added after the move, under *The JS client and Cloudflare*)

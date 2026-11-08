@@ -10,6 +10,7 @@ mod hooks;
 mod https;
 mod logs;
 mod mcp;
+mod openapi;
 mod otlp;
 mod providers;
 mod scheduled;
