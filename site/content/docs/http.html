@@ -330,7 +330,9 @@ curl -X PATCH http://127.0.0.1:8080/articles/3 \
     the tag under the same write lock that makes the write.</li>
   <li><b><code>If-None-Match: *</code></b> with <code>PUT
     /&lt;name&gt;/&lt;id&gt;</code> makes the row only if there is none;
-    <code>If-Match: *</code> writes only if it is there.</li>
+    <code>If-Match: *</code> writes only if it is there. <code>PUT</code> is
+    the server token's: a user's scoped token writes over the row it read
+    with <code>PATCH</code> or <code>DELETE</code>.</li>
   <li><b><code>If-None-Match</code> with the tag on a <code>GET</code></b>
     answers <code>304</code> while the row is unchanged.</li>
   <li><b>Retry with both.</b> An <code>Idempotency-Key</code> beside

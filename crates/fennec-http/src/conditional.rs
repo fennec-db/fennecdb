@@ -145,34 +145,63 @@ fn which(name: &str) -> u8 {
 
 /// What a request asks of the row it names before it is answered or
 /// written: `If-Match` and `If-None-Match`, the standard's names for the
-/// two, read in one pass over its headers.
-#[derive(Clone, Copy, Default)]
+/// two, which of them it sent read in one pass over its headers.
+///
+/// Every line of each is read, as one list: RFC 9110 (5.3) has a field
+/// sent on several lines mean their values joined by commas, and a proxy
+/// may split a list so, or join it. Kept by its last line alone, `If-Match:
+/// "<the row's tag>"` then `If-Match: "x"` was 412 over the very row it
+/// named, and `If-None-Match` naming the row on its first line was
+/// written over it. The lines are read again only where one was sent.
+#[derive(Clone, Copy)]
 pub struct Preconditions<'a> {
-    pub if_match: Option<&'a str>,
-    pub if_none_match: Option<&'a str>,
+    headers: &'a [(String, String)],
+    sent: u8,
 }
 
 impl<'a> Preconditions<'a> {
     pub fn of(req: &'a Request) -> Preconditions<'a> {
-        let mut p = Preconditions::default();
-        for (k, v) in (req.headers.iter()).filter(|(k, _)| starts_if(k)) {
-            match which(k) {
-                IF_MATCH => p.if_match = Some(v),
-                IF_NONE_MATCH => p.if_none_match = Some(v),
-                _ => {}
-            }
+        let mut sent = NEITHER;
+        for (k, _) in (req.headers.iter()).filter(|(k, _)| starts_if(k)) {
+            sent |= which(k);
         }
-        p
+        Preconditions {
+            headers: &req.headers,
+            sent,
+        }
     }
 
     pub fn any(&self) -> bool {
-        self.if_match.is_some() || self.if_none_match.is_some()
+        self.sent != NEITHER
+    }
+
+    /// Whether `If-Match` was sent, on any line.
+    pub fn if_match(&self) -> bool {
+        self.sent & IF_MATCH != 0
+    }
+
+    /// Whether `If-None-Match` was sent, on any line.
+    pub fn if_none_match(&self) -> bool {
+        self.sent & IF_NONE_MATCH != 0
+    }
+
+    /// The values of every line of `name`, one of [`IF_MATCH`] and
+    /// [`IF_NONE_MATCH`], in the order sent.
+    fn lines(&self, name: u8) -> impl Iterator<Item = &'a str> {
+        (self.headers.iter())
+            .filter(move |(k, _)| starts_if(k) && which(k) == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Whether `name`'s list, all its lines, holds `now` ([`listed`]).
+    fn names(&self, name: u8, now: Option<&str>, weak: bool) -> bool {
+        self.lines(name).any(|v| listed(v, now, weak))
     }
 
     /// Whether `If-None-Match` is `*`: a `PUT` made only where there is no
     /// such row, which the route sends as an `insert`.
     pub fn only_if_absent(&self) -> bool {
-        self.if_none_match.is_some_and(|v| v.trim() == "*")
+        self.if_none_match() && self.lines(IF_NONE_MATCH).any(|v| v.trim() == "*")
     }
 
     /// The refusal of a write over a row whose tag is `now` -- `None`
@@ -180,36 +209,34 @@ impl<'a> Preconditions<'a> {
     /// `If-Match` first, compared strongly, then `If-None-Match`, weakly
     /// (RFC 9110, 13.2.2). 412 where either fails.
     pub fn refused(&self, now: Option<&str>) -> Option<Response> {
-        if let Some(asked) = self.if_match {
-            if !listed(asked, now, false) {
-                return Some(failed(match now {
-                    None => "If-Match: there is no such row",
-                    Some(_) => "If-Match: the row is not the one tagged, it changed since",
-                }));
-            }
+        if self.if_match() && !self.names(IF_MATCH, now, false) {
+            return Some(failed(match now {
+                None => "If-Match: there is no such row",
+                Some(_) => "If-Match: the row is not the one tagged, it changed since",
+            }));
         }
-        if let Some(asked) = self.if_none_match {
-            if listed(asked, now, true) {
-                return Some(failed(match asked.trim() {
-                    "*" => "If-None-Match: * -- the row is there",
-                    _ => "If-None-Match: the row is the one tagged",
-                }));
-            }
+        if self.if_none_match() && self.names(IF_NONE_MATCH, now, true) {
+            return Some(failed(match self.only_if_absent() {
+                true => "If-None-Match: * -- the row is there",
+                false => "If-None-Match: the row is the one tagged",
+            }));
         }
         None
     }
 
     /// A read's answer to its preconditions over a row tagged `now`: 412
-    /// where `If-Match` fails, 304 where `If-None-Match` names it.
+    /// where `If-Match` fails, 304 where `If-None-Match` names it. Either
+    /// answer carries `Cache-Control: no-transform`, as the row's does
+    /// (`Response::no_transform`).
     pub fn read(&self, now: Option<&str>) -> Option<Response> {
-        if let Some(asked) = self.if_match {
-            if !listed(asked, now, false) {
-                return Some(failed("If-Match: the row is not the one tagged"));
-            }
+        if self.if_match() && !self.names(IF_MATCH, now, false) {
+            return Some(failed("If-Match: the row is not the one tagged"));
         }
-        match (self.if_none_match, now) {
-            (Some(asked), Some(tag)) if listed(asked, now, true) => {
-                Some(Response::json(304, Vec::new()).header("ETag", tag))
+        match now {
+            Some(tag) if self.if_none_match() && self.names(IF_NONE_MATCH, now, true) => {
+                let mut same = Response::json(304, Vec::new()).header("ETag", tag);
+                same.no_transform = true;
+                Some(same)
             }
             _ => None,
         }
@@ -219,6 +246,16 @@ impl<'a> Preconditions<'a> {
 /// 412 Precondition Failed, saying which precondition it was.
 fn failed(why: &str) -> Response {
     Response::error(412, why)
+}
+
+/// The refusal of `If-Match` or `If-None-Match` on a route that holds no
+/// write to a row by them (400), `why` saying where they go: a write sent
+/// as conditional is never made as one that is not. Out of line, as a
+/// refusal is.
+#[cold]
+#[inline(never)]
+pub fn off_row(why: &str) -> Response {
+    Response::error(400, why)
 }
 
 /// Whether a header's list -- `*`, or tags apart by commas, each `"..."`
@@ -365,13 +402,53 @@ mod tests {
         ] {
             let r = req(names);
             let p = Preconditions::of(&r);
-            assert_eq!(
-                (p.if_match.is_some(), p.if_none_match.is_some()),
-                (m, n),
-                "{names:?}"
-            );
+            assert_eq!((p.if_match(), p.if_none_match()), (m, n), "{names:?}");
             assert_eq!(asked(&r), m || n, "{names:?}");
         }
+    }
+
+    /// A header sent on several lines is one list, whichever line names
+    /// the row: `If-Match` holds where any line holds it, `If-None-Match`
+    /// refuses where any line names it.
+    #[test]
+    fn every_line_of_a_header_is_read() {
+        let req = |lines: &[(&str, &str)]| crate::http::Request {
+            method: crate::http::Method::Patch,
+            target: "/t/1".into(),
+            path: "/t/1".into(),
+            query: Vec::new(),
+            headers: (lines.iter())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+            keep_alive: true,
+        };
+        let now = Some("\"abc\"");
+        for lines in [
+            [("If-Match", "\"abc\""), ("If-Match", "\"x\"")],
+            [("If-Match", "\"x\""), ("if-match", "\"abc\"")],
+        ] {
+            let r = req(&lines);
+            assert!(Preconditions::of(&r).refused(now).is_none(), "{lines:?}");
+        }
+        let r = req(&[("If-Match", "\"x\""), ("If-Match", "\"y\"")]);
+        assert_eq!(
+            Preconditions::of(&r).refused(now).map(|r| r.status),
+            Some(412)
+        );
+        for lines in [
+            [("If-None-Match", "\"abc\""), ("If-None-Match", "\"x\"")],
+            [("If-None-Match", "\"x\""), ("IF-NONE-MATCH", "W/\"abc\"")],
+        ] {
+            let r = req(&lines);
+            let p = Preconditions::of(&r);
+            assert_eq!(p.refused(now).map(|r| r.status), Some(412), "{lines:?}");
+            assert_eq!(p.read(now).map(|r| r.status), Some(304), "{lines:?}");
+        }
+        let r = req(&[("If-None-Match", "\"x\""), ("If-None-Match", "*")]);
+        let p = Preconditions::of(&r);
+        assert!(p.only_if_absent() && p.refused(None).is_none());
+        assert_eq!(p.refused(now).map(|r| r.status), Some(412));
     }
 
     #[test]

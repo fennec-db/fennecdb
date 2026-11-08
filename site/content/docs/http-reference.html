@@ -445,7 +445,7 @@ curl -si -X PATCH http://127.0.0.1:8080/orders/42 \
 <tr><td><b><code>If-Match: *</code></b></td><td>written only where the row is there; a missing row is 412, and a <code>PUT</code> makes none</td></tr>
 <tr><td><b><code>If-None-Match: *</code></b></td><td>on <code>PUT</code>: the row is made only where there is none of that id, else 412 — a create that never writes over</td></tr>
 <tr><td><b><code>If-None-Match: "&lt;tag&gt;"</code></b></td><td>on <code>GET</code> or <code>HEAD</code>: 304, no body, while the row is the one tagged; on a write, 412 where it is</td></tr>
-<tr><td><b><code>ETag</code></b></td><td>on every <code>GET</code> of a row, and on a <code>PATCH</code> or <code>PUT</code> sent with a precondition: the row's tag as the write left it, for the next one</td></tr>
+<tr><td><b><code>ETag</code></b></td><td>on every <code>GET</code> of a row, and on a <code>PATCH</code> or <code>PUT</code> sent with a precondition: the row's tag as the write left it, for the next one. <code>Cache-Control: no-transform</code> beside it, so a proxy that compresses the answer leaves the tag strong</td></tr>
 </tbody>
 </table>
 </div>
@@ -465,23 +465,41 @@ curl -si -X PATCH http://127.0.0.1:8080/orders/42 \
     field alone leaves the token's tag as it was, its writes under it go on,
     and the tag tells nothing of the field.</li>
   <li><b>On no other route.</b> <code>If-Match</code> or
-    <code>If-None-Match</code> on a write to a filter, <code>/all</code> or
-    <code>POST /&lt;name&gt;</code> is refused (400), never passed over: a
-    write sent as conditional is never made as one that is not. A
-    <code>/query</code> read's <code>If-None-Match</code> is the <a
+    <code>If-None-Match</code> on a write to a filter, <code>/all</code>,
+    <code>POST /&lt;name&gt;</code> or <code>/_schema</code> is refused (400),
+    never passed over: a write sent as conditional is never made as one that
+    is not. <code>/query</code>, <code>/batch</code> and
+    <code>/_call</code> refuse <code>If-Match</code> whatever they run, and
+    <code>If-None-Match</code> on a write; on a read it is the <a
     href="#polling">poll's</a>.</li>
+  <li><b>A header sent on several lines is one list</b>, as RFC 9110 has
+    it: <code>If-Match</code> holds where any line names the row, and
+    <code>If-None-Match</code> refuses where any line does.</li>
+  <li><b>A scoped token writes over the row it read with
+    <code>PATCH</code> or <code>DELETE</code></b> under
+    <code>If-Match</code>. <code>PUT</code> names the row's id, which a
+    scoped token never writes — it could write over a row the token cannot
+    see — so it is 403 whatever its preconditions: the server's token's
+    alone. A row a token's rules hide from it is answered as one that is not
+    there, the same 404 and the same 412.</li>
   <li><b>With an <code>Idempotency-Key</code></b> a conditional write sent
     again after it was made is answered as the first time (its status and
     body, not its <code>ETag</code>), never 412; a refused one keeps no
     key.</li>
   <li><b><code>/&lt;name&gt;/&lt;id&gt;</code> is the row</b>: an id is digits
     alone, and the route takes no query string (400) — the tag is the whole
-    row's. A missing row is 404 to a <code>GET</code>, whatever its
-    preconditions; a <code>PATCH</code> or <code>DELETE</code> of one
-    without a precondition answers <code>{"updated":0}</code> as the filter
-    routes do. <code>PUT</code> writes the body as the row, a field it
-    leaves out gone, and a body's <code>id</code> other than the path's is
-    400.</li>
+    row's. A missing row, or one past its <code>@ttl</code>, is 404 to a
+    <code>GET</code>, whatever its preconditions; without a precondition, a
+    <code>PATCH</code> of one answers <code>{"updated":0}</code> and a
+    <code>DELETE</code> <code>{"deleted":0}</code>, as the filter routes do.
+    <code>PUT</code> writes the body as the row, a field it leaves out gone,
+    and a body's <code>id</code> other than the path's is 400.</li>
+  <li><b>Behind Cloudflare</b>, or any proxy that compresses: a compressed
+    answer's strong <code>ETag</code> is made weak (<code>W/"…"</code>),
+    which names no row for <code>If-Match</code>, so every conditional write
+    would be 412. A row's answer says <code>Cache-Control:
+    no-transform</code>, which Cloudflare does not compress; see <a
+    href="sharding-entry.html#strong-tags">the global entry</a>.</li>
 </ul>
 
 

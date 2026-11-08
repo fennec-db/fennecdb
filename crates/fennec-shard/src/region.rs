@@ -954,6 +954,7 @@ impl Router {
                     seq: None,
                     history: None,
                     version: None,
+                    no_transform: false,
                 };
                 resp = resp.header("Fennec-Node", &node);
                 if let Some(q) = quota {
@@ -1563,6 +1564,7 @@ fn response_of(status: u16, headers: &[(String, String)], body: Vec<u8>) -> Resp
         seq: None,
         history: None,
         version: None,
+        no_transform: false,
     };
     for name in [
         "Retry-After",

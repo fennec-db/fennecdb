@@ -39,8 +39,12 @@ const VENDOR: Record<string, string> = {
   'http.js': join(FENNEC_WEB, 'http.js'),
 };
 
-/** The headers a request to the database may carry through /db/, and an answer back. */
-const PASS_UP = ['authorization', 'content-type', 'accept', 'idempotency-key', 'if-none-match', 'fennec-after', 'fennec-wait'];
+/**
+ * The headers a request to the database may carry through /db/, and an answer back.
+ * `if-match` holds a PATCH or DELETE of /<name>/<id> to the row's ETag the page read:
+ * dropped here, the write was made over whatever the row had become.
+ */
+const PASS_UP = ['authorization', 'content-type', 'accept', 'idempotency-key', 'if-match', 'if-none-match', 'fennec-after', 'fennec-wait'];
 const PASS_DOWN = ['content-type', 'etag', 'fennec-seq', 'fennec-next', 'retry-after', 'idempotent-replayed', 'cache-control'];
 
 const PAGE_ROUTES = /^\/(?:$|signin$|signup$|forgot$|reset$|verify$|account$|orgs\/new$|invite\/[^/]+\/[^/]+$|o\/[a-z0-9-]+(?:\/(?:board|members|search|audit)(?:\/[^/]*)?)?$)/;

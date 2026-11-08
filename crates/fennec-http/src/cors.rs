@@ -20,8 +20,11 @@ pub fn allows(cors: Option<&str>, req: &Request) -> bool {
 fn headers(origin: &str) -> [(&'static str, &str); 6] {
     [
         ("Access-Control-Allow-Origin", origin),
-        // `PUT` writes a row whole (`PUT /<name>/<id>`), and a page holds
-        // a write to the row it read with `If-Match`.
+        // `PUT /<name>/<id>` writes a row whole: the server token's alone,
+        // a scoped token's 403 whatever it asks, so allowed for a page
+        // holding that token (an admin's tool). A user's page holds a
+        // write to the row it read with `PATCH` or `DELETE` under
+        // `If-Match`, the header allowed below.
         (
             "Access-Control-Allow-Methods",
             "GET, POST, PUT, PATCH, DELETE, OPTIONS",

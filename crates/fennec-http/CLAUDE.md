@@ -276,13 +276,20 @@ byte for byte (`tests/query_json.rs`).
 preconditions are judged under the lock that writes it.](../../docs/design/http.md#row-tags)**
 `GET /<name>/<id>` answers `ETag`, `conditional::tag` of the bytes it
 answers, which `row_into` writes, the one way for a read and a write: a
-field a read rule withholds is in no tag. `If-Match` and `If-None-Match`
-on `PATCH`, `PUT` or `DELETE /<name>/<id>` are judged in `rest_run`
-(`looked`) under the write lock that then writes, before its block opens
--- never on a read lock before it -- a refusal 412, nothing written,
-waiting as one read from others' writes does; on any other write they are
-refused (400), never passed over. A conditional write's `ETag` is worked
-out under the lock (`tag_after`).
+field a read rule withholds is in no tag. `If-Match` and `If-None-Match`,
+every line of each one list (`Preconditions`), on `PATCH`, `PUT` or
+`DELETE /<name>/<id>` are judged in `rest_run` (`looked`) under the write
+lock that then writes, before its block opens -- never on a read lock
+before it -- a refusal 412, nothing written, waiting as one read from
+others' writes does. Elsewhere they are refused (400), never passed over:
+on a write by a filter, `/all`, `POST /<name>` or `/_schema`; at `/query`,
+`/batch` and `/_call`, `If-Match` whatever they run, `If-None-Match` where
+they write (a read's is its poll). A scoped token's conditional write is a
+`PATCH` or `DELETE`: its `PUT` names the id, 403 whatever it asks
+(`put_row_refused`), the server token's alone. A conditional write's
+`ETag` is worked out under the lock (`tag_after`); an answer carrying a
+row's tag says `Cache-Control: no-transform` (`Response::no_transform`),
+or a proxy compressing it weakens the tag `If-Match` compares strongly.
 
 **[A connection no thread can be made for is answered
 503.](../../docs/design/http.md#connections-without-a-thread)** Both accept loops

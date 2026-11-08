@@ -803,24 +803,77 @@ cost off a read, and leaves a client nothing to send in `If-Match`.
 *The rest of the routes' answers.* A missing row is 404 to a `GET` whatever
 its preconditions, as RFC 9110 (13.2.1) has a server answer what it would
 without them where that is no success; a write's 2xx without them is
-judged, so `If-Match: *` on a missing row is 412. A `PATCH` or `DELETE` of
-a missing row without a precondition answers `{"updated":0}`, as the
-filter's routes do. A `PUT` writes the body as the row (`put`), a field it
-leaves out gone, and always looks: 201 where it made the row, 200 over it;
-under `If-None-Match: *` it is an `insert`, which a row the writer is not
-shown refuses (409) as `POST` does, never writing over it. A conditional
-`PATCH` or `PUT` answers the row's tag as the write left it, worked out
-under the lock -- after it, another write could have moved it, and the
-client's next write would carry a tag it never read -- a second read by id;
-a delete answers none. A replay of a keyed one answers the first try's
-status and body, which `_idempotency` keeps, not its `ETag`. `If-Match` or
-`If-None-Match` on any other write -- a filter's, `/all`, `POST
-/<name>` -- is 400, read before the lock in one pass over the headers
-(`Preconditions::of`): a write sent as conditional is never made as one
-that is not. `/<name>/<id>` takes no query string, its tag the whole row's,
-and an id is digits alone, so `/all`, `/near` and `/changes` stay the
-routes they were. The router forwards both headers as any other; CORS lets
-a page send `If-Match` and `PUT`.
+judged, so `If-Match: *` on a missing row is 412. A row a token's rules
+hide from it, and a row past its `@ttl`, which every read leaves out, are
+answered as a missing one -- the same 404, the same 412 and its words
+(`a_row_a_rule_hides_is_answered_as_a_missing_one`,
+`a_row_past_its_ttl_is_no_row`): the look reads the row as the `GET`
+does. Without a precondition, a `PATCH` of a missing row answers
+`{"updated":0}` and a `DELETE` `{"deleted":0}`, as the filter's routes
+do. A `PUT` writes the body as the row (`put`), a field it leaves out
+gone, and always looks: 201 where it made the row, 200 over it; under
+`If-None-Match: *` it is an `insert`, which the look before it refuses
+(412) where the row is there, so it never writes over one -- of eight
+clients making one row so at once, one is made, every other 412
+(`of_puts_making_one_row_at_once_one_is_made`), as of eight deleting one
+under its tag one deletes it (`of_deletes_under_one_tag_at_once_one_is_made`).
+A conditional `PATCH` or `PUT` answers the row's tag as the write left it,
+worked out under the lock -- after it, another write could have moved it,
+and the client's next write would carry a tag it never read -- a second
+read by id; a delete answers none. A replay of a keyed one answers the
+first try's status and body, which `_idempotency` keeps, not its `ETag`.
+`/<name>/<id>` takes no query string, its tag the whole row's, and an id
+is digits alone, so `/all`, `/near` and `/changes` stay the routes they
+were. The router forwards both headers as any other; CORS lets a page send
+`If-Match` and `PUT`.
+
+*A scoped token's conditional write is a `PATCH` or a `DELETE`.* A `PUT`
+names its row's id, and a scoped token never puts one (`access`'s `put`:
+an insert without `id` alone), since a put writes over a row, every field
+it leaves out gone, a row the token cannot see among them. So a scoped
+token's `PUT /<name>/<id>` is 403 whatever its preconditions, over a row
+and a missing one alike, refused as the statement is scoped, before the
+look (`a_scoped_put_is_refused_whatever_its_precondition`), its words
+naming the routes it has (`put_row_refused`). A first draft of this
+section had it 409 under `If-None-Match: *`, which no scoped token ever
+reached. Letting a scoped `PUT` through where its row is one the token may
+update and every field it would drop is one it may write was the other
+way: a second rule of what a put may do, for a route `PATCH` already
+serves -- a `PATCH` naming every field is the same write.
+
+*Nowhere else.* `If-Match` and `If-None-Match` hold a write to the row
+`/<name>/<id>` names; a write that names none is never made as though it
+were held. On a write by a filter, `/all` or `POST /<name>`, either is
+400, read before the lock in one pass over the headers (`asked`); a
+`/_schema` plan or apply too. `/query`, `/batch` and `/_call` returned
+before that check, so `POST /query` with a `set` under `If-Match: "nope"`
+wrote: they refuse `If-Match` whatever they run, and `If-None-Match`
+where they write -- on a read it is the poll's (`content_tag`, `etag`),
+which a call that reads answers too. One pass over the headers at the top
+of each (`Preconditions::of`), a byte of each header looked at, its
+result the read's poll asks again instead of a second scan
+(`a_precondition_on_a_statement_is_refused`).
+
+*Every line of a header is read.* RFC 9110 (5.3) reads a field sent on
+several lines as their values joined by commas, and a proxy may split a
+list so or join one. Kept by its last line, `If-Match: "<the row's tag>"`
+then `If-Match: "x"` was 412 over the very row it named, and
+`If-None-Match` naming the row on its first line let a write over it.
+`Preconditions` keeps which of the two were sent and reads every line of
+one where it judges it (`every_line_of_a_precondition_counts`).
+
+*`Cache-Control: no-transform` beside a row's tag.* A proxy compressing an
+answer changes its bytes, and Cloudflare's edge weakens a strong `ETag` it
+compresses to `W/"..."` unless the zone's Respect Strong ETags, a cache
+rule, is on. `If-Match` compares strongly, so a page behind the entry
+Worker read a weak tag and was refused (412) every conditional write. Every
+answer carrying a row's tag -- the `GET`'s 200 and 304, a conditional
+write's -- says `no-transform`, which Cloudflare does not compress
+(its *Content compression* page). Accepting a weak tag for `If-Match` was
+the other way, and is what RFC 9110 forbids: a weak tag names a body only
+as equivalent, and a write held to one could pass over a change. The
+header is a flag of `Response` (`no_transform`), in the padding after
+`status`, written as `seq` is: an `extra` was two allocations an answer.
 
 *What it costs, and what it cost nothing.* Counted in process through
 `handle` (`make instr-compare EXAMPLE=rows MODES=get,row,patch,patch-row,if-match`,

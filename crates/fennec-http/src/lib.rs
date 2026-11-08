@@ -2297,8 +2297,15 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         };
     }
 
-    // A schema declared in code (`fennec_core::declared`).
+    // A schema declared in code (`fennec_core::declared`): a plan or an
+    // apply holds no row to a precondition.
     if req.segments().first() == Some(&"_schema") {
+        if req.method == Method::Post && conditional::asked(req) {
+            return conditional::off_row(
+                "If-Match and If-None-Match hold a write to one row: PATCH, PUT or DELETE \
+                 /<name>/<id>, never /_schema",
+            );
+        }
         return handle_schema(db, cfg, req, &who);
     }
 
@@ -2496,6 +2503,10 @@ fn rest_write(
                 return refused_under(db, cfg, guard, false, error_response(&told));
             }
             let read = who.reaches_out() && read_from_writes(&e);
+            let e = match (e, req.method, routed.row) {
+                (Error::Denied(_), Method::Put, Some(_)) => put_row_refused(),
+                (e, _, _) => e,
+            };
             return refused_under(db, cfg, guard, read, error_response(&e));
         }
     };
@@ -2509,6 +2520,23 @@ fn rest_write(
         None => rest_run(db, cfg, who, key, guard, run, ready, NoRow),
         Some(id) => row_run(db, cfg, req, who, key, guard, run, ready, id),
     }
+}
+
+/// A scoped token's `PUT /<name>/<id>`, refused (403) whatever its
+/// preconditions: it names its row's id, which a scoped token never puts
+/// (`access`'s `put`, an insert without `id` alone) -- a `PUT` writes over
+/// a row, every field it leaves out gone, and would write over one the
+/// token cannot see. The server's token's alone; told here by the route,
+/// which the statement's refusal names nothing of.
+#[cold]
+#[inline(never)]
+fn put_row_refused() -> Error {
+    Error::Denied(
+        "PUT /<name>/<id> writes a row whole, the server's token's alone: a scoped token \
+         changes a row with PATCH /<name>/<id> (under If-Match: the tag it read) and makes \
+         one with POST /<name>"
+            .into(),
+    )
 }
 
 /// [`rest_run`] of a write to `/<name>/<id>`, holding the row to the
@@ -2680,7 +2708,9 @@ fn row_read(
                 http::give_back(body.into_bytes());
                 return answer;
             }
-            Response::json(200, body).header("ETag", tag)
+            let mut row = Response::json(200, body).header("ETag", tag);
+            row.no_transform = true;
+            row
         }
         Ok(false) => {
             http::give_back(body.into_bytes());
@@ -2860,6 +2890,7 @@ fn rest_run<A: Asks>(
     let mut out = with_seq(kept.unwrap_or_else(|| answer(&result)), seq);
     if let Some(t) = tagged {
         out.extra.push(("ETag".to_string(), t.as_str().to_string()));
+        out.no_transform = true;
     }
     out
 }
@@ -3452,6 +3483,13 @@ fn keyed(
     Ok(())
 }
 
+/// `If-None-Match` on a write of `/query`, `/batch` or `/_call`'s, refused
+/// ([`conditional::off_row`]): it holds a read's poll to its answer, a
+/// write to the row `/<name>/<id>` names, and a statement's write to
+/// neither.
+const NONE_MATCH_WRITTEN: &str = "If-None-Match on a write holds one row: PATCH, PUT or DELETE \
+     /<name>/<id>; at /query, /batch and /_call it is a read's poll";
+
 /// Raw FennecQL: parsed first (without a lock), then whether it reads or writes
 /// is read off the statement itself.
 fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
@@ -3506,6 +3544,18 @@ fn run_query(
     stmt: Arc<Statement>,
     params: Vec<fennec_core::value::Value>,
 ) -> Response {
+    // `If-Match` holds a write to the row `/<name>/<id>` names, and a
+    // statement names none: refused whatever it runs, before it is charged
+    // or asked anything, never made as a write that is not conditional.
+    // `If-None-Match` is a read's poll ([`etag`]), refused on a write
+    // below. One pass over the headers, a byte of each looked at.
+    let pre = conditional::Preconditions::of(req);
+    if pre.if_match() {
+        return conditional::off_row(
+            "If-Match holds a write to one row: PATCH, PUT or DELETE /<name>/<id>, never \
+             /query, /batch or /_call",
+        );
+    }
     // A scoped caller's call is charged against `--call-rate` once its
     // token is known, before anything of the statement is asked.
     if let Some(r) = calls::admitted(cfg.call_rate, who, db, std::iter::once(&*stmt)) {
@@ -3558,6 +3608,9 @@ fn run_query(
         return read_only_refused(cfg);
     }
     if !stmt.is_read_only() {
+        if pre.if_none_match() {
+            return conditional::off_row(NONE_MATCH_WRITTEN);
+        }
         metrics::wrote();
         if let Err(refused) = quota::writing() {
             return refused;
@@ -3640,8 +3693,12 @@ fn run_query(
             // `If-None-Match` with the tag of an answer whose collections
             // no write has touched since: 304, the query not run (`poll`).
             // Asked for only: a read that sends none is answered as it
-            // was, no tag worked out (the first poll sends `"0"`).
-            let asked = req.header("if-none-match");
+            // was, no tag worked out (the first poll sends `"0"`), nor the
+            // headers read again for it.
+            let asked = match pre.if_none_match() {
+                true => req.header("if-none-match"),
+                false => None,
+            };
             // A scoped token's tag is its answer's own ([`content_tag`]):
             // the query runs every time, and 304 says only that its rows
             // are the rows it had. Tagged by the change counter, 304
@@ -4271,6 +4328,15 @@ fn counted(resp: &fennec_core::prelude::Response) -> u64 {
 /// batch's frame.
 #[inline(never)]
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
+    // As at `/query` ([`run_query`]): `If-Match` whatever the batch runs,
+    // `If-None-Match` where it writes, which no line of it holds to a row.
+    let pre = conditional::Preconditions::of(req);
+    if pre.if_match() {
+        return conditional::off_row(
+            "If-Match holds a write to one row: PATCH, PUT or DELETE /<name>/<id>, never \
+             /query, /batch or /_call",
+        );
+    }
     let body = match std::str::from_utf8(&req.body) {
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
@@ -4343,6 +4409,9 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         return read_only_refused(cfg);
     }
     if stmts.iter().any(|(s, _)| !s.is_read_only()) {
+        if pre.if_none_match() {
+            return conditional::off_row(NONE_MATCH_WRITTEN);
+        }
         metrics::wrote();
         if let Err(refused) = quota::writing() {
             return refused;
