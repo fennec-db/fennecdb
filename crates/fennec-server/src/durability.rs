@@ -3,9 +3,9 @@
 //! - Writes are pushed to disk periodically by the background syncer, or
 //!   after each write ([`SyncPolicy`]); the fsync runs outside the
 //!   exclusive lock, so readers are not held up by the disk.
-//! - On `SIGINT`, `SIGTERM` or `SIGHUP` a final `sync` runs, and after it
-//!   -- when there is a vector index -- a checkpoint, otherwise every
-//!   restart would link the HNSW graph again from the documents.
+//! - On `SIGINT`, `SIGTERM` or `SIGHUP`, or a Windows console's event, a
+//!   final `sync` runs, then -- when there is a vector index -- a
+//!   checkpoint: else every restart would link the HNSW graph again.
 //! - Under `--exit-on-stdin-close` the end of stdin starts that same
 //!   shutdown ([`exit_on_stdin_close`]), and so does a failure of what runs
 //!   beside the database ([`stop_with`]): every way a server stops sets
@@ -96,12 +96,12 @@ impl SyncPolicy {
     }
 }
 
-/// Catches `SIGINT`/`SIGTERM`/`SIGHUP`. The handler only writes an atomic
-/// (signal-safe); the real `sync` happens in the syncer thread.
-///
-/// Installed before the line saying the server listens: a supervisor that
-/// sends SIGTERM as soon as it reads that line would otherwise stop it by
-/// the default action, with no final sync.
+/// Catches `SIGINT`/`SIGTERM`/`SIGHUP`; the handler only writes an atomic
+/// (signal-safe), the real `sync` happens in the syncer thread. Installed
+/// before the line saying the server listens: a supervisor that sends
+/// SIGTERM as soon as it reads that line would otherwise stop it by the
+/// default action, with no final sync. Windows: the console's events.
+#[cfg(not(windows))]
 pub fn install_signal_handlers() {
     // libc's `signal` function, declared directly so as not to add a
     // dependency. SIGINT=2, SIGTERM=15, SIGHUP=1.
@@ -371,6 +371,13 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     }
     std::process::exit(exit_code());
 }
+
+// Below the code a Unix build compiles, so its lines -- a panic's location
+// among them -- stay where they were (docs/design/windows.md, 7l).
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::install_signal_handlers;
 
 #[cfg(test)]
 mod tests {

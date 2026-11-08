@@ -506,7 +506,7 @@ fn main() {
     #[cfg(windows)]
     fennec_http::log!(
         "windows: a rename is made durable, the file and its directory flushed; \
-         no mapped file and no SIGTERM yet"
+         no mapped file yet"
     );
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;

@@ -329,6 +329,29 @@ open, as before: a SIGTERM while they open stops it at once by the default
 action, rather than wait for each to open past a supervisor's grace. What
 its followers had applied by then is not lost to the primary: a replica
 asks from its file's own position, so the primary sends it again.
+Windows raises no `SIGTERM`, and the CRT's `signal` caught Ctrl+C alone:
+Ctrl+Break, its `SIGBREAK`, ended the process by the default action, as
+closing the console did, with no final sync. There
+`install_signal_handlers` is kernel32's `SetConsoleCtrlHandler` in the
+CRT's place (`durability/windows.rs`, [windows.md](windows.md#4-stopping-console-events-and-services)),
+its handler run on a thread the system makes for it. Ctrl+C and Ctrl+Break
+store `SHUTDOWN` and return. The console's close -- its window shut, or
+*End Task* -- and the system's shutdown store it and then hold the handler
+until the syncer's `process::exit` ends its thread: their handler's return
+lets the system end the process at once, and it waits 5 s for one at
+most, so the final sync and checkpoint have five seconds there, a
+checkpoint cut short leaving the file whole as a failed rewrite does. A
+logoff, which reaches services alone and at any user's logoff, is passed
+on: a server run as a service outlives it, as the JVM's handler lets a
+service's do. Ctrl+Break is the one event a process can send another, to a
+process group (`GenerateConsoleCtrlEvent`, the group made by
+`CREATE_NEW_PROCESS_GROUP`), so on Windows it is a supervisor's `SIGTERM`
+and the tests' (`support::Server::terminate`); a service runs under a
+wrapper that sends it, or Ctrl+C, and waits before it kills (WinSW, NSSM).
+`durability::windows`' unit tests call the handler as the system would:
+each event's flag, and the close's and the shutdown's held until the exit
+is asked; `shutdown.rs` and the rest of the server's tests stop their
+servers through it on Windows CI.
 `--exit-on-stdin-close` sets the flag (`request_shutdown`) from a thread
 that reads stdin to its end. An app
 that starts a server for a file it opened holds a pipe on the server's

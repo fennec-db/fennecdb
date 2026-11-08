@@ -232,7 +232,7 @@ pub fn ending() -> bool {
 /// reads as a stream cut short.
 pub fn end_all(grace: Duration) {
     ENDING.store(true, Ordering::Relaxed);
-    #[cfg(all(feature = "tls", unix))]
+    #[cfg(all(feature = "tls", any(unix, windows)))]
     {
         for wake in open::shut_reading() {
             wake();
@@ -242,62 +242,62 @@ pub fn end_all(grace: Duration) {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
-    #[cfg(not(all(feature = "tls", unix)))]
+    #[cfg(not(all(feature = "tls", any(unix, windows))))]
     let _ = grace;
 }
 
-/// The open TLS connections, each by its socket's descriptor, for the one
-/// shutdown to end ([`end_all`]). A descriptor is let go of here before it
-/// closes, both under the one lock, so [`end_all`] never shuts one that a
+/// The open TLS connections, each by its socket's descriptor (on Windows
+/// its `SOCKET`) for the one shutdown to end ([`end_all`]), let go of before
+/// it closes, both under the one lock, so [`end_all`] never shuts one that a
 /// new connection took after; one lock a TLS connection's start and end,
 /// beside its handshake's milliseconds.
 #[cfg(feature = "tls")]
 mod open {
     use std::net::TcpStream;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use std::sync::{Arc, Mutex};
 
     /// What wakes a stream waiting on something other than its socket.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) type Waker = Arc<dyn Fn() + Send + Sync>;
 
     /// By descriptor, a map: thousands open, a list's search was each
     /// close's, under the lock every connection's start and end take.
-    #[cfg(unix)]
-    type Open = std::collections::BTreeMap<i32, Option<Waker>>;
+    #[cfg(any(unix, windows))]
+    type Open = std::collections::BTreeMap<super::sock::RawFd, Option<Waker>>;
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     static OPEN: Mutex<Open> = Mutex::new(Open::new());
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn open() -> std::sync::MutexGuard<'static, Open> {
         OPEN.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn note(sock: &TcpStream) {
-        use std::os::fd::AsRawFd;
+        use super::sock::AsRawFd;
         open().insert(sock.as_raw_fd(), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn wake_with(sock: &TcpStream, wake: Waker) {
-        use std::os::fd::AsRawFd;
+        use super::sock::AsRawFd;
         if let Some(w) = open().get_mut(&sock.as_raw_fd()) {
             *w = Some(wake);
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn forget(sock: &TcpStream) {
-        use std::os::fd::AsRawFd;
+        use super::sock::AsRawFd;
         open().remove(&sock.as_raw_fd());
     }
 
     /// The read side of every open connection shut, and their wakers.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn shut_reading() -> Vec<Waker> {
-        use std::os::fd::FromRawFd;
+        use super::sock::FromRawFd;
         let open = open();
         let mut wakers = Vec::new();
         for (fd, wake) in open.iter() {
@@ -311,15 +311,15 @@ mod open {
         wakers
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn none() -> bool {
         open().is_empty()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub(super) fn note(_: &TcpStream) {}
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub(super) fn forget(_: &TcpStream) {}
 }
 
@@ -626,11 +626,11 @@ impl Conn {
     /// -- is woken to look at [`ending`], and ends, its `close_notify`
     /// sent. A plain connection is let be: no end of TLS to send.
     pub fn on_ending(&self, wake: impl Fn() + Send + Sync + 'static) {
-        #[cfg(all(feature = "tls", unix))]
+        #[cfg(all(feature = "tls", any(unix, windows)))]
         if let Conn::Tls(t) = self {
             open::wake_with(&t.sock, Arc::new(wake));
         }
-        #[cfg(not(all(feature = "tls", unix)))]
+        #[cfg(not(all(feature = "tls", any(unix, windows))))]
         let _ = wake;
     }
 }
@@ -791,6 +791,16 @@ impl Write for &Conn {
         }
     }
 }
+
+// A socket as `open` keys it: std's descriptor traits on Unix, and on
+// Windows their stand-ins over a `SOCKET` (docs/design/windows.md, 7g).
+// Below the code a Unix build compiles, so its lines -- a panic's location
+// among them -- stay where they were.
+#[cfg(all(feature = "tls", unix))]
+use std::os::fd as sock;
+#[cfg(all(feature = "tls", windows))]
+#[path = "conn/windows.rs"]
+mod sock;
 
 #[cfg(test)]
 mod tests {

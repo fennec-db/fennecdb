@@ -7,8 +7,6 @@
 //! the process exits there, with nothing to sync and no checkpoint to
 //! rewrite a file of vectors with.
 
-#![cfg(unix)]
-
 use crate::support::{command, documents, ended, start, tmp, Http};
 use std::time::Duration;
 
@@ -49,11 +47,51 @@ fn vectors(args: &[&str], node: bool) {
     assert_eq!(code, 0, "{log}");
 }
 
-/// A file's inode and bytes.
-fn as_it_is(path: &std::path::Path) -> (u64, Vec<u8>) {
+/// A file's identity -- its inode, on Windows its volume's serial and its
+/// index there -- and bytes: a rewrite renames a new file into the name.
+fn as_it_is(path: &std::path::Path) -> (u128, Vec<u8>) {
+    (identity(path), std::fs::read(path).unwrap())
+}
+
+#[cfg(unix)]
+fn identity(path: &std::path::Path) -> u128 {
     use std::os::unix::fs::MetadataExt;
-    let ino = std::fs::metadata(path).unwrap().ino();
-    (ino, std::fs::read(path).unwrap())
+    let m = std::fs::metadata(path).unwrap();
+    (u128::from(m.dev()) << 64) | u128::from(m.ino())
+}
+
+/// `GetFileInformationByHandle`'s: std's own reading of it
+/// (`MetadataExt::file_index`) is not stable. A file's creation time would
+/// not do: NTFS gives a name made again within 15 s the time of the file
+/// that had it (tunneling), as a rename over the file does.
+#[cfg(windows)]
+fn identity(path: &std::path::Path) -> u128 {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Info {
+        attributes: u32,
+        // Three `FILETIME`s, each two `DWORD`s: aligned to 4, not 8.
+        times: [u32; 6],
+        serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(file: *mut std::ffi::c_void, info: *mut Info) -> i32;
+    }
+    let f = std::fs::File::open(path).unwrap();
+    let mut info = Info::default();
+    // SAFETY: an open file's handle, and room for the answer.
+    let read = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
+    assert_ne!(read, 0, "{}", std::io::Error::last_os_error());
+    (u128::from(info.serial) << 64)
+        | (u128::from(info.index_high) << 32)
+        | u128::from(info.index_low)
 }
 
 /// A port this test holds, so a server asked to listen there cannot.

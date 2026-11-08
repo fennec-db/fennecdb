@@ -7,7 +7,9 @@ fennec-server's invariant -- every way it stops is the one shutdown -- for code 
 ### Durability
 
 **[Every way a server stops is the one shutdown.](../../docs/design/durability.md#the-one-shutdown)**
-A signal's handler, `--exit-on-stdin-close`'s end of stdin
+A signal's handler -- on Windows every console event's but a logoff's
+(`SetConsoleCtrlHandler`), the close's and the system shutdown's holding
+until the exit --, `--exit-on-stdin-close`'s end of stdin
 (`request_shutdown`) and a failure of what runs beside the database
 (`stop_with`, its exit code) set one flag, `SHUTDOWN`; the syncer, a file's
 or a node's, looks every `LOOK` whatever `--sync` is, syncs, checkpoints

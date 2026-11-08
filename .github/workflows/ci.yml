@@ -113,6 +113,11 @@ jobs:
           cargo clippy -p fennec-core -p fennec-abi -p fennec-http --lib --target x86_64-pc-windows-msvc -- -D warnings
           cargo clippy -p fennec-core -p fennec-abi --lib --profile test --target x86_64-pc-windows-msvc -- -D warnings
 
+      # fennec-server's console handler (docs/design/windows.md, slice 3),
+      # without the TLS whose ring wants MSVC: its tests are the Windows
+      # job's, whose build is the compiler's word on them.
+      - run: cargo clippy -p fennec-server --no-default-features --lib --bins --target x86_64-pc-windows-msvc -- -D warnings
+
       # The native library with the JNI functions the Kotlin binding calls,
       # which the workspace's run builds without.
       - run: cargo clippy -p fennec-ffi --features jni --all-targets -- -D warnings
@@ -297,6 +302,46 @@ jobs:
       # volume -- held to what Windows did, its answers printed.
       - name: The file layer, and what a view of a file refuses
         run: cargo test -p fennec-core --lib 'fs::' -- --nocapture
+
+  # docs/design/windows.md, slice 3: fennec-server's suite on Windows, each
+  # of its servers stopped by Ctrl+Break to the process group the harness
+  # started it in -- the one shutdown, through the console's events -- and
+  # killed by TerminateProcess, beside fennec-abi's, fennec's and the native
+  # library's suites. What needs the mapped file is slice 2's, gated so.
+  windows-server:
+    name: windows (server)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-latest-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: windows-latest-server-
+
+      - name: Build the suites
+        run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
+
+      # What the design left to Windows itself, printed: whether the harness
+      # shares a console with its servers, and whether a second `listen`
+      # changes a listener's queue.
+      - name: A console shared with the servers, and a second listen
+        run: cargo test -p fennec-server --test all windows:: -- --nocapture
+
+      - name: fennec-server's suite, its servers stopped by Ctrl+Break
+        run: cargo test -p fennec-server
+
+      # After the server's: fennec's lock tests run beside its binary.
+      - name: fennec-abi's, fennec's and the native library's suites
+        run: cargo test -p fennec-abi -p fennec-cli -p fennec-ffi
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,

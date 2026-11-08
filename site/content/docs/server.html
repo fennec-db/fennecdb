@@ -372,6 +372,22 @@ left that looked successful to the client but never reached the disk. Under
 <code>kill -9</code> you get exactly what the chosen policy promised, and no
 more.</p>
 
+<p>Windows sends no signals. There Ctrl+C and Ctrl+Break, closing the
+server's console window and the system shutting down start the same
+shutdown. On a close or a shutdown Windows waits five seconds at most
+before it ends the process: a checkpoint cut short leaves the file whole,
+and the next start links the vectors it would have held. A program that
+stops a server it started sends Ctrl+Break to the server's process group,
+what <code>SIGTERM</code> is elsewhere: start it with
+<code>CREATE_NEW_PROCESS_GROUP</code>, then call
+<code>GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)</code> from the same
+console. Run as a Windows service, the server goes under a wrapper that
+stops it with Ctrl+C or Ctrl+Break and waits for it before it kills, as
+WinSW and NSSM do; give it the time a final sync takes. A user logging off
+does not stop a server run as a service. Killed
+(<code>taskkill /f</code>, <i>End process</i> in Task Manager's details),
+it gets what <code>kill -9</code> gets.</p>
+
 <p>With <code>--exit-on-stdin-close</code> the end of stdin starts the same
 shutdown. A process that is killed sends its children no signal, but the
 system closes every descriptor it held, so a server started with a pipe on its
