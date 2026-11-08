@@ -439,11 +439,15 @@ too. The clients follow: JavaScript's `JSON.stringify` and Go's
 What a server is sent goes through `web/builder.js`'s `jsonOf`
 (`FennecHttp`'s bodies, the sync layer's batch lines) and Go's `exactly`,
 which write every digit of it instead. `JSON.stringify` cannot write a
-number's text from a replacer, so `jsonOf` marks such a number and replaces
-the mark, only where the value holds one: a request's parameters, every
-`FennecHttp` body's, are noted as they are normalized (`normalizeAll`, its
-own copy of `normalize`'s walk), and the sync layer's lines walked. The
-module's parameters go by `JSON.stringify` as they always did: a parameter
+number's text from a replacer, so `jsonOf` marks such a number
+(`\u0000fennec-int:` and its digits, as a text) and replaces the mark, only
+where the value holds one: a request's parameters, every `FennecHttp`
+body's, are noted as they are normalized (`bodyOf`, through `counted`, its
+own copy of `normalize`'s walk), and the sync layer's lines walked, after a
+first `JSON.stringify` has refused a cycle the walk would follow. A text or
+a key that already starts with the mark -- written by no one but on purpose
+-- leaves the text as `JSON.stringify` writes it, the number with its
+shortest digits. The module's parameters go by `JSON.stringify` as they always did: a parameter
 there is a JavaScript value, and no JavaScript value is an int no double
 holds, so `fennec-wasm` reads such an int as the double it rounds to, the
 int that double is (`as_double`), and only for a text whose reading met an
@@ -460,8 +464,22 @@ reader's count) and its time -1.0% (inside its runs' 2%), the builder's
 insert of the documents 72.92M -> 72.95M (+0.03%), a small `get` 780 482
 -> 780 548. A note kept by `normalize` itself had cost that insert 0.2%, so
 the builder's own parameters are not noted; a request's body of 1 000
-documents takes 1% longer to make (`normalizeAll`), where a walk of it
-after had taken 8.7%. `as_double` is 159 bytes of the module, which with
+documents takes 1% longer to make (`normalizeAll` then, a `WeakMap` telling
+`jsonOf` what it had found), where a walk of it after had taken 8.7%. The
+client ships as source, so a comment is bytes every page loads: these
+reasons are here, and `web/builder.js` keeps a line or three a function.
+`bodyOf` hands `jsonOf` its note as an argument instead of the `WeakMap`.
+Counted so, a call less a run doing nothing (seven alternating runs, the
+load under 3, one run over it discarded), against main: that body 13.68M
+-> 13.60M instructions (-0.6%, inside its runs' spread), a sync line of the
+same documents 2.21M -> 3.32M (+50%: the walk), the module's `run`, insert
+and `get` within 0.4%. A note kept by `normalize` itself, measured again,
+cost the insert 0.2% and the body 1.9%; `holdsWide` by `some` cost a line
+12% more and by `Object.values` 87%. The client grew 2 633 bytes, 903
+gzip, 798 brotli (`web/fennec.js` and its modules, as served), and
+`@fennecdb/web/client` in an app's bundle (esbuild, minified) 902, 297 and
+265; with these reasons in its comments it had grown 5 074, 1 694 and
+1 408, and 1 074, 359 and 339. `as_double` is 159 bytes of the module, which with
 it grew 649 bytes in all, 336 gzip, 305 brotli; it leaves an int an int --
 changing the kind cost 126 bytes of drop glue -- as no text
 `JSON.stringify` writes is an int rounding to 2^63. Natively, by `make

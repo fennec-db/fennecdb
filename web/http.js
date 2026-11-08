@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fennecdb/web/client`).
 
-import { FennecError, Query, call, checked, declared, ident, jsonOf, nameOf, normalizeAll, rowsOf, statementOf, whole } from './builder.js';
+import { FennecError, Query, bodyOf, call, checked, declared, ident, nameOf, rowsOf, statementOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -726,10 +726,4 @@ export async function* sseEvents(res) {
       /* already closed */
     }
   }
-}
-
-/** A `/query` body, or a `/batch` line: the text and its parameters, normalized. */
-function bodyOf(sql, params) {
-  const values = normalizeAll(params);
-  return jsonOf({ query: sql, params: values }, values);
 }

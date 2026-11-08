@@ -36,7 +36,7 @@ collection read (`Lives`), `fennec_changes` those written.
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
 server as JSON -- `FennecHttp`'s bodies, the sync layer's lines -- writes
 them through `jsonOf`, never `JSON.stringify`, whose shortest digits the
-server reads as another int, a request's parameters made by
-`normalizeAll` as its second argument; the module's parameters go by
+server reads as another int, a request's body by `bodyOf`, which notes
+them as it normalizes the parameters; the module's parameters go by
 `JSON.stringify`, which it reads as JavaScript's doubles (`as_double`).
-`normalize` itself counts nothing: the module's builder runs through it.
+`normalize` itself notes nothing: the module's builder runs through it.

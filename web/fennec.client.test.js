@@ -237,7 +237,7 @@ test('sseEvents reads the events of a stream cut anywhere', async () => {
 });
 
 test('a whole number from 2^53 to 2^63 goes out as every digit of it, anything else as JSON.stringify writes it', async () => {
-  const { jsonOf, from, normalizeAll } = await import('./builder.js');
+  const { jsonOf, from, bodyOf } = await import('./builder.js');
   assert.equal(JSON.stringify(2 ** 60), '1152921504606847000');
   assert.equal(jsonOf(2 ** 60), '1152921504606846976');
   assert.equal(jsonOf(-(2 ** 60)), '-1152921504606846976');
@@ -262,12 +262,13 @@ test('a whole number from 2^53 to 2^63 goes out as every digit of it, anything e
   }, TypeError);
   // A request's parameters are looked through as they are made, and a
   // builder's text's walked: those holding no such number are written as
-  // JSON.stringify writes them, and the others with every digit.
+  // JSON.stringify writes them, and the others with every digit -- a typed
+  // array's too.
   for (const [n, text] of [[7, '7'], [2 ** 60, '1152921504606846976']]) {
     const [, params] = from('t').toInsert({ m: { a: [n] } });
     assert.equal(jsonOf({ params }), `{"params":[{"a":[${text}]}]}`);
-    const values = normalizeAll([{ a: [n] }]);
-    assert.equal(jsonOf({ params: values }, values), `{"params":[{"a":[${text}]}]}`);
+    assert.equal(bodyOf('q', [{ a: [n] }]), `{"query":"q","params":[{"a":[${text}]}]}`);
+    assert.equal(bodyOf('q', [new Float64Array([n])]), `{"query":"q","params":[[${text}]]}`);
   }
 });
 
