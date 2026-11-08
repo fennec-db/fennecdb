@@ -281,9 +281,9 @@ endif
 ## (fennec-http), MODES (put,keyed) a run each, ARGS after the mode, PATTERN
 ## the figure's line (PKG=fennec-core EXAMPLE=json_numbers
 ## MODES=e15,wide,small,frac,ints: a page of numbers written as JSON;
-## PKG=fennec-core EXAMPLE=orders
-## MODES=order-int,order-float,scan-float,group-float: values compared and
-## keyed over 100 000 rows);
+## PKG=fennec-core EXAMPLE=orders MODES=order-int,order-float,scan-float,
+## group-float,group-int,group-list,hash-list: values compared and keyed
+## over 100 000 rows, a list's in a group and a `@hash` too);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET

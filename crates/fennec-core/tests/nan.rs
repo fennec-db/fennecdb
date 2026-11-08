@@ -503,3 +503,170 @@ fn a_range_above_every_number_holds_the_nans() {
     let r = answer(&db, "get f where xs >= 7 count", &[]);
     assert_eq!(r.rows[0].values, [Value::Int(4)]);
 }
+
+/// `NaN`s of four bit patterns as `f32`s, a vector's components.
+const NANS32: [u32; 4] = [0x7FC0_0000, 0xFFC0_0000, 0x7FC0_0001, 0xFF80_0001];
+
+/// A list or a vector holds a `NaN` and a zero as a float field does:
+/// `[NaN, 1]` of any bits is one value, `[-0.0, 1]` is `[0.0, 1]`. A
+/// `[float]` field's `@hash` answers as the scan does -- it filed a list by
+/// its floats' bits, and took one of the `[NaN, 1]` rows where the scan
+/// took four -- and a group, a distinct count, a sketch and `@unique` take
+/// each as one value, as `=` does.
+#[test]
+fn a_list_or_a_vector_holds_one_nan_and_one_zero() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection l (xs [float], xh [float] @hash, e vector<2>, eh vector<2> @hash, j json);
+         create collection lu (xs [float] @unique)",
+    );
+    let list = |a: f64| Value::List(vec![Value::Float(a), Value::Float(1.0)]);
+    let vector = |a: f32| Value::Vector(vec![a, 1.0]);
+    let put = "put l {xs: $1, xh: $1, e: $2, eh: $2}";
+    for (i, bits) in NANS32.into_iter().enumerate() {
+        let e = vector(f32::from_bits(bits));
+        with(&mut db, put, &[list(nan(i)), e]).unwrap();
+    }
+    for x in [-0.0, 0.0, 2.0] {
+        with(&mut db, put, &[list(x), vector(x as f32)]).unwrap();
+    }
+    // A json list holds no `NaN`, but both zeros.
+    for x in [-0.0, 0.0] {
+        let j = Value::List(vec![Value::Float(x), Value::Int(1)]);
+        with(&mut db, "put l {j: $1}", &[j]).unwrap();
+    }
+    for (i, bits) in NANS32.into_iter().enumerate() {
+        for field in ["xs", "xh"] {
+            let text = format!("get l where {field} = $1");
+            assert_eq!(ids(&db, &text, &[list(nan(i))]), [1, 2, 3, 4], "{text}");
+        }
+        let e = vector(f32::from_bits(bits));
+        for field in ["e", "eh"] {
+            let text = format!("get l where {field} = $1");
+            assert_eq!(ids(&db, &text, one(&e)), [1, 2, 3, 4], "{text}");
+        }
+    }
+    for x in [-0.0, 0.0] {
+        for field in ["xs", "xh"] {
+            let text = format!("get l where {field} = $1");
+            assert_eq!(ids(&db, &text, &[list(x)]), [5, 6], "{text}");
+        }
+        for field in ["e", "eh"] {
+            let text = format!("get l where {field} = $1");
+            assert_eq!(ids(&db, &text, &[vector(x as f32)]), [5, 6], "{text}");
+        }
+    }
+    for (field, v) in [("xh", list(nan(1))), ("eh", vector(f32::NAN))] {
+        let text = format!("get l where {field} = $1");
+        let p = plan(&db, &text, &[v]);
+        assert!(p.contains("hash index"), "{p}");
+    }
+    // One group a value, through the scan and the `@hash` fields alike.
+    for field in ["xs", "xh", "e", "eh"] {
+        let text =
+            format!("get l where {field} != null select {field}, count(*) as n group {field}");
+        let r = answer(&db, &text, &[]);
+        let mut counts: Vec<Value> = r.rows.iter().map(|r| r.values[1].clone()).collect();
+        counts.sort_by(|a, b| a.cmp_value(b));
+        assert_eq!(
+            counts,
+            [Value::Int(1), Value::Int(2), Value::Int(4)],
+            "{text}: {:?}",
+            r.rows
+        );
+        for text in [
+            format!("get l select count(distinct {field}) as n"),
+            format!("get l select approx_count_distinct({field}) as n"),
+            format!("get l select hll_estimate(hll_accumulate({field})) as n"),
+        ] {
+            let r = answer(&db, &text, &[]);
+            assert_eq!(r.rows[0].values, [Value::Int(3)], "{text}");
+        }
+    }
+    let text = "get l where j != null select j, count(*) as n group j";
+    assert_eq!(answer(&db, text, &[]).rows.len(), 1, "{text}");
+    let text = "get l select count(distinct j) as n";
+    assert_eq!(answer(&db, text, &[]).rows[0].values, [Value::Int(1)]);
+    // `@unique` holds one of each.
+    for (a, b) in [(nan(0), nan(1)), (-0.0, 0.0)] {
+        with(&mut db, "put lu {xs: $1}", &[list(a)]).unwrap();
+        let e = with(&mut db, "put lu {xs: $1}", &[list(b)]).unwrap_err();
+        assert!(e.to_string().contains("unique"), "{e}");
+    }
+}
+
+/// A `@unique` refusal names a `NaN` and an infinity as they are, never
+/// as `null`, which JSON writes for them and which is no value a
+/// `@unique` refuses.
+#[test]
+fn a_unique_refusal_names_a_nan_as_it_is() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection u (x float @unique);
+         create collection ul (xs [float] @unique);
+         create collection w (x float, z int, @unique(x, z))",
+    );
+    for (x, name) in [
+        (nan(1), "NaN"),
+        (f64::INFINITY, "inf"),
+        (f64::NEG_INFINITY, "-inf"),
+    ] {
+        let x = Value::Float(x);
+        with(&mut db, "put u {x: $1}", one(&x)).unwrap();
+        let e = with(&mut db, "put u {x: $1}", one(&x)).unwrap_err();
+        let want = format!("holds {name} already");
+        assert!(e.to_string().contains(&want), "{e}");
+        let xs = Value::List(vec![Value::Float(2.5), x.clone()]);
+        with(&mut db, "put ul {xs: $1}", one(&xs)).unwrap();
+        let e = with(&mut db, "put ul {xs: $1}", one(&xs)).unwrap_err();
+        let want = format!("holds [2.5,{name}] already");
+        assert!(e.to_string().contains(&want), "{e}");
+        with(&mut db, "put w {x: $1, z: 1}", one(&x)).unwrap();
+        let e = with(&mut db, "put w {x: $1, z: 1}", one(&x)).unwrap_err();
+        let want = format!("holds [{name}, 1] already");
+        assert!(e.to_string().contains(&want), "{e}");
+    }
+    // `create index ... @unique` over a value held twice names it so too.
+    run(&mut db, "create collection p (x float)");
+    for _ in 0..2 {
+        with(&mut db, "put p {x: $1}", &[Value::Float(nan(2))]).unwrap();
+    }
+    let s = fennec_ql::parse_one("create index on p (x) @unique").unwrap();
+    let e = db.execute(&s).unwrap_err();
+    assert!(e.to_string().contains("both hold NaN"), "{e}");
+}
+
+/// A rewrite that changes a list's zero from `-0.0` to `0.0` changes no
+/// index's entry (`same`, by the key every index follows), so an index
+/// over several fields keys a json list as the hash key does: by its
+/// bits, it kept the `[-0.0, 1]` entry, the delete took out the `[0.0, 1]`
+/// one it did not hold, and the entry left behind refused a later row as
+/// a duplicate of the row deleted.
+#[test]
+fn a_zero_rewritten_in_a_list_leaves_no_entry_behind() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection w (j json, z int, @unique(j, z));
+         create collection h (xs [float] @unique)",
+    );
+    let list = |a: f64| Value::List(vec![Value::Float(a), Value::Int(1)]);
+    let floats = |a: f64| Value::List(vec![Value::Float(a), Value::Float(1.0)]);
+    with(&mut db, "put w {j: $1, z: 1}", &[list(-0.0)]).unwrap();
+    with(&mut db, "set w {j: $1} where id = 1", &[list(0.0)]).unwrap();
+    with(&mut db, "put h {xs: $1}", &[floats(-0.0)]).unwrap();
+    with(&mut db, "set h {xs: $1} where id = 1", &[floats(0.0)]).unwrap();
+    run(&mut db, "del w where id = 1; del h where id = 1");
+    with(&mut db, "put w {j: $1, z: 1}", &[list(-0.0)]).unwrap();
+    with(&mut db, "put h {xs: $1}", &[floats(-0.0)]).unwrap();
+    for (c, f) in [("w", "j"), ("h", "xs")] {
+        let text = format!("get {c} where {f} = $1 count");
+        let r = answer(&db, &text, &[list(0.0)]);
+        assert_eq!(r.rows[0].values, [Value::Int(1)], "{text}");
+    }
+}

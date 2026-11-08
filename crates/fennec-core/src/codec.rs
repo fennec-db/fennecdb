@@ -246,7 +246,9 @@ pub fn geo_value((lon, lat): (f64, f64)) -> Value {
 /// bytes put once: a `Value` made again went through `encode_value`'s own
 /// match a second time, and a group by a float over a million rows took
 /// 1.9% longer that way; this way as long as before (ABBA, functions
-/// aligned to 64 bytes on both sides).
+/// aligned to 64 bytes on both sides). Any other value goes through
+/// [`encode`] as a key, a list's, an object's and a vector's floats folded
+/// the same way.
 #[inline]
 pub fn encode_key(out: &mut Vec<u8>, v: &Value) {
     match v {
@@ -254,7 +256,21 @@ pub fn encode_key(out: &mut Vec<u8>, v: &Value) {
             out.push(TAG_FLOAT);
             out.extend_from_slice(&key_float(*f).to_le_bytes());
         }
-        v => encode_value(out, v),
+        v => encode::<true>(out, v),
+    }
+}
+
+/// A vector's `f32`s as a key: each as [`key_float`] folds a float. Out of
+/// line: in the key's copy of [`encode`] the loop's constants took two
+/// registers more, saved and restored by a key of every kind.
+#[inline(never)]
+fn key_f32s(out: &mut Vec<u8>, v: &[f32]) {
+    for x in v {
+        let x = match x.is_nan() {
+            true => f32::NAN,
+            false => x + 0.0,
+        };
+        out.extend_from_slice(&x.to_le_bytes());
     }
 }
 
@@ -270,7 +286,25 @@ pub fn key_float(f: f64) -> f64 {
     }
 }
 
+/// A value's encoding, as a record holds it: every float to the bit.
+#[inline]
 pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
+    encode::<false>(out, v)
+}
+
+/// [`encode_value`], or as `KEY` [`encode_key`]: each float a list, an
+/// object or a vector holds folded as [`key_float`] folds one, a vector's
+/// `f32`s as [`key_f32s`] does. `=` finds `[NaN]` equal to `[-NaN]` and
+/// `[-0.0]` to `[0.0]` (`Value::cmp_value`), and by their floats' bits a
+/// `[float]` field's `@hash` took one of the rows the scan took, a group or
+/// a distinct count split them, and `@unique` held both. A copy each, the
+/// record's the code it was: a key of an int or a text reaches its arm as
+/// before. One copy cost every key: a test of the kind ahead of the float's
+/// took a group by a float 0.22% more instructions, after it a group by an
+/// int 0.30%, and a flag handed down 0.14% to the int's group and two
+/// registers saved to every value a record writes. A sparse vector holds no
+/// `NaN` and no zero, and is written as it is either way.
+fn encode<const KEY: bool>(out: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Null => out.push(TAG_NULL),
         Value::Bool(b) => {
@@ -287,6 +321,10 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
         }
         Value::Float(f) => {
             out.push(TAG_FLOAT);
+            let f = match KEY {
+                true => key_float(*f),
+                false => *f,
+            };
             out.extend_from_slice(&f.to_le_bytes());
         }
         Value::Text(s) => {
@@ -303,15 +341,20 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             out.push(TAG_VECTOR);
             put_uvarint(out, v.len() as u64);
             // f32 LE array: allows zero-copy when read aligned.
-            for f in v {
-                out.extend_from_slice(&f.to_le_bytes());
+            match KEY {
+                true => key_f32s(out, v),
+                false => {
+                    for f in v {
+                        out.extend_from_slice(&f.to_le_bytes());
+                    }
+                }
             }
         }
         Value::List(items) => {
             out.push(TAG_LIST);
             put_uvarint(out, items.len() as u64);
             for it in items {
-                encode_value(out, it);
+                encode::<KEY>(out, it);
             }
         }
         Value::Object(members) => {
@@ -319,7 +362,7 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             put_uvarint(out, members.len() as u64);
             for (k, v) in members {
                 encode_str(out, k);
-                encode_value(out, v);
+                encode::<KEY>(out, v);
             }
         }
         Value::Sparse(dim, entries) => {

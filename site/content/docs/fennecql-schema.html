@@ -33,10 +33,16 @@ whatever its bits, and is greater than every other number,
 <code>max</code>, <code>group</code>, <code>count(distinct …)</code>,
 <code>facet</code>, every index and <code>lookup</code>; so <code>x &gt; 5</code>
 takes the <code>NaN</code> rows, and a <code>@unique</code> field holds one
-<code>NaN</code>. JSON writes one as <code>null</code>, as it does an
-infinity; one reaches a field through the native APIs and the Rust crate, an
-import of PostgreSQL's or SQLite's, or a vector function over an infinity
-(<code>dot([1e39], [0])</code>). A list of numbers given an <code>[int]</code> or a
+<code>NaN</code>. A list or a vector holding one is one value so too, and
+one holding <code>-0.0</code> the value holding <code>0.0</code>:
+<code>[NaN, 1]</code> of any bits is one key of a <code>[float]</code>
+field's <code>@hash</code> and <code>@unique</code>, one group and one
+distinct value. JSON writes one as <code>null</code>, as it does an
+infinity; one reaches a field through the native APIs and the Rust crate,
+an import of PostgreSQL's (<a href="import.html#vector-columns">never
+into a vector</a>) or a SQLite text reading <code>NaN</code> into a float
+column (SQLite stores a <code>NaN</code> itself as <code>NULL</code>), or
+a vector function over an infinity (<code>dot([1e39], [0])</code>). A list of numbers given an <code>[int]</code> or a
 <code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
 2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 

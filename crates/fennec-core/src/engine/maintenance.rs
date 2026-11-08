@@ -490,7 +490,7 @@ impl Database {
                         "`{}.{}` cannot be unique: documents {a} and {b} both hold {}",
                         copy.collection,
                         copy.field,
-                        crate::json::to_string(&v)
+                        crate::json::named(&v)
                     )));
                 }
                 c.hashes.insert(copy.field.clone(), Derived::new(ix));

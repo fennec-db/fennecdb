@@ -653,7 +653,17 @@ test('a NaN equals a NaN and is above every number, through every index, in the 
   assert.equal(db.rows('get t select count(distinct x) as d')[0].d, 4);
   db.run('create collection u (x float @unique)');
   db.run(`put u {x: ${nan}}`);
-  assert.throws(() => db.run(`put u {x: ${nan}}`), /unique/);
+  assert.throws(() => db.run(`put u {x: ${nan}}`), /holds NaN already/);
+  // A list's zero is one value as a float's is: one group, one distinct
+  // value, one key of `@hash` and of `@unique`.
+  db.run('create collection l (xs [float], xh [float] @hash, xu [float] @unique)');
+  db.run('put l {xs: [-0.0, 1], xh: [-0.0, 1], xu: [-0.0, 1]}');
+  assert.throws(() => db.run('put l {xu: [0.0, 1]}'), /unique/);
+  db.run('put l {xs: [0.0, 1], xh: [0.0, 1]}');
+  for (const f of ['xs', 'xh']) {
+    assert.equal(db.rows(`get l select ${f}, count(*) as n group ${f}`).length, 1, f);
+    assert.equal(db.rows(`get l select count(distinct ${f}) as d`)[0].d, 1, f);
+  }
   db.close();
 });
 

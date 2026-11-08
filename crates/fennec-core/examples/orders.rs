@@ -1,7 +1,8 @@
 //! What comparing values costs where it is hottest: `cargo run --release
 //! -p fennec-core --example orders -- MODE [N]`, one mode a process, or two
 //! builds held to each other by `make instr-compare PKG=fennec-core
-//! EXAMPLE=orders MODES=order-int,order-float,scan-float,group-float`.
+//! EXAMPLE=orders
+//! MODES=order-int,order-float,scan-float,group-float,group-int,group-list,hash-list`.
 //!
 //! 100 000 rows of a random int `n` and a random float `f`, neither
 //! indexed, each request one statement over all of them:
@@ -12,7 +13,18 @@
 //!   * `scan-float`: `get t where f > $1 count`, a float field's filter
 //!     tested on every row against a float, no row passing;
 //!   * `group-float`: `get t select f, count(*) as c group f limit 1`,
-//!     every float filed by its key (`codec::encode_key`).
+//!     every float filed by its key (`codec::encode_key`);
+//!   * `group-int`: `get t select n, count(*) as c group n limit 1`, every
+//!     int so.
+//!
+//! The list modes write 100 000 rows of another collection instead, `l`,
+//! each a random pair of floats in a `[float]` field and in one with a
+//! `@hash`:
+//!
+//!   * `group-list`: `get l select xs, count(*) as c group xs limit 1`,
+//!     every list filed by its key, its floats folded (`codec::encode_key`);
+//!   * `hash-list`: `get l where xh in $1 count`, 1 000 of the lists held,
+//!     each looked up in the `@hash` by its key (`hash_key`).
 //!
 //! It prints ns a request, the median of 9 rounds of N / 9 (N 18 unless
 //! given), and on macOS the instructions and cycles the loop retired
@@ -30,8 +42,6 @@ fn main() {
     let mode = args.next().unwrap_or_else(|| "order-float".into());
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(18);
     let mut db = Database::new();
-    db.execute(&fennec_ql::parse_one("create collection t (n int, f float)").unwrap())
-        .unwrap();
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = move || {
         // xorshift64*: the same values every run and every build.
@@ -40,24 +50,52 @@ fn main() {
         seed ^= seed >> 27;
         seed.wrapping_mul(0x2545_f491_4f6c_dd1d)
     };
+    let float = |r: u64| (r >> 11) as f64 / (1u64 << 53) as f64 * 2e6 - 1e6;
+    let lists = mode.ends_with("-list");
     let mut docs = Vec::with_capacity(ROWS);
-    for _ in 0..ROWS {
-        let n = (next() >> 1) as i64 - (1 << 62);
-        let f = (next() >> 11) as f64 / (1u64 << 53) as f64 * 2e6 - 1e6;
+    let mut held = Vec::new();
+    for i in 0..ROWS {
         // An object's members ascending by key.
-        docs.push(Value::Object(vec![
-            ("f".to_string(), Value::Float(f)),
-            ("n".to_string(), Value::Int(n)),
-        ]));
+        docs.push(Value::Object(match lists {
+            false => {
+                let n = (next() >> 1) as i64 - (1 << 62);
+                vec![
+                    ("f".to_string(), Value::Float(float(next()))),
+                    ("n".to_string(), Value::Int(n)),
+                ]
+            }
+            true => {
+                let (a, b) = (float(next()), float(next()));
+                let xs = Value::List(vec![Value::Float(a), Value::Float(b)]);
+                if i % (ROWS / 1_000) == 0 {
+                    held.push(xs.clone());
+                }
+                vec![("xh".to_string(), xs.clone()), ("xs".to_string(), xs)]
+            }
+        }));
     }
-    let put = fennec_ql::parse_one("put t $1").unwrap();
+    let (create, put) = match lists {
+        false => ("create collection t (n int, f float)", "put t $1"),
+        true => (
+            "create collection l (xs [float], xh [float] @hash)",
+            "put l $1",
+        ),
+    };
+    db.execute(&fennec_ql::parse_one(create).unwrap()).unwrap();
+    let put = fennec_ql::parse_one(put).unwrap();
     db.execute_with(&put, &[Value::List(docs)]).unwrap();
     let (text, params): (&str, Vec<Value>) = match mode.as_str() {
         "order-int" => ("get t select n order n", vec![]),
         "order-float" => ("get t select f order f", vec![]),
         "scan-float" => ("get t where f > $1 count", vec![Value::Float(2e6)]),
         "group-float" => ("get t select f, count(*) as c group f limit 1", vec![]),
-        other => panic!("no mode {other}: order-int, order-float, scan-float or group-float"),
+        "group-int" => ("get t select n, count(*) as c group n limit 1", vec![]),
+        "group-list" => ("get l select xs, count(*) as c group xs limit 1", vec![]),
+        "hash-list" => ("get l where xh in $1 count", vec![Value::List(held)]),
+        other => panic!(
+            "no mode {other}: order-int, order-float, scan-float, group-float, group-int, \
+             group-list or hash-list"
+        ),
     };
     let stmt = fennec_ql::parse_one(text).unwrap();
     // The first answer builds what a read builds once.

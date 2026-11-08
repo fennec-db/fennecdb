@@ -621,9 +621,13 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
     scram-sha-256 or cleartext.</li>
   <li>PostgreSQL <code>timestamp(tz)</code> values are truncated to
     milliseconds.</li>
-  <li><b>A non-finite component in a vector column stops the import</b> and it
-    says which row. A NaN makes a distance incomparable; even if the index
-    accepted it, the result would be meaningless.</li>
+  <li><b>A non-finite component of a value bound for a vector field stops
+    the import</b> — a pgvector column, a BLOB under <code>--vector</code>,
+    a <code>float[]</code> named with it — and it says which row. A NaN
+    makes a distance incomparable; even if the index accepted it, the result
+    would be meaningless. A <code>float</code> or <code>[float]</code> field
+    keeps its <code>NaN</code>s and infinities, as PostgreSQL holds
+    them.</li>
   <li>An import that stops halfway cannot be rolled back — there are no
     transactions.</li>
   <li><b><code>--follow</code> needs <code>wal_level = logical</code> and an

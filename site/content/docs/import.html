@@ -439,7 +439,15 @@ after</a>). pgvector's <code>vector</code>, <code>halfvec</code> and
 <code>vector&lt;N, f16&gt;</code> and <code>sparse&lt;N&gt;</code> with
 nothing named; <code>--follow</code> keeps them in step as any column, an
 untouched vector taken from the collection rather than resent (<a
-href="#following">Following changes</a>).</p>
+href="#following">Following changes</a>). A <code>NaN</code> or an
+infinity in a value bound for a vector field — one of pgvector's, a BLOB
+under <code>--vector</code>, a <code>float[]</code> named with it — stops
+the import at its row, naming it: no distance orders by one. A
+<code>float</code> or <code>[float]</code> field keeps its
+<code>NaN</code>s and infinities, as PostgreSQL holds them (<a
+href="fennecql-schema.html">Collections and types</a>); SQLite stores a
+<code>NaN</code> as <code>NULL</code>, and a text <code>NaN</code> read
+into a float column is one.</p>
 </details>
 
 <h2>Speed and testing</h2>

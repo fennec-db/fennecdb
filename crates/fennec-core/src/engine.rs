@@ -2178,7 +2178,7 @@ impl Collection {
         let held = self.store.read(&self.schema, *other)?;
         let at = |k: &str| {
             let v = held.as_ref().and_then(|d| d.at(k)).or_else(|| doc.at(k));
-            crate::json::to_string(v.unwrap_or(&Value::Null))
+            crate::json::named(v.unwrap_or(&Value::Null))
         };
         match holders.first() {
             Some((Unique::Field(f), other)) => Err(Error::Duplicate(format!(
@@ -2953,9 +2953,12 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// finds the two equal -- PostgreSQL's float hash hashes -0 as 0 for the
 /// same reason -- and under a key of its own a stored -0.0 was missed by
 /// `price = 0.0` through the index alone. The document keeps the value as
-/// it was written. A -0.0 inside a list or a vector keeps its sign: folding
-/// those too was 570 bytes of the browser module, for a hash index on such
-/// a field meeting a -0.0.
+/// it was written. A list's, an object's and a vector's floats are folded
+/// as a group's key folds them (`codec::encode_key`), one copy of the fold
+/// for both: `[-0.0]` is `[0.0]`, and `[NaN]` of any bits one key, as `=`
+/// finds them. Left unfolded once, for 570 bytes of the browser module, a
+/// `[float]` field's `@hash` answered `xs = [NaN]` with one of the two
+/// rows the scan took, and `@unique` held `[0.0]` beside `[-0.0]`.
 ///
 /// A whole float that is an int is filed under the int: a json path holds
 /// `3` in one document and `3.0` in another, which the scan finds equal
@@ -2979,7 +2982,7 @@ fn hash_key(v: &Value) -> Vec<u8> {
                 crate::codec::encode_value(&mut out, &Value::Float(crate::codec::key_float(*f)))
             }
         },
-        _ => crate::codec::encode_value(&mut out, v),
+        _ => crate::codec::encode_key(&mut out, v),
     }
     out
 }
@@ -13202,7 +13205,7 @@ fn composite_shared(c: &Collection, comp: &Composite, a: DocId, b: DocId) -> Err
             if i > 0 {
                 vals.push_str(", ");
             }
-            vals.push_str(&crate::json::to_string(doc.at(k).unwrap_or(&Value::Null)));
+            vals.push_str(&crate::json::named(doc.at(k).unwrap_or(&Value::Null)));
         }
     }
     vals.push(']');
@@ -13230,7 +13233,7 @@ fn refuse_shared(c: &Collection, field: &str) -> Result<()> {
             Err(Error::Duplicate(format!(
                 "`{}.{field}` cannot be unique: documents {a} and {b} both hold {}",
                 c.schema.name,
-                crate::json::to_string(&v)
+                crate::json::named(&v)
             )))
         }
         None => Ok(()),

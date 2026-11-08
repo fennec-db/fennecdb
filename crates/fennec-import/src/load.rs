@@ -241,8 +241,20 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
                     .collect(),
             )?
         }
-        // List and vector values are checked before they enter the index too.
+        // List and vector values are checked before they enter the index too:
+        // a PostgreSQL `float8[]` or `real[]` read as a list holds `NaN`
+        // and `Infinity` as its floats do, and went into a vector field
+        // unchecked, the `put` making the list a vector.
         (DataType::Vector(..), Value::Vector(v)) => finite(v)?,
+        (DataType::Vector(..), Value::List(items)) => {
+            for (i, x) in items.iter().enumerate() {
+                match x {
+                    Value::Float(f) if !f.is_finite() => return Err(not_finite(i, *f)),
+                    _ => {}
+                }
+            }
+            Value::List(items)
+        }
         // BOOLEAN is a 0/1 integer in SQLite; `t`/`f` in PostgreSQL text.
         (DataType::Bool, Value::Int(n)) => Value::Bool(n != 0),
         (DataType::Bool, Value::Text(s)) => match s.trim().to_ascii_lowercase().as_str() {
@@ -254,6 +266,9 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
             Ok(n) => Value::Int(n),
             Err(_) => return Err(mismatch("int", &Value::Text(s))),
         },
+        // `NaN` and the infinities are a float column's values, as
+        // PostgreSQL holds them (and `parse` reads `nan` and `inf` in any
+        // case): a `float` keeps them, ordered as PostgreSQL orders them.
         (DataType::Float, Value::Text(s)) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => return Err(mismatch("float", &Value::Text(s))),
@@ -276,12 +291,15 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
 /// which row it was.
 fn finite(v: Vec<f32>) -> Result<Value> {
     if let Some(i) = v.iter().position(|f| !f.is_finite()) {
-        return Err(Error::Type(format!(
-            "component {} of the vector is not finite ({}); is the source column really an f32 array?",
-            i, v[i]
-        )));
+        return Err(not_finite(i, v[i] as f64));
     }
     Ok(Value::Vector(v))
+}
+
+fn not_finite(i: usize, x: f64) -> Error {
+    Error::Type(format!(
+        "component {i} of the vector is not finite ({x}); is the source column really an f32 array?"
+    ))
 }
 
 /// Shows the value briefly in error text; long strings and byte blobs are truncated.
@@ -713,6 +731,68 @@ mod tests {
         let e = run(&mut src, &mut db, &o).unwrap_err().to_string();
         assert!(e.contains("not finite"), "{e}");
         assert!(e.contains("row 1, field `embed`"), "{e}");
+    }
+
+    /// A PostgreSQL `float8[]` arrives as a list, and a `NaN` or an
+    /// infinity in it was put into a vector field unchecked, the `put`
+    /// making the list a vector; a `float` column and a `[float]` one keep
+    /// theirs, as PostgreSQL does.
+    #[test]
+    fn non_finite_list_for_a_vector_is_refused() {
+        let list = |x: f64| Value::List(vec![Value::Float(1.0), Value::Float(x), Value::Int(2)]);
+        for (x, shown) in [
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            let mut src = Rows::new(
+                vec![
+                    Column::new(
+                        "embed",
+                        DataType::List(Box::new(DataType::Float)),
+                        "_float8",
+                    ),
+                    Column::new("xs", DataType::List(Box::new(DataType::Float)), "_float8"),
+                    Column::new("x", DataType::Float, "float8"),
+                ],
+                vec![
+                    vec![list(0.5), list(x), Value::Text(shown.into())],
+                    vec![list(x), list(x), Value::Float(x)],
+                ],
+            );
+            let mut db = Database::new();
+            let mut o = Options::new("m");
+            o.vectors.push(("embed".into(), 3));
+            let e = run(&mut src, &mut db, &o).unwrap_err().to_string();
+            assert!(e.contains("component 1 of the vector is not finite"), "{e}");
+            assert!(e.contains("row 2, field `embed`"), "{e}");
+            // Without the vector, the row before it went in whole.
+            let mut src = Rows::new(
+                vec![
+                    Column::new("xs", DataType::List(Box::new(DataType::Float)), "_float8"),
+                    Column::new("x", DataType::Float, "float8"),
+                ],
+                vec![vec![list(x), Value::Text(shown.into())]],
+            );
+            let mut db = Database::new();
+            run(&mut src, &mut db, &Options::new("m")).unwrap();
+            let Response::Rows(rs) = db
+                .execute(&Statement::Select(Select {
+                    collection: "m".into(),
+                    project: Some(vec!["xs".into(), "x".into()]),
+                    ..Default::default()
+                }))
+                .unwrap()
+            else {
+                panic!()
+            };
+            let same = |v: &Value| matches!(v, Value::Float(f) if f.to_bits() == x.to_bits());
+            assert!(same(&rs.rows[0].values[1]), "{:?}", rs.rows[0]);
+            match &rs.rows[0].values[0] {
+                Value::List(items) => assert!(same(&items[1]), "{items:?}"),
+                v => panic!("{v:?}"),
+            }
+        }
     }
 
     /// A wrongly sized BLOB must not be truncated silently.

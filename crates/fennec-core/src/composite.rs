@@ -286,11 +286,18 @@ fn text(out: &mut Vec<u8>, t: &str, coll: Option<Collation>) -> bool {
     false
 }
 
+/// A value apart as its key bytes: its encoding, a list's or an object's
+/// floats folded as a hash key folds them (`codec::encode_key`). A
+/// rewrite changing no index's key leaves the entries alone (`same`, by
+/// the hash key), so a key must follow it: by its bits, a json list's
+/// `[-0.0]` rewritten as `[0.0]` kept the entry of `[-0.0]`, the delete
+/// after it looked for the other, and the entry left behind refused a
+/// later row as a duplicate of the row deleted.
 fn apart(out: &mut Vec<u8>, v: &Value) -> bool {
     out.push(APART);
     let at = out.len();
     out.extend_from_slice(&[0; 4]);
-    crate::codec::encode_value(out, v);
+    crate::codec::encode_key(out, v);
     let n = (out.len() - at - 4) as u32;
     out[at..at + 4].copy_from_slice(&n.to_be_bytes());
     true

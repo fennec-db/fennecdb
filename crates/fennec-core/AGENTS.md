@@ -228,7 +228,8 @@ which compares an int and a float by their true values (`value::tie`),
 never as two `f64`s alone, every index's keys and `Value::key_as` with it;
 a `NaN` equals a `NaN` and is above every other number, `+inf` included --
 PostgreSQL's order (`value::floats`), never equal to everything -- every
-`NaN` one key whatever its bits (`float_key`, `codec::key_float`); `null`
+`NaN` one key whatever its bits, `-0.0` that of `0.0`, in a list or a
+vector too (`float_key`, `codec::key_float`, `codec::encode_key`); `null`
 apart, ties in id order; a literal of another kind than a
 typed field's -- or part's -- is no bound or none (`SortedIndex::by_kind`),
 and a time claim's `or` edge is folded by the field's type (`fold_kinds`).
