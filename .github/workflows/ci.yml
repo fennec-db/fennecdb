@@ -214,7 +214,8 @@ jobs:
   # and a shell beside one -- and goes with a holder that closes or is
   # killed. The shell's tests rename a checkpoint, a compact and a restore
   # over a file another handle has open. Without the lock a second server
-  # took the file beside the first.
+  # took the file beside the first. Then fennec-core's file layer and the
+  # experiment of docs/design/windows.md (slice 1).
   windows:
     name: windows (single writer)
     runs-on: windows-latest
@@ -243,6 +244,43 @@ jobs:
       # Beside fennec-server's binary, which the build above put there.
       - name: A second process over a served file is refused
         run: cargo test -p fennec-cli --test lock
+
+      # docs/design/windows.md, decision 2's experiment, run on the
+      # runner's NTFS and on a ReFS and a FAT32 volume, each a VHD diskpart
+      # makes here (the runner's account is an administrator). A volume
+      # that could not be made is named below and left out of the test.
+      - name: A ReFS and a FAT32 volume, each a VHD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $made = @()
+          foreach ($v in @(@('refs', 'R', 4096), @('fat32', 'F', 256))) {
+            $fs, $letter, $mb = $v
+            $vhd = Join-Path $env:RUNNER_TEMP "$fs.vhdx"
+            $script = Join-Path $env:RUNNER_TEMP "$fs.diskpart"
+            @(
+              "create vdisk file=`"$vhd`" maximum=$mb type=expandable",
+              "select vdisk file=`"$vhd`"",
+              "attach vdisk",
+              "create partition primary",
+              "format fs=$fs quick label=$fs",
+              "assign letter=$letter"
+            ) | Set-Content -Path $script -Encoding ascii
+            diskpart /s $script
+            if (Test-Path "${letter}:\") { $made += "${letter}:\" }
+            else { Write-Output "no $fs volume: diskpart could not make one here" }
+          }
+          "FENNEC_TEST_VOLUMES=$($made -join ';')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          exit 0
+
+      # fennec-core's file layer: a rename made durable (the renamed file
+      # and its directory flushed), one another handle refuses tried again
+      # for a bounded time and then failing the sink, and the experiment --
+      # what a read-only view refuses, in this process and another, on each
+      # volume -- held to what Windows did, its answers printed.
+      - name: The file layer, and what a view of a file refuses
+        run: cargo test -p fennec-core --lib fs:: -- --nocapture
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,

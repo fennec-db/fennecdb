@@ -404,9 +404,17 @@ impl FileSink {
         let swapped = (|| -> Result<File> {
             #[cfg(unix)]
             disk.tail.forget(&disk.file)?;
+            #[cfg(not(windows))]
             std::fs::rename(from, &self.path)?;
+            #[cfg(not(windows))]
             sync_dir(&self.path)?;
+            #[cfg(not(windows))]
             let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            // On Windows the rename is tried again while another handle
+            // refuses it, and the file flushed through the handle opened
+            // here before its directory is (docs/design/windows.md).
+            #[cfg(windows)]
+            let mut f = windows::swap(from, &self.path)?;
             f.seek(SeekFrom::End(0))?;
             Ok(f)
         })();
@@ -445,12 +453,24 @@ impl FileSink {
         // renames over it, leaving the link a link.
         let path = resolved(path.as_ref());
         // An existing file is the database: never truncated.
+        #[cfg(not(windows))]
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)?;
+        // Made out of the search indexer's reach, one handle fewer that
+        // may refuse a rename over it.
+        #[cfg(windows)]
+        let mut file = windows::unindexed(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+        )
+        .open(&path)?;
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
@@ -1077,8 +1097,9 @@ impl Drop for SideFile {
 /// is an entry in the directory, and until the directory is synced a power
 /// loss can bring back the old one: the file from before a `compact`,
 /// without the writes the image had taken in. Public for the files a server
-/// keeps beside a database (fennec-http's `.follows`); nothing where the
-/// target is not unix, as the rest of this module.
+/// keeps beside a database (fennec-http's `.follows`). On Windows the
+/// renamed file is flushed and then the directory, NTFS's log written
+/// lazily (`windows::sync_dir`); nothing elsewhere.
 #[cfg(unix)]
 pub fn sync_dir(path: &Path) -> Result<()> {
     let dir = match path.parent() {
@@ -1089,10 +1110,21 @@ pub fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn sync_dir(path: &Path) -> Result<()> {
+    windows::sync_dir(path)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn sync_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{volume, Volume};
 
 /// What wraps a file's sink before the database takes it: a primary's
 /// `Tee` (fennec-http) goes around it here, fsyncing what the file already
