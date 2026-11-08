@@ -633,15 +633,9 @@ impl Value {
                     // A `NaN`, which only a float is: above the other.
                     None => nan_order(a, b),
                 },
-                // A vector against a list of numbers alone, by the vector
-                // the quick read makes of the list ([`vector_list`]).
                 // Incomparable types fall back to type rank. This used to
                 // return Equal: `year = "abc"` matched every row.
-                _ => match (self, other) {
-                    (Value::Vector(v), Value::List(l)) => vector_list(v, l),
-                    (Value::List(l), Value::Vector(v)) => vector_list(v, l).reverse(),
-                    _ => self.type_rank().cmp(&other.type_rank()),
-                },
+                _ => self.type_rank().cmp(&other.type_rank()),
             },
         }
     }
@@ -794,38 +788,34 @@ fn tie(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// A vector against a list of numbers alone, element by element as two
-/// vectors are, each number the `f32` the quick read makes of it: what the
-/// list would have been read as with no field keeping numbers in the
-/// statement. A text read as written for a json field or a list of numbers
-/// reads every list in it so, and a parameter given one is read so -- and
-/// `v = [0.5, 2]` beside them then found no row, a vector never equal to a
-/// list, where it found the row read the quick way
-/// (`a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not`). A
-/// list holding anything else is ranked apart, as before. Each pair as two
-/// vectors' are ([`floats`]: a `NaN` one value, above every number). Out
-/// of line, in the arm of the kinds that do not compare: no comparison of
-/// two values of one kind is longer for it.
-#[cold]
-#[inline(never)]
-fn vector_list(v: &[f32], l: &[Value]) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let quick = |x: &Value| match x {
-        Value::Int(i) => Some(*i as f32),
-        Value::Float(f) => Some(*f as f32),
-        _ => None,
+/// The vector a filter compares a vector field with where it is handed a
+/// list of numbers alone: each number's `f32`, as the quick read makes of
+/// it -- and `None` for any other value, compared as it is. A text read as
+/// written for a json field or a list of numbers reads every list in it so,
+/// and a parameter given one is read so; a vector is never equal to a
+/// list, and `v = [0.5, 2]` beside them then found no row, where the quick
+/// read's vector found it (`a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not`).
+/// Made once a query where the filter is bound (`Filter::bind`): asked in
+/// `cmp_value`, even out of line, an order by an int took 1.15 to 3.4% more
+/// instructions and one by a float 1.5 to 3.2% (`make instr-compare
+/// PKG=fennec-core EXAMPLE=orders`), every comparison's dispatch laid out
+/// anew.
+pub fn compared_vector(v: &Value) -> Option<Vec<f32>> {
+    let Value::List(items) = v else {
+        return None;
     };
-    // The vector ranks first, as `type_rank` ranks it.
-    if !l.iter().all(|x| quick(x).is_some()) {
-        return Ordering::Less;
+    if items.is_empty() {
+        return None;
     }
-    for (x, y) in v.iter().zip(l) {
-        let o = floats(*x as f64, quick(y).unwrap_or(0.0) as f64);
-        if o != Ordering::Equal {
-            return o;
-        }
+    let mut out = Vec::with_capacity(items.len());
+    for x in items {
+        out.push(match x {
+            Value::Int(i) => *i as f32,
+            Value::Float(f) => *f as f32,
+            _ => return None,
+        });
     }
-    v.len().cmp(&l.len())
+    Some(out)
 }
 
 /// The vector a list of numbers alone read as written is read into the
@@ -991,23 +981,25 @@ mod tests {
         assert_eq!(whole_vector(&Value::Vector(vec![1.0])), None);
     }
 
-    /// A vector compares with a list of numbers alone by the `f32`s the
-    /// quick read makes of it, either side, and ranks before any other list.
+    /// A list of numbers alone a filter compares a vector field with is the
+    /// vector of its `f32`s; any other value is compared as it is.
     #[test]
-    fn a_vector_compares_with_a_list_of_numbers_by_its_f32s() {
-        let v = Value::Vector(vec![0.1, 2.0]);
-        let l = |xs: Vec<Value>| Value::List(xs);
-        let tenth = l(vec![Value::Float(0.1), Value::Int(2)]);
-        assert_eq!(v.cmp_value(&tenth), Equal);
-        assert_eq!(tenth.cmp_value(&v), Equal);
+    fn a_list_compared_with_a_vector_is_its_f32s() {
+        let l = Value::List;
         assert_eq!(
-            v.cmp_value(&l(vec![Value::Float(0.2), Value::Int(2)])),
-            Less
+            compared_vector(&l(vec![Value::Float(0.1), Value::Int(2)])),
+            Some(vec![0.1, 2.0])
         );
-        assert_eq!(l(vec![Value::Float(0.2)]).cmp_value(&v), Greater);
-        assert_eq!(v.cmp_value(&l(vec![Value::Float(0.1)])), Greater);
-        assert_eq!(v.cmp_value(&l(vec![Value::Text("a".into())])), Less);
-        assert_eq!(l(vec![Value::Text("a".into())]).cmp_value(&v), Greater);
+        assert_eq!(
+            compared_vector(&l(vec![Value::Float(1.00000001)])),
+            Some(vec![1.0])
+        );
+        assert_eq!(
+            compared_vector(&l(vec![Value::Int(1), Value::Text("a".into())])),
+            None
+        );
+        assert_eq!(compared_vector(&l(vec![])), None);
+        assert_eq!(compared_vector(&Value::Vector(vec![1.0])), None);
     }
 
     /// An int against a float worked out in `i128`, which holds every int

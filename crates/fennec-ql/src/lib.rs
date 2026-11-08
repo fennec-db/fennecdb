@@ -52,8 +52,8 @@ fn one_definition(stmt: Statement) -> Result<fennec_core::named::Definition> {
 /// to the stored one. Read the quick way, a body's `[0.5, 2]` was a
 /// vector's `f32`s, which a list of numbers or a json field it was handed
 /// refused at every call, a binding's at every write it woke; read as
-/// written, a vector field takes the list's `f32`s and `near` and `=` read
-/// it as the vector it was (`value::vector_list`), and the digest stays
+/// written, a vector field takes the list's `f32`s and `near` and a filter
+/// read it as the vector it was (`value::compared_vector`), and the digest stays
 /// the one every definition stored before holds. A text with no `[` reads
 /// alike both ways, and is read once.
 #[cfg(feature = "statements")]

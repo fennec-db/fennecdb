@@ -15154,6 +15154,18 @@ impl<'q> Filter<'q> {
             Slot::At(p) => c.schema.fields[p].collate,
             Slot::Id | Slot::Path(_) => None,
         };
+        // A vector field compared with a list of numbers alone, by the
+        // list's `f32`s, once a query (`value::compared_vector`): however
+        // the statement's lists were read, `v = [0.5, 2]` finds its row.
+        let vectored = |s: Option<Slot>, v: Value| match s {
+            Some(Slot::At(p)) if matches!(c.schema.fields[p].ty, DataType::Vector(..)) => {
+                match crate::value::compared_vector(&v) {
+                    Some(f) => Value::Vector(f),
+                    None => v,
+                }
+            }
+            _ => v,
+        };
         // A `nocase` field's fold, and a value it is compared with folded,
         // once a query.
         let fold_of = |s: Option<Slot>| match s {
@@ -15188,6 +15200,7 @@ impl<'q> Filter<'q> {
                     (_, _, Some(value), Some(s)) => (s, value, false),
                     _ => return Test::Eval(e),
                 };
+                let value = vectored(Some(s), value);
                 match (fold_of(Some(s)), value) {
                     (Some(f), v @ Value::Text(_)) => Test::Folded(
                         s,
@@ -15235,7 +15248,7 @@ impl<'q> Filter<'q> {
                 for it in items {
                     match (it.cloned(), fold) {
                         (Some(v), Some(f)) => values.push(folded(f, v)),
-                        (Some(v), None) => values.push(v),
+                        (Some(v), None) => values.push(vectored(s, v)),
                         (None, _) => return Test::Eval(e),
                     }
                 }

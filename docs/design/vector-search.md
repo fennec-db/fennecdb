@@ -141,11 +141,18 @@ vector field (`set t {xs: $1} where v = $1`), a text read as written for
 one literal holding another compared with a vector field -- and a vector
 was never equal to a list: read as written, `[0.5, 2]` found no row
 holding the vector `[0.5, 2]`, which main found, while `[1, 2]`, whose
-quick read is taken as it came, did. A vector compares with a list of
-numbers alone by the `f32`s the quick read makes of it
-(`value::vector_list`, in `cmp_value`'s arm of the kinds that do not
-compare, so no comparison of one kind is longer), as `near`, a vector
-field's value and the vector functions read one already. And a value is
+quick read is taken as it came, did. A filter compares a vector field with
+a list of numbers alone by the `f32`s the quick read makes of it -- `=`,
+`<`, `in [...]` -- the list made that vector once a query where the filter
+is bound (`value::compared_vector`, `Filter::bind`), as `near`, a vector
+field's value and the vector functions read one already. Asked in
+`Value::cmp_value` instead, in the arm of the kinds that do not compare,
+an order by an int over 100 000 rows took 1.15% more instructions and one
+by a float 1.54%, every comparison's dispatch laid out anew; moved out of
+line there, 3.4% and 3.2% (`make instr-compare PKG=fennec-core
+EXAMPLE=orders`). A comparison the filter does not bind -- one inside a
+`case`, an item of the select list -- compares a vector and a list as
+two kinds still. And a value is
 the same whichever way the reader came to it: a list a hint read at once
 whose `f32`s are the integers written is given back as the quick read's
 vector (`value::whole_vector`, below), and the native library and the

@@ -329,10 +329,10 @@ alone into `f32`s. An `[int]`, `[float]` or `[timestamp]` keeps a list as
 written, as a json field does (`DataType::keeps_numbers`): a vector of
 whole `f32`s short of 2^24 is the integers written, no quick read making
 one of a list hiding a rounding (`value::quick_vector`), and any other is
-read again where `Database::exactly` names it. A vector compares
-with a list of numbers by its `f32`s (`value::vector_list`): how a list
-was read changes no answer. A stored statement runs its text as written,
-held to its quick read's digest (`fennec_ql::stored_definition`).
+read again where `Database::exactly` names it. A filter compares a vector
+field with a list of numbers by its `f32`s (`value::compared_vector`). A
+stored statement runs its text as written, held to its quick read's digest
+(`fennec_ql::stored_definition`).
 
 **[A vector parameter goes into the module as
 `f32`s.](../../docs/design/vector-search.md#vector-parameters)** `run` hands it
