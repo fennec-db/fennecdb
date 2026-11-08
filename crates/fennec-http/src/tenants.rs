@@ -32,7 +32,7 @@ use fennec_core::history::History;
 use fennec_core::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -2930,16 +2930,22 @@ pub fn shaped(name: &str) -> bool {
 /// rule the one to hold. The superscript digits Windows reads as digits
 /// too (`com¹`) are no tenant's: [`shaped`] refuses them.
 ///
-/// The stem -- three or four bytes before the end or a `.` -- is read as
-/// one word, a short one ended with a space, and each byte's 0x20 set,
-/// which lowercases a letter and leaves a digit, a space and a dot as they
-/// are: a word compared, where the stem lowercased byte by byte and matched
-/// was a decision tree of 420 bytes, and split and compared word by word
-/// 852. A byte below 0x20 folds onto one above, which no name [`shaped`]
-/// holds; a NUL so ends a stem, as Windows ends a name at one, and a space
-/// ends one as Windows trims it. Out of line: its callers each pay a call.
-#[inline(never)]
+/// One call to `device`, out of line.
 pub fn a_device(name: &str) -> bool {
+    device(name) != 0
+}
+
+/// The device `name` reads as, a bit of its own of 22, or 0 for none:
+/// what [`passed_over`] says each once by. The stem -- three or four bytes
+/// before the end or a `.` -- is read as one word, a short one ended with a
+/// space, each byte's 0x20 set, which lowercases a letter and leaves a
+/// digit, a space and a dot as they are: one word compared, where the stem
+/// lowercased byte by byte and matched was a decision tree of 420 bytes,
+/// and split and compared word by word 852. A byte below 0x20 folds onto
+/// one above, which no name [`shaped`] holds; a NUL so ends a stem, as
+/// Windows ends a name at one, and a space too, as Windows trims it.
+#[inline(never)]
+fn device(name: &str) -> u32 {
     const fn word(w: [u8; 4]) -> u32 {
         u32::from_le_bytes(w)
     }
@@ -2953,11 +2959,17 @@ pub fn a_device(name: &str) -> bool {
     let stem = match *name.as_bytes() {
         [a, b, c] | [a, b, c, b'.', ..] => [a, b, c, b' '],
         [a, b, c, d] | [a, b, c, d, b'.', ..] => [a, b, c, d],
-        _ => return false,
+        _ => return 0,
     };
     let w = word(stem) | 0x2020_2020;
-    let digit = (w >> 24).wrapping_sub(u32::from(b'1')) < 9;
-    NAMED.contains(&w) || (digit && NUMBERED.contains(&(w & 0x00ff_ffff)))
+    if let Some(i) = NAMED.iter().position(|&n| n == w) {
+        return 1 << i;
+    }
+    let digit = (w >> 24).wrapping_sub(u32::from(b'1'));
+    match NUMBERED.iter().position(|&n| n == w & 0x00ff_ffff) {
+        Some(i) if digit < 9 => 1 << (4 + 9 * i as u32 + digit),
+        _ => 0,
+    }
 }
 
 /// Whether `name`, read off `file` in `dir` -- a node's directory or an
@@ -2969,25 +2981,26 @@ pub fn listed(name: &str, dir: &Path, file: &str) -> bool {
     if !shaped(name) {
         return false;
     }
-    if a_device(name) {
-        passed_over(dir, file, name);
+    let device = device(name);
+    if device != 0 {
+        passed_over(device, dir, file, name);
         return false;
     }
     true
 }
 
-/// Says a device-named `file` in `dir` is passed over, once a process: the
-/// listings it is met by run at every stats request and archive round. By
-/// its name alone, a process reading one node's directory and one archive.
+/// Says a device-named `file` in `dir` is passed over, once a process for
+/// each device: the listings it is met by run at every stats request and
+/// archive round, and the way back it names covers every file of the name.
+/// A bit of a word, where a list of the files said, behind a mutex, was
+/// 768 bytes of the server.
 #[cold]
 #[inline(never)]
-fn passed_over(dir: &Path, file: &str, name: &str) {
-    static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if said.iter().any(|f| f == file) {
+fn passed_over(device: u32, dir: &Path, file: &str, name: &str) {
+    static SAID: AtomicU32 = AtomicU32::new(0);
+    if SAID.fetch_or(device, Ordering::Relaxed) & device != 0 {
         return;
     }
-    said.push(file.to_string());
     crate::log!(
         "{}{MAIN_SEPARATOR}{file}: `{name}` is a device's name on Windows, no tenant's on any \
          system since: passed over, its tenant out of reach. With the server stopped, rename it \
@@ -3484,6 +3497,13 @@ mod tests {
             .collect();
         devices.extend(numbered.iter().map(String::as_str));
         assert_eq!(devices.len(), 22);
+        // A bit each, which the log says each device once by.
+        let bits = devices.iter().fold(0u32, |all, d| {
+            let bit = device(d);
+            assert!(bit.count_ones() == 1 && all & bit == 0, "{d}");
+            all | bit
+        });
+        assert_eq!(bits.count_ones(), 22);
         for d in &devices {
             let refused = check_name(d).unwrap_err();
             assert_eq!(refused.0, 400);
