@@ -43,3 +43,16 @@ of its write -- so a write marked `ran` sends no value that run did not
 read -- the rest walked. The module's parameters go by `JSON.stringify`,
 which it reads as JavaScript's doubles (`as_double`). `normalize` itself
 notes nothing: the module's builder runs through it.
+
+**[A client sends a request again only where it cannot have run or may
+run twice, and bounds every request in time.](../docs/design/js-client.md#retries)**
+`FennecHttp`'s requests go through `#ask`, a stream's head through
+`#open`: a 503 or 429 naming its wait goes again after it, never sooner,
+unless its body says statements landed (`completed`), a refused connection
+too; only a read the builder made (`BUILT`), one sent near or a write under
+a key goes again after a reset -- never the caller's `read: true` sent home,
+a claim nothing checks. Nothing goes again after the client's own timeout,
+the caller's abort or a refusal naming no wait. `timeout` bounds the wait
+for the head and each between the body's pieces (`textOf`), a stream's its
+head alone; the client makes no key. Python's `Client` and `AsyncClient`
+keep the same rule (`_send`, `_post`, `_BUILT`).

@@ -44,6 +44,14 @@ export const appDb = (company: string) => conn(tenantOf(company), appToken(compa
 /** A company's tenant under a person's own token, held to their role's rules. */
 export const asUser = (who: Who) => conn(tenantOf(who.company!), tokenFor(who));
 
+/**
+ * `asUser`, but a refusal comes back as the server said it: the client
+ * waits out a 429 that names its wait and sends again on its own, which a
+ * test of the refusal itself must not have done for it.
+ */
+export const asUserTold = (who: Who) =>
+  connect(`${router}/t/${tenantOf(who.company!)}`, { token: tokenFor(who), fetch: nodeFetch, retry: false });
+
 /** A tenant under the operator's token: setup and the tests' checks alone. */
 export const operatorDb = (tenant: string) => conn(tenant, OPERATOR_TOKEN);
 

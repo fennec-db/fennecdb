@@ -1938,6 +1938,15 @@ fn handle_admitted(
 /// read answered after the lapse is a read. An MCP write tool's call is
 /// answered so as well, its transport's error rather than a tool's result,
 /// which would say the write was made.
+///
+/// A 403 is told to come back (503) only where nothing landed: the lease
+/// lapsed, or the tenant frozen for a move. `freeze_as` sets the flag
+/// before it waits for the requests in flight, this one among them, so a
+/// batch holding a compact, a statement of it landed and a later one
+/// refused for its own reasons, read the flag here; turned into the 503, it
+/// was sent again whole and its writes made twice. Its stop is answered as
+/// it stands, `completed` saying what landed: the freeze waits for it, and
+/// the move takes what it wrote.
 pub(crate) fn answered_under_lease(t: &tenants::Tenant, req: &Request, resp: Response) -> Response {
     let lapsed = t.writable().err();
     let landed = metrics::landed_at();
@@ -1945,7 +1954,7 @@ pub(crate) fn answered_under_lease(t: &tenants::Tenant, req: &Request, resp: Res
         resp.status != 500 && (landed.is_some() || (resp.status < 300 && metrics::writing()));
     match lapsed {
         Some(_) if wrote => outcome_unknown(t, req, landed, resp),
-        lapsed if resp.status == 403 => match refusal_after(t, lapsed) {
+        lapsed if resp.status == 403 && !wrote => match refusal_after(t, lapsed) {
             Some(why) => Response::retry_after(503, &why, 1),
             None => resp,
         },
@@ -4615,8 +4624,29 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
 /// A stopped `/batch`'s answer: where it stopped and how much of it stayed
 /// applied, and the quota where one stopped it -- whose refusal reads
 /// `quota: <kind>: <why>` as the engine's error says it.
+///
+/// Never a come-back once a statement was applied: a 429 or a 503 says
+/// nothing ran, and a client, a proxy or a retry policy sends the whole
+/// batch again, its first statements made twice. A stop that would be one
+/// there -- `--call-rate`'s, a batch holding a compact run a statement at a
+/// time -- is a 409 naming no wait, the conflict its words: `completed`
+/// statements made, the one at `at` and those after it not, to be sent on
+/// their own.
 fn batch_stop(stop: api::Stop, completed: usize, at: usize) -> Response {
     let status = stop.0;
+    if completed > 0 && (status == 429 || status == 503) {
+        let why = format!(
+            "{}: the {completed} statements before it were made, it and those after it were \
+             not: send those alone",
+            stop.1
+        );
+        return api::render_batch_stop(
+            (409, why, stop.2, stop.3),
+            completed,
+            at,
+            fennec_core::VERSION,
+        );
+    }
     // A write's runs past `--call-rate`: when to send the batch again, in
     // the body too, as every wait the server names is.
     if status == 429 {
@@ -5460,6 +5490,86 @@ mod tests {
         }
         drop(t);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn retry_after_of(resp: &Response) -> Option<&str> {
+        resp.extra
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// A tenant frozen for a move tells a refused request to come back
+    /// (503) only where nothing of it landed. `freeze_as` sets the flag
+    /// before it waits for the requests in flight, so a batch holding a
+    /// compact -- a statement of it landed, a later one refused for its own
+    /// reasons -- reads it as it is answered: told to come back, it was sent
+    /// again whole and its first statements made twice. It is answered its
+    /// stop, `completed` and `at` saying what landed and what did not.
+    #[test]
+    fn a_frozen_tenant_tells_a_refusal_to_come_back_only_where_nothing_landed() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-frozen-stop-{}-{}",
+            std::process::id(),
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        let tenants = Tenants::new(&dir).unwrap();
+        let t = tenants.create("acme").unwrap();
+        tenants.freeze_as("acme").unwrap();
+        let req = rest_post("/batch", String::new());
+        let stop = |completed| {
+            let why = "denied: not this token's to write".to_string();
+            api::render_batch_stop((403, why, None, None), completed, completed, "t")
+        };
+        metrics::begin_request();
+        let unrun = answered_under_lease(&t, &req, stop(0));
+        assert_eq!(unrun.status, 503);
+        assert!(retry_after_of(&unrun).is_some());
+
+        metrics::begin_request();
+        metrics::landed(7);
+        let landed = answered_under_lease(&t, &req, stop(1));
+        let body = String::from_utf8(landed.body.clone()).unwrap();
+        assert_eq!(landed.status, 403, "{body}");
+        assert!(body.contains(r#""completed":1,"at":1"#), "{body}");
+        assert_eq!(retry_after_of(&landed), None);
+        metrics::begin_request();
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A `/batch` stopped after a statement of it was applied is never a
+    /// 429 or a 503, which say nothing ran: `--call-rate`'s stop there is
+    /// a 409 naming no wait, `completed` and `at` saying what landed and
+    /// where the rest begins. With nothing applied it is the 429 and its
+    /// wait, as before.
+    #[test]
+    fn a_batch_stopped_after_a_landing_is_never_told_to_come_back() {
+        let why = format!(
+            "{}this server runs 1 statements bound to writes a second for one caller \
+             (--call-rate), and the write woke 3; write again in 1500 ms",
+            calls::RUNS_WAIT
+        );
+        for status in [429, 503] {
+            let after = batch_stop((status, why.clone(), None, None), 2, 2);
+            let body = String::from_utf8(after.body.clone()).unwrap();
+            assert_eq!(after.status, 409, "{body}");
+            assert_eq!(retry_after_of(&after), None);
+            assert!(body.contains(r#""completed":2,"at":2"#), "{body}");
+            assert!(!body.contains("retry_after"), "{body}");
+            assert!(
+                body.contains("the 2 statements before it were made"),
+                "{body}"
+            );
+        }
+        let before = batch_stop((429, why, None, None), 0, 0);
+        let body = String::from_utf8(before.body.clone()).unwrap();
+        assert_eq!(before.status, 429, "{body}");
+        assert_eq!(retry_after_of(&before), Some("2"));
+        assert!(
+            body.contains(r#""completed":0,"at":0,"retry_after":2"#),
+            "{body}"
+        );
     }
 
     fn rest_post(target: &str, body: String) -> Request {

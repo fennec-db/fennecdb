@@ -2462,7 +2462,8 @@ test("a tenant's quota is the error's: its name and the wait the server asks for
       headers: { 'content-type': 'application/json', 'fennec-quota': 'bytes' },
     }),
   ];
-  const db = new FennecHttp('http://x', { fetch: async () => answers.shift() });
+  // The error as a caller meets it once no try is left: here, the first.
+  const db = new FennecHttp('http://x', { fetch: async () => answers.shift(), retry: false });
   const rows = await db.run('put notes {n: 6}').catch((e) => e);
   assert.ok(rows instanceof FennecError);
   assert.equal(rows.status, 507);
@@ -2486,7 +2487,7 @@ test('a tenant being moved says when to come back, in its body as in its header'
       headers: { 'content-type': 'application/json' },
     }),
   ];
-  const db = new FennecHttp('http://x', { fetch: async () => answers.shift() });
+  const db = new FennecHttp('http://x', { fetch: async () => answers.shift(), retry: false });
   const moved = await db.run('put notes {n: 1}').catch((e) => e);
   assert.ok(moved instanceof FennecError);
   assert.equal(moved.status, 503);

@@ -44,14 +44,14 @@ the page does.</p>
 <table>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
-<tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">10 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
+<tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">12 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
 <tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">282 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 57 KB brotli as they are served with no build step; a bundler keeps
+imports, 58 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -82,7 +82,7 @@ re-exports the builder (<code>builder.js</code>) and the HTTP client
 its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
-10 KB brotli through it and to 14 KB through <code>@fennecdb/web</code>,
+12 KB brotli through it and to 14 KB through <code>@fennecdb/web</code>,
 whose <code>Fennec</code> class and its glue a bundler cannot drop (esbuild,
 minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
@@ -152,8 +152,10 @@ const stop = db.subscribe('tasks', { team: 'eq.design', select: ['title', 'statu
 </pre>
 
 <p>A stream that ends -- a tenant moved, the network -- is opened again
-(250 ms, doubling to 15 s) and seeds again; one refused or ended for its
-token is not. <code>sseEvents(res)</code>, the reader under it, takes any
+(250 ms, doubling to 15 s, or the wait a 503 names where that is longer)
+and seeds again; one refused or ended for its token is not. Its
+<code>timeout</code> is to its head alone: a stream with nothing to say
+stays open. <code>sseEvents(res)</code>, the reader under it, takes any
 <code>fetch</code> answer of server-sent events: <code>EventSource</code>
 cannot send <code>Authorization</code>.</p>
 
@@ -163,7 +165,8 @@ cannot send <code>Authorization</code>.</p>
 write lands or none does. Each is a builder query, a FennecQL text, or
 <code>[text, params]</code> as <code>toInsert</code>, <code>toUpdate</code>
 and <code>toDelete</code> make them; with an <code>idempotencyKey</code> a
-retry after a timeout is answered as the first was.</p>
+retry after a timeout is answered as the first was, and the client makes
+that retry itself.</p>
 
 <pre data-lang="ts">import { connect, inc, FennecError } from '@fennecdb/web/client';
 
@@ -209,6 +212,28 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     server's, each statement with its own parameters.</li>
   <li><b>A write answers where it left the database,</b>
     <code>seq</code>, and the client keeps the last as <code>db.seq</code>.</li>
+  <li><b>A request goes again only where that is safe.</b> One the server
+    says ran nothing -- a 503, or a quota's 429, naming its wait -- goes
+    again after that wait and never sooner, and so does one whose
+    connection was refused; a read the builder made or sent near, or a
+    write under an <code>idempotencyKey</code>, goes again after a dropped
+    connection too. A refusal naming no wait never does, nor a write
+    without a key once it may have landed, nor a text given <code>{ read:
+    true }</code> and sent home, a claim nothing checks: its error is
+    yours. Three tries and 10 s of waits at most, then the last error with
+    what the server said: <code>connect(url, { retry: { attempts: 5,
+    maxWait: 30_000 } })</code>, or <code>{ retry: false }</code>
+    (<a href="/docs/http#idempotency">Retrying a write</a>).</li>
+  <li><b>Every request is bounded in time:</b> <code>{ timeout }</code>,
+    30 000 ms unless given, to the answer's head, plus a <code>{ wait
+    }</code>, and between the pieces of its body; past it the request is
+    given up with a <code>DOMException</code> named
+    <code>TimeoutError</code>, and never sent again, since the server may
+    still run it. A statement that runs long before it answers -- a
+    <code>compact</code>, a <code>create index</code> -- is sent through a
+    client given a longer one: <code>connect(url, { timeout: 600_000
+    })</code>. A <code>{ signal }</code> still gives it up sooner, and a
+    request it gave up is never sent again.</li>
   <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a
     server thread and a wake-up at every write, a poll holds nothing between
     rounds (<a href="/docs/http-reference#polling">Polling a read</a>).</li>

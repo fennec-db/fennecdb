@@ -24,6 +24,7 @@ export type {
   Fields,
   HeldSlot,
   HttpOptions,
+  RetryOptions,
   RunOptions,
   Insert,
   InsertRow,

@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { startWorld, tandem, hopper, cast, quantile, sleep, type World } from './harness';
 import { heartbeat } from '../lib/dispatch';
 import { placeOrder } from '../lib/orders';
-import { asUser, FennecError, operatorDb, one, retrying } from '../lib/db';
+import { asUser, asUserTold, FennecError, operatorDb, one, retrying } from '../lib/db';
 import { setQuota } from '../lib/setup';
 import { PLANS } from '../lib/plans';
 import { addresses, bounds, rng, type Point } from '../lib/city';
@@ -102,7 +102,9 @@ test('a starter fleet writing ten times its plan is refused; the pro company bes
 });
 
 test('a bulk import past the bytes a second waits out its debt', async () => {
-  const dispatcher = asUser(hp.dispatcher);
+  // The refusal as the server says it: a client left to itself waits the
+  // debt out and sends the page again, so no refusal would reach us.
+  const dispatcher = asUserTold(hp.dispatcher);
   const doors = addresses();
   // An import is let off the plan's rows a second -- 120 rows a page would
   // be three seconds of a Starter company's 40 -- and held to its bytes.

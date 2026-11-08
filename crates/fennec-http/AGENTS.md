@@ -153,7 +153,10 @@ longer than its backoff.
 
 **[Every 503 says when to come back, in its body
 too.](../../docs/design/quotas.md#retry-after-in-bodies)** Write one with
-`Response::retry_after`.
+`Response::retry_after`. Nothing that landed is told to come back: a
+`/batch` stopped after a statement was applied is never a 503 nor a 429
+naming its wait (`answered_under_lease`'s `wrote`, `batch_stop`'s 409),
+which a client sends again whole.
 
 ### The HTTP server
 
