@@ -349,6 +349,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `/_stats/statements` counts by shape, a tenant's apart.
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
+- A text's lists are read as written at once from its second request.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
 - A connection no thread can be made for is answered 503.

@@ -34,7 +34,15 @@ goes in as text with its parameters as JSON, and its answer comes back as
 the JSON the browser module answers with, from the same code
 (<code>fennec-abi</code>), so a page and an app handed the same text get the
 same bytes. A vector goes in as its <code>f32</code> bytes beside the
-JSON, never as digits. The same file can be a replica a server keeps in
+JSON, never as digits. Where such a parameter is given a <code>json</code>
+field or a list of numbers (<code>[int]</code>, <code>[float]</code>,
+<code>[timestamp]</code>), or compared with one, the library names it
+before running anything and the binding sends it again inside the JSON,
+so <code>[16777217]</code> and <code>[0.1]</code> are kept as the numbers
+written, not as <code>f32</code>s; each binding remembers a text's places
+and sends them so from its second call on, one call of the library's
+rather than two (2.1 µs a put of an <code>[int]</code> of 8 beside a
+128-dim vector, against 3.4 asked again). The same file can be a replica a server keeps in
 step (<a href="#sync">Sync with a server</a>), and an app can ask a server
 with no file at all (<a href="#connect">Without a file</a>).</p>
 </details>

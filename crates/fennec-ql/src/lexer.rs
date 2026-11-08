@@ -385,8 +385,11 @@ impl Kept {
     #[inline(never)]
     fn start(&mut self, at: &mut Keeping, v: &[f32], text: usize) {
         if self.nums.capacity() == 0 {
-            // A number and its comma are two bytes at the least, and
-            // nearly every list's are more.
+            // A number and its comma are two bytes at the least, so a text
+            // can hold half its length in numbers -- but a list that keeps
+            // any holds decimals, `0.123456,` and longer, and the text more
+            // than lists: an eighth of its length is room for nearly every
+            // page's, and one past it grows the arena, a doubling, once.
             self.nums.reserve(text / 8);
             self.ints.reserve(text / 8);
         }

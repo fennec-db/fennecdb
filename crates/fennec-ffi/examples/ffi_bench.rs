@@ -17,7 +17,12 @@
 //! the write lock, the reader asking again within microseconds of its last
 //! answer. `ffi_bench beside` runs that part alone, three times (`beside
 //! durable` with every text fsynced), and `ffi_bench put` a buffered put of
-//! one row alone, 20 000 of them.
+//! one row alone, 20 000 of them. `ffi_bench lists` puts a row holding an
+//! `[int]` of 8 beside its vector, 20 000 times each way: the list handed
+//! over apart as `f32`s, as a binding hands any list of numbers, and sent
+//! again as JSON where the library asks for it (`exact`), what a binding
+//! remembering no places pays each call; and as JSON at once, what one
+//! remembering its text's places pays from the second call on.
 
 use fennec_core::prelude::*;
 use fennec_ffi::*;
@@ -61,6 +66,11 @@ fn main() {
             us[us.len() / 2],
             mean
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("lists") {
+        lists(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
@@ -291,6 +301,67 @@ fn beside(dir: &std::path::Path, durable: bool) {
         at(&waits, 1.0) / 1e3,
         written.load(Ordering::Relaxed) as f64 / run.as_secs_f64()
     );
+}
+
+/// `ffi_bench lists`: see the head of the file.
+fn lists(dir: &std::path::Path) {
+    let path = dir.join("lists.fennec");
+    let h = open(path.to_str().unwrap(), FENNEC_OPEN_NO_SYNC);
+    ok(h, "create collection t (xs [int], e vector<128>)", "[]", &[]);
+    let sql = "put t {xs: $1, e: $2}";
+    let xs: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let v: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+    let both = [apart(0, &xs), apart(1, &v)].concat();
+    let e = apart(1, &v);
+    let listed = format!("[{},null]", list(&xs));
+    let n = 20_000;
+    for round in 0..3 {
+        let mut asked = 0;
+        let each = |f: &mut dyn FnMut()| {
+            let mut us: Vec<f64> = (0..n)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            us.sort_by(f64::total_cmp);
+            (us[n / 2], us.iter().sum::<f64>() / n as f64)
+        };
+        let apart_first = each(&mut || {
+            if answer(h, sql, "[null,null]", &both).contains("\"exact\"") {
+                asked += 1;
+                ok(h, sql, &listed, &e);
+            }
+        });
+        let json_first = each(&mut || ok(h, sql, &listed, &e));
+        println!(
+            "round {round}: an [int] of 8 and a 128-dim vector, buffered library put: \
+             apart, asked again {:.2} us p50 {:.2} mean ({asked} of {n} asked again); \
+             as JSON at once {:.2} us p50 {:.2} mean",
+            apart_first.0, apart_first.1, json_first.0, json_first.1
+        );
+    }
+    call(fennec_close, h);
+}
+
+/// A call's answer, whatever it is.
+fn answer(h: u64, sql: &str, params: &str, vectors: &[u8]) -> String {
+    let mut out = std::ptr::null_mut();
+    unsafe {
+        fennec_query(
+            h,
+            sql.as_ptr(),
+            sql.len(),
+            params.as_ptr(),
+            params.len(),
+            vectors.as_ptr(),
+            vectors.len(),
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    taken(out)
 }
 
 fn open(p: &str, flags: u32) -> u64 {

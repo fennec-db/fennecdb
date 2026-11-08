@@ -173,6 +173,18 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
     internal val inflight = AtomicInteger()
     internal val lives = Lives(this)
 
+    /**
+     * By text, the parameters the library asked to have as JSON (`exact`):
+     * a list of numbers it keeps as written -- a json field's, an
+     * `[int]`'s, a `[float]`'s -- goes so at once from the text's second
+     * call on, where sent apart as `f32`s it was refused and sent again,
+     * two of the library's calls each time: 3.38 us a put of an `[int]` of
+     * 8 beside a 128-dim vector against 2.12 (`ffi_bench lists`). Forgotten
+     * past 256 texts, as the JavaScript client's are. Internal for the
+     * tests.
+     */
+    internal val asked = java.util.concurrent.ConcurrentHashMap<String, Set<Int>>()
+
     /** The replica's sync, set once by [Fennec.Companion.sync]. */
     @Volatile internal var syncing: Replica? = null
         private set
@@ -297,13 +309,23 @@ class Fennec private constructor(internal val handle: Long) : AutoCloseable {
         val values = params.map { Values.normalize(it) }
         if (!quiet) inflight.incrementAndGet()
         try {
-            return try {
-                answer(text, values, emptySet())
-            } catch (e: FennecException) {
-                // A json field keeps a list of numbers as written: those the
-                // library asks for go again inside the JSON.
-                if (e.exact == null) throw e
-                answer(text, values, e.exact.toSet())
+            // Looked up only where a list of numbers is among the
+            // parameters, so a call with none pays nothing.
+            var asJson = if (values.any { Values.vector(it) != null }) asked[text] ?: emptySet() else emptySet()
+            while (true) {
+                try {
+                    return answer(text, values, asJson)
+                } catch (e: FennecException) {
+                    // A field keeping a list of numbers as written: those the
+                    // library asks for go again inside the JSON, and so at
+                    // once the next time. Never a place sent as JSON already:
+                    // those it names are new, so this ends.
+                    val more = asJson + (e.exact ?: throw e)
+                    if (more == asJson) throw e
+                    asJson = more
+                    if (asked.size >= 256 && !asked.containsKey(text)) asked.clear()
+                    asked[text] = more
+                }
             }
         } finally {
             if (!quiet) {

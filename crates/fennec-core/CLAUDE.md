@@ -327,13 +327,12 @@ shortest text reading back as it (`json::num32_into`), but for
 `num::parse_f64` reads one, and natively `num::clinger` a list of numbers
 alone into `f32`s. An `[int]`, `[float]` or `[timestamp]` keeps a list as
 written, as a json field does (`DataType::keeps_numbers`): a vector of
-whole `f32`s short of 2^24 is the integers written (`value::whole_f32s`),
-so no quick reader makes one of a list that hid a rounding
-(`num::hides_rounding`, `value::quick_vector`), and any other bound for a
-list is read again where `Database::exactly` names it -- by a server at
-once where its text's last request named it (`api::Cached::hint`, held to
-`exactly` each request, so no answer depends on it), a page's documents'
-lists alone (`fennec_ql::read_listed`).
+whole `f32`s short of 2^24 is the integers written, no quick read making
+one of a list hiding a rounding (`value::quick_vector`), and any other is
+read again where `Database::exactly` names it. A vector compares
+with a list of numbers by its `f32`s (`value::vector_list`): how a list
+was read changes no answer. A stored statement runs its text as written,
+held to its quick read's digest (`fennec_ql::stored_definition`).
 
 **[A vector parameter goes into the module as
 `f32`s.](../../docs/design/vector-search.md#vector-parameters)** `run` hands it

@@ -52,7 +52,13 @@ a type error naming the field and the element, counted from 0 —
 9223372036854775807</code> — never clamped or rounded
 (<a href="limits.html#fixed-limits">limits</a>). A <code>[timestamp]</code>
 takes its elements as milliseconds, and <code>where xs = [1, 2]</code> finds
-the row holding that list.</p>
+the row holding that list. A row written before fennecdb read these lists
+as written keeps the <code>f32</code>s it stored —
+0.10000000149011612 for <code>0.1</code>, 16777216 for 16777217 — and
+<code>where fs = [0.1]</code> does not find it: write its numbers again to
+put it right. A vector field compared with a list of numbers compares with
+the list's <code>f32</code>s, so <code>where embed = [0.5, 2]</code> finds
+its row however the statement's lists were read.</p>
 
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 

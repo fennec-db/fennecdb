@@ -74,6 +74,25 @@ struct Note: Codable, Equatable, FennecValue {
         try await db.close()
     }
 
+    /// An `[int]` and a `[float]` keep their numbers as written: the
+    /// library asks for a list sent as `Float`s again as JSON, and the
+    /// binding sends the text's lists so at once from its second call on.
+    @Test func aListOfNumbersKeepsItsNumbersAndIsAskedForOnce() async throws {
+        let db = try Fennec.memory()
+        try await db.execute("create collection l (xs [int], fs [float], e vector<2>)")
+        let put = "put l {xs: $1, fs: $2, e: $3}"
+        #expect(db.askedPlaces(put).isEmpty)
+        try await db.execute(put, [16777217, 2] as [Int], [0.1] as [Double], [Float(0.5), 0.25])
+        #expect(db.askedPlaces(put) == [0, 1])
+        try await db.execute(put, [1, 2] as [Int], [19.99] as [Double], [Float(0.5), 0.25])
+        #expect(db.askedPlaces(put) == [0, 1])
+        let r = try await db.query("get l select xs, fs, e order id")
+        #expect(r.map { $0["xs"] } == [.array([.int(16777217), .int(2)]), .array([.int(1), .int(2)])])
+        #expect(r.map { $0["fs"] } == [.array([.double(0.1)]), .array([.double(19.99)])])
+        #expect(r.first?["e"]?.floats == [0.5, 0.25])
+        try await db.close()
+    }
+
     @Test func errorsCarryTheirKind() async throws {
         let db = try Fennec.memory()
         try await db.execute("create collection t (a int @unique)")

@@ -4,7 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:fennecdb/fennecdb.dart';
-import 'package:fennecdb/src/fennec.dart' show namedStatement;
+import 'package:fennecdb/src/fennec.dart' show askedPlaces, namedStatement;
 import 'package:fennecdb/src/values.dart' show iso, number, writeJson;
 import 'package:test/test.dart';
 
@@ -144,6 +144,41 @@ void main() {
       [0.1, 0.2]
     ]);
     expect((await db.query('get t select meta')).first['meta'], [0.1, 0.2]);
+    await db.close();
+  });
+
+  test('a list of numbers keeps its numbers and is asked for once', () async {
+    // The library asks for a list sent as `f32`s again as JSON, and the
+    // binding sends the text's lists so at once from its second call on.
+    final db = await Fennec.memory();
+    await db.execute('create collection l (xs [int], fs [float], e vector<2>)');
+    const put = 'put l {xs: \$1, fs: \$2, e: \$3}';
+    expect(askedPlaces(db, put), isNull);
+    await db.execute(put, [
+      [16777217, 2],
+      [0.1],
+      Float32List.fromList([0.5, 0.25])
+    ]);
+    expect(askedPlaces(db, put), {0, 1});
+    await db.execute(put, [
+      [1, 2],
+      [19.99],
+      Float32List.fromList([0.5, 0.25])
+    ]);
+    expect(askedPlaces(db, put), {0, 1});
+    final rows = await db.query('get l select xs, fs order id');
+    expect([
+      for (final r in rows) r['xs']
+    ], [
+      [16777217, 2],
+      [1, 2]
+    ]);
+    expect([
+      for (final r in rows) r['fs']
+    ], [
+      [0.1],
+      [19.99]
+    ]);
     await db.close();
   });
 

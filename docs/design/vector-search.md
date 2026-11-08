@@ -116,7 +116,11 @@ alone, `json::exact_params` stepping over the rest), the native library and
 the browser module from the parameters' JSON (`exact_noting`, a list handed
 over apart as `f32`s asked for as JSON, as a json field's is), the text
 through `fennec_ql::parse_exact`. A REST body's and a replica's documents
-name the field, and read it as written the first time.
+name the field, and read it as written the first time. A row an earlier
+build wrote keeps the numbers it stored -- 0.10000000149011612 for `0.1`,
+16777216 for 16777217 -- and `where fs = [0.1]` finds none of them, `=`
+asking for the numbers written; nothing reads the stored ones back into
+what a client sent, so only writing a row's numbers again puts it right.
 
 *Where the rounding is told.* In the value itself, per literal and per
 parameter. A vector of whole `f32`s short of 2^24 (`value::whole_f32s`) is
@@ -130,6 +134,24 @@ or parameter of whole numbers is taken as it came (`Exactly::lists`,
 `Exactly::settle` against the parameters as read), every other vector bound
 for a list of numbers is read again, and a vector built in Rust and handed
 to one is its `f32`s widened (`Value::coerce`).
+
+*How a list was read changes no answer.* One value can be read either way
+in one statement -- a parameter given an `[float]` and compared with a
+vector field (`set t {xs: $1} where v = $1`), a text read as written for
+one literal holding another compared with a vector field -- and a vector
+was never equal to a list: read as written, `[0.5, 2]` found no row
+holding the vector `[0.5, 2]`, which main found, while `[1, 2]`, whose
+quick read is taken as it came, did. A vector compares with a list of
+numbers alone by the `f32`s the quick read makes of it
+(`value::vector_list`, in `cmp_value`'s arm of the kinds that do not
+compare, so no comparison of one kind is longer), as `near`, a vector
+field's value and the vector functions read one already. And a value is
+the same whichever way the reader came to it: a list a hint read at once
+whose `f32`s are the integers written is given back as the quick read's
+vector (`value::whole_vector`, below), and the native library and the
+browser module, which read every parameter again where one needs it, take
+only the places named from that read (`exact_noting`), so a whole list
+beside them is the vector it is with nothing named.
 
 *Read once where it can be, and nothing kept decides an answer.* A server
 reads a list as written in its first read wherever it can know to:
@@ -146,9 +168,23 @@ reads a list as written in its first read wherever it can know to:
   parameters read the quick way again and the hint dropped; a place it
   names is read as written either way, at once or again, since
   `Exactly::settle` drops a value holding no vector, which is what a value
-  read as written is. Kept again only where it changed, under its shard's
-  lock: a statement whose hint holds takes no lock for it. The first
-  request of a text still reads twice.
+  read as written is -- but for a list given a list of numbers alone
+  (`Exactly::lists`), which `settle` takes as it came where its `f32`s are
+  the integers written: read at once, such a list is given back as that
+  vector (`value::whole_vector`). So the value is the hint's no more than
+  the answer is, whatever text or tenant left it: the parse cache is the
+  process's, a `--dir` node's tenants' alike, and a long text is known by
+  its 64-bit FNV-1a alone (`a_hint_another_tenant_left_changes_no_answer`).
+  First read, the hint read `[1, 2]` as the list of two ints where the
+  quick read made a vector, and `v = $1` beside `xs: $1` found the row by
+  one and not the other. Kept again only where it changed, under its
+  shard's lock: a statement whose hint holds takes no lock for it. The
+  first request of a text still reads twice. A hint keeps at most 4 096
+  places (`HINT_PLACES`; a text naming more keeps none, and reads twice
+  each request) and a shard of long texts' at most 16 384 together
+  (`HINT_BUDGET`, forgotten past it as past its 64 texts): a place is 8
+  bytes, and a long text's are bounded by its body alone --
+  `put t [{xs: $1}, ..., {xs: $3000000}]` would have kept 24 MB a text.
 - A kept text: its tree read as written is kept beside its quick one, read
   once (`Cached::exact`) -- what the text says alone, the same tree each
   time.
@@ -181,17 +217,43 @@ written, its `f32`s
 made where it binds to a vector, as the browser module makes a page's
 (a double, then `Math.fround`): no bit would move -- the lexer reads each
 number into an `f64` first and rounds that, natively (`num::clinger`,
-`num::parse_f64`) as in the module -- but the tree would. A short list
-read so made a vector's kind its length's, `near` on a vector of 8 and a
-`vector<8>` field handed lists; every list read so makes a definition's
-tree, and so its digest, the native parser's and not the module's, which
-reads such a list into a vector: a statement a server defined
-holding a vector would be marked broken where the module opens it. Its
-cost is not what rules it out: read as written, a page of 100 128-dim
-vectors parsed in 6.78 M instructions, the quick read 5.77 M (`make
-instr-compare PKG=fennec-http EXAMPLE=number_lists MODES=parse,parse-exact`)
--- but each list a `Value` a number, eight times a vector's memory until
-it binds.
+`num::parse_f64`) as in the module -- but the tree would, and a named
+statement is held to its tree's digest: every stored definition holding a
+list of numbers would read to another digest and be marked broken under a
+new grammar epoch, and `make fennecql-corpus` would find every such text
+reading another tree. A definition alone is read so, its digest still its
+quick read's (below). The cost in time is not what rules it out: read as
+written, a page of 100 128-dim vectors parsed in 6.78 M instructions, the
+quick read 5.77 M (`make instr-compare PKG=fennec-http EXAMPLE=number_lists
+MODES=parse,parse-exact`) -- but each list a `Value` a number, eight times
+a vector's memory until it binds.
+
+*A named statement runs its text as written.* A definition's tree is the
+one an open reads its text into (`fennec_core::named::Reader`), and it was
+the quick read's: a body's `[0.5, 2]` handed a list of numbers or a json
+field was a vector there, which `Database::exactly` refused at every call
+-- naming `fennec_ql::parse_for` to an HTTP caller -- every slot of a
+schedule, every event of a hook and every write a binding woke, its
+collection then unwritable; on main a list of numbers took the vector's
+`f32`s, `[0.1]` as 0.10000000149011612. Now the reader reads the text as
+written (`fennec_ql::stored_definition`, `parse_exact`), and holds it to the
+digest of the tree the text reads to the quick way, the one every record
+holds: no stored definition reads to another digest for it, but one hiding
+a rounding (*Grammar epoch 4*, [named-statements.md](named-statements.md)),
+and one stored by an earlier build runs its lists as written from its next
+open. A vector in a body takes the list's `f32`s where it binds, and `near`
+and `=` read it so (above); a text with no `[` is read once.
+
+*The bindings send a text's lists as JSON once asked.* Swift, Kotlin and
+Dart send any list of numbers apart as `f32`s, as the browser module's
+page does a vector (`vectorsApart`); one bound for a list of numbers or a
+json field is asked for again as JSON (`exact`) whatever it holds, since
+its `f32`s may be the rounding of the client's doubles. Each binding, as
+the JavaScript client does, keeps by text the places the library asked
+for (256 texts) and sends them as JSON from the second call on: a buffered
+put of an `[int]` of 8 beside a 128-dim vector took 3.38 us asked again
+each call, 2.12 us sent as JSON at once, against main's 1.96 apart, where
+the list was taken as its `f32`s (`ffi_bench lists`, p50 of 20 000).
 
 *What reading again costs, and what was made cheaper for it.* A list read
 again is read in one pass, as the quick read reads it: the lexer makes a
