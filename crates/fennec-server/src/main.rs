@@ -505,8 +505,8 @@ fn main() {
     // token: what a Unix gives and Windows does not yet (docs/design/windows.md).
     #[cfg(windows)]
     fennec_http::log!(
-        "windows: a rename is made durable, the file and its directory flushed, and the \
-         file mapped; no SIGTERM yet"
+        "windows: a rename is made durable, the file and its directory flushed; \
+         no SIGTERM yet"
     );
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
@@ -1638,16 +1638,13 @@ fn say_volume(path: &str, mmap: bool) {
         "read into memory (--no-mmap)"
     } else if !fennec_core::fs::mappable(std::path::Path::new(path)) {
         "read into memory"
-    } else if fennec_core::fs::placeholders() {
-        "mapped, a view laid past the last at each handover"
     } else {
-        "mapped whole and anew at each handover: this Windows lays no views in a \
-         placeholder (Windows 10 1803 and later do)"
+        mapped_as()
     };
     match fennec_core::fs::volume(std::path::Path::new(path)) {
         Ok(v) if v.remote => fennec_http::log!(
-            "windows: {path} is on a share ({}): the file is {held}, a share's read error \
-             ending the process through a view",
+            "windows: {path} is on a share ({}): the file is {held}, since a share's read \
+             error would end the process through a view",
             v.file_system
         ),
         Ok(v) if v.posix_renames() => fennec_http::log!(
@@ -1665,4 +1662,21 @@ fn say_volume(path: &str, mmap: bool) {
             "windows: the volume {path} is on could not be read ({e}): the file is {held}"
         ),
     }
+}
+
+/// How [`say_volume`] says a file it may map is held: a 32-bit build maps
+/// none (`fennec_core::fs::open`).
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn mapped_as() -> &'static str {
+    if fennec_core::fs::placeholders() {
+        "mapped, a view laid past the last at each handover"
+    } else {
+        "mapped whole and anew at each handover: this Windows lays no views in a \
+         placeholder (Windows 10 1803 and later do)"
+    }
+}
+
+#[cfg(all(windows, not(target_pointer_width = "64")))]
+fn mapped_as() -> &'static str {
+    "read into memory, as a 32-bit build reads every file"
 }

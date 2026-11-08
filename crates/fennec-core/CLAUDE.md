@@ -19,7 +19,8 @@ system's, a "buffer pool" a database's own, which fennecdb has none of.
 **[Writes are handed over to the mapped file.](../../docs/design/storage.md#handover)**
 Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the
 stores at it, never with a block open, the file the same byte for byte; on
-Windows at a view laid past the last.
+Windows at a view laid past the last, a mapping of many views let go of
+on a thread, not under the write lock (`map::Teardown`).
 
 **[A block past 16 MB spills into the file before it lands.](../../docs/design/storage.md#spills)**
 A spill (kind 10) counts only where a land (kind 11) names it; the feed

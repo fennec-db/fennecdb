@@ -254,8 +254,20 @@ fn a_torn_tail_is_cut_by_a_second_open() {
         .err()
         .expect("cut under a view");
     println!("a torn tail another process maps: {refused}");
+    assert!(refused.to_string().contains("a view"), "{refused}");
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 7);
+
+    // This process's own view -- a stream or a pinned read still reading
+    // the database a storage error stopped -- refuses it too, until it goes.
+    let held = open_read_only(&path).unwrap();
+    let refused = fennec_core::fs::open(&path)
+        .err()
+        .expect("cut under this process's view");
+    println!("a torn tail this process maps: {refused}");
+    assert!(refused.to_string().contains("a view"), "{refused}");
+    drop(held);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 7);
 
     {
@@ -269,5 +281,80 @@ fn a_torn_tail_is_cut_by_a_second_open() {
     let db = open_mapped(&path).unwrap();
     assert_eq!(count(&db), 35);
     drop(db);
+    let _ = std::fs::remove_file(&path);
+}
+
+const VOLUMES: &str = "FENNEC_TEST_VOLUMES";
+
+/// `path` through its drive's administrative share, `\\localhost\C$\...`,
+/// which the runner's account, an administrator's, reaches.
+fn shared(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut out = PathBuf::new();
+    for c in std::fs::canonicalize(path).unwrap().components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(d) | Prefix::Disk(d) => {
+                    out.push(format!(r"\\localhost\{}$\", d as char))
+                }
+                other => panic!("{other:?}: not on a drive"),
+            },
+            Component::RootDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn mapped(db: &Database) -> bool {
+    db.collection("docs").unwrap().store.is_mapped()
+}
+
+/// A file opened as a server opens it -- `fs::open_serving`, which asks
+/// `fs::mappable` -- is mapped on the runner's NTFS, as `fs::open`'s and
+/// `fs::open_read_only`'s are; through a share, and on the job's FAT32
+/// volume, it is read into memory. The tests above map through
+/// `open_mapped`, which asks nothing: had `mappable` said no on NTFS, a
+/// Windows server would hold its whole file in memory and they would pass.
+#[test]
+fn a_server_s_file_is_mapped_on_ntfs_and_read_through_a_share() {
+    let path = tmp("mappable");
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    run(&mut db, "create collection docs (n int, body text)");
+    fill(&mut db, 0, 50);
+    drop(db);
+    let serving = |p: &Path, mmap| fennec_core::fs::open_serving(p, mmap, Box::new(Ok)).unwrap();
+
+    let db = serving(&path, true);
+    assert!(mapped(&db), "a server's file on NTFS read into memory");
+    assert_eq!(count(&db), 50);
+    drop(db);
+    assert!(mapped(&fennec_core::fs::open(&path).unwrap()));
+    assert!(mapped(&open_read_only(&path).unwrap()));
+    assert!(!mapped(&serving(&path, false)), "--no-mmap mapped");
+
+    let share = shared(&path);
+    let db = serving(&share, true);
+    assert!(!mapped(&db), "{} mapped", share.display());
+    assert_eq!(count(&db), 50);
+    drop(db);
+    assert!(!mapped(&open_read_only(&share).unwrap()));
+
+    let volumes = std::env::var_os(VOLUMES).unwrap_or_default();
+    for root in std::env::split_paths(&volumes).filter(|p| !p.as_os_str().is_empty()) {
+        let fs = fennec_core::fs::volume(&root).unwrap().file_system;
+        let dir = root.join(format!("fennecdb-windows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let there = dir.join("mappable.fennec");
+        let mut db = serving(&there, true);
+        run(&mut db, "create collection docs (n int, body text)");
+        fill(&mut db, 0, 10);
+        drop(db);
+        let db = serving(&there, true);
+        println!("{}: {fs}, mapped {}", there.display(), mapped(&db));
+        assert_eq!(mapped(&db), fs != "FAT32", "{fs}");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     let _ = std::fs::remove_file(&path);
 }

@@ -84,8 +84,10 @@ last one ends at (`Mapping::cover`: the placeholder split, a section and a
 view, `MapViewOfFile3`), the stores' addresses kept and a view's last page
 showing what later writes put there, CI found; where the system has no
 placeholders, before Windows 10 1803, the file is mapped whole and anew at
-each handover, as one outgrowing its room is
-([windows.md](windows.md#1-the-mapped-file-on-windows)). Whether the heap goes back to the system is the allocator's call:
+each handover, as one outgrowing its room is; and a mapping of more than 16
+views dropped lets them go on a thread of its own, an `UnmapViewOfFile`
+each, rather than under the write lock (`map::Teardown`,
+[windows.md](windows.md#built-in-slice-2)). Whether the heap goes back to the system is the allocator's call:
 musl's and glibc's unmap a large block when it is freed, so the process
 holds what the engine counts (250 000 x 768 with no graph: 6 MB of
 anonymous memory against 777), while macOS's keeps hundreds of megabytes of

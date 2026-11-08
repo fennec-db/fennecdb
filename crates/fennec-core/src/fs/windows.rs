@@ -355,12 +355,12 @@ pub fn volume(path: &Path) -> io::Result<Volume> {
 const FILE_REMOTE_PROTOCOL_INFO: i32 = 13;
 
 /// Whether `f` is reached through a network redirector: only there does
-/// the system answer `FILE_REMOTE_PROTOCOL_INFO` (180 bytes), a local file
-/// system refusing the class (`a_local_volume_is_not_remote`).
+/// the system answer `FILE_REMOTE_PROTOCOL_INFO` (116 bytes), a local file
+/// system refusing the class (`a_file_is_mapped_where_its_volume_allows`).
 fn remote(f: &File) -> bool {
-    let mut info = [0u32; 45];
+    let mut info = [0u32; 29];
     // SAFETY: the handle is open across the call, and `info` is the
-    // struct's 180 bytes, 4-aligned, as the class asks.
+    // struct's 116 bytes, 4-aligned, as the class asks.
     unsafe {
         GetFileInformationByHandleEx(
             f.as_raw_handle(),
@@ -388,9 +388,13 @@ pub fn mappable(path: &Path) -> bool {
 /// go, the file is cut to the `whole` bytes its records fill, and it opens
 /// again -- a crash's tail costs a second open -- as the first was set up:
 /// `deferred`, a server's, its vectors left to link beside the queries
-/// (`defer_linking`, which the first load cleared). Another process's view
-/// refuses the cut, and the open fails with it: a reader held over a file
-/// whose writer crashed.
+/// (`defer_linking`, which the first load cleared). Another view of the
+/// file refuses the cut, and the open fails with it, saying so, until the
+/// view goes: another process's -- a reader held over a file whose writer
+/// crashed -- or this one's, a stream or a pinned read still reading the
+/// database a storage error stopped, a `--dir` tenant opened again. Once
+/// an open: the second open finding a tail to cut fails rather than cut
+/// again.
 #[cfg(target_pointer_width = "64")]
 pub(super) fn cut_and_open(
     db: crate::engine::Database,
@@ -401,6 +405,27 @@ pub(super) fn cut_and_open(
 ) -> crate::error::Result<crate::engine::Database> {
     drop(db);
     sink.mapping = None;
+    if CUTTING.with(|c| c.get()) {
+        return Err(crate::error::Error::Io(
+            "the file's last record was cut short again after its torn tail was cut".into(),
+        ));
+    }
+    // The mappings this process let go of before, whose views a thread
+    // may still be letting go ([`map::unmapped`]).
+    map::unmapped();
+    // Through the sink's handle, as its `cut` does after, for the error's
+    // number: the system's words for it name no view.
+    let cut = super::lock(&sink.disk).file.set_len(whole as u64);
+    if let Err(e) = cut {
+        return Err(match e.raw_os_error() {
+            Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
+                "the file's last record was cut short, and Windows cuts no file a view \
+                 maps: another process maps it, or a stream or a pinned read of this one \
+                 still reads it, and it opens once they let it go ({e})"
+            )),
+            _ => e.into(),
+        });
+    }
     sink.cut(whole)?;
     let path = sink.path().to_path_buf();
     drop(sink);
@@ -408,7 +433,26 @@ pub(super) fn cut_and_open(
     if deferred {
         db.defer_linking();
     }
+    // Set across the second open, whatever it ends in.
+    struct Cutting;
+    impl Drop for Cutting {
+        fn drop(&mut self) {
+            CUTTING.with(|c| c.set(false));
+        }
+    }
+    CUTTING.with(|c| c.set(true));
+    let _cutting = Cutting;
     super::open_mapped_into(db, path, wrap)
+}
+
+/// `SetEndOfFile`'s refusal of a file a view maps.
+#[cfg(target_pointer_width = "64")]
+const ERROR_USER_MAPPED_FILE: i32 = 1224;
+
+#[cfg(target_pointer_width = "64")]
+thread_local! {
+    /// Set while [`cut_and_open`] opens the file it cut.
+    static CUTTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1208,6 +1252,113 @@ pub(super) mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
         assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
         drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `path` through its drive's administrative share,
+    /// `\\localhost\C$\...`, which the runner's account, an
+    /// administrator's, reaches: the file as a share serves it.
+    fn shared(path: &Path) -> PathBuf {
+        use std::path::{Component, Prefix};
+        let mut out = PathBuf::new();
+        for c in std::fs::canonicalize(path).unwrap().components() {
+            match c {
+                Component::Prefix(p) => match p.kind() {
+                    Prefix::VerbatimDisk(d) | Prefix::Disk(d) => {
+                        out.push(format!(r"\\localhost\{}$\", d as char))
+                    }
+                    other => panic!("{other:?}: not on a drive"),
+                },
+                Component::RootDir => {}
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// `mappable`, which every open of a server's file asks on Windows:
+    /// true on the runner's NTFS and the job's ReFS, false on its FAT32 and
+    /// through a share -- the temporary directory through its drive's
+    /// administrative share, the one place the network redirector answers
+    /// `FILE_REMOTE_PROTOCOL_INFO`. The mapped path's other tests open
+    /// through `open_mapped`, which asks nothing: had `remote` said yes on
+    /// NTFS, every Windows server would read its file into memory with them
+    /// green. Each answer printed.
+    #[test]
+    fn a_file_is_mapped_where_its_volume_allows() {
+        let dir = scratch("mappable");
+        let file = dir.join("new.fennec");
+        let local = volume(&file).unwrap();
+        println!(
+            "{}: {}, remote {}, mappable {}",
+            dir.display(),
+            local.file_system,
+            local.remote,
+            mappable(&file)
+        );
+        assert!(
+            !local.remote,
+            "the runner's {} taken for a share",
+            local.file_system
+        );
+        assert!(
+            mappable(&file),
+            "a file on the runner's {}",
+            local.file_system
+        );
+
+        if let Some(more) = std::env::var_os(VOLUMES) {
+            let mut seen = Vec::new();
+            for root in std::env::split_paths(&more).filter(|p| !p.as_os_str().is_empty()) {
+                let v = volume(&root).unwrap();
+                let m = mappable(&root.join("new.fennec"));
+                println!(
+                    "{}: {}, remote {}, mappable {m}",
+                    root.display(),
+                    v.file_system,
+                    v.remote
+                );
+                assert!(!v.remote, "{} taken for a share", v.file_system);
+                assert_eq!(m, v.posix_renames(), "{}", v.file_system);
+                seen.push((v.file_system, m));
+            }
+            assert!(seen.contains(&("ReFS".into(), true)), "{seen:?}");
+            assert!(seen.contains(&("FAT32".into(), false)), "{seen:?}");
+        }
+
+        let share = shared(&dir);
+        let v = volume(&share.join("new.fennec"))
+            .unwrap_or_else(|e| panic!("{}: {e}", share.display()));
+        let open = OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&share)
+            .unwrap();
+        let mut info = [0u32; 29];
+        // SAFETY: the handle is open across the call, `info` the struct's
+        // 116 bytes.
+        let answered = unsafe {
+            GetFileInformationByHandleEx(
+                open.as_raw_handle(),
+                FILE_REMOTE_PROTOCOL_INFO,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        } != 0;
+        println!(
+            "{}: {}, remote {}, mappable {}; FILE_REMOTE_PROTOCOL_INFO answered {answered}, \
+             version {}, {} bytes, protocol {:#x}",
+            share.display(),
+            v.file_system,
+            v.remote,
+            mappable(&share.join("new.fennec")),
+            info[0] & 0xffff,
+            info[0] >> 16,
+            info[1],
+        );
+        assert!(v.remote, "{} not taken for a share", share.display());
+        assert!(!mappable(&share.join("new.fennec")));
+        drop(open);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

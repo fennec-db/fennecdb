@@ -26,7 +26,7 @@ use std::fs::File;
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 const PAGE_NOACCESS: u32 = 0x01;
 const PAGE_READONLY: u32 = 0x02;
@@ -420,6 +420,8 @@ impl Mapping {
                 }
                 return Err(e);
             }
+            // A view replacing a placeholder is where the placeholder was.
+            debug_assert_eq!(view, at);
             v.at.push(view as usize);
             v.mapped = end;
         }
@@ -445,11 +447,34 @@ impl AsRef<[u8]> for Mapping {
     }
 }
 
-impl Drop for Mapping {
+/// A mapping of more views than this lets them go on a thread of its own
+/// ([`Teardown`]). Each view is an `UnmapViewOfFile`, where a Unix mapping
+/// is one `munmap`, and the drop that lets a mapping go is a handover's
+/// past its room or a rewrite's, under the write lock: single small writes
+/// hand over every 16 384 (`HANDOVER_DOCS`), 2 MB of 128-byte rows, so
+/// 100 GB written into a mapping's room are 50 000 views. Fewer go in
+/// place -- an open's one among them -- as a Unix mapping's do.
+const IN_PLACE: usize = 16;
+
+/// The teardowns on threads not done yet, and the wait for them
+/// ([`unmapped`]).
+static UNMAPPING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// What a dropped mapping lets go of -- its views, the placeholders past
+/// them and its handle of the file -- in place, or on a thread of its own.
+struct Teardown {
+    at: usize,
+    reserved: usize,
+    views: Views,
+    /// Counted in [`UNMAPPING`] until done.
+    counted: bool,
+}
+
+impl Drop for Teardown {
     fn drop(&mut self) {
-        let v = self.views.get_mut().unwrap_or_else(|e| e.into_inner());
+        let v = &self.views;
         for &view in &v.at {
-            // SAFETY: each a view this mapping made, unmapped once: its
+            // SAFETY: each a view the mapping made, unmapped once: its
             // addresses are freed with it.
             unsafe { UnmapViewOfFile(view as *const c_void) };
         }
@@ -458,10 +483,56 @@ impl Drop for Mapping {
             // split for a view that could not be made.
             let rest = [Some(v.mapped), v.stuck];
             for from in rest.into_iter().flatten().filter(|&f| f < self.reserved) {
-                // SAFETY: a placeholder this mapping reserved, freed once.
-                unsafe { VirtualFree(self.at.wrapping_add(from).cast(), 0, MEM_RELEASE) };
+                // SAFETY: a placeholder the mapping reserved, freed once.
+                unsafe { VirtualFree((self.at + from) as *mut c_void, 0, MEM_RELEASE) };
             }
         }
+        if self.counted {
+            let mut n = UNMAPPING.0.lock().unwrap_or_else(|e| e.into_inner());
+            *n -= 1;
+            if *n == 0 {
+                UNMAPPING.1.notify_all();
+            }
+        }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        let v = self.views.get_mut().unwrap_or_else(|e| e.into_inner());
+        let views = Views {
+            file: v.file.take(),
+            at: std::mem::take(&mut v.at),
+            mapped: v.mapped,
+            stuck: v.stuck,
+        };
+        let mut t = Teardown {
+            at: self.at as usize,
+            reserved: self.reserved,
+            views,
+            counted: false,
+        };
+        if t.views.at.len() <= IN_PLACE {
+            return;
+        }
+        *UNMAPPING.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        t.counted = true;
+        #[cfg(test)]
+        tests::SENT.with(|n| n.set(n.get() + 1));
+        // Nothing reads the views now: the last holder of the mapping let
+        // it go. A thread that cannot be made drops the teardown with the
+        // closure, which lets the views go in place.
+        let _ = std::thread::Builder::new().spawn(move || drop(t));
+    }
+}
+
+/// Waits for the teardowns on threads ([`IN_PLACE`]) to be done: a cut,
+/// which Windows refuses while any view maps the file, waits for the
+/// mappings this process dropped before it.
+pub(in crate::fs) fn unmapped() {
+    let mut n = UNMAPPING.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *n > 0 {
+        n = UNMAPPING.1.wait(n).unwrap_or_else(|e| e.into_inner());
     }
 }
 
@@ -492,6 +563,11 @@ pub(in crate::fs) mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    thread_local! {
+        /// Teardowns this thread's drops sent to a thread of their own.
+        pub(super) static SENT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fennec-map-{name}-{}", std::process::id()));
@@ -606,6 +682,54 @@ pub(in crate::fs) mod tests {
         assert!(m.as_ref() == &bytes(0, len)[..], "the views read otherwise");
         drop(m);
         drop(file);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mapping of a few views lets them go in its drop, and one of many
+    /// on a thread of its own, the drop -- a handover's or a rewrite's,
+    /// under the write lock -- paying no `UnmapViewOfFile` a view; a cut,
+    /// which Windows refuses while a view maps the file, is taken once
+    /// [`unmapped`] answers.
+    #[test]
+    fn many_views_are_let_go_of_on_a_thread() {
+        let dir = scratch("teardown");
+        let path = dir.join("views.fennec");
+        std::fs::write(&path, bytes(0, 5000)).unwrap();
+        let mut file = appending(&path);
+        let sent = || SENT.with(|n| n.get());
+        // `appending`'s handle may append, not cut.
+        let cut = |len| {
+            let f = std::fs::OpenOptions::new().write(true).open(&path);
+            f.and_then(|f| f.set_len(len))
+        };
+
+        let few = Mapping::with_room(&file, 5000).unwrap();
+        file.write_all(&bytes(5000, 20_000)).unwrap();
+        assert!(few.cover(20_000));
+        assert_eq!(few.views(), 2);
+        let before = sent();
+        drop(few);
+        assert_eq!(sent(), before, "a mapping of two views sent away");
+        cut(19_000).expect("a cut after the views went in place");
+
+        let many = Mapping::with_room(&file, 19_000).unwrap();
+        let mut len = 19_000;
+        for _ in 0..200 {
+            file.write_all(&bytes(len, len + 5000)).unwrap();
+            len += 5000;
+            assert!(many.cover(len));
+        }
+        assert!(many.views() > IN_PLACE, "{}", many.views());
+        drop(many);
+        assert_eq!(
+            sent(),
+            before + 1,
+            "a mapping of many views let go in place"
+        );
+        unmapped();
+        cut(5000).expect("a cut once the thread let the views go");
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes(0, 5000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
