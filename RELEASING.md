@@ -98,6 +98,15 @@ nothing reaches a registry before the notes have had a read.
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
 
+**A release's notes name every break of the REST API, and every route
+deprecated since the last.** The API only grows
+(`docs/design/http.md#compatibility`): each break made on purpose is an
+entry of `tools/openapi_compat.py`'s `BREAKS`, with its reason and the
+document version it went out in, and `git diff vA.B.C --
+integrations/openapi/` against the last tag shows each operation added
+and each newly `deprecated`, with its `x-fennec-sunset`. A deprecated route
+is removed no sooner than its sunset, in a release whose notes say so.
+
 **A release whose first use moves the format says so in its notes.** The
 first release with named statements is one: installing it changes nothing
 on disk, but a `create statement` writes record kind 13, which every binary

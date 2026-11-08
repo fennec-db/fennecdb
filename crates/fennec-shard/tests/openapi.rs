@@ -3,10 +3,15 @@
 //! its node, and the router's own -- is sent to a router in front of a
 //! node, answered neither 404 nor 405; each one whose `security` asks a
 //! token is 401 without one, and one asking none is not; a GET it lists no
-//! HEAD beside answers HEAD 404 or 405. fennec-server's `tests/openapi.rs`
-//! holds a file's server and a node to theirs.
+//! HEAD beside answers HEAD 404 or 405. Sent with its token, its body and,
+//! for a hook, its sender's signature, every operation reaches its handler
+//! -- none is refused before it, 401 -- and one the document marks
+//! `deprecated` answers `Deprecation` whatever its status, no other ever.
+//! fennec-server's `tests/openapi.rs` holds a file's server and a node to
+//! theirs.
 
 use fennec_core::value::Value;
+use fennec_http::crypto::hmac_sha256;
 use fennec_http::openapi::{document, Kind};
 use fennec_http::replication::{fresh_id, Replication};
 use fennec_http::tenants::{Replicated, Tenants};
@@ -25,6 +30,10 @@ const ADMIN: &str = "adm";
 const ROUTER: &str = "rtr";
 /// The node's tenants' and the router's directory's replication token.
 const REPLICATION: &str = "rep";
+/// The tenant's `stripe` hook's secret, as Stripe shows it.
+const STRIPE_SECRET: &str = "whsec_a_secret_stripe_shows";
+/// The event the hook is sent, signed: what `taken` inserts.
+const EVENT: &str = r#"{"id":"evt_openapi","type":"openapi.sent"}"#;
 
 struct Scratch(PathBuf);
 
@@ -99,25 +108,54 @@ fn router(path: &std::path::Path) -> u16 {
     port
 }
 
-/// The status of `method target`, on a connection of its own: its status
-/// line alone, so a stream's head is enough.
+/// The status of `method target`, on a connection of its own: its head
+/// alone, so a stream's is enough.
 fn status(port: u16, method: &str, target: &str, token: Option<&str>, body: &str) -> u16 {
+    answer(port, method, target, token, body, &[]).0
+}
+
+/// The status of `method target`, sent `headers` too, and whether its head
+/// carries `Deprecation`: the head alone, read to its blank line, never
+/// into a stream's body.
+fn answer(
+    port: u16,
+    method: &str,
+    target: &str,
+    token: Option<&str>,
+    body: &str,
+    headers: &[(&str, String)],
+) -> (u16, bool) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let mut more = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    for (name, value) in headers {
+        more.push_str(&format!("{name}: {value}\r\n"));
+    }
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{more}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
+    let mut head = BufReader::new(s);
     let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).unwrap();
-    line.split_whitespace()
+    head.read_line(&mut line).unwrap();
+    let status = line
+        .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"))
+        .unwrap_or_else(|| panic!("{method} {target}: no status line: {line:?}"));
+    let mut marked = false;
+    loop {
+        let mut h = String::new();
+        if head.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+            return (status, marked);
+        }
+        marked |= h
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("deprecation"));
+    }
 }
 
 /// The status and body of `method target`, read to its end.
@@ -148,6 +186,9 @@ struct Operation {
     /// what it takes.
     unauthorized: Option<bool>,
     body: bool,
+    /// The document marks it `deprecated`: its answer, the node's relayed
+    /// or the router's own, carries `Deprecation`.
+    deprecated: bool,
 }
 
 fn operations(doc: &Value) -> Vec<Operation> {
@@ -204,6 +245,7 @@ fn operations(doc: &Value) -> Vec<Operation> {
                 token,
                 unauthorized,
                 body: get(op, "requestBody").is_some(),
+                deprecated: get(op, "deprecated") == Some(&Value::Bool(true)),
             });
         }
     }
@@ -228,8 +270,25 @@ fn body(id: &str) -> &'static str {
         "batch" => "{\"query\":\"get c\"}\n",
         "moveConsumer" => r#"{"since":0}"#,
         "mcp" => r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        "hook" => EVENT,
         _ => "{}",
     }
+}
+
+/// The headers an operation is sent beside its token: a hook's event its
+/// sender's signature, so the node's handler -- never the refusal before
+/// it -- answers it.
+fn signed(id: &str) -> Vec<(&'static str, String)> {
+    if id != "hook" {
+        return Vec::new();
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mac = hmac_sha256(STRIPE_SECRET.as_bytes(), format!("{t}.{EVENT}").as_bytes());
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    vec![("Stripe-Signature", format!("t={t},v1={hex}"))]
 }
 
 #[test]
@@ -252,10 +311,19 @@ fn every_operation_of_the_routers_document_is_answered() {
     assert_eq!(placed.0, 201, "{}", placed.1);
     let made = call(port, "PUT", "/_shard/tenants/acme", ROUTER, "");
     assert_eq!(made.0, 201, "{}", made.1);
+    let hooked = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme/hooks/stripe",
+        ROUTER,
+        &format!(r#"{{"scheme":"stripe","secrets":["{STRIPE_SECRET}"]}}"#),
+    );
+    assert_eq!(hooked.0, 200, "{}", hooked.1);
     for q in [
         "create collection c (t text, v vector<2>)",
         "put c {t: \"a\", v: [1, 0]}",
         "create statement s() as get c select t",
+        "create statement taken($id text from event.id) on hook stripe as insert c {t: $id}",
     ] {
         let mut body = String::from("{\"query\":");
         fennec_core::json::escape_into(&mut body, q);
@@ -307,11 +375,34 @@ fn every_operation_of_the_routers_document_is_answered() {
     let mut unrouted = false;
     for op in &ops {
         let body = if op.body { body(&op.id) } else { "" };
-        let s = status(port, &op.method, &op.target, op.token, body);
+        let (s, marked) = answer(
+            port,
+            &op.method,
+            &op.target,
+            op.token,
+            body,
+            &signed(&op.id),
+        );
         // A 502 or a 503 is a forward that never reached the node: the
         // run would hold nothing.
         unrouted |= matches!(s, 404 | 405 | 502 | 503);
         answered.push(format!("{s} {} {} ({})", op.method, op.target, op.id));
+        // A token and a hook's signature are what is asked before a
+        // handler runs: each given, every answer is its handler's, which a
+        // deprecated route's marks whatever its status, relayed as it came.
+        if s == 401 {
+            wrong.push(format!(
+                "{s} {} {}: refused before its handler, its token or signature given",
+                op.method, op.target
+            ));
+        }
+        if marked != op.deprecated {
+            let what = match marked {
+                true => "answered Deprecation, which the document does not say",
+                false => "deprecated in the document, answered without Deprecation",
+            };
+            wrong.push(format!("{s} {} {}: {what}", op.method, op.target));
+        }
     }
     assert!(
         !unrouted && wrong.is_empty(),

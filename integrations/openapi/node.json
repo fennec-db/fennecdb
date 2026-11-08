@@ -1,0 +1,5436 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "fennecdb: a tenant node",
+  "version": "1",
+  "description": "A tenant node's REST API (fennec-server --dir): each tenant's routes below /t/{tenant}, the node's own at the root, /_admin/ with --admin-token. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 503 says when to come back in Retry-After and its body's retry_after. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
+  "license": {
+   "name": "Apache-2.0",
+   "identifier": "Apache-2.0"
+  }
+ },
+ "externalDocs": {
+  "url": "https://fennecdb.com/docs/http-reference"
+ },
+ "servers": [
+  {
+   "url": "/"
+  }
+ ],
+ "security": [
+  {
+   "token": []
+  },
+  {
+   "jwt": []
+  }
+ ],
+ "tags": [
+  {
+   "name": "Replication",
+   "description": "What a replica, an archiver or a router reads, and a replica's promotion."
+  },
+  {
+   "name": "Server",
+   "description": "The server's own: who a token is, its counts, its health, the studio, this document."
+  },
+  {
+   "name": "Admin",
+   "description": "A tenant node's administration, the surface a router drives."
+  },
+  {
+   "name": "Collections",
+   "description": "A collection's rows over REST: read by the query string, written by the body."
+  },
+  {
+   "name": "Subscriptions",
+   "description": "A read that follows its rows: the shape, then each change, as server-sent events."
+  },
+  {
+   "name": "Statements",
+   "description": "FennecQL as text with its parameters, a batch landing whole, a named statement called."
+  },
+  {
+   "name": "Webhooks",
+   "description": "Another service's events, taken by a named statement once verified."
+  },
+  {
+   "name": "Schema",
+   "description": "The schema as a description, and a description planned or applied."
+  },
+  {
+   "name": "Change data capture",
+   "description": "Every write on disk, a JSON line each, and the consumers reading them."
+  },
+  {
+   "name": "Agents",
+   "description": "The MCP endpoint: an agent's tools, each a statement held to the token."
+  }
+ ],
+ "paths": {
+  "/_replication/tenants": {
+   "post": {
+    "operationId": "nodeStream",
+    "tags": [
+     "Replication"
+    ],
+    "summary": "Every tenant of the node over one stream, from the places the body lists",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "replication": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "text/plain": {
+       "schema": {
+        "type": "string",
+        "description": "A line a tenant the client holds: <tenant> <since> <history, hex> <image 0|1>."
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "A body with no end, the stream a replica reads",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "contentMediaType": "application/octet-stream"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_whoami": {
+   "get": {
+    "operationId": "whoami",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Who the server takes the token for: its roles, its rules, the statements it may call",
+    "responses": {
+     "200": {
+      "description": "The token's reading",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Whoami"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "whoamiHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Who the server takes the token for: its roles, its rules, the statements it may call",
+    "responses": {
+     "200": {
+      "description": "The token's reading",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_stats/statements": {
+   "get": {
+    "operationId": "nodeStatementStats",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Every tenant's statements, by shape, each named",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The counts",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "nodeStatementStatsHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Every tenant's statements, by shape, each named",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The counts",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "nodeResetStatementStats",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Start every tenant's counts again",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Reset",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_metrics": {
+   "get": {
+    "operationId": "metrics",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Counters and gauges, Prometheus's text format",
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "admin": []
+     },
+     {}
+    ],
+    "responses": {
+     "200": {
+      "description": "Prometheus's text format",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "text/plain": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "metricsHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Counters and gauges, Prometheus's text format",
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "admin": []
+     },
+     {}
+    ],
+    "responses": {
+     "200": {
+      "description": "Prometheus's text format",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_health": {
+   "get": {
+    "operationId": "health",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Whether the server is up: no token, no lock",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "Up",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "healthHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Whether the server is up: no token, no lock",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "Up",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_studio/": {
+   "get": {
+    "operationId": "studio",
+    "tags": [
+     "Server"
+    ],
+    "summary": "fennec studio's page: the token is the page's to send",
+    "x-fennec-flag": "--studio",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "The file",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "text/html": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "studioHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: fennec studio's page: the token is the page's to send",
+    "x-fennec-flag": "--studio",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "The file",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_studio/{file}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/file"
+    }
+   ],
+   "get": {
+    "operationId": "studioFile",
+    "tags": [
+     "Server"
+    ],
+    "summary": "One of the studio's files",
+    "x-fennec-flag": "--studio",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "The file",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "*/*": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "studioFileHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: One of the studio's files",
+    "x-fennec-flag": "--studio",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "The file",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_openapi.json": {
+   "get": {
+    "operationId": "openapi",
+    "tags": [
+     "Server"
+    ],
+    "summary": "This document",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "This OpenAPI 3.1 document",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "An OpenAPI 3.1 document"
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "openapiHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: This document",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "This OpenAPI 3.1 document",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/stats": {
+   "get": {
+    "operationId": "adminStats",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "The node's tenants, disk, memory and open tenants",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/open": {
+   "get": {
+    "operationId": "adminOpen",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "The open tenants: name, memory, frozen",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The open tenants",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "type": "object"
+         }
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants": {
+   "get": {
+    "operationId": "adminTenants",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "The tenants' names on disk",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The names",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/sizes": {
+   "get": {
+    "operationId": "adminSizes",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Each tenant's bytes on disk",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/quotas": {
+   "get": {
+    "operationId": "adminQuotas",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Every tenant's quota and usage",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The quotas",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "type": "object"
+         }
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "put": {
+    "operationId": "adminCreate",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Make an empty tenant (409 if there is one)",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "201": {
+      "description": "Made: {created, lineage, instance}",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "adminDelete",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Close and remove a tenant",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Removed",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/quota": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "adminQuota",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A tenant's quota, what is set and its usage",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "adminSetQuota",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Set a tenant's quota over the node's, the whole set replaced",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Quota"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/hooks": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "adminHooks",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A tenant's webhook consumers, never a secret",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/hooks/{hook}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/hook"
+    }
+   ],
+   "put": {
+    "operationId": "adminSetHook",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Set a hook's scheme and secrets, kept beside the tenant's file",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Hook"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "adminDeleteHook",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Remove a hook's secrets",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/hook-secrets": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "adminHookSecrets",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A tenant's hook secrets whole, for a router copying them onto a copy",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "adminSetHookSecrets",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Install a tenant's hook secrets whole, their version kept",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/HookSecrets"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/schema": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminSchema",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Apply a description to a tenant, as /_schema/apply does",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Description"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/query": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminQuery",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A read of a tenant, answered as /query answers it; a write is refused",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Query"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The read's answer",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Answer"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/reclaim": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminReclaim",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Remove a tenant's file only where it carries one of the instances named",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Reclaim"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/freeze": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminFreeze",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Refuse a tenant's writes, once those in flight landed",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/thaw": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminThaw",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Take a tenant's writes again",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/file": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "adminExport",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A tenant's whole image",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The image",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "contentMediaType": "application/octet-stream"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "adminImport",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Install an image as a new tenant",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/octet-stream": {
+       "schema": {
+        "type": "string",
+        "contentMediaType": "application/octet-stream"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Installed: {imported, lineage, instance}",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/lineage": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "adminLineage",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A tenant's lineage and history",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/promote": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminPromote",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "This node's copy of a tenant takes its writes",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Promote"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/tenants/{tenant}/follow": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "adminFollow",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "Follow the tenant's primary at `from`, or this node's upstream",
+    "x-fennec-flag": "--admin-token",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Follow"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/_admin/lease": {
+   "post": {
+    "operationId": "adminGrantLease",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "A router's grant of the node's lease",
+    "x-fennec-flag": "--admin-token --lease",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/LeaseGrant"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "get": {
+    "operationId": "adminLease",
+    "tags": [
+     "Admin"
+    ],
+    "summary": "The node's lease as it runs",
+    "x-fennec-flag": "--admin-token --lease",
+    "security": [
+     {
+      "admin": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Done",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantInfo",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The server's version and its collections' names",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Version and names",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Info"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantInfoHead",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The GET's head: The server's version and its collections' names",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Version and names",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/collections": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantListCollections",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Every collection's schema",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The schemas",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Schemas"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantListCollectionsHead",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The GET's head: Every collection's schema",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The schemas",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/{collection}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/collection"
+    }
+   ],
+   "get": {
+    "operationId": "tenantReadRows",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The rows the query string's filter matches; ?count their number, select and group aggregates, facet each value's count",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/Select"
+     },
+     {
+      "$ref": "#/components/parameters/Order"
+     },
+     {
+      "$ref": "#/components/parameters/Limit"
+     },
+     {
+      "$ref": "#/components/parameters/Offset"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/Group"
+     },
+     {
+      "$ref": "#/components/parameters/Facet"
+     },
+     {
+      "$ref": "#/components/parameters/Lookup"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The rows",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Read"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantReadRowsHead",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The GET's head: The rows the query string's filter matches; ?count their number, select and group aggregates, facet each value's count",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/Select"
+     },
+     {
+      "$ref": "#/components/parameters/Order"
+     },
+     {
+      "$ref": "#/components/parameters/Limit"
+     },
+     {
+      "$ref": "#/components/parameters/Offset"
+     },
+     {
+      "$ref": "#/components/parameters/Count"
+     },
+     {
+      "$ref": "#/components/parameters/Group"
+     },
+     {
+      "$ref": "#/components/parameters/Facet"
+     },
+     {
+      "$ref": "#/components/parameters/Lookup"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The rows",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "post": {
+    "operationId": "tenantInsertRows",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Insert a document or a list of them; an id that is taken is 409",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Returning"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Documents"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "How many were inserted, or with ?returning the rows",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Written"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "tenantUpdateRows",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Set the body's fields on the rows the filter matches (a filter is required)",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Fields"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "tenantUpdateRowsPut",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "PATCH /{collection}, under PUT",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Fields"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "tenantDeleteRows",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Delete the rows the filter matches (a filter is required)",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "How many were deleted",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/{collection}/all": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/collection"
+    }
+   ],
+   "patch": {
+    "operationId": "tenantUpdateAll",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Set the body's fields on every row: no filter, deliberately explicit",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Fields"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "tenantUpdateAllPut",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "PATCH /{collection}/all, under PUT",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Fields"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "tenantDeleteAll",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Delete every row",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "How many were deleted",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/{collection}/{id}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/collection"
+    },
+    {
+     "$ref": "#/components/parameters/id"
+    }
+   ],
+   "get": {
+    "operationId": "tenantReadRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The row of that id, its tag in ETag; 304 where If-None-Match names that tag, 412 where If-Match names another, 404 where there is no such row",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The row",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Document"
+        }
+       }
+      }
+     },
+     "304": {
+      "$ref": "#/components/responses/RowNotModified"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantReadRowHead",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The GET's head: The row of that id, its tag in ETag; 304 where If-None-Match names that tag, 412 where If-Match names another, 404 where there is no such row",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The row",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       }
+      }
+     },
+     "304": {
+      "$ref": "#/components/responses/RowNotModified"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "put": {
+    "operationId": "tenantPutRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Write the body as the row of that id, whole: 201 where it made it, 200 over it; under If-Match only over the row tagged, under If-None-Match: * only where there is none (412 else, nothing written)",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Document"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Written over the row; a conditional write's ETag is the row's new tag",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "201": {
+      "$ref": "#/components/responses/RowMade"
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "tenantUpdateRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Set the body's fields on the row of that id; under If-Match only where it is the row tagged (* any), else 412 and nothing written",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Document"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "How many were updated; a conditional write's ETag is the row's new tag",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "ETag": {
+        "$ref": "#/components/headers/ETag"
+       },
+       "Cache-Control": {
+        "$ref": "#/components/headers/NoTransform"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "tenantDeleteRow",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "Delete the row of that id; under If-Match only where it is the row tagged (* any), else 412 and nothing deleted",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IfMatch"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatchRow"
+     },
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "How many were deleted",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Outcome"
+        }
+       }
+      }
+     },
+     "412": {
+      "$ref": "#/components/responses/PreconditionFailed"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/{collection}/near": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/collection"
+    }
+   ],
+   "post": {
+    "operationId": "tenantNearRows",
+    "tags": [
+     "Collections"
+    ],
+    "summary": "The rows nearest a vector, nearest first; the query string's filter and the body's where ANDed, a match making it hybrid",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Near"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The rows",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Rows"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/{collection}/changes": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/collection"
+    }
+   ],
+   "get": {
+    "operationId": "tenantSubscribe",
+    "tags": [
+     "Subscriptions"
+    ],
+    "summary": "A subscription: the rows the filter matches, then each change to them",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Filter"
+     },
+     {
+      "$ref": "#/components/parameters/Where"
+     },
+     {
+      "$ref": "#/components/parameters/Select"
+     },
+     {
+      "$ref": "#/components/parameters/Order"
+     },
+     {
+      "$ref": "#/components/parameters/Limit"
+     },
+     {
+      "$ref": "#/components/parameters/Since"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "A server-sent events stream: the shape, then each change as a diff",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "text/event-stream": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/query": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantQuery",
+    "tags": [
+     "Statements"
+    ],
+    "summary": "Run one FennecQL statement (or SQL's spellings of one) with its parameters",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     },
+     {
+      "$ref": "#/components/parameters/FennecWait"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     },
+     {
+      "$ref": "#/components/parameters/IfNoneMatch"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Query"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The statement's answer",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Answer"
+        }
+       }
+      }
+     },
+     "304": {
+      "$ref": "#/components/responses/NotModified"
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/batch": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantBatch",
+    "tags": [
+     "Statements"
+    ],
+    "summary": "Run several statements, one a line, landing whole or not at all",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     },
+     {
+      "$ref": "#/components/parameters/FennecWait"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/x-ndjson": {
+       "schema": {
+        "type": "string",
+        "description": "One {\"query\", \"params\"} object a line"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The batch's answer",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Answer"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_call/{statement}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/statement"
+    }
+   ],
+   "post": {
+    "operationId": "tenantCall",
+    "tags": [
+     "Statements"
+    ],
+    "summary": "Call a named statement with its arguments, answered as /query answers it",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/IdempotencyKey"
+     },
+     {
+      "$ref": "#/components/parameters/FennecWait"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Call"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The statement's answer",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Answer"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_hooks/{hook}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/hook"
+    }
+   ],
+   "post": {
+    "operationId": "tenantHook",
+    "tags": [
+     "Webhooks"
+    ],
+    "summary": "Another service's event, verified by its signature in place of a token, against the --hooks file's secrets or, below a tenant, those the node's /_admin/ routes set; every refusal before it verifies is one 401",
+    "x-fennec-flag": "--admin-token",
+    "security": [],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/StripeSignature"
+     },
+     {
+      "$ref": "#/components/parameters/WebhookId"
+     },
+     {
+      "$ref": "#/components/parameters/WebhookTimestamp"
+     },
+     {
+      "$ref": "#/components/parameters/WebhookSignature"
+     },
+     {
+      "$ref": "#/components/parameters/HubSignature"
+     },
+     {
+      "$ref": "#/components/parameters/GitHubDelivery"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Event"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Taken, durable",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unverified"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_schema": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantSchema",
+    "tags": [
+     "Schema"
+    ],
+    "summary": "The schema as a description, its bound, scheduled and webhook statements beside it",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/As"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The description",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Description"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantSchemaHead",
+    "tags": [
+     "Schema"
+    ],
+    "summary": "The GET's head: The schema as a description, its bound, scheduled and webhook statements beside it",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/As"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The description",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_schema/plan": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantSchemaPlan",
+    "tags": [
+     "Schema"
+    ],
+    "summary": "What applying a description would do, writing nothing; ?mode=follow what the server lacks",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Mode"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Description"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The plan",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Plan"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_schema/apply": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantSchemaApply",
+    "tags": [
+     "Schema"
+    ],
+    "summary": "Run a description's migrations, then what only adds, as one block",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Description"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "What was applied",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Plan"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_changes": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantChanges",
+    "tags": [
+     "Change data capture"
+    ],
+    "summary": "Every write on disk after `since` (or a consumer's place), a JSON line each",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Since"
+     },
+     {
+      "$ref": "#/components/parameters/Consumer"
+     },
+     {
+      "$ref": "#/components/parameters/Limit"
+     },
+     {
+      "$ref": "#/components/parameters/Wait"
+     },
+     {
+      "$ref": "#/components/parameters/FennecAfter"
+     },
+     {
+      "$ref": "#/components/parameters/FennecHistory"
+     },
+     {
+      "$ref": "#/components/parameters/FennecRead"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "One JSON object a line, a write each; Fennec-Next is the next since",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       },
+       "Fennec-Seq": {
+        "$ref": "#/components/headers/FennecSeq"
+       },
+       "Fennec-History": {
+        "$ref": "#/components/headers/FennecHistory"
+       },
+       "Fennec-Next": {
+        "$ref": "#/components/headers/FennecNext"
+       }
+      },
+      "content": {
+       "application/x-ndjson": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_changes/consumers": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantListConsumers",
+    "tags": [
+     "Change data capture"
+    ],
+    "summary": "Each consumer, where it is and how far behind",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The consumers",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "type": "object"
+         }
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_changes/consumers/{consumer}": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    },
+    {
+     "$ref": "#/components/parameters/consumer"
+    }
+   ],
+   "post": {
+    "operationId": "tenantMakeConsumer",
+    "tags": [
+     "Change data capture"
+    ],
+    "summary": "Make a consumer at `since` or the last write (201); one already there stays put (200)",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Since"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Made",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "tenantMoveConsumer",
+    "tags": [
+     "Change data capture"
+    ],
+    "summary": "Move a consumer: commit what it read, or go back",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Since"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Moved",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "tenantDeleteConsumer",
+    "tags": [
+     "Change data capture"
+    ],
+    "summary": "Forget a consumer",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Forgotten",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_replication": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantReplicationStream",
+    "tags": [
+     "Replication"
+    ],
+    "summary": "The stream a replica is fed: a body with no end",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "replication": []
+     }
+    ],
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Since"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "A body with no end, the stream a replica reads",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "contentMediaType": "application/octet-stream"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_replication/status": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantReplicationStatus",
+    "tags": [
+     "Replication"
+    ],
+    "summary": "Where this server's replication stands",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "replication": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The status",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_replication/promote": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantPromote",
+    "tags": [
+     "Replication"
+    ],
+    "summary": "Promote this replica: it takes writes from now on",
+    "x-fennec-flag": "--replication-token",
+    "security": [
+     {
+      "replication": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Promoted: {promoted, seq, history}",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_whoami": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantWhoami",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Who the server takes the token for: its roles, its rules, the statements it may call",
+    "responses": {
+     "200": {
+      "description": "The token's reading",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Whoami"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantWhoamiHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Who the server takes the token for: its roles, its rules, the statements it may call",
+    "responses": {
+     "200": {
+      "description": "The token's reading",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_stats/statements": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "get": {
+    "operationId": "tenantStatementStats",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Each statement's count and time, by its shape",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The counts",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "head": {
+    "operationId": "tenantStatementStatsHead",
+    "tags": [
+     "Server"
+    ],
+    "summary": "The GET's head: Each statement's count and time, by its shape",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The counts",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "tenantResetStatementStats",
+    "tags": [
+     "Server"
+    ],
+    "summary": "Start the counts again",
+    "security": [
+     {
+      "token": []
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Reset",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  },
+  "/t/{tenant}/_mcp": {
+   "parameters": [
+    {
+     "$ref": "#/components/parameters/tenant"
+    }
+   ],
+   "post": {
+    "operationId": "tenantMcp",
+    "tags": [
+     "Agents"
+    ],
+    "summary": "The MCP endpoint for agents: one JSON-RPC message a request",
+    "x-fennec-flag": "--mcp",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/JsonRpc"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The JSON-RPC answer",
+      "headers": {
+       "X-Request-Id": {
+        "$ref": "#/components/headers/RequestId"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/JsonRpc"
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     },
+     "default": {
+      "$ref": "#/components/responses/Refused"
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "token": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "The server's token (--http-token): every collection, unscoped."
+   },
+   "jwt": {
+    "type": "http",
+    "scheme": "bearer",
+    "bearerFormat": "JWT",
+    "description": "A scoped token: a JSON Web Token signed under --jwt-secret or --jwt-keys (HS256, RS256, ES256), held to the --policy rules at every level, on a node bound to the tenant it names."
+   },
+   "admin": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "A tenant node's --admin-token."
+   },
+   "replication": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "--replication-token: what a replica, an archiver or a router sends."
+   },
+   "router": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "fennec-shard's --token: its admin's."
+   }
+  },
+  "parameters": {
+   "collection": {
+    "name": "collection",
+    "in": "path",
+    "required": true,
+    "description": "A collection's name.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "id": {
+    "name": "id",
+    "in": "path",
+    "required": true,
+    "description": "A row's id: digits alone.",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "tenant": {
+    "name": "tenant",
+    "in": "path",
+    "required": true,
+    "description": "A tenant's name: its file on its node.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "statement": {
+    "name": "statement",
+    "in": "path",
+    "required": true,
+    "description": "A named statement (create statement).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "hook": {
+    "name": "hook",
+    "in": "path",
+    "required": true,
+    "description": "A webhook consumer: a line of the hooks file, or a tenant's hook.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "consumer": {
+    "name": "consumer",
+    "in": "path",
+    "required": true,
+    "description": "A change-stream consumer.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "file": {
+    "name": "file",
+    "in": "path",
+    "required": true,
+    "description": "A file of the studio.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Filter": {
+    "name": "filter",
+    "in": "query",
+    "style": "form",
+    "explode": true,
+    "description": "field=operator.value, each an AND: eq neq lt lte gt gte like has in is, not. before one; a value alone is an equality (?year=2024).",
+    "schema": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string"
+     }
+    }
+   },
+   "Where": {
+    "name": "where",
+    "in": "query",
+    "description": "A FennecQL filter, for what the pattern cannot say: year >= 2024 and tags has \"rust\".",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Select": {
+    "name": "select",
+    "in": "query",
+    "description": "The fields, or aggregates: title,year or status,count(*),sum(total).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Order": {
+    "name": "order",
+    "in": "query",
+    "description": "year.desc,title.asc; a collation among the modifiers: name.und.desc.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Limit": {
+    "name": "limit",
+    "in": "query",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "Offset": {
+    "name": "offset",
+    "in": "query",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "Count": {
+    "name": "count",
+    "in": "query",
+    "allowEmptyValue": true,
+    "description": "Present: the number of matching rows, not the rows.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Group": {
+    "name": "group",
+    "in": "query",
+    "description": "Aggregates per group: status.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Facet": {
+    "name": "facet",
+    "in": "query",
+    "description": "Each value's count beside the rows: brand top 5,color.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Lookup": {
+    "name": "lookup",
+    "in": "query",
+    "description": "Another collection's matching documents attached to each row.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Returning": {
+    "name": "returning",
+    "in": "query",
+    "description": "The rows a write made, not their count: id,title (* every field).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Since": {
+    "name": "since",
+    "in": "query",
+    "description": "The change to start after.",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "Consumer": {
+    "name": "consumer",
+    "in": "query",
+    "description": "Start from where this consumer committed.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Wait": {
+    "name": "wait",
+    "in": "query",
+    "description": "Milliseconds to wait for a write when there is none yet.",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "As": {
+    "name": "as",
+    "in": "query",
+    "description": "fennecql: the schema as its statements.",
+    "schema": {
+     "type": "string",
+     "enum": [
+      "fennecql"
+     ]
+    }
+   },
+   "Mode": {
+    "name": "mode",
+    "in": "query",
+    "description": "follow: only what the description declares and the server lacks.",
+    "schema": {
+     "type": "string",
+     "enum": [
+      "follow"
+     ]
+    }
+   },
+   "IdempotencyKey": {
+    "name": "Idempotency-Key",
+    "in": "header",
+    "description": "Makes a write once: a retry with the same key and request is answered as the first try was; the key with another request is 422.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "FennecWait": {
+    "name": "Fennec-Wait",
+    "in": "header",
+    "description": "Milliseconds to hold a set or a del that writes nothing, or a call whose body does, until it writes (30000 at most).",
+    "schema": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 30000
+    }
+   },
+   "FennecAfter": {
+    "name": "Fennec-After",
+    "in": "header",
+    "description": "Answer from nothing older than this change (a Fennec-Seq an answer named): a replica waits for it, 504 past the wait.",
+    "schema": {
+     "type": "integer",
+     "minimum": 0
+    }
+   },
+   "FennecHistory": {
+    "name": "Fennec-History",
+    "in": "header",
+    "description": "The history Fennec-After's change is of, as an answer named it.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "FennecRead": {
+    "name": "Fennec-Read",
+    "in": "header",
+    "description": "replica: a read a router may answer from a read replica; every server runs it read-only.",
+    "schema": {
+     "type": "string",
+     "enum": [
+      "replica"
+     ]
+    }
+   },
+   "IfNoneMatch": {
+    "name": "If-None-Match",
+    "in": "header",
+    "description": "A read's last ETag: 304 while nothing it reads was written.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "IfMatch": {
+    "name": "If-Match",
+    "in": "header",
+    "description": "The row's ETag (a list of them), or *: answered or written only where the row is one tagged (* any row there), compared strongly, under the write lock that writes it; else 412 and nothing written.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "IfNoneMatchRow": {
+    "name": "If-None-Match",
+    "in": "header",
+    "description": "A read: the row's last ETag, 304 while it is that row. A write: *, made only where there is no such row (a PUT's create), or tags it must not be; else 412 and nothing written.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "StripeSignature": {
+    "name": "Stripe-Signature",
+    "in": "header",
+    "description": "A Stripe hook's signature.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "WebhookId": {
+    "name": "webhook-id",
+    "in": "header",
+    "description": "A Standard Webhooks event's id (or svix-id).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "WebhookTimestamp": {
+    "name": "webhook-timestamp",
+    "in": "header",
+    "description": "A Standard Webhooks event's time (or svix-timestamp).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "WebhookSignature": {
+    "name": "webhook-signature",
+    "in": "header",
+    "description": "A Standard Webhooks event's signature (or svix-signature).",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "HubSignature": {
+    "name": "X-Hub-Signature-256",
+    "in": "header",
+    "description": "A GitHub hook's signature.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "GitHubDelivery": {
+    "name": "X-GitHub-Delivery",
+    "in": "header",
+    "description": "A GitHub event's key, where its hook says key delivery.",
+    "schema": {
+     "type": "string"
+    }
+   }
+  },
+  "headers": {
+   "RequestId": {
+    "description": "The request's id, in every log line and span it made; one sent is kept.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "FennecSeq": {
+    "description": "The change the answer was read at, or the write landed as.",
+    "schema": {
+     "type": "integer"
+    }
+   },
+   "FennecHistory": {
+    "description": "The history Fennec-Seq is of.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "FennecNext": {
+    "description": "The since of the next page.",
+    "schema": {
+     "type": "integer"
+    }
+   },
+   "RetryAfter": {
+    "description": "Seconds to wait before coming back.",
+    "schema": {
+     "type": "integer"
+    }
+   },
+   "ETag": {
+    "description": "The row's tag: a hash of the row as the token is shown it, the same on every server for the same row. On a write, where it was sent with a precondition: the row's tag as the write left it.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "NoTransform": {
+    "description": "no-transform, beside a row's ETag: a proxy compressing the answer would weaken the tag, which If-Match compares strongly.",
+    "schema": {
+     "type": "string",
+     "enum": [
+      "no-transform"
+     ]
+    }
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "required": [
+     "error"
+    ],
+    "properties": {
+     "error": {
+      "type": "string"
+     },
+     "retry_after": {
+      "type": "integer",
+      "description": "Seconds to wait, as Retry-After says."
+     },
+     "retry_after_ms": {
+      "type": "integer",
+      "description": "A quota's wait, to the millisecond."
+     },
+     "quota": {
+      "type": "string",
+      "description": "The quota refused."
+     },
+     "reason": {
+      "type": "string",
+      "description": "A require's else words."
+     },
+     "at": {
+      "type": "integer",
+      "description": "The statement of a batch that stopped."
+     },
+     "completed": {
+      "type": "integer"
+     },
+     "binding": {
+      "type": "string"
+     },
+     "outcome": {
+      "type": "string",
+      "enum": [
+       "unknown"
+      ],
+      "description": "A write whose outcome the server cannot know."
+     },
+     "seq": {
+      "type": "integer"
+     },
+     "history": {
+      "type": "string"
+     }
+    }
+   },
+   "Document": {
+    "type": "object",
+    "description": "A document: its fields, id among them. Open on purpose: any field is taken, the collection's schema (GET /_schema) holding each it declares to its type.",
+    "additionalProperties": true
+   },
+   "Fields": {
+    "type": "object",
+    "minProperties": 1,
+    "description": "The fields to set on each row it reaches, each to its value, the rest left as they are. Open on purpose: any of the collection's fields, the schema (GET /_schema) saying which.",
+    "additionalProperties": true
+   },
+   "Event": {
+    "type": "object",
+    "description": "The sender's event as it signed it, read only once its signature verifies. Open on purpose: any JSON object its sender sends; a Stripe event names its id, which keys it.",
+    "additionalProperties": true
+   },
+   "Instance": {
+    "type": "string",
+    "pattern": "^[0-9a-fA-F]{16}$",
+    "description": "A file's identity on its node, 16 hex digits."
+   },
+   "Instances": {
+    "description": "The identities a file may carry: a list, or one.",
+    "oneOf": [
+     {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+       "$ref": "#/components/schemas/Instance"
+      }
+     },
+     {
+      "$ref": "#/components/schemas/Instance"
+     }
+    ]
+   },
+   "Lineage": {
+    "type": "string",
+    "pattern": "^[0-9a-fA-F]{8}$",
+    "description": "The lineage a tenant's history is of, 8 hex digits."
+   },
+   "Reclaim": {
+    "type": "object",
+    "required": [
+     "instances"
+    ],
+    "properties": {
+     "instances": {
+      "$ref": "#/components/schemas/Instances"
+     }
+    }
+   },
+   "Promote": {
+    "type": "object",
+    "description": "What the router knows of the tenant, which the copy is held to (409 where it differs); left out, nothing is said.",
+    "properties": {
+     "lineage": {
+      "$ref": "#/components/schemas/Lineage"
+     },
+     "history": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{16}$",
+      "description": "The history its primary forked at its last failover."
+     },
+     "force": {
+      "type": "boolean",
+      "description": "Promote it whatever it holds."
+     }
+    }
+   },
+   "Follow": {
+    "type": "object",
+    "description": "Whom the tenant follows; left out, this node's upstream.",
+    "properties": {
+     "from": {
+      "type": "string",
+      "description": "The node to follow, its address."
+     },
+     "lineage": {
+      "$ref": "#/components/schemas/Lineage"
+     },
+     "instances": {
+      "$ref": "#/components/schemas/Instances"
+     },
+     "reader": {
+      "type": "boolean",
+      "description": "A read replica's copy, which no hook's answer waits for."
+     }
+    }
+   },
+   "LeaseGrant": {
+    "type": "object",
+    "required": [
+     "ms",
+     "epoch"
+    ],
+    "properties": {
+     "ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How long it runs, from when the node answered the grant acked names."
+     },
+     "epoch": {
+      "type": "string",
+      "description": "The list's: a node holding another answers 412, to be sent primaries."
+     },
+     "primaries": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "The tenants the node is primary of."
+     },
+     "authority": {
+      "type": "string",
+      "description": "Who grants it."
+     },
+     "term": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "history": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$"
+     },
+     "grant": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$",
+      "description": "This grant's number."
+     },
+     "acked": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{1,16}$",
+      "description": "The grant it acknowledges, sent beside grant."
+     }
+    }
+   },
+   "Hook": {
+    "type": "object",
+    "required": [
+     "scheme",
+     "secrets"
+    ],
+    "additionalProperties": false,
+    "description": "A hook's scheme and secrets, refused (400) as a hooks file's line is.",
+    "properties": {
+     "scheme": {
+      "type": "string",
+      "enum": [
+       "stripe",
+       "github",
+       "standard"
+      ]
+     },
+     "secrets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+       "type": "string"
+      },
+      "description": "Its secret as its sender shows it, or two while one rolls."
+     },
+     "keep": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "How long an event's key is kept: 30d."
+     },
+     "tolerance": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "How far an event's time may be from the server's, 1s to 1h: 5m."
+     },
+     "key": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "body",
+       "delivery",
+       null
+      ],
+      "description": "A github hook's: its events keyed by their body or by X-GitHub-Delivery."
+     },
+     "max_body": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^\\S+$",
+      "description": "The most bytes an event takes: 64k."
+     }
+    }
+   },
+   "HookSecrets": {
+    "type": "object",
+    "additionalProperties": false,
+    "description": "A tenant's hook secrets whole, as GET .../hook-secrets answers them: a set holding a hook names its version.",
+    "properties": {
+     "version": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "pattern": "^[0-9a-fA-F]{16}$"
+     },
+     "hooks": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "object",
+       "required": [
+        "scheme",
+        "secrets"
+       ],
+       "additionalProperties": false,
+       "properties": {
+        "scheme": {
+         "type": "string",
+         "enum": [
+          "stripe",
+          "github",
+          "standard"
+         ]
+        },
+        "secrets": {
+         "type": "array",
+         "minItems": 1,
+         "maxItems": 2,
+         "items": {
+          "type": "string"
+         }
+        },
+        "keep": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "tolerance": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "key": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "enum": [
+          "body",
+          "delivery",
+          null
+         ]
+        },
+        "max_body": {
+         "type": [
+          "string",
+          "null"
+         ],
+         "pattern": "^\\S+$"
+        },
+        "set": {
+         "type": "integer",
+         "description": "When it was set, in ms since the epoch; left out, now."
+        }
+       }
+      }
+     },
+     "tenant": {
+      "description": "The answer's own, taken and not read."
+     }
+    }
+   },
+   "Documents": {
+    "oneOf": [
+     {
+      "$ref": "#/components/schemas/Document"
+     },
+     {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Document"
+      }
+     }
+    ]
+   },
+   "Rows": {
+    "type": "array",
+    "items": {
+     "$ref": "#/components/schemas/Document"
+    }
+   },
+   "Faceted": {
+    "type": "object",
+    "properties": {
+     "rows": {
+      "$ref": "#/components/schemas/Rows"
+     },
+     "count": {
+      "type": "integer"
+     },
+     "facets": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "value": {},
+         "count": {
+          "type": "integer"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "Read": {
+    "oneOf": [
+     {
+      "$ref": "#/components/schemas/Rows"
+     },
+     {
+      "$ref": "#/components/schemas/Faceted"
+     }
+    ]
+   },
+   "Outcome": {
+    "type": "object",
+    "description": "What a write did.",
+    "properties": {
+     "inserted": {
+      "type": "integer"
+     },
+     "updated": {
+      "type": "integer"
+     },
+     "deleted": {
+      "type": "integer"
+     },
+     "message": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": true
+   },
+   "Written": {
+    "oneOf": [
+     {
+      "$ref": "#/components/schemas/Outcome"
+     },
+     {
+      "$ref": "#/components/schemas/Rows"
+     }
+    ]
+   },
+   "Answer": {
+    "description": "A statement's answer: its rows, a count, or what a write did.",
+    "oneOf": [
+     {
+      "$ref": "#/components/schemas/Rows"
+     },
+     {
+      "$ref": "#/components/schemas/Faceted"
+     },
+     {
+      "$ref": "#/components/schemas/Outcome"
+     }
+    ]
+   },
+   "Query": {
+    "type": "object",
+    "required": [
+     "query"
+    ],
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "A FennecQL statement, or SQL's spelling of one."
+     },
+     "params": {
+      "description": "$1, $2 by position, or $name by name.",
+      "oneOf": [
+       {
+        "type": "array"
+       },
+       {
+        "type": "object"
+       }
+      ]
+     }
+    }
+   },
+   "Call": {
+    "type": "object",
+    "properties": {
+     "params": {
+      "type": "object",
+      "description": "The statement's arguments by name."
+     }
+    }
+   },
+   "Near": {
+    "type": "object",
+    "required": [
+     "vector"
+    ],
+    "properties": {
+     "vector": {
+      "description": "What to rank by: a vector field's numbers, a point's [longitude, latitude], or a sparse field's text form {index:value,...}/dimension, as pgvector's sparsevec writes it.",
+      "oneOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "minItems": 1
+       },
+       {
+        "type": "string"
+       }
+      ]
+     },
+     "field": {
+      "type": "string",
+      "description": "The vector, sparse or point field, where the collection has several."
+     },
+     "limit": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "offset": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "ef": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The graph search's beam: how many candidates it keeps."
+     },
+     "exact": {
+      "type": "boolean",
+      "description": "true: every row compared, no index."
+     },
+     "where": {
+      "type": "string",
+      "description": "A FennecQL filter, ANDed with the query string's."
+     },
+     "select": {
+      "description": "The fields to answer: a list, or one field's name.",
+      "oneOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       {
+        "type": "string"
+       }
+      ]
+     },
+     "match": {
+      "type": "string",
+      "description": "Words BM25 ranks too over a @text field: a hybrid search, the two rankings fused by reciprocal rank."
+     },
+     "match_field": {
+      "type": "string",
+      "description": "The @text field match ranks, where the collection has several."
+     },
+     "match_fuzzy": {
+      "description": "true, or the most edits a word of match may take.",
+      "oneOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2
+       }
+      ]
+     },
+     "match_prefix": {
+      "type": "boolean",
+      "description": "The last word of match a prefix."
+     },
+     "fuse_k": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000,
+      "description": "The fusion's rank offset."
+     },
+     "candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "How many candidates each side ranks."
+     }
+    }
+   },
+   "Info": {
+    "type": "object",
+    "properties": {
+     "fennecdb": {
+      "type": "string"
+     },
+     "collections": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "Schemas": {
+    "type": "array",
+    "items": {
+     "type": "object",
+     "properties": {
+      "name": {
+       "type": "string"
+      },
+      "fields": {
+       "type": "array",
+       "items": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   },
+   "Description": {
+    "type": "object",
+    "description": "A schema description, as Schema in code sends it.",
+    "properties": {
+     "format": {
+      "type": "integer"
+     },
+     "fennecql": {
+      "type": "string"
+     },
+     "migrations": {
+      "type": "array"
+     }
+    }
+   },
+   "Plan": {
+    "type": "object",
+    "properties": {
+     "applied": {
+      "type": "boolean"
+     },
+     "ran": {
+      "type": "array"
+     },
+     "migrations": {
+      "type": "array"
+     },
+     "statements": {
+      "type": "array"
+     },
+     "refusals": {
+      "type": "array"
+     }
+    }
+   },
+   "Since": {
+    "type": "object",
+    "properties": {
+     "since": {
+      "type": "integer",
+      "minimum": 0
+     }
+    }
+   },
+   "Whoami": {
+    "type": "object",
+    "properties": {
+     "node": {
+      "type": "string"
+     },
+     "tenant": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "read_only": {
+      "type": "boolean"
+     },
+     "kind": {
+      "type": "string"
+     }
+    }
+   },
+   "Quota": {
+    "type": "object",
+    "properties": {
+     "bytes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "rows": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "streams": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "requests": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "writes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "write_bytes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     }
+    }
+   },
+   "JsonRpc": {
+    "type": "object",
+    "description": "A JSON-RPC 2.0 message (MCP).",
+    "properties": {
+     "jsonrpc": {
+      "const": "2.0"
+     },
+     "id": {},
+     "method": {
+      "type": "string"
+     },
+     "params": {},
+     "result": {},
+     "error": {}
+    }
+   }
+  },
+  "responses": {
+   "Refused": {
+    "description": "A refusal: its status says what to do about it.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   },
+   "Unverified": {
+    "description": "The event did not verify: its headers, scheme, time, size, hook or signature, one answer for each.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   },
+   "Unauthorized": {
+    "description": "No token, or a wrong one.",
+    "headers": {
+     "WWW-Authenticate": {
+      "schema": {
+       "type": "string"
+      }
+     },
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   },
+   "Unavailable": {
+    "description": "Come back after Retry-After seconds. Fennec-Unserved (as the connection was taken) or, from fennec-shard, Fennec-Unsent: 1 says the request never ran.",
+    "headers": {
+     "Retry-After": {
+      "$ref": "#/components/headers/RetryAfter"
+     },
+     "Fennec-Unserved": {
+      "schema": {
+       "type": "string",
+       "enum": [
+        "ceiling",
+        "no_thread"
+       ]
+      }
+     },
+     "Fennec-Unsent": {
+      "schema": {
+       "type": "string"
+      }
+     },
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/Error"
+        },
+        {
+         "required": [
+          "retry_after"
+         ]
+        }
+       ]
+      }
+     }
+    }
+   },
+   "NotModified": {
+    "description": "Unchanged since the If-None-Match tag: no body, the read not run.",
+    "headers": {
+     "ETag": {
+      "schema": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "RowNotModified": {
+    "description": "The row is the one the If-None-Match tag names: no body.",
+    "headers": {
+     "ETag": {
+      "$ref": "#/components/headers/ETag"
+     },
+     "Cache-Control": {
+      "$ref": "#/components/headers/NoTransform"
+     }
+    }
+   },
+   "RowMade": {
+    "description": "The row was made: there was none of that id. Its ETag where the PUT was sent with a precondition.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     },
+     "Fennec-Seq": {
+      "$ref": "#/components/headers/FennecSeq"
+     },
+     "Fennec-History": {
+      "$ref": "#/components/headers/FennecHistory"
+     },
+     "ETag": {
+      "$ref": "#/components/headers/ETag"
+     },
+     "Cache-Control": {
+      "$ref": "#/components/headers/NoTransform"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Outcome"
+      }
+     }
+    }
+   },
+   "PreconditionFailed": {
+    "description": "If-Match or If-None-Match did not hold for the row as the write lock found it: nothing written.",
+    "headers": {
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   }
+  }
+ }
+}

@@ -215,7 +215,7 @@ export function corsHeaders(origin) {
     'Access-Control-Allow-Headers':
       'content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, fennec-read, if-match, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
     'Access-Control-Expose-Headers':
-      'fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, fennec-quota, retry-after, fennec-unsent',
+      'fennec-seq, fennec-history, fennec-next, idempotent-replayed, etag, x-request-id, fennec-quota, retry-after, fennec-unsent, deprecation, sunset, link',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };

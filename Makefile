@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -185,6 +185,28 @@ openapi-lint:
 	  --skip-rule no-path-trailing-slash --skip-rule operation-4xx-response \
 	  --skip-rule no-unused-components \
 	  target/tmp/openapi/file.json target/tmp/openapi/node.json target/tmp/openapi/router.json
+
+## The REST API only grows: the three documents held to the baseline in
+## integrations/openapi/ by this checkout's checker, and to BASE's (origin/main)
+## by BASE's checker, as CI holds them -- an operation, a status, a field or a
+## way in removed, a parameter or field made required, a request type narrowed
+## or a token asked where none was fails, unless tools/openapi_compat.py's
+## BREAKS names it (docs/design/http.md#compatibility)
+openapi-check:
+	$(CARGO) test -p fennec-server --test all openapi::
+	python3 tools/openapi_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/openapi_compat.py" 2>/dev/null; then \
+	  git show "$$base:tools/openapi_compat.py" > target/tmp/openapi/compat-base.py && \
+	  python3 -I target/tmp/openapi/compat-base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/openapi_compat.py; \
+	else echo "$$base has no tools/openapi_compat.py yet: no base pass"; fi
+
+## integrations/openapi/ written again from the documents the server serves,
+## refused where they break what the baseline holds and BREAKS names not
+openapi-golden:
+	$(CARGO) test -p fennec-server --test all openapi::
+	python3 tools/openapi_compat.py --write
 
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples

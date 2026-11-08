@@ -29,6 +29,7 @@ make agents-md  # each AGENTS.md rewritten from the CLAUDE.md beside it
 make builder-golden  # integrations/builder-golden.json rewritten from the JS builder (web/golden.mjs)
 make docs-builder  # the SDKs' tests of the site's builder tabs (site/builder_tabs.py)
 make schema-golden  # integrations/schema-golden.json rewritten through the module (web/schema-golden.mjs)
+make openapi-golden  # integrations/openapi/ rewritten from the served documents; openapi-check: the API only grew
 make types-check  # web/fennec.d.ts held to web/fennec.js and a caller's code under tsc --strict, then docs-types
 make studio-highlight  # studio/highlight.js and the Grafana data source's copy rewritten from site/highlight.js
 make pgvector-up  # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432 for comparisons and --follow (pgvector-down)
