@@ -918,11 +918,13 @@ test('a list each of whose numbers an f32 holds goes over apart and is never ask
     const made = await instantiate(src, imports);
     const real = (made instanceof WebAssembly.Instance ? made : made.instance).exports;
     const query = real.fennec_query;
+    // Its arguments named: `run` hands vectors apart only to a
+    // `fennec_query` of more than five.
     const exports = {
       ...real,
-      fennec_query(...args) {
+      fennec_query(a, b, c, d, e, f, g, h) {
         calls++;
-        return query(...args);
+        return query(a, b, c, d, e, f, g, h);
       },
     };
     return { instance: { exports } };

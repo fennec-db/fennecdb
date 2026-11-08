@@ -1244,7 +1244,11 @@ compared with one or with a path into a <code>json</code> field, the module
 names it before running anything and <code>run</code> sends it again as
 JSON — once a text: it remembers which parameters to send so — so a plain
 array keeps its numbers as written and a <code>Float32Array</code> goes as
-the numbers it holds.</p>
+the numbers it holds. An array each of whose numbers an <code>f32</code>
+holds — integers up to 2<sup>24</sup>, <code>0.5</code>, a
+<code>Float32Array</code> — goes over marked exact, and a list of numbers
+takes it as it came, nothing sent again; <code>[0.1]</code> and
+<code>[16777217]</code> are sent again.</p>
 </details>
 
 <h2>Independent of the transport</h2>
