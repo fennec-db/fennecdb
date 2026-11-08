@@ -6990,7 +6990,9 @@ mod tests {
     /// every list read into a vector a document's field's. Over documents of
     /// several fields, lists among other values, nested ones, one hiding a
     /// rounding, a list given a field of an `else set`, which the listing is
-    /// not whole for, and a letter outside ASCII before a list.
+    /// not whole for, a letter outside ASCII before a list, a parameter, an
+    /// `in [...]`, whose list keeps its numbers either way, and a
+    /// `returning` after.
     #[test]
     fn a_put_s_lists_read_again_are_its_text_read_as_written() {
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
@@ -7001,6 +7003,9 @@ mod tests {
             (x % n as u64) as usize
         };
         let (mut listed, mut not) = (0, 0);
+        // Texts read whole again holding a parameter, an `in` and a
+        // `returning`: each shape met many times.
+        let mut shapes = [0u32; 3];
         for _ in 0..20_000 {
             let docs = 1 + rnd(3);
             let mut text = String::from(["put t ", "insert into t ", "put t "][rnd(3)]);
@@ -7029,13 +7034,16 @@ mod tests {
                         });
                     }
                     list.push(']');
-                    match rnd(11) {
+                    match rnd(14) {
                         0 => text.push_str("'é'"),
                         10 => text.push_str("[1.00000001, 2]"),
                         1 => text.push_str(&format!("{{j: {list}}}")),
                         2 => text.push_str(&format!("[{list}, [2]]")),
                         3 => text.push('7'),
                         4 => text.push_str(&format!("{list} + 1")),
+                        11 => text.push_str(&format!("${}", 1 + rnd(3))),
+                        12 => text.push_str(&format!("3 in {list}")),
+                        13 => text.push_str(&format!("$1 in {list}")),
                         _ => text.push_str(&list),
                     }
                 }
@@ -7046,6 +7054,12 @@ mod tests {
             }
             if rnd(6) == 0 {
                 text.push_str(" if absent else set {f0: [0.5, 0.25]}");
+            }
+            match rnd(8) {
+                0 => text.push_str(" returning id"),
+                1 => text.push_str(" returning *"),
+                2 => text.push_str(" returning f0, id"),
+                _ => {}
             }
             let quick = parse_one(&text);
             let (mut stmt, listing) = match (parse_one_listing(&text), &quick) {
@@ -7064,11 +7078,15 @@ mod tests {
                     let exact = parse_exact(&text).unwrap().remove(0);
                     assert_eq!(format!("{stmt:?}"), format!("{exact:?}"), "{text}");
                     listed += lists;
+                    for (n, shape) in shapes.iter_mut().zip(["$", " in ", "returning"]) {
+                        *n += (lists == 1 && text.contains(shape)) as u32;
+                    }
                 }
                 false => not += 1,
             }
         }
         // Both ways, many times over.
         assert!(listed > 1_000 && not > 1_000, "{listed} {not}");
+        assert!(shapes.iter().all(|&n| n > 300), "{shapes:?}");
     }
 }
