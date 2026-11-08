@@ -233,7 +233,7 @@ test('a subscription: its seed, then each change, alike', { skip }, async () => 
 
 // Last: a definition is a write of the server's that the page has none
 // of, so the server's change counter stands ahead of the page's after it.
-test('a call: answered as the page answers its body, which refuses statements in words of its own', { skip }, async () => {
+test('a call and a test event: answered as the page answers the body, which refuses statements in words of its own', { skip }, async () => {
   await q('create collection acct (owner text @hash, balance int)');
   await q('put acct [{owner: "a", balance: 10}, {owner: "b", balance: 5}, {owner: "c", balance: 7}]');
   // Defined on the server alone: the module in the page is built without them.
@@ -256,6 +256,72 @@ test('a call: answered as the page answers its body, which refuses statements in
   await q('get acct select owner, balance order owner');
   // Refused as /query refuses any statement: an argument of another type.
   assert.equal((await call('pay', { owner: 'b', n: 'two' })).status, 400);
+  // A webhook consumer's test event, the schema view's: the same text, the
+  // event its one parameter, answered as the page answers the body its
+  // parameters read. Defined over a server's file with no hooks file, as
+  // the studio may: its hook is listed not armed.
+  const hook = await remote(
+    'POST',
+    '/query',
+    JSON.stringify({
+      query: "create statement paid($owner text from event.data.object.metadata.owner, $n int from event.data.object.amount) on hook stripe where event.type = 'payment_intent.succeeded' as set acct {balance: balance + $n} where owner = $owner require 1",
+    }),
+  );
+  assert.equal(hook.status, 200, JSON.stringify(hook));
+  const event = { type: 'payment_intent.succeeded', data: { object: { amount: 3, metadata: { owner: 'c' } } } };
+  const took = await call('paid', event);
+  assert.deepEqual([took.status, took.json], [200, (await body('set acct {balance: balance + $2} where owner = $1 require 1', ['c', 3])).json]);
+  assert.ok(took.seq > paid.seq, JSON.stringify(took));
+  const listed = (await remote('POST', '/query', JSON.stringify({ query: 'statements' }))).json.find((s) => s.name === 'paid');
+  assert.deepEqual([listed.hook, listed.armed, listed.signature], ['stripe', false, '($owner text from event.data.object.metadata.owner, $n int from event.data.object.amount)']);
+  // An event its condition passes over runs nothing; one missing a path its
+  // parameters read is refused naming it; a guard not met is 412.
+  for (const [e, status, words] of [
+    [{ ...event, type: 'charge.refunded' }, 400, /passes this event over/],
+    [{ type: event.type, data: { object: { amount: 3 } } }, 400, /data\.object\.metadata\.owner/],
+    [{ ...event, data: { object: { amount: 3, metadata: { owner: 'nobody' } } } }, 412, /./],
+  ]) {
+    const r = await call('paid', e);
+    assert.equal(r.status, status, JSON.stringify(r));
+    assert.match(r.json.error, words);
+  }
+  // The event the studio begins a test from is answered as a delivery's
+  // parameters read it: a value of each type -- a list empty and a text for
+  // bytes, where a path holding `null` is a missing one -- and the literals
+  // its condition compares as the lexer reads them, in either quotes.
+  const E = await import('../statements-event.js');
+  const server = (query) => remote('POST', '/query', JSON.stringify({ query }));
+  for (const text of [
+    'create collection blanks (i int, f float, b bool, t text, ts timestamp, tags [text], ns [int], j json, raw bytes)',
+    "create statement blanks($i int from event.i, $f float from event.n.f, $b bool from event.b, $t text from event.t, $ts timestamp from event.ts, $tags [text] from event.tags, $ns [int] from event.ns, $j json from event.j, $raw bytes from event.raw) on hook stripe where event.type = \"it's\" and event.n.\"kind-of\" = 'a\\'b' as insert blanks {i: $i, f: $f, b: $b, t: $t, ts: $ts, tags: $tags, ns: $ns, j: $j, raw: $raw}",
+    "create statement stamped($at timestamp from hook.at, $t text from event.t) on hook stripe as insert blanks {ts: $at, t: $t}",
+    "create statement pushed($t text from event.t) on hook github where hook.event = 'push' as insert blanks {t: $t}",
+  ]) {
+    const r = await server(text);
+    assert.equal(r.status, 200, `${text}: ${JSON.stringify(r)}`);
+  }
+  const described = async (n) => (await server(`describe statement ${n}`)).json[0];
+  const blanks = await described('blanks');
+  const begun = E.eventSkeleton(blanks.signature, blanks.condition);
+  assert.deepEqual(JSON.parse(JSON.stringify(begun)), { i: 0, n: { f: 0, 'kind-of': "a'b" }, b: false, t: '', ts: 0, tags: [], ns: [], j: {}, raw: '', type: "it's" });
+  assert.equal(E.notes(blanks.signature, blanks.condition).never, null);
+  const sent = await call('blanks', begun);
+  assert.equal(sent.status, 200, JSON.stringify(sent));
+  assert.deepEqual((await server('get blanks select i, f, b, t, tags, ns, j')).json, [{ i: 0, f: 0, b: false, t: '', tags: [], ns: [], j: {} }]);
+  // A parameter reading `hook.at` with no default is refused whatever the
+  // event holds, which the dialog says before it is sent; a condition
+  // asking `hook.event = '...'` passes a test event over, which it names.
+  const stamped = await described('stamped');
+  assert.match(E.notes(stamped.signature, stamped.condition).never, /\$at reads hook\.at/);
+  const held = await call('stamped', E.eventSkeleton(stamped.signature, stamped.condition));
+  assert.equal(held.status, 400, JSON.stringify(held));
+  assert.match(held.json.error, /reads `hook\.at`, which the event does not hold/);
+  const pushed = await described('pushed');
+  assert.equal(pushed.condition, "hook.event = 'push'");
+  assert.match(E.notes(pushed.signature, pushed.condition).said, /Its condition reads hook\.event/);
+  const over = await call('pushed', E.eventSkeleton(pushed.signature, pushed.condition));
+  assert.equal(over.status, 400, JSON.stringify(over));
+  assert.match(over.json.error, /passes this event over/);
   // The page names what it lacks, before anything of the text runs.
   for (const text of ['statements', 'call rich $1', 'create statement x() as get acct select owner']) {
     const r = await local('POST', '/query', JSON.stringify({ query: text, params: [{ min: 1 }] }));

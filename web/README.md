@@ -40,7 +40,10 @@ refuses a call (a statement is a server's): call through `connect(url)`.
 `await db.statements()` lists them as the server lists them to its own token,
 each a `NamedStatement`: its signature, comment, what a binding is bound to,
 and a scheduled statement's clock -- `schedule`, the `next` slot, the `last`
-run and a slot the server holds back (`held`). Its `version` is the history
+run and a slot the server holds back (`held`) -- and a webhook consumer's
+`hook` and whether the server holds its secret (`armed`: `false` answers
+every event 401). `db.call(name, event)` sends a webhook consumer a test
+event, run as a delivery is, keeping no key. Its `version` is the history
 and change the definition landed at; the history, a signed 64-bit identity,
 is read rounded past 2^53, so compare the change, not the history.
 

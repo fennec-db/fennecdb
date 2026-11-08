@@ -151,7 +151,10 @@ extension FennecRemote {
     /// The named statements the server holds, as it lists them to its own
     /// token (`statements`) -- a scoped one is refused (403): each one's
     /// signature, whether it writes, its comment, why the schema broke it,
-    /// what a binding is bound to, and a scheduled one's clock.
+    /// what a binding is bound to, a scheduled one's clock, and a webhook
+    /// consumer's hook and whether the server holds its secret. `call`
+    /// sends a webhook consumer a test event, the event its argument, run
+    /// as a delivery is and keeping no key.
     public func statements() async throws -> [NamedStatement] {
         try await query("statements").map(NamedStatement.init)
     }
@@ -196,6 +199,13 @@ public struct NamedStatement: Sendable, Equatable {
     /// A due slot the server's state holds back -- a tenant's quota, a
     /// storage error -- tried again as that changes.
     public let held: HeldSlot?
+    /// A webhook consumer's hook, whose events are sent to
+    /// `/_hooks/<hook>`.
+    public let hook: String?
+    /// Whether this server -- on a tenant node, the tenant -- holds the
+    /// hook's secret: `false` answers every event of it 401. The app's own
+    /// database takes no event, and says `false` for a hook.
+    public let armed: Bool?
 
     init(_ row: Row) {
         name = row["name"]?.string ?? ""
@@ -218,6 +228,8 @@ public struct NamedStatement: Sendable, Equatable {
             guard let slot = instant(r["slot"]), let since = instant(r["since"]) else { return nil }
             return HeldSlot(slot: slot, status: r["status"]?.int ?? 0, since: since)
         }
+        hook = row["hook"]?.string
+        armed = row["armed"]?.bool
     }
 }
 

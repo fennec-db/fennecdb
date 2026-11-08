@@ -75,9 +75,13 @@ public sealed record Statement(string Query, IReadOnlyList<object?>? Parameters 
 /// <param name="Last">Its last run, landed or pending; null before the first.</param>
 /// <param name="Held">A due slot the server's state holds back -- a tenant's quota, a storage error -- tried again
 /// as that changes.</param>
+/// <param name="Hook">A webhook consumer's hook, whose events are sent to <c>/_hooks/&lt;hook&gt;</c>.</param>
+/// <param name="Armed">Whether this server -- on a tenant node, the tenant -- holds the hook's secret: <c>false</c>
+/// answers every event of it 401.</param>
 public sealed record NamedStatement(
     string Name, IReadOnlyList<long> Version, string? Signature, bool? Writes, string? Comment, string? Broken,
-    IReadOnlyList<string>? After, string? Schedule, DateTimeOffset? Next, LastRun? Last, HeldSlot? Held);
+    IReadOnlyList<string>? After, string? Schedule, DateTimeOffset? Next, LastRun? Last, HeldSlot? Held,
+    string? Hook = null, bool? Armed = null);
 
 /// <summary>A scheduled statement's last run, as <c>statements</c> lists it.</summary>
 /// <param name="Slot">The slot it ran for: what <c>slot()</c> read.</param>

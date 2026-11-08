@@ -971,6 +971,15 @@ impl Store {
         self.land_frame(op, id, &out[from..], payload.len());
     }
 
+    /// [`Self::append`] of a frame as a record holds it, `payload_len` its
+    /// payload's bytes at its end: a replica's apply takes its primary's
+    /// frames as they came. Made again in a `Vec` of their own, allocated,
+    /// copied and freed, they took 660 to 680 instructions a record, more
+    /// than the record's put-back costs (`docs/design/engine.md`, *Blocks*).
+    pub fn append_frame(&mut self, op: u8, id: DocId, frame: &[u8], payload_len: usize) {
+        self.land_frame(op, id, frame, payload_len);
+    }
+
     /// The frame put in the active segment and the index pointed at it.
     #[inline(always)]
     fn land_frame(&mut self, op: u8, id: DocId, frame: &[u8], payload_len: usize) {
@@ -1090,6 +1099,12 @@ impl Store {
             return Ok(None);
         };
         schema.read_doc(id, self.payload(loc)?).map(Some)
+    }
+
+    /// [`Self::read`] of `id`'s record where [`Self::loc`] found it: a
+    /// replica's apply remembers the place before it reads the row.
+    pub fn read_at(&self, schema: &Schema, id: DocId, loc: Loc) -> Result<Document> {
+        schema.read_doc(id, self.payload(loc)?)
     }
 
     /// Decodes a single field; the fields before it are skipped without

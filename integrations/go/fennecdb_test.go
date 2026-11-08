@@ -440,6 +440,59 @@ func TestTheStatementsAServerHoldsAreListedAScheduledOneWithItsClock(t *testing.
 	}
 }
 
+// A webhook consumer, listed: its hook, and whether the server holds its
+// secret -- armed for stripe, which the server's hooks file names, and not
+// for github, which it does not; a called statement has neither. The
+// server's token sends one a test event with Call, the event its args, run
+// as a delivery is. A server of its own, given a hooks file.
+func TestAWebhookConsumerIsListedByItsHookArmedOrNotAndSentATestEvent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	secret, hooks := filepath.Join(dir, "stripe.whsec"), filepath.Join(dir, "hooks")
+	if err := os.WriteFile(secret, []byte("whsec_go_tests"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks, []byte("stripe stripe "+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	url, stop := serve("--file", filepath.Join(dir, "hooked.fennec"), "--http-token", rootToken, "--hooks", hooks)
+	defer stop()
+	db := fennecdb.New(url, fennecdb.WithToken(rootToken))
+	for _, q := range []string{
+		"create collection orders (ref text @hash, status text)",
+		"insert orders {ref: 'o-1', status: 'open'}",
+		"create statement paid($order text from event.data.object.metadata.order) on hook stripe " +
+			"where event.type = 'payment_intent.succeeded' as set orders {status: 'paid'} where ref = $order require 1",
+		"create statement pushed($ref text from event.ref) on hook github as insert orders {ref: $ref, status: 'pushed'}",
+		"create statement counted() as get orders count",
+	} {
+		must(db.Exec(ctx, q)).of(t)
+	}
+	listed := map[string]fennecdb.NamedStatement{}
+	for _, s := range must(db.Statements(ctx)).of(t) {
+		listed[s.Name] = s
+	}
+	if p := listed["paid"]; p.Hook != "stripe" || !p.Armed || !p.Writes || p.Signature != "($order text from event.data.object.metadata.order)" {
+		t.Fatalf("a webhook consumer of an armed hook: %+v", p)
+	}
+	if g := listed["pushed"]; g.Hook != "github" || g.Armed {
+		t.Fatalf("a webhook consumer of a hook not armed: %+v", g)
+	}
+	if c := listed["counted"]; c.Hook != "" || c.Armed {
+		t.Fatalf("a called statement: %+v", c)
+	}
+	event := map[string]any{"type": "payment_intent.succeeded", "data": map[string]any{"object": map[string]any{"metadata": map[string]any{"order": "o-1"}}}}
+	if r := must(db.Call(ctx, "paid", event)).of(t); r.Affected != 1 {
+		t.Fatalf("a test event: %+v", r)
+	}
+	if rows := must(db.Query(ctx, "get orders select status where ref = 'o-1'")).of(t); len(rows) != 1 || rows[0]["status"] != "paid" {
+		t.Fatalf("what the test event wrote: %v", rows)
+	}
+	if _, err := db.Call(ctx, "paid", map[string]any{"type": "charge.refunded"}); statusOf(t, err).Status != 400 {
+		t.Fatalf("an event its condition passes over: %v", err)
+	}
+}
+
 // A run and a held slot as the server lists them, read into their types:
 // the times as time.Time, a binding's After its collection and events.
 func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
@@ -449,7 +502,7 @@ func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
 			`"last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},` +
 			`"held":{"since":"2026-05-04T12:16:00.250Z","slot":"2026-05-04T12:15:00Z","status":507}},` +
 			`{"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,` +
-			`"after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]`))
+			`"after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null,"hook":null,"armed":null}]`))
 	}))
 	defer srv.Close()
 	listed := must(fennecdb.New(srv.URL).Statements(context.Background())).of(t)
@@ -464,7 +517,7 @@ func TestAListedRunAndAHeldSlotAreReadAsTimes(t *testing.T) {
 	if h := lapse.Held; !h.Slot.Equal(at(15, 0, 0)) || h.Status != 507 || !h.Since.Equal(at(16, 0, 250)) {
 		t.Fatalf("the held slot: %+v", h)
 	}
-	if !reflect.DeepEqual(billed.After, []string{"bills", "insert or set"}) || billed.Last != nil || billed.Next != nil {
+	if !reflect.DeepEqual(billed.After, []string{"bills", "insert or set"}) || billed.Last != nil || billed.Next != nil || billed.Hook != "" || billed.Armed {
 		t.Fatalf("a binding: %+v", billed)
 	}
 }

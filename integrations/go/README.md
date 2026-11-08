@@ -130,8 +130,10 @@ if errors.As(err, &e) && e.Status == 412 { fmt.Println(e.Reason) } // "insuffici
   refused, 403): each a `NamedStatement` -- `Signature`, `Writes`, `Comment`, `Broken`, a binding's `After`, and a
   scheduled statement's clock: its `Schedule` (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `Next` slot as a
   `*time.Time`, the `Last` run (`*LastRun`: `Slot`, `Outcome` `ran` or `refused`, `Status`, `Reason`, `Skipped`) and a
-  slot the server holds back (`*HeldSlot`). `Call` of a scheduled one runs it now, as the server's token, marking no
-  slot.
+  slot the server holds back (`*HeldSlot`); and a webhook consumer's `Hook` and whether the server holds its secret
+  (`Armed`: false answers every event 401). `Call` of a scheduled one runs it now, as the server's token, marking no
+  slot; of a webhook consumer, `Call(ctx, "stripe_paid", event)` sends it a test event, run as a delivery is, keeping
+  no key.
 
 `go test` runs against `fennec-server` processes it starts (`cargo build -p fennec-server`, or `FENNEC_SERVER`), and the
 builder against every case of `integrations/builder-golden.json`.

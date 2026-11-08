@@ -339,6 +339,40 @@ def test_the_statements_a_server_holds_are_listed_a_scheduled_one_with_its_clock
         client.query(f"drop collection if exists {ticks}")
 
 
+def test_a_webhook_consumer_is_listed_by_its_hook_armed_or_not_and_sent_a_test_event(client):
+    """A webhook consumer, listed: its hook, and whether the server holds
+    its secret -- armed for `stripe`, which run-tests.sh's hooks file names,
+    and not for `github`, which it does not; a called statement has
+    neither. The server's token sends one a test event with `call`, the
+    event its one argument, run as a delivery is."""
+    tag = fresh("h")
+    orders, paid, pushed, counted = f"orders_{tag}", f"paid_{tag}", f"pushed_{tag}", f"counted_{tag}"
+    client.query(f"create collection {orders} (ref text @hash, status text)")
+    client.query(f"insert {orders} {{ref: 'o-1', status: 'open'}}")
+    client.query(
+        f"create statement {paid}($order text from event.data.object.metadata.order) on hook stripe "
+        f"where event.type = 'payment_intent.succeeded' as set {orders} {{status: 'paid'}} where ref = $order require 1"
+    )
+    client.query(f"create statement {pushed}($ref text from event.ref) on hook github as insert {orders} {{ref: $ref, status: 'pushed'}}")
+    client.query(f"create statement {counted}() as get {orders} count")
+    try:
+        listed = {s.name: s for s in client.statements()}
+        p, g, c = listed[paid], listed[pushed], listed[counted]
+        assert (p.hook, p.armed, p.signature, p.writes) == ("stripe", True, "($order text from event.data.object.metadata.order)", True)
+        assert (g.hook, g.armed) == ("github", False)
+        assert (c.hook, c.armed) == (None, None)
+        event = {"type": "payment_intent.succeeded", "data": {"object": {"metadata": {"order": "o-1"}}}}
+        assert client.call(paid, event) == {"affected": 1}
+        assert client.query(f"get {orders} select status where ref = 'o-1'") == [{"status": "paid"}]
+        with pytest.raises(FennecError) as refused:
+            client.call(paid, {**event, "type": "charge.refunded"})
+        assert refused.value.status == 400 and "passes this event over" in str(refused.value)
+    finally:
+        for name in (paid, pushed, counted):
+            client.query(f"drop statement if exists {name}")
+        client.query(f"drop collection if exists {orders}")
+
+
 # ------------------------------------------------------- against a scripted server
 
 
@@ -453,8 +487,12 @@ def test_a_listed_run_and_a_held_slot_are_read_as_times():
         "held": {"since": "2026-05-04T12:16:00.250Z", "slot": "2026-05-04T12:15:00Z", "status": 507},
     }
     bound = {**row, "name": "billed", "after": ["bills", "insert or set"], "schedule": None, "next": None, "last": None, "held": None}
-    port, seen = _scripted([(200, [row, bound], {}), (200, [row], {})])
-    lapse, billed = Client(f"http://127.0.0.1:{port}").statements()
+    hooked = {**bound, "name": "paid", "after": None, "hook": "stripe", "armed": False}
+    port, seen = _scripted([(200, [row, bound, hooked], {}), (200, [row], {})])
+    lapse, billed, paid = Client(f"http://127.0.0.1:{port}").statements()
+    # A webhook consumer's hook and whether the server holds its secret;
+    # None where a row says nothing of a hook.
+    assert (paid.hook, paid.armed, lapse.hook, lapse.armed) == ("stripe", False, None, None)
     assert seen[0]["body"] == {"query": "statements", "params": []}
     utc = timezone.utc
     assert lapse.next == datetime(2026, 5, 4, 12, 15, tzinfo=utc)

@@ -27,6 +27,13 @@ data class NamedStatement(
     val last: LastRun?,
     /** A due slot the server's state holds back -- a tenant's quota, a storage error -- tried again as that changes. */
     val held: HeldSlot?,
+    /** A webhook consumer's hook, whose events are sent to `/_hooks/<hook>`. */
+    val hook: String? = null,
+    /**
+     * Whether this server -- on a tenant node, the tenant -- holds the hook's secret: `false` answers every event of it
+     * 401. The app's own database takes no event, and says `false` for a hook.
+     */
+    val armed: Boolean? = null,
 ) {
     internal companion object {
         /** A row of `statements` as a [NamedStatement]. */
@@ -56,6 +63,8 @@ data class NamedStatement(
                     since = epochMillis(r.string("since") ?: return@let null),
                 )
             },
+            hook = row.string("hook"),
+            armed = row.bool("armed"),
         )
     }
 }

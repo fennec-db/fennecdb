@@ -369,5 +369,38 @@ public sealed class CallTests(Servers servers)
         Assert.Equal(new HeldSlot(At(15), 507, At(16, 0, 250)), lapse.Held);
         Assert.Equal(["bills", "insert or set"], billed.After!);
         Assert.Equal(((DateTimeOffset?)null, (LastRun?)null), (billed.Next, billed.Last));
+        Assert.Equal(((string?)null, (bool?)null), (billed.Hook, billed.Armed));
+    }
+
+    // A webhook consumer, listed: its hook, and whether the server holds its secret -- armed for stripe, which the
+    // server's hooks file names, and not for github, which it does not; a called statement has neither. The server's
+    // token sends one a test event with CallAsync, the event its arguments, run as a delivery is. A server of its
+    // own, given a hooks file.
+    [Fact]
+    public async Task AWebhookConsumerIsListedByItsHookArmedOrNotAndSentATestEvent()
+    {
+        var dir = Path.Combine(servers.Scratch, $"hooks-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var (secret, hooks) = (Path.Combine(dir, "stripe.whsec"), Path.Combine(dir, "hooks"));
+        await File.WriteAllTextAsync(secret, "whsec_dotnet_tests");
+        await File.WriteAllTextAsync(hooks, $"stripe stripe {secret}\n");
+        var url = servers.Serve("--file", Path.Combine(dir, "hooked.fennec"), "--http-token", Servers.RootToken, "--hooks", hooks);
+        using var db = new FennecClient(url, new FennecClientOptions { Token = Servers.RootToken });
+        await db.ExecAsync("create collection orders (ref text @hash, status text)");
+        await db.ExecAsync("insert orders {ref: 'o-1', status: 'open'}");
+        await db.ExecAsync("create statement paid($order text from event.data.object.metadata.order) on hook stripe " +
+            "where event.type = 'payment_intent.succeeded' as set orders {status: 'paid'} where ref = $order require 1");
+        await db.ExecAsync("create statement pushed($ref text from event.ref) on hook github as insert orders {ref: $ref, status: 'pushed'}");
+        await db.ExecAsync("create statement counted() as get orders count");
+        var listed = (await db.StatementsAsync()).ToDictionary(s => s.Name);
+        Assert.Equal(("stripe", (bool?)true, "($order text from event.data.object.metadata.order)"),
+            (listed["paid"].Hook, listed["paid"].Armed, listed["paid"].Signature));
+        Assert.Equal(("github", (bool?)false), (listed["pushed"].Hook, listed["pushed"].Armed));
+        Assert.Equal(((string?)null, (bool?)null), (listed["counted"].Hook, listed["counted"].Armed));
+        var paid = await db.CallAsync("paid", new { type = "payment_intent.succeeded", data = new { @object = new { metadata = new { order = "o-1" } } } });
+        Assert.Equal(1, paid.Affected);
+        var e = await Assert.ThrowsAnyAsync<FennecException>(() => db.CallAsync("paid", new { type = "charge.refunded" }));
+        Assert.Equal(400, e.Status);
+        Assert.Contains("passes this event over", e.Message);
     }
 }

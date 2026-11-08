@@ -1248,6 +1248,14 @@ export interface NamedStatement {
   last: LastRun | null;
   /** A due slot the server's state holds back -- a tenant's quota, a storage error -- tried again as it changes; `null` otherwise. */
   held: HeldSlot | null;
+  /** A webhook consumer's hook, whose events are sent to `/_hooks/<hook>`; `null` for a statement taking no hook. */
+  hook: string | null;
+  /**
+   * Whether this server -- on a tenant node, the tenant -- holds the hook's
+   * secret: `false` answers every event of it 401, whoever sends it. `null`
+   * for a statement taking no hook.
+   */
+  armed: boolean | null;
 }
 
 /** A scheduled statement's last run, as `statements` lists it. */
@@ -1336,9 +1344,13 @@ export declare class FennecHttp<S extends AnySchema<S> = Schema, Rel extends Rel
    * `statements`: each named statement the database holds, as the server
    * lists them to its own token -- a scoped one is refused (403): its
    * signature, whether it writes, its comment, why the schema broke it,
-   * what a binding is bound to, and a scheduled one's clock.
+   * what a binding is bound to, a scheduled one's clock, and a webhook
+   * consumer's hook and whether this server holds its secret (`armed`).
+   * The server's token sends a webhook consumer a test event with `call`,
+   * the event its argument, run as a delivery is, keeping no key.
    *
    *   const held = (await db.statements()).filter((s) => s.held);
+   *   const unarmed = (await db.statements()).filter((s) => s.armed === false);
    */
   statements(): Promise<NamedStatement[]>;
   /**

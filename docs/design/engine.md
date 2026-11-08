@@ -636,3 +636,200 @@ panic, met by every write bringing a word new to the field, would have
 rebuilt them for each; how far a write got kept as it goes, an instruction
 or more an index on every write for the put-back of a panic alone; and
 every write of the block put back whole, each re-linking its vector.
+
+**A replica's records land as blocks do.** `Database::apply` opened no
+block: a record's frames went into the stores and their indexes one by
+one, the record went to the sink, and its vectors waited in a batch going
+on over the records after it, linked as it ended. So #505 left it out: a
+panic in a record's upkeep of the indexes -- #501's, in the sorted words
+-- left part of the record in memory, the row in the store and in some of
+its indexes, in no record and the counter not moved, and the replica
+answered every read from it until the next open; so did a record refused
+part way, a block's write to a collection the replica does not hold, its
+writes before the refusal left in. Now each frame is remembered before it
+changes anything, as a write is (`Block::remember_frame`: the store's
+mark and where the id's record was, the row read from there), and each
+schema change as the write path's is: a collection made or dropped (`Undo::Created`,
+`Undo::Dropped`, kept until the record lands), its fields changed
+(`Undo::Altered`), a statement record's table and mark
+(`keep_statement`), and an index record (`Undo::Reindexed`, native alone:
+the schema before and the indexes it built taken off -- or, where it
+builds every index again, those it let go of put back whole). A record
+lands once it is whole in memory, its vectors linked, as a block's are
+before its record is written (`land_applied`): one whose vectors wait in
+the batch waits with them, and lands with the records before it as the
+batch is linked, each handed to the sink in turn (`handing`) and its
+writes noted -- linked a record at a time, a stream of single `put`s
+would lose the batch's candidates found on every core. An error puts back
+every record not landed; a panic before a record's sink call does too, the
+last write whole (`put_back_torn`, `apply_unwound` under `unwinding`, as
+`whole` is a block's). The records landed before stay. An error's
+put-back asks for the last write whole too, though none is torn today:
+`torn` reaches only the last entry, and acts on a frame's alone, which is
+read whole before its entry with nothing after it that can fail, and a
+schema change's entry puts back all it built whatever `torn` says. It is
+kept so that a step that can fail, added after a frame's entry, puts its
+row back whole rather than index it twice, at the cost of an error's
+put-back alone (its last frame taken out of every index and put in
+again). As #512 first had it, its reason was an error part way into a
+schema change's indexes, which `torn` never reached.
+
+Each record's entries are a stretch of the log of their own, its stores
+marked anew before its first write to each (`Applied`, a store marked
+more than once taken back to each mark, the latest first), so that the
+records from any one on are put back alone. The sink's refusal of a
+record puts back it and every record after it, and stops writes, as a
+primary's refused block is put back; from a record's sink call through
+its notes a panic fails the database, that record whole in memory and the
+file holding it or not, as a block landing does, and the records after
+it, which never reached the sink, are put back (`Handing`, a guard that
+drops on the refusal's return and the panic's unwind). As #512 was first
+written the whole log was let go of there, and the records after the one
+refused, or in the sink's hands -- up to a batch of them, their vectors
+waiting together -- stayed in memory, in no record and on no feed, served
+by the failed replica until it was opened again. A record landed is the
+replica's like any other: a panic before the next one's sink call puts
+back that one and those after it, and the replica goes on, failing
+nothing (`landing` is let go of as each record's notes end). The watcher
+is told of the records landed however `apply` ends (`Waking`, a guard
+that drops as it returns and on the unwind, once the records not landed
+are put back): told as it returned alone, a panic after a record landed
+-- before the next one's sink call, in a later batch's linking -- woke no
+one for the records landed before it, noted and counted, and a reader
+waiting on the replica for one of them (`Fennec-After`, a subscriber)
+waited on, the next `apply` beginning past them. Still once an `apply`:
+a record's cost is the same.
+
+A frame is read whole before it changes anything -- the row it writes
+over from where the store holds it, its own from its payload, its op a
+put or a del -- so one that does not read is refused with nothing of it
+made, its record put back by the log. Read from the store once the frame
+was in, a payload that did not read was refused with the row it wrote
+over still in its indexes, which the put-back indexed again, its words
+counted twice in the text indexes; an op of neither was taken, the row
+taken out of its indexes and the store still holding it. Decoded from
+the frame, the row is no longer looked up in the store a second time.
+
+An index record that builds every index again (`Reindexed`'s `kept`)
+holds the collection's indexes, its HNSW graphs among them, until it
+lands, while it builds them all anew: its peak is about twice the
+collection's indexes. Only an older primary writes such a record -- every
+index record a primary writes now adds an index, or drops one over several
+fields, which a replica builds or lets go of alone -- so they are kept
+whole to put back rather than built a third time where it does not land.
+
+The log is the
+spare block's -- its marks, entries and notes, which the next block's
+`begin` takes and clears, and no block opens while a replica applies
+(`apply` refuses to run in one) -- read by the block's put-back
+(`rewind`). A `Block` of its own, taken from the spare and given back for
+every `apply` a follower makes, moved hundreds of bytes a record for
+buffers `apply` never fills, and its notes would have waited for a
+commit; a log of the database's own, a field beside the spare, was 57
+bytes of the browser module, which links no `apply`.
+
+Chosen over failing the database at a panic in `apply`, which is simpler:
+a failed database refuses writes but answers reads from memory
+(`Database::failure`: what every client was told so far), so a replica
+failed holding half a record would serve it until reopened, and refusing
+its reads too would be a rule of its own beside a storage error's. And a
+follower recovers from a write it could not apply already: it connects
+again and is sent an image (`force_image`), which a record put back joins.
+The follower takes a panic out of `apply` as it takes its error, caught
+with the lock held (`Follower::session`): let through, the panic ended
+the follower's thread with nothing in the log and the lock poisoned, the
+copy taking nothing more, and `halt` -- a promotion's first step -- waited
+for that thread for good.
+
+`engine/unwinding.rs`'s `a_panic_anywhere_in_applying_a_record_puts_it_back_whole`
+applies an insert, a `put` over a row, a `set`, a `del` and an upsert,
+each alone, after the record of a `put` to a second collection whose
+vector waits on the batch, in one block record with that `put`, and after
+the records of three such `put`s, whose vectors wait together and go into
+the graph one after another, with a panic at each point a record reaches
+-- each index taking the row in or out, part way into the text index's
+terms, its sorted words and the sparse index's dimensions, the graph
+placing the first vector of a batch and the second, the first linked (a
+batch linked half way), the record whole, the sink call's start -- 580
+cases: the rows, every index, the ids, the counter, the feed and the
+schemas are as before, the records applied again are the primary's, and
+so is the file opened again. On main 404 of them fail (279 of the 405
+the test first held).
+`a_panic_applying_a_schema_change_puts_it_back_whole` does so for an
+index made (part way into its terms), one over two fields made and
+dropped, a field added, dropped and renamed, a collection dropped and
+made, and an index record building every index again, alone and after a
+record waiting on the batch (on main the 4 whose panic falls part way
+into the terms fail); `a_panic_landing_an_applied_record_fails_the_replica`
+holds each record of each of the four ways in turn to a panic at its sink
+call's start, in it, at the handover's note and at its notes: the
+records before it landed, it whole in memory and the replica failed --
+but at the call's start, which puts it back and fails nothing -- and those
+after it put back, the file opened again holding what the sink took (32
+cases: 16 failed as #512 was first written, every one on main);
+`a_refused_record_is_put_back_with_every_record_after_it` refuses each
+record in turn (8 cases, each failing as first written and on main);
+`records_making_and_dropping_a_collection_are_put_back_from_any_one_on`
+does the same over eight records in one `apply` landing in three groups
+-- a `put` to `u` and one to `t`, `x` made with a graph and `@text`, a
+block writing `x`, `u` and `x`, a `put` to `u` and one to `x`, `x` dropped
+and a `put` to `u` -- each refused, panicking before its sink call and in
+it (24 cases): the records before it as they landed, it whole where the
+sink had it, a collection made after it taken off and one dropped back,
+the replica failed but before the sink call, the log empty, the watcher
+told of the records landed, and the rest applied again the primary's
+state; `a_panic_after_a_record_landed_wakes_whoever_waits_for_it` the
+first of two records landed and the second's panic before its sink call
+(it and 14 of the 24 failed without `Waking`);
+`a_frame_that_does_not_read_changes_nothing` a payload that is no document
+and an op of neither, alone and after a frame that read, and alone `t`'s
+graph counting no change: read after the frame went into the store, the
+payload's frame was put back as a torn write, the rows and indexes as
+before but its row placed in the graph again, so that the rest of the
+test failed only with the reading first and `torn` both undone;
+`a_record_refused_part_way_is_put_back_whole` a block's write to a
+collection the replica does not hold; and `tests/replication.rs`'s
+`a_panic_applying_a_write_ends_the_follower_and_never_its_halt` the
+follower, whose halt waited 20 s and more without the catch (on main the
+copy took the panic as nothing, its thread ended),
+and `a_copy_that_could_not_apply_a_write_takes_an_image_and_goes_on` a
+copy whose `items2` is not its primary's: the primary's index record on
+it is refused after the writes before it, which are put back, and the
+copy connects again, takes an image and follows on, the primary's copy.
+
+A record applied pays nothing for it. Counted in process over a database
+in a file -- 50 000 lone `put` records of a collection under `@unique`,
+`@hash`, `@sorted` and `@text`, applied a record an `apply` and 1 000 an
+`apply`, a run the median of nine rounds and its loop's instructions a
+record (`proc_pid_rusage`, `MallocNanoZone=0`), main's build and this
+one's in turns, seven pairs, each run started under a 1-minute load below
+6 (4.7-5.9): a record an `apply` 14 059.7 instructions against 14 632.8
+(-3.9%), 1 000 an `apply` 13 139.0 against 13 650.2 (-3.7%), every pair of
+each lower; with a 16-dimension `@hnsw` field, 1 000 an `apply` and five
+rounds, 715 664 against 715 714, the graph's linking on every core, each
+pair within 0.3% either way. A record's own marks, the guard over its
+landing and its row read from the frame rather than looked up again in
+the store cost nothing there: as first written, measured in another
+harness (load 3.2-5.9), a record an `apply` took 13 115.7 against
+13 611.2, 1 000 an `apply` 12 375.3 against 12 735.1. The time a record
+under that load was main's within its noise (1 062 and 1 011 ns against
+1 060 and 1 007); in the two quietest pairs as first written (load
+3.2-3.5) 1 074 and 1 096 ns against 1 099 and 1 130 a record an `apply`,
+1 011 and 1 030 against 1 060 and 1 034 a thousand. The put-back's
+entries alone cost 181 and 299 instructions a record (13 792.1 and
+13 034.5, three runs each, the frame made again as before): a frame taken
+into the store as the record holds it (`Store::append_frame`), where
+`Store::append` made it again in a `Vec` of its own, gives back more, 676
+and 659. The browser module links no `apply` and carries none of it --
+none of its messages is in the module, `Undo::Reindexed` is native alone,
+a statement's put-back behind `statements`, which the module is built
+without: 838 714 bytes against main's 838 722 (brotli 286 468 against
+286 434). Its data is as first written (838 643), one function inlined
+otherwise, 71 bytes longer. `Waking` costs nothing measurable either:
+the same kind of harness over three builds (main, the PR before the
+guard and with it), each 8 copies under random UUIDs of 7 runs
+(`tools/instr/compare.py`), each run started under a 1-minute load below
+4 (1.75-3.44), read 13 229.4 instructions a record an `apply` with the
+guard against 13 217.7 without (SE 27.6 for the difference) and
+12 371.4 against 12 370.1 a thousand an `apply` (SE 20.3), main's
+13 727.8 and 12 798.7.

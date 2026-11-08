@@ -83,6 +83,10 @@ Named statements
   create [or replace] statement <name> every 1h | at '0 3 * * *' [in 'Europe/Berlin']
            [comment '...'] [scans] as ...   -- scheduled: fennec-server's clock runs it,
            a slot once, slot() the slot's time; defined on a server, never here
+  create [or replace] statement <name>($id text from event.data.object.id, ...)
+           on hook <hook> [where event.type = '...'] [comment '...'] as ...
+           -- a webhook consumer: fennec-server takes each verified event of
+           /_hooks/<hook> once; defined on a server, never here
   call <name> {a: 1, b: 'y'} [as {sub: 'alice'}]   -- or CALL name(1, b => 'y')
   statements | describe statement <name> | drop statement [if exists] <name>
 

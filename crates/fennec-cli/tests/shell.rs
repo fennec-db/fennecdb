@@ -917,6 +917,28 @@ fn the_help_gives_the_scheduled_form() {
     assert!(help.contains("defined on a server, never here"), "{help}");
 }
 
+/// `.help` gives a webhook consumer's form beside them, what its parameters
+/// read and where its events come: a server takes them, never the shell,
+/// which refuses the definition.
+#[test]
+fn the_help_gives_the_webhook_consumer_s_form() {
+    let d = Dir::new("help-hook");
+    let out = piped(&d.0.join("help.fennec"), ".help\n");
+    let help = text(&out.stdout);
+    assert!(
+        help.contains("statement <name>($id text from event.data.object.id, ...)"),
+        "{help}"
+    );
+    assert!(
+        help.contains("on hook <hook> [where event.type = '...']"),
+        "{help}"
+    );
+    assert!(
+        help.contains("/_hooks/<hook> once; defined on a server"),
+        "{help}"
+    );
+}
+
 /// The shell holds a file for a session and runs no schedule: a file
 /// whose slot is due -- `tick`, every hour, defined a day ago -- takes the
 /// shell's reads and writes and keeps its slot due, unmarked, for the

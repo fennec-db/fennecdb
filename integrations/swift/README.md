@@ -187,8 +187,12 @@ binding's `after`, and a scheduled statement's clock -- its `schedule`
 (`every 1h`, `at '0 3 * * *' in 'Europe/Berlin'`), the `next` slot as a
 `Date`, the `last` run (a `LastRun`: `slot`, `outcome` `ran` or `refused`,
 `status`, `reason`, `skipped`) and a slot the server holds back (`held`, a
-`HeldSlot`). The library runs no schedule: a server's file opened in the app
-keeps its schedules for the server that next opens it.
+`HeldSlot`); and a webhook consumer's `hook` and whether the server holds its
+secret (`armed`: `false` answers every event 401). `call("stripe_paid",
+event)` on `FennecRemote` sends a webhook consumer a test event, run as a
+delivery is, keeping no key. The library runs no schedule and takes no
+event: a server's file opened in the app keeps its schedules and hooks for
+the server that next opens it.
 
 The call builder is `Call`, stood beside `Query.from`: `try Call.call("mine",
 ["limit": 10], claims: ["sub": "alice"]).toCall()` is `("call mine $1 as

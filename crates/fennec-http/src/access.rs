@@ -2507,14 +2507,17 @@ impl Scope {
     }
 
     /// The statements `lines` grant the token, in the policy's order, as a
-    /// JSON list: `/_whoami`'s `calls` and `wakes`.
-    fn granted_into(&self, out: &mut String, lines: &[CallLine]) {
+    /// JSON list, each one `held` keeps: `/_whoami`'s `calls` and `wakes`.
+    /// One body for both lists, `held` behind a pointer: a generic's two
+    /// copies were 0.3 KB more of `fennec-server`.
+    fn granted_into(&self, out: &mut String, lines: &[CallLine], held: &dyn Fn(&str) -> bool) {
         out.push('[');
         let mut first = true;
         for name in lines
             .iter()
             .filter(|c| self.granted(c))
             .flat_map(|c| &c.names)
+            .filter(|n| held(n))
         {
             if !std::mem::take(&mut first) {
                 out.push(',');
@@ -2603,8 +2606,12 @@ impl Scope {
     /// a read shows and the rows, the filter as the policy writes it. A
     /// token is shown its own rules and no other's: a rule for a role it
     /// does not hold, or naming a claim it lacks, never became one of its
-    /// own.
-    pub fn summary_into(&self, out: &mut String) {
+    /// own. `calls` are those it can call in `db`: a statement there that a
+    /// caller calls, since a grant naming one it lacks -- or one bound to
+    /// writes, scheduled or a hook's, which run by themselves -- is a
+    /// missing statement's 404 to it ([`judged`]). Where no database is
+    /// asked, a tenant node's root, they are the lines' grants.
+    pub fn summary_into(&self, out: &mut String, db: Option<&Database>) {
         use fennec_core::json::escape_into;
         out.push_str("\"sub\":");
         match &self.subject {
@@ -2643,9 +2650,11 @@ impl Scope {
         out.push_str(",\"append_only\":");
         texts_into(out, Some(&self.lines.append_only));
         out.push_str(",\"calls\":");
-        self.granted_into(out, &self.lines.calls);
+        let callable =
+            |n: &str| db.is_none_or(|db| db.statements().get(n).is_some_and(|s| s.called()));
+        self.granted_into(out, &self.lines.calls, &callable);
         out.push_str(",\"wakes\":");
-        self.granted_into(out, &self.lines.wakes);
+        self.granted_into(out, &self.lines.wakes, &|_| true);
         out.push_str(",\"rules\":[");
         for (i, r) in self.rules.iter().enumerate() {
             if i > 0 {
@@ -4027,7 +4036,7 @@ mod tests {
         let calls = |claims: &str| {
             let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
             let mut out = String::new();
-            s.granted_into(&mut out, &s.lines.calls);
+            s.granted_into(&mut out, &s.lines.calls, &|_| true);
             out
         };
         assert_eq!(
@@ -4077,7 +4086,7 @@ mod tests {
         let scope = |claims: &str| a.scope(&a.mint(claims).unwrap(), 0).unwrap();
         let listed = |s: &Scope, lines: &[CallLine]| {
             let mut out = String::new();
-            s.granted_into(&mut out, lines);
+            s.granted_into(&mut out, lines, &|_| true);
             out
         };
         let s = scope(r#"{"sub":"c","role":"customer"}"#);
@@ -4092,7 +4101,7 @@ mod tests {
         let lines: Vec<_> = a.wake_grants().collect();
         assert_eq!(lines, [(1, "paid"), (1, "voided"), (2, "counted")]);
         let mut out = String::new();
-        s.summary_into(&mut out);
+        s.summary_into(&mut out, None);
         assert!(
             out.contains(r#""wakes":["paid","voided","counted"]"#),
             "{out}"
@@ -5279,7 +5288,7 @@ mod tests {
         let roles = |a: &Access, claims: &str| {
             let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
             let mut out = String::new();
-            s.summary_into(&mut out);
+            s.summary_into(&mut out, None);
             let at = out.find("\"roles\":").unwrap() + 8;
             out[at..at + out[at..].find(']').unwrap() + 1].to_string()
         };

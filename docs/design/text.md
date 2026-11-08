@@ -205,7 +205,9 @@ main's and the branch's alike; over seven identities each, main and this
 branch ran it in 16.55 and 16.56 thousand cycles, and with
 `MallocNanoZone=0` the two retire the same and run in the same cycles. Two
 builds a few percent apart in a statement of microseconds are compared
-over several UUIDs, or with that variable set.
+over several UUIDs, or with that variable set -- which on macOS 26 no
+longer holds the count still, so over several UUIDs (`make
+instr-compare`, [benchmarks.md](benchmarks.md#instruction-counts)).
 
 What answers beside it. `highlight()` and `snippet()` mark a row's words
 whatever orders it, the marks its ranking gives it, so they stay beside

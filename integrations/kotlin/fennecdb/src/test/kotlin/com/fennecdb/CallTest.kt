@@ -178,6 +178,7 @@ class CallLocalTest {
         val transfer = db.statements().single { it.name == "transfer" }
         assertEquals(listOf<Any?>("(\$from int, \$to int, \$amount int)", true, 2), listOf(transfer.signature, transfer.writes, transfer.version.size))
         assertEquals(listOf<Any?>(null, null, null, null, null, null), listOf(transfer.schedule, transfer.next, transfer.last, transfer.held, transfer.after, transfer.broken))
+        assertEquals(listOf<Any?>(null, null), listOf(transfer.hook, transfer.armed))
         assertEquals(db.statements(), db.statementsBlocking())
         db.close()
     }
@@ -192,10 +193,14 @@ class CallLocalTest {
                     "last":{"outcome":"refused","reason":"no hold","skipped":2,"slot":"2026-05-04T12:00:00Z","status":412},
                     "held":{"since":"2026-05-04T12:16:00.25Z","slot":"2026-05-04T12:15:00Z","status":507}},
                    {"name":"billed","version":[0,5],"signature":"()","writes":true,"comment":null,"broken":null,
-                    "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null}]""",
+                    "after":["bills","insert or set"],"schedule":null,"next":null,"last":null,"held":null},
+                   {"name":"paid","version":[0,6],"signature":"(${'$'}order text from event.data.object.metadata.order)","writes":true,
+                    "comment":null,"broken":null,"after":null,"schedule":null,"next":null,"last":null,"held":null,"hook":"stripe","armed":true}]""",
             ) as List<*>
             ).map { NamedStatement.of(it as Row) }
-        val (lapse, billed) = rows
+        val (lapse, billed, paid) = rows
+        // A webhook consumer's hook and whether the server holds its secret; null where a row says nothing of a hook.
+        assertEquals(listOf<Any?>("stripe", true, null, null), listOf(paid.hook, paid.armed, lapse.hook, lapse.armed))
         // 2026-05-04T12:00:00Z, as Json.iso writes it back.
         val noon = 1_777_896_000_000L
         assertEquals("2026-05-04T12:00:00.000Z", Json.iso(noon))
@@ -368,6 +373,29 @@ class CallRemoteTest {
         assertEquals(1L, db.call("tick").affected)
         val again = db.statementsBlocking().single { it.name == "tick" }
         assertEquals(listOf<Any?>(newYears(), null), listOf(again.next, again.last))
+    }
+
+    /**
+     * A webhook consumer, listed by its hook -- not armed, this server given no hooks file -- and a called statement by
+     * none; the server's token sends one a test event with `call`, the event its one argument, run as a delivery is.
+     */
+    @Test
+    fun aWebhookConsumerIsListedByItsHookAndSentATestEvent() = runBlocking {
+        val db = Fennec.connect(server("hooked").url)
+        db.execute(
+            "create statement paid(\$key text from event.data.object.metadata.key) on hook stripe " +
+                "where event.type = 'payment_intent.succeeded' as set tasks {status: 'paid'} where key = \$key require 1",
+        )
+        db.execute("create statement open_ones() as get tasks where status = 'open' count")
+        val listed = db.statements().associateBy { it.name }
+        val paid = listed.getValue("paid")
+        assertEquals(listOf<Any?>("stripe", false, "(\$key text from event.data.object.metadata.key)"), listOf(paid.hook, paid.armed, paid.signature))
+        assertEquals(listOf<Any?>(null, null), listOf(listed.getValue("open_ones").hook, listed.getValue("open_ones").armed))
+        val event = mapOf("type" to "payment_intent.succeeded", "data" to mapOf("object" to mapOf("metadata" to mapOf("key" to "a"))))
+        assertEquals(1L, db.call("paid", event).affected)
+        val passed = assertFailsWith<FennecException> { db.call("paid", mapOf("type" to "charge.refunded")) }
+        assertEquals(400, passed.status)
+        assertTrue(passed.message!!.contains("passes this event over"), passed.message)
     }
 
     /** A binding's refusal over HTTP names it to the server's token; one no binding made names none. */

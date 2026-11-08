@@ -487,6 +487,11 @@ export async function remote() {
   expect<[string, string] | null>(listed[0].after);
   // @ts-expect-error -- a slot is the server's ISO text, not a Date
   expect<Date | null>(listed[0].next);
+  // A webhook consumer's hook, and whether the server holds its secret.
+  expect<string | null>(listed[0].hook);
+  expect<boolean | null>(listed[0].armed);
+  // @ts-expect-error -- `armed` is null for a statement taking no hook
+  expect<boolean>(listed[0].armed);
   // @ts-expect-error -- the page's database holds no statement it runs
   void local.statements;
   // What `fennec types` writes for the statements of a schema, and the call

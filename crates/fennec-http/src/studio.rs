@@ -94,6 +94,13 @@ pub static ASSETS: &[Asset] = &[
         "studio/schema.js",
         "text/javascript; charset=utf-8"
     ),
+    // A webhook consumer's test event, fetched by the schema view when
+    // Test event is clicked.
+    file!(
+        "statements-event.js",
+        "studio/statements-event.js",
+        "text/javascript; charset=utf-8"
+    ),
     file!(
         "live.js",
         "studio/live.js",

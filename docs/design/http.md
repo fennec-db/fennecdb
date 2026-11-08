@@ -21,8 +21,9 @@ token is pasted into the page, kept in its tab's `sessionStorage` and sent
 as a client sends it, so the server's scope rewrite holds the grid, the
 counts and the facets to a scoped token's rows. Every statement is written
 in `studio/statements.js` -- the later views' in `statements-views.js`,
-under the same rules: values as parameters, a name refused unless it is
-one FennecQL writes, the typed `where` held inside parentheses it cannot
+a webhook consumer's test event in `statements-event.js` -- under the
+same rules: values as parameters, a name refused unless it is one
+FennecQL writes, the typed `where` held inside parentheses it cannot
 close; writes are `/batch`es under an `Idempotency-Key`, a cell's `set ...
 where id = $2 require 1`, so a row deleted meanwhile is a 412. `GET
 /_whoami` is what it shows a token by: `open`, `full` or `scoped` with the
@@ -34,10 +35,14 @@ the longest frame 18.7 ms in headless Chrome. Its first load is 71 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
 The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
-`views.css`): 22, 24, 18 and 20 KB gzipped with what they share, none of
+`views.css`): 23, 25, 18 and 20 KB gzipped with what they share, none of
 it on the first load (`statements.test.mjs` holds both, each view under
 24 000 bytes but the schema view, under 25 000 since it listed the scheduled
-statements' clocks, 23 819 to 24 202, [named-statements.md](named-statements.md#what-f3-has-built)). The editor runs
+statements' clocks, 23 819 to 24 202, [named-statements.md](named-statements.md#what-f3-has-built);
+listing the webhook consumers took it to 24 908, and their test event,
+which would have taken it to 25 292, is a module of its own fetched when
+Test event is first clicked, `statements-event.js`, 1 966 bytes held under
+2 500, [named-statements.md](named-statements.md#what-f4-has-built)). The editor runs
 the text as typed -- cut at each `;` outside strings and comments, one
 statement to `/query`, several one `/batch` -- and shows the status,
 `Fennec-Seq`, `X-Request-Id` (exposed to CORS for it) and `explain` of a

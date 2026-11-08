@@ -590,8 +590,16 @@ fn authenticate(
 /// -- and where it was asked: a single database, a tenant node's root, or a
 /// tenant under it. A client shows a person what their token may do before
 /// they find out by a refusal; it grants nothing, and a token the server
-/// refuses is answered as everywhere else.
-fn whoami(cfg: &Config, req: &Request, node: &str, tenant: Option<&str>) -> Response {
+/// refuses is answered as everywhere else. A scoped token's `calls` are
+/// asked of `db`, the database there, under its read lock; a node's root
+/// has none.
+fn whoami(
+    cfg: &Config,
+    req: &Request,
+    node: &str,
+    tenant: Option<&str>,
+    db: Option<&RwLock<Database>>,
+) -> Response {
     if !matches!(req.method, Method::Get | Method::Head) {
         return Response::error(405, "/_whoami is read with GET");
     }
@@ -614,7 +622,8 @@ fn whoami(cfg: &Config, req: &Request, node: &str, tenant: Option<&str>) -> Resp
         Who::Full => out.push_str("\"full\""),
         Who::Scoped(scope) => {
             out.push_str("\"scoped\",");
-            scope.summary_into(&mut out);
+            let held = db.map(held::read);
+            scope.summary_into(&mut out, held.as_deref());
         }
     }
     out.push('}');
@@ -1065,7 +1074,13 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             } else {
                 "single"
             };
-            let resp = whoami(cfg, &req, node, tenant.as_ref().map(|t| t.name()));
+            let resp = whoami(
+                cfg,
+                &req,
+                node,
+                tenant.as_ref().map(|t| t.name()),
+                Some(&**db),
+            );
             audit::http(&req, resp.status, peer);
             trace::end(resp.status);
             if cors(resp, cfg)
@@ -1694,7 +1709,7 @@ fn route_tenant(
     // The node's own answer, before a tenant is chosen: which tenants the
     // token's claim names is what a client picks one from.
     if segs.as_slice() == ["_whoami"] {
-        return Err(whoami(cfg, req, "tenants", None));
+        return Err(whoami(cfg, req, "tenants", None, None));
     }
     if req.body.len() > cfg.max_body {
         return Err(Response::error(

@@ -432,8 +432,9 @@ export const runNow = (n) => ({ text: `call ${statementName(n)}`, params: [] });
 
 /**
  * The parameters of a signature as `statements` writes it -- `($from int,
- * $to int = ..., $tags [text]) claims (sub text)` -- each `{name, type,
- * optional}`, and the claims it reads, by name.
+ * $to int = ..., $tags [text]) claims (sub text)`, a webhook consumer's
+ * `$id text from event.data.id` -- each `{name, type, optional, from}`,
+ * and the claims it reads, by name.
  */
 export function signatureParams(signature) {
   const s = String(signature ?? '');
@@ -455,9 +456,9 @@ export function signatureParams(signature) {
   }
   pieces.push(s.slice(from, end));
   const params = pieces
-    .map((p) => /^\s*\$([A-Za-z][A-Za-z0-9_]*)\s+(.+?)(\s*=\s*\.\.\.)?\s*$/.exec(p))
+    .map((p) => /^\s*\$([A-Za-z][A-Za-z0-9_]*)\s+(.+?)(?:\s+from\s+(.+?))?(\s*=\s*\.\.\.)?\s*$/.exec(p))
     .filter(Boolean)
-    .map(([, n, type, dflt]) => ({ name: n, type, optional: Boolean(dflt) }));
+    .map(([, n, type, from, dflt]) => ({ name: n, type, optional: Boolean(dflt), from }));
   const claims = /^\)\s*claims\s*\((.*)\)\s*$/.exec(s.slice(end));
   return { params, claims: claims ? claims[1].split(',').map((c) => c.trim().split(/\s+/)[0]).filter(Boolean) : [] };
 }

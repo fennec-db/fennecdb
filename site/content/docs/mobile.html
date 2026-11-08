@@ -302,8 +302,11 @@ binding is bound to, and a <a href="fennecql.html#scheduled-statements">schedule
 statement</a>'s clock, its <code>schedule</code>, <code>next</code> slot,
 <code>last</code> run and <code>held</code> slot (a <code>Date</code> in
 Swift, milliseconds since the epoch in Kotlin, a UTC <code>DateTime</code> in
-Dart). The server lists them to its own token alone; the app's own database
-lists what its file holds, and runs no schedule (<a
+Dart), and a <a href="webhooks.html">webhook consumer</a>'s <code>hook</code>
+and whether the server holds its secret (<code>armed</code>). The server
+lists them to its own token alone, and its token's <code>call</code> sends a
+webhook consumer a test event; the app's own database lists what its file
+holds, runs no schedule and takes no event (<a
 href="languages.html#named-statements">every SDK's</a>).</p>
 
 <h2 id="live">Live queries</h2>

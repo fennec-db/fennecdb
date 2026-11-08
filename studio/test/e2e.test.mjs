@@ -12,7 +12,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { availableParallelism, loadavg } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { availableParallelism, loadavg, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startServer, startRouter, seed, browser as launch, jwt, query, TOKEN, ADMIN } from './harness.mjs';
 
 const ROWS = 100_000;
@@ -775,6 +777,78 @@ test('the schema: a scheduled statement with its clock, run now, opened as its r
   } finally {
     await query(server.url, 'drop statement if exists tick');
     await query(server.url, 'drop collection if exists ticks');
+  }
+});
+
+// A webhook consumer: listed by its hook, armed where the server's hooks
+// file holds the hook's secret and not where it does not; a test event begun
+// from what it reads -- its module fetched as Test event is first clicked --
+// sent from its dialog into the editor as the server's token's call -- no
+// signature, no key kept -- and its definition opened as its replacement.
+// One whose parameter reads `hook.at` with no default is told it never
+// runs and sends nothing; one whose condition reads `hook.event` is told
+// so. A server of its own, given a hooks file.
+test('the schema: a webhook consumer by its hook, armed or not, sent a test event, opened as its replacement', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fennec-studio-hooks-'));
+  writeFileSync(join(dir, 'stripe.whsec'), 'whsec_studio_test');
+  writeFileSync(join(dir, 'hooks'), `stripe stripe ${join(dir, 'stripe.whsec')}\n`);
+  const hooked = await startServer({ extra: ['--hooks', join(dir, 'hooks')] });
+  try {
+    await query(hooked.url, 'create collection orders (ref text @hash, status text, amount int)');
+    await query(hooked.url, 'insert orders {ref: $1, status: $2, amount: 0}', ['o-1', 'open']);
+    await query(
+      hooked.url,
+      "create statement stripe_paid($order text from event.data.object.metadata.order, $amount int from event.data.object.amount_received) on hook stripe where event.type = 'payment_intent.succeeded' comment 'Marks an order paid' as set orders {status: 'paid', amount: $amount} where ref = $order require 1",
+    );
+    await query(hooked.url, "create statement pushed($repo text from event.repository.full_name) on hook github where hook.event = 'push' as insert orders {ref: $repo, status: 'pushed', amount: 0}");
+    await query(hooked.url, "create statement stamped($at timestamp from hook.at, $order text from event.order) on hook stripe as set orders {status: 'stamped'} where ref = $order");
+    const p = await page();
+    await signIn(p, TOKEN, hooked.url);
+    await view(p, 'schema', 'tr[data-statement="pushed"]');
+    const cells = (n) => p.$eval(`tr[data-statement="${n}"]`, (e) => [...e.cells].slice(0, 3).map((c) => c.textContent));
+    assert.deepEqual(await cells('stripe_paid'), ['stripe_paidhook', 'on hook stripearmed', 'Marks an order paid']);
+    assert.deepEqual(await cells('pushed'), ['pushedhook', 'on hook githubnot armed: its events are answered 401', '']);
+    assert.equal(await p.$('button[aria-label="Call stripe_paid"]'), null);
+    const fetched = () => p.evaluate(() => performance.getEntriesByType('resource').some((e) => /\/statements-event\.js$/.test(e.name)));
+    assert.equal(await fetched(), false);
+    // A parameter reading `hook.at` with no default: said first, and sent never.
+    await p.click('button[aria-label="Send stamped a test event"]');
+    await p.waitForSelector('dialog[open] #sc-arg-all');
+    assert.equal(await fetched(), true);
+    assert.equal(await p.$eval('dialog[open] .form-error', (e) => e.textContent), 'A test event never runs it: $at reads hook.at, with no default.');
+    assert.equal(await p.$eval('dialog[open] button[type=submit]', (e) => e.disabled), true);
+    await p.click('dialog[open] .dialog-actions .btn:not(.primary)');
+    // A condition reading `hook.event`, which a test event leaves null.
+    await p.click('button[aria-label="Send pushed a test event"]');
+    await p.waitForFunction(() => /Its condition reads hook\.event, so hook\.event = '\.\.\.' passes it over\./.test(document.querySelector('dialog[open] .hint')?.textContent ?? ''), { timeout: 10_000 });
+    assert.deepEqual(JSON.parse(await p.$eval('#sc-arg-all', (e) => e.value)), { repository: { full_name: '' } });
+    await p.click('dialog[open] .dialog-actions .btn:not(.primary)');
+    // The test event begins with the paths its parameters read and the type
+    // its condition compares; the person fills in the rest.
+    await p.click('button[aria-label="Send stripe_paid a test event"]');
+    await p.waitForSelector('dialog[open] #sc-arg-all');
+    assert.equal(await p.$('dialog[open] .form-error:not(:empty)'), null);
+    const begun = JSON.parse(await p.$eval('#sc-arg-all', (e) => e.value));
+    assert.deepEqual(begun, { data: { object: { metadata: { order: '' }, amount_received: 0 } }, type: 'payment_intent.succeeded' });
+    const event = { ...begun, data: { object: { metadata: { order: 'o-1' }, amount_received: 1200 } } };
+    await p.$eval('#sc-arg-all', (e) => (e.value = ''));
+    await p.type('#sc-arg-all', JSON.stringify(event));
+    await p.waitForFunction((want) => document.querySelector('dialog[open] form')?.textContent.includes(want), {}, `call stripe_paid $1$1 = ${JSON.stringify(event)}`);
+    await p.click('dialog[open] button[type=submit]');
+    await p.waitForFunction(() => /Wrote 1 row/.test(document.querySelector('.ed-out')?.textContent ?? ''), { timeout: 10_000 });
+    assert.equal(await p.$eval('#query', (e) => e.value), 'call stripe_paid $1');
+    assert.deepEqual(await query(hooked.url, 'get orders select status, amount where ref = $1', ['o-1']), [{ status: 'paid', amount: 1200 }]);
+    // Its definition says what it takes, and opens as its replacement.
+    await view(p, 'schema', 'tr[data-statement="stripe_paid"]');
+    await p.click('button[aria-label="The definition of stripe_paid"]');
+    await p.waitForFunction(() => /Takes hook stripe's events where event\.type = 'payment_intent\.succeeded', each once; reads orders/.test(document.querySelector('dialog[open]')?.textContent ?? ''), { timeout: 10_000 });
+    await p.click('dialog[open] .dialog-actions .btn.primary');
+    await p.waitForFunction(() => /^create or replace statement stripe_paid\(/.test(document.querySelector('#query')?.value ?? ''), { timeout: 10_000 });
+    assert.deepEqual(p.problems, []);
+    await p.close();
+  } finally {
+    await hooked.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -18,7 +18,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
 - [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
-- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how
+- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
@@ -38,7 +38,7 @@ The conventions hold no invariant of the code, and are listed apart:
 
 A proposal holds no invariant until it is built, and is listed apart:
 
-- [named-statements.md](named-statements.md) -- FennecQL defined once in a database and called by name with typed arguments and an authority of its own: its storage, its authority model against `SECURITY DEFINER`'s, its surfaces -- HTTP, the SDKs, MCP's tools, the studio and the shell -- and the slices that built it; and write-bound statements (F2), run in the block of the write that woke them, built in six slices; and scheduled statements (F3), run by the primary that may write the file, once a slot, the run and its slot's mark one block, built in six slices; and webhook consumers (F4), a statement taking another service's signed events at `/_hooks/<name>`, verified before anything is read and taken once by the event's key, its writes and the key one block -- designed, not built
+- [named-statements.md](named-statements.md) -- FennecQL defined once in a database and called by name with typed arguments and an authority of its own: its storage, its authority model against `SECURITY DEFINER`'s, its surfaces -- HTTP, the SDKs, MCP's tools, the studio and the shell -- and the slices that built it; and write-bound statements (F2), run in the block of the write that woke them, built in six slices; and scheduled statements (F3), run by the primary that may write the file, once a slot, the run and its slot's mark one block, built in six slices; and webhook consumers (F4), a statement taking another service's signed events at `/_hooks/<name>`, verified before anything is read and taken once by the event's key, its writes and the key one block, built in six slices
 
 ## The original order
 

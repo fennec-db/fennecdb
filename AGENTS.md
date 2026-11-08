@@ -140,7 +140,10 @@ lock.
 
 **[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
 `commit` appends it whole and only then notes it, so a crash, a replica
-and a subscriber see all of it or none. A failed one is undone in memory,
+and a subscriber see all of it or none; a replica's `apply` lands each of
+its primary's records so, whole in memory, its vectors linked, before the
+sink takes it (`land_applied`), those after one refused or in the sink's
+hands at a panic put back (`Handing`). A failed one is undone in memory,
 a schema change too (`Undo`, a variant each), every write recording its
 undo before it changes anything (`Block::remember`) by the id it was
 handed, a hook changing that id refused natively (`ask_hooks`); whatever
@@ -485,6 +488,10 @@ Covers `crates/fennec-bench/`.
   asserts the event, the count or the order (`audit::would_wait`,
   `Router::grants_waiting`, `Router::round_grants`). A timeout given a
   test's servers or clients bounds every request they make.
+- [Two builds' instruction counts](docs/design/benchmarks.md#instruction-counts)
+  differing by under ~500 a request are read over re-signed copies'
+  UUIDs or a trace (`make instr-compare`), never from plain pairs: on
+  macOS the allocator draws its path from a binary's identity.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
   listens on port 0, never a fixed or found-free port, found by its
   `listening on: http://<address>` stderr line, a router told its nodes by

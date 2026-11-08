@@ -143,7 +143,7 @@ export class FennecHttp {
     return this.run(sql, params, { idempotencyKey, wait, signal, read });
   }
 
-  /** `statements`, as the server lists them to its own token: a scheduled one's clock among the columns. */
+  /** `statements`, as the server lists them to its own token: a scheduled one's clock, a webhook consumer's hook among the columns. */
   async statements() {
     return this.rows('statements');
   }
