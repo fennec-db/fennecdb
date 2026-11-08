@@ -337,7 +337,6 @@ pub struct Listing {
 /// What a parse notes beside its tree ([`Listing`]): nothing in the
 /// browser module, nor natively unless asked.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
 struct Noting {
     on: bool,
     /// Whether a `put`'s document is being read.
@@ -350,10 +349,26 @@ struct Noting {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[derive(Default)]
 struct Noting;
 
 impl Noting {
+    /// Nothing noted: every parse but [`parse_one_listing`]'s.
+    const fn off() -> Noting {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Noting {
+                on: false,
+                doc: false,
+                noted: 0,
+                vectors: 0,
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Noting
+        }
+    }
+
     /// A list of numbers read into a vector.
     #[inline(always)]
     fn vector(&mut self) {
@@ -421,7 +436,7 @@ struct Bound {
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
-    statements(src, tokenize(src)?, false, Noting::default()).map(|(s, _)| s)
+    statements(src, tokenize(src)?, false, Noting::off()).map(|(s, _)| s)
 }
 
 /// [`parse_one`], and the lists of numbers its `put`'s documents give a
@@ -440,7 +455,7 @@ pub fn parse_one_listing(src: &str) -> Result<(Statement, Listing)> {
     let (toks, kept) = crate::lexer::tokenize_kept(src)?;
     let noting = Noting {
         on: true,
-        ..Noting::default()
+        ..Noting::off()
     };
     let (stmts, noting) = statements(src, toks, false, noting)?;
     let listing = Listing {
@@ -481,7 +496,7 @@ pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
         src,
         crate::lexer::tokenize_values(src)?,
         true,
-        Noting::default(),
+        Noting::off(),
     )
     .map(|(s, _)| s)
 }
@@ -726,7 +741,7 @@ pub fn reading(src: &str) -> Reading {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
-        noting: Noting::default(),
+        noting: Noting::off(),
     };
     // In characters, as tokens are placed: each statement read whole, by
     // where it starts, and the one just read, which what follows decides,
@@ -1024,7 +1039,7 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
-        noting: Noting::default(),
+        noting: Noting::off(),
     };
     let list = p.select_list()?;
     if !p.ended() {
@@ -1045,7 +1060,7 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
-        noting: Noting::default(),
+        noting: Noting::off(),
     };
     let list = p.group_list()?;
     if !p.ended() {
@@ -1066,7 +1081,7 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         cut: false,
         outer: Around::At(usize::MAX),
         def: None,
-        noting: Noting::default(),
+        noting: Noting::off(),
     };
     let list = p.facet_list()?;
     if !p.ended() {
@@ -6858,7 +6873,7 @@ mod tests {
             cut: false,
             outer: Around::At(usize::MAX),
             def: None,
-            noting: Noting::default(),
+            noting: Noting::off(),
         };
         let mut out = Vec::new();
         while !p.at_eof() {
@@ -7019,7 +7034,7 @@ mod tests {
                         10 => text.push_str("[1.00000001, 2]"),
                         1 => text.push_str(&format!("{{j: {list}}}")),
                         2 => text.push_str(&format!("[{list}, [2]]")),
-                        3 => text.push_str("7"),
+                        3 => text.push('7'),
                         4 => text.push_str(&format!("{list} + 1")),
                         _ => text.push_str(&list),
                     }

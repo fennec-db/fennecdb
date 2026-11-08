@@ -1047,7 +1047,11 @@ pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)
 /// members before it. The browser module names none: nothing there, not a
 /// byte.
 #[cfg(not(target_arch = "wasm32"))]
-type Places<'a> = Option<&'a mut dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>>>;
+type Places<'a> = Option<&'a mut Lister<'a>>;
+/// Handed the members before the listed one, the places of its elements to
+/// read as written, if any.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Lister<'a> = dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>> + 'a;
 #[cfg(target_arch = "wasm32")]
 type Places<'a> = std::marker::PhantomData<&'a ()>;
 
@@ -1061,7 +1065,7 @@ type Places<'a> = std::marker::PhantomData<&'a ()>;
 pub fn parse_object_listing_at(
     src: &str,
     list: &str,
-    places: &mut dyn FnMut(&[(String, Value)]) -> Option<std::sync::Arc<[usize]>>,
+    places: &mut Lister<'_>,
 ) -> Result<Vec<(String, Value)>> {
     listing(src, list, &[], Some(places))
 }
