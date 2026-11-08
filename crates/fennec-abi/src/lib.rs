@@ -35,9 +35,10 @@ pub enum Refused {
     /// (`Database::refused_by`): an app holds its database's authority, and
     /// is told the `binding` as a server's token is.
     Error(Error, usize, Option<usize>, Bound),
-    /// A json field is handed a list of numbers that came over as `f32`s:
-    /// the places of those parameters, written as the answer lists them,
-    /// for the caller to send them again as JSON.
+    /// A json field, a point or a list of numbers is handed a list of
+    /// numbers that came over as `f32`s: the places of those parameters,
+    /// written as the answer lists them, for the caller to send them again
+    /// as JSON.
     Exact(String),
 }
 
@@ -148,8 +149,13 @@ pub fn exact_noting(
     let (mut text, mut exact) = (false, false);
     let mut as_json = String::new();
     for s in &p.stmts {
-        let need = db.exactly(s);
+        let mut need = db.exactly(s);
         text |= need.text;
+        // A vector handed over apart is the `f32`s of numbers the page may
+        // have rounded (`1.00000001` is 1 as an `f32`): a list of numbers
+        // asks for it as JSON, as a json field does, whatever it holds.
+        need.apart(&|i| apart(vectors, i));
+        need.settle(&p.params);
         for i in need.params {
             exact = true;
             if apart(vectors, i) {
@@ -166,6 +172,9 @@ pub fn exact_noting(
     if text {
         p.stmts = fennec_ql::parse_exact(sql)?;
     }
+    // Every one read again, as it always was: a vector goes over apart,
+    // so what the JSON holds is small, and a reader of the named ones alone
+    // was 1.6 KB of the browser module.
     if exact {
         p.params = json::parse_params_exact(params_src).and_then(|p| with_vectors(p, vectors))?;
     }
@@ -290,8 +299,8 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
         Ok(r) => json::response_to_string(r),
         // The places to send as JSON, for the caller to send them so.
         Err(Refused::Exact(places)) => format!(
-            "{{\"kind\":\"error\",\"message\":\"a json field is handed a list of numbers \
-             sent over as f32s\",\"exact\":[{places}]}}"
+            "{{\"kind\":\"error\",\"message\":\"a field keeping numbers as written is handed \
+             a list of them sent over as f32s\",\"exact\":[{places}]}}"
         ),
         // Native alone: the module runs no binding, and carried this arm's
         // words for nothing (`make size-report`).
@@ -681,20 +690,71 @@ mod tests {
         }
     }
 
+    /// An `[int]` and a `[float]` keep their numbers through the module's
+    /// and the native library's path: read once where the quick read's
+    /// `f32`s are the integers written -- an embedding beside them handed
+    /// over apart -- and again, those parameters alone, where they are not.
+    #[test]
+    fn a_list_of_numbers_keeps_its_numbers() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection t (xs [int], fs [float], e vector<2>)",
+            "",
+            &[],
+        );
+        let apart = {
+            let mut b = [2u32.to_le_bytes(), 2u32.to_le_bytes()].concat();
+            [0.1f32, 0.2].iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let put = "put t {xs: $1, fs: $2, e: $3}";
+        let anew = |db: &Database, params: &str| {
+            let mut p = prepare(put, params, &apart).unwrap();
+            let mut anew = false;
+            let ran = exact_noting(db, &mut p, put, params, &apart, &mut anew);
+            assert!(ran.is_ok(), "{params}");
+            (anew, p.params)
+        };
+        let (again, params) = anew(&db, "[[1, -2], [3], null]");
+        assert!(!again);
+        assert!(matches!(params[0], Value::Vector(_)));
+        let (again, params) = anew(&db, "[[16777217], [0.1], null]");
+        assert!(again);
+        assert_eq!(params[0], Value::List(vec![Value::Int(16_777_217)]));
+        assert_eq!(params[1], Value::List(vec![Value::Float(0.1)]));
+        assert!(matches!(params[2], Value::Vector(_)));
+        for params in ["[[1, -2], [3], null]", "[[16777217], [0.1], null]"] {
+            let r = run(&mut db, put, params, &apart);
+            assert!(r.contains("\"affected\""), "{r}");
+        }
+        let r = run(&mut db, "get t select xs, fs order id", "", &[]);
+        assert!(
+            r.contains(r#"[{"xs":[1,-2],"fs":[3]},{"xs":[16777217],"fs":[0.1]}]"#),
+            "{r}"
+        );
+    }
+
     /// A number past an int's range is refused naming its field, never
     /// clamped to the nearest int -- a text's literal, a parameter's JSON, a
-    /// document's and a list's element handed over as `f32`s alike, the
-    /// module's and the native library's answer -- and the ends are taken.
-    /// An `[int]`'s ends are `f32`s of ±2^63 and kept as they always were.
+    /// document's and a list's element alike, the module's and the native
+    /// library's answer -- and the ends are taken. A list handed over as
+    /// `f32`s is asked for as JSON: its sender may have rounded it, and an
+    /// `f32` holds no int's ends.
     #[test]
     fn an_int_past_its_range_is_refused_naming_the_field() {
         let mut db = Database::new();
         run(&mut db, "create collection t (n int, xs [int])", "", &[]);
         let refused = |field: &str| {
+            let at = match field {
+                "xs" => "`, element 0",
+                _ => "`",
+            };
             format!(
-                r#"{{"kind":"error","message":"type error: field `{field}`: an int is from -9223372036854775808 to 9223372036854775807"}}"#
+                r#"{{"kind":"error","message":"type error: field `{field}{at}: an int is from -9223372036854775808 to 9223372036854775807"}}"#
             )
         };
+        let asked = r#"{"kind":"error","message":"a field keeping numbers as written is handed a list of them sent over as f32s","exact":[0]}"#;
         for n in [
             "1e300",
             "-1e300",
@@ -713,7 +773,7 @@ mod tests {
             b
         };
         let r = run(&mut db, "put t {xs: $1}", "[null]", &apart(1e20));
-        assert_eq!(r, refused("xs"));
+        assert_eq!(r, asked);
         assert_eq!(
             run(&mut db, "put t {xs: $1}", "[[1e20]]", &[]),
             refused("xs")
@@ -725,16 +785,16 @@ mod tests {
             let r = run(&mut db, "put t {xs: $1}", &format!("[{xs}]"), &[]);
             assert!(r.contains("\"affected\""), "{r}");
         }
-        for x in [-(2f32.powi(63)), 2f32.powi(63)] {
+        for x in [-(2f32.powi(63)), 2f32.powi(63), 16_777_216.0, 0.5] {
             let r = run(&mut db, "put t {xs: $1}", "[null]", &apart(x));
-            assert!(r.contains("\"affected\""), "{r}");
+            assert_eq!(r, asked);
         }
         let r = run(&mut db, "get t select xs order id", "", &[]);
         let (min, max) = (
             r#"{"xs":[-9223372036854775808]}"#,
             r#"{"xs":[9223372036854775807]}"#,
         );
-        let want = format!("[{min},{min},{max},{max},{min},{max}]");
+        let want = format!("[{min},{min},{max},{max}]");
         assert!(r.contains(&want), "{r}");
         for n in ["9223372036854775807", "-9223372036854775808"] {
             let r = run(&mut db, "put t {n: $1}", &format!("[{n}]"), &[]);

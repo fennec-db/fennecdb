@@ -1500,6 +1500,73 @@ fn an_int_past_its_range_is_refused_naming_the_field() {
     }
 }
 
+/// An `[int]` and a `[float]` keep their numbers as written -- a REST
+/// insert's, a PATCH's, a `/query` text's (twice, through the parse cache)
+/// and its parameters', a `/batch` line's -- where their quick read's
+/// `f32`s kept 16777216 for 16777217 and 0.10000000149011612 for 0.1; an
+/// element past an int's range is refused naming the field and the element.
+#[test]
+fn an_int_or_float_list_keeps_its_numbers() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection lists (k text, xs [int], fs [float])"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let xs = "[16777217,9007199254740993]";
+    let body = format!(r#"{{"k":"rest","xs":{xs},"fs":[0.1]}}"#);
+    let r = call(h.port, "POST", "/lists", Some(&body));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let body = format!(r#"{{"k":"patched","xs":{xs},"fs":[19.99]}}"#);
+    let r = call(h.port, "POST", "/lists", Some(r#"{"k":"patched"}"#));
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = call(h.port, "PATCH", "/lists?k=eq.patched", Some(&body));
+    assert_eq!(r.status, 200, "{}", r.body);
+    for _ in 0..2 {
+        let r = q(&format!(
+            r#"{{"query":"put lists {{k: 'text', xs: {xs}, fs: [0.1]}}"}}"#
+        ));
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(&format!(
+        r#"{{"query":"put lists {{k: 'params', xs: $1, fs: $2}}","params":[{xs},[0.1]]}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let line = format!(r#"{{"query":"put lists {{k: 'batch', xs: $1}}","params":[{xs}]}}"#);
+    let r = call(h.port, "POST", "/batch", Some(&line));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"get lists select k, xs, fs order id"}"#);
+    let row = |k: &str, fs: &str| format!(r#"{{"k":"{k}","xs":{xs},"fs":{fs}}}"#);
+    let want = [
+        row("rest", "[0.1]"),
+        row("patched", "[19.99]"),
+        row("text", "[0.1]"),
+        row("text", "[0.1]"),
+        row("params", "[0.1]"),
+        format!(r#"{{"k":"batch","xs":{xs},"fs":null}}"#),
+    ];
+    assert_eq!(r.body.trim(), format!("[{}]", want.join(",")));
+    let r = q(r#"{"query":"get lists select k where xs = [16777217, 9007199254740993]"}"#);
+    assert_eq!(r.body.matches("\"k\":").count(), 6, "{}", r.body);
+    let r = q(r#"{"query":"get lists select k where xs = [16777216, 9007199254740992]"}"#);
+    assert_eq!(r.body.trim(), "[]");
+    for (status, r) in [
+        (
+            400,
+            call(h.port, "POST", "/lists", Some(r#"{"xs":[1,1e20]}"#)),
+        ),
+        (
+            400,
+            q(r#"{"query":"put lists {xs: $1}","params":[[1, 1e20]]}"#),
+        ),
+    ] {
+        assert_eq!(r.status, status, "{}", r.body);
+        assert!(
+            r.body.contains("field `xs`, element 1: an int is from"),
+            "{}",
+            r.body
+        );
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

@@ -371,7 +371,7 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
 /// at a time, which is slower than the vector [`parse`] makes, so a text is
 /// read so only where [`parse_for`] finds a json field given one.
 pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
-    statements(src, crate::lexer::tokenize(src)?, true)
+    statements(src, crate::lexer::tokenize_values(src)?, true)
 }
 
 /// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
@@ -1043,18 +1043,28 @@ impl Parser {
 
     /// At a `[`: the numbers up to the `]` that closes it as `f32`s, and the
     /// tokens stepped past, when there are any and each is followed by a
-    /// `,` or that `]`; `None`, and nothing stepped past, otherwise.
+    /// `,` or that `]`; `None`, and nothing stepped past, otherwise -- and
+    /// where the `f32`s would pass for the whole numbers written while one
+    /// was another (`fennec_core::value::quick_vector`), a list read as
+    /// written below.
     fn numbers_in_brackets(&mut self) -> Option<Vec<f32>> {
         let mut j = self.i + 1;
         let mut v = Vec::new();
+        // A float the `f32` is not: a list of whole `f32`s holding one hides
+        // a rounding.
+        let mut rounded = false;
         loop {
             v.push(match self.toks.get(j)?.tok {
                 Tok::Int(n) => n as f32,
-                Tok::Float(f) => f as f32,
+                Tok::Float(f) => {
+                    rounded |= (f as f32) as f64 != f;
+                    f as f32
+                }
                 _ => return None,
             });
             match self.toks.get(j + 1)?.tok {
                 Tok::Comma => j += 2,
+                Tok::RBracket if rounded && fennec_core::value::whole_f32s(&v) => return None,
                 Tok::RBracket => {
                     self.i = j + 2;
                     return Some(v);
@@ -1873,8 +1883,13 @@ impl Parser {
             // `text[]`, `integer array`, `int array[3]`: a list, its length
             // not held, as PostgreSQL holds none.
             let array = self.eat_kw("array");
-            // `[3]` is a vector of one to the lexer.
-            if matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
+            // `[3]` is a vector of one to the lexer, a list of one read as
+            // written.
+            #[cfg(not(target_arch = "wasm32"))]
+            let one = matches!(self.peek(), Tok::Values(v) if v.len() == 1);
+            #[cfg(target_arch = "wasm32")]
+            let one = false;
+            if one || matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
                 self.skip();
                 ty = DataType::List(Box::new(ty));
             } else if matches!(self.peek(), Tok::LBracket) {
@@ -6069,10 +6084,19 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr> {
         // Taken rather than cloned, as `next` would.
-        if let Tok::Vector(v) = &mut self.toks[self.i].tok {
-            let v = std::mem::take(v);
-            self.i += 1;
-            return Ok(Expr::Lit(Value::Vector(v)));
+        match &mut self.toks[self.i].tok {
+            Tok::Vector(v) => {
+                let v = std::mem::take(v);
+                self.i += 1;
+                return Ok(Expr::Lit(Value::Vector(v)));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Tok::Values(v) => {
+                let v = std::mem::take(v);
+                self.i += 1;
+                return Ok(Expr::Lit(Value::List(v)));
+            }
+            _ => {}
         }
         match self.peek().clone() {
             Tok::LParen => {
@@ -6142,17 +6166,12 @@ impl Parser {
                     vals.push(v);
                 }
                 // Every element a constant number: a vector, so embedding
-                // lists become Value::Vector in one go.
+                // lists become Value::Vector in one go -- but for one whose
+                // `f32`s would pass for whole numbers one was not.
                 if numbers {
-                    let mut v = Vec::with_capacity(vals.len());
-                    for x in &vals {
-                        v.push(match x {
-                            Value::Int(i) => *i as f32,
-                            Value::Float(f) => *f as f32,
-                            _ => continue,
-                        });
+                    if let Some(v) = fennec_core::value::quick_vector(&vals) {
+                        return Ok(Expr::Lit(Value::Vector(v)));
                     }
-                    return Ok(Expr::Lit(Value::Vector(v)));
                 }
                 Ok(Expr::Lit(Value::List(vals)))
             }
@@ -6691,14 +6710,14 @@ mod tests {
     }
 
     /// What the parser made of a text before the lexer read a list of
-    /// numbers as one token.
-    fn parse_plain(src: &str) -> Result<Vec<Statement>> {
+    /// numbers as one token, as written where `exact`.
+    fn parse_plain(src: &str, exact: bool) -> Result<Vec<Statement>> {
         let mut p = Parser {
             toks: crate::lexer::tokenize(src)?,
             i: 0,
             depth: 0,
             subqueries: 0,
-            exact: false,
+            exact,
             cut: false,
             outer: Around::At(usize::MAX),
             def: None,
@@ -6713,7 +6732,8 @@ mod tests {
     /// A list of numbers read at once parses to the statement its tokens
     /// one by one did, and a text one refused the other refuses: over
     /// numbers of every shape the lexer reads, and some it does not, in
-    /// every place a list goes.
+    /// every place a list goes -- read into a vector, and as written, to the
+    /// bit (`-0.0`).
     #[test]
     fn a_list_read_as_a_vector_parses_as_its_tokens_did() {
         let items = [
@@ -6752,6 +6772,7 @@ mod tests {
             "1 # c\n",
         ];
         let seps = [", ", ",", " , ", ",\n", "\t,\t"];
+        let mut read_at_once = 0;
         let mut x = 0x2545f4914f6cdd1du64;
         let mut rnd = |n: usize| {
             x ^= x << 13;
@@ -6777,19 +6798,30 @@ mod tests {
                 list.push(',');
             }
             list.push_str(["]", " ]", "\n]"][rnd(3)]);
-            let text = match rnd(6) {
+            let text = match rnd(7) {
                 0 => format!("put t {{v: {list}}}"),
                 1 => format!("get t where x in {list}"),
                 2 => format!("get t where x IN {list} and y = 1"),
                 3 => format!("get t near v {list} limit 3"),
                 4 => format!("put t [{{v: {list}}}, {{w: {list}}}]"),
+                5 => format!("create collection t (x int{list})"),
                 _ => format!("get t where x has {list}"),
             };
-            match (parse(&text), parse_plain(&text)) {
+            match (parse(&text), parse_plain(&text, false)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "{text}"),
                 (Err(_), Err(_)) => {}
                 (a, b) => panic!("{text}: {a:?} against {b:?}"),
             }
+            read_at_once += crate::lexer::tokenize_values(&text)
+                .is_ok_and(|t| t.iter().any(|t| matches!(t.tok, Tok::Values(_))))
+                as u32;
+            match (parse_exact(&text), parse_plain(&text, true)) {
+                (Ok(a), Ok(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}"), "{text}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!("{text}: {a:?} against {b:?}"),
+            }
         }
+        // As written, the lists were read at once, many times over.
+        assert!(read_at_once > 5_000, "{read_at_once}");
     }
 }

@@ -3449,6 +3449,18 @@ pub fn holds_vector(v: &Value) -> bool {
     }
 }
 
+/// [`holds_vector`], a vector of whole `f32`s short of 2^24 left out: the
+/// integers written, which a list of numbers takes as they came
+/// ([`crate::value::whole_f32s`]).
+pub fn holds_rounded(v: &Value) -> bool {
+    match v {
+        Value::Vector(f) => !crate::value::whole_f32s(f),
+        Value::List(items) => items.iter().any(holds_rounded),
+        Value::Object(m) => m.iter().any(|(_, v)| holds_rounded(v)),
+        _ => false,
+    }
+}
+
 impl Expr {
     /// Whether a literal anywhere in it holds a vector, as a list of
     /// numbers alone is read: what a json field could be handed instead of

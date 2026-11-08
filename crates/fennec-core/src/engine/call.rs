@@ -318,17 +318,19 @@ impl Database {
         };
         // A list parameter as well: `$ids [int]`, read the quick way, was a
         // vector's `f32`s made `[int]`, 16777217 the 16777216 of another
-        // row in `id in $ids`.
-        let list = |t: &crate::value::DataType| matches!(t, crate::value::DataType::List(_));
-        let params: Vec<(&str, bool)> = def
-            .params
-            .iter()
-            .map(|p| (&*p.name, p.ty.keeps_numbers() || list(&p.ty)))
-            .collect();
-        let claims: Vec<(&str, bool)> = def
+        // row in `id in $ids`. A list of numbers takes a vector of whole
+        // `f32`s as the integers written (`Some(true)`, `given_list`).
+        let kept = |t: &crate::value::DataType| match t {
+            t if t.holds_numbers() => Some(true),
+            t if t.keeps_numbers() || matches!(t, crate::value::DataType::List(_)) => Some(false),
+            _ => None,
+        };
+        let params: Vec<(&str, Option<bool>)> =
+            def.params.iter().map(|p| (&*p.name, kept(&p.ty))).collect();
+        let claims: Vec<(&str, Option<bool>)> = def
             .claims
             .iter()
-            .map(|c| (c.claim(), c.ty.keeps_numbers()))
+            .map(|c| (c.claim(), kept(&c.ty)))
             .collect();
         exact_args(&c.args, &params, out);
         if let Some(a) = &c.claims {
@@ -718,24 +720,36 @@ fn arguments(def: &Definition, args: &Args, ctx: &EvalCtx) -> Result<Vec<Value>>
 }
 
 /// [`Database::call_exactly`] over one side of a call, its names and
-/// whether each keeps a list of numbers as written, by place.
-fn exact_args(args: &Args, keeps: &[(&str, bool)], out: &mut super::Exactly) {
-    let by_name = |k: &str| keeps.iter().any(|&(n, kept)| kept && n == k);
+/// whether each keeps a list of numbers as written, by place: `Some(true)`
+/// a list of numbers, which takes a vector of whole `f32`s as written.
+fn exact_args(args: &Args, keeps: &[(&str, Option<bool>)], out: &mut super::Exactly) {
+    let by_name = |k: &str| {
+        keeps
+            .iter()
+            .find(|&&(n, _)| n == k)
+            .and_then(|&(_, kept)| kept)
+    };
+    let one = |kept: Option<bool>, e: &Expr, out: &mut super::Exactly| match kept {
+        Some(true) => super::given_list(e, out),
+        Some(false) => super::given(e, out),
+        None => {}
+    };
     // An argument a parameter hands, `call f($1)`, is that parameter read
     // as written, as a list of numbers written in is the text.
     let named = |pairs: &[(String, Expr)], out: &mut super::Exactly| {
-        for (_, e) in pairs.iter().filter(|(k, _)| by_name(k)) {
-            super::given(e, out);
+        for (k, e) in pairs {
+            one(by_name(k), e, out);
         }
     };
     match args {
-        Args::Param(i) if keeps.iter().any(|&(_, kept)| kept) => out.params.push(*i),
+        Args::Param(i) if keeps.iter().any(|&(_, kept)| kept.is_some()) => {
+            super::noted(&mut out.params, *i)
+        }
         Args::Named(pairs) => named(pairs, out),
         Args::Placed(placed, pairs) => {
             named(pairs, out);
-            let at = |j: usize| keeps.get(j).is_some_and(|&(_, kept)| kept);
-            for (_, e) in placed.iter().enumerate().filter(|(j, _)| at(*j)) {
-                super::given(e, out);
+            for (j, e) in placed.iter().enumerate() {
+                one(keeps.get(j).and_then(|&(_, kept)| kept), e, out);
             }
         }
         _ => {}

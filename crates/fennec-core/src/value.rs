@@ -70,15 +70,68 @@ impl DataType {
     }
 
     /// Whether a field of the type keeps a list of numbers as written: a
-    /// json field, and a point, whose degrees are `f64`s -- where a reader
-    /// with no schema reads such a list into a vector's `f32`s, which would
-    /// move a point by up to 1.7 m (`Database::exactly`).
+    /// json field, a point, whose degrees are `f64`s, and a list of numbers
+    /// ([`Self::holds_numbers`]) -- where a reader with no schema reads such
+    /// a list into a vector's `f32`s, which would move a point by up to 1.7
+    /// m and keep 16777216 for 16777217 (`Database::exactly`).
     pub fn keeps_numbers(&self) -> bool {
         match self {
             DataType::Json | DataType::Geo => true,
-            DataType::List(t) => t.keeps_numbers(),
+            DataType::List(t) => t.keeps_numbers() || t.is_number(),
             _ => false,
         }
+    }
+
+    /// Whether the type is a list of numbers, `[int]`, `[float]` or
+    /// `[timestamp]`: the one field keeping numbers that takes a vector,
+    /// each `f32` an element, so a vector of whole `f32`s short of 2^24 --
+    /// the integers written ([`whole_f32s`]) -- is handed it as it came
+    /// and no other is.
+    pub fn holds_numbers(&self) -> bool {
+        matches!(self, DataType::List(t) if t.is_number())
+    }
+
+    fn is_number(&self) -> bool {
+        matches!(self, DataType::Int | DataType::Float | DataType::Timestamp)
+    }
+}
+
+/// Whether every `f32` of `v` is whole and short of 2^24 either side, where
+/// an `f32` holds every integer: what a list of integers written alone is
+/// read into, and the one vector a list of numbers takes as its numbers
+/// written ([`DataType::holds_numbers`]). The quick read makes no such
+/// vector of a list holding a number it rounds to one (`1.00000001` is 1 as
+/// an `f32`), and reads that list as written ([`quick_vector`],
+/// `num::hides_rounding`), so a vector of whole `f32`s is never another
+/// list's. Through `as i32`, which the range test bounds: `trunc` is a call
+/// of libm's on x86-64's baseline.
+pub fn whole_f32s(v: &[f32]) -> bool {
+    v.iter()
+        .all(|&f| f.abs() < 16_777_216.0 && (f as i32) as f32 == f)
+}
+
+/// Numbers alone, read one at a time, as the vector of `f32`s the quick read
+/// makes of them -- an embedding's -- or `None`: an empty list, one holding
+/// no number, and one whose `f32`s would pass for the whole numbers written
+/// ([`whole_f32s`]) where one was another number -- `[1.00000001]`, `[1e-50]`
+/// -- which is read as written, a list, instead. The text's and the JSON's
+/// readers a value at a time make their vectors here.
+pub fn quick_vector(items: &[Value]) -> Option<Vec<f32>> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut v = Vec::with_capacity(items.len());
+    for x in items {
+        v.push(match x {
+            Value::Int(i) => *i as f32,
+            Value::Float(f) => *f as f32,
+            _ => return None,
+        });
+    }
+    let hides = |(x, y): (&Value, &f32)| matches!(x, Value::Float(f) if *y as f64 != *f);
+    match whole_f32s(&v) && items.iter().zip(&v).any(hides) {
+        true => None,
+        false => Some(v),
     }
 }
 
@@ -326,7 +379,6 @@ impl Value {
                 let fits = match fit {
                     Fit::Write => f.abs() < I64_END,
                     Fit::Key => (-I64_END..I64_END).contains(&f),
-                    Fit::F32 => f.abs() <= I64_END,
                 };
                 match fits {
                     true => Ok(Value::Int(f as i64)),
@@ -396,29 +448,60 @@ impl Value {
                 })?;
                 check_dim(out, *dim)
             }
-            // On the JSON side an all-numeric array is parsed as a vector
-            // (json.rs), because `near $1` is evaluated without schema
-            // context. If the target field is a list it is converted back
-            // here; without this arm `[int]`/`[float]` fields could not be
-            // filled from the browser and fennec-server paths. The numbers
-            // are `f32`s by then: a `[float]` keeps an `f32`'s digits, and an
-            // `[int]` is exact only to 2^24 (vector-search.md#numbers-in).
-            // Nor does an `f32` tell an int's ends from past them: 2^63 is
-            // where every number from 2^63 - 2^38 to 2^63 + 2^39 lands,
-            // i64::MAX among them, so an `[int]` takes ±2^63 as its ends, as
-            // it always did ([`Fit::F32`]), and refuses an `f32` past them,
-            // which only a number past 2^63 + 2^39 is.
+            // A list of numbers alone is read into a vector's `f32`s where no
+            // schema is at hand (`near $1`), and a list of numbers takes one
+            // as its elements: every reader hands it the list as written
+            // instead unless the `f32`s are the integers written, each whole
+            // and short of 2^24 (`whole_f32s`, `Database::exactly`) -- a whole
+            // one is the int it came from, as the exact read makes it, so a
+            // `[timestamp]` takes it too. What else comes here is a vector
+            // built in Rust, its `f32`s the numbers it holds: 2^63 is past
+            // every int, and refused as the float it is.
             (DataType::List(inner), Value::Vector(v)) => {
+                // What an `[int]` and a `[float]` mostly take, made at once,
+                // each element what the way below makes of it: a call of
+                // this function an element was 5% of a `put` of rows each
+                // holding an `[int]` of 16. Natively: the browser module
+                // takes a page's lists as JSON, as written.
+                #[cfg(not(target_arch = "wasm32"))]
+                match inner.as_ref() {
+                    DataType::Float => {
+                        return Ok(Value::List(
+                            v.into_iter().map(|f| Value::Float(f as f64)).collect(),
+                        ))
+                    }
+                    DataType::Int if whole_f32s(&v) => {
+                        return Ok(Value::List(
+                            v.into_iter().map(|f| Value::Int(f as i64)).collect(),
+                        ))
+                    }
+                    _ => {}
+                }
                 let mut out = Vec::with_capacity(v.len());
-                for f in v {
-                    out.push(Value::Float(f as f64).coerce_as(inner, Fit::F32)?);
+                for (i, f) in v.into_iter().enumerate() {
+                    let x = match f.abs() < 16_777_216.0 && (f as i32) as f32 == f {
+                        true => Value::Int(f as i64),
+                        false => Value::Float(f as f64),
+                    };
+                    out.push(x.coerce_as(inner, fit).map_err(|e| at_element(i, e))?);
                 }
                 Ok(Value::List(out))
             }
             (DataType::List(inner), Value::List(items)) => {
+                // Elements of the type already, as a list of numbers read as
+                // written mostly holds, are what the way below would make
+                // of each: the list is kept as it came, not built again.
+                let kept = match inner.as_ref() {
+                    DataType::Float => items.iter().all(|v| matches!(v, Value::Float(_))),
+                    DataType::Int => items.iter().all(|v| matches!(v, Value::Int(_))),
+                    _ => false,
+                };
+                if kept {
+                    return Ok(Value::List(items));
+                }
                 let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(it.coerce_as(inner, fit)?);
+                for (i, it) in items.into_iter().enumerate() {
+                    out.push(it.coerce_as(inner, fit).map_err(|e| at_element(i, e))?);
                 }
                 Ok(Value::List(out))
             }
@@ -649,9 +732,6 @@ enum Fit {
     /// As a key `=` finds rows by: only the number it is, -2^63 the int
     /// `i64::MIN` and 2^63 none, an int no float holds no `float`.
     Key,
-    /// An `[int]`'s element read as an `f32`, where ±2^63 is what its ends
-    /// were read as.
-    F32,
 }
 
 /// 2^53: every int short of it either side is a float, so two numbers
@@ -728,6 +808,19 @@ pub(crate) fn floats_beside(i: i64) -> (f64, f64) {
 #[inline(never)]
 fn past_int() -> Error {
     Error::Type("an int is from -9223372036854775808 to 9223372036854775807".into())
+}
+
+/// The refusal `e` of a list's element `i`, counted from 0, as a batch's
+/// statements are: a document's write names the field before it
+/// (`engine::in_field`), "field `xs`, element 2: an int is from ...". Out of
+/// line, on the refusal alone.
+#[cold]
+#[inline(never)]
+fn at_element(i: usize, e: Error) -> Error {
+    match e {
+        Error::Type(m) => Error::Type(format!("element {i}: {m}")),
+        e => e,
+    }
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

@@ -27,6 +27,12 @@ pub enum Tok {
     /// Numbers alone between brackets, read as the parser reads such a
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
+    /// Numbers alone between brackets, as written: what [`tokenize_values`]
+    /// makes of the list [`Tok::Vector`] stands for. Natively alone: the
+    /// browser module reads them a token a number, and a token holding
+    /// `Value`s took their comparison into it with the tokens', 0.4 KB.
+    #[cfg(not(target_arch = "wasm32"))]
+    Values(Vec<fennec_core::value::Value>),
     LBrace,
     RBrace,
     LParen,
@@ -92,6 +98,8 @@ impl Tok {
             #[cfg(feature = "statements")]
             Tok::Keys(_) => "a path with a quoted key".into(),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Tok::Values(v) => format!("a list of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
             Tok::LParen => "`(`".into(),
@@ -293,6 +301,8 @@ fn subtracts(last: Option<&Token>) -> bool {
             | Tok::RParen
             | Tok::RBracket,
         ) => true,
+        #[cfg(not(target_arch = "wasm32"))]
+        Some(Tok::Values(_)) => true,
         #[cfg(feature = "statements")]
         Some(Tok::Named(_) | Tok::Keys(_)) => true,
         _ => false,
@@ -300,7 +310,15 @@ fn subtracts(last: Option<&Token>) -> bool {
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
-    lex::<false>(src)
+    lex::<false>(src, false)
+}
+
+/// [`tokenize`], with numbers alone between brackets read at once, as
+/// written, into the list the parser makes of their tokens (`Tok::Values`)
+/// where [`tokenize_vectors`] reads a vector: what `parse_exact` reads,
+/// natively. The browser module reads them a token a number, as it did.
+pub(crate) fn tokenize_values(src: &str) -> Result<Vec<Token>> {
+    lex::<false>(src, cfg!(not(target_arch = "wasm32")))
 }
 
 /// [`tokenize`], with numbers alone between brackets read at once into
@@ -315,7 +333,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 /// 768-dim rows as text took it from 58 to 130 MB, which it never gives
 /// back, for 0.3 KB brotli.
 pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
-    lex::<true>(src)
+    lex::<true>(src, false)
 }
 
 /// The words a text that ends inside a string is refused with, by which
@@ -431,11 +449,25 @@ impl Unclosed {
 /// each read as a token of its own reads it and made an `f32` as the parser
 /// makes it, and where the `]` ends. `None` for anything else -- an empty
 /// list, a trailing comma, a comment, a `_` in a number, one that does not
-/// read -- which the tokens then read as they always did.
+/// read -- which the tokens then read as they always did. And `None` for a
+/// list whose `f32`s would pass for the whole numbers written where one was
+/// another (`[1.00000001]`), which the parser reads as written: a list of
+/// numbers takes a vector of whole `f32`s as the integers written
+/// (`fennec_core::value::whole_f32s`), so the quick read makes no other.
 fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
     let mut v = Vec::new();
+    let start = i;
+    // A number written with a fraction or an exponent: only a list holding
+    // one can hide a rounding in a whole `f32`.
+    let mut floats = false;
+    let closed = |v: Vec<f32>, end: usize, floats: bool| {
+        let hides = floats
+            && fennec_core::value::whole_f32s(&v)
+            && fennec_core::num::hides_rounding(src.get(start..end)?, &v);
+        (!hides).then_some((v, end))
+    };
     i += 1;
     loop {
         while space(i) {
@@ -446,7 +478,7 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
         // 3.5 -> 2.3 ms of the 1 000 rows' parse. The browser module goes
         // the general way, and carries no second reader.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(x) = fennec_core::num::clinger(b, &mut i) {
+        if let Some(x) = fennec_core::num::clinger(b, &mut i, &mut floats) {
             v.push(x as f32);
             while space(i) {
                 i += 1;
@@ -456,7 +488,7 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
                     i += 1;
                     continue;
                 }
-                Some(b']') => return Some((v, i + 1)),
+                Some(b']') => return closed(v, i + 1, floats),
                 _ => return None,
             }
         }
@@ -485,10 +517,77 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
             }
         }
         let text = src.get(s..i)?;
+        floats |= float;
         v.push(match float {
             true => fennec_core::num::parse_f64(text)? as f32,
             false => fennec_core::num::parse_i64(text)? as f32,
         });
+        while space(i) {
+            i += 1;
+        }
+        match b.get(i) {
+            Some(b',') => i += 1,
+            Some(b']') => return closed(v, i + 1, floats),
+            _ => return None,
+        }
+    }
+}
+
+/// [`numbers_at`] as written, for [`tokenize`]: each number the value its
+/// token would be -- an integer an `Int`, one with a fraction or an exponent
+/// the `f64` it says -- in one pass, natively. `None` for anything else,
+/// which the tokens read as they always did. A number a token at a time
+/// was most of what reading a text again as written cost: a `put` of 1 000
+/// rows, each an `[int]` and a `[float]` of 16, sent as text and read again
+/// for its `[float]`s, took 93.9 M instructions so and 80.6 M this way.
+#[cfg(not(target_arch = "wasm32"))]
+fn values_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<fennec_core::value::Value>, usize)> {
+    use fennec_core::value::Value;
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
+    let mut v = Vec::new();
+    i += 1;
+    loop {
+        while space(i) {
+            i += 1;
+        }
+        let mut float = false;
+        let x = match fennec_core::num::clinger(b, &mut i, &mut float) {
+            // Clinger's path takes an integer of no more than 2^53.
+            Some(x) if !float => Value::Int(x as i64),
+            Some(x) => Value::Float(x),
+            None => {
+                let s = i;
+                i += (b.get(i) == Some(&b'-')) as usize;
+                if !digit(i) {
+                    return None;
+                }
+                while digit(i) {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'.') && digit(i + 1) {
+                    float = true;
+                    i += 1;
+                    while digit(i) {
+                        i += 1;
+                    }
+                }
+                if let Some(b'e' | b'E') = b.get(i) {
+                    float = true;
+                    i += 1;
+                    i += matches!(b.get(i), Some(b'+' | b'-')) as usize;
+                    while digit(i) {
+                        i += 1;
+                    }
+                }
+                let text = src.get(s..i)?;
+                match float {
+                    true => Value::Float(fennec_core::num::parse_f64(text)?),
+                    false => Value::Int(fennec_core::num::parse_i64(text)?),
+                }
+            }
+        };
+        v.push(x);
         while space(i) {
             i += 1;
         }
@@ -504,12 +603,19 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
 /// module keeps one, the flag read at run time: [`tokenize`] is there only
 /// for a list a json field is given (`fennec_ql::parse_exact`), and a copy
 /// of its own was 2.9 KB of the module.
-fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
-    lex_with(src, VECTORS)
+fn lex<const VECTORS: bool>(src: &str, values: bool) -> Result<Vec<Token>> {
+    lex_with(src, VECTORS, values)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
+fn lex_with(src: &str, vectors: bool, values: bool) -> Result<Vec<Token>> {
+    // The browser module reads a list as written a token a number, and
+    // carries no code for the other way (`tokenize_values`).
+    #[cfg(target_arch = "wasm32")]
+    let values = {
+        let _ = values;
+        false
+    };
     // Walked a byte at a time, a character read whole only where one
     // outside ASCII stands. Collected into a `Vec<char>` first, and each
     // number copied into a `String` of its own to parse, a query holding a
@@ -580,12 +686,12 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
             }
             // Not inside an object literal, two braces down: only a json
             // field holds one, and its numbers stay as they are written.
-            '[' if vectors && braces < 2 => {
+            '[' if braces < 2 && (vectors || values) => {
                 // `in [..]` and `facet f ranges [..]` keep their integers and
                 // `f64`s: a bound past 2^24 is not an `f32`.
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in") || w.eq_ignore_ascii_case("ranges"));
                 match !after_in {
-                    true => match numbers_at(src, b, i) {
+                    true if vectors => match numbers_at(src, b, i) {
                         Some((v, end)) => {
                             i = end;
                             Tok::Vector(v)
@@ -595,7 +701,18 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                             Tok::LBracket
                         }
                     },
-                    false => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    true => match values_at(src, b, i) {
+                        Some((v, end)) => {
+                            i = end;
+                            Tok::Values(v)
+                        }
+                        None => {
+                            i += 1;
+                            Tok::LBracket
+                        }
+                    },
+                    _ => {
                         i += 1;
                         Tok::LBracket
                     }

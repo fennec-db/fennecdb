@@ -1514,12 +1514,13 @@ fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
         ("b2", "`ef` is 1 to 4294967295, not 0"),
     ] {
         let why = why(&db, name);
+        let ends = format!(
+            "under grammar epoch {GRAMMAR_EPOCH}, where it was defined under 2: define it again"
+        );
         assert!(
             why.starts_with("its text no longer reads: ")
                 && why.contains(says)
-                && why.ends_with(
-                    "under grammar epoch 3, where it was defined under 2: define it again"
-                ),
+                && why.ends_with(&ends),
             "{name}: {why}"
         );
     }
@@ -1555,6 +1556,97 @@ fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
         r.rows().unwrap().rows[0].values[0],
         Value::Text("seen".into())
     );
+}
+
+/// Grammar epoch 4: a list of numbers whose `f32`s would pass for the whole
+/// numbers written where one was another reads as written, a list, where
+/// epoch 3 read `[1.00000001, 2]` into the vector `[1, 2]`. A definition an
+/// epoch-3 build stored holding one reads as another tree, and is marked
+/// broken, told to define it again; one holding whole numbers written as
+/// floats, or an embedding's fractions, reads as it did.
+#[test]
+fn a_hidden_rounding_epoch_4_marks_a_stored_definition_broken() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(&mut db, "create collection a (fs [float], e vector<2>)").unwrap();
+    let mut file = db.snapshot();
+    let hidden = "create statement hidden() public as insert a {fs: [1.00000001, 2]}";
+    // The tree epoch 3 read the text into, and so the digest it stored.
+    let mut was = fennec_ql::definition(hidden).unwrap();
+    match &mut was.body[0] {
+        Statement::Put { docs, .. } => match &mut docs[0][0].1 {
+            Expr::Lit(v) => {
+                assert_eq!(
+                    *v,
+                    Value::List(vec![Value::Float(1.00000001), Value::Int(2)])
+                );
+                *v = Value::Vector(vec![1.0, 2.0]);
+            }
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+    let whole = "create statement whole() public as insert a {fs: [1.0, 2], e: [0.1, 0.2]}";
+    let record = |name: &str, text: &str, digest: u64, change: u64| {
+        let mut body = vec![1u8];
+        put_uvarint(&mut body, 0);
+        put_uvarint(&mut body, change);
+        put_uvarint(&mut body, 3);
+        body.extend_from_slice(&digest.to_le_bytes());
+        encode_str(&mut body, name);
+        put_uvarint(&mut body, 1);
+        encode_str(&mut body, "a");
+        encode_str(&mut body, text);
+        let mut record = vec![13u8];
+        put_uvarint(&mut record, 0);
+        put_uvarint(&mut record, body.len() as u64);
+        record.extend_from_slice(&body);
+        record
+    };
+    let seq = db.change_seq();
+    file.extend(record("hidden", hidden, was.digest().unwrap(), seq + 1));
+    file.extend(record("whole", whole, digest(whole), seq + 2));
+    let mut db = opened(&file);
+    let s = db.statements().get("hidden").unwrap();
+    assert_eq!(
+        s.broken.as_deref(),
+        Some(
+            format!(
+                "its text reads as another statement under grammar epoch {GRAMMAR_EPOCH}, \
+                 where it was defined under 3: define it again"
+            )
+            .as_str()
+        )
+    );
+    assert!(db.statements().get("whole").unwrap().broken.is_none());
+    run(&mut db, "call whole").unwrap();
+    run(
+        &mut db,
+        &hidden.replace("statement", "or replace statement"),
+    )
+    .unwrap();
+    run(&mut db, "call hidden").unwrap();
+    let r = run(&mut db, "get a select fs order id").unwrap();
+    let fs = |xs: &[f64]| Value::List(xs.iter().map(|&x| Value::Float(x)).collect());
+    let got: Vec<Value> = r
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.values[0].clone())
+        .collect();
+    assert_eq!(got, [fs(&[1.0, 2.0]), fs(&[1.00000001, 2.0])]);
+    // A body is read the quick way, its tree the definition's: a literal
+    // list it hands a list of numbers is taken where its `f32`s are the
+    // integers written, and refused at the call otherwise, as a json
+    // field's is, rather than run as the `f32`s it was not given.
+    run(
+        &mut db,
+        "create statement tenth() public as insert a {fs: [0.1, 2]}",
+    )
+    .unwrap();
+    let e = run(&mut db, "call tenth").unwrap_err().to_string();
+    assert!(e.contains("fennec_ql::parse_for"), "{e}");
 }
 
 /// An op or an event this version does not know is refused, never read

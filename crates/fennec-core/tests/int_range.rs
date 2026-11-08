@@ -191,31 +191,43 @@ fn an_upsert_past_it_is_refused() {
     }
 }
 
-/// An `[int]` is read as a vector's `f32`s, as on main: 2^63 is where an
-/// `f32` puts 9223372036854775807 and everything near it, so the ends are
-/// stored as they were, and only an `f32` past 2^63 -- `1e20` -- is
-/// refused, never clamped.
+/// `text` and its parameters read as a server reads them: as written where
+/// a list of numbers is handed what its `f32`s are not
+/// (`tests/exact_lists.rs`).
+fn exact(db: &mut Database, text: &str, params: &str) -> Result<Response> {
+    let s = fennec_ql::parse_one_for(db, text)?;
+    let mut values = fennec_core::json::parse_params(params)?;
+    let mut need = db.exactly(&s);
+    need.settle(&values);
+    for (i, v) in fennec_core::json::exact_params(params, None, &need.params)? {
+        values[i] = v;
+    }
+    db.execute_with(&s, &values)
+}
+
+/// An `[int]`'s element past the range is refused naming the field and the
+/// element, as a scalar is; the ends, which an `f32` reads as ±2^63, are
+/// taken as written, where the quick read kept them only by taking ±2^63
+/// as the ends.
 #[test]
 fn a_lists_element_past_it_is_refused_and_its_ends_kept() {
     let mut db = db();
     for xs in ["[1, 1e20]", "[-1e20]"] {
-        past(run(&mut db, &format!("put t {{xs: {xs}}}")), "field `xs`");
+        let at = "field `xs`, element";
+        past(exact(&mut db, &format!("put t {{xs: {xs}}}"), ""), at);
         past(
             with(&mut db, "put t $1", &format!(r#"[{{"xs": {xs}}}]"#)),
-            "field `xs`",
+            at,
         );
-        past(
-            with(&mut db, "put t {xs: $1}", &format!("[{xs}]")),
-            "field `xs`",
-        );
+        past(exact(&mut db, "put t {xs: $1}", &format!("[{xs}]")), at);
     }
     assert_eq!(column(&db, "xs"), []);
     let ends = "[-9223372036854775808, 9223372036854775807]";
-    run(&mut db, &format!("put t {{xs: {ends}}}")).unwrap();
+    exact(&mut db, &format!("put t {{xs: {ends}}}"), "").unwrap();
     with(&mut db, "put t $1", &format!(r#"[{{"xs": {ends}}}]"#)).unwrap();
-    with(&mut db, "put t {xs: $1}", &format!("[{ends}]")).unwrap();
+    exact(&mut db, "put t {xs: $1}", &format!("[{ends}]")).unwrap();
     for xs in ["[-9223372036854775808]", "[9223372036854775807]"] {
-        with(&mut db, "put t {xs: $1}", &format!("[{xs}]")).unwrap();
+        exact(&mut db, "put t {xs: $1}", &format!("[{xs}]")).unwrap();
     }
     let both = Value::List(vec![Value::Int(i64::MIN), Value::Int(i64::MAX)]);
     let one = |i| Value::List(vec![Value::Int(i)]);

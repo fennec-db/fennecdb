@@ -22,6 +22,7 @@ mod composite_lookup;
 mod counts;
 mod crash;
 mod derived;
+mod exact_lists;
 mod exact_places;
 mod explain;
 mod facets;

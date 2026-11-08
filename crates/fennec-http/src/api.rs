@@ -1216,15 +1216,23 @@ fn exactly_in(
     stmt: Arc<Statement>,
     params: Vec<Value>,
 ) -> Result<(Arc<Statement>, Vec<Value>)> {
-    let need = db.exactly(&stmt);
+    let mut need = db.exactly(&stmt);
+    need.settle(&params);
     if !need.is_needed() {
         return Ok((stmt, params));
     }
-    let obj = json::parse_object_listing_exact(body, "params")?;
-    let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-    let stmt = match (need.text, get("query").or_else(|| get("sql"))) {
-        (true, Some(Value::Text(sql))) => Arc::new(
-            fennec_ql::parse_exact(sql)
+    // The text, and those parameters alone, read again as written: the
+    // rest of the body is stepped over, an embedding beside them unread.
+    let sql = match need.text {
+        true => match json::member(body, "query")? {
+            Some(sql) => Some(sql),
+            None => json::member(body, "sql")?,
+        },
+        false => None,
+    };
+    let stmt = match sql {
+        Some(Value::Text(sql)) => Arc::new(
+            fennec_ql::parse_exact(&sql)
                 .and_then(|mut s| match s.len() {
                     1 => Ok(s.remove(0)),
                     n => Err(Error::Query(format!(
@@ -1235,10 +1243,14 @@ fn exactly_in(
         ),
         _ => stmt,
     };
-    let params = match get("params") {
-        Some(Value::List(items)) if !need.params.is_empty() => items.clone(),
-        _ => params,
-    };
+    let mut params = params;
+    if !need.params.is_empty() {
+        for (i, v) in json::exact_params(body, Some("params"), &need.params)? {
+            if let Some(p) = params.get_mut(i) {
+                *p = v;
+            }
+        }
+    }
     Ok((stmt, params))
 }
 

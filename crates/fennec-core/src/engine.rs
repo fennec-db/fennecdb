@@ -13558,16 +13558,75 @@ impl Database {
 /// this names it, and only then: a statement with no list of numbers costs
 /// the walk of its literals, and one into a collection with no json field a
 /// look at its fields.
+///
+/// A list of numbers -- `[int]`, `[float]` -- given one takes a vector of
+/// whole `f32`s short of 2^24 as the integers written, which they are: the
+/// quick read makes no such vector of a list holding another number
+/// (`value::whole_f32s`). So a literal given one is read again only where
+/// its vector is another, and a parameter given one is named in `lists`
+/// too, for [`Exactly::settle`] to drop where its value is such a vector:
+/// per literal and per parameter, by what each holds, nothing kept beside
+/// the statement.
 #[derive(Debug, Default, PartialEq)]
 pub struct Exactly {
     pub text: bool,
+    /// Their places, ascending, each once.
     pub params: Vec<usize>,
+    /// Those of `params` given a list of numbers alone, ascending.
+    pub lists: Vec<usize>,
 }
 
 impl Exactly {
     pub fn is_needed(&self) -> bool {
         self.text || !self.params.is_empty()
     }
+
+    /// `params` less those of `lists` whose value among `values` -- the
+    /// parameters as the quick read made them -- holds no vector but of
+    /// whole `f32`s short of 2^24: the numbers written, for the list of
+    /// numbers given them. A vector handed over apart as `f32`s
+    /// (`fennec_abi::with_vectors`) is the `f32`s of a number its sender
+    /// may have rounded, and its caller takes it out of `lists` first.
+    pub fn settle(&mut self, values: &[Value]) {
+        let lists = std::mem::take(&mut self.lists);
+        kept(&mut self.params, &|i| {
+            lists.binary_search(&i).is_err()
+                || values.get(i).is_some_and(crate::query::holds_rounded)
+        });
+    }
+
+    /// `lists` less those `apart` names: a vector handed over apart, as
+    /// `f32`s, is read again as written whatever it holds.
+    pub fn apart(&mut self, apart: &dyn Fn(usize) -> bool) {
+        kept(&mut self.lists, &|i| !apart(i));
+    }
+
+    /// `lists` among `params`, those given elsewhere too out of `lists`:
+    /// such a parameter is read as written whatever it holds.
+    fn finish(&mut self) {
+        let always = &self.params;
+        kept(&mut self.lists, &|i| always.binary_search(&i).is_err());
+        for &i in &self.lists {
+            noted(&mut self.params, i);
+        }
+    }
+}
+
+/// `i` among the places `v` holds ascending, each once. Asked `contains`
+/// at each, a page of 1 000 documents' parameters was quadratic; a place
+/// mostly comes after the ones before it, and is pushed. Not sorted after:
+/// a sort of `usize`s was 2 KB of the browser module.
+fn noted(v: &mut Vec<usize>, i: usize) {
+    if let Err(at) = v.binary_search(&i) {
+        v.insert(at, i);
+    }
+}
+
+/// The places of `v` that `keep` keeps, in their order: one `retain` for
+/// every use, where each closure made a copy of its own, 185 bytes of the
+/// browser module each.
+fn kept(v: &mut Vec<usize>, keep: &dyn Fn(usize) -> bool) {
+    v.retain(|&i| keep(i));
 }
 
 impl Database {
@@ -13582,7 +13641,8 @@ impl Database {
         if !stmt.reads_vectors() && !params.iter().any(crate::query::holds_vector) {
             return Ok(());
         }
-        let need = self.exactly(stmt);
+        let mut need = self.exactly(stmt);
+        need.settle(params);
         let param = need
             .params
             .iter()
@@ -13590,9 +13650,9 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field, a point or an `in $n` list keeps a list of numbers as written, \
-                 and this one was read into a vector's f32s: read the text with \
-                 fennec_ql::parse_for, a parameter as JSON"
+                "a json field, a point, a list of numbers or an `in $n` list keeps a list of \
+                 numbers as written, and this one was read into a vector's f32s: read the \
+                 text with fennec_ql::parse_for, a parameter as JSON"
                     .into(),
             )),
         }
@@ -13607,6 +13667,7 @@ impl Database {
         #[cfg(feature = "statements")]
         if let Statement::Call(c) = stmt {
             self.call_exactly(c, &mut out);
+            out.finish();
             return out;
         }
         let of = |name: &str| match self.collections.get(name) {
@@ -13614,6 +13675,7 @@ impl Database {
             None => Known::Missing,
         };
         statement_needs(&of, stmt, &mut out);
+        out.finish();
         out
     }
 }
@@ -13642,6 +13704,16 @@ impl<'a> Known<'a> {
         match self {
             Known::Schema(schema, true) => names_json(schema, name),
             Known::Unknown => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `name` is a list of numbers alone, which takes a vector of
+    /// whole `f32`s as the integers written (`DataType::holds_numbers`): a
+    /// value given it is read again only where it holds another.
+    fn numbers(self, name: &str) -> bool {
+        match self {
+            Known::Schema(schema, true) => schema.field(name).is_some_and(|f| f.ty.holds_numbers()),
             _ => false,
         }
     }
@@ -13687,6 +13759,7 @@ pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
         false => Known::Unknown,
     };
     statement_needs(&of, stmt, &mut out);
+    out.finish();
     out
 }
 
@@ -13704,7 +13777,10 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     let any = !matches!(k, Known::Schema(_, false));
     let mut pair = |(key, e): &(String, Expr)| {
         if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
-            given(e, out);
+            match k.numbers(key) {
+                true => given_list(e, out),
+                false => given(e, out),
+            }
         }
         // A literal or a parameter holds no call and no inner `get`: a
         // `put`'s values, nearly all of them one, are not walked. Walked,
@@ -13834,8 +13910,21 @@ fn names_json(schema: &Schema, name: &str) -> bool {
 /// of numbers.
 fn given(e: &Expr, out: &mut Exactly) {
     match e {
-        Expr::Param(i) if !out.params.contains(i) => out.params.push(*i),
-        Expr::Param(_) => {}
+        Expr::Param(i) => noted(&mut out.params, *i),
+        e => out.text |= e.reads_vectors(),
+    }
+}
+
+/// [`given`], for a list of numbers given `e` as its value: a literal
+/// holding a vector but of whole `f32`s -- the integers written -- has the
+/// text read again, and a parameter is named in `lists` for its value to
+/// say ([`Exactly::settle`]). A comparison with such a field is no value
+/// given it: a vector compares unequal to a list, so its literal is read
+/// as written whatever it holds ([`expr_needs`]).
+fn given_list(e: &Expr, out: &mut Exactly) {
+    match e {
+        Expr::Param(i) => noted(&mut out.lists, *i),
+        Expr::Lit(v) => out.text |= crate::query::holds_rounded(v),
         e => out.text |= e.reads_vectors(),
     }
 }
@@ -13923,12 +14012,19 @@ fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<(
 /// writer to find which, where the importer names a row's field
 /// (`fennec_import::load`) and a call its argument. Out of line, on the
 /// refusal alone: a value taken goes by as it did. Joined by `cat`, 132
-/// bytes of the browser module, where a `format!` was 148.
+/// bytes of the browser module, where a `format!` was 148. A list's
+/// element is named after it, "field `xs`, element 2: ...".
 #[cold]
 #[inline(never)]
 fn in_field(name: &str, e: Error) -> Error {
     match e {
-        Error::Type(m) => Error::Type(crate::declared::cat(&["field `", name, "`: ", &m])),
+        Error::Type(m) => {
+            let by = match m.starts_with("element ") {
+                true => "`, ",
+                false => "`: ",
+            };
+            Error::Type(crate::declared::cat(&["field `", name, by, &m]))
+        }
         e => e,
     }
 }
