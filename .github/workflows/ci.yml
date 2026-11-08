@@ -283,8 +283,11 @@ jobs:
           key: windows-latest-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: windows-latest-core-
 
+      # The library's and the integration tests; not the examples, which
+      # `cargo test` builds otherwise: measurement programs `make` runs on
+      # a Unix (`examples/open.rs` reads `getrusage`).
       - name: Build fennec-core's tests
-        run: cargo test -p fennec-core --no-run
+        run: cargo test -p fennec-core --lib --tests --no-run
 
       # docs/design/windows.md, decision 2's experiment, run on the
       # runner's NTFS and on a ReFS and a FAT32 volume, each a VHD diskpart
@@ -335,7 +338,7 @@ jobs:
       # mapped.rs, handover.rs, pinned.rs, prepared.rs, spill.rs, limit.rs,
       # autocompact.rs and windows.rs -- over the runner's NTFS.
       - name: fennec-core's suite
-        run: cargo test -p fennec-core -- --skip 'fs::'
+        run: cargo test -p fennec-core --lib --tests -- --skip 'fs::'
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
