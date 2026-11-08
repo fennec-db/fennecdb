@@ -958,7 +958,7 @@ mod tests {
 
     use super::*;
     use rcgen::{
-        date_time_ymd, BasicConstraints, Certificate, CertificateParams, DnType,
+        date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, DnType,
         ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     };
     use std::net::TcpListener;
@@ -966,8 +966,7 @@ mod tests {
     use std::thread;
 
     struct Ca {
-        cert: Certificate,
-        key: KeyPair,
+        cert: CertifiedIssuer<'static, KeyPair>,
     }
 
     fn ca(name: &str) -> Ca {
@@ -979,8 +978,7 @@ mod tests {
         p.not_before = date_time_ymd(2026, 1, 1);
         p.not_after = date_time_ymd(2126, 1, 1);
         Ca {
-            cert: p.self_signed(&key).unwrap(),
-            key,
+            cert: CertifiedIssuer::self_signed(p, key).unwrap(),
         }
     }
 
@@ -993,7 +991,7 @@ mod tests {
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         p.not_before = date_time_ymd(2026, 1, 1);
         p.not_after = date_time_ymd(2126, 1, 1);
-        let cert = p.signed_by(&key, &ca.cert, &ca.key).unwrap();
+        let cert = p.signed_by(&key, &ca.cert).unwrap();
         (cert.pem(), key.serialize_pem())
     }
 
