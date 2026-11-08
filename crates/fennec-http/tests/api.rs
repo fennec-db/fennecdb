@@ -1206,11 +1206,21 @@ fn written_after_the_refusal(port: u16) -> std::result::Result<String, String> {
     c.shutdown(std::net::Shutdown::Write)
         .map_err(|e| format!("the end: {e}"))?;
     // Over either way -- the end acknowledged, or reset -- a connection
-    // has no peer.
+    // has no peer; on Windows, which still names it, its TCP state says so.
     let by = std::time::Instant::now() + Duration::from_secs(30);
-    while c.peer_addr().is_ok() {
+    #[cfg(unix)]
+    let ended = |c: &TcpStream| c.peer_addr().is_err();
+    #[cfg(windows)]
+    let ended = fennec_http::accept::ended;
+    while !ended(&c) {
         assert!(std::time::Instant::now() < by, "the connection never ended");
         std::thread::sleep(Duration::from_millis(1));
+    }
+    // Winsock tells a reset to the next read: past the end it read
+    // already, a graceful end reads nothing more.
+    #[cfg(windows)]
+    if let Err(e) = c.read(&mut [0u8; 1]) {
+        return Err(format!("after the end: {e}"));
     }
     match c.take_error() {
         Ok(None) => Ok(out),

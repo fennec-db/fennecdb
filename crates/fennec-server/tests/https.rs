@@ -52,31 +52,58 @@ fn tls_flags_go_together_and_are_read_at_the_start() {
     assert!(log.contains("absent.pem"), "{log}");
 }
 
-/// A key file open to other users is said at the start, its path and mode
-/// named and none of it; one open to its owner alone is not.
-#[cfg(unix)]
+/// A key file open to other users is said at the start, its path and who
+/// may read it named and none of it; one open to its owner alone is not.
+/// On Windows by its DACL (docs/design/windows.md, 7h): a key Everyone may
+/// read, then one given a protected DACL of its owner alone.
 #[test]
 fn a_key_open_to_others_is_warned_of() {
-    use std::os::unix::fs::PermissionsExt;
     let pem = cert("server.pem");
     let key = tmp("https-key", "server.key");
     std::fs::copy(cert("server.key"), &key).unwrap();
     let bytes = std::fs::read_to_string(&key).unwrap();
-    for (mode, warned) in [(0o644, true), (0o600, false)] {
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+    for warned in [true, false] {
+        open_to_every_user(&key, warned);
         let server = start(&["--tls-cert", &pem, "--tls-key", key.to_str().unwrap()]);
         let (_, log) = server.terminate();
-        assert_eq!(
-            log.contains("warning: --tls-key"),
-            warned,
-            "{mode:o}: {log}"
-        );
+        assert_eq!(log.contains("warning: --tls-key"), warned, "{log}");
         if warned {
+            #[cfg(unix)]
             assert!(log.contains("every user (mode 0644)"), "{log}");
+            #[cfg(windows)]
+            assert!(log.contains("every user (Everyone) by its ACL"), "{log}");
         }
         for line in bytes.lines() {
             assert!(!log.contains(line), "the key in the log: {log}");
         }
+    }
+}
+
+/// `key` open to every user, or to its owner alone: a mode.
+#[cfg(unix)]
+fn open_to_every_user(key: &Path, open: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if open { 0o644 } else { 0o600 };
+    std::fs::set_permissions(key, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// `key` open to every user -- a read granted to Everyone (S-1-1-0) -- or
+/// to its owner alone, as `fennec key` makes its file.
+#[cfg(windows)]
+fn open_to_every_user(key: &Path, open: bool) {
+    if open {
+        let granted = Command::new("icacls")
+            .arg(key)
+            .args(["/grant", "*S-1-1-0:R"])
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+    } else {
+        let mut opts = std::fs::OpenOptions::new();
+        let f = fennec_http::owner_only::options(opts.write(true))
+            .open(key)
+            .unwrap();
+        fennec_http::owner_only::restrict(&f).unwrap();
     }
 }
 

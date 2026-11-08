@@ -1032,9 +1032,9 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-node-unit-{tag}-{}-{:?}",
+            "fennec-node-unit-{tag}-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

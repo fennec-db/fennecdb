@@ -209,7 +209,8 @@ log.</p>
 
 <p>A node measures its lease on its machine's boot clock —
 <code>CLOCK_BOOTTIME</code> on Linux, <code>mach_continuous_time</code> on
-macOS — which counts the time the machine was suspended. A node woken from
+macOS, interrupt time (<code>QueryInterruptTimePrecise</code>) on Windows —
+which counts the time the machine was suspended. A node woken from
 a suspend that outlasted its lease holds none, and the grant it reads on
 waking acknowledges an answer from before the suspend, which runs nothing
 past that answer's lease. Measured on the monotonic clock, as it was, a

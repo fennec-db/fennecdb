@@ -1497,7 +1497,13 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     let seq = fennec_core::fs::open_read_only(&tmp)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
         .change_seq();
+    #[cfg(not(windows))]
     File::open(&tmp)?.sync_all()?;
+    // Through a handle that may write: Windows' `FlushFileBuffers` refuses
+    // a read-only one (5, access denied), where a Unix fsyncs any -- every
+    // `fennec unseal` there failed so (archive.rs's sealed archive test).
+    #[cfg(windows)]
+    File::options().write(true).open(&tmp)?.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
     crate::instance::put_away_beside(given)?;
     crate::tenant_hooks::put_away_beside(given)?;

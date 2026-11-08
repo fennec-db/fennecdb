@@ -3,7 +3,8 @@
 //! (`AsRawSocket`) where Unix names a descriptor (`AsRawFd`), so these are
 //! the descriptor traits' stand-ins over it, and the list, the one
 //! shutdown's end of each connection with its `close_notify` among them,
-//! is the same code on both.
+//! is the same code on both. And the TLS key's warning, which a Unix reads
+//! from a mode and Windows from a DACL ([`warn_if_open`]).
 
 use std::ffi::c_void;
 use std::net::TcpStream;
@@ -36,6 +37,22 @@ pub fn cancel_io(sock: &TcpStream) {
     // with nothing under way has nothing to cancel, which is no error here.
     unsafe {
         CancelIoEx(sock.as_raw_socket() as *mut c_void, std::ptr::null_mut());
+    }
+}
+
+/// Says at the start where the key file is open to more than its owner, as
+/// a Unix server says it of a mode (`conn::warn_if_open`), naming the file
+/// and who may read it, never a byte of it: on Windows by its DACL, an
+/// entry letting Everyone, Authenticated Users or Users read it
+/// (`owner_only::open_to`, docs/design/windows.md, 7h) -- what a key
+/// copied into `C:\ProgramData` inherits. Warned, not refused, as there.
+pub fn warn_if_open(key: &str) {
+    if let Ok(Some(who)) = crate::owner_only::open_to(key.as_ref()) {
+        crate::log!(
+            "warning: --tls-key {key} is open to {who} by its ACL: whoever reads it can pose as \
+             this server. `icacls {key} /inheritance:r /grant:r <user>:R`, the user the server \
+             runs as, leaves it to that user alone"
+        );
     }
 }
 

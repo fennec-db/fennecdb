@@ -202,7 +202,11 @@ build of fennecdb, and file systems keeping none — the identity is bound to
 the file's device and inode, and a file put in place may be given the
 inode of the one it replaced; every way the node and <code>fennec restore</code> or
 <code>fennec backup --force</code> remove or replace a file removes it
-first.</p>
+first. On Windows it is bound to the file's volume and its id there too,
+as NTFS gives a file renamed into the place the creation time of the one it
+replaced; on FAT32 and exFAT a file's id is its place in the directory,
+which a file made by hand at the name may take, so keep a node's directory
+on NTFS or ReFS.</p>
 
 <p>Every repair has the node take back each noted file that still carries
 one of the identities noted with it

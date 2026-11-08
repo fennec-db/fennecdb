@@ -267,7 +267,18 @@ pub fn append(dir: &Path, name: &str) -> io::Result<()> {
         f.read_to_end(&mut all)?;
         let end = (all.iter().rposition(|&b| b == b'\n'))
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        #[cfg(not(windows))]
         f.set_len(end as u64 + 1)?;
+        // Through a handle that may write: Windows opens an append as
+        // `FILE_APPEND_DATA` without `FILE_WRITE_DATA`, which a cut asks
+        // (5, access denied: the hint's test on Windows CI), so a torn
+        // hint was never appended to again. The append after goes to the
+        // end the cut left.
+        #[cfg(windows)]
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path(dir))?
+            .set_len(end as u64 + 1)?;
     }
     let mut line = String::new();
     line_into(&mut line, name, None, None);
@@ -282,9 +293,9 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-hint-{tag}-{}-{:?}",
+            "fennec-hint-{tag}-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

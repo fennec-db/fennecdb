@@ -619,7 +619,13 @@ over to the copy; without it the copy keeps everything.</p>
 
 <p>Give a key file and every archive file and backup is encrypted and
 tamper-checked. Keep the key apart from the archive: without it nothing can
-be restored.</p>
+be restored. <code>fennec key</code> makes the file readable by its owner
+alone — mode <code>0600</code>, and on Windows, where a file takes its
+folder's permissions, an ACL granting the account that ran it alone, set
+before the key is written — and never writes over a file already there. Run
+elevated, Windows makes the Administrators group the file's owner, which may
+change its ACL: any administrator can then grant themselves a read, as one
+can take any file's ownership anyway.</p>
 
 <pre data-lang="bash">fennec key /secrets/archive.key         # 64 hex digits, readable by its owner alone
 fennec archive http://primary:8080 /backups/archive --key-file /secrets/archive.key

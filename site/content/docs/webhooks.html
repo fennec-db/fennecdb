@@ -240,7 +240,8 @@ files.</p>
 <code>GET /_shard/tenants/&lt;tenant&gt;/hooks</code> lists each hook's
 scheme, bounds and when it was set — never a secret. A tenant's set lives
 beside its file on its node, in <code>&lt;tenant&gt;.hooks</code>, readable
-by the node's user alone, and never in the database, its archive or the
+by the node's user alone (mode <code>0600</code>, on Windows an ACL granting
+that user alone), and never in the database, its archive or the
 router's directory, which keeps each tenant's hook names and a version.
 The router sends the set to every copy a failover could promote — a pair's
 standby and the tenant's <code>--replicas</code> copy — before it answers:
@@ -266,7 +267,14 @@ one put in place under a running node too, whose set in memory the
 tenant's next open puts away, an event verified against it before that
 answered 401 — which the node logs as the tenant opens
 (<code>tenant `acme`'s hook `stripe`: consumed by 1 statement, no
-secret</code>).</p>
+secret</code>). On Windows, a <code>fennec restore</code>,
+<code>unseal</code> or <code>backup --force</code> over a tenant's file run
+by another account than the node's must be able to delete
+<code>&lt;tenant&gt;.hooks</code>, whose ACL grants the node's user alone:
+it needs Full Control of the folder (a folder's Modify does not let a file
+the folder's rules do not reach be deleted) or the node's account, and is
+refused otherwise, where on Linux and macOS the folder's write permission
+is enough.</p>
 
 <p>An event is verified against the secrets in the node's memory before its
 tenant is looked up, so a forged one opens no tenant. A verified one is
