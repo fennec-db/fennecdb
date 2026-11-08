@@ -53,6 +53,7 @@ pub mod archive;
 pub mod audit;
 pub mod calls;
 pub mod cdc;
+pub mod conditional;
 pub mod conn;
 pub mod cors;
 pub mod crypto;
@@ -2292,6 +2293,17 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // A `POST` of documents is read before it, against the schema it then
     // finds still in place ([`early_put`]).
     if wants_write(req) {
+        // `If-Match` and `If-None-Match` hold a write to the row
+        // `/<name>/<id>` names, and nothing else: a write a client sent
+        // as conditional is never made as one that is not.
+        let pre = conditional::Preconditions::of(req);
+        let row = api::row_name(req);
+        if pre.any() && row.is_none() {
+            return Response::error(
+                400,
+                "If-Match and If-None-Match hold a write to one row: PATCH, PUT or DELETE /<name>/<id>",
+            );
+        }
         metrics::wrote();
         // A tenant's write rates (`quota::within`), asked before the lock.
         if let Err(refused) = quota::writing() {
@@ -2304,13 +2316,23 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         // Let go of after the write lock, with the documents the put wrote.
         let mut ready = fennec_core::engine::Prepared::default();
         let early = early_put(db, req, &who, &mut ready);
-        rest_write(db, cfg, req, &who, key, early.as_ref(), &mut ready)
+        let row = Row { name: row, pre };
+        rest_write(db, cfg, req, &who, key, early.as_ref(), &mut ready, row)
     } else {
         let guard = held::read(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&path_refusal(&who, req).unwrap_or(e)),
         };
+        // `GET /<name>/<id>`: the row and its tag.
+        if let (Some(id), Some(name)) = (routed.row, api::row_name(req)) {
+            let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
+            let running = trace::span("execute");
+            let found = row_into(&guard, &who, &routed.statement, &mut body);
+            drop(running);
+            drop(guard);
+            return row_read(req, &who, (name, id), found, body);
+        }
         let mut mask = None;
         let (stmt, bound) = match scoped_under(&who, &guard, routed.statement, &[], &mut mask) {
             Ok(s) => s,
@@ -2401,6 +2423,7 @@ fn own_answer(name: &str) -> Response {
 /// is the caller's, let go of after the lock with the documents the put
 /// wrote; the statement is borrowed where it was read, not moved: a
 /// `Statement` is a kilobyte, and a copy is a `memcpy` of it.
+#[allow(clippy::too_many_arguments)]
 fn rest_write(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
@@ -2409,6 +2432,7 @@ fn rest_write(
     key: Option<idempotent::Key>,
     early: Option<&Early>,
     ready: &mut fennec_core::engine::Prepared,
+    row: Row<'_>,
 ) -> Response {
     let guard = held::write(db);
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
@@ -2425,6 +2449,7 @@ fn rest_write(
             stmt: &e.stmt,
             bound: None,
             mask: e.mask.as_ref(),
+            row: None,
         };
         return rest_run(db, cfg, who, key, guard, run, ready);
     }
@@ -2463,8 +2488,123 @@ fn rest_write(
         stmt: &stmt,
         bound,
         mask: mask.as_ref(),
+        row: routed.row.zip(row.name).map(|(id, name)| (name, id, row.pre)),
     };
     rest_run(db, cfg, who, key, guard, run, ready)
+}
+
+/// What a REST write's path and headers say of the one row it may name,
+/// read before the lock: the collection of `/<name>/<id>`, and the
+/// request's preconditions (`conditional::Preconditions`), held on that
+/// path alone.
+struct Row<'a> {
+    name: Option<&'a str>,
+    pre: conditional::Preconditions<'a>,
+}
+
+/// The row `look` picks ([`api::row_select`]) as `who` is shown it --
+/// `GET /<name>/<id>`'s answer, and the row a write to that path holds its
+/// preconditions to -- written into `out` as the JSON object it is:
+/// `false`, and `out` as it was, where `who` is shown no such row. One way
+/// for both, so a tag is worked out of the same bytes whichever asks: the
+/// stored document written out as JSON (`Database::query_json`) where no
+/// field is withheld, else its row with the fields a read rule withholds
+/// made `null` ([`shown`]) -- which `query_json` writes byte for byte as
+/// `rows_array_into` writes rows (`tests/query_json.rs`). The server's
+/// token reads `look` as it is, which `scoped` leaves a read as it was: a
+/// copy of it moved through there was a kilobyte copied three times.
+fn row_into(
+    db: &Database,
+    who: &Who,
+    look: &Statement,
+    out: &mut String,
+) -> fennec_core::error::Result<bool> {
+    let mut mask = None;
+    let held;
+    let (stmt, bound) = match who.scope() {
+        None => (look, None),
+        Some(_) => {
+            let (s, bound) = scoped_under(who, db, look.clone(), &[], &mut mask)?;
+            held = s;
+            (&held, bound)
+        }
+    };
+    let start = out.len();
+    let written = match mask {
+        None => db.query_json(stmt, &[], out)?,
+        Some(_) => None,
+    };
+    let n = match written {
+        Some(n) => n,
+        None => {
+            out.truncate(start);
+            let shows = bound.as_ref().unwrap_or(who);
+            match shown(shows, mask.as_ref(), db, db.query(stmt, &[])?) {
+                api::Response2::Rows(rs) => {
+                    fennec_core::json::rows_array_into(out, &rs);
+                    rs.rows.len()
+                }
+                _ => 0,
+            }
+        }
+    };
+    if n == 0 {
+        out.truncate(start);
+        return Ok(false);
+    }
+    // `[{...}]`: the object alone. An id names one row.
+    out.pop();
+    out.remove(start);
+    Ok(true)
+}
+
+/// The tag ([`conditional::tag`]) of the row `look` picks as `who` is
+/// shown it under the lock `db` is held by, written out in `buf`; none
+/// where it is shown no such row.
+fn row_tag(
+    db: &Database,
+    who: &Who,
+    look: &Statement,
+    buf: &mut String,
+) -> fennec_core::error::Result<Option<conditional::Tag>> {
+    buf.clear();
+    Ok(row_into(db, who, look, buf)?.then(|| conditional::tag(buf.as_bytes())))
+}
+
+/// `GET /<name>/<id>`'s answer, the row read as [`row_into`] found it: the
+/// object and its tag in `ETag`, 304 where `If-None-Match` names that tag,
+/// 412 where `If-Match` names another; 404 where there is no such row,
+/// whatever the preconditions -- the standard has a server answer what it
+/// would without them where that is no success. The tag is worked out
+/// after the read lock.
+fn row_read(
+    req: &Request,
+    who: &Who,
+    (name, id): (&str, i64),
+    found: fennec_core::error::Result<bool>,
+    body: String,
+) -> Response {
+    match found {
+        Ok(true) => {
+            statements::rows(1);
+            let tag = conditional::tag(body.as_bytes());
+            let tag = tag.as_str();
+            if let Some(answer) = conditional::Preconditions::of(req).read(Some(tag)) {
+                http::give_back(body.into_bytes());
+                return answer;
+            }
+            Response::json(200, body).header("ETag", tag)
+        }
+        Ok(false) => {
+            http::give_back(body.into_bytes());
+            let e = Error::NotFound(format!("row {id} in collection `{name}`"));
+            error_response(&e)
+        }
+        Err(e) => {
+            http::give_back(body.into_bytes());
+            error_response(&path_refusal(who, req).unwrap_or(e))
+        }
+    }
 }
 
 /// A REST write's statement as [`rest_write`] found it: read before the
@@ -2477,6 +2617,8 @@ struct Run<'a> {
     /// rules were bound under the lock ([`scoped_under`]).
     bound: Option<Who>,
     mask: Option<&'a access::Mask>,
+    /// The row `/<name>/<id>` names, and the request's preconditions on it.
+    row: Option<(&'a str, i64, conditional::Preconditions<'a>)>,
 }
 
 /// [`rest_write`]'s statement run under the write lock `guard`, answered,
@@ -2496,9 +2638,42 @@ fn rest_run(
         stmt,
         bound,
         mask,
+        row,
     } = run;
     if let Some(why) = over_ceiling(cfg.max_memory, &guard, stmt) {
         return refused(why);
+    }
+    // A write to `/<name>/<id>` under `If-Match` or `If-None-Match` is held
+    // to the row as this write lock shows it, the lock that then writes
+    // it: no write lands between the look and the write. Refused, it was
+    // read from what other writes left, and waits for them as such a
+    // refusal does. A `PUT` looks whatever it was sent with: 201 where it
+    // makes the row.
+    let put = matches!(stmt, Statement::Put { .. });
+    let mut made = false;
+    let row = row.filter(|r| r.2.any() || put);
+    // The row's statement, built once for the look and the tag after.
+    let look = row.map(|(name, id, _)| api::row_select(name, id));
+    // The rows looked at are written out in the connection's spare body,
+    // which this answer's leaves free: grown from nothing, a row of 66
+    // bytes was three allocations a look.
+    let mut buf = match look {
+        Some(_) => String::from_utf8(http::spare_body()).unwrap_or_default(),
+        None => String::new(),
+    };
+    if let (Some((_, _, pre)), Some(look)) = (row, &look) {
+        let now = match row_tag(&guard, who, look, &mut buf) {
+            Ok(now) => now,
+            Err(e) => {
+                let read = read_from_writes(&e);
+                return refused_under(db, cfg, guard, read, error_response(&e));
+            }
+        };
+        if let Some(failed) = pre.refused(now.as_ref().map(conditional::Tag::as_str)) {
+            http::give_back(buf.into_bytes());
+            return refused_under(db, cfg, guard, true, failed);
+        }
+        made = put && now.is_none();
     }
     if key.is_some() {
         // Only a block left open refuses it, which reads nothing a write
@@ -2524,10 +2699,28 @@ fn rest_run(
     {
         Ok(resp) => {
             statements::rows(counted(resp));
-            api::render(resp, shape, fennec_core::VERSION)
+            let mut out = api::render(resp, shape, fennec_core::VERSION);
+            if made && out.status == 200 {
+                out.status = 201;
+            }
+            out
         }
         Err(e) => told_response(e, bound.as_deref()),
     };
+    // A conditional write's answer carries the row's tag as it left it,
+    // for the client's next one: worked out under this lock, before
+    // another write moves it.
+    let tagged = match (&result, row, &look) {
+        (Ok(_), Some((_, _, pre)), Some(look))
+            if pre.any() && !matches!(stmt, Statement::Delete { .. }) =>
+        {
+            row_tag(&guard, who, look, &mut buf).ok().flatten()
+        }
+        _ => None,
+    };
+    if look.is_some() {
+        http::give_back(buf.into_bytes());
+    }
     // A key keeps the answer, so it is made under the lock; without
     // one, after it, as before.
     let kept = match &key {
@@ -2553,7 +2746,11 @@ fn rest_run(
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
     }
-    with_seq(kept.unwrap_or_else(|| answer(&result)), seq)
+    let out = with_seq(kept.unwrap_or_else(|| answer(&result)), seq);
+    match tagged {
+        Some(t) => out.header("ETag", t.as_str()),
+        None => out,
+    }
 }
 
 /// A `POST /<name>` read before the write lock: its body's documents as
@@ -5201,7 +5398,11 @@ mod tests {
                 "{change}"
             );
             let cfg = Config::default();
-            let resp = rest_write(&b, &cfg, &req, &Who::Full, None, early.as_ref(), &mut ready);
+            let row = Row {
+                name: None,
+                pre: conditional::Preconditions::default(),
+            };
+            let resp = rest_write(&b, &cfg, &req, &Who::Full, None, early.as_ref(), &mut ready, row);
             let body = String::from_utf8_lossy(&resp.body);
             assert_eq!(resp.status, 201, "{change}: {body}");
             let routed = api::route(&a, &req).unwrap();

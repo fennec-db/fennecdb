@@ -15,6 +15,10 @@
 //! PATCH  /<name>/all             body: {...}   (unfiltered, deliberately)
 //! DELETE /<name>?<filter>
 //! DELETE /<name>/all
+//! GET    /<name>/<id>            the row, its tag in `ETag`
+//! PATCH  /<name>/<id>            body: {...}   (`If-Match`, `If-None-Match`)
+//! PUT    /<name>/<id>            body: {...}   the row written whole
+//! DELETE /<name>/<id>
 //! POST   /<name>/near            body: {"field":..,"vector":[..],"limit":..}
 //! POST   /query                  body: {"query":"<FennecQL>","params":[..]}
 //! ```
@@ -49,6 +53,9 @@ pub struct Routed {
     pub statement: Statement,
     /// The shape of the response body becomes clear during translation.
     pub shape: Shape,
+    /// The id of the row `/<name>/<id>` names, whose tag its preconditions
+    /// are held to (`crate::conditional`); `None` on every other route.
+    pub row: Option<i64>,
 }
 
 pub enum Shape {
@@ -64,6 +71,8 @@ pub enum Shape {
     Info,
     /// Schema list
     Schemas,
+    /// One row, `GET /<name>/<id>`: the object alone, and its tag.
+    Row,
 }
 
 /// Turns a request into a statement. It only consults the database for schemas.
@@ -73,10 +82,12 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
         (Method::Get | Method::Head, []) => Ok(Routed {
             statement: Statement::ListCollections,
             shape: Shape::Info,
+            row: None,
         }),
         (Method::Get | Method::Head, ["collections"]) => Ok(Routed {
             statement: Statement::ListCollections,
             shape: Shape::Schemas,
+            row: None,
         }),
         (Method::Get | Method::Head, [name]) => {
             let schema = &db.collection(name)?.schema;
@@ -85,6 +96,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
             Ok(Routed {
                 statement: Statement::Select(sel),
                 shape,
+                row: None,
             })
         }
         (Method::Post, [name, "near"]) => {
@@ -92,6 +104,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
             Ok(Routed {
                 statement: Statement::Select(near_from_body(schema, req)?),
                 shape: Shape::Rows,
+                row: None,
             })
         }
         (Method::Post, [name]) => route_put(&db.collection(name)?.schema, req),
@@ -112,6 +125,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     pick: None,
                 },
                 shape: Shape::Affected("updated", 200),
+                row: None,
             })
         }
         (Method::Delete, [name]) | (Method::Delete, [name, "all"]) => {
@@ -126,6 +140,88 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     pick: None,
                 },
                 shape: Shape::Affected("deleted", 200),
+                row: None,
+            })
+        }
+        // `/<name>/<id>`: the row by its id. A second segment that is no
+        // id is no path, as it was before these routes: `all`, `near` and
+        // `changes` are the routes above and the subscription's.
+        (Method::Get | Method::Head, [name, id]) => {
+            let id = row_id(req, id)?;
+            db.collection(name)?;
+            Ok(Routed {
+                statement: row_select(name, id),
+                shape: Shape::Row,
+                row: Some(id),
+            })
+        }
+        (Method::Patch, [name, id]) => {
+            let id = row_id(req, id)?;
+            let schema = &db.collection(name)?.schema;
+            let set = document(schema, req)?;
+            if set.is_empty() {
+                return Err(Error::Query("empty body: no field to update".into()));
+            }
+            Ok(Routed {
+                statement: Statement::Update {
+                    collection: name.to_string(),
+                    set,
+                    filter: Some(by_id(id)),
+                    require: None,
+                    pick: None,
+                },
+                shape: Shape::Affected("updated", 200),
+                row: Some(id),
+            })
+        }
+        (Method::Put, [name, id]) => {
+            let id = row_id(req, id)?;
+            let schema = &db.collection(name)?.schema;
+            let mut doc = document(schema, req)?;
+            match doc.iter().find(|(k, _)| k == "id") {
+                Some((_, Expr::Lit(Value::Int(n)))) if *n == id => {}
+                Some((_, v)) => {
+                    return Err(Error::Query(format!(
+                        "the body's `id` is {}, the path's {id}",
+                        match v {
+                            Expr::Lit(v) => json::to_string(v),
+                            _ => "not a number".into(),
+                        }
+                    )))
+                }
+                None => doc.push(("id".to_string(), Expr::Lit(Value::Int(id)))),
+            }
+            // `If-None-Match: *`, made only where the id is free: an
+            // `insert`, which a row the writer is not shown refuses as it
+            // refuses `POST`'s (409), never writes over.
+            let insert = crate::conditional::Preconditions::of(req).only_if_absent();
+            Ok(Routed {
+                statement: Statement::Put {
+                    collection: name.to_string(),
+                    docs: vec![doc],
+                    docs_param: None,
+                    insert,
+                    if_absent: false,
+                    else_set: None,
+                    require: None,
+                    pick: None,
+                },
+                shape: Shape::Affected("written", 200),
+                row: Some(id),
+            })
+        }
+        (Method::Delete, [name, id]) => {
+            let id = row_id(req, id)?;
+            db.collection(name)?;
+            Ok(Routed {
+                statement: Statement::Delete {
+                    collection: name.to_string(),
+                    filter: Some(by_id(id)),
+                    require: None,
+                    pick: None,
+                },
+                shape: Shape::Affected("deleted", 200),
+                row: Some(id),
             })
         }
         _ => Err(unrouted(req)),
@@ -135,6 +231,52 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
 /// [`route`]'s refusal of a path no route takes.
 fn unrouted(req: &Request) -> Error {
     Error::NotFound(format!("path `{}`", req.path))
+}
+
+/// The id `/<name>/<id>` names: digits alone, as a row's id is written,
+/// else no path a route takes. The row is the route's whole answer, so a
+/// query string -- a `select`, a filter -- is refused rather than passed
+/// over: its tag is the whole row's.
+fn row_id(req: &Request, raw: &str) -> Result<i64> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(unrouted(req));
+    }
+    let id = raw.parse().map_err(|_| unrouted(req))?;
+    if !req.query.is_empty() {
+        return Err(Error::Query(
+            "`/<name>/<id>` is the row: it takes no query string".into(),
+        ));
+    }
+    Ok(id)
+}
+
+/// The collection `/<name>/<id>` names, where the path is one: read
+/// before the lock, for a request's preconditions, which no other route
+/// takes ([`route`] then gives the id).
+pub fn row_name(req: &Request) -> Option<&str> {
+    let mut seg = req.path.split('/').filter(|s| !s.is_empty());
+    let (name, id) = (seg.next()?, seg.next()?);
+    let digits = id.bytes().all(|b| b.is_ascii_digit());
+    (seg.next().is_none() && digits).then_some(name)
+}
+
+/// `id = <id>`.
+fn by_id(id: i64) -> Expr {
+    Expr::Cmp(
+        CmpOp::Eq,
+        Box::new(Expr::Field("id".to_string())),
+        Box::new(Expr::Lit(Value::Int(id))),
+    )
+}
+
+/// `get <name> where id = <id>`: the row `GET /<name>/<id>` answers, and
+/// the one a write to that path holds its preconditions to.
+pub fn row_select(name: &str, id: i64) -> Statement {
+    Statement::Select(Select {
+        collection: name.to_string(),
+        filter: Some(by_id(id)),
+        ..Default::default()
+    })
 }
 
 /// Whether [`route`]'s refusal `e` of `req` was read from the database it
@@ -182,7 +324,11 @@ pub fn route_put(schema: &Schema, req: &Request) -> Result<Routed> {
         }
         _ => Shape::Affected("inserted", 201),
     };
-    Ok(Routed { statement, shape })
+    Ok(Routed {
+        statement,
+        shape,
+        row: None,
+    })
 }
 
 /// An unfiltered `PATCH`/`DELETE` covers the whole collection. It is very
