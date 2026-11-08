@@ -1705,7 +1705,8 @@ fn a_definition_runs_its_lists_as_written() {
         run(&mut db, "call aimed").unwrap();
         let r = run(&mut db, "get na select k, fs, j order id").unwrap();
         let r = fennec_core::json::response_to_string(&r);
-        let want = r#"[{"k":"row","fs":[0.25,0.1],"j":null},{"k":"tenth","fs":[0.5,2],"j":[0.1,2]}]"#;
+        let want =
+            r#"[{"k":"row","fs":[0.25,0.1],"j":null},{"k":"tenth","fs":[0.5,2],"j":[0.1,2]}]"#;
         assert!(r.contains(want), "{r}");
     }
     // A binding: each `insert nlog` wakes it, and lands with its row.

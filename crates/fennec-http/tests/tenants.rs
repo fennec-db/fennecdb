@@ -193,9 +193,8 @@ fn a_hint_another_tenant_left_changes_no_answer() {
         }
     }
     let set = |tenant: &str, p: &str| {
-        let body = format!(
-            r#"{{"query":"set rh {{xs: $1}} where v = $1 and id > 0","params":[{p}]}}"#
-        );
+        let body =
+            format!(r#"{{"query":"set rh {{xs: $1}} where v = $1 and id > 0","params":[{p}]}}"#);
         let r = call(
             n.port,
             "POST",

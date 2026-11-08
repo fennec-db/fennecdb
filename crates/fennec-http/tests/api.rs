@@ -1683,7 +1683,10 @@ fn a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not() {
     let affected = |text: &str, p: &str| {
         let b = ok(&format!(r#"{{"query":"{text}","params":[{p}]}}"#));
         let n = b.split("\"affected\":").nth(1).unwrap_or("x");
-        n.split(|c: char| !c.is_ascii_digit()).next().unwrap().to_string()
+        n.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .to_string()
     };
     // Each text fresh, then after a request of it whose list is no
     // integers, then whose list is integers, both orders: every answer 1.
@@ -1705,15 +1708,22 @@ fn a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not() {
     }
     let r = ok(r#"{"query":"get rh select xs, j order id"}"#);
     assert!(
-        r.contains(r#"[{"xs":[1,2],"j":[1,2]},{"xs":[0.5,2],"j":[0.5,2]},{"xs":[0.1,2],"j":[0.1,2]}]"#),
+        r.contains(
+            r#"[{"xs":[1,2],"j":[1,2]},{"xs":[0.5,2],"j":[0.5,2]},{"xs":[0.1,2],"j":[0.1,2]}]"#
+        ),
         "{r}"
     );
     // The same lists bound for `xs` alone, the hint taken at once: the
     // numbers written either way.
     for p in ["[0.1, 2]", "[1, 2]", "[16777217, 2]"] {
-        ok(&format!(r#"{{"query":"put rh {{id: 9, xs: $1}}","params":[{p}]}}"#));
+        ok(&format!(
+            r#"{{"query":"put rh {{id: 9, xs: $1}}","params":[{p}]}}"#
+        ));
         let r = ok(r#"{"query":"get rh select xs where id = 9"}"#);
-        assert!(r.contains(&format!(r#"[{{"xs":{}}}]"#, p.replace(' ', ""))), "{p}: {r}");
+        assert!(
+            r.contains(&format!(r#"[{{"xs":{}}}]"#, p.replace(' ', ""))),
+            "{p}: {r}"
+        );
     }
     // Literals: the text read as written for `xs`, the vector compared as one.
     for (xs, v) in [
@@ -1721,7 +1731,9 @@ fn a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not() {
         ("[0.1]", "[0.5, 2]"),
         ("[1.00000001]", "[0.1, 2]"),
     ] {
-        let r = ok(&format!(r#"{{"query":"set rh {{xs: {xs}}} where v = {v}"}}"#));
+        let r = ok(&format!(
+            r#"{{"query":"set rh {{xs: {xs}}} where v = {v}"}}"#
+        ));
         assert!(r.contains("\"affected\":1"), "{xs} {v}: {r}");
     }
 }

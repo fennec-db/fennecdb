@@ -2163,7 +2163,11 @@ mod tests {
                 assert_eq!(params[n - 1], Value::List(vec![Value::Float(0.1)]));
             }
             let q = parse_query(&b).unwrap();
-            assert_eq!(q.seen.hint.as_ref().map(|h| h.len()), kept.then_some(n), "{n}");
+            assert_eq!(
+                q.seen.hint.as_ref().map(|h| h.len()),
+                kept.then_some(n),
+                "{n}"
+            );
         }
         let mut shard = Hinted::default();
         let hint: Arc<[usize]> = (0..HINT_PLACES).collect::<Vec<_>>().into();

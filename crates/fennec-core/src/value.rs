@@ -846,9 +846,7 @@ pub fn whole_vector(v: &Value) -> Option<Vec<f32>> {
         _ => false,
     };
     match v {
-        Value::List(items) if !items.is_empty() && items.iter().all(whole) => {
-            quick_vector(items)
-        }
+        Value::List(items) if !items.is_empty() && items.iter().all(whole) => quick_vector(items),
         _ => None,
     }
 }
@@ -983,8 +981,10 @@ mod tests {
             let want = quick_vector(&items).filter(|v| whole_f32s(v));
             let got = whole_vector(&Value::List(items.clone()));
             assert_eq!(
-                got.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
-                want.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+                got.as_ref()
+                    .map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+                want.as_ref()
+                    .map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
                 "{items:?}"
             );
         }
@@ -1000,7 +1000,10 @@ mod tests {
         let tenth = l(vec![Value::Float(0.1), Value::Int(2)]);
         assert_eq!(v.cmp_value(&tenth), Equal);
         assert_eq!(tenth.cmp_value(&v), Equal);
-        assert_eq!(v.cmp_value(&l(vec![Value::Float(0.2), Value::Int(2)])), Less);
+        assert_eq!(
+            v.cmp_value(&l(vec![Value::Float(0.2), Value::Int(2)])),
+            Less
+        );
         assert_eq!(l(vec![Value::Float(0.2)]).cmp_value(&v), Greater);
         assert_eq!(v.cmp_value(&l(vec![Value::Float(0.1)])), Greater);
         assert_eq!(v.cmp_value(&l(vec![Value::Text("a".into())])), Less);

@@ -191,7 +191,11 @@ fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
 fn a_hook_s_body_runs_its_lists_as_written() {
     let tap = Tap::default();
     let mut db = orders(&tap);
-    run(&mut db, "create collection taken (k text, fs [float], j json)").unwrap();
+    run(
+        &mut db,
+        "create collection taken (k text, fs [float], j json)",
+    )
+    .unwrap();
     run(
         &mut db,
         "create statement took($k text from event.id) on hook stripe \

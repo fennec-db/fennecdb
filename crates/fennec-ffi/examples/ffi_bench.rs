@@ -307,7 +307,12 @@ fn beside(dir: &std::path::Path, durable: bool) {
 fn lists(dir: &std::path::Path) {
     let path = dir.join("lists.fennec");
     let h = open(path.to_str().unwrap(), FENNEC_OPEN_NO_SYNC);
-    ok(h, "create collection t (xs [int], e vector<128>)", "[]", &[]);
+    ok(
+        h,
+        "create collection t (xs [int], e vector<128>)",
+        "[]",
+        &[],
+    );
     let sql = "put t {xs: $1, e: $2}";
     let xs: Vec<f32> = (0..8).map(|i| i as f32).collect();
     let v: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
