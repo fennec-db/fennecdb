@@ -40,7 +40,7 @@ JSON, never as digits, and so does a list of numbers each of which an
 2<sup>24</sup>, doubles such as <code>0.5</code> — marked exact, which a
 list of numbers (<code>[int]</code>, <code>[float]</code>,
 <code>[timestamp]</code>) takes as it came: a put of an <code>[int]</code>
-of 8 beside a 128-dim vector is one call, 2.1 µs. Any other list given a
+of 8 beside a 128-dim vector is one call, 2.0 µs. Any other list given a
 <code>json</code> field or a list of numbers, or compared with one, the
 library names before running anything and the binding sends it again
 inside the JSON, so <code>[16777217]</code> and <code>[0.1]</code> are

@@ -281,21 +281,23 @@ before, and its parameters' JSON whole: a page's vectors go over apart, so
 what the JSON holds is small.
 
 Against main before (`number_lists`, `make instr-compare`, the mean of 8
-binary identities' medians of 7 runs each; instructions a request):
+binary identities' medians of 7 runs each; instructions a request; `parse`
+and `parse-exact` as first measured, the rest after the exact mark and
+`engine::Places`, against befad9f2):
 
 | mode | main | lists as written | |
 |---|---:|---:|---:|
-| `docs`: 1 000 rows as one parameter | 53.79 M | 45.31 M | -15.8% |
-| `text`: the rows written in the statement | 48.70 M | 47.88 M | -1.7% |
-| `params`: a parameter a value | 47.83 M | 46.33 M | -3.1% |
-| `ints`: the rows' `[int]`s alone, written | 25.55 M | 25.21 M | -1.4% |
-| `embed`: a 128-dim vector and an `[int]`, parameters | 118 741 | 94 727 | -20.2% |
-| `vectors`: 100 128-dim vectors written | 12.78 M | 9.65 M | -24.5% |
-| `short`: a kept text, a `[float]` of 16 written | 38 429 | 38 136 | -0.8% |
+| `docs`: 1 000 rows as one parameter | 53.79 M | 45.35 M | -15.7% |
+| `text`: the rows written in the statement | 48.72 M | 47.39 M | -2.7% |
+| `params`: a parameter a value | 47.79 M | 45.83 M | -4.1% |
+| `ints`: the rows' `[int]`s alone, written | 25.55 M | 24.71 M | -3.3% |
+| `embed`: a 128-dim vector and an `[int]`, parameters | 118 850 | 92 363 | -22.3% |
+| `vectors`: 100 128-dim vectors written | 12.78 M | 9.62 M | -24.7% |
+| `short`: a kept text, a `[float]` of 16 written | 38 370 | 37 871 | -1.3% |
 | `parse`: the `vectors` text parsed alone | 9.24 M | 5.77 M | -37.5% |
 | `parse-exact`: that text read as written | 20.49 M | 6.78 M | -66.9% |
-| replays' `put` | 22 066 | 21 224 | -3.8% |
-| replays' `keyed` | 84 760 | 83 763 | -1.2% |
+| replays' `put` | 22 100 | 21 174 | -4.2% |
+| replays' `keyed` | 84 817 | 83 618 | -1.4% |
 
 On main those lists were stored as `f32`s; each request here stores the
 numbers written. The first reading of the hint (a parameter read again at
@@ -345,10 +347,12 @@ parameters"), and the bindings ship with their library.
 Measured with `ffi_bench lists` (a buffered put of a list of 8 beside a
 128-dim vector, 20 000 a round, p50 of the steady rounds of four runs a
 build in turn, the 1-minute load under 2): an `[int]` of small ints marked
-exact 2.04 to 2.08 us against main's 2.00 to 2.04, where main took the
-list as its `f32`s; a `[float]` of tenths, which no `f32` holds, 2.38 us
-sent as JSON from a text's second call, 3.58 to 3.62 us its first,
-refused and sent again, against main's 2.00 to 2.04 storing their `f32`s.
+exact 2.04 us (2.30 to 2.34 mean) against main's 2.00 to 2.04 (2.28 to
+2.33), where main took the list as its `f32`s; a `[float]` of tenths, which
+no `f32` holds, 2.33 to 2.38 us sent as JSON from a text's second call,
+3.58 to 3.62 us its first, refused and sent again, against main's 2.00 to
+2.04 storing their `f32`s; `ffi_bench put`, a vector alone, 1.96 us
+against 1.92 to 1.96.
 Before the mark the `[int]` took 3.38 us asked again each call, 2.12 us
 sent as JSON at once. One `fennec_query` call traced (`trace.py`, the
 program's own code; the allocations alike, 30 a call): the marked `[int]`
