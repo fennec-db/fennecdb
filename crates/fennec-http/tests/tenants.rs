@@ -302,7 +302,8 @@ fn an_exported_image_imports_as_a_working_tenant() {
     assert!(image.head.contains("application/octet-stream"));
 
     // A sync log a tenant of the name left (`fennec_core::fs`) is not the
-    // image's, and goes before the image is renamed into the place.
+    // image's, and goes before the image is renamed into the place -- where
+    // the system keeps logs: Windows keeps and reads none (windows.md, 3).
     let stale = fennec_core::fs::beside(&n.dir.join("copy.fennec"), "sync");
     std::fs::write(&stale, b"FENECSYN another file's log").unwrap();
     let r = call(
@@ -313,7 +314,7 @@ fn an_exported_image_imports_as_a_working_tenant() {
         Some(ADMIN),
     );
     assert_eq!(r.status, 201, "{}", r.text());
-    assert!(!stale.exists());
+    assert_eq!(stale.exists(), cfg!(windows));
     let r = call(
         n.port,
         "POST",
