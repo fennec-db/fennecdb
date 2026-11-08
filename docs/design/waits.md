@@ -91,7 +91,24 @@ a keyed one keeps no key while it writes nothing (sent again it waits
 again), a replica refuses it as any write, and the router waits
 `--upstream-timeout` plus the wait (`Pool::send_held`: cut
 at the timeout, a 502 while the node leased the job to no one). `/_metrics`
-counts `fennec_held_requests` and the heads' looks and runs. A job
+counts `fennec_held_requests` and the heads' looks and runs. A panic
+unwinding a held request's thread -- a run of its statement, the leader's
+look for every group -- leaves its group as one answered with nothing
+written, the run's write put back by the engine (`Ticket`'s drop), and
+the groups of a look it began look again at once: kept, its group waited
+behind a head that would never run or leave, every claim of its shape
+after it held its whole wait for nothing, and a leader's looks were never
+made again. Not where the state's mutex is poisoned: a panic under it may
+have left it half changed, and a second panic in a drop, unwinding, aborts
+the process. Its count among `fennec_held_requests`, which a shutdown
+waits for, is an `Answering`, dropped once the answer is written or as the
+thread unwinds: given back by a call after the write, a panic kept it for
+good, and every shutdown waited out its grace. The connection's own place
+is given back the same way ([http.md](http.md#connections-without-a-thread)).
+`a_held_claim_whose_run_panics_leaves_its_group` -- a claim whose run
+panics in a hook, closed unanswered, then a claim of its shape held and
+given the next job -- failed with the drop skipped on unwinding, the
+panicked claim held still. A job
 enqueued reached one of 8 held workers in 0.38 ms p50, 0.76 p99, against
 0.83/10.1 polling every 10 ms (ten times the claims) and 15.5/85.8 every
 100 ms; a delayed job 0.04/1.9 ms after its time against 1.2/8.4 and

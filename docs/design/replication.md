@@ -100,6 +100,35 @@ holding only its magic, which needs `position`'s walk back all the same, and
 an archive written before needs the lenient read all the same -- two
 mechanisms and an fsync for each segment made, where one rule does.
 
+*A round's own file.* `consolidate` assembles the archive's end -- its
+last image and the writes after it -- in a file beside them and takes the
+database it opens to as the image. Every round assembled in one name,
+`consolidating.fennec`, removed after with its failure let go of: on
+Windows a copier holding it as a round ended -- a sync tool, an indexer,
+`fs::copy`'s `CopyFileExW`, sharing no deletion (32) -- kept it there, the
+next sync copied a stale file the size of the database, and the round
+after could not write over it and took no image (#526 had the test of a
+copy taken while the archive writes accept that refusal on Windows). Now
+a round assembles in `consolidating-<end>.fennec`, named by the change it
+reaches -- or, where a file of that name stays, the first
+`consolidating-<end>-<k>.fennec` that does not (`scratch_name`) -- and
+reads it back through the handle that wrote it (`assemble_into`), never
+opening it again by its name: on Windows that handle writes it from its
+making (`copied`), where a copier holding it between `fs::copy` and an
+open after kept the round's appends, and its read -- an open of a
+database asks to write (`fs::open_in_memory`) -- from it. On a Unix the
+image is still copied by the system (a clone on APFS, `copy_file_range`
+on Linux) and nothing changes but the name. What rounds left goes as a
+round begins and as an archiver opens the archive to write
+(`Archive::sweep`, in `writer`, never while a round runs beside it),
+`consolidating.fennec` among it, and a file that will not go is said in
+the log once, the rounds naming theirs past it. The copy test takes every
+image on every system again, and
+`a_round_consolidates_in_a_file_of_its_own_and_sweeps_what_others_left`
+plants what rounds left -- on Windows one held as a copier holds it, under
+the round's own name -- and finds the image taken and every one gone once
+let go of.
+
 ## A node's archive
 
 **A node's tenants are archived over one stream** (`fennec archive
@@ -289,8 +318,9 @@ synced into place before they return, and a node's root once as it is
 made; a tenant's directory is synced into the root by the first segment
 written after it was made, once for every tenant made before that sync
 (`archive::Parent`), where each tenant's first segment paid two fsyncs on
-the one stream thread, the root's beside its own. `consolidating.fennec`,
-the side files and a line moved aside are not synced, each harmless
+the one stream thread, the root's beside its own. A round's
+`consolidating-<end>.fennec`, the side files and a line moved aside are
+not synced, each harmless
 brought back or lost, or moved again by the next hello. A directory sync
 that fails is known to be retried, as a segment's failed fsync already is:
 it fails the step it stands before, and `follow` (`Archive::follow`,

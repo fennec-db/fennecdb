@@ -995,6 +995,37 @@ against 132-225. `fennec-server`'s `__text` grew 5 632 bytes and
 `fennec-shard`'s 5 632 (aarch64-apple-darwin): `linger`, `hold`, `ready`,
 `most_held` and `widen`; a refusal reads the descriptor limit once.
 
+**A connection's place under the ceiling is given back by a drop.** The
+count `--max-connections` reads was taken as a connection was accepted
+and given back by a line after its work in the closure its thread ran
+(`counter.fetch_sub`, the router's `live.fetch_sub`). A panic on that
+thread -- `fennec-server`'s `release` profile unwinds a connection's thread
+alone, the process going on ([crates.md](crates.md#profiles)) -- skipped
+the line: the place was kept for good, and once as many connections had
+panicked as the ceiling allows, every connection after was refused 503.
+Now the place is an `accept::Slot`, taken by `Slot::take` -- the same two
+atomic operations a refusal took, the count's `Arc` cloned only for one
+admitted, as before -- and given back by its drop: bound in
+`serve_connection` (the router's `connection`) after the socket, so it is
+given back before the socket closes on every way out, a panic's unwinding
+too, and a client that saw its connection close finds its place free;
+dropped with the closure where no thread is made for it, which replaces
+the accepting thread's own `fetch_sub` there. Every other count taken
+around a connection was a guard already -- `fennec_connections`
+(`metrics::Connection`), a tenant's requests, streams and held writes
+(`quota::Slot`), a subscription's place (`sse`'s `StreamSlot`), the TLS
+connections the shutdown ends (`conn`'s open list, forgotten in
+`Secured`'s drop) -- but for a held request's: `fennec_held_requests` and
+what a shutdown waits for are an `Answering` now, and a held request a
+panic unwinds leaves its group as `Ticket`'s drop
+([waits.md](waits.md#fennec-wait)). `server.rs`'s
+`a_connection_whose_handling_panics_gives_its_slot_back` -- five
+connections at a ceiling of one, each panicking in a hook as its write
+lands, each closed unanswered, then a request answered 200 -- failed at
+its second connection, a 503, with the drop skipped on unwinding, and
+`accept`'s `a_slot_is_given_back_however_its_thread_ends` holds the slot
+served, unwound and never spawned.
+
 ## Chunked bodies
 
 **A chunked body grows as it comes, held to the ceiling; a

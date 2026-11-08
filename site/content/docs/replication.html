@@ -613,6 +613,16 @@ archive a file at a time while writes and images go on, and every copy
 verifies and restores to a prefix of what the primary wrote.
 <code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
 over to the copy; without it the copy keeps everything.</p>
+
+<p>An image the archive takes of its own is put together in
+<code>consolidating-&lt;change&gt;.fennec</code>, a file of that round's
+own, removed once the image is in place. A copy taken meanwhile may hold
+one, which no restore reads; <code>--exclude 'consolidating*'</code>
+(rclone's, and <code>aws s3 sync</code>'s) leaves it out. Where a sync tool
+or an indexer holds one as its round ends — on Windows, a file open
+elsewhere cannot be deleted — it is removed at the next image, or as the
+archiver starts again, said once in its log, and no round ever writes over
+it.</p>
 </details>
 
 <h2 id="sealed">Sealed archives and backups</h2>
