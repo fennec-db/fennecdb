@@ -67,6 +67,13 @@ function Quote([string] $a) {
 # Run FILE ARGS..., its stdout and stderr in OUT, with the variables of ENV
 # set for it alone (a $null value unsets one); its exit code.
 function Run([string] $exe, [string[]] $argv, [string] $out, [hashtable] $vars = @{}, [string] $cwd = $work) {
+    # Windows PowerShell started by Start-Process from PowerShell 7 inherits
+    # 7's module path and cannot load its own Get-FileHash: it is given the
+    # system's, as a Windows PowerShell window has it.
+    if ([IO.Path]::GetFileNameWithoutExtension($exe) -eq 'powershell' -and -not $vars.ContainsKey('PSModulePath')) {
+        $vars = $vars.Clone()
+        $vars['PSModulePath'] = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+    }
     $saved = @{}
     foreach ($k in $vars.Keys) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')

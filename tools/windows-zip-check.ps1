@@ -58,7 +58,7 @@ function Get-Imports([string] $path) {
         throw "$path`: the address $at is in no section"
     }
     $names = @()
-    if ($rva -eq 0) { return , $names }
+    if ($rva -eq 0) { return }
     $d = & $offset $rva
     while ($true) {
         $nameRva = [BitConverter]::ToUInt32($b, $d + 12)
@@ -68,7 +68,7 @@ function Get-Imports([string] $path) {
         $names += [Text.Encoding]::ASCII.GetString($b, $n, $end - $n)
         $d += 20
     }
-    return , $names
+    return $names
 }
 
 $Zip = (Resolve-Path -LiteralPath $Zip).Path
@@ -98,6 +98,7 @@ try {
         $imports = @(Get-Imports (Join-Path $unpacked "$folder\$b") | Sort-Object)
         Write-Host "      $b imports $($imports -join ', ')"
         $runtime = @($imports | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' })
+        Expect "$b imports kernel32.dll, the list read" ([string]($imports -contains 'kernel32.dll')) 'True'
         Expect "$b imports from the Visual C++ runtime" ($runtime -join ', ') ''
     }
 
@@ -125,6 +126,12 @@ try {
         $env:FENNEC_INSTALL = $inst
         # One run finds the version in SHA256SUMS, the other is told it.
         if ($tag -eq 'pwsh') { $env:FENNEC_VERSION = $Version } else { $env:FENNEC_VERSION = $null }
+        # Windows PowerShell started by Start-Process from PowerShell 7
+        # inherits 7's module path and cannot load its own Get-FileHash ("not
+        # recognized"): it is given the system's, as a Windows PowerShell
+        # window has it.
+        $modules = $env:PSModulePath
+        if ($tag -eq 'powershell') { $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine') }
         $out = Join-Path $work "install-$tag.out"
         $p = Start-Process -FilePath $shell -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$installer`"" `
             -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError "$out.err"
@@ -135,6 +142,7 @@ try {
         Expect "install.ps1 under $tag, its exit" ([string]$p.ExitCode) '0'
         Expect "install.ps1 under $tag checked the sum" ([string]$said.Contains("Checksum ok ($sum)")) 'True'
         Remove-Item Env:FENNEC_FROM, Env:FENNEC_INSTALL -ErrorAction SilentlyContinue
+        $env:PSModulePath = $modules
 
         $bin = Join-Path $inst 'bin'
         Expect "$tag`: fennec-server.exe --version" ([string](@(& (Join-Path $bin 'fennec-server.exe') --version) -join "`n")) "fennec-server $Version"
