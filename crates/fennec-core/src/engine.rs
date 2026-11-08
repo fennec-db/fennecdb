@@ -13594,8 +13594,9 @@ pub struct Exactly {
 /// its vector cost over one with no list, some 1 200 instructions of 2 500
 /// (`ffi_bench lists`, `tools/instr/trace.py`). A statement names more
 /// than four rarely: a `put` of rows a parameter each, which spills. The
-/// browser module keeps them in a `Vec`, as before: held in place they
-/// were 0.6 KB of it, for a call a page makes far less often than an app.
+/// browser module keeps them in a `Vec`, as before: held in place, with
+/// `fennec_abi::exact_noting` split and `query::holds_vector` inline, they
+/// were 1.0 KB of it (`make size-report`).
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Default)]
 pub struct Places {

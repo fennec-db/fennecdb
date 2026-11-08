@@ -251,16 +251,18 @@ and one stored by an earlier build runs its lists as written from its next
 open. A vector in a body takes the list's `f32`s where it binds, and `near`
 and `=` read it so (above); a text with no `[` is read once.
 
-*The bindings send a text's lists as JSON once asked.* Swift, Kotlin and
-Dart send any list of numbers apart as `f32`s, as the browser module's
-page does a vector (`vectorsApart`); one bound for a list of numbers or a
-json field is asked for again as JSON (`exact`) whatever it holds, since
-its `f32`s may be the rounding of the client's doubles. Each binding, as
-the JavaScript client does, keeps by text the places the library asked
-for (256 texts) and sends them as JSON from the second call on: a buffered
-put of an `[int]` of 8 beside a 128-dim vector took 3.38 us asked again
-each call, 2.12 us sent as JSON at once, against main's 1.96 apart, where
-the list was taken as its `f32`s (`ffi_bench lists`, p50 of 20 000).
+*The bindings hand a list an `f32` holds apart, marked exact.* Swift,
+Kotlin and Dart hand any list of numbers apart as `f32`s, as the browser
+module's page does a vector (`vectorsApart`); one bound for a list of
+numbers or a json field was asked for again as JSON (`exact`) whatever it
+held, since its `f32`s may be the rounding of the client's doubles. Where
+each of its numbers is one an `f32` holds -- a typed `f32` array, an int of
+at most 2^24, a double the `f32` it rounds to gives back -- the binding
+marks it exact and a list of numbers takes it as it came, in one call, as
+on main ([Vector parameters](#vector-parameters)). Any other, `[0.1]` or
+`[16777217]`, is asked for, and each binding, as the JavaScript client
+does, keeps by text the places the library asked for (256 texts) and sends
+them as JSON from the second call on.
 
 *What reading again costs, and what was made cheaper for it.* A list read
 again is read in one pass, as the quick read reads it: the lexer makes a
@@ -320,6 +322,56 @@ before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON wr
 so the file is the same either way (`web/fennec.test.js`). 200 768-dim
 vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
 builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
+
+**A vector marked exact is a list of numbers as it came.** Since a list
+of numbers keeps its numbers as written ([Numbers in](#numbers-in)), a
+vector handed apart and bound for an `[int]`, a `[float]` or a
+`[timestamp]` is asked for again as JSON (`Refused::Exact`): its `f32`s may
+be the rounding of what the caller held, `0.1` or 16777217. Each binding
+and `vectorsApart` sets the top bit of a vector's place (`fennec_abi::EXACT`,
+`FENNEC_VECTOR_EXACT` in `fennec.h`) where every number it was handed is
+one an `f32` holds -- a typed `f32` array; an int of at most 2^24 in size;
+a double `d` with `Double(Float(d)) == d` (`Math.fround(x) === x` in
+JavaScript) -- and `exact_noting` takes such a vector as it came for a list
+of numbers: one of whole `f32`s short of 2^24 stays the vector the engine
+takes as the integers written, any other is made the list of its numbers,
+a whole one an int as JSON writes it (`[16777216]`, `[0.5]`). A json field,
+an `in $n` list and a path into a json field keep asking for it (an int
+and a float differ there). An unmarked vector, from a binding before the
+mark, is asked for as before; a library before the mark reads a marked
+place as past the parameters and refuses the call ("malformed vector
+parameters"), and the bindings ship with their library.
+
+Measured with `ffi_bench lists` (a buffered put of a list of 8 beside a
+128-dim vector, 20 000 a round, p50 of the steady rounds of four runs a
+build in turn, the 1-minute load under 2): an `[int]` of small ints marked
+exact 2.04 to 2.08 us against main's 2.00 to 2.04, where main took the
+list as its `f32`s; a `[float]` of tenths, which no `f32` holds, 2.38 us
+sent as JSON from a text's second call, 3.58 to 3.62 us its first,
+refused and sent again, against main's 2.00 to 2.04 storing their `f32`s.
+Before the mark the `[int]` took 3.38 us asked again each call, 2.12 us
+sent as JSON at once. One `fennec_query` call traced (`trace.py`, the
+program's own code; the allocations alike, 30 a call): the marked `[int]`
+16 622 instructions against main's 16 426, a 128-dim vector's put into a
+collection with no list field 13 871 against 13 765, into one with an
+`[int]` 14 687 against 14 389 -- what asking a field holding a list of
+numbers whether a parameter is given it costs (`Known::give`).
+
+What brought it there, the trace read function by function: `Exactly`'s
+places held in place, up to four (`engine::Places`) -- in `Vec`s a list's place
+was two allocations a walk, and a call walks twice, the library's ask and
+the engine's own (`refuse_inexact`), with the binding's place one more,
+five allocations and some 1 200 instructions with the allocator's; a lone
+statement needing nothing answered inline in `exact_noting`, the rest out
+of line -- inline whole it grew the library's call past what `fennec_query`
+inlined, 80 instructions; the field a pair gives looked up once, out of
+the walk's closure (`Known::give`); `holds_vector` inline for a number or a
+vector; and the lists `parse_exact` reads as written held beside the
+tokens (`Tok::Values` an index into `Noting::listed`), where in the token
+every token's drop walked a `Value`'s kinds, some 170 instructions a parse
+of a short `put`. The browser module keeps `Places` a `Vec`,
+`exact_noting` one body and `holds_vector` a call: as natively they were
+1.0 KB of it (`make size-report`).
 
 ## Quantized indexes
 

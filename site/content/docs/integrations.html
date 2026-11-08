@@ -335,7 +335,10 @@ flutter pub add fennecdb_flutter                                     // Flutter<
     file (<a href="languages.html#builder">The builder</a>).</li>
   <li><b>Vectors as their bytes:</b> a <code>[Float]</code>,
     <code>FloatArray</code> or <code>Float32List</code> goes to the library
-    as its <code>f32</code>s, never as digits.</li>
+    as its <code>f32</code>s, never as digits, and so does a list of
+    numbers an <code>f32</code> holds, marked exact, which an
+    <code>[int]</code> or a <code>[float]</code> takes as it came
+    (<a href="mobile.html">Mobile</a>).</li>
   <li><b>Live queries,</b> run again once a burst of writes to a collection
     they read.</li>
 </ul>

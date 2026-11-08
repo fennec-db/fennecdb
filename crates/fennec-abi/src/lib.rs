@@ -170,8 +170,8 @@ pub fn exact_noting(
     // where it needs nothing read again, as a vector's put does, that is
     // all, and the rest is out of line. Inline whole it grew the native
     // library's call past what its caller inlined, some 80 instructions a
-    // call (`tools/instr/trace.py`). The browser module keeps one body:
-    // split, `exactly` was made twice, 1.1 KB.
+    // call (`tools/instr/trace.py`). The browser module keeps one body
+    // (`engine::Places` says what the split cost it).
     #[cfg(not(target_arch = "wasm32"))]
     let first = match p.stmts.as_slice() {
         [s] => {
