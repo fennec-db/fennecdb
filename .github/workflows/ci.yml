@@ -340,28 +340,6 @@ jobs:
       - name: fennec-core's suite
         run: cargo test -p fennec-core --lib --tests -- --skip 'fs::'
 
-  # TEMPORARY, this pull request alone: what slice 2 adds to the Windows
-  # programs, built as a release builds them, against main's.
-  windows-size:
-    name: windows (size, temporary)
-    if: github.event_name == 'pull_request'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Install the pinned toolchain
-        run: rustup show
-
-      - name: fennec-server (release) and fennec (cli) here and on main
-        shell: bash
-        run: |
-          size() { cargo build -q --release -p fennec-server && cargo build -q --profile cli -p fennec-cli && wc -c target/release/fennec-server.exe target/cli/fennec.exe; }
-          echo "this branch:"; size
-          git worktree add -q ../main "origin/$GITHUB_BASE_REF"
-          cd ../main && echo "$GITHUB_BASE_REF:" && size
-
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
