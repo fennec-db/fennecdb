@@ -168,7 +168,10 @@ has, and a write's refusal, read from what others landed, once theirs has
 (`refusal_durability`; none for a storage error's, a replica's or the
 request's own, `api::refusal_read`); a failed
 one is never retried (500 under `--sync always`) and goes to
-`Database::fail`. A write the lock still makes is put off while a
+`Database::fail`. A rename a handle refuses -- another process's, on FAT32
+the sink's own -- which wrote nothing, is tried again, the open after it
+too, within one bounded time before it fails the sink (Windows,
+`fs::windows::swap`). A write the lock still makes is put off while a
 durability holds the disk (`Sink::syncing`). A durability asked under the
 read lock clears nothing (`Database::durability`), its caller handing a
 sink's error to `Database::fail` once the lock is let go. A durability

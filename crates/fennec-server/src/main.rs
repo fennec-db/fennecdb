@@ -502,11 +502,11 @@ fn main() {
     // its tree, its digest checked.
     fennec_http::install_statement_reader();
     // Said at the start, as a server told no JWT demands says it takes every
-    // token: what a Unix gives and Windows does not yet (docs/design/engine.md).
+    // token: what a Unix gives and Windows does not yet (docs/design/windows.md).
     #[cfg(windows)]
     fennec_http::log!(
-        "windows: a checkpoint's or a compact's rename is durable once NTFS writes its log; \
-         no directory sync, no mapped file and no SIGTERM yet"
+        "windows: a rename is made durable, the file and its directory flushed; \
+         no mapped file and no SIGTERM yet"
     );
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
@@ -1250,6 +1250,8 @@ fn main() {
             match opened {
                 Ok(db) => {
                     fennec_http::log!("opened: {path}");
+                    #[cfg(windows)]
+                    say_volume(path);
                     db
                 }
                 Err(e) => {
@@ -1503,6 +1505,8 @@ fn serve_dir(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
+    #[cfg(windows)]
+    say_volume(dir);
     {
         use fennec_http::quota::Kind;
         let n = |k| match quota.get(k) {
@@ -1618,5 +1622,27 @@ fn serve_dir(
         if !idle_close.is_zero() {
             tenants.close_idle(idle_close);
         }
+    }
+}
+
+/// Says what the volume a served file or a node's directory is on does with
+/// a rename (docs/design/windows.md, decision 3): NTFS and ReFS replace a
+/// file other handles hold open, as a checkpoint and a compact need; FAT32
+/// and exFAT have no such rename, and std's falls back to the classic one,
+/// which the server's own handle on the file refuses.
+#[cfg(windows)]
+fn say_volume(path: &str) {
+    match fennec_core::fs::volume(std::path::Path::new(path)) {
+        Ok(v) if v.posix_renames() => fennec_http::log!(
+            "windows: {path} is on {}, whose renames replace a file other handles hold open",
+            v.file_system
+        ),
+        Ok(v) => fennec_http::log!(
+            "windows: {path} is on {}, which has no POSIX renames: a checkpoint or a compact \
+             there fails while the file is open, and stops the writes -- serve it from NTFS \
+             or ReFS",
+            v.file_system
+        ),
+        Err(e) => fennec_http::log!("windows: the volume {path} is on could not be read: {e}"),
     }
 }

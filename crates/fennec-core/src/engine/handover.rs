@@ -25,8 +25,7 @@
 
 use super::*;
 
-/// A run of a collection's frames in a record appended to the file: how
-/// long it is, and where it starts.
+/// A run of a collection's frames in a record appended to the file.
 #[derive(Clone, Copy)]
 pub(super) struct Landed {
     cid: u32,
@@ -35,7 +34,8 @@ pub(super) struct Landed {
 }
 
 impl Landed {
-    /// The collection, the run's length and where it starts.
+    /// The collection, the run's length and where it starts: the mapped path's.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
     pub(super) fn run(&self) -> (u32, u64, u64) {
         (self.cid, self.len, self.at)
     }
