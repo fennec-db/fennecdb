@@ -46,6 +46,28 @@ a vector function over an infinity (<code>dot([1e39], [0])</code>). A list of nu
 <code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
 2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 
+<p id="kinds">Values of two kinds — a number and a text, a time and a
+text, a bool and a number — order by kind wherever values are put in
+order, as <code>order</code>, <code>min</code> and <code>max</code> over
+a json field or an expression meet them: <code>null</code> first, then booleans, numbers,
+texts and bytes, vectors, lists, sparse vectors and objects. The numbers
+are one kind — an int, a float and a <a href="#time">time</a>, which is
+its epoch milliseconds, ordered by their values — and a text and bytes
+order by their bytes. A comparison — <code>=</code>, <code>&lt;</code>,
+<code>in</code>, <code>has</code>, in a filter or anywhere else — finds a
+value of one kind equal to none of another, but for a text beside a time,
+which it reads as the time it names (<a href="#time">Time</a>), and
+<code>greatest</code> and <code>least</code> choose as it does: beside a
+<code>timestamp</code> field, <code>greatest(at, $1)</code> with
+<code>$1</code> an ISO text is the later of the two times. What the
+order finds equal is one value wherever values are told apart: one
+<code>group</code>, one value of <code>count(distinct …)</code>,
+<code>approx_count_distinct</code> and <code>facet</code>, one
+<code>@unique</code> value — a json field's <code>3</code> and
+<code>3.0</code> are one group, and so are <code>[3]</code> and
+<code>[3.0]</code>, shown as the first row holding it wrote it; a time and
+the ISO text naming it, which <code>=</code> finds equal, are two.</p>
+
 <p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fennec&gt; create collection people (name text collate tr @sorted, email text nocase @unique, meta json);
@@ -163,10 +185,13 @@ field. A filter binds a path once a query, as it binds a field, and walks
 its keys over each row's bytes, passing the members before the key without
 decoding them. An aggregate and <code>group</code> read a field, not a
 path; a <code>lookup</code>'s keys are fields too. Comparisons are the
-ones every value already has: an int and a float by their true values,
-<code>3</code> equal to <code>3.0</code>, every number below every text,
-text below a list and a list below an object, and <code>null</code> equal
-only to <code>null</code>.</p>
+ones every value already has (<a href="#kinds">above</a>): an int and a
+float by their true values, <code>3</code> equal to <code>3.0</code> and one
+group with it, every number below every text — but beside a time, which
+reads a path's ISO text as the time it names, so
+<code>where meta.at &gt; now() - 1d</code> compares two times — text below
+a list and a list below an object, and <code>null</code> equal only to
+<code>null</code>.</p>
 
 <p>An index on a path is a field of its own beside the fields, named by the
 path, and its kind is the field's: <code>@hash</code> keys a value as a
@@ -257,10 +282,26 @@ put events {name: "logout", t: 1758285296000}        -- epoch ms
 get events where t >= "2026-01-01" and t < now()
 </pre>
 
+<p>A comparison reads a text beside a time as the time it names, whichever
+side either is on: a literal or a parameter, <code>t &gt;= "2026-01-01"</code>,
+<code>t = $1</code>, an item of <code>in</code> or <code>has</code>, a json
+field's ISO text (<code>meta.at &gt; now() - 1d</code>, <code>t =
+meta.at</code>), a text field's in any spelling a time is read from. Every
+index answers it as the scan does, or leaves it to the scan; a text naming
+no time is above every time. An order is no comparison: <code>order
+coalesce(t, meta.at)</code> puts every time before every text, by kind
+(<a href="#kinds">two kinds</a>), and <code>order timestamp(meta.at)</code>
+orders ISO texts as the times they name, where every one names one. A page
+by such an expression should be by <code>timestamp(…)</code> too: under
+<code>order coalesce(t, meta.at)</code>, <code>where coalesce(t, meta.at)
+&gt; $last</code> reads the texts as times the order put after every
+time.</p>
+
 <details class="deep"><summary>Why timestamp is a type of its own</summary>
 <p><code>timestamp</code> holds UTC epoch milliseconds as an
-<code>i64</code>. Writes accept both text and numbers; a text literal in a
-comparison is parsed.</p>
+<code>i64</code>. Writes accept both text and numbers; a text in a
+comparison is parsed, a literal or parameter beside a field once a
+query.</p>
 
 <p>The representation is always ISO-8601
 (<code>2026-09-19T12:34:56.789Z</code>), in JSON and in FennecQL alike. The calendar conversion is

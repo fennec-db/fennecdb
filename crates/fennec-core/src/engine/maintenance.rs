@@ -480,12 +480,10 @@ impl Database {
                 }
                 // Asked of the index as it stands once the writes made
                 // meanwhile are in: one of them may be the second holder,
-                // named as it wrote the value -- a `nocase` key is a fold.
+                // named as it wrote the value -- a `nocase` key is a fold,
+                // and a key files a time, a list's too, as its int.
                 if let (true, Some((v, a, b))) = (copy.kind.is_unique(), ix.shared()) {
-                    let v = match copy.order.fold {
-                        Some(_) => c.store.read_field(a, pos)?.unwrap_or(v),
-                        None => v,
-                    };
+                    let v = c.store.read_field(a, pos)?.unwrap_or(v);
                     return Err(Error::Duplicate(format!(
                         "`{}.{}` cannot be unique: documents {a} and {b} both hold {}",
                         copy.collection,

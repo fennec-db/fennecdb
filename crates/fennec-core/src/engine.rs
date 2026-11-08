@@ -2967,23 +2967,22 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// 2^60 and not to 2^60 + 1, and to none at 2^63 or past it -- where the
 /// float keeps a key of its own -- and a bucket is exactly the rows `=`
 /// finds. A typed field never meets the two, its values and its literals
-/// made its one type first ([`Value::key_as`]).
+/// made its one type first ([`Value::key_as`]). A time is filed under its
+/// milliseconds' int so, which a facet reading a key back reads as the
+/// field's time (`Database::facet`).
 ///
 /// Every `NaN` is filed under one key, `f64::NAN`'s, whatever its bits --
 /// a sign, a payload, the one `0.0 / 0.0` makes on x86 -- as `=` finds them
 /// equal and PostgreSQL's float hash files them; under the key of its bits
 /// a `NaN` row was missed by `x = $1` through the index alone.
+///
+/// The key a group, a facet and a sketch count by, one copy of it: a
+/// bucket and a group are the values `cmp_value` finds equal alike, which
+/// `=` does too but for a time beside the text naming it -- which no key
+/// files together, and [`lookup_key`] sends to the scan.
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
-    match v {
-        Value::Float(f) => match crate::value::exact_int(*f) {
-            Some(i) => crate::codec::encode_value(&mut out, &Value::Int(i)),
-            None => {
-                crate::codec::encode_value(&mut out, &Value::Float(crate::codec::key_float(*f)))
-            }
-        },
-        _ => crate::codec::encode_key(&mut out, v),
-    }
+    crate::codec::encode_key(&mut out, v);
     out
 }
 
@@ -3114,9 +3113,10 @@ fn merge_runs(ids: &mut Vec<DocId>, ends: &mut Vec<usize>) {
 /// is exactly what `=` finds: null, a boolean, text, and a number
 /// ([`hash_key`] files a whole float under the int it is, and every `NaN`
 /// under one key, which no json value holds). `None` sends the comparison
-/// to the scan: a timestamp equals the text it parses from, and a number
-/// no value of a typed field's type is -- 2.5 or 2^63 against an `int`,
-/// 2^53 + 1 against a `float` -- none of its rows, which the scan finds.
+/// to the scan: a timestamp equals the text it parses from
+/// (`Value::cmp_read`), and a number no value of a typed field's type is
+/// -- 2.5 or 2^63 against an `int`, 2^53 + 1 against a `float` -- none of
+/// its rows, which the scan finds.
 fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
     let fd = schema.indexed(field)?;
     match &fd.ty {
@@ -12494,10 +12494,16 @@ impl Database {
                             }
                         }
                     }
-                    let value = match shown {
+                    let mut value = match shown {
                         Some(v) => v,
                         None => crate::codec::decode_value(key, &mut 0)?,
                     };
+                    // A key files a time as its milliseconds' int, which `=`
+                    // finds equal to it (`hash_key`): read back as the
+                    // field's.
+                    if let (Value::Int(ms), DataType::Timestamp) = (&value, &field.ty) {
+                        value = Value::Timestamp(*ms);
+                    }
                     if n > 0 && !value.is_null() {
                         held += n;
                         counted.push((value, n));
@@ -14839,14 +14845,48 @@ struct Filter<'q> {
 /// 14.9.
 const IN_SET_AT: usize = 8;
 
+/// `v`, written beside the field `slot` reads -- a literal, a parameter,
+/// an item of an `in` list -- read in place as the field's type reads it,
+/// once a query: a text beside a `timestamp` field, or in a list beside a
+/// `[timestamp]` one, as the time it names (`query::read_time`), as the
+/// comparison would read it at every row (`Value::cmp_read`), and the
+/// field's `@hash`, `@sorted` and every index over several fields read it
+/// (`Value::key_as`, `SortedIndex::bound`, `CompositeIndex::literal`). A
+/// text naming no time stays one, above every time, as those indexes rank
+/// it (`SortedIndex::by_kind`). Read at every row, `t > $1` with a text
+/// over 100 000 times took 3.8 times the instructions.
+fn as_field(c: &Collection, slot: Slot, v: &mut Value) {
+    let Slot::At(p) = slot else { return };
+    match (&c.schema.fields[p].ty, v) {
+        (DataType::Timestamp, v) => crate::query::read_time(v),
+        (DataType::List(t), Value::List(items)) if **t == DataType::Timestamp => {
+            items.iter_mut().for_each(crate::query::read_time)
+        }
+        // `has`'s one item.
+        (DataType::List(t), v) if **t == DataType::Timestamp => crate::query::read_time(v),
+        _ => {}
+    }
+}
+
+/// Whether the field `slot` reads holds times, alone or in a list: what
+/// [`as_field`] reads a written text beside.
+fn holds_times(c: &Collection, slot: Slot) -> bool {
+    let Slot::At(p) = slot else { return false };
+    match &c.schema.fields[p].ty {
+        DataType::List(t) => **t == DataType::Timestamp,
+        t => *t == DataType::Timestamp,
+    }
+}
+
 /// The values of an `in` over `slot` as the keys a hash index files them
 /// under, when the list is long and a key's bytes say what `cmp_value`
 /// says: every value of the type the field holds -- an int, a text, a
 /// timestamp or a boolean, which a typed field's every row holds or
 /// `null` -- so equal keys are equal values and no others are. A float
-/// (`-0.0` is `0.0`, a `NaN` of any bits every other), a timestamp written
-/// as text, a json field or a path is compared a value at a time, as
-/// before.
+/// (`-0.0` is `0.0`, a `NaN` of any bits every other), a text naming no
+/// time in a time field's list -- every other read as a time there
+/// ([`as_field`]) -- a json field or a path is compared a value at a time,
+/// as before.
 fn in_set(c: &Collection, slot: Slot, values: &[Value]) -> Option<HashIndex> {
     let ty = match slot {
         Slot::Id => DataType::Int,
@@ -15079,11 +15119,12 @@ impl<'q> Filter<'q> {
                 None => Test::Eval(e),
             },
             Expr::Cmp(op, a, b) => {
-                let (s, value, first) = match (slot(a), value(b), value(a), slot(b)) {
+                let (s, mut value, first) = match (slot(a), value(b), value(a), slot(b)) {
                     (Some(s), Some(value), ..) => (s, value, true),
                     (_, _, Some(value), Some(s)) => (s, value, false),
                     _ => return Test::Eval(e),
                 };
+                as_field(c, s, &mut value);
                 match (fold_of(Some(s)), value) {
                     (Some(f), v @ Value::Text(_)) => Test::Folded(
                         s,
@@ -15135,6 +15176,12 @@ impl<'q> Filter<'q> {
                         (None, _) => return Test::Eval(e),
                     }
                 }
+                // Read after, a time field's alone: asked of each item,
+                // 1 000 lists' lookups in a `[float]` field's `@hash` took
+                // 0.2% more instructions.
+                if let Some(s) = s.filter(|s| holds_times(c, *s)) {
+                    values.iter_mut().for_each(|v| as_field(c, s, v));
+                }
                 let long = values.len() >= IN_SET_AT;
                 match (s, fold) {
                     (Some(s), Some(f)) => {
@@ -15164,7 +15211,10 @@ impl<'q> Filter<'q> {
                 _ => Test::Eval(e),
             },
             Expr::Has(a, b) => match (slot(a), value(b)) {
-                (Some(s), Some(v)) => Test::Has(s, v),
+                (Some(s), Some(mut v)) => {
+                    as_field(c, s, &mut v);
+                    Test::Has(s, v)
+                }
                 _ => Test::Eval(e),
             },
             Expr::Call(name, args) if name == "like" || name == "ilike" => {
@@ -15387,7 +15437,7 @@ impl<'q> Filter<'q> {
                     compare(*op, l, r, &|| TextOrder::BYTES)
                 }
                 Folded::In(values) | Folded::InSet(values, _) => {
-                    values.iter().any(|w| w.cmp_value(v) == Ordering::Equal)
+                    values.iter().any(|w| w.cmp_read(v) == Ordering::Equal)
                 }
                 Folded::Like(_) => false,
             };
@@ -15436,7 +15486,7 @@ impl<'q> Filter<'q> {
             // A short list, or a long one no set holds: a value at a time.
             Folded::In(values) | Folded::InSet(values, _) => values.iter().any(|w| match w {
                 Value::Text(y) => crate::case::cmp_to_folded(x, y, f) == Ordering::Equal,
-                w => w.cmp_value(v) == Ordering::Equal,
+                w => w.cmp_read(v) == Ordering::Equal,
             }),
             Folded::Like(needle) => {
                 let (h, n) = (whole(), needle.as_bytes());
@@ -15525,7 +15575,7 @@ impl<'q> Filter<'q> {
             }
             Test::In(s, values) => {
                 let f = get(*s);
-                values.iter().any(|v| v.cmp_value(f) == Ordering::Equal)
+                values.iter().any(|v| v.cmp_read(f) == Ordering::Equal)
             }
             Test::InSet(s, values, set) => {
                 let f = get(*s);
@@ -15536,7 +15586,7 @@ impl<'q> Filter<'q> {
                         crate::codec::encode_value(&mut key, f);
                         !f.is_null() && set.get(&key).is_some()
                     }
-                    None => values.iter().any(|v| v.cmp_value(f) == Ordering::Equal),
+                    None => values.iter().any(|v| v.cmp_read(f) == Ordering::Equal),
                 }
             }
             Test::Like(s, v) => match (get(*s).as_text(), v.as_text()) {
@@ -15544,7 +15594,7 @@ impl<'q> Filter<'q> {
                 _ => false,
             },
             Test::Has(s, v) => match get(*s) {
-                Value::List(items) => items.iter().any(|i| i.cmp_value(v) == Ordering::Equal),
+                Value::List(items) => items.iter().any(|i| i.cmp_read(v) == Ordering::Equal),
                 _ => false,
             },
             // One arm, out of line, for the tests no scan of a plain field

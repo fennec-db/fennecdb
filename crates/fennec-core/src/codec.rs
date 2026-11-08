@@ -240,28 +240,72 @@ pub fn geo_value((lon, lat): (f64, f64)) -> Value {
     Value::List(vec![Value::Float(lon), Value::Float(lat)])
 }
 
-/// [`encode_value`] of a value a group, a set of distinct values or a facet
-/// counts by: `-0.0` as `0.0`, which `=` holds equal and SQL makes one row
-/// of, and every `NaN` as one ([`key_float`]). Written here, a float's
-/// bytes put once: a `Value` made again went through `encode_value`'s own
-/// match a second time, and a group by a float over a million rows took
-/// 1.9% longer that way; this way as long as before (ABBA, functions
-/// aligned to 64 bytes on both sides). Any other value goes through
-/// [`encode`] as a key, a list's, an object's and a vector's floats folded
-/// the same way.
+/// [`encode_value`] of a value a group, a set of distinct values, a facet,
+/// a sketch or an index counts by: equal bytes for the values `=` finds
+/// equal (`Value::cmp_value`), and only for them. A number as the number
+/// it is ([`key_number`]): a whole float, `-0.0` among them, and a time
+/// as the int they are -- a json field's `3` and `3.0` one group, as `=`
+/// and PostgreSQL's numeric find them, where they were two -- and every
+/// `NaN` as one. Written here, a float's bytes put once: a `Value` made
+/// again went through `encode_value`'s own match a second time, and a group
+/// by a float over a million rows took 1.9% longer that way. Any other
+/// value goes through [`encode`] as a key, a list's, an object's and a
+/// vector's numbers folded the same way.
 #[inline]
 pub fn encode_key(out: &mut Vec<u8>, v: &Value) {
     match v {
-        Value::Float(f) => {
-            out.push(TAG_FLOAT);
-            out.extend_from_slice(&key_float(*f).to_le_bytes());
-        }
+        Value::Float(f) => key_number(out, *f),
         v => encode::<true>(out, v),
     }
 }
 
-/// A vector's `f32`s as a key: each as [`key_float`] folds a float. Out of
-/// line: in the key's copy of [`encode`] the loop's constants took two
+/// A float as a key: the int it is where it is a whole one short of 2^63
+/// either side (`value::exact_int`), keyed as that int is, and else its
+/// bits, every `NaN` as one. `-0.0` is the int 0, so the bits never meet
+/// one; past 2^63 no int is the float, and it keeps a key of its own.
+#[inline]
+fn key_number(out: &mut Vec<u8>, f: f64) {
+    if let Some(i) = crate::value::exact_int(f) {
+        return key_whole(out, i);
+    }
+    let f = match f.is_nan() {
+        true => f64::NAN,
+        false => f,
+    };
+    // The tag and the bytes in one write: pushed apart, each asking for
+    // room, a group by a float field took 0.06% more instructions.
+    let mut key = [TAG_FLOAT; 9];
+    key[1..].copy_from_slice(&f.to_le_bytes());
+    out.extend_from_slice(&key);
+}
+
+/// The tag a key files bytes under: `=` finds bytes equal to the text of
+/// the same bytes, so those that are one go as a text. Out of line: the
+/// UTF-8 test inlined into the key's copy of [`encode`] took a group by an
+/// int 0.07% more instructions.
+#[inline(never)]
+fn key_bytes_tag(b: &[u8]) -> u8 {
+    match std::str::from_utf8(b).is_ok() {
+        true => TAG_TEXT,
+        false => TAG_BYTES,
+    }
+}
+
+/// [`key_number`]'s whole float, keyed as its int. Out of line: the int's
+/// varint inlined beside the float's bytes took a group by a float field,
+/// whose floats are rarely whole, 0.5% more instructions.
+#[inline(never)]
+fn key_whole(out: &mut Vec<u8>, i: i64) {
+    out.push(TAG_INT);
+    put_uvarint(out, zigzag(i));
+}
+
+/// A vector's `f32`s as a key, each the one of those `=` finds equal to
+/// it: `-0.0` as `0.0` -- adding `+0.0` turns it into `0.0` and leaves
+/// every other float alone -- and every `NaN`, of whatever sign or
+/// payload, as `f32::NAN`, which `cmp_value` finds equal to each. A vector
+/// is no list (`Value::type_rank`), so its whole numbers stay floats. Out
+/// of line: in the key's copy of [`encode`] the loop's constants took two
 /// registers more, saved and restored by a key of every kind.
 #[inline(never)]
 fn key_f32s(out: &mut Vec<u8>, v: &[f32]) {
@@ -274,30 +318,20 @@ fn key_f32s(out: &mut Vec<u8>, v: &[f32]) {
     }
 }
 
-/// The float a key files `f` as, the one of those `=` finds equal to it:
-/// `-0.0` as `0.0` -- adding `+0.0` turns it into `0.0` and leaves every
-/// other float alone -- and every `NaN`, of whatever sign or payload, as
-/// `f64::NAN`, which `cmp_value` finds equal to each.
-#[inline]
-pub fn key_float(f: f64) -> f64 {
-    match f.is_nan() {
-        true => f64::NAN,
-        false => f + 0.0,
-    }
-}
-
 /// A value's encoding, as a record holds it: every float to the bit.
 #[inline]
 pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
     encode::<false>(out, v)
 }
 
-/// [`encode_value`], or as `KEY` [`encode_key`]: each float a list, an
-/// object or a vector holds folded as [`key_float`] folds one, a vector's
-/// `f32`s as [`key_f32s`] does. `=` finds `[NaN]` equal to `[-NaN]` and
-/// `[-0.0]` to `[0.0]` (`Value::cmp_value`), and by their floats' bits a
-/// `[float]` field's `@hash` took one of the rows the scan took, a group or
-/// a distinct count split them, and `@unique` held both. A copy each, the
+/// [`encode_value`], or as `KEY` [`encode_key`]: each number a list or an
+/// object holds keyed as [`key_number`] keys one, a time as its int, bytes
+/// that are UTF-8 as that text, a vector's `f32`s folded as [`key_f32s`]
+/// folds them. `=` finds `[NaN]`
+/// equal to `[-NaN]`, `[-0.0]` to `[0.0]` and `[3]` to `[3.0]`
+/// (`Value::cmp_value`), and by their floats' bits a `[float]` field's
+/// `@hash` took one of the rows the scan took, a group or a distinct count
+/// split them, and `@unique` held both. A copy each, the
 /// record's the code it was: a key of an int or a text reaches its arm as
 /// before. One copy cost every key: a test of the kind ahead of the float's
 /// took a group by a float 0.22% more instructions, after it a group by an
@@ -316,24 +350,29 @@ fn encode<const KEY: bool>(out: &mut Vec<u8>, v: &Value) {
             put_uvarint(out, zigzag(*i));
         }
         Value::Timestamp(ms) => {
-            out.push(TAG_TIMESTAMP);
+            out.push(match KEY {
+                true => TAG_INT,
+                false => TAG_TIMESTAMP,
+            });
             put_uvarint(out, zigzag(*ms));
         }
-        Value::Float(f) => {
-            out.push(TAG_FLOAT);
-            let f = match KEY {
-                true => key_float(*f),
-                false => *f,
-            };
-            out.extend_from_slice(&f.to_le_bytes());
-        }
+        Value::Float(f) => match KEY {
+            true => key_number(out, *f),
+            false => {
+                out.push(TAG_FLOAT);
+                out.extend_from_slice(&f.to_le_bytes());
+            }
+        },
         Value::Text(s) => {
             out.push(TAG_TEXT);
             put_uvarint(out, s.len() as u64);
             out.extend_from_slice(s.as_bytes());
         }
         Value::Bytes(b) => {
-            out.push(TAG_BYTES);
+            out.push(match KEY {
+                true => key_bytes_tag(b),
+                false => TAG_BYTES,
+            });
             put_uvarint(out, b.len() as u64);
             out.extend_from_slice(b);
         }

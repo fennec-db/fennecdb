@@ -521,6 +521,76 @@ fn an_archive_takes_its_own_images_and_lets_go_of_what_no_restore_needs() {
     assert_eq!(shared.prune(now - moment_b, now).unwrap(), (0, 0));
 }
 
+/// A consolidating round assembles its image in a file of its own,
+/// `consolidating-<end>.fennec`, and removes what rounds before left -- as
+/// it begins, and as an archiver opens the archive to write -- the name
+/// every round shared before, `consolidating.fennec`, among them. Where one
+/// stays -- on Windows a copier holding it, sharing no deletion (32) --
+/// the round takes another name, and its image all the same, and the file
+/// goes at the round after it was let go of.
+#[test]
+fn a_round_consolidates_in_a_file_of_its_own_and_sweeps_what_others_left() {
+    let d = dir("scratch");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection notes (n int)");
+    let arch = d.join("archive");
+    std::fs::create_dir_all(&arch).unwrap();
+    let plant = |name: &str| std::fs::write(arch.join(name), b"a round's leftovers").unwrap();
+    // Left by a crash before the archiver started: gone as it opens the
+    // archive, before the image its hello brings.
+    plant("consolidating.fennec");
+    plant("consolidating-7.fennec");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    first_image(&arch);
+    assert_eq!(files(&arch, "consolidating"), 0, "swept as it was opened");
+
+    p.exec("put notes {n: 1}");
+    let end = p.seq();
+    archived(&arch, end);
+    plant("consolidating.fennec");
+    plant(&format!("consolidating-{end}.fennec"));
+    // Held as a copier holds it on Windows: the round's own name taken.
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        std::fs::File::options()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(arch.join(format!("consolidating-{end}.fennec")))
+            .unwrap()
+    };
+    assert_eq!(shared.consolidate().unwrap(), Some(end));
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            named(&arch, "consolidating"),
+            [arch.join(format!("consolidating-{end}.fennec"))],
+            "the held file stays, the round's own gone"
+        );
+        drop(held);
+        p.exec("put notes {n: 2}");
+        archived(&arch, p.seq());
+        assert_eq!(shared.consolidate().unwrap(), Some(p.seq()));
+    }
+    assert_eq!(files(&arch, "consolidating"), 0, "swept as the round began");
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+    let (db, _) = restored(&arch, &d.join("end.fennec"), Target::End);
+    assert_eq!(
+        rows(&db, "get notes"),
+        rows(&p.db.read().unwrap(), "get notes")
+    );
+}
+
 /// A copy of an archive's directory, to damage.
 fn copy_of(arch: &Path, to: &Path) -> PathBuf {
     let _ = std::fs::remove_dir_all(to);
@@ -690,19 +760,13 @@ fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
             while go.load(Ordering::SeqCst) {
                 p.exec(&format!("put notes {{n: {i}, title: \"note {i}\"}}"));
                 if i % 150 == 149 {
-                    // On Windows a copier that shares no writer -- `fs::copy`
-                    // is `CopyFileExW` -- may hold the image being read back,
-                    // `consolidating.fennec` (32, `windows (http)`): that
-                    // round's image is refused and said, as `keep_up` and a
-                    // node's archiver say it, and the next round takes it.
-                    match a.consolidate() {
-                        Err(e) if cfg!(windows) && e.to_string().contains("(os error 32)") => {
-                            eprintln!("an image refused while a copy read it: {e}")
-                        }
-                        r => {
-                            r.unwrap();
-                        }
-                    }
+                    // Taken whatever the copies hold, on Windows too, where
+                    // a copier that shares no writer -- `fs::copy` is
+                    // `CopyFileExW` -- held the one file every round
+                    // assembled in, and the round after it could not write
+                    // over it (32): each round's file is its own, read back
+                    // through the handle that wrote it.
+                    a.consolidate().unwrap();
                 }
                 i += 1;
             }
