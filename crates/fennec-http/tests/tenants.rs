@@ -173,6 +173,60 @@ fn tenants_do_not_see_each_other() {
     assert_eq!(beta.text(), r#"[{"id":1,"title":"beta"}]"#);
 }
 
+/// The parse cache and the hints are the process's, every tenant's: a
+/// text's hint one tenant's request left changes no answer another's
+/// gets. `set rh {xs: $1} where v = $1` reads its list where the hint
+/// asks, as a list whose `f32`s are the integers written the vector the
+/// quick read makes of it, and a vector compares with a list of numbers by
+/// its `f32`s: 1 row each, whichever tenant asked first and with what.
+#[test]
+fn a_hint_another_tenant_left_changes_no_answer() {
+    let n = start("hints", admin_cfg());
+    for t in ["acme", "beta"] {
+        create(n.port, t);
+        for q in [
+            "create collection rh (xs [float], v vector<2>)",
+            "put rh [{id: 1, v: [1, 2]}, {id: 2, v: [0.5, 2]}, {id: 3, v: [0.1, 2]}]",
+        ] {
+            let r = query(n.port, t, q);
+            assert_eq!(r.status, 200, "{}", r.text());
+        }
+    }
+    let set = |tenant: &str, p: &str| {
+        let body = format!(
+            r#"{{"query":"set rh {{xs: $1}} where v = $1 and id > 0","params":[{p}]}}"#
+        );
+        let r = call(
+            n.port,
+            "POST",
+            &format!("/t/{tenant}/query"),
+            body.as_bytes(),
+            None,
+        );
+        assert_eq!(r.status, 200, "{}", r.text());
+        r.text()
+    };
+    for (tenant, p) in [
+        ("acme", "[0.1, 2]"),
+        ("beta", "[1, 2]"),
+        ("acme", "[1, 2]"),
+        ("beta", "[0.5, 2]"),
+        ("beta", "[0.1, 2]"),
+        ("acme", "[0.5, 2]"),
+    ] {
+        let r = set(tenant, p);
+        assert!(r.contains("\"affected\":1"), "{tenant} {p}: {r}");
+    }
+    for t in ["acme", "beta"] {
+        let r = query(n.port, t, "get rh select xs order id");
+        assert_eq!(
+            r.text(),
+            r#"[{"xs":[1,2]},{"xs":[0.5,2]},{"xs":[0.1,2]}]"#,
+            "{t}"
+        );
+    }
+}
+
 #[test]
 fn the_metrics_are_the_nodes() {
     let n = start("metrics", admin_cfg());

@@ -13642,7 +13642,9 @@ impl Database {
     /// than those given and a comparison find none of the documents holding
     /// them -- a wrong answer believed right. A statement with no list of
     /// numbers, the one nearly every statement is, costs the walk of its
-    /// literals.
+    /// literals. A caller in Rust reads its text with `fennec_ql::parse_for`
+    /// and its parameters as JSON; the words name no API, as a server's
+    /// answer carries them (`tests/stored.rs`).
     fn refuse_inexact(&self, stmt: &Statement, params: &[Value]) -> Result<()> {
         if !stmt.reads_vectors() && !params.iter().any(crate::query::holds_vector) {
             return Ok(());
@@ -13657,8 +13659,8 @@ impl Database {
             false => Ok(()),
             true => Err(Error::Query(
                 "a json field, a point, a list of numbers or an `in $n` list keeps a list of \
-                 numbers as written, and this one was read into a vector's f32s: read the \
-                 text with fennec_ql::parse_for, a parameter as JSON"
+                 numbers as written, and this one was handed over read into a vector's f32s: \
+                 hand it over as written"
                     .into(),
             )),
         }

@@ -634,9 +634,15 @@ impl Value {
                     Some(o) => o,
                     None => Ordering::Equal,
                 },
+                // A vector against a list of numbers alone, by the vector
+                // the quick read makes of the list ([`vector_list`]).
                 // Incomparable types fall back to type rank. This used to
                 // return Equal: `year = "abc"` matched every row.
-                _ => self.type_rank().cmp(&other.type_rank()),
+                _ => match (self, other) {
+                    (Value::Vector(v), Value::List(l)) => vector_list(v, l),
+                    (Value::List(l), Value::Vector(v)) => vector_list(v, l).reverse(),
+                    _ => self.type_rank().cmp(&other.type_rank()),
+                },
             },
         }
     }
@@ -760,6 +766,53 @@ fn tie(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Int(i) | Value::Timestamp(i), Value::Float(f)) => whole(*i, *f),
         (Value::Float(f), Value::Int(i) | Value::Timestamp(i)) => whole(*i, *f).reverse(),
         _ => Ordering::Equal,
+    }
+}
+
+/// A vector against a list of numbers alone, element by element as two
+/// vectors are, each number the `f32` the quick read makes of it: what the
+/// list would have been read as with no field keeping numbers in the
+/// statement. A text read as written for a json field or a list of numbers
+/// reads every list in it so, and a parameter given one is read so -- and
+/// `v = [0.5, 2]` beside them then found no row, a vector never equal to a
+/// list, where it found the row read the quick way
+/// (`a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not`). A
+/// list holding anything else is ranked apart, as before. Out of line, in
+/// the arm of the kinds that do not compare: no comparison of two values
+/// of one kind is longer for it.
+#[cold]
+#[inline(never)]
+fn vector_list(v: &[f32], l: &[Value]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let quick = |x: &Value| match x {
+        Value::Int(i) => Some(*i as f32),
+        Value::Float(f) => Some(*f as f32),
+        _ => None,
+    };
+    // The vector ranks first, as `type_rank` ranks it.
+    if !l.iter().all(|x| quick(x).is_some()) {
+        return Ordering::Less;
+    }
+    for (x, y) in v.iter().zip(l) {
+        let o = x.partial_cmp(&quick(y).unwrap_or(0.0)).unwrap_or(Ordering::Equal);
+        if o != Ordering::Equal {
+            return o;
+        }
+    }
+    v.len().cmp(&l.len())
+}
+
+/// The vector a list of numbers alone read as written is read into the
+/// quick way where its `f32`s are the integers written
+/// ([`whole_f32s`], [`quick_vector`]), and `None` for any other value: what
+/// the quick read hands a list of numbers as it came
+/// (`Exactly::settle`), so a list read as written where it was asked for
+/// at once (`fennec_http::api`'s hint) is the value it would have been
+/// read again as -- the integers the vector is, a list a number past them.
+pub fn whole_vector(v: &Value) -> Option<Vec<f32>> {
+    match v {
+        Value::List(items) => quick_vector(items).filter(|q| whole_f32s(q)),
+        _ => None,
     }
 }
 

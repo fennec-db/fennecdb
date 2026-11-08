@@ -1118,7 +1118,7 @@ impl super::Database {
                 continue;
             }
             if let (None, Some(read)) = (&s.tree, crate::named::reader()) {
-                match read(&s.text).and_then(|d| Ok((d.digest()?, d))) {
+                match read(&s.text) {
                     // A definition's record (op 1) holds a callable
                     // statement, a bound one's (op 3) the collection and
                     // events its text binds, a scheduled one's (op 4) the
@@ -1317,8 +1317,8 @@ impl super::Database {
         // server for a statement read once.
         let tree = crate::named::reader()
             .and_then(|read| read(&def.text).ok())
-            .filter(|t| t.digest().ok() == Some(digest))
-            .map(Arc::new);
+            .filter(|(read, _)| *read == digest)
+            .map(|(_, t)| Arc::new(t));
         // A schedule starts at its own landing: no slot before it runs, and
         // a replacement's moves it and clears the mark (`last`), which a
         // wrong clock may have left ahead.

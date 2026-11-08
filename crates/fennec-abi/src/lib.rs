@@ -146,8 +146,9 @@ pub fn exact_noting(
     if !vectored {
         return Ok(());
     }
-    let (mut text, mut exact) = (false, false);
+    let mut text = false;
     let mut as_json = String::new();
+    let mut needed: Vec<usize> = Vec::new();
     for s in &p.stmts {
         let mut need = db.exactly(s);
         text |= need.text;
@@ -157,7 +158,7 @@ pub fn exact_noting(
         need.apart(&|i| apart(vectors, i));
         need.settle(&p.params);
         for i in need.params {
-            exact = true;
+            needed.push(i);
             if apart(vectors, i) {
                 if !as_json.is_empty() {
                     as_json.push(',');
@@ -174,11 +175,19 @@ pub fn exact_noting(
     }
     // Every one read again, as it always was: a vector goes over apart,
     // so what the JSON holds is small, and a reader of the named ones alone
-    // was 1.6 KB of the browser module.
-    if exact {
-        p.params = json::parse_params_exact(params_src).and_then(|p| with_vectors(p, vectors))?;
+    // was 1.6 KB of the browser module. Those named alone taken from it:
+    // the rest are as the quick read made them whatever another needed, so
+    // a whole list of numbers is the vector it is with nothing beside it
+    // read again, and every use of it answers alike.
+    if !needed.is_empty() {
+        let mut written = json::parse_params_exact(params_src)?;
+        for &i in &needed {
+            if let (Some(p), Some(w)) = (p.params.get_mut(i), written.get_mut(i)) {
+                *p = std::mem::replace(w, Value::Null);
+            }
+        }
     }
-    *anew = text || exact;
+    *anew = text || !needed.is_empty();
     Ok(())
 }
 

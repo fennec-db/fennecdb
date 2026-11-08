@@ -1660,6 +1660,72 @@ fn a_hint_reads_a_list_at_once_and_changes_no_answer() {
     assert_eq!(r.body.trim(), r#"[{"fs":[0.1,0.33333334]}]"#);
 }
 
+/// A parameter given a list of numbers and compared with a vector field
+/// answers the same with or without the hint its text's last request left,
+/// and whatever its elements: read at once as the hint asks, a list whose
+/// `f32`s are the integers written is the vector the quick read makes of
+/// it, and a vector compared with a list of numbers compares with its
+/// `f32`s -- `[0.5, 2]` finds the row holding them, as on main, and `xs`
+/// keeps the numbers written. A literal compared with a vector field
+/// matches the same whether another literal had the text read as written,
+/// and a json field's parameter too.
+#[test]
+fn a_list_parameter_used_as_a_vector_answers_alike_hinted_or_not() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let ok = |body: &str| {
+        let r = q(body);
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body
+    };
+    ok(r#"{"query":"create collection rh (xs [float], j json, v vector<2>)"}"#);
+    ok(r#"{"query":"put rh [{id: 1, v: [1, 2]}, {id: 2, v: [0.5, 2]}, {id: 3, v: [0.1, 2]}]"}"#);
+    let affected = |text: &str, p: &str| {
+        let b = ok(&format!(r#"{{"query":"{text}","params":[{p}]}}"#));
+        let n = b.split("\"affected\":").nth(1).unwrap_or("x");
+        n.split(|c: char| !c.is_ascii_digit()).next().unwrap().to_string()
+    };
+    // Each text fresh, then after a request of it whose list is no
+    // integers, then whose list is integers, both orders: every answer 1.
+    // The last a text too long to keep, its hint kept by its hash.
+    let long = format!("id > -2 -- {}\\n", "x".repeat(1100));
+    let orders = [
+        ("id > 0", ["[1, 2]", "[0.1, 2]", "[1, 2]"]),
+        ("id >= 0", ["[0.1, 2]", "[1, 2]", "[0.1, 2]"]),
+        ("id > -1", ["[0.5, 2]", "[0.5, 2]", "[0.5, 2]"]),
+        (&long, ["[0.1, 2]", "[1, 2]", "[0.5, 2]"]),
+    ];
+    for (cond, lists) in orders {
+        for field in ["xs", "j"] {
+            let text = format!("set rh {{{field}: $1}} where v = $1 and {cond}");
+            for p in lists {
+                assert_eq!(affected(&text, p), "1", "{text} {p}");
+            }
+        }
+    }
+    let r = ok(r#"{"query":"get rh select xs, j order id"}"#);
+    assert!(
+        r.contains(r#"[{"xs":[1,2],"j":[1,2]},{"xs":[0.5,2],"j":[0.5,2]},{"xs":[0.1,2],"j":[0.1,2]}]"#),
+        "{r}"
+    );
+    // The same lists bound for `xs` alone, the hint taken at once: the
+    // numbers written either way.
+    for p in ["[0.1, 2]", "[1, 2]", "[16777217, 2]"] {
+        ok(&format!(r#"{{"query":"put rh {{id: 9, xs: $1}}","params":[{p}]}}"#));
+        let r = ok(r#"{"query":"get rh select xs where id = 9"}"#);
+        assert!(r.contains(&format!(r#"[{{"xs":{}}}]"#, p.replace(' ', ""))), "{p}: {r}");
+    }
+    // Literals: the text read as written for `xs`, the vector compared as one.
+    for (xs, v) in [
+        ("[1]", "[0.5, 2]"),
+        ("[0.1]", "[0.5, 2]"),
+        ("[1.00000001]", "[0.1, 2]"),
+    ] {
+        let r = ok(&format!(r#"{{"query":"set rh {{xs: {xs}}} where v = {v}"}}"#));
+        assert!(r.contains("\"affected\":1"), "{xs} {v}: {r}");
+    }
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]

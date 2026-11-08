@@ -93,9 +93,10 @@ pub enum What {
 /// FennecQL holds one (`make fennecql-corpus`).
 pub const GRAMMAR_EPOCH: u32 = 4;
 
-/// What reads a named statement's stored text back into its tree: the
-/// parser's (`fennec_ql::definition`), which this crate does not hold.
-pub type Reader = fn(&str) -> Result<Definition>;
+/// What reads a named statement's stored text back into the tree it runs
+/// as, and the digest its record is held to: the parser's
+/// (`fennec_ql::stored_definition`), which this crate does not hold.
+pub type Reader = fn(&str) -> Result<(u64, Definition)>;
 
 static READER: std::sync::OnceLock<Reader> = std::sync::OnceLock::new();
 

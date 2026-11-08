@@ -1395,6 +1395,19 @@ fn exactly_in(
         params = listed_params(&mut json::parse_object_listing(body, "params")?);
         hint = None;
     }
+    // A list of numbers alone given one read as written at once, its
+    // `f32`s the integers written: the vector the quick read made of it,
+    // as with no hint (`Exactly::settle` keeps that one), so the value is
+    // the same either way, and every use of it -- `v = $1` beside `xs: $1`
+    // -- answers alike. One holding another number is read as written
+    // either way.
+    for &i in hint.unwrap_or_default() {
+        if need.lists.binary_search(&i).is_ok() {
+            if let Some(v) = params.get(i).and_then(fennec_core::value::whole_vector) {
+                params[i] = Value::Vector(v);
+            }
+        }
+    }
     need.settle(&params);
     let stmt = match need.text {
         true => exact_text(stmt, &mut seen)?,
@@ -1517,8 +1530,48 @@ static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) };
 /// keeps its texts': a page of rows a parameter a field is one long text
 /// sent again and again. A hint read for another text changes no answer
 /// ([`exactly_in`]) and is put right by the request that read it.
-type Hints = std::sync::Mutex<Option<std::collections::HashMap<u64, Arc<[usize]>>>>;
+type Hints = std::sync::Mutex<Option<Hinted>>;
 static HINTS: [Hints; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) }; PARSED_SHARDS];
+
+/// The most places a hint holds: a text naming more for its lists keeps
+/// none, and each request of it reads them a second time, as one with no
+/// hint does. A place is 8 bytes and a long text's places are bounded by
+/// its body alone, 64 MiB: `put t [{xs: $1}, ..., {xs: $3000000}]` would
+/// have kept 24 MB a text, and a shard's 64 texts 1.5 GB. 4 096 places --
+/// a page of 1 000 rows of four lists each -- are 32 KB.
+const HINT_PLACES: usize = 4096;
+/// The most places a shard of [`HINTS`] keeps, all its texts' together:
+/// past it the shard forgets them, as it does past its 64 texts. 128 KB a
+/// shard, 2 MB for the 16.
+const HINT_BUDGET: usize = 16_384;
+
+/// A shard of [`HINTS`]: its texts' hints by hash, and how many places
+/// they hold together.
+#[derive(Default)]
+struct Hinted {
+    map: std::collections::HashMap<u64, Arc<[usize]>>,
+    places: usize,
+}
+
+impl Hinted {
+    /// `next` as the hint of the text hashed `hash`, or none: the shard
+    /// forgets every hint first where it holds 64 texts or `next` would
+    /// take it past [`HINT_BUDGET`].
+    fn keep(&mut self, hash: u64, next: Option<Arc<[usize]>>) {
+        if let Some(old) = self.map.remove(&hash) {
+            self.places -= old.len();
+        }
+        let Some(h) = next else {
+            return;
+        };
+        if self.map.len() >= PARSED_PER_SHARD || self.places + h.len() > HINT_BUDGET {
+            self.map.clear();
+            self.places = 0;
+        }
+        self.places += h.len();
+        self.map.insert(hash, h);
+    }
+}
 
 fn hash_of(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
@@ -1551,29 +1604,21 @@ fn long_hint(hash: u64) -> Option<Arc<[usize]>> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|m| m.get(&hash).cloned())
+        .and_then(|m| m.map.get(&hash).cloned())
 }
 
 /// `next` kept as the hint of `seen`'s text: on its shard's statement, or
-/// for a long text by its hash.
+/// for a long text by its hash. A hint of more than [`HINT_PLACES`] places
+/// is none.
 fn remember(seen: &Seen, next: Option<Arc<[usize]>>) {
+    let next = next.filter(|h| h.len() <= HINT_PLACES);
     let hash = seen.hash.unwrap_or_else(|| hash_of(&seen.text));
     if seen.text.len() > PARSED_LONGEST {
-        let mut shard = HINTS[shard_of(hash)]
+        HINTS[shard_of(hash)]
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let map = shard.get_or_insert_with(Default::default);
-        match next {
-            Some(h) => {
-                if map.len() >= PARSED_PER_SHARD {
-                    map.clear();
-                }
-                map.insert(hash, h);
-            }
-            None => {
-                map.remove(&hash);
-            }
-        }
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .keep(hash, next);
         return;
     }
     let mut shard = PARSED[shard_of(hash)]
@@ -2065,6 +2110,70 @@ mod tests {
         let q = parse_query(both).unwrap();
         assert!(q.seen.hint.is_none());
         assert!(matches!(q.params[0], Value::Vector(_)));
+    }
+
+    /// A list read at once as the hint asks, its `f32`s the integers
+    /// written, is the vector the quick read makes of it, as it is with no
+    /// hint: the value is the same either way, so is every answer.
+    #[test]
+    fn a_whole_list_read_at_once_is_the_quick_read_s_vector() {
+        let db = RwLock::new(Database::new());
+        let create = fennec_ql::parse_one("create collection hinted_whole (fs [float])");
+        db.write().unwrap().execute(&create.unwrap()).unwrap();
+        let body = |p: &str| format!(r#"{{"query":"put hinted_whole {{fs: $1}}","params":[{p}]}}"#);
+        let (fresh, tenth) = (body("[1, 2]"), body("[0.1, 2]"));
+        let q = parse_query(&fresh).unwrap();
+        let (_, quick) = exactly(&db, &fresh, q).unwrap();
+        assert_eq!(quick[0], Value::Vector(vec![1.0, 2.0]));
+        let q = parse_query(&tenth).unwrap();
+        exactly(&db, &tenth, q).unwrap();
+        let q = parse_query(&fresh).unwrap();
+        assert_eq!(q.seen.hint.as_deref(), Some(&[0][..]));
+        assert_eq!(q.params[0], Value::List(vec![Value::Int(1), Value::Int(2)]));
+        let (_, hinted) = exactly(&db, &fresh, q).unwrap();
+        assert_eq!(hinted, quick);
+        // Past 2^24 a list keeps the integer written either way.
+        let past = body("[16777217]");
+        let q = parse_query(&past).unwrap();
+        let (_, hinted) = exactly(&db, &past, q).unwrap();
+        assert_eq!(hinted[0], Value::List(vec![Value::Int(16_777_217)]));
+    }
+
+    /// A hint keeps no more than [`HINT_PLACES`] places, and a shard of
+    /// long texts' hints no more than [`HINT_BUDGET`] together: a text
+    /// naming more is read twice each request, as with no hint.
+    #[test]
+    fn a_hint_is_bounded_in_places_and_a_shard_in_bytes() {
+        let db = RwLock::new(Database::new());
+        let create = fennec_ql::parse_one("create collection hinted_many (fs [float])");
+        db.write().unwrap().execute(&create.unwrap()).unwrap();
+        let body = |n: usize| {
+            let docs: Vec<String> = (1..=n).map(|d| format!("{{fs: ${d}}}")).collect();
+            format!(
+                r#"{{"query":"put hinted_many [{}]","params":[{}]}}"#,
+                docs.join(", "),
+                vec!["[0.1]"; n].join(", ")
+            )
+        };
+        for (n, kept) in [(HINT_PLACES, true), (HINT_PLACES + 1, false)] {
+            let b = body(n);
+            for _ in 0..2 {
+                let q = parse_query(&b).unwrap();
+                let (_, params) = exactly(&db, &b, q).unwrap();
+                assert_eq!(params[n - 1], Value::List(vec![Value::Float(0.1)]));
+            }
+            let q = parse_query(&b).unwrap();
+            assert_eq!(q.seen.hint.as_ref().map(|h| h.len()), kept.then_some(n), "{n}");
+        }
+        let mut shard = Hinted::default();
+        let hint: Arc<[usize]> = (0..HINT_PLACES).collect::<Vec<_>>().into();
+        for hash in 0..64 {
+            shard.keep(hash, Some(Arc::clone(&hint)));
+            assert!(shard.places <= HINT_BUDGET);
+            assert_eq!(shard.places, shard.map.len() * HINT_PLACES);
+        }
+        shard.keep(63, None);
+        assert_eq!(shard.places, shard.map.len() * HINT_PLACES);
     }
 
     /// A text is parsed once whether its body names parameters or not,
