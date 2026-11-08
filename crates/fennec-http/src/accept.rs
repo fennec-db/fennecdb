@@ -139,6 +139,38 @@ pub fn spawn(
     }
 }
 
+/// A connection's place under `--max-connections`, given back as it is
+/// dropped: however its thread ends -- its connection served, or a panic
+/// unwinding it, which `fennec-server`'s `release` profile lets a
+/// connection's thread do alone -- and with the closure [`spawn`] made no
+/// thread for. The count was given back by a line after the connection's
+/// work, which a panic skipped: each panicking connection kept its place
+/// for good, and as many as the ceiling had every connection after them
+/// refused 503.
+pub struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    /// A place among `live`'s, or `None` where it would be past `most`
+    /// (0: no ceiling) -- the same two atomic operations a refusal took
+    /// before, the count shared only once the place is taken.
+    #[inline]
+    pub fn take(live: &Arc<AtomicUsize>, most: usize) -> Option<Slot> {
+        let n = live.fetch_add(1, Ordering::SeqCst) + 1;
+        if most > 0 && n > most {
+            live.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot(Arc::clone(live)))
+    }
+}
+
+impl Drop for Slot {
+    #[inline]
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Answers `stream` with `answer` on the accepting thread, marked
 /// [`UNSERVED_HEADER`], ends it, and counts it under `why`.
 ///
@@ -700,6 +732,46 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         assert!(spawn(Builder::new(), s, &fail, move |_| tx.send(()).unwrap()).is_ok());
         rx.recv().unwrap();
+    }
+
+    /// A connection's slot is given back however its thread ends -- served,
+    /// unwound by a panic -- and where no thread is made for it; one past
+    /// the ceiling is never taken.
+    #[test]
+    fn a_slot_is_given_back_however_its_thread_ends() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let accepted = || {
+            let c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            (c, l.accept().unwrap().0)
+        };
+        let live = Arc::new(AtomicUsize::new(0));
+        let fail = FailSpawns::default();
+        for panics in [false, true] {
+            let slot = Slot::take(&live, 1).expect("a place under the ceiling");
+            assert!(Slot::take(&live, 1).is_none(), "a place past the ceiling");
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+            let (_c, s) = accepted();
+            // The thread's end is the event: its sender, made before the
+            // slot, is dropped after it, unwinding or not.
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let spawned = spawn(Builder::new(), s, &fail, move |_| {
+                let _tx = tx;
+                let _slot = slot;
+                if panics {
+                    panic!("a connection's handling panicking, as a test means it to");
+                }
+            });
+            assert!(spawned.is_ok());
+            assert!(rx.recv().is_err());
+            assert_eq!(live.load(Ordering::SeqCst), 0, "panicking: {panics}");
+        }
+        let slot = Slot::take(&live, 1).unwrap();
+        fail.next(1);
+        let (_c, s) = accepted();
+        let refused = spawn(Builder::new(), s, &fail, move |_| drop(slot));
+        assert!(refused.is_err());
+        assert_eq!(live.load(Ordering::SeqCst), 0, "no thread made");
     }
 
     /// Ends `c` and waits for it to be over -- its end acknowledged, or

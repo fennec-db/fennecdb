@@ -7,11 +7,18 @@
 
 use fennec_core::prelude::*;
 use fennec_http::{Config, Server};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+/// How long a client waits for an answer: a bound on a hang, never a
+/// pace. What it waits on is a request's work, which a loaded runner
+/// slows: 10 s ran out once beside a load of 33 on twelve searches at
+/// once (`concurrent_vector_search_matches_serial`), and read as the
+/// server closing the connection.
+const ANSWER_WITHIN: Duration = Duration::from_secs(60);
 
 struct Harness {
     port: u16,
@@ -51,42 +58,54 @@ struct Conn {
 impl Conn {
     fn open(port: u16) -> Conn {
         let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
         Conn {
             r: BufReader::new(s.try_clone().unwrap()),
             w: s,
         }
     }
 
-    /// `(status, body)`, or `None` when the server closed the connection.
-    fn ask(&mut self, method: &str, target: &str, body: &str) -> Option<(u16, String)> {
+    /// `(status, body)`. The connection closed before the answer was whole
+    /// is an `UnexpectedEof` saying so, and a read that waited out
+    /// [`ANSWER_WITHIN`] an error naming the bound: told apart, where each
+    /// was `None`, and a timeout was reported as a close.
+    fn ask(&mut self, method: &str, target: &str, body: &str) -> io::Result<(u16, String)> {
         let req = format!(
             "{method} {target} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        self.w.write_all(req.as_bytes()).ok()?;
-        let mut line = String::new();
-        if self.r.read_line(&mut line).ok()? == 0 {
-            return None;
-        }
-        let status = line.split_whitespace().nth(1)?.parse().ok()?;
+        self.w.write_all(req.as_bytes())?;
+        let line = self.line()?;
+        let status = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| unreadable(&line))?;
         let mut len = 0;
         loop {
-            let mut h = String::new();
-            self.r.read_line(&mut h).ok()?;
+            let h = self.line()?;
             let h = h.trim_end();
             if h.is_empty() {
                 break;
             }
             if let Some((k, v)) = h.split_once(':') {
                 if k.eq_ignore_ascii_case("content-length") {
-                    len = v.trim().parse().ok()?;
+                    len = v.trim().parse().map_err(|_| unreadable(h))?;
                 }
             }
         }
         let mut body = vec![0; len];
-        self.r.read_exact(&mut body).ok()?;
-        Some((status, String::from_utf8_lossy(&body).into_owned()))
+        self.r.read_exact(&mut body).map_err(told)?;
+        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    }
+
+    /// The answer's next line, its end an error ([`told`]).
+    fn line(&mut self) -> io::Result<String> {
+        let mut line = String::new();
+        match self.r.read_line(&mut line).map_err(told)? {
+            0 => Err(closed()),
+            _ => Ok(line),
+        }
     }
 
     /// A write sent with `Idempotency-Key: key`: `(status, whether it was
@@ -134,8 +153,36 @@ impl Conn {
     fn query(&mut self, q: &str) -> (u16, String) {
         let body = format!("{{\"query\": {}}}", json_string(q));
         self.ask("POST", "/query", &body)
-            .expect("the server closed the connection")
+            .unwrap_or_else(|e| panic!("POST /query {q:?}: {e}"))
     }
+}
+
+fn closed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "the server closed the connection",
+    )
+}
+
+/// A read's error as a test reports it: the connection's end a close, and
+/// a read timing out -- `WouldBlock` where a Unix socket's timeout runs
+/// out, `TimedOut` on Windows -- the bound it waited out.
+fn told(e: io::Error) -> io::Error {
+    match e.kind() {
+        io::ErrorKind::UnexpectedEof => closed(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("no answer within {ANSWER_WITHIN:?} ({e})"),
+        ),
+        _ => e,
+    }
+}
+
+fn unreadable(line: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("not an answer: {line:?}"),
+    )
 }
 
 fn json_string(s: &str) -> String {
@@ -1433,13 +1480,75 @@ fn connection_limit_refuses_extra_connections() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match Conn::open(h.port).ask("GET", "/collections", "") {
-            Some((200, _)) => break,
+            Ok((200, _)) => break,
             other => {
                 assert!(Instant::now() < deadline, "no slot freed up: {other:?}");
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
     }
+}
+
+/// Panics as a write reaches the collection `boom`: a connection's
+/// handling panicking, its thread unwound, as `fennec-server`'s profile
+/// lets a connection's thread unwind alone.
+struct Boom;
+
+impl fennec_core::plugin::Hook for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn rewrites(&self) -> bool {
+        false
+    }
+    fn before_write(
+        &self,
+        schema: &fennec_core::schema::Schema,
+        _op: fennec_core::plugin::WriteOp,
+        _doc: &mut Document,
+    ) -> Result<()> {
+        if schema.name == "boom" {
+            panic!("a connection's handling panicking, as the test means it to");
+        }
+        Ok(())
+    }
+}
+
+/// A connection whose handling panics gives its slot back as its thread
+/// unwinds, before its socket closes: at a ceiling of one, connection
+/// after connection panics, each served, and a request after them is
+/// answered. The slot was given back by a line after the connection's
+/// work, which a panic skipped: the first panic kept it for good, and
+/// every connection after was refused 503.
+#[test]
+fn a_connection_whose_handling_panics_gives_its_slot_back() {
+    let mut db = Database::new();
+    db.registry_mut().register_hook(Arc::new(Boom));
+    db.execute(&fennec_ql::parse_one("create collection boom (n int)").unwrap())
+        .unwrap();
+    let h = start(
+        Config {
+            max_connections: 1,
+            ..Config::default()
+        },
+        db,
+    );
+    let body = r#"{"query": "put boom {n: 1}"}"#;
+    for i in 0..5 {
+        // The close is the event: read once the panicking thread let go
+        // of its slot, so the next connection finds it free.
+        let asked = Conn::open(h.port).ask("POST", "/query", body);
+        match asked {
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            other => panic!("connection {i}: closed unanswered, not {other:?}"),
+        }
+    }
+    let (status, rows) = Conn::open(h.port).query("get boom count");
+    assert_eq!(status, 200, "{rows}");
+    assert!(
+        rows.contains(r#""count":0"#),
+        "every write put back: {rows}"
+    );
 }
 
 /// A keep-alive connection silent past `--idle-timeout` is closed, and
@@ -1458,8 +1567,8 @@ fn idle_timeout_closes_the_connection_without_a_word() {
     let mut c = Conn::open(h.port);
     ok(c.query("collections"));
     // The server's close is the event waited for: the read ends at it, and
-    // the client's own read timeout (10 s) bounds only a server that never
-    // closes.
+    // the client's own read timeout ([`ANSWER_WITHIN`]) bounds only a
+    // server that never closes.
     let mut sent = Vec::new();
     let read = c.r.read_to_end(&mut sent);
     assert!(read.is_ok(), "the connection was kept: {read:?}");

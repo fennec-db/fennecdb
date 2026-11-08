@@ -91,7 +91,7 @@ use replication::Replication;
 use sse::Hub;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tenants::Tenants;
@@ -476,9 +476,7 @@ impl Server {
         accept::widen(&listener);
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
-                self.live.fetch_sub(1, Ordering::SeqCst);
+            let Some(slot) = accept::Slot::take(&self.live, self.cfg.max_connections) else {
                 // Told with the CORS headers as every other answer is: a
                 // page on another origin read a refusal without them as
                 // the network failing.
@@ -492,22 +490,20 @@ impl Server {
                     }
                 }
                 continue;
-            }
+            };
 
             let backend = self.backend.clone();
             let cfg = Arc::clone(&self.cfg);
-            let counter = Arc::clone(&self.live);
             let builder = std::thread::Builder::new()
                 .name("fennec-http".into())
                 .stack_size(CONNECTION_STACK);
             let spawned = accept::spawn(builder, stream, &self.fail_spawns, move |stream| {
-                serve_connection(stream, &backend, &cfg);
-                counter.fetch_sub(1, Ordering::SeqCst);
+                serve_connection(stream, slot, &backend, &cfg);
             });
             // No thread: answered as the ceiling answers, where it was
-            // closed unanswered (`accept`'s comment).
+            // closed unanswered (`accept`'s comment). Its slot went with the
+            // closure that could not run.
             if let Err(unserved) = spawned {
-                self.live.fetch_sub(1, Ordering::SeqCst);
                 let answer = self
                     .cfg
                     .tls
@@ -761,14 +757,19 @@ fn is_remote(addr: &str) -> bool {
     }
 }
 
-/// A single connection: reads consecutive requests on a keep-alive connection.
-fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
+/// A single connection: reads consecutive requests on a keep-alive
+/// connection, holding its `slot` under `--max-connections` until it ends.
+fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cfg: &Config) {
     let _ = stream.set_nodelay(true);
     // The handshake, where it speaks TLS: here, on the connection's own
     // thread, never the accepting one ([`conn`]).
     let Some(conn) = conn::Conn::open(stream, cfg.tls.as_deref()) else {
         return;
     };
+    // Bound after the socket, so it is given back first, on every way out
+    // -- a panic's unwinding too: a client that saw its connection closed
+    // finds its place free.
+    let _slot = slot;
     let _ = conn.set_read_timeout(cfg.idle_timeout);
     let peer = conn.peer_addr().ok();
     audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
@@ -1237,6 +1238,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let gone = || reader.buffer().is_empty() && conn.gone();
         let hold = tenant.as_ref().map(|t| &t.quota);
         let held_by = (&**db, cfg.sync_on_write);
+        // A held request counted until its answer is written: given back
+        // by a drop on every way out, a panic's unwinding too.
         let (resp, waited, held) = respond(run, hub, held_by, &req, gone, hold);
         if let Some(t) = &tenant {
             quota::noted(&resp, t.name(), &req);
@@ -1293,9 +1296,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let resp = cors(resp, cfg);
         timing::lap(timing::Phase::Books);
         let written = resp.write(&mut out, keep_alive, head_only);
-        if held {
-            waits::answered();
-        }
+        // Answered and written: a shutdown waits for it no more.
+        drop(held);
         trace::end(resp.status);
         if written.is_err() || !keep_alive {
             return;
@@ -1332,10 +1334,11 @@ fn bound_noted(tenant: Option<&str>, took: std::time::Duration) {
 }
 
 /// A request's answer, run again while `Fennec-Wait` holds it ([`waits`]):
-/// the answer, how long it was held, and whether it was. Each run is the
-/// whole of `run` -- the token asked again, a tenant's gate entered and let
-/// go -- so a held request holds no tenant against a move, and a token
-/// past its `exp` is refused at the run after.
+/// the answer, how long it was held, and, where it was, its count among
+/// the held, to drop once the answer is written. Each run is the whole of
+/// `run` -- the token asked again, a tenant's gate entered and let go -- so
+/// a held request holds no tenant against a move, and a token past its
+/// `exp` is refused at the run after.
 fn respond(
     run: impl Fn() -> Response,
     hub: &Arc<Hub>,
@@ -1343,30 +1346,31 @@ fn respond(
     req: &Request,
     gone: impl Fn() -> bool,
     quota: Option<&Arc<quota::Held>>,
-) -> (Response, Duration, bool) {
+) -> (Response, Duration, Option<waits::Answering>) {
     // A plan left by a caller of `handle` that holds nothing is not this
     // request's.
     drop(waits::planned());
     let mut resp = run();
     let Some(plan) = waits::planned() else {
-        return (resp, Duration::ZERO, false);
+        return (resp, Duration::ZERO, None);
     };
     // Asked again: a server going down holds nothing more. The run's answer
     // was kept back with no durability of its own, so it goes out as at its
     // wait's end ([`held_answered`]): returned as it was, a keyed run's or
     // a `/batch`'s 412 went out before what it read was on disk.
     let Ok(Some(wait)) = waits::asked(req) else {
-        return (held_answered(db, durable, resp), Duration::ZERO, false);
+        return (held_answered(db, durable, resp), Duration::ZERO, None);
     };
     // A held write holds a thread as a stream does: past its tenant's
     // quota of held writes it is answered as it ran, and told to come back.
     let _held = match quota.map(|q| q.held()).transpose() {
         Ok(slot) => slot,
-        Err(refused) => return (refused, Duration::ZERO, false),
+        Err(refused) => return (refused, Duration::ZERO, None),
     };
     let held = std::time::Instant::now();
     let until = held + wait;
     let waiting = trace::span("fennec.wait_for_rows");
+    let answering = waits::Answering::begin();
     let ticket = waits::Ticket::join(hub, plan);
     let mut ran = Duration::ZERO;
     loop {
@@ -1429,7 +1433,7 @@ fn respond(
         }
     }
     drop(waiting);
-    (resp, held.elapsed().saturating_sub(ran), true)
+    (resp, held.elapsed().saturating_sub(ran), Some(answering))
 }
 
 /// A held write's answer as its wait ends: its last run's, kept back while
@@ -4814,6 +4818,7 @@ pub mod owner_only;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn constant_eq_matches_eq() {

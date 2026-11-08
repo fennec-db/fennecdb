@@ -357,8 +357,30 @@ pub fn planned() -> Option<Plan> {
 }
 
 /// Held requests across the process, until each is answered and written:
-/// what a shutdown waits for ([`end_all`]).
+/// what a shutdown waits for ([`end_all`]), one an [`Answering`].
 static OPEN: AtomicUsize = AtomicUsize::new(0);
+
+/// A held request, from its place taken until its answer is written: one
+/// of [`OPEN`], given back as it is dropped -- after the write, or as a
+/// panic unwinds the thread that held it. Given back by a call after the
+/// write, which a panic skipped, the request stayed counted for good:
+/// `fennec_held_requests` kept it, and every shutdown waited out its grace
+/// for an answer no thread would write.
+pub struct Answering(());
+
+impl Answering {
+    pub fn begin() -> Answering {
+        OPEN.fetch_add(1, Ordering::AcqRel);
+        Answering(())
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        OPEN.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Set once the server is going down: a held request is answered at once,
 /// and none is held from then on.
 static ENDING: AtomicBool = AtomicBool::new(false);
@@ -818,19 +840,22 @@ fn resign(st: &mut State, me: &Arc<Turn>) {
 }
 
 /// A held request's place in its group, from its first run that wrote
-/// nothing until it is answered.
+/// nothing until it is answered ([`Ticket::leave`]) -- or, where a panic
+/// unwinds the thread holding it, until it is dropped.
 pub struct Ticket<'h> {
     hub: &'h Arc<Hub>,
     group: u64,
     turn: Arc<Turn>,
+    /// Set by [`Ticket::leave`]: its drop has nothing left to do.
+    left: bool,
 }
 
 impl<'h> Ticket<'h> {
     /// Takes a place at the back of the group `plan`'s tests make, or
-    /// starts it.
+    /// starts it. Counted among the process's held requests by an
+    /// [`Answering`] its caller holds until the answer is written.
     pub fn join(hub: &'h Arc<Hub>, plan: Plan) -> Ticket<'h> {
         enlist(hub);
-        OPEN.fetch_add(1, Ordering::AcqRel);
         let waits = hub.waits();
         let turn = Arc::new(Turn {
             cv: Condvar::new(),
@@ -890,7 +915,12 @@ impl<'h> Ticket<'h> {
             }
         };
         drop(st);
-        Ticket { hub, group, turn }
+        Ticket {
+            hub,
+            group,
+            turn,
+            left: false,
+        }
     }
 
     /// Waits until this request should run again, or ends. `db` is read
@@ -1002,9 +1032,14 @@ impl<'h> Ticket<'h> {
     /// Answered: it leaves its group. One that wrote -- or whose client
     /// went away as a row was there for it -- hands the turn to the next
     /// at once, since more may be ready.
-    pub fn leave(self, hand_on: bool) {
+    pub fn leave(mut self, hand_on: bool) {
+        let mut st = lock(&self.hub.waits().state);
+        self.part(&mut st, hand_on);
+        self.left = true;
+    }
+
+    fn part(&self, st: &mut State, hand_on: bool) {
         let waits = self.hub.waits();
-        let mut st = lock(&waits.state);
         let at = st.groups.iter().position(|g| g.id == self.group);
         if let Some(i) = at {
             let g = &mut st.groups[i];
@@ -1051,12 +1086,52 @@ impl<'h> Ticket<'h> {
                         st.gone.extend(took.into_iter().map(|r| (r, writes)));
                     }
                 }
-                release(&mut st, self.group);
+                release(st, self.group);
             }
-            settle(&mut st);
-            kick(&st);
+            settle(st);
+            kick(st);
         }
         waits.held.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for Ticket<'_> {
+    /// Left unanswered: a panic unwinds the thread holding it -- a run of
+    /// its statement, a look made for every group -- and it leaves as one
+    /// answered with nothing written, the database having put the run's
+    /// write back. Kept, its group waited behind a head that would never
+    /// run or leave, every claim of its shape after it held its whole wait
+    /// for nothing, and a leader's looks were never made again. Not where
+    /// the state's mutex is poisoned -- a panic under it may have left it
+    /// half changed, and a second panic here, unwinding, aborts the
+    /// process; the others take it as it stands, as before.
+    fn drop(&mut self) {
+        if self.left || self.hub.waits().state.is_poisoned() {
+            return;
+        }
+        let mut st = lock(&self.hub.waits().state);
+        let leads = st
+            .leader
+            .as_ref()
+            .is_some_and(|l| Arc::ptr_eq(l, &self.turn));
+        // Its looks under way end here, unrecorded: their groups look
+        // again, at once, as one whose row a run took does.
+        if leads && st.looking {
+            st.looking = false;
+            for g in st.groups.iter_mut().filter(|g| g.looking) {
+                g.looking = false;
+                g.now = true;
+            }
+        }
+        // A head's run was put back, so the row it ran for is there to be
+        // taken: the next head looks at once, not at the next write.
+        if let Some(g) = st.groups.iter_mut().find(|g| g.id == self.group) {
+            if g.queue.front().is_some_and(|t| Arc::ptr_eq(t, &self.turn)) {
+                g.now = true;
+            }
+        }
+        resign(&mut st, &self.turn);
+        self.part(&mut st, false);
     }
 }
 
@@ -1082,11 +1157,6 @@ pub fn totals() -> Stats {
         // Each database's own: the process counts none.
         epoch: 0,
     }
-}
-
-/// A held request answered and written: a shutdown waits for none more.
-pub fn answered() {
-    OPEN.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Settles the round once every group woken by the writes its first bidder
@@ -1843,6 +1913,7 @@ mod tests {
                     at: None,
                     seq: db.read().unwrap().change_seq(),
                 };
+                let _answering = Answering::begin();
                 let ticket = Ticket::join(&hub, plan);
                 joined_tx.send(()).unwrap();
                 let until = Instant::now() + Duration::from_secs(60);
@@ -1854,7 +1925,6 @@ mod tests {
                     }
                     _ => ticket.leave(false),
                 }
-                answered();
             }));
             // Held in order: each joins before the next is started.
             joined.recv().unwrap();

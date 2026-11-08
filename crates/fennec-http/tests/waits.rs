@@ -33,8 +33,12 @@ fn start() -> Node {
 }
 
 fn start_with(policy: Option<&str>) -> Node {
+    start_on(Database::new(), policy)
+}
+
+/// [`start_with`] over `db`, its hooks registered.
+fn start_on(mut db: Database, policy: Option<&str>) -> Node {
     fennec_http::audit::set_delay(0);
-    let mut db = Database::new();
     db.execute(
         &fennec_ql::parse_one(
             "create collection jobs (kind text, run_at timestamp @sorted, owner text, \
@@ -714,6 +718,116 @@ fn a_held_worker_gone_hands_its_job_on() {
     assert_eq!(int(&rows(&a.body)[0]["id"]), id, "{}", a.body);
     let a = Conn::open(port).query("get jobs select owner", "[]");
     assert!(a.body.contains("\"next\""), "{}", a.body);
+}
+
+/// Panics as the worker `w1` claims a job: a held run's thread unwound, as
+/// `fennec-server`'s profile lets a connection's unwind alone.
+struct Boom;
+
+impl fennec_core::plugin::Hook for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn rewrites(&self) -> bool {
+        false
+    }
+    fn before_write(
+        &self,
+        _schema: &fennec_core::schema::Schema,
+        _op: fennec_core::plugin::WriteOp,
+        doc: &mut Document,
+    ) -> Result<()> {
+        if doc.get("owner") == Some(&Value::Text("w1".into())) {
+            panic!("a held claim's run panicking, as the test means it to");
+        }
+        Ok(())
+    }
+}
+
+/// A held claim whose run panics leaves its group as one answered with
+/// nothing written, its connection closed unanswered: the server's held
+/// count comes back to none, and a claim held after it, of the same shape,
+/// takes the next job. Kept, its group waited behind a head that would
+/// never run, and every claim of its shape held its whole wait for nothing.
+#[test]
+fn a_held_claim_whose_run_panics_leaves_its_group() {
+    let mut db = Database::new();
+    db.registry_mut().register_hook(Arc::new(Boom));
+    let node = start_on(db, None);
+    let port = node.port;
+    let mut panicking = Conn::open(port);
+    panicking.send(
+        "/query",
+        &line(CLAIM, "[\"w1\"]"),
+        &[("Fennec-Wait", "60000")],
+    );
+    until_held(&node, 1);
+    let boom = put(port, "mail", now_ms() - 1);
+    let mut line_read = String::new();
+    let read = panicking.r.read_line(&mut line_read);
+    assert!(
+        matches!(read, Ok(0)),
+        "closed unanswered: {read:?} {line_read:?}"
+    );
+    // Left as it unwound: none held, which a ticket kept never was.
+    let t = Instant::now();
+    while node.server.waits().held > 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "the panicked claim is held still"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let gone = Conn::open(port).query("del jobs where id = $1", &format!("[{boom}]"));
+    assert_eq!(gone.status, 200, "{}", gone.body);
+    let next = std::thread::spawn(move || Conn::open(port).claim("w2", 60_000));
+    until_held(&node, 1);
+    let id = put(port, "mail", now_ms() - 1);
+    let a = next.join().unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
+    let got = rows(&a.body);
+    assert_eq!(got.len(), 1, "{}", a.body);
+    assert_eq!(int(&got[0]["id"]), id);
+}
+
+/// The claim held behind one whose run panics takes the job that run put
+/// back, at once: the row is there again, so its group looks without
+/// waiting for the next write.
+#[test]
+fn a_claim_behind_a_panicked_run_takes_the_job_it_put_back() {
+    let mut db = Database::new();
+    db.registry_mut().register_hook(Arc::new(Boom));
+    let node = start_on(db, None);
+    let port = node.port;
+    let mut panicking = Conn::open(port);
+    panicking.send(
+        "/query",
+        &line(CLAIM, "[\"w1\"]"),
+        &[("Fennec-Wait", "60000")],
+    );
+    until_held(&node, 1);
+    // Held after w1, of its shape: second in its group. Its wait is the
+    // bound on what must happen; a later write would wake it anyway, so
+    // none is made.
+    let behind = std::thread::spawn(move || Conn::open(port).claim("w2", 20_000));
+    until_held(&node, 2);
+    let id = put(port, "mail", now_ms() - 1);
+    let mut line_read = String::new();
+    let read = panicking.r.read_line(&mut line_read);
+    assert!(
+        matches!(read, Ok(0)),
+        "closed unanswered: {read:?} {line_read:?}"
+    );
+    let a = behind.join().unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
+    let got = rows(&a.body);
+    assert_eq!(
+        got.len(),
+        1,
+        "the put-back job, not the end of the wait: {}",
+        a.body
+    );
+    assert_eq!(int(&got[0]["id"]), id);
 }
 
 /// Many held workers, producers enqueueing ready and delayed jobs, and
