@@ -61,10 +61,13 @@ nothing reaches a registry before the notes have had a read.
    **Windows.** The zip is unsigned (SmartScreen warns of a program a
    browser downloaded; `install.ps1` takes the mark off what it checked),
    and nothing publishes it but the release itself: there is no winget or
-   Scoop manifest yet. Before the first release with a Windows build, the
-   power cut docs/design/windows.md asks for (the owner's ninth decision):
-   on a Windows VM, a compact and `--sync always` writes in flight, the VM
-   powered off, then every acknowledged write read back. After the draft is
+   Scoop manifest yet. A release with a Windows build needs the last run of
+   `windows-power-cut.yml` green -- a Windows guest cut five times under
+   `--sync always` writes, compacts and spills, twice with its disk's cache
+   lost, every acknowledged write read back (docs/design/windows.md, the
+   owner's ninth decision): `gh run list --workflow windows-power-cut.yml
+   --limit 1`, and if it ran before the commit being released, `gh workflow
+   run windows-power-cut.yml --ref main` and wait for it. After the draft is
    published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
    Windows machine and the Quickstart's Windows line, as the other
    installs are run once more.
