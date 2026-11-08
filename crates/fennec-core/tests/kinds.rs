@@ -4,11 +4,12 @@
 //! before, while the int equal to the time ranked below that text: no
 //! order, and `order coalesce(t, j)` over a time field and a json one
 //! holding ints and ISO texts panicked in the standard library's sort. A
-//! text written beside a time -- a literal, a parameter -- is read as the
-//! time it names before a row is compared, as PostgreSQL reads a literal of
-//! no type, so `where t >= "2026-01-01"` still compares times. And a group,
-//! a distinct count, a facet and a sketch tell apart only what `=` does:
-//! a json field's `3` and `3.0` were two groups.
+//! comparison still reads a text beside a time as the time it names
+//! (`Value::cmp_read`), whichever side either came from -- a literal, a
+//! parameter, a json field's ISO text, a text field's -- through the scan
+//! and every index alike. And a group, a distinct count, a facet and a
+//! sketch tell apart only what `cmp_value` does: a json field's `3` and
+//! `3.0` were two groups.
 
 use fennec_core::prelude::*;
 use fennec_core::time::format_iso;
@@ -143,8 +144,8 @@ const OPS: [(&str, Holds); 6] = [
 /// of `in`, `has`'s item over a list of times -- is read as the time it
 /// names, through the scan, a `@hash`, a `@sorted`, an index over several
 /// fields and an expression alike; a text naming no time is above every
-/// time. A text read off a row is no literal: a json field's ISO text is a
-/// text, and equals no time.
+/// time. A text read off a row is read so too: a json field's ISO text
+/// equals its time.
 #[test]
 fn a_text_written_beside_a_time_is_read_as_the_time() {
     fennec_ql::install();
@@ -222,15 +223,23 @@ fn a_text_written_beside_a_time_is_read_as_the_time() {
         let got = ids(&db, &text, &[Value::List(long.clone())]);
         assert_eq!(got, (1..=11).collect::<Vec<u64>>(), "{text}");
     }
-    // A json field's ISO text is a text: no time equals it, nor does a
-    // time order beside it as the time it reads as.
-    assert_eq!(ids(&db, "get w where t = j", &[]), Vec::<u64>::new());
-    assert_eq!(
-        ids(&db, "get w where t < j", &[]),
-        (1..=11).collect::<Vec<_>>()
-    );
+    // A json field's ISO text is the time it names beside a time, either
+    // side.
+    let every: Vec<u64> = (1..=11).collect();
+    for text in [
+        "get w where t = j",
+        "get w where j = t",
+        "get w where j <= t",
+    ] {
+        assert_eq!(ids(&db, text, &[]), every, "{text}");
+    }
+    assert_eq!(ids(&db, "get w where t < j", &[]), Vec::<u64>::new());
     let now = [Value::Timestamp(at(4))];
-    assert_eq!(ids(&db, "get w where j = $1", &now), Vec::<u64>::new());
+    assert_eq!(ids(&db, "get w where j = $1", &now), [5]);
+    assert_eq!(
+        ids(&db, "get w where $1 < j", &now),
+        (6..=12).collect::<Vec<_>>()
+    );
     // `case` and `having` read a written text as a time too.
     let text = format!(
         "get w where t != null select case when t >= {} then 1 else 0 end as late",
@@ -267,11 +276,10 @@ fn turn(op: &str) -> &str {
     }
 }
 
-/// What `=` finds equal is one group, one distinct value, one sketched,
-/// one facet value and one `@unique` value: a json field's `3` and `3.0`,
-/// `[3]` and `[3.0]`, a time and the int of its milliseconds, bytes and the
-/// text of them. Through a `@hash` too, and a json `@hash` finds a time's
-/// numbers, as the scan does, and never a text reading as it.
+/// What `cmp_value` finds equal is one group, one distinct value, one
+/// sketched, one facet value and one `@unique` value: a json field's `3`
+/// and `3.0`, `[3]` and `[3.0]`, a time and the int of its milliseconds,
+/// bytes and the text of them. Through a `@hash` too.
 #[test]
 fn what_equals_is_one_group() {
     fennec_ql::install();
@@ -334,10 +342,15 @@ fn what_equals_is_one_group() {
         assert_eq!(three.1, 4, "{text}: {facet:?}");
         let held = facet.iter().filter(|v| !v.0.is_null()).count();
         assert_eq!(held, 5, "{text}: {facet:?}");
-        // A time finds the numbers of its milliseconds, through the
-        // bucket as through the scan, and not the text reading as it.
+        // A time finds the numbers of its milliseconds and the text naming
+        // it, a json `@hash` stepping aside for the scan: one value to `=`,
+        // three to a group, as the order has them.
         let text = format!("get g where {f} = $1");
-        assert_eq!(ids(&db, &text, &[Value::Timestamp(MS)]), [7, 8], "{text}");
+        assert_eq!(
+            ids(&db, &text, &[Value::Timestamp(MS)]),
+            [7, 8, 9],
+            "{text}"
+        );
     }
     let r = answer(&db, "get g group k select k, count(distinct j) as n", &[]);
     assert_eq!(r.rows[0].values[1], Value::Int(6));
@@ -375,4 +388,249 @@ fn what_equals_is_one_group() {
     }
     let text = "get x select coalesce(t, 0) as k, count(*) as n group k";
     assert_eq!(answer(&db, text, &[]).rows.len(), 1, "{text}");
+}
+
+/// A json path's ISO text beside a time -- `now()` less a span, which the
+/// parser folds to a time, a parameter, a time field -- is the time it
+/// names, through the scan, a `@sorted` and a `@hash` on the path alike, an
+/// ISO text a time was written into the field as among them. Ordered by
+/// kind alone, every text was above every time: `j.at > now() - 1d` found
+/// the rows of a week ago, and `t = j.at` none.
+#[test]
+fn a_json_time_compares_as_the_time_through_every_index() {
+    fennec_ql::install();
+    let hour = 3_600_000;
+    let now = MS + 30 * 24 * hour;
+    let iso = |ms: i64| Value::Text(format_iso(ms));
+    let at = |v: Value| Value::Object(vec![("at".into(), v)]);
+    for index in ["", "@sorted", "@hash"] {
+        let mut db = Database::new();
+        db.set_clock(Some(now));
+        run(&mut db, "create collection c (t timestamp, j json)");
+        if !index.is_empty() {
+            run(&mut db, &format!("create index on c (j.at) {index}"));
+        }
+        let rows = [
+            (Value::Timestamp(now - hour), at(iso(now - hour))),
+            (
+                Value::Timestamp(now - 168 * hour),
+                at(iso(now - 168 * hour)),
+            ),
+            // A time written into a json field, which keeps its ISO text.
+            (Value::Null, at(Value::Timestamp(now - hour / 2))),
+            (Value::Null, at(iso(now - 168 * hour))),
+        ];
+        for (t, j) in rows {
+            with(&mut db, "put c {t: $1, j: $2}", &[t, j]).unwrap();
+        }
+        let hour_ago = [Value::Timestamp(now - hour)];
+        let cases: [(&str, &[Value], &[u64]); 11] = [
+            ("get c where j.at > now() - 86400000", &[], &[1, 3]),
+            ("get c where now() - 86400000 < j.at", &[], &[1, 3]),
+            ("get c where j.at < now() - 86400000", &[], &[2, 4]),
+            ("get c where j.at = $1", &hour_ago, &[1]),
+            ("get c where $1 = j.at", &hour_ago, &[1]),
+            ("get c where j.at in [$1]", &hour_ago, &[1]),
+            ("get c where j.at >= $1", &hour_ago, &[1, 3]),
+            ("get c where t = j.at", &[], &[1, 2]),
+            ("get c where j.at = t", &[], &[1, 2]),
+            (
+                "get c where coalesce(t, j.at) > now() - 9000000",
+                &[],
+                &[1, 3],
+            ),
+            (
+                "get c where coalesce(t, j.at) < now() - 9000000",
+                &[],
+                &[2, 4],
+            ),
+        ];
+        for (text, params, want) in cases {
+            assert_eq!(ids(&db, text, params), want, "{index}: {text}");
+        }
+    }
+}
+
+/// A comparison answers alike wherever it stands and whichever side each
+/// value is on: a filter, a select list's item, an aggregate's `filter`, a
+/// `having` -- whose fields reach the comparison as values lifted off the
+/// group's rows, which once read as a statement's own.
+#[test]
+fn a_comparison_answers_alike_wherever_it_stands() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection s (t timestamp, j json, x text, k int)",
+    );
+    let iso = |ms: i64| Value::Text(format_iso(ms));
+    let text = |t: &str| Value::Text(t.into());
+    let pg = Value::Text(fennec_core::time::format_pg(MS));
+    let rows = [
+        (Value::Timestamp(MS), iso(MS), iso(MS)),
+        (Value::Timestamp(MS), iso(MS + 1000), pg),
+        (Value::Timestamp(MS + 5000), iso(MS), text("abc")),
+        (
+            Value::Timestamp(MS),
+            text("abc"),
+            text(&format_iso(MS).replace('T', " ")),
+        ),
+        (Value::Timestamp(MS), Value::Int(MS), text("2026-01-01")),
+        (Value::Null, iso(MS), Value::Null),
+        (Value::Timestamp(MS - 1), Value::Null, iso(MS + 1)),
+        (
+            Value::Timestamp(MS + 1),
+            Value::Float(MS as f64 + 0.5),
+            text(""),
+        ),
+    ];
+    for (k, (t, j, x)) in rows.into_iter().enumerate() {
+        let doc = "put s {t: $1, j: $2, x: $3, k: $4}";
+        with(&mut db, doc, &[t, j, x, Value::Int(k as i64 + 1)]).unwrap();
+    }
+    assert_eq!(ids(&db, "get s where t = j", &[]), [1, 5]);
+    // Row 6's two nulls are equal, as a filter has them.
+    assert_eq!(ids(&db, "get s where t = x", &[]), [1, 2, 4, 5, 6]);
+    let selected = |text: &str, params: &[Value]| -> Vec<u64> {
+        let mut out: Vec<u64> = answer(&db, text, params)
+            .rows
+            .iter()
+            .filter(|r| r.values[0] == Value::Bool(true))
+            .map(|r| r.id)
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    let counted = |text: &str, params: &[Value]| -> usize {
+        match answer(&db, text, params).rows[0].values[0] {
+            Value::Int(n) => n as usize,
+            ref v => panic!("{text}: {v:?}"),
+        }
+    };
+    let having = |text: &str, params: &[Value]| -> Vec<u64> {
+        let mut out: Vec<u64> = answer(&db, text, params)
+            .rows
+            .iter()
+            .map(|r| match r.values[0] {
+                Value::Int(k) => k as u64,
+                ref v => panic!("{text}: {v:?}"),
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    let time = [Value::Timestamp(MS)];
+    let pairs: [(&str, &str, &[Value]); 5] = [
+        ("t", "j", &[]),
+        ("t", "x", &[]),
+        ("j", "x", &[]),
+        ("j", "$1", &time),
+        ("x", "$1", &time),
+    ];
+    for (a, b, params) in pairs {
+        let agg = |e: &str| match e.starts_with('$') {
+            true => e.to_string(),
+            false => format!("max({e})"),
+        };
+        for (op, _) in OPS {
+            let back = turn(op);
+            let want = ids(&db, &format!("get s where {a} {op} {b}"), params);
+            let forms = [
+                (
+                    "where, turned",
+                    ids(&db, &format!("get s where {b} {back} {a}"), params),
+                ),
+                (
+                    "select",
+                    selected(&format!("get s select {a} {op} {b} as v"), params),
+                ),
+                (
+                    "select, turned",
+                    selected(&format!("get s select {b} {back} {a} as v"), params),
+                ),
+                (
+                    "having",
+                    having(
+                        &format!("get s group k select k having {} {op} {}", agg(a), agg(b)),
+                        params,
+                    ),
+                ),
+                (
+                    "having, turned",
+                    having(
+                        &format!("get s group k select k having {} {back} {}", agg(b), agg(a)),
+                        params,
+                    ),
+                ),
+            ];
+            for (form, got) in forms {
+                assert_eq!(got, want, "{a} {op} {b}, {form}");
+            }
+            for (x, o, y) in [(a, op, b), (b, back, a)] {
+                let text = format!("get s select count(*) filter (where {x} {o} {y}) as n");
+                assert_eq!(counted(&text, params), want.len(), "{text}");
+            }
+        }
+    }
+}
+
+/// A text field beside a time reads its every spelling of it -- ISO, a
+/// space for the `T`, an offset, PostgreSQL's, a date -- through the scan,
+/// a `@hash`, a `@sorted` and an index over several fields alike: the
+/// `@hash` filed the ISO text alone, and found that one where the scan
+/// found them all.
+#[test]
+fn a_text_field_meets_a_time_alike_through_every_index() {
+    fennec_ql::install();
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection x (s text, sh text @hash, ss text @sorted, sc text, z int, \
+         @sorted(sc, z))",
+    );
+    let iso = format_iso(MS);
+    let spellings = [
+        iso.clone(),
+        iso.replace('T', " "),
+        iso.replace('Z', "+00:00"),
+        fennec_core::time::format_pg(MS),
+        "2026-01-01".to_string(),
+        format_iso(MS + 1000),
+        format_iso(MS - 1000),
+        "abc".to_string(),
+        String::new(),
+    ];
+    for s in &spellings {
+        let doc = "put x {s: $1, sh: $1, ss: $1, sc: $1, z: 1}";
+        with(&mut db, doc, &[Value::Text(s.clone())]).unwrap();
+    }
+    let time = [Value::Timestamp(MS)];
+    for (op, holds) in OPS {
+        let want: Vec<u64> = spellings
+            .iter()
+            .zip(1u64..)
+            .filter(|(s, _)| match fennec_core::time::parse(s) {
+                Ok(ms) => holds(ms.cmp(&MS)),
+                // Above every time.
+                Err(_) => holds(Ordering::Greater),
+            })
+            .map(|(_, id)| id)
+            .collect();
+        for f in ["s", "sh", "ss", "sc"] {
+            let text = format!("get x where {f} {op} $1");
+            assert_eq!(ids(&db, &text, &time), want, "{text}");
+            let text = format!("get x where $1 {} {f}", turn(op));
+            assert_eq!(ids(&db, &text, &time), want, "{text}");
+        }
+    }
+    // `in`, short and long: a set keyed by the field's texts holds no time.
+    let mut list = vec![Value::Timestamp(MS)];
+    list.extend((1..10).map(|i| Value::Timestamp(MS + i * 7_000)));
+    for f in ["s", "sh", "ss", "sc"] {
+        for n in [1, list.len()] {
+            let text = format!("get x where {f} in $1");
+            let got = ids(&db, &text, &[Value::List(list[..n].to_vec())]);
+            assert_eq!(got, [1, 2, 3, 4, 5], "{text} ({n})");
+        }
+    }
 }

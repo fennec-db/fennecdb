@@ -634,8 +634,6 @@ impl SortedIndex {
             | (DataType::Timestamp, Value::Timestamp(i) | Value::Int(i)) => {
                 Some(Key::Num(int_key(*i)))
             }
-            // A text written beside a time is read as the time it names,
-            // as the scan reads it (`Filter::bind`'s `as_field`).
             (DataType::Timestamp, Value::Text(t)) => {
                 crate::time::parse(t).ok().map(|ms| Key::Num(int_key(ms)))
             }
@@ -650,8 +648,8 @@ impl SortedIndex {
             (DataType::Text, Value::Text(t)) => Some(Key::Text(t.as_str().into())),
             // A json path's numbers are keyed as `f64`s, an int only where
             // a float holds it exactly; text by its bytes. A literal of
-            // another kind -- a timestamp, which no json value is -- is
-            // evaluated row by row.
+            // another kind -- a timestamp, which compares against text by
+            // parsing it -- is evaluated row by row.
             (DataType::Json, v) => match json_slot(Some(v)) {
                 JsonSlot::Num(k) => Some(Key::Num(k)),
                 JsonSlot::Text(t) => Some(Key::Text(t)),
@@ -704,8 +702,8 @@ impl SortedIndex {
         let rank = match (ty, v) {
             (_, Value::Bool(_)) if number || *ty == DataType::Text => Greater,
             (DataType::Int | DataType::Float, Value::Text(_) | Value::Bytes(_)) => Less,
-            // A text written beside a time is read as one ([`Self::bound`]);
-            // one that reads as none stays a text, above every time.
+            // A time compares with a text by reading it: one that does not
+            // read is above every time.
             (DataType::Timestamp, Value::Text(t)) if crate::time::parse(t).is_err() => Less,
             (DataType::Timestamp, Value::Bytes(_)) => Less,
             (_, v) if number && high(v) => Less,

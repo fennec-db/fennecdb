@@ -536,52 +536,83 @@ row, equal to every claim, and admits none now, where `x > $jwt.min`
 admits every one (`http-access.html` says so).
 
 **Values of two kinds order by kind, but for the numbers, and a text and
-bytes** (`Value::type_rank`): `null`, a bool, a number -- an int, a float
-and a time, its milliseconds' int, by their true values (above) -- a text
-or bytes by their bytes, a vector, a list, a sparse vector, an object. The
-last cross-kind equality that was no order went with #520's review:
-`cmp_value` read a text beside a time as the time it named, so
-`Timestamp(0)` equalled `"1970-01-01T00:00:00Z"`, which the int 0, equal to
-the time, ranked below as a text. No field holds the three -- a json field
-never holds a time, `json_value` writing it as ISO text -- but an
-expression does: `order coalesce(t, j)`, `t` a time field and `j` a json
-one holding ints and ISO texts, panicked in the standard library's sort
-(`smallsort.rs`, its total-order check) in 3 of 117 runs of 1 191 to 2 530
-rows, and otherwise put the rows in no order. A server's connection
-unwinds such a panic; the shell, `panic = abort`, died. Now a time and a
-text order by kind, the time below, in `cmp_value` and every key alike,
-and a text *written* beside a time -- a literal, a parameter, an item of
-`in` or `has`, a claim -- is read as the time it names before a row is
-compared, PostgreSQL's rule: a literal of no type takes the type of what
-it meets (`where t >= '2026-01-01'` casts the text), and two values of
-two types meet by an operator or not at all. A bound filter reads it so
-once a query by the field's type (`Filter::bind`'s `as_field`: a
-`timestamp` field, an item of a `[timestamp]` one), the one every index
-already read (`Value::key_as`, `SortedIndex::bound`,
-`CompositeIndex::literal`); `eval` reads it by the other side's value
-(`query::compare_beside`, `read_beside`, `same_read`), for a comparison
-of an expression --
-`t + 0 >= $1`, a `case`, `having max(t) > '...'`. A text naming no time
-stays a text, above every time, as `SortedIndex::by_kind` ranks it. Every
-index answered `t = '2026-...'` and `t > $1` as it does now; what moved is
-what was never a literal: a json field's ISO text against a time -- `t =
-j`, `j.at > now() - 1d`, an `order` or a `group` mixing them -- is a text
-beside a number, never equal, the time below. A main-branch scan of
-100 000 times against a text parameter read the text again every row
-(`time::parse` in `cmp_value`): 172.5 M instructions a scan, 45.1 M now
-(-73.9%). Rejected: reading in
-`cmp_value` a text that names a time as that time against every kind
-makes it a number -- `"2026-01-01"` below `"10"` and `"abc"` above, two
-texts no longer in their bytes' order -- and breaks a text field's
-`@sorted`; refusing a time beside a text, as PostgreSQL's operator lookup
-does, would refuse every filter over a json field holding both, which
-`where j > 5` reads now; and ordering every two kinds by kind, the
-literal too, would leave `where t >= "2026-01-01"` no row.
+bytes; a comparison reads a text beside a time as the time it names**
+(`Value::type_rank`, `Value::cmp_read`): `null`, a bool, a number -- an
+int, a float and a time, its milliseconds' int, by their true values
+(above) -- a text or bytes by their bytes, a vector, a list, a sparse
+vector, an object. The last cross-kind equality that was no order went
+with #520's review: `cmp_value` read a text beside a time as the time it
+named, so `Timestamp(0)` equalled `"1970-01-01T00:00:00Z"`, which the int
+0, equal to the time, ranked below as a text. No field holds the three --
+a json field never holds a time, `json_value` writing it as ISO text --
+but an expression does: `order coalesce(t, j)`, `t` a time field and `j` a
+json one holding ints and ISO texts, panicked in the standard library's
+sort (`smallsort.rs`, its total-order check) in 3 of 117 runs of 1 191 to
+2 530 rows, and otherwise put the rows in no order. A server's connection
+unwinds such a panic; the shell, `panic = abort`, died.
+
+Now the order and the comparison are two. The order -- `cmp_value`, which
+`order`, `min`, `max`, `greatest`, `least`, a sort's keys and every key a
+group, a distinct count, a facet or an index files take -- puts a time
+below every text, as any two kinds. A comparison -- `=`, `<`, `in`, `has`,
+a filter's, a `case`'s, a `having`'s, an aggregate's `filter`, an access
+rule's -- reads a text beside a time as the time it names, whichever side
+either came from, as main's `cmp_value` did: `j.at > now() - 1d` over a
+json field's ISO times compares two times. It is `cmp_read`, a copy of
+`cmp_value`'s body (`cmp_kinds::<READ>`) whose arms where a time meets a
+text parse the text, so no comparison of two other kinds pays for it; a
+comparison needs no order, its values met two at a time and never sorted.
+
+The first try read only a text *written* beside a time -- a literal, a
+parameter -- as PostgreSQL types a literal of no type by what it meets,
+and left a text read off a row beside a time a text. #529's review found
+the answers it moved wrong and silent, through the scan and every index
+alike: over a json field whose `at` held ISO times, `j.at > now() - 1d`
+held of a week's rows too (`now() - 1d` is folded to a time), `j.at <
+now() - 1d` of none, `j.at = $1` and `t = j.at` of none. Nor could `eval`
+tell a statement's value from a row's: `aggregate.rs`'s `lift` makes a
+group's fields parameters, a binding's `new.x` is one, so `where t = j.at`
+answered none where `select t = j.at` answered true, and `count(*) filter
+(where j.at > $1)` 2 where `filter (where $1 < j.at)` answered 1.
+
+A `timestamp` field still has a text written beside it read once a query
+(`Filter::bind`'s `as_field`: a `timestamp` field, an item of a
+`[timestamp]` one), as every index reads it (`Value::key_as`,
+`SortedIndex::bound`, `CompositeIndex::literal`): read at every row, as
+main read it, a scan of 100 000 times against a text parameter took
+172.5 M instructions, 45.1 M so. A text naming no time stays a text, above
+every time, as `SortedIndex::by_kind` ranks it. An index answers a time
+beside a text as the scan does or leaves it to the scan: a text field's
+`@hash` takes no key for a time (`key_as`), whose ISO text found one
+spelling where the scan, reading `2026-01-01 00:00:00+00` and `2026-01-01`
+as the time too, found every one -- main's own mismatch, which a `lookup`
+never meets, `check_key_types` refusing a time key beside a text one; a
+json `@hash` and `@sorted` keep no key for a time (`lookup_key`,
+`SortedIndex::bound`), nor an index over several fields for a text or
+json part (`CompositeIndex::literal`).
+
+What users meet: no answer of a comparison moved from main. An `order`
+and a `group` over an expression mixing a time with a text go by kind --
+`order coalesce(t, j.at)` puts every time before every text, `group` keeps
+a time and its ISO text apart -- and `order timestamp(j.at)` orders ISO
+texts as the times they name, where every one names one. A keyset page
+over such an expression (`where coalesce(t, j.at) > $last order
+coalesce(t, j.at)`) reads the texts as times the order put after every
+time, skipping or repeating rows: page by `timestamp(...)`. Rejected:
+reading in `cmp_value` a text that names a time as that time against
+every kind makes it a number -- `"2026-01-01"` below `"10"` and `"abc"`
+above, two texts no longer in their bytes' order -- and breaks a text
+field's `@sorted`; refusing a time beside a text, as PostgreSQL's
+operator lookup does, would refuse every filter over a json field holding
+both, which `where j > 5` reads now; a comparison by kind, the literal
+read as above or not, the first try's wrong answers.
 
 **A key is equal exactly where `cmp_value` is** (`codec::encode_key`), so
 a group, a distinct count, `approx_count_distinct`, a facet, a sketch, a
 `@hash` bucket, a `@unique` value and an index over several fields part
-only the values `=` does: a whole float short of 2^63 either side,
+only the values the order does -- `=` too, but for a time beside the
+text naming it, which no key files together and `lookup_key` leaves to
+the scan: a whole float short of 2^63 either side,
 `-0.0` among them, and a time are keyed as the int they are
 (`key_number`, through `value::exact_int`), bytes that are UTF-8 as that
 text, every `NaN` as one, in a list or an object too (the key copy of
@@ -599,33 +630,47 @@ SSE4.1 -- and a range both ways; the whole int's key is out of line, and
 a float's tag and bytes go in one write, so a group by a float field pays
 nothing for the test. `value::tests` holds two
 keys equal exactly where `cmp_value` is over every pair of the edge values
-and every int against every float, and `cmp_value` antisymmetric and
+and every int against every float, `cmp_value` antisymmetric and
 transitive over every triple of 98 of them, times about a time's
-milliseconds and texts reading as times among them; `tests/kinds.rs`
+milliseconds and texts reading as times among them, and `cmp_read`
+antisymmetric over every pair, `cmp_value`'s answer but where a time
+meets a text (`a_comparison_reads_a_text_beside_a_time`); `tests/kinds.rs`
 holds the order over `coalesce(t, j)` to one worked out apart in 60 runs
-(on main the sort panicked, or put the rows in no order), a text written
-beside a time to the time through the scan, a `@hash`, a `@sorted`, an
-index over several fields and an expression, `in`, `has`, a long list, a
-parameter either side, and a json field's ISO text to no time, and one
-group, one distinct value, one sketch, one facet value and one `@unique`
-value for `3` and `3.0`, `[3]` and `[3.0]`, a time and its int, bytes and
-their text. Against the build before (`make instr-compare PKG=fennec-core
-EXAMPLE=orders`, the base the example's new modes on main, 8 identities a
-build, 7 rounds, every run started under a 1-minute load of 4 and ending
-at most at 4.06): an order by an int +0.03%, by a float, a time or a text
-0.00%; a float field's scan -0.38% and an expression's comparison's
--0.67% -- the reading is asked in `compare_beside`, beside the nulls'
-test, where the kinds are at hand: asked before it in `eval`, the
-expression's scan took 0.7% more -- and a time field's by a text
-parameter -73.9%; a group by a float -0.03%, by an int 0.00%, by a
-`[float]` pair +0.07% (its two floats' test) and 1 000 lookups of such
-pairs in a `@hash` +0.83%, inside 2 SE (+0.26% in plain runs); a group by
-a json number of which a third are whole floats -15.3%, a group fewer for
-each. The time and text arms stay in `cmp_value`, returning the kinds'
-order: left to its last arm, the dispatch laid out anew took an order by
-an int 0.5% more. The browser module grew 1 024 bytes, 479 gzip and 138 brotli at
-`-q 11` (inside the 0.3 KB brotli moves by), the test build without the
-indexes 1 024, 648 and 465. *What a file written before meets*: no record
+(on main the sort panicked, or put the rows in no order); a text beside a
+time to the time through the scan, a `@hash`, a `@sorted`, an index over
+several fields and an expression, `in`, `has`, a long list, a parameter
+either side and a json field's ISO text; #529's review's answers over a
+json path, with no index, a `@sorted` and a `@hash` on it
+(`a_json_time_compares_as_the_time_through_every_index`, main's answers);
+one answer from a comparison in `where`, a select list, an aggregate's
+`filter` and `having`, either way round
+(`a_comparison_answers_alike_wherever_it_stands`); a text field's
+spellings of a time through the scan, a `@hash`, a `@sorted` and an index
+over several fields (`a_text_field_meets_a_time_alike_through_every_index`,
+which main's `@hash` failed); and one group, one distinct value, one
+sketch, one facet value and one `@unique` value for `3` and `3.0`, `[3]`
+and `[3.0]`, a time and its int, bytes and their text. Against the build
+before (`make instr-compare PKG=fennec-core EXAMPLE=orders`, the base the
+example's new modes on main, 8 identities a build, 7 rounds, every run
+started under a 1-minute load of 4): an order by an int, a float, a time
+or a text, a float field's scan, an expression's comparison, a group by a
+float or an int and 1 000 lookups of `[float]` pairs in a `@hash`, each
+inside 2 SE of 0.00%; a group by a `[float]` pair +0.05%, the
+whole-float test of its two floats; a time field's scan by a text
+parameter -73.7%, a group by a json number of which a third are whole
+floats -15.3%, a group fewer for each. The comparison and the order are
+two copies of one body (`cmp_kinds::<READ>`): one copy taking a flag, asked
+only where a time meets a text, kept the flag in a register through the
+recursion and passed it at every call, and every order took 2.2% more,
+a float field's scan 0.8%; a `cmp_read` of the reading arms alone, the
+rest sent on to `cmp_value` and `query::compare` sending it those kinds
+alone, was 682 bytes of the browser module smaller and took the float
+field's scan 1.9% more, the kinds asked before every comparison. The time
+and text arms stay in the order's copy, returning the kinds' order: left
+to its last arm, the dispatch laid out anew took an order by an int 0.5%
+more. The browser module grew 1 676 bytes against main, 379 gzip and 382
+brotli at `-q 11`, the second copy 1.1 KB of them; the test build without
+the indexes 1 676, 428 and 367. *What a file written before meets*: no record
 changes; a `@unique` json field or index over several fields holding
 `[3]` beside `[3.0]` holds one value twice now, every `set` of either row
 refused until one changes; a sketch `hll_accumulate` stored before hashed
