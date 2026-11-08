@@ -275,7 +275,7 @@ impl Segment {
             return Ok(());
         }
         let mut frame = Vec::with_capacity(pending.len() + 32);
-        seal::seal_frame(key, *index, false, pending, &mut frame);
+        seal::seal_frame(key, *index, false, pending, &mut frame)?;
         *index += 1;
         pending.clear();
         self.file()?.write_all(&frame)
@@ -515,12 +515,20 @@ impl Archive {
     /// what depends on the name syncs it first ([`Self::sync_dir`]): an
     /// fsync more a tenant made a node's first pass 44% longer (`keep_began`).
     fn put(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        // Sealed before the side file is made, as `backup` seals: a seal the
+        // system's randomness refused left an empty `.tmp` a try, never
+        // removed.
+        let sealed;
+        let bytes = match &self.key {
+            Some(key) => {
+                sealed = seal::seal_whole(key, bytes)?;
+                &sealed[..]
+            }
+            None => bytes,
+        };
         let tmp = path.with_extension("tmp");
         let mut f = File::create(&tmp)?;
-        match &self.key {
-            Some(key) => f.write_all(&seal::seal_whole(key, bytes))?,
-            None => f.write_all(bytes)?,
-        }
+        f.write_all(bytes)?;
         f.sync_all()?;
         renamed(&f, &tmp, path)
     }
@@ -917,21 +925,21 @@ impl Archive {
                         s.park()?;
                     }
                     let path = self.segment_path(seq);
-                    let mut file = File::create(&path)?;
                     // Sealed, the magic is a frame of its own, so a segment
-                    // the archiver made and died in reads as an empty one.
-                    let sealed = match &self.key {
+                    // the archiver made and died in reads as an empty one;
+                    // sealed before the file is made, so a refused seal
+                    // leaves none.
+                    let head = match &self.key {
                         Some(key) => {
                             let mut head = seal::MAGIC.to_vec();
-                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head);
-                            file.write_all(&head)?;
-                            Some((key.clone(), 1, Vec::new()))
+                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head)?;
+                            Some(head)
                         }
-                        None => {
-                            file.write_all(LOG_MAGIC)?;
-                            None
-                        }
+                        None => None,
                     };
+                    let mut file = File::create(&path)?;
+                    file.write_all(head.as_deref().unwrap_or(LOG_MAGIC))?;
+                    let sealed = self.key.as_ref().map(|key| (key.clone(), 1, Vec::new()));
                     // The directory synced before the segment's first write:
                     // its name then lasts as long as its writes do, where an
                     // fsync of the file alone left a segment written for an
@@ -1460,7 +1468,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         let id = crate::replication::fork_id(&history, fresh_id());
         bytes.extend_from_slice(&history.forked(id, seq).record());
         if let Some(key) = key {
-            bytes = seal::seal_whole(key, &bytes);
+            bytes = seal::seal_whole(key, &bytes)?;
         }
         let tmp = out.with_extension("tmp");
         let mut f = File::create(&tmp)?;
@@ -1567,5 +1575,31 @@ mod tests {
         let again = Archive::in_parent(root.join("a"), None, &parent).unwrap();
         assert_eq!(again.made.load(Ordering::SeqCst), 0);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A seal the system's randomness refused fails the image's put and
+    /// leaves no file behind: no `.tmp` a try, as `backup` leaves none.
+    #[test]
+    fn a_refused_seal_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("fennec-refused-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+        let archive = Archive::with_key(&dir, Some(key)).unwrap();
+        let listed = || -> Vec<_> {
+            fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect()
+        };
+        crate::crypto::without_randomness(|| {
+            for seq in 1..=3 {
+                assert!(archive.add_image(seq, b"an image").is_err());
+            }
+        });
+        assert_eq!(listed(), Vec::<std::ffi::OsString>::new());
+        archive.add_image(1, b"an image").unwrap();
+        assert_eq!(archive.images().unwrap().len(), 1);
+        assert_eq!(listed().len(), 1, "the image alone: {:?}", listed());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
