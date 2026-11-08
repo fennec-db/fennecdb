@@ -59,6 +59,13 @@ serial_new() {
 
 qemu_alive() { kill -0 "$(cat "$VM/qemu.pid" 2>/dev/null)" 2>/dev/null; }
 
+# When the guest last booted, as Windows says; nothing while it is down.
+boot_time() {
+    timeout 30 sshpass -p "$PW" ssh "${SSHO[@]}" -p 2222 Administrator@127.0.0.1 \
+        'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString(\"s\")"' 2>/dev/null |
+        tr -d '\r' | grep -E '^[0-9]{4}-'
+}
+
 # Killed and gone: QEMU's own exit leaves nothing to wait for but the pid.
 qemu_kill() {
     kill -9 "$(cat "$VM/qemu.pid")" 2>/dev/null || true
@@ -168,14 +175,23 @@ install() {
     grep -q 'firstlogon done' "$VM/serial.log" || { echo "the first logon did not finish"; return 1; }
     # A clean restart before any cut: the spike found the boot policy the
     # first logon set gone after a cut 29 s after bcdedit; after a clean
-    # restart it is on disk.
+    # restart it is on disk. Held to a new boot time: run 4's restart
+    # answered SSH again 13 s after `shutdown /r`, where others took 137 s.
+    local booted again=
+    booted=$(boot_time)
     tr=$(now)
     gssh 'shutdown /r /t 0' >/dev/null 2>&1 || true
-    for _ in $(seq 1 60); do
-        timeout 20 sshpass -p "$PW" ssh "${SSHO[@]}" -p 2222 Administrator@127.0.0.1 "echo ok" 2>/dev/null | grep -q ok || break
-        sleep 2
+    for _ in $(seq 1 120); do
+        again=$(boot_time || true)
+        [ -n "$again" ] && [ "$again" != "$booted" ] && break
+        sleep 5
     done
     wait_ssh 600 10 restart 240
+    again=$(boot_time)
+    if [ "$again" = "$booted" ]; then
+        echo "the guest did not restart: it booted at $booted still"
+        return 1
+    fi
     say "TIMING clean_restart_to_first_command=$(( $(now) - tr ))s"
     gssh 'bcdedit /enum {default}' | tr -d '\r' | grep -E 'bootstatuspolicy|recoveryenabled' | sed 's/^/BCD /' || true
 }
@@ -239,6 +255,10 @@ fennec() {
         grep -E 'Cache|Power' | sed 's/^ */DISK /' | while read -r l; do say "$l"; done || true
     serve 0
     "${CLIENT[@]}" setup
+    # The rig's own files on disk before any cut: run 4 lost the token,
+    # copied in a minute before its first cut and never flushed, and the
+    # server rightly refused to listen without one.
+    gssh 'powershell -NoProfile -Command "Write-VolumeCache -DriveLetter C"'
 }
 
 # The server that opened the file after the cut holds its lock: a second
@@ -291,6 +311,10 @@ boot_check() {
     say "FILES cut $n $label: $(tr '\n' ' ' < "$VM/files-$n-$label.txt")"
     if grep -v -x -E 't\.fennec|t\.fennec\.lock|t\.fennec\.beside' "$VM/files-$n-$label.txt"; then
         echo "a file the server does not keep is beside the database"
+        return 1
+    fi
+    if ! gssh 'powershell -NoProfile -Command "if ((Get-Item C:\ci\token).Length -gt 0 -and (Test-Path C:\ci\fennec-server.exe)) { exit 0 } else { exit 1 }"'; then
+        echo "the rig's own files did not survive the cut: the token or fennec-server.exe in C:\\ci"
         return 1
     fi
     serve "$n-$label"
