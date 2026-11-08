@@ -7,7 +7,7 @@ npm, and the `fennec-web` bundle of each release.
 | --- | --- |
 | `fennec.js` | the client: the module's glue, persistence and the sync layer, a dependency-free ES module that imports and re-exports the two below |
 | `builder.js`, `http.js` | the query builder and the HTTP client |
-| `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fennecdb/web/client`, 10 KB brotli in an app's bundle |
+| `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fennecdb/web/client`, 12 KB brotli in an app's bundle |
 | `fennec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fennecdb/web/schema` |
 | `fennec.wasm` | the engine with every index and the schema check: 282 KB brotli |
@@ -52,6 +52,16 @@ A refusal throws a `FennecError` with the server's `status`; a stopped
 (`quota`): `'bytes'` and `'rows'` answer 507, and room is made by deleting;
 `'streams'`, `'requests'`, `'writes'` and `'write_bytes'` answer 429 with
 `retryAfter`, the seconds the server asks to wait.
+
+`connect` sends a request again only where that is safe: one the server
+says ran nothing -- a 503, or a 429 naming its wait -- after that wait, and
+one whose connection was refused; a read, or a write under an
+`idempotencyKey`, after a timeout or a dropped connection too. Three tries
+and 10 s of waits at most (`{ retry: { attempts, maxWait } }`, or `{ retry:
+false }`); `{ retry: { idempotencyKeys: true } }` gives each write sent
+without a key one of the client's own. Every request is given up at its
+`timeout`, 30 000 ms unless given (a stream's at its head), with a
+`DOMException` named `TimeoutError`.
 
 **From npm** the files are the same. A page serves the module and `collate/`
 as static files and hands `Fennec.open` the module's URL -- with Vite, say:

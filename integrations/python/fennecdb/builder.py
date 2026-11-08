@@ -1508,10 +1508,11 @@ def _count(answer: Any) -> int:
 
 def _read_kw(client: Any) -> dict:
     """What a query's read passes its client beside the text: `read=True`
-    to a client reading near (`reads="nearest"`), which marks it for a read
-    replica near it; nothing to any other, a client of one's own making
-    among them."""
-    return {"read": True} if getattr(client, "reads", "home") == "nearest" else {}
+    to `Client` and `AsyncClient` -- one reading near (`reads="nearest"`)
+    marks it for a read replica near it, and either sends it again after a
+    timeout or a dropped connection, as a read may be (`Retry`); nothing to
+    any other, a client of one's own making among them."""
+    return {"read": True} if getattr(client, "reads", None) in ("home", "nearest") else {}
 
 
 class Query(_Builder):

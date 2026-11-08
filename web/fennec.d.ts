@@ -1297,6 +1297,45 @@ export interface HttpOptions {
    * default: every request goes to the tenant's home.
    */
   reads?: 'home' | 'nearest';
+  /**
+   * The milliseconds a request may take, 30 000 unless given -- and the
+   * `wait` that holds it at the server on top; `Infinity` for none. Past
+   * it, the request is given up with a `DOMException` named
+   * `'TimeoutError'`. A stream's (`live`, `subscribe`) is timed to its head
+   * alone: its body runs as long as it is read.
+   */
+  timeout?: number;
+  /**
+   * How a request is sent again; `false`, never. On unless given, with
+   * three tries and 10 000 ms of waits between them at most.
+   */
+  retry?: false | RetryOptions;
+}
+
+/**
+ * What `FennecHttp` sends again, and how often. Only what cannot have run
+ * goes again whatever it is -- a 503, or a quota's 429, naming its wait,
+ * sent after that wait and never sooner; a connection refused -- and what
+ * may run twice -- a read, a write under an `idempotencyKey` -- after a
+ * timeout or a dropped connection too. A refusal naming no wait never goes
+ * again, nor a write without a key once it may have reached the server.
+ */
+export interface RetryOptions {
+  /** Tries at most, the first among them: 3 unless given. */
+  attempts?: number;
+  /**
+   * Milliseconds of waits between the tries at most, 10 000 unless given:
+   * a wait the server names past what is left is not waited, its refusal
+   * thrown at once.
+   */
+  maxWait?: number;
+  /**
+   * `true`: a write sent with no `idempotencyKey` (a `run`, `call` or
+   * `batch` that writes, but a `compact`) is given one of the client's own,
+   * and so may go again after a timeout. Off unless given: each key is a
+   * row the server keeps a day.
+   */
+  idempotencyKeys?: boolean;
 }
 
 /**

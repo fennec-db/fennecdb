@@ -255,7 +255,49 @@ after a timeout cannot write it twice: a repeat gets the first answer back.</p>
   <li><b>One key per write.</b> The same key with a different request is
     refused (422).</li>
   <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
+  <li><b>The JavaScript and Python clients retry for you, by one rule:</b>
+    a request goes again only where it ran nothing — a 503, or a quota's
+    429, naming its wait, sent after that wait and never sooner; a
+    connection refused — or where running it twice is harmless: a read, or
+    a write under a key, after a timeout or a dropped connection too. A
+    write without a key is never sent again once it may have landed.</li>
 </ul>
+
+<details class="deep"><summary>What the clients send again, how often, and when they give a request up</summary>
+<p>The rule is the router's, which sends a request on to a node again only
+where the node cannot have run it or may run it twice. A refusal that names
+no wait — a quota waiting makes no room for, such as a full file's 507 or
+<code>held</code>'s 429, and every other 4xx — is the caller's at once, and
+so is a 500, a write's <code>outcome: "unknown"</code> among them.</p>
+<ul>
+  <li><b>Bounded:</b> three tries at most and 10 s of waits between them:
+    the server's wait — <code>retry_after_ms</code>, to the millisecond,
+    before <code>Retry-After</code> — or 250 ms doubling where it names
+    none, with up to 30% jitter on top. A wait past what is left of the 10
+    s is not waited: the refusal is thrown at once, its
+    <code>retryAfter</code> (<code>retry_after</code> in Python) saying
+    when to come back. Past the tries, the last error, with what the server
+    said.</li>
+  <li><b>A timeout bounds every try</b>, 30 s unless given, from its first
+    byte to its answer's last, and a held write's <code>wait</code> on top;
+    a stream's (<code>live</code>, <code>subscribe</code>) is timed to its
+    head alone. A JavaScript caller's <code>signal</code> still gives a
+    request up sooner, and nothing it gave up is sent again.</li>
+  <li><b>Keys the client makes are asked for:</b>
+    <code>connect(url, { retry: { idempotencyKeys: true } })</code>, or
+    <code>Retry(idempotency_keys=True)</code> in Python, gives each write
+    sent without a key one of the client's own, so it too goes again after
+    a timeout. Off unless asked: each key is a row the server keeps for
+    <code>--idempotency-ttl</code>, written in the write's block (16 200
+    single puts a second against 18 300 without), and a
+    <code>compact</code> takes none.</li>
+  <li><b>Off, or wider:</b> <code>{ retry: false }</code> and
+    <code>retry=False</code> send nothing again; <code>{ retry: { attempts,
+    maxWait } }</code> and <code>Retry(attempts, max_wait)</code> set the
+    bounds. The Go, .NET, Swift, Kotlin and Dart clients do not retry yet:
+    they hand every answer and error to the caller as before.</li>
+</ul>
+</details>
 
 <details class="deep"><summary>How an Idempotency-Key replays, and what it costs</summary>
 <p>A <code>put</code> with no id makes a row each time it runs, so a client
