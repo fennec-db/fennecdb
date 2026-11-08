@@ -215,7 +215,7 @@ import { Fennec } from './fennec.js';
 const db = await Fennec.open('./fennec.wasm');
 ```
 
-338 KB of gzipped WebAssembly and a 66 KB gzipped client — no wasm-bindgen, no
+338 KB of gzipped WebAssembly and a 67 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fennecdb/web/client`, 10 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fennecdb.com/docs/javascript#packages)). With live
@@ -352,7 +352,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64 and arm64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 338 KB gzip wasm + 66 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
+| **Runtime size** | 338 KB gzip wasm + 67 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 

@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 56 KB brotli as they are served with no build step; a bundler keeps
+imports, 57 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -82,7 +82,7 @@ re-exports the builder (<code>builder.js</code>) and the HTTP client
 its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
-10 KB brotli through it and to 13 KB through <code>@fennecdb/web</code>,
+10 KB brotli through it and to 14 KB through <code>@fennecdb/web</code>,
 whose <code>Fennec</code> class and its glue a bundler cannot drop (esbuild,
 minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
