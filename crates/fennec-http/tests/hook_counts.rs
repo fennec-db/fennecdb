@@ -18,7 +18,7 @@ use fennec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const ADMIN: &str = "adm";
 const SECRET: &str = "whsec_acme";
@@ -111,9 +111,9 @@ fn an_events_statements_are_counted_and_traced_by_name_a_tenant_s_apart() {
     fennec_http::trace::install(settings).unwrap();
 
     let dir = std::env::temp_dir().join(format!(
-        "fennec-hook-counts-{}-{:?}",
+        "fennec-hook-counts-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let tenants = Arc::new(Tenants::new(&dir).unwrap());
     let cfg = Config {

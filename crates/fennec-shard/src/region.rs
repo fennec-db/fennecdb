@@ -178,7 +178,7 @@ impl Router {
         let Some(region) = cfg.region.clone() else {
             return Err("a region's router names its region (--region)".into());
         };
-        if fennec_http::tenants::check_name(&region).is_err() {
+        if !fennec_http::tenants::shaped(&region) {
             return Err(format!(
                 "--region `{region}`: a region is named [a-z0-9_-], 1 to {} characters",
                 fennec_http::tenants::MAX_NAME
@@ -821,7 +821,7 @@ impl Router {
     /// directory, kept by the first of `routers` and followed by the rest;
     /// `DELETE`: it keeps none any more. The global router's.
     fn set_region_of(&self, req: &Request, region: &str) -> Outcome<Response> {
-        if region.is_empty() || fennec_http::tenants::check_name(region).is_err() {
+        if !fennec_http::tenants::shaped(region) {
             return Err(Fail(
                 400,
                 format!(

@@ -624,7 +624,24 @@ mod record {
             at: *mut Overlapped,
         ) -> i32;
         fn GetFileInformationByHandle(file: *mut c_void, info: *mut Info) -> i32;
+        fn GetFileInformationByHandleEx(
+            file: *mut c_void,
+            class: i32,
+            info: *mut c_void,
+            size: u32,
+        ) -> i32;
     }
+
+    /// `FILE_ID_INFO`: the volume's serial and the file's 128-bit id.
+    #[repr(C)]
+    #[derive(Default)]
+    struct IdInfo {
+        volume: u64,
+        id: [u8; 16],
+    }
+
+    /// `FileIdInfo`, of `FILE_INFO_BY_HANDLE_CLASS`.
+    const FILE_ID_INFO: i32 = 18;
 
     const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
     const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
@@ -682,6 +699,57 @@ mod record {
         let index = (u64::from(info.index_high) << 32) | u64::from(info.index_low);
         Ok((u64::from(info.volume), index))
     }
+
+    /// The file's volume, its id there and its creation time, read through
+    /// `file` alone. The id is `FileIdInfo`'s 128 bits: ReFS's ids are 128,
+    /// and the 64-bit index [`id`] reads is not promised unique there. On
+    /// NTFS the 128 bits are the index, widened; where a file system
+    /// answers none, the index is taken.
+    pub fn named(file: &File) -> std::io::Result<(u64, u128, std::time::SystemTime)> {
+        let mut info = Info::default();
+        // SAFETY: as in `id`.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut wide = IdInfo::default();
+        // SAFETY: the handle is the file's, `wide` the struct `FileIdInfo`
+        // fills, its size given, and both outlive the call.
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_ID_INFO,
+                (&mut wide as *mut IdInfo).cast(),
+                std::mem::size_of::<IdInfo>() as u32,
+            )
+        } != 0;
+        let id = if read {
+            u128::from_le_bytes(wide.id)
+        } else {
+            u128::from((u64::from(info.index_high) << 32) | u64::from(info.index_low))
+        };
+        // `FILETIME`: 100 ns intervals since 1601; one before 1970, or 0
+        // where none is kept, is the epoch, which binds no birth time.
+        let ticks = (u64::from(info.created[1]) << 32) | u64::from(info.created[0]);
+        let since = ticks.saturating_sub(116_444_736_000_000_000);
+        let since = std::time::Duration::new(since / 10_000_000, (since % 10_000_000) as u32 * 100);
+        Ok((u64::from(info.volume), id, std::time::UNIX_EPOCH + since))
+    }
+}
+
+/// The file at `path` as Windows names it -- its volume's serial and its
+/// 128-bit id there -- where a Unix reads a device and an inode, and its
+/// creation time, through one handle opened for no access, which no other
+/// handle's sharing refuses. A tenant's identity binds its file by it
+/// (`fennec_http::instance`): a creation time alone names no file on NTFS,
+/// which gives a name made again within 15 s, a rename over it too, its
+/// old file's (tunneling). FAT32's and exFAT's index is a directory
+/// entry's place, which a file made at the name after a delete may take,
+/// tunneled its creation time too: there it names no file for certain.
+#[cfg(windows)]
+pub fn file_id(path: &std::path::Path) -> std::io::Result<(u64, u128, std::time::SystemTime)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().access_mode(0).open(path)?;
+    record::named(&file)
 }
 
 #[cfg(test)]
@@ -823,23 +891,36 @@ mod tests {
     /// A link to a database -- absolute, relative, a link to a link, one
     /// whose file is not made yet -- and a directory reached through a
     /// link take the target's lock: named as written, a shell through a
-    /// link wrote beside a server.
-    #[cfg(unix)]
+    /// link wrote beside a server. On Windows a link is a file's or a
+    /// directory's, and making one needs `SeCreateSymbolicLinkPrivilege`,
+    /// which CI's account holds and a developer's without Developer Mode
+    /// may not: there the test says so (docs/design/windows.md, 7c).
     #[test]
     fn a_file_through_a_link_takes_its_targets_lock() {
-        use std::os::unix::fs::symlink;
+        #[cfg(unix)]
+        use std::os::unix::fs::{symlink, symlink as symlink_dir};
+        #[cfg(windows)]
+        use std::os::windows::fs::{symlink_dir, symlink_file as symlink};
         let p = scratch("target.fennec");
         std::fs::write(&p, b"").unwrap();
         let dir = std::path::Path::new(&p).parent().unwrap().to_path_buf();
         let at = |n: &str| dir.join(n);
         let links = ["link.fennec", "relative.fennec", "chain.fennec"];
-        for n in links.iter().chain(&["linked-dir", "dangling.fennec"]) {
+        for n in links.iter().chain(&["dangling.fennec"]) {
             let _ = std::fs::remove_file(at(n));
         }
-        symlink(&p, at("link.fennec")).unwrap();
+        // A link to a directory is a file on a Unix, a directory on Windows.
+        let _ = std::fs::remove_file(at("linked-dir"));
+        let _ = std::fs::remove_dir(at("linked-dir"));
+        if let Err(e) = symlink(&p, at("link.fennec")) {
+            // ERROR_PRIVILEGE_NOT_HELD
+            assert!(cfg!(windows) && e.raw_os_error() == Some(1314), "{e}");
+            println!("no symbolic link made here, the privilege not held: {e}");
+            return;
+        }
         symlink("target.fennec", at("relative.fennec")).unwrap();
         symlink("link.fennec", at("chain.fennec")).unwrap();
-        symlink(&dir, at("linked-dir")).unwrap();
+        symlink_dir(&dir, at("linked-dir")).unwrap();
         symlink("not-yet.fennec", at("dangling.fennec")).unwrap();
         for n in links {
             assert_eq!(lock_path(at(n)), lock_path(&p), "{n}");
@@ -1002,5 +1083,32 @@ mod tests {
         assert!(matches!(hold(&p), Err(Refused::Held)));
         drop(s);
         drop(hold(&p).unwrap());
+    }
+
+    /// What a tenant's identity binds a file by on Windows: two names of
+    /// one file -- a hard link -- read alike, another file another id on
+    /// the volume, and the creation time read through the same handle the
+    /// one std reads.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_s_id_names_it_and_no_other() {
+        let p = scratch("named.fennec");
+        let path = std::path::Path::new(&p);
+        let (link, other) = (path.with_extension("link"), path.with_extension("other"));
+        let _ = std::fs::remove_file(&link);
+        std::fs::write(path, b"one").unwrap();
+        std::fs::write(&other, b"one").unwrap();
+        std::fs::hard_link(path, &link).unwrap();
+        let named = file_id(path).unwrap();
+        assert_eq!(file_id(&link).unwrap(), named);
+        let (volume, id, created) = named;
+        let (on, another, _) = file_id(&other).unwrap();
+        assert_eq!(on, volume);
+        assert_ne!(another, id);
+        assert!(created > std::time::UNIX_EPOCH);
+        assert_eq!(std::fs::metadata(path).unwrap().created().unwrap(), created);
+        for f in [path, &link, &other] {
+            std::fs::remove_file(f).unwrap();
+        }
     }
 }

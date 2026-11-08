@@ -88,9 +88,16 @@ pub(crate) fn path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.instance"))
 }
 
-/// What names the file a sidecar was written for: its device, inode and
-/// birth time in nanoseconds, 0 where its file system keeps none.
-pub(crate) type Binding = (u64, u64, u64);
+/// What names the file a sidecar was written for: its device and inode (on
+/// Windows its volume and id), its birth time in ns, 0 where none kept.
+pub(crate) type Binding = (Word, Word, Word);
+
+/// A binding's number: 64 bits, on Windows 128 -- a file's id there is
+/// `FileIdInfo`'s, ReFS's ids 128 bits (`fennec_abi::lock::file_id`).
+#[cfg(not(windows))]
+pub(crate) type Word = u64;
+#[cfg(windows)]
+pub(crate) type Word = u128;
 
 /// A file's birth time in nanoseconds, 0 where its file system keeps none
 /// -- and on Linux wherever std asks no `statx`, which it asks under glibc
@@ -109,12 +116,20 @@ fn birth(created: io::Result<std::time::SystemTime>) -> u64 {
         .map_or(0, ns)
 }
 
-/// `file`'s binding as it stands: one `stat`, all an open pays.
-/// `Unsupported` where neither an inode nor a birth time is kept, which
-/// would name every file.
+/// `file`'s binding as it stands: one `stat`, on Windows one open, its id
+/// and creation time read through it. `Unsupported` where neither an inode
+/// nor a birth time is kept, which would name every file.
 pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
+    #[cfg(not(windows))]
     let m = std::fs::metadata(file)?;
+    #[cfg(not(windows))]
     let born = birth(m.created());
+    // `metadata` there was an open of its own, and `file_id` another.
+    #[cfg(windows)]
+    let (dev, ino, born) = {
+        let (volume, id, created) = fennec_abi::lock::file_id(file)?;
+        (Word::from(volume), id, Word::from(birth(Ok(created))))
+    };
     #[cfg(test)]
     let born = if tests::NO_BIRTH.with(|c| c.get()) {
         0
@@ -126,8 +141,6 @@ pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
         use std::os::unix::fs::MetadataExt;
         (m.dev(), m.ino())
     };
-    #[cfg(not(unix))]
-    let (dev, ino) = (0, 0);
     if ino == 0 && born == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -151,7 +164,7 @@ fn read(dir: &Path, name: &str) -> Option<(u64, Binding, bool)> {
         return None;
     }
     let id = parse(f.next()?)?;
-    let mut n = || f.next()?.parse::<u64>().ok();
+    let mut n = || f.next()?.parse::<Word>().ok();
     // Neither an inode nor a birth time names every file ([`binding`]).
     let bound = Some((n()?, n()?, n()?)).filter(|b| b.1 != 0 || b.2 != 0)?;
     let following = match f.next()? {
@@ -434,7 +447,8 @@ mod tests {
         assert_eq!(birth(unsupported()), 0);
         assert_eq!(birth(Ok(UNIX_EPOCH)), 0);
         assert_eq!(birth(Ok(UNIX_EPOCH - Duration::from_secs(1))), 0);
-        assert_eq!(birth(Ok(UNIX_EPOCH + Duration::from_nanos(7))), 7);
+        // Hundreds: Windows' clock counts 100 ns, and 7 ns there is none.
+        assert_eq!(birth(Ok(UNIX_EPOCH + Duration::from_nanos(700))), 700);
         NO_BIRTH.with(|c| c.set(true));
         let dir = scratch("unborn");
         let file = dir.join("acme.fennec");
@@ -462,10 +476,20 @@ mod tests {
         closing(&dir, "acme", Some(now), &file);
         assert!(!path(&dir, "acme").exists());
         // Through a link: beside the link, and beside the file it leads to.
+        // On Windows a file's link needs `SeCreateSymbolicLinkPrivilege`,
+        // which CI's account holds and a developer's may not: passed over
+        // there (docs/design/windows.md, 7c).
+        let linked = dir.join("linked.fennec");
         #[cfg(unix)]
-        {
-            let linked = dir.join("linked.fennec");
-            std::os::unix::fs::symlink(&file, &linked).unwrap();
+        let made = std::os::unix::fs::symlink(&file, &linked);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&file, &linked);
+        if let Err(e) = &made {
+            // ERROR_PRIVILEGE_NOT_HELD
+            assert!(cfg!(windows) && e.raw_os_error() == Some(1314), "{e}");
+            println!("no symbolic link made here, the privilege not held: {e}");
+        }
+        if made.is_ok() {
             write(&dir, "acme", 6, now, false).unwrap();
             write(&dir, "linked", 6, now, false).unwrap();
             put_away_beside(&linked).unwrap();

@@ -31,8 +31,8 @@ use crate::sse::Hub;
 use fennec_core::history::History;
 use fennec_core::prelude::*;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -2526,7 +2526,7 @@ impl Tenants {
         Ok(())
     }
 
-    /// Every tenant on disk, sorted.
+    /// Every tenant on disk, sorted; a device's name passed over, said.
     pub fn names(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
@@ -2534,7 +2534,7 @@ impl Tenants {
                 let file = e.file_name();
                 let Some(file) = file.to_str() else { continue };
                 if let Some(name) = file.strip_suffix(".fennec") {
-                    if check_name(name).is_ok() {
+                    if listed(name, &self.dir, file) {
                         out.push(name.to_string());
                     }
                 }
@@ -2880,22 +2880,135 @@ fn frozen(name: &str) -> Refused {
     )
 }
 
-/// `[a-z0-9_-]{1,64}`: safe as a file name everywhere, no traversal, and
-/// the same name on a case-insensitive file system.
+/// `[a-z0-9_-]{1,64}`, and no device's name ([`a_device`]): safe as a file
+/// name everywhere, no traversal, and the same name on a case-insensitive
+/// file system.
 pub fn check_name(name: &str) -> std::result::Result<(), Refused> {
-    let ok = !name.is_empty()
+    if !shaped(name) {
+        return Err(Refused(
+            400,
+            format!("invalid tenant name `{name}`: [a-z0-9_-], 1 to {MAX_NAME} characters"),
+        ));
+    }
+    no_device(name)
+}
+
+/// [`check_name`]'s device half, out of line with its refusal: inlined, it
+/// was 16 to 100 bytes more in each of the twenty-odd callers `check_name`
+/// is inlined into. Each pays a call.
+#[inline(never)]
+fn no_device(name: &str) -> std::result::Result<(), Refused> {
+    if !a_device(name) {
+        return Ok(());
+    }
+    Err(Refused(
+        400,
+        format!(
+            "invalid tenant name `{name}`: a device's name on Windows (con, prn, aux, nul, com1 \
+             to com9, lpt1 to lpt9), refused on every system"
+        ),
+    ))
+}
+
+/// `[a-z0-9_-]`, 1 to [`MAX_NAME`] characters: a tenant's name's shape,
+/// and the whole rule for a region's and a zone's, which name no file.
+pub fn shaped(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= MAX_NAME
         && name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    if ok {
-        Ok(())
-    } else {
-        Err(Refused(
-            400,
-            format!("invalid tenant name `{name}`: [a-z0-9_-], 1 to {MAX_NAME} characters"),
-        ))
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Whether Windows may read `name` as a device rather than a file: `con`,
+/// `prn`, `aux`, `nul`, `com1` to `com9` and `lpt1` to `lpt9`, in any case,
+/// with any extension before Windows 11 (`T\con.fennec` the console there,
+/// `T\com1.hooks` a serial port). Server 2025 reads a name alone so, and in
+/// a full path `nul` alone (docs/design/windows.md, 7b, settled on CI).
+/// Refused on every system, not on Windows alone: a node's directory and
+/// its archive made on Linux restore on any Windows, the naming page's
+/// rule the one to hold. The superscript digits Windows reads as digits
+/// too (`com¹`) are no tenant's: [`shaped`] refuses them.
+///
+/// One call to `device`, out of line.
+pub fn a_device(name: &str) -> bool {
+    device(name) != 0
+}
+
+/// The device `name` reads as, a bit of its own of 22, or 0 for none:
+/// what [`passed_over`] says each once by. The stem -- three or four bytes
+/// before the end or a `.` -- is read as one word, a short one ended with a
+/// space, each byte's 0x20 set, which lowercases a letter and leaves a
+/// digit, a space and a dot as they are: one word compared, where the stem
+/// lowercased byte by byte and matched was a decision tree of 420 bytes,
+/// and split and compared word by word 852. A byte below 0x20 folds onto
+/// one above, which no name [`shaped`] holds; a NUL so ends a stem, as
+/// Windows ends a name at one, and a space too, as Windows trims it.
+#[inline(never)]
+fn device(name: &str) -> u32 {
+    const fn word(w: [u8; 4]) -> u32 {
+        u32::from_le_bytes(w)
     }
+    const NAMED: [u32; 4] = [
+        word(*b"con "),
+        word(*b"prn "),
+        word(*b"aux "),
+        word(*b"nul "),
+    ];
+    const NUMBERED: [u32; 2] = [word(*b"com\0"), word(*b"lpt\0")];
+    let stem = match *name.as_bytes() {
+        [a, b, c] | [a, b, c, b'.', ..] => [a, b, c, b' '],
+        [a, b, c, d] | [a, b, c, d, b'.', ..] => [a, b, c, d],
+        _ => return 0,
+    };
+    let w = word(stem) | 0x2020_2020;
+    if let Some(i) = NAMED.iter().position(|&n| n == w) {
+        return 1 << i;
+    }
+    let digit = (w >> 24).wrapping_sub(u32::from(b'1'));
+    match NUMBERED.iter().position(|&n| n == w & 0x00ff_ffff) {
+        Some(i) if digit < 9 => 1 << (4 + 9 * i as u32 + digit),
+        _ => 0,
+    }
+}
+
+/// Whether `name`, read off `file` in `dir` -- a node's directory or an
+/// archive's -- is a tenant's to list: [`check_name`]'s rule, no refusal
+/// written. A device's name, which a node on a Unix took before the rule,
+/// is passed over and said ([`passed_over`]): its tenant is out of reach
+/// until renamed by hand, and a node that only skipped it said nothing.
+pub fn listed(name: &str, dir: &Path, file: &str) -> bool {
+    if !shaped(name) {
+        return false;
+    }
+    let device = device(name);
+    if device != 0 {
+        passed_over(device, dir, file, name);
+        return false;
+    }
+    true
+}
+
+/// Says a device-named `file` in `dir` is passed over, once a process for
+/// each device: the listings it is met by run at every stats request and
+/// archive round, and the way back it names covers every file of the name.
+/// A bit of a word, where a list of the files said, behind a mutex, was
+/// 768 bytes of the server.
+#[cold]
+#[inline(never)]
+fn passed_over(device: u32, dir: &Path, file: &str, name: &str) {
+    static SAID: AtomicU32 = AtomicU32::new(0);
+    if SAID.fetch_or(device, Ordering::Relaxed) & device != 0 {
+        return;
+    }
+    crate::log!(
+        "{}{MAIN_SEPARATOR}{file}: `{name}` is a device's name on Windows, no tenant's on any \
+         system since: passed over, its tenant out of reach. With the server stopped, rename it \
+         and whatever beside it is named `{name}.*` by hand to a name a tenant may take, and \
+         remove `schedules.hint` beside it if there is one, for the node to learn its schedules \
+         again (docs: sharding-reference.html)",
+        dir.display()
+    );
 }
 
 #[cfg(test)]
@@ -2904,9 +3017,9 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-registry-{tag}-{}-{:?}",
+            "fennec-registry-{tag}-{}-{}",
             std::process::id(),
-            Instant::now()
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
@@ -3319,17 +3432,39 @@ mod tests {
     /// A delete whose file could not be removed is no departure: noted as
     /// one, the archive said the tenant went and came back 62 ms later, and
     /// a restore to a moment between left out a tenant that never left.
-    #[cfg(unix)]
+    /// Failed on a Unix by the directory's mode 0555; on Windows, where a
+    /// directory's read-only attribute keeps no file in it, by a handle on
+    /// the file that does not share its deletion -- an indexer's, a backup
+    /// agent's.
     #[test]
     fn a_delete_that_fails_is_no_departure() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = scratch("delete-fails");
         let reg = replicating(&dir);
         drop(reg.create("t").unwrap());
-        let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m));
+        #[cfg(unix)]
+        let mode = |m| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m))
+        };
+        #[cfg(unix)]
         mode(0o555).unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE: the tenant's own handles
+        // write, and a removal asks a share of deletion.
+        #[cfg(windows)]
+        let held = std::os::windows::fs::OpenOptionsExt::share_mode(
+            std::fs::OpenOptions::new().read(true),
+            1 | 2,
+        )
+        .open(dir.join("t.fennec"))
+        .unwrap();
         let deleted = reg.delete("t");
+        #[cfg(unix)]
         mode(0o755).unwrap();
+        #[cfg(windows)]
+        {
+            drop(held);
+            assert!(deleted.is_err(), "removed under a handle not sharing it");
+        }
         // Run as root, the directory refuses nothing: no failure to hold.
         if deleted.is_err() {
             assert!(dir.join("t.fennec").exists());
@@ -3347,5 +3482,177 @@ mod tests {
         assert!(check_name("a/b").is_err());
         assert!(check_name("Acme").is_err());
         assert!(check_name(&"a".repeat(MAX_NAME + 1)).is_err());
+    }
+
+    /// A device's name is refused as a tenant's on every system, the rule
+    /// in any case and with any extension, as Windows reads one; a name
+    /// that only begins or ends like one is a tenant's. A region and a zone
+    /// name no file, and keep the shape alone.
+    #[test]
+    fn a_device_s_name_is_no_tenant_s() {
+        let mut devices = vec!["con", "prn", "aux", "nul"];
+        let numbered: Vec<String> = ["com", "lpt"]
+            .iter()
+            .flat_map(|p| (1..=9).map(move |n| format!("{p}{n}")))
+            .collect();
+        devices.extend(numbered.iter().map(String::as_str));
+        assert_eq!(devices.len(), 22);
+        // A bit each, which the log says each device once by.
+        let bits = devices.iter().fold(0u32, |all, d| {
+            let bit = device(d);
+            assert!(bit.count_ones() == 1 && all & bit == 0, "{d}");
+            all | bit
+        });
+        assert_eq!(bits.count_ones(), 22);
+        for d in &devices {
+            let refused = check_name(d).unwrap_err();
+            assert_eq!(refused.0, 400);
+            assert!(
+                refused.1.contains("a device's name on Windows"),
+                "{}",
+                refused.1
+            );
+            assert!(shaped(d), "{d}");
+            for spelled in [
+                d.to_uppercase(),
+                format!("{d}.fennec"),
+                format!("{d}.tar.gz"),
+            ] {
+                assert!(a_device(&spelled), "{spelled}");
+                assert!(check_name(&spelled).is_err(), "{spelled}");
+            }
+        }
+        for tenant in [
+            "console",
+            "conf",
+            "co",
+            "nul-1",
+            "auxiliary",
+            "prn_",
+            "com",
+            "com0",
+            "com10",
+            "lpt0",
+            "lpt10",
+            "lptx",
+            "acom1",
+            "con1",
+            "xnul",
+        ] {
+            assert!(!a_device(tenant), "{tenant}");
+            assert!(check_name(tenant).is_ok(), "{tenant}");
+        }
+        assert!(!a_device("") && !a_device("."));
+        for not in [
+            "co",
+            "con1.x",
+            "co.n",
+            "comx",
+            "com1x",
+            "xcon",
+            "c",
+            "nul\u{0}x",
+        ] {
+            assert!(!a_device(not), "{not:?}");
+        }
+        assert!(a_device("con.") && a_device("NUL.tar.gz") && a_device("Lpt9"));
+        // Ended as Windows ends a name: at a NUL, and a space trimmed.
+        assert!(a_device("con\u{0}") && a_device("Aux ") && a_device("prn\u{0}.x"));
+    }
+
+    /// A tenant a node on a Unix took before the rule -- `con.fennec` --
+    /// is passed over by the listings, said, and refused as a request's;
+    /// the tenants beside it are listed still. Made on a Unix alone: a
+    /// Windows before 11 opens the console for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_s_file_from_before_the_rule_is_passed_over() {
+        let dir = scratch("device-file");
+        let reg = Tenants::new(&dir).unwrap();
+        drop(reg.create("acme").unwrap());
+        std::fs::write(dir.join("con.fennec"), b"").unwrap();
+        for _ in 0..2 {
+            assert_eq!(reg.names(), ["acme"]);
+        }
+        assert!(listed("acme", &dir, "acme.fennec"));
+        assert!(!listed("con", &dir, "con.fennec") && !listed("con", &dir, "con.hooks"));
+        assert!(!listed("Acme", &dir, "Acme.fennec"));
+        assert_eq!(reg.get("con").map(|_| ()).unwrap_err().0, 400);
+        assert!(dir.join("con.fennec").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What Windows makes of a device's name, printed for the design to
+    /// say (docs/design/windows.md, 7b): the full path a name in a node's
+    /// directory and the name alone are read as -- `\\.\CON` where the
+    /// system takes it for the device -- and whether an open of the first
+    /// made a file. The refusal does not rest on it: it holds on every
+    /// system so a directory restores on any Windows, and a name alone is
+    /// the device on every one, `nul` asserted so.
+    #[cfg(windows)]
+    #[test]
+    fn what_windows_makes_of_a_device_s_name() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetFullPathNameW(name: *const u16, len: u32, buf: *mut u16, part: *mut u16) -> u32;
+        }
+        let full = |name: &std::ffi::OsStr| {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = name.encode_wide().chain([0]).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: a NUL-ended name and a buffer of 1 024 units.
+            let n = unsafe {
+                GetFullPathNameW(wide.as_ptr(), 1024, buf.as_mut_ptr(), std::ptr::null_mut())
+            };
+            String::from_utf16_lossy(&buf[..n as usize])
+        };
+        let dir = scratch("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        let names: Vec<String> = ["con", "prn", "aux", "nul"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(
+                ["com", "lpt"]
+                    .iter()
+                    .flat_map(|p| (1..=9).map(move |n| format!("{p}{n}"))),
+            )
+            .collect();
+        let listed = |name: &str| {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .any(|e| e.unwrap().file_name().eq_ignore_ascii_case(name))
+        };
+        let mut said = Vec::new();
+        for name in &names {
+            for form in [name.clone(), format!("{name}.fennec")] {
+                let at = dir.join(&form);
+                let opened = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&at);
+                let file = listed(&form);
+                said.push(format!(
+                    "{form}: in a directory {} -- {}; alone {}",
+                    full(at.as_os_str()),
+                    match (&opened, file) {
+                        (_, true) => "a file".to_string(),
+                        (Ok(_), false) => "opened, no file".to_string(),
+                        (Err(e), false) => format!("refused, no file ({e})"),
+                    },
+                    full(form.as_ref()),
+                ));
+                drop(opened);
+                if file {
+                    std::fs::remove_file(&at).unwrap();
+                }
+            }
+        }
+        println!("a device's name on this Windows:\n{}", said.join("\n"));
+        assert!(
+            full("nul".as_ref()).eq_ignore_ascii_case(r"\\.\nul"),
+            "{said:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

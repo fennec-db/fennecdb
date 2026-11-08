@@ -1016,7 +1016,13 @@ on a new machine given the node's address, restore the node's archive into
 `FENNEC_DIR` before `fennec-node` first starts (`fennec restore --tenants
 <archive> <dir>`, to the archive's end); what the archive had not received
 is lost, and each copy that does not lead from a restored primary is sent
-an image.
+an image. On a Windows node, run `fennec restore`, `unseal` or `backup
+--force` over the node's directory as the node's account: each puts away a
+tenant's `<t>.hooks` before it replaces the file, an ACL granting that
+account alone, and another account is refused it -- and the command with it
+-- unless it holds Full Control of the directory (Modify does not delete a
+file the folder's rules do not reach), where on Linux the directory's write
+permission is enough.
 
 **The weekly restore**, from the bucket and on a machine of no role, as a
 disaster would have it -- the archiver's own disk proves nothing about the

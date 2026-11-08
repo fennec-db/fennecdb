@@ -1069,7 +1069,8 @@ mod tests {
     #[test]
     fn overflow_threshold_matches_the_format() {
         let p = Pager {
-            file: File::open("/dev/null").unwrap(),
+            // The null device: `NUL` on Windows, read as the device alone.
+            file: File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap(),
             page_size: 4096,
             usable: 4096,
             encoding: Encoding::Utf8,

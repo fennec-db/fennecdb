@@ -195,11 +195,12 @@ second slice, in views laid end to end in a placeholder, and a view
 refuses no rename over its file, so mapping needed no other swap; a
 compact and a `create index` run beside the database there too
 (`Database::maintain`), and the page cache's room is
-`GlobalMemoryStatusEx`'s. What Windows lacks besides, none of it the
-single writer's: the sync log (Linux and Android alone by design),
-`fennec backup`'s key file made `0600`, `SIGTERM` and `SIGHUP` (Ctrl+C is
-the CRT's `SIGINT`, the one shutdown), and a release build. Their design,
-in slices, is [windows.md](windows.md).
+`GlobalMemoryStatusEx`'s. The one shutdown takes the console's events
+there (the third slice), and a secret's file -- `fennec key`'s, a tenant's
+`<t>.hooks` -- is its owner's alone by a protected DACL where a Unix makes
+it `0600` (the fourth). What Windows lacks besides, none of it the single
+writer's: the sync log (Linux and Android alone by design) and a release
+build. Their design, in slices, is [windows.md](windows.md).
 
 `fennec restore` and `fennec backup` into a file renamed theirs over
 whatever had the name, a database written since included, and exited 0:

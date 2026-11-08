@@ -98,7 +98,7 @@ pub fn from_flags(cert: Option<&str>, key: Option<&str>) -> Result<Option<Arc<Tl
         (Some(cert), Some(key)) => {
             let tls = Tls::from_pem_files(cert.as_ref(), key.as_ref())
                 .map_err(|e| format!("--tls-cert and --tls-key: {e}"))?;
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             warn_if_open(key);
             Ok(Some(Arc::new(tls)))
         }
@@ -801,6 +801,8 @@ use std::os::fd as sock;
 #[cfg(all(feature = "tls", windows))]
 #[path = "conn/windows.rs"]
 mod sock;
+#[cfg(all(feature = "tls", windows))]
+use sock::warn_if_open;
 
 #[cfg(test)]
 mod tests {

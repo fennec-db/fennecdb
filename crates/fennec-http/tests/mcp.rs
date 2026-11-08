@@ -12,7 +12,7 @@ use fennec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 const ROOT: &str = "root-token";
@@ -1746,9 +1746,9 @@ fn a_caller_past_its_rate_is_told_when_to_call_again() {
 fn a_tenant_s_endpoint_is_under_its_prefix_and_bound_to_its_token() {
     fennec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
-        "fennec-mcp-tenants-{}-{:?}",
+        "fennec-mcp-tenants-{}-{}",
         std::process::id(),
-        Instant::now()
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     let tenants = Arc::new(Tenants::new(&dir).unwrap());
     for name in ["acme", "globex"] {
