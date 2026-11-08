@@ -1,6 +1,6 @@
 <!--
 title: HTTP reference — fennecdb
-description: Every route of the HTTP endpoint, the filters of the query string, vector search and lookups over REST, the headers that hold a write or mark a read, the statuses a refusal answers with, subscriptions, polling and the change stream.
+description: Every route of the HTTP endpoint and its OpenAPI 3.1 document, the filters of the query string, vector search and lookups over REST, the headers that hold a write or mark a read, the statuses a refusal answers with, subscriptions, polling and the change stream.
 -->
 
 <h1>HTTP reference</h1>
@@ -43,7 +43,9 @@ GET    /_whoami                 who the server takes the token for, the roles it
 GET    /_schema                 the schema as a description (Schema in code), each collection's bound statements beside it, then the scheduled ones as schedules and the webhook consumers as hooks; ?as=fennecql: as its statements, the bound, the scheduled and the webhook ones after them
 POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
 POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
-POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
+POST   /_mcp                    MCP for agents (--mcp): one JSON-RPC message a request
+GET    /_health                 {"ok": true}, with no token and no lock: a container's health check
+GET    /_openapi.json           the OpenAPI 3.1 document of every route here, with no token (<a href="#openapi">below</a>)
 </pre>
 
 <details class="deep"><summary>The _replication, _schema and _metrics routes</summary>
@@ -131,6 +133,41 @@ keeps it out of the way of a collection called <code>metrics</code>; a
 collection called <code>_metrics</code> cannot be read over
 <code>GET</code>.</p>
 </details>
+
+<h2 id="openapi">The OpenAPI document</h2>
+
+<p><code>GET /_openapi.json</code> is an OpenAPI 3.1 description of every
+route above: its parameters, the query string's clauses, each body, each
+answer and its status, the refusal's <code>{"error": ...}</code> and a
+503's <code>retry_after</code>, the headers that carry meaning
+(<code>Idempotency-Key</code>, <code>Fennec-Wait</code>,
+<code>Fennec-After</code>, <code>Fennec-Read</code>,
+<code>X-Request-Id</code>, <code>Retry-After</code>), the tokens a route
+takes — the server's, a scoped JSON Web Token, a node's admin token, the
+replication token — and a subscription as <code>text/event-stream</code>. It
+asks no token: it is the binary's, the same for every server of its kind
+whatever its flags or data, so a route served only under a flag says so
+(<code>x-fennec-flag</code>). A file's server describes its routes; a tenant
+node (<code>--dir</code>) its own at the root, <code>/_admin/</code> marked
+with the admin token, and each tenant's below <code>/t/{tenant}</code>;
+<code>fennec-shard</code> what a tenant's client calls through it, the
+tenant's routes alone (its <code>/_shard/</code> routes are in the <a
+href="/docs/sharding-reference">sharding reference</a>). Every route the
+server answers is in it, and nothing else: CI sends each operation of the
+document to a running server and finds each route of the server's code in
+the document.</p>
+
+<pre data-lang="bash">curl -s http://127.0.0.1:8080/_openapi.json -o fennecdb.json
+
+# Swagger UI on the document (a page on another origin reads it with --http-cors)
+docker run -p 8081:8080 -e SWAGGER_JSON_URL=http://127.0.0.1:8080/_openapi.json swaggerapi/swagger-ui
+
+# a client in any language OpenAPI Generator writes
+npx @openapitools/openapi-generator-cli generate -i fennecdb.json -g python -o fennec-client</pre>
+
+<p>The official SDKs (<a href="/docs/languages">Languages</a>) speak the same
+routes with the query builder and the sync on top; a generated client is
+for a language they do not cover, or a contract test.</p>
 
 
 <h2>Filters</h2>

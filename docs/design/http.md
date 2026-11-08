@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, and connections no thread is made for and chunked bodies (both added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), and the OpenAPI document (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -1519,3 +1519,98 @@ bytes (+291 KB: rustls's client half, webpki's verifier and Mozilla's roots,
 the router's first dial over TLS), `fennec-server` and `fennec` one 16 KB
 page each (6 064 144 -> 6 080 672, 4 459 632 -> 4 476 176), the client half
 being theirs already for `--follow` and `fennec import`.
+
+## OpenAPI
+
+**The OpenAPI document is held to the routes** (`fennec_http::openapi`,
+`GET /_openapi.json` on a file's server, a tenant node and `fennec-shard`).
+An OpenAPI 3.1 description of every REST route is part of the API, not an
+extra: what Swagger UI, Redoc and an SDK generator read, and what a client's
+contract test checks itself against. It names each route's parameters, the
+query string's clauses, its body (a statement and its `params`, a
+document, a description), its answers and the refusal's `{"error": ...}`
+with a 503's `retry_after` and `Retry-After`, the headers that carry
+meaning (`Idempotency-Key`, `Fennec-Wait`, `Fennec-After`,
+`Fennec-History`, `Fennec-Read`, `If-None-Match`, `X-Request-Id`, a hook's
+signature headers), the four bearer schemes a server takes (its token, a
+scoped JSON Web Token, a node's admin token, the replication token) and a
+subscription as `text/event-stream`.
+
+*One table, written once.* `OPS` holds a row a route: method, path, where it
+is served (a file's server, a node's root, below a tenant), its id, tag,
+summary, the flag it is served under (`x-fennec-flag`), the token it takes,
+its query and header parameters by their component's name, its body and its
+answer. `build` writes the paths from it, a node's tenant routes under
+`/t/{tenant}` with their ids prefixed (`tenantQuery`: a node holds
+`/_whoami` and each tenant's both); the components -- schemes, parameters,
+headers, schemas, the refusals -- are one JSON string written by hand. No
+serde: the crate's own escaping, as every answer is written. A document is
+built the first time it is asked, once a process (`OnceLock`): 38 KB for a
+file's server, 57 KB for a node.
+
+*No token, the admin routes marked.* The document is the binary's, the same
+for every server of its kind whatever its flags or its data, so it reveals
+nothing the source and the docs do not, and asks no token, as `/_health`
+and the studio's files ask none; it is answered before tracing and the
+routing, as they are, under `--http-cors`'s headers so Swagger UI on
+another origin reads it. A node's `/_admin/` routes are described, each
+naming the `admin` scheme, not hidden from a caller without that token: a
+document that varied by caller is one neither Swagger UI nor a generator
+expects, and would hide no route. A route served only under a flag
+(`--hooks`, `--mcp`, `--cdc`, `--studio`, `--replication-token`, `--lease`)
+says so instead of leaving the document to vary by flags.
+
+*The router serves its own, from the same table.* `fennec-shard`'s
+document is what a tenant's client calls through it: each tenant's routes
+below `/t/{tenant}`, which it forwards as bytes to the node -- so the node's
+tests hold them -- and the document itself. Relaying a node's was rejected:
+a node call and its token for a document the router's own binary already
+holds, of the same version. Its `/_shard/` routes are its admin's, in the
+sharding reference, and left out.
+
+*Held to the routes by two tests, not by a table the dispatcher reads.* One
+table the dispatcher and the document both read was rejected: the
+dispatcher is a sequence of checks across `serve_connection`,
+`route_tenant`, `handle`, `api::route`, `admin::handle`, `cdc::route`,
+`replication::handle` and `node_stream::handle`, whose order carries
+meaning (the health check before a token, the studio before the routing, a
+hook's signature before its tenant is looked up), and matching a table on
+every request is work the hot path never paid. Instead:
+
+- `every_route_the_server_matches_is_documented` (fennec-http) reads the
+  crate's sources, tests and comments cut, for every form the dispatcher
+  matches by -- a `(Method::X | .., [..])` arm, `segments() == [..]`,
+  `.as_slice() == [..]`, `matches!(.. .as_slice(), [..])`, a first segment
+  `Some(&"_x")`, a path or its prefix `path == "/_x"` and
+  `starts_with("/_x")` -- and finds each pattern in `OPS`: a placeholder
+  never stands for a word starting with `_` (no collection's name does),
+  `t/<t>/..` is a tenant's route, `admin.rs` matches below `_admin`, a
+  `HEAD` is its `GET`'s. `UNDOCUMENTED` names what is left out and why
+  (`_timing`, a measurement build's; `_shard`, the router's, named by the
+  audit log). A route written in another form teaches the scan that form;
+  `the_scan_finds_a_route_left_out` holds the scan to finding one.
+- `tests/openapi.rs` (fennec-server) starts a file's server and a tenant node
+  under every flag a route is served with, fetches the document each serves,
+  makes the fixtures its paths name, and sends every operation -- its status
+  line alone, so a stream's head is enough -- each answered neither 404 nor
+  405. It leaves the documents in `CARGO_TARGET_TMPDIR/openapi/`, the
+  router's beside them, for `make openapi-lint`: Redocly's CLI (npx,
+  pinned) against OpenAPI 3.1's schema, in CI's test job. Its skipped rules
+  are what the API does on purpose: `/{collection}/all` beside
+  `/_call/{statement}`, `/_studio/` (the page's address), a route whose
+  refusals are its `default`, components the three documents share.
+- `every_document_is_openapi_3_1` reads each document with
+  `fennec_core::json` and holds it to the shape: `openapi` 3.1.0, an
+  `operationId` of its own and responses on every operation, each path's
+  placeholders its path parameters, every `$ref` resolving.
+
+*Its cost.* Every other request pays one comparison of its path with
+`/_openapi.json` (`openapi::asked`, a length compared first), before a
+segment is made; nothing else on a request's way changed. `make
+instr-compare` (replays, 8 identities a build, 7 rounds) read `put`
+21 144.8 -> 21 079.5 instructions an op (-0.31%, the layout's: the example
+calls `handle`, below the connection's loop) and `keyed` 83 739.3 ->
+83 760.6 (+0.03%, inside 2 SE). `fennec-server`'s release binary grew
+6 742 400 -> 6 792 400 bytes (+49 KB): `__text` +11 KB (the writer and the
+answer), `__const` +33 KB (the table's strings and the components), for an
+answer the API owes and no request pays.
