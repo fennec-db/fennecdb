@@ -300,6 +300,15 @@ numbers written. The first reading of the hint (a parameter read again at
 every request) was +20% on `params`, and a page's lists read again from its
 text +44% on `text`.
 
+Again after the review that made a hinted whole list the quick read's
+vector, a filter compare a vector field with a list by its `f32`s and a
+named statement run as written, against main a few changes on: `docs`
+-15.74%, `text` -1.72%, `params` -3.01%, `embed` -20.22%, `short` -0.65%,
+replays' `put` -3.81% and `keyed` -1.02%; and `orders`' `order-int`,
+`order-float` and `scan-float` inside 2 SE of main. The hinted places' loop
+asks each value before its place: looked up first, `params` was 0.36%
+more.
+
 ## Vector parameters
 
 **A vector parameter goes into the module as `f32`s.** `web/fennec.js`'s
