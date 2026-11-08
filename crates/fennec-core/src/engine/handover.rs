@@ -35,7 +35,7 @@ pub(super) struct Landed {
 
 impl Landed {
     /// The collection, the run's length and where it starts: the mapped path's.
-    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     pub(super) fn run(&self) -> (u32, u64, u64) {
         (self.cid, self.len, self.at)
     }

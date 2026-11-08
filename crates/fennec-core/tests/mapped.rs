@@ -5,7 +5,7 @@
 //! checkpoint's image, not the tail after it, not what a write, a checkpoint
 //! or a compact on the mapped database leaves behind.
 
-#![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+#![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::fs::{open_in_memory as open, open_mapped};
 use fennec_core::prelude::*;

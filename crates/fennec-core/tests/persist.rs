@@ -354,14 +354,24 @@ fn dropping_a_collection_keeps_the_file_readable() {
 /// (`fs::resolved`): a compact and a checkpoint rename their image over
 /// that file and leave the link a link. Renamed over the link, the image
 /// was a file of its own, and a second opener through the link wrote
-/// beside the first.
-#[cfg(all(unix, feature = "std-fs"))]
+/// beside the first. On Windows a file's link needs
+/// `SeCreateSymbolicLinkPrivilege`, which CI's account holds and a
+/// developer's without Developer Mode may not: there the test says so.
+#[cfg(all(any(unix, windows), feature = "std-fs"))]
 #[test]
 fn a_rewrite_through_a_link_renames_over_the_file_it_leads_to() {
     let (dir, real) = tmp_path("link");
     let link = dir.join("link.fennec");
     let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
     std::os::unix::fs::symlink("data.fennec", &link).expect("link");
+    #[cfg(windows)]
+    if let Err(e) = std::os::windows::fs::symlink_file("data.fennec", &link) {
+        // ERROR_PRIVILEGE_NOT_HELD
+        assert_eq!(e.raw_os_error(), Some(1314), "{e}");
+        println!("no symbolic link made here, the privilege not held: {e}");
+        return;
+    }
     assert_eq!(fennec_core::fs::resolved(&link), real);
     let is_link = || {
         std::fs::symlink_metadata(&link)
