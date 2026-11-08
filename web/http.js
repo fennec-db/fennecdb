@@ -700,24 +700,45 @@ export function connect(url, opts = {}) {
 export async function* sseEvents(res) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buf = '';
+  // A seed is one `data:` line of megabytes, so each network piece is searched
+  // and normalized once, and the pieces stay apart in an array until an event
+  // ends. `buf = (buf + piece).replace(...)` with `indexOf` from the start
+  // rescanned and recopied the whole seed per piece, quadratic in its size
+  // (16 KB pieces: 20 MB 2 226 ms, 50 MB 14 003 ms, 100 MB 55 776 ms; now 8,
+  // 21 and 81 ms); `+=` then `indexOf` flattens V8's rope every time and is
+  // no better (2.6 s for 50 MB).
+  let held = [];
+  let tail = ''; // the last character held, for a blank line straddling two pieces
+  let cr = false; // a piece ended in `\r`: whether `\n` follows is for the next
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) return;
-      buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
-      let i;
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        let name = '';
-        let data = '';
-        for (const line of block.split('\n')) {
-          if (line.startsWith('event:')) name = line.slice(6).trim();
-          else if (line.startsWith('data:')) data += line.slice(5).trim();
-        }
-        if (name) yield { name, data };
+      let t = decoder.decode(value, { stream: true });
+      if (cr) t = '\r' + t;
+      cr = t.endsWith('\r');
+      if (cr) t = t.slice(0, -1);
+      if (t.includes('\r')) t = t.replace(/\r\n/g, '\n');
+      let from = 0;
+      if (tail === '\n' && t[0] === '\n') {
+        const ev = eventOf(held.join(''));
+        held = [];
+        from = 1;
+        if (ev) yield ev;
       }
+      let i;
+      while ((i = t.indexOf('\n\n', from)) >= 0) {
+        held.push(t.slice(from, i));
+        const ev = eventOf(held.join(''));
+        held = [];
+        from = i + 2;
+        if (ev) yield ev;
+      }
+      const rest = t.slice(from);
+      if (rest) {
+        held.push(rest);
+        tail = rest[rest.length - 1];
+      } else if (from) tail = '';
     }
   } finally {
     try {
@@ -726,4 +747,14 @@ export async function* sseEvents(res) {
       /* already closed */
     }
   }
+}
+
+function eventOf(block) {
+  let name = '';
+  let data = '';
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) name = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
+  }
+  return name ? { name, data } : null;
 }

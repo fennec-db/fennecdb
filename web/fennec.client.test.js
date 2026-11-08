@@ -236,6 +236,51 @@ test('sseEvents reads the events of a stream cut anywhere', async () => {
   ]);
 });
 
+test('sseEvents reads the same events at every cut: \\r\\n endings, \\r | \\n and \\n | \\n splits', async () => {
+  const texts = [
+    'event: seed\r\ndata: {"seq":1}\r\n\r\n: keepalive\r\n\r\nevent: change\r\ndata: a\r\ndata: b\r\n\r\n',
+    'event: x\ndata: 1\n\n\n\nevent: y\ndata: 2\n\nevent: z\n\n',
+    'event: x\r\ndata: 1\n\r\nevent: y\ndata: 2\n\n',
+  ];
+  const read = async (cuts, bytes) => {
+    const body = new ReadableStream({
+      start(c) {
+        let at = 0;
+        for (const end of [...cuts, bytes.length]) {
+          if (end > at) c.enqueue(bytes.slice(at, end));
+          at = Math.max(at, end);
+        }
+        c.close();
+      },
+    });
+    const got = [];
+    for await (const ev of client.sseEvents(new Response(body))) got.push(ev);
+    return got;
+  };
+  for (const text of texts) {
+    const bytes = new TextEncoder().encode(text);
+    const whole = await read([], bytes);
+    assert.ok(whole.length >= 2, text);
+    for (let a = 1; a < bytes.length; a++) {
+      assert.deepEqual(await read([a], bytes), whole, `cut at ${a} of ${JSON.stringify(text)}`);
+      assert.deepEqual(await read([a, a + 1], bytes), whole, `cuts at ${a} and ${a + 1}`);
+    }
+    assert.deepEqual(await read([...bytes.keys()].slice(1), bytes), whole, 'a byte a piece');
+  }
+  assert.deepEqual(await read([], new TextEncoder().encode(texts[0])), [
+    { name: 'seed', data: '{"seq":1}' },
+    { name: 'change', data: 'ab' },
+  ]);
+  assert.deepEqual(await read([], new TextEncoder().encode(texts[1])), [
+    { name: 'x', data: '1' },
+    { name: 'y', data: '2' },
+    { name: 'z', data: '' },
+  ]);
+  // A \r ending one piece and the \n starting the next are one line ending.
+  const split = await read([20], new TextEncoder().encode('event: a\r\ndata: 1\r\n\r\n'));
+  assert.deepEqual(split, [{ name: 'a', data: '1' }]);
+});
+
 test('a whole number from 2^53 to 2^63 goes out as every digit of it, anything else as JSON.stringify writes it', async () => {
   const { jsonOf, from, bodyOf } = await import('./builder.js');
   assert.equal(JSON.stringify(2 ** 60), '1152921504606847000');
