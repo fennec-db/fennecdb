@@ -1486,16 +1486,24 @@ test('the statements a server holds name a webhook consumer\'s hook and whether 
 // A claim held at the server until a job comes (`{ wait }`, `Fennec-Wait`):
 // taken by the builder's update and by `run`, ended on time with no row,
 // and given up by an AbortSignal; a database in the page refuses `wait`.
+//
+// A job is ready by an instant the test holds, not by now(): a lease of
+// now() + a minute runs out whenever a minute passes between two claims
+// (an iOS simulator's run of the Swift twin once stalled 75 s between
+// them), the later claim taking a job the first held. now() writes the
+// leases still, every one of them past that instant.
 test('a held claim over HTTP takes the job enqueued meanwhile, and a signal gives it up', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {
   const s = await server();
   const db = client.connect(s.url);
   try {
     await db.run('create collection jobs (kind text, run_at timestamp @sorted, owner text)');
-    const ready = () => db.from('jobs').where(client.raw('run_at <= now()')).order('run_at').limit(1);
+    // Past every job's run_at (milliseconds since the epoch).
+    const readyBy = 1000;
+    const ready = () => db.from('jobs').where(client.raw('run_at <= ?', readyBy)).order('run_at').limit(1);
     const lease = (owner) => ({ owner, run_at: client.expr('now() + ?', 60000) });
     const held = ready().update(lease('w1'), { returning: ['kind'], wait: 10000 });
     await new Promise((r) => setTimeout(r, 200));
-    await db.from('jobs').insert({ kind: 'mail', run_at: Date.now() });
+    await db.from('jobs').insert({ kind: 'mail', run_at: 1 });
     assert.deepEqual(await held, [{ kind: 'mail' }]);
     // Nothing more to take: the wait ends on time, with no row.
     const began = Date.now();
@@ -1503,7 +1511,7 @@ test('a held claim over HTTP takes the job enqueued meanwhile, and a signal give
     assert.ok(Date.now() - began >= 290, `${Date.now() - began} ms`);
     // A signal gives a held claim up, and the client goes on.
     const stop = new AbortController();
-    const given = db.run('del jobs where run_at <= now() order run_at limit 1 returning kind', [], { wait: 10000, signal: stop.signal });
+    const given = db.run('del jobs where run_at <= $1 order run_at limit 1 returning kind', [readyBy], { wait: 10000, signal: stop.signal });
     setTimeout(() => stop.abort(), 100);
     await assert.rejects(given, (e) => e.name === 'AbortError');
     assert.equal(await db.from('jobs').count(), 1);
