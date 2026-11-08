@@ -3457,15 +3457,30 @@ mod tests {
         assert!(!a_device("") && !a_device("."));
     }
 
-    /// What Windows makes of a device's name in a node's directory, printed
-    /// and asserted: `T\<name>` opens the device, or fails, and makes no
-    /// file -- `con` the console, `nul` nothing, a port the runner has not
-    /// -- which is why the name is refused. With `.fennec` after it, the
-    /// naming page says the same; Windows 11 made such names files, which
-    /// the line says of the runner's Windows.
+    /// What Windows makes of a device's name, printed for the design to
+    /// say (docs/design/windows.md, 7b): the full path a name in a node's
+    /// directory and the name alone are read as -- `\\.\CON` where the
+    /// system takes it for the device -- and whether an open of the first
+    /// made a file. The refusal does not rest on it: it holds on every
+    /// system so a directory restores on any Windows, and a name alone is
+    /// the device on every one, `nul` asserted so.
     #[cfg(windows)]
     #[test]
-    fn a_device_s_name_makes_no_file_on_windows() {
+    fn what_windows_makes_of_a_device_s_name() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetFullPathNameW(name: *const u16, len: u32, buf: *mut u16, part: *mut u16) -> u32;
+        }
+        let full = |name: &std::ffi::OsStr| {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = name.encode_wide().chain([0]).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: a NUL-ended name and a buffer of 1 024 units.
+            let n = unsafe {
+                GetFullPathNameW(wide.as_ptr(), 1024, buf.as_mut_ptr(), std::ptr::null_mut())
+            };
+            String::from_utf16_lossy(&buf[..n as usize])
+        };
         let dir = scratch("devices");
         std::fs::create_dir_all(&dir).unwrap();
         let names: Vec<String> = ["con", "prn", "aux", "nul"]
@@ -3485,32 +3500,33 @@ mod tests {
         let mut said = Vec::new();
         for name in &names {
             for form in [name.clone(), format!("{name}.fennec")] {
+                let at = dir.join(&form);
                 let opened = std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(false)
-                    .open(dir.join(&form));
+                    .open(&at);
                 let file = listed(&form);
                 said.push(format!(
-                    "{form}: {}",
+                    "{form}: in a directory {} -- {}; alone {}",
+                    full(at.as_os_str()),
                     match (&opened, file) {
                         (_, true) => "a file".to_string(),
                         (Ok(_), false) => "opened, no file".to_string(),
                         (Err(e), false) => format!("refused, no file ({e})"),
-                    }
+                    },
+                    full(form.as_ref()),
                 ));
                 drop(opened);
                 if file {
-                    std::fs::remove_file(dir.join(&form)).unwrap();
-                }
-                if form == *name {
-                    assert!(!file, "{form} made a file");
+                    std::fs::remove_file(&at).unwrap();
                 }
             }
         }
-        println!(
-            "a device's name in a directory on this Windows:\n{}",
-            said.join("\n")
+        println!("a device's name on this Windows:\n{}", said.join("\n"));
+        assert!(
+            full("nul".as_ref()).eq_ignore_ascii_case(r"\\.\nul"),
+            "{said:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
