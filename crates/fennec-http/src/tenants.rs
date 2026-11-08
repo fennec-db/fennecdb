@@ -31,7 +31,7 @@ use crate::sse::Hub;
 use fennec_core::history::History;
 use fennec_core::prelude::*;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
@@ -2895,7 +2895,7 @@ pub fn check_name(name: &str) -> std::result::Result<(), Refused> {
 
 /// [`check_name`]'s device half, out of line with its refusal: inlined, it
 /// was 16 to 100 bytes more in each of the twenty-odd callers `check_name`
-/// is inlined into, and `a_device` 852 bytes of its own. Each pays a call.
+/// is inlined into. Each pays a call.
 #[inline(never)]
 fn no_device(name: &str) -> std::result::Result<(), Refused> {
     if !a_device(name) {
@@ -2930,30 +2930,34 @@ pub fn shaped(name: &str) -> bool {
 /// rule the one to hold. The superscript digits Windows reads as digits
 /// too (`com¹`) are no tenant's: [`shaped`] refuses them.
 ///
-/// The stem -- what comes before the first `.` -- lowercased into four
-/// bytes and matched: a stem of three ends in a NUL there, which no name
-/// [`shaped`] holds and at which Windows ends a name. Split and compared
-/// word by word, it was 852 bytes of the server.
+/// The stem -- three or four bytes before the end or a `.` -- is read as
+/// one word, a short one ended with a space, and each byte's 0x20 set,
+/// which lowercases a letter and leaves a digit, a space and a dot as they
+/// are: a word compared, where the stem lowercased byte by byte and matched
+/// was a decision tree of 420 bytes, and split and compared word by word
+/// 852. A byte below 0x20 folds onto one above, which no name [`shaped`]
+/// holds; a NUL so ends a stem, as Windows ends a name at one, and a space
+/// ends one as Windows trims it. Out of line: its callers each pay a call.
+#[inline(never)]
 pub fn a_device(name: &str) -> bool {
-    let mut stem = [0u8; 4];
-    for (i, &b) in name.as_bytes().iter().enumerate() {
-        if b == b'.' {
-            break;
-        }
-        if i == stem.len() {
-            return false;
-        }
-        stem[i] = b.to_ascii_lowercase();
+    const fn word(w: [u8; 4]) -> u32 {
+        u32::from_le_bytes(w)
     }
-    matches!(
-        &stem,
-        b"con\0"
-            | b"prn\0"
-            | b"aux\0"
-            | b"nul\0"
-            | [b'c', b'o', b'm', b'1'..=b'9']
-            | [b'l', b'p', b't', b'1'..=b'9']
-    )
+    const NAMED: [u32; 4] = [
+        word(*b"con "),
+        word(*b"prn "),
+        word(*b"aux "),
+        word(*b"nul "),
+    ];
+    const NUMBERED: [u32; 2] = [word(*b"com\0"), word(*b"lpt\0")];
+    let stem = match *name.as_bytes() {
+        [a, b, c] | [a, b, c, b'.', ..] => [a, b, c, b' '],
+        [a, b, c, d] | [a, b, c, d, b'.', ..] => [a, b, c, d],
+        _ => return false,
+    };
+    let w = word(stem) | 0x2020_2020;
+    let digit = (w >> 24).wrapping_sub(u32::from(b'1')) < 9;
+    NAMED.contains(&w) || (digit && NUMBERED.contains(&(w & 0x00ff_ffff)))
 }
 
 /// Whether `name`, read off `file` in `dir` -- a node's directory or an
@@ -2973,25 +2977,25 @@ pub fn listed(name: &str, dir: &Path, file: &str) -> bool {
 }
 
 /// Says a device-named `file` in `dir` is passed over, once a process: the
-/// listings it is met by run at every stats request and archive round.
+/// listings it is met by run at every stats request and archive round. By
+/// its name alone, a process reading one node's directory and one archive.
 #[cold]
 #[inline(never)]
 fn passed_over(dir: &Path, file: &str, name: &str) {
-    static SAID: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-    let path = dir.join(file);
+    static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if said.contains(&path) {
+    if said.iter().any(|f| f == file) {
         return;
     }
+    said.push(file.to_string());
     crate::log!(
-        "{}: `{name}` is a device's name on Windows, no tenant's on any system since: passed \
-         over, its tenant out of reach. With the server stopped, rename it and whatever beside \
-         it is named `{name}.*` by hand to a name a tenant may take, and remove \
-         `schedules.hint` beside it if there is one, for the node to learn its schedules again \
-         (docs: sharding-reference.html)",
-        path.display()
+        "{}{MAIN_SEPARATOR}{file}: `{name}` is a device's name on Windows, no tenant's on any \
+         system since: passed over, its tenant out of reach. With the server stopped, rename it \
+         and whatever beside it is named `{name}.*` by hand to a name a tenant may take, and \
+         remove `schedules.hint` beside it if there is one, for the node to learn its schedules \
+         again (docs: sharding-reference.html)",
+        dir.display()
     );
-    said.push(path);
 }
 
 #[cfg(test)]
@@ -3532,6 +3536,8 @@ mod tests {
             assert!(!a_device(not), "{not:?}");
         }
         assert!(a_device("con.") && a_device("NUL.tar.gz") && a_device("Lpt9"));
+        // Ended as Windows ends a name: at a NUL, and a space trimmed.
+        assert!(a_device("con\u{0}") && a_device("Aux ") && a_device("prn\u{0}.x"));
     }
 
     /// A tenant a node on a Unix took before the rule -- `con.fennec` --
