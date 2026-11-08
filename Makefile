@@ -291,9 +291,11 @@ endif
 ## (target/instr): the binaries removed unless KEEP=1, BASE's worktree and
 ## build unless KEEP_BASE=1 (tools/instr/compare.py;
 ## docs/design/benchmarks.md#instruction-counts)
+# A comma `$(or ...)` would read as its arguments' separator.
+instr_modes := put,keyed
 instr-compare:
 	python3 tools/instr/compare.py --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
-	  --package '$(or $(PKG),fennec-http)' --example '$(or $(EXAMPLE),replays)' --modes '$(or $(MODES),put,keyed)' \
+	  --package '$(or $(PKG),fennec-http)' --example '$(or $(EXAMPLE),replays)' --modes '$(or $(MODES),$(instr_modes))' \
 	  --uuids $(or $(UUIDS),8) --rounds $(or $(ROUNDS),7) --quiet $(or $(QUIET),4) $(if $(ARGS),--args '$(ARGS)') \
 	  $(if $(PATTERN),--pattern '$(PATTERN)') $(if $(TRACE),--trace '$(TRACE)' --hit $(or $(HIT),30)) \
 	  $(if $(WORK),--work '$(WORK)') $(if $(OUT),--out '$(OUT)') $(if $(KEEP),--keep) $(if $(KEEP_BASE),--keep-base)
