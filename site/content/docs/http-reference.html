@@ -560,7 +560,7 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
 <tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
-<tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists</td><td>a lost race for a value</td></tr>
+<tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists; a <code>/batch</code> holding a <code>compact</code> that <code>--call-rate</code> stopped after statements of it landed — never a 429 or 503 then, which say nothing ran</td><td>a lost race for a value; for the batch, send the statements from <code>at</code> on, alone</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
 <tr><td class="n">412</td><td>a <code>require</code> not met, its batch put back; <code>reason</code> where its <code>else '…'</code> gave one</td><td>read again, decide again; tell refusals apart by <code>reason</code>, not <code>at</code></td></tr>
 <tr><td class="n">413</td><td>a body past the ceiling, 64 MB, by its length or its chunks</td><td>send less at once</td></tr>

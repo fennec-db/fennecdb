@@ -215,21 +215,25 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
   <li><b>A request goes again only where that is safe.</b> One the server
     says ran nothing -- a 503, or a quota's 429, naming its wait -- goes
     again after that wait and never sooner, and so does one whose
-    connection was refused; a read, or a write under an
-    <code>idempotencyKey</code>, goes again after a timeout or a dropped
+    connection was refused; a read the builder made or sent near, or a
+    write under an <code>idempotencyKey</code>, goes again after a dropped
     connection too. A refusal naming no wait never does, nor a write
-    without a key once it may have landed: its error is yours. Three tries
-    and 10 s of waits at most, then the last error with what the server
-    said: <code>connect(url, { retry: { attempts: 5, maxWait: 30_000 } })</code>,
-    or <code>{ retry: false }</code>. <code>{ retry: { idempotencyKeys: true } }</code>
-    gives each write sent without a key one of the client's own, so it may
-    go again as well; each is a row the server keeps a day
+    without a key once it may have landed, nor a text given <code>{ read:
+    true }</code> and sent home, a claim nothing checks: its error is
+    yours. Three tries and 10 s of waits at most, then the last error with
+    what the server said: <code>connect(url, { retry: { attempts: 5,
+    maxWait: 30_000 } })</code>, or <code>{ retry: false }</code>
     (<a href="/docs/http#idempotency">Retrying a write</a>).</li>
   <li><b>Every request is bounded in time:</b> <code>{ timeout }</code>,
-    30 000 ms unless given, plus a <code>{ wait }</code>; past it the
-    request is given up with a <code>DOMException</code> named
-    <code>TimeoutError</code>. A <code>{ signal }</code> still gives it up
-    sooner, and a request it gave up is never sent again.</li>
+    30 000 ms unless given, to the answer's head, plus a <code>{ wait
+    }</code>, and between the pieces of its body; past it the request is
+    given up with a <code>DOMException</code> named
+    <code>TimeoutError</code>, and never sent again, since the server may
+    still run it. A statement that runs long before it answers -- a
+    <code>compact</code>, a <code>create index</code> -- is sent through a
+    client given a longer one: <code>connect(url, { timeout: 600_000
+    })</code>. A <code>{ signal }</code> still gives it up sooner, and a
+    request it gave up is never sent again.</li>
   <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a
     server thread and a wake-up at every write, a poll holds nothing between
     rounds (<a href="/docs/http-reference#polling">Polling a read</a>).</li>

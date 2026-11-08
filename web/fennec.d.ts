@@ -1171,7 +1171,8 @@ export function call(name: string, args?: Record<string, unknown> | null, opts?:
  * `FennecHttp.call`'s options: `run`'s `idempotencyKey`, `wait` and `signal`;
  * `read: true` says the statement only reads, so on a client reading near
  * it goes to the read replica near it (a statement that writes is refused
- * there, 403, never landed); and `claims`.
+ * there, 403, never landed) -- home, a claim nothing checks, never sent
+ * again after a reset; and `claims`.
  */
 export interface CallOptions extends CallClaims {
   idempotencyKey?: string;
@@ -1298,11 +1299,15 @@ export interface HttpOptions {
    */
   reads?: 'home' | 'nearest';
   /**
-   * The milliseconds a request may take, 30 000 unless given -- and the
-   * `wait` that holds it at the server on top; `Infinity` for none. Past
-   * it, the request is given up with a `DOMException` named
-   * `'TimeoutError'`. A stream's (`live`, `subscribe`) is timed to its head
-   * alone: its body runs as long as it is read.
+   * The milliseconds to an answer's head, 30 000 unless given -- and the
+   * `wait` that holds it at the server on top -- and between the pieces of
+   * its body, read for as long as it keeps coming; `Infinity` for none.
+   * Past it, the request is given up with a `DOMException` named
+   * `'TimeoutError'`, and never sent again: the server may still run it.
+   * A statement that runs long before it answers -- a `compact`, a `create
+   * index` -- is sent through a client given a longer one. A stream's
+   * (`live`, `subscribe`) is timed to its head alone: its body runs as
+   * long as it is read.
    */
   timeout?: number;
   /**
@@ -1315,10 +1320,12 @@ export interface HttpOptions {
 /**
  * What `FennecHttp` sends again, and how often. Only what cannot have run
  * goes again whatever it is -- a 503, or a quota's 429, naming its wait,
- * sent after that wait and never sooner; a connection refused -- and what
- * may run twice -- a read, a write under an `idempotencyKey` -- after a
- * timeout or a dropped connection too. A refusal naming no wait never goes
- * again, nor a write without a key once it may have reached the server.
+ * sent after that wait and never sooner, unless it says statements of a
+ * batch were made (`completed`); a connection refused -- and what may run
+ * twice -- a read the builder made, one sent near, a write under an
+ * `idempotencyKey` -- after a reset too. Nothing goes again after the
+ * `timeout`, nor a refusal naming no wait, nor a text the caller said to
+ * read (`{ read: true }`) sent home, a claim nothing checks.
  */
 export interface RetryOptions {
   /** Tries at most, the first among them: 3 unless given. */
@@ -1329,19 +1336,13 @@ export interface RetryOptions {
    * thrown at once.
    */
   maxWait?: number;
-  /**
-   * `true`: a write sent with no `idempotencyKey` (a `run`, `call` or
-   * `batch` that writes, but a `compact`) is given one of the client's own,
-   * and so may go again after a timeout. Off unless given: each key is a
-   * row the server keeps a day.
-   */
-  idempotencyKeys?: boolean;
 }
 
 /**
  * `run`'s and `batch`'s options: a write's, and `{ read: true }`, which says
  * a text only reads -- on a client reading near, it may be answered by a
- * read replica near it. A batch of builder queries alone says so on its own.
+ * read replica near it; home, it is a claim nothing checks, never sent again
+ * after a reset. A batch of builder queries alone says so on its own.
  */
 export interface RunOptions extends WriteOptions {
   read?: boolean;

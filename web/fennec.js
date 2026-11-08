@@ -41,7 +41,7 @@ import {
   statementOf,
   whole,
 } from './builder.js';
-import { FennecHttp, connect, newKey, sseEvents } from './http.js';
+import { FennecHttp, connect, sseEvents } from './http.js';
 
 export {
   FennecError, Query, Call, Param, from, call, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, param,
@@ -1475,6 +1475,11 @@ function schemaDDL(schema) {
   );
   for (const ix of schema.indexes ?? []) fields.push(`@${ix.replace(/^unique\(/, 'sorted(')}`);
   return `create collection if not exists ${ident(schema.name, 'collection')} (${fields.join(', ')})`;
+}
+
+function newKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**

@@ -1506,13 +1506,31 @@ def _count(answer: Any) -> int:
     return rows[0].get("count", 0) if rows and isinstance(rows[0], dict) else 0
 
 
+class _Built:
+    """The `read` a builder's read hands `Client` and `AsyncClient`, true as
+    `read=True` is: a read the builder made itself, a `get` whatever the
+    caller says, which may go again after a reset (`Retry`). A caller's
+    `read=True` is a claim nothing checks at home, and grants no resend."""
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        return "_BUILT"
+
+
+_BUILT = _Built()
+
+
 def _read_kw(client: Any) -> dict:
-    """What a query's read passes its client beside the text: `read=True`
+    """What a query's read passes its client beside the text: `read=_BUILT`
     to `Client` and `AsyncClient` -- one reading near (`reads="nearest"`)
     marks it for a read replica near it, and either sends it again after a
-    timeout or a dropped connection, as a read may be (`Retry`); nothing to
-    any other, a client of one's own making among them."""
-    return {"read": True} if getattr(client, "reads", None) in ("home", "nearest") else {}
+    reset, as a read the builder made may be (`Retry`); nothing to any
+    other, a client of one's own making among them."""
+    return {"read": _BUILT} if getattr(client, "reads", None) in ("home", "nearest") else {}
 
 
 class Query(_Builder):

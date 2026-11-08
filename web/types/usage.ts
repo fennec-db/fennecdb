@@ -459,7 +459,9 @@ export async function remote() {
   // @ts-expect-error -- read is a boolean
   void near.run('get articles', [], { read: 'yes' });
   // A timeout, and the retries: off, or their bounds.
-  client.connect<Schema>('http://127.0.0.1:8080', { timeout: 5000, retry: { attempts: 5, maxWait: 20000, idempotencyKeys: true } });
+  client.connect<Schema>('http://127.0.0.1:8080', { timeout: 5000, retry: { attempts: 5, maxWait: 20000 } });
+  // @ts-expect-error -- the client makes no key: a caller passes `idempotencyKey`
+  client.connect<Schema>('http://127.0.0.1:8080', { retry: { idempotencyKeys: true } });
   client.connect<Schema>('http://127.0.0.1:8080', { timeout: Infinity, retry: false });
   // @ts-expect-error -- retry is false or its bounds
   client.connect<Schema>('http://127.0.0.1:8080', { retry: 3 });

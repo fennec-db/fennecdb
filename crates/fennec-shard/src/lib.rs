@@ -2307,16 +2307,8 @@ impl Router {
             };
             let mut headers = forwarded_headers(req, traced);
             let cut = matches!(ended, upstream::Ended::Cut { .. });
-            if ended == (upstream::Ended::Cut { whole: true })
-                && !upstream::replayable(req.method.name(), &req.target, &headers)
-            {
-                metrics::cut(metrics::Cut::MayHaveRun, 1);
-                let why = format!(
-                    "node `{node}` was failed over while this request was out to it, and may \
-                     have run it: sent again it could run twice, so it is not -- read the \
-                     tenant to learn whether it ran"
-                );
-                return reply(out, region::homed(Response::error(502, &why), &home));
+            if ended == whole && !upstream::replayable(req.method.name(), &req.target, &headers) {
+                return reply(out, region::homed(may_have_run(&node), &home));
             }
             // Once a cut, however many times the copy is asked or its
             // bucket moves: a follower's counted at every ask, one request
@@ -2455,11 +2447,22 @@ impl Router {
                 }
                 Err(e) if upstream::ended_by(&e).is_some() => {
                     forwarding.error(e.to_string());
+                    let again = upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved);
                     if tries == CUT_TRIES {
+                        // The last cut judged as the loop's top judges one:
+                        // a request it ended once it went out whole, which
+                        // may not run twice, may have run -- the 502, never
+                        // the 503 below inviting it again.
+                        let replayable =
+                            upstream::replayable(req.method.name(), &req.target, &headers);
+                        if again == whole && !replayable {
+                            drop(forwarding);
+                            return reply(out, region::homed(may_have_run(&to), &home));
+                        }
                         break;
                     }
                     tries += 1;
-                    match upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved) {
+                    match again {
                         // Moved before its first byte, it wrote nothing: what
                         // it was is what it still is -- cut off `node`, its
                         // asks and pauses where they stood -- and only a try
@@ -6361,6 +6364,22 @@ fn forward_span(req: &Request, node: &str, addr: &str) -> fennec_http::trace::Sp
     forwarding
 }
 
+/// The 502 of a request a failover cut off `node` once it went out whole,
+/// and which may not run twice ([`upstream::replayable`]): it may have run
+/// there, so it is not sent again -- [`Router::after_cut`]'s, at any of its
+/// tries, the last among them.
+#[cold]
+#[inline(never)]
+fn may_have_run(node: &str) -> Response {
+    metrics::cut(metrics::Cut::MayHaveRun, 1);
+    let why = format!(
+        "node `{node}` was failed over while this request was out to it, and may have run \
+         it: sent again it could run twice, so it is not -- read the tenant to learn whether \
+         it ran"
+    );
+    Response::error(502, &why)
+}
+
 /// The router's own answer to a forward to `node` at `addr` -- or to a
 /// region's `routers` -- that failed short of an answer with `e`, naming
 /// the tenant's `home` where it is known (`region::homed`). Where the
@@ -7005,21 +7024,32 @@ mod tests {
     /// What [`Router::after_cut`] answers a keyed write a failover ended on
     /// `n1`, sent whole there where `whole`: the status and the head.
     fn after_cut_from_n1(router: &Router, whole: bool) -> (u16, String) {
+        let body = br#"{"query":"put notes {title: \"t\"}"}"#.to_vec();
+        after_cut_of(router, body, Some("k-1"), whole)
+    }
+
+    /// [`after_cut_from_n1`]'s, of a write of `body` under `key`, or none.
+    fn after_cut_of(
+        router: &Router,
+        body: Vec<u8>,
+        key: Option<&str>,
+        whole: bool,
+    ) -> (u16, String) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let out = Conn::Plain(l.accept().unwrap().0);
-        let body = br#"{"query":"put notes {title: \"t\"}"}"#.to_vec();
         let header = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let mut headers = vec![
+            header("Host", "t"),
+            header("Content-Length", &body.len().to_string()),
+        ];
+        headers.extend(key.map(|k| header("Idempotency-Key", k)));
         let req = Request {
             method: Method::Post,
             target: "/t/acme/query".into(),
             path: "/t/acme/query".into(),
             query: Vec::new(),
-            headers: vec![
-                header("Host", "t"),
-                header("Idempotency-Key", "k-1"),
-                header("Content-Length", &body.len().to_string()),
-            ],
+            headers,
             body,
             keep_alive: false,
         };
@@ -7084,5 +7114,66 @@ mod tests {
         let (status, head) = after_cut_from_n1(&r, false);
         assert_eq!(status, 503, "{head}");
         assert!(unsent_mark(&head), "{head}");
+    }
+
+    /// A write with no key, cut each of [`CUT_TRIES`] times: the first two
+    /// before its last byte went out, so it ran nowhere and went again, the
+    /// last once it went out whole. That last cut is judged as any other:
+    /// the 502 saying it may have run, never the 503 that tells a client to
+    /// come back -- told so, it sent a put that had landed again. The node
+    /// reads a request's head alone, its body only on the last try, and the
+    /// test cuts the tenant off it then, as a failover does.
+    #[test]
+    fn a_write_whose_last_cut_went_whole_is_a_502_at_the_cut_limit() {
+        use std::io::BufRead;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let r = placing_on(addr.clone());
+        let (read, came) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let mut tries = 0;
+            for conn in l.incoming() {
+                let Ok(conn) = conn else { return };
+                let mut conn = std::io::BufReader::new(conn);
+                let (mut line, mut length) = (String::new(), 0);
+                let _ = conn.read_line(&mut line);
+                if !line.contains("/query") {
+                    continue;
+                }
+                tries += 1;
+                loop {
+                    line.clear();
+                    if conn.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(n) = lower.strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap();
+                    }
+                }
+                if tries == CUT_TRIES {
+                    let mut body = vec![0u8; length];
+                    std::io::Read::read_exact(&mut conn, &mut body).unwrap();
+                }
+                let _ = read.send(());
+                std::thread::spawn(move || std::io::copy(&mut conn, &mut std::io::sink()));
+            }
+        });
+        let cutter = Arc::clone(&r);
+        let cuts = std::thread::spawn(move || {
+            for _ in 0..CUT_TRIES {
+                came.recv_timeout(Duration::from_secs(30)).unwrap();
+                cutter.pool.cut(&addr, "acme");
+            }
+        });
+        // Far more than the sockets between router and node hold: its last
+        // byte waits for the node to read, which it does on the last try
+        // alone.
+        let mut body = br#"{"query":"put notes {n: 1}"}"#.to_vec();
+        body.resize(32 << 20, b' ');
+        let (status, head) = after_cut_of(&r, body, None, false);
+        cuts.join().unwrap();
+        assert_eq!(status, 502, "{head}");
+        assert!(!unsent_mark(&head), "{head}");
     }
 }

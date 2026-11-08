@@ -367,31 +367,57 @@ twice, and bounds every request in time.** `FennecHttp` (`web/http.js`,
 (`integrations/python/fennecdb/__init__.py`, `_send` and `_post`) keep
 the rule the router keeps toward its nodes
 ([router.md](router.md#pooled-connections)), which is Go `net/http`'s.
+
 *Cannot have run:* an answer that says nothing ran -- a 503, every one of
 which names its wait ([quotas.md](quotas.md#retry-after-in-bodies)), the
 `Fennec-Unserved` one a server answers at its ceiling among them, and a
 tenant's 429 where waiting makes room (`retry_after_ms`); and a connection
 refused, which sent nothing (Node's `fetch` says so as `cause.code`
 `ECONNREFUSED`; a browser's says nothing it can be told by, and its
-refusals go as resets do). Python also takes a request it could not hand
-the system whole as unsent, as the router judges a write by its `Stage`:
+refusals go as resets do; `asyncio.open_connection`, refused at each of a
+host's addresses, joins their words in one `OSError` -- "Multiple
+exceptions: ..." -- which `_refused` takes for a refusal where every error
+in it is one). Python also takes a request it could not hand the system
+whole as unsent, as the router judges a write by its `Stage`:
 `conn.request` writes a bytes body with the head in one `sendall`, which
 fails only before the last byte. Any such request goes again, after the
 wait the server names -- `retry_after_ms` before `Retry-After`, whole
 seconds, before the body's `retry_after`, which a page whose CORS exposes
-no header still reads -- and never sooner. *May run twice:* a read -- the
-builders' (JS hands `run` `{ read: true }` for every read, and Python's
-builder now hands its own clients `read=True` whatever their `reads`,
-which marks nothing on a client reading home), a text given `{ read: true
-}`, a `GET` of the change stream's -- and a write under an
-`Idempotency-Key`, which the server answers as the first try was, a
-repeat while the first is under way waiting for it
-([http.md](http.md#idempotency-keys)). These alone go again after a
-timeout, a reset or a dropped connection, which a write may have landed
-before: a write without a key never does, and its error is the caller's.
-A refusal naming no wait -- a quota waiting makes no room for, any 4xx, a
-500, `outcome: "unknown"` among them -- never goes again, nor a request
-the caller's `signal` gave up.
+no header still reads -- and never sooner. Never a 429 or a 503 whose body
+says statements of a batch were made (`completed` above 0): a `/batch`
+holding a `compact` runs a statement at a time, and sent again whole its
+first statements were made twice. The server answers no stop after a
+landing so ([quotas.md](quotas.md#retry-after-in-bodies)); the clients
+hold to it whatever they are told.
+
+*May run twice:* a read the client knows to be one, and a write under an
+`Idempotency-Key`, which the server answers as the first try was, a repeat
+while the first is under way waiting for it
+([http.md](http.md#idempotency-keys)). A read the client knows: one the
+builder made, marked by the builder itself apart from the caller's `read`
+-- `BUILT` in JS's `READ` and in a batch of builder queries alone, Python's
+`_BUILT`, the `read` its builder hands `Client` and `AsyncClient` -- one
+sent near (`Fennec-Read: replica`), which every server runs read-only
+([read-replicas.md](read-replicas.md#marked-reads)), and Python's `GET`s of
+the change stream. The caller's `{ read: true }` (`read=True`) sent home is
+none: a claim nothing checks, and `db.call("history", read=True)` stops
+being a read once the statement is made to log a row, which sent again it
+logs twice. It keeps what it meant -- a text a client reading near sends
+near -- and grants no resend. These alone go again after a reset or a
+dropped connection, which a write may have landed before; anything else's
+error is the caller's. A refusal naming no wait -- a quota waiting makes no
+room for, any 4xx, a 500, `outcome: "unknown"` among them -- never goes
+again, nor a request the caller's `signal` gave up, nor one past the
+client's own timeout (below).
+
+**So the rule sends nothing again that the server could make twice.** A
+request goes again only where the server said nothing ran, where nothing
+reached it, or where running it again ends as the first run did: a read,
+or a write whose key the server holds -- `--idempotency-ttl`, a day, after
+which a key is gone and a write under it is made anew. On by default: the
+project is alpha, and no caller relies on a 503 reaching it. `retry:
+false` (`retry=False`) turns it off; the tests of the error's shape do
+(`web/fennec.test.js`).
 
 The bounds are three tries and 10 s of waits between them unless given
 (`{ retry: { attempts, maxWait } }`, `Retry(attempts, max_wait)`): the
@@ -401,46 +427,58 @@ layer's backoff ([the sync's quotas](quotas.md#quotas-in-the-sync)) --
 the jitter cut to what is left of the ceiling. A wait past what is left is
 not waited: the refusal is thrown at once with its `retryAfter`, the
 caller's to schedule. Past either bound the last answer or error is
-thrown as it came. On by default: the project is alpha, no caller relies
-on a 503 reaching it, and the rule can make nothing twice. `retry: false`
-turns it off; the tests of the error's shape do (`web/fennec.test.js`).
+thrown as it came.
 
-**No key is made unless asked.** `{ retry: { idempotencyKeys: true } }`
-and `Retry(idempotency_keys=True)` give each `/query` or `/batch` sent
-without a key and not marked read one of the client's own
-(`crypto.randomUUID`, `uuid4`), kept across its tries, so such a write
-goes again after a timeout too. Off by default because a key is not free:
-each is a row of `_idempotency` written in the write's block and kept
-`--idempotency-ttl` (a day), 16 200 single puts a second against 18 300
-without; the server refuses a key to a `compact` (400), which the client
-so never keys (a statement starting `compact`), and keys a text that
-reads, which the server ignores, since the client cannot tell a text that
-writes from one that reads without the parser. A caller that wants a
-write made once under every failure gives it a key of its own, one it can
-send again after a restart, which no key the client makes can be.
+**The client makes no key.** A caller that wants a write sent again after
+a reset passes its own (`idempotencyKey`, `idempotency_key`), one it can
+send again after a restart too. The first version made one where asked
+(`{ retry: { idempotencyKeys: true } }`, `Retry(idempotency_keys=True)`),
+off by default since a key is not free -- a row of `_idempotency` written
+in the write's block and kept a day, 16 200 single puts a second against
+18 300 without. Dropped: a key the client makes dies with its process, so
+the write a caller most needs made once -- the one it sends again after a
+crash -- was never covered; it could not tell a text that writes from one
+that reads without the parser, nor a `compact`, which the server refuses a
+key (400), but by its first word; and it cost the client entry 112 bytes
+brotli.
 
-**The timeout bounds every try whole**, from its first byte to its
-answer's last: 30 s unless given (`{ timeout }` in ms, Python's
-`timeout` in seconds as before), a held write's `Fennec-Wait` on top.
-`fetch` bounds nothing of its own. The JS client aborts its fetch, the
-body's read included, with a `DOMException` named `TimeoutError`, as
-`AbortSignal.timeout` does -- which cannot be stopped, and a stream's
-(`live`, `subscribe`, `#open`) is timed to its head alone, its body
-running as long as it is read; and `AbortSignal.any`, to join the
+**The timeout bounds the wait for an answer's head, and each wait between
+the pieces of its body** -- not the whole: 30 s unless given (`{ timeout
+}` in ms, Python's `timeout` in seconds as before), a held write's
+`Fennec-Wait` on top of the head's. Bounded whole, as the first version
+had it, a read longer than the timeout failed however steadily it came,
+and was run three times; a `compact` or a `create index` past it threw
+`TimeoutError` while it ran on to its end. Nothing goes again after the
+client's own timeout, a read neither: past it the server may still be
+running the request, and three tries of a read it took 30 s over ran it
+three times. A statement that runs long before it answers is sent through
+a client given a longer `timeout`. A server sending a byte at a time holds
+a request only while it keeps sending: one that stops is given up the
+timeout after its last piece.
+
+`fetch` bounds nothing of its own. `FennecHttp` aborts its fetch, the
+body's read included, with a `DOMException` named `TimeoutError`
+(`bounded`'s `late`), as `AbortSignal.timeout` does -- which cannot be
+stopped at a stream's head, nor started again at a piece of a body:
+`bounded`'s clock starts again (`tick`) as `textOf` reads each piece through
+the body's reader, where `res.text()` hands nothing over until the last. A
+stream's (`live`, `subscribe`, `#open`) is timed to its head alone, its
+body running as long as it is read; `AbortSignal.any`, to join the
 caller's signal, is Safari 17.4's, so `bounded` joins them by hand and
 lets the caller's go at the end -- a live query opens one a stream, and
-each reconnect would leave a listener behind. Python's `Client` gave the
-timeout to each socket wait, so a server sending a byte a little under it
-held a request for good: each wait is now given what is left of the
-deadline (`_bound`), the body read with `read1`, which waits once at most
-(`read` waits for every piece with the timeout it began with; 3.10's
-`read1` leaves a body read whole open, closed by a last `read`), and a
-`settimeout`, a system call (0.3 us), made only where the one set is a
-millisecond off. `changes`, `consumers`, `move_consumer` and
-`forget_consumer` went through `urlopen`, a connection each; they go over
-the thread's kept connection now, bounded and retried alike, a `PATCH` and
-a `DELETE` as writes. `AsyncClient` bounds its exchange with `wait_for`,
-as it did.
+each reconnect would leave a listener behind. Python's `Client` gives the
+connect and each wait for the head what is left of the head's deadline
+(`_bound`), then the timeout to each wait of the body, which `read` meets
+a piece at a time; a `settimeout`, a system call (0.3 us), is made only
+where the one set is a millisecond off. `changes`, `consumers`,
+`move_consumer` and `forget_consumer` went through `urlopen`, a connection
+each; they go over the thread's kept connection now, bounded and retried
+alike, a `PATCH` and a `DELETE` as writes. `AsyncClient` bounds the
+connect, the head and a body the loop holds whole with it by one
+`wait_for`, as it bounded its whole exchange before, and a body still to
+come by a timer the loop holds (`_Idle`), started again at each piece,
+which lets the connection go as it fires: `wait_for` made a task a wait
+before 3.12.
 
 `AsyncClient` used to send any request once more over a fresh connection
 when its kept one failed, which made a write the server had read and
@@ -452,15 +490,26 @@ reads a close as it comes whenever it waits.
 
 Streams and polls keep their own loops and take the server's wait as a
 floor: a stream opened again waits `max(backoff, retryAfter)`, and a
-poll's round is a read sent through `#ask`. The Go, .NET, Swift, Kotlin
-and Dart clients name the wait (`RetryAfter`) and send nothing again yet.
+poll's round goes through `#ask`, sent again after a reset where its query
+is a builder's. The Go, .NET, Swift, Kotlin and Dart clients name the wait
+(`RetryAfter`) and send nothing again yet.
 
-Cost, measured against a server answering at once on loopback, rounds
-alternated: `FennecHttp.run` of a builder read 5.00 -> 5.83 us over a
-`fetch` answering in-process (an `AbortController`, a timer and an `async`
-frame a request); Python's `Client.query` 60.6 -> 61.6 us and
-`AsyncClient.query` 58.6 -> 60.0 us over a socket to another process.
-`web/http.js` grew 9 894 -> 11 762 bytes minified, 3 642 -> 4 417 brotli;
-an app bundling `connect` and a query's rows through the client entry
-34 137 -> 35 976 bytes, 11 052 -> 11 788 brotli; the modules as served,
-which carry their comments, 57 -> 58 KB brotli.
+Cost, measured against a server answering at once, rounds alternated:
+`FennecHttp.run` of a builder read 5.00 -> 5.83 us over a `fetch`
+answering in-process as the first version had it (an `AbortController`, a
+timer and an `async` frame a request), and 5.26 -> 5.27 us from there with
+the body read a piece at a time: its clock moved at each piece, the timer
+set again only as it fires -- set again at each piece, 5.65 us, 7% more.
+Python's `Client.query` 60.6 -> 61.6 us and `AsyncClient.query` 58.6 ->
+60.0 us over a socket to another process as the first version had it, and
+70.7 -> 71.0 us and 58.1 -> 57.9 us from there against a Python server
+answering at once, within the noise: `AsyncClient` reads a body the loop
+holds whole already within the head's bound, as before (`_exchange`), and
+leaves one still to come to `_body` and its timer -- every body read so
+cost 3.5 us, 6%. `web/http.js` grew 9 894 -> 11 792 bytes minified,
+3 642 -> 4 411 brotli; an app bundling `connect` and a query's rows
+through the client entry 34 137 -> 36 032 bytes, 11 052 -> 11 794 brotli
+-- the first version's 11 788, of which the keys gone, the shorter
+messages and `#send`'s own parse gone took back 116 bytes and the clock
+between a body's pieces cost 122. The modules as served, which carry their
+comments, 57 -> 58 KB brotli.

@@ -55,13 +55,14 @@ A refusal throws a `FennecError` with the server's `status`; a stopped
 
 `connect` sends a request again only where that is safe: one the server
 says ran nothing -- a 503, or a 429 naming its wait -- after that wait, and
-one whose connection was refused; a read, or a write under an
-`idempotencyKey`, after a timeout or a dropped connection too. Three tries
-and 10 s of waits at most (`{ retry: { attempts, maxWait } }`, or `{ retry:
-false }`); `{ retry: { idempotencyKeys: true } }` gives each write sent
-without a key one of the client's own. Every request is given up at its
-`timeout`, 30 000 ms unless given (a stream's at its head), with a
-`DOMException` named `TimeoutError`.
+one whose connection was refused; a read the builder made or sent near, or
+a write under an `idempotencyKey`, after a dropped connection too. Three
+tries and 10 s of waits at most (`{ retry: { attempts, maxWait } }`, or `{
+retry: false }`). A request is given up with a `DOMException` named
+`TimeoutError` once its `timeout`, 30 000 ms unless given, passes before
+its answer's head or between the pieces of its body (a stream's at its
+head), and is never sent again: a `compact` that runs long before it
+answers is sent through a client given a longer one.
 
 **From npm** the files are the same. A page serves the module and `collate/`
 as static files and hands `Fennec.open` the module's URL -- with Vite, say:

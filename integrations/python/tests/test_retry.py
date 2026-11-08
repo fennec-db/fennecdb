@@ -1,10 +1,13 @@
 """What a client sends again, and when it gives a request up: only what
 cannot have run -- an answer naming its wait, a connection refused -- or
-may run twice -- a read, a write under a key -- each try bounded whole by
-the timeout (docs/design/js-client.md#retries). Against a scripted server
-on loopback, no fennec-server needed."""
+may run twice -- a read the builder made or sent near, a write under a key
+-- never after the client's own timeout, which bounds the wait for an
+answer's head and between the pieces of its body
+(docs/design/js-client.md#retries). Against a scripted server on loopback,
+no fennec-server needed."""
 
 import asyncio
+import errno
 import json
 import socket
 import threading
@@ -21,8 +24,9 @@ class Server:
     reads: `(status, body, headers)`, answered over the kept connection;
     "drop", the connection closed with no answer; "hang", no answer until
     the client lets the connection go; "trickle", a head and then a body a
-    byte every 20 ms. Each request read is noted with the time it came and
-    its head (`seen`)."""
+    byte every 20 ms; "stall", a head and five bytes of its body, then
+    nothing until the client lets the connection go. Each request read is
+    noted with the time it came and its head (`seen`)."""
 
     def __init__(self, *plan):
         self.plan = list(plan)
@@ -66,6 +70,14 @@ class Server:
                         for b in body:
                             time.sleep(0.02)
                             conn.sendall(bytes([b]))
+                    except OSError:
+                        pass
+                    continue
+                if what == "stall":
+                    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{"aff')
+                    try:
+                        while conn.recv(65536):
+                            pass
                     except OSError:
                         pass
                     return
@@ -132,6 +144,10 @@ def test_a_refusal_naming_no_wait_is_never_sent_again():
         (409, {"error": "a value taken"}, {}),
         (500, {"error": "the write landed", "outcome": "unknown", "seq": 7}, {}),
         (503, {"error": "no wait named"}, {}),
+        # Statements of a batch made: sent again whole, they were made twice,
+        # whatever the stop says -- the server answers no such stop so.
+        (503, {"error": "moved", "completed": 1, "at": 1, "retry_after": 1}, {"Retry-After": "1"}),
+        (429, {"error": "too many runs", "completed": 2, "at": 2, "retry_after": 1}, {"Retry-After": "1"}),
     ]:
         srv = Server(refusal, (200, [], {}))
         with pytest.raises(FennecError) as e:
@@ -145,6 +161,7 @@ def test_a_write_is_sent_again_after_a_dropped_connection_only_under_a_key():
     with pytest.raises(OSError):
         Client(srv.url).query("put notes {n: 1}")
     assert len(srv.seen) == 1, "a write that may have landed is never made twice"
+    assert srv.keys() == [None], "the client makes no key of its own"
 
     keyed = Server("drop", (200, {"affected": 1}, {"Idempotent-Replayed": "true"}))
     c = Client(keyed.url)
@@ -155,15 +172,27 @@ def test_a_write_is_sent_again_after_a_dropped_connection_only_under_a_key():
     Client(copy.url).with_idempotency_key("n-2").collection("notes").insert({"n": 2})
     assert copy.keys() == ["n-2", "n-2"]
 
-    # A builder's read and a statement said to read go again; a text not
-    # said to read may write, and does not.
-    reads = Server("drop", (200, [{"id": 1}], {}), "drop", "drop", (200, [{"id": 2}], {}))
+    # A read the builder made goes again. A text, said to read or not, is
+    # the caller's: said home, `read=True` is a claim nothing checks -- a
+    # call to `history` stops being a read once the statement is made to
+    # log a row -- and goes once.
+    reads = Server("drop", (200, [{"id": 1}], {}), "drop", "drop", "drop")
     r = Client(reads.url)
     assert r.collection("docs").rows() == [{"id": 1}]
     with pytest.raises(OSError):
         r.query("get docs")
-    assert r.query("get docs", read=True) == [{"id": 2}]
+    with pytest.raises(OSError):
+        r.query("get docs", read=True)
+    with pytest.raises(OSError):
+        r.call("history", read=True)
     assert len(reads.seen) == 5
+
+    # Said to read on a client reading near, it goes marked
+    # (`Fennec-Read: replica`), which every server runs read-only: again.
+    near = Server("drop", (200, [{"id": 2}], {}))
+    assert Client(near.url, reads="nearest").query("get docs", read=True) == [{"id": 2}]
+    assert len(near.seen) == 2
+    assert "Fennec-Read: replica" in near.seen[1][1]
 
 
 def test_a_connection_refused_is_tried_again_whatever_the_request():
@@ -216,36 +245,40 @@ def test_the_tries_are_bounded_attempts_and_their_waits_within_max_wait():
         Client(off.url, retry=Retry(attempts=0))
 
 
-def test_the_timeout_bounds_a_request_whole_and_a_read_goes_again():
+def test_the_timeout_bounds_the_head_and_each_piece_and_nothing_goes_again_after_it():
     # A head at once, then a byte every 20 ms: each wait well within the
-    # timeout, the whole a second past it.
+    # timeout, the whole a second past it -- read whole, as a long answer is.
     srv = Server("trickle", OK)
     began = time.monotonic()
-    with pytest.raises(TimeoutError):
-        Client(srv.url, timeout=0.3).query("put notes {n: 1}")
-    assert time.monotonic() - began >= 0.3
-    assert len(srv.seen) == 1, "a write with no key that timed out may have landed"
+    assert Client(srv.url, timeout=0.3).query("put notes {n: 1}") == {"affected": 1}
+    assert time.monotonic() - began >= 0.9
+    assert len(srv.seen) == 1
 
-    hung = Server("hang", (200, [{"id": 1}], {}))
-    assert Client(hung.url, timeout=0.2).collection("docs").rows() == [{"id": 1}]
-    assert len(hung.seen) == 2
+    # No head: given up at the timeout, and not sent again, a read the
+    # builder made nor a write under a key -- past the client's timeout a
+    # `compact` may still be running, and a long read ran three times.
+    for send in (
+        lambda c: c.collection("docs").rows(),
+        lambda c: c.query("put notes {n: 1}", idempotency_key="n-1"),
+    ):
+        hung = Server("hang", (200, [{"id": 1}], {}))
+        began = time.monotonic()
+        with pytest.raises(TimeoutError):
+            send(Client(hung.url, timeout=0.2))
+        assert time.monotonic() - began >= 0.2
+        assert len(hung.seen) == 1
+
+    # A body that stops: given up the timeout after its last piece.
+    stalled = Server("stall", (200, [{"id": 1}], {}))
+    with pytest.raises(TimeoutError):
+        Client(stalled.url, timeout=0.2).collection("docs").rows()
+    assert len(stalled.seen) == 1
 
     # The change stream's reads go over the same connection, bounded alike.
     changes = Server("hang", (200, {"name": "c", "since": 0}, {}))
     with pytest.raises(TimeoutError):
         Client(changes.url, timeout=0.2).move_consumer("c", 0)
     assert len(changes.seen) == 1, "a commit is a write"
-
-
-def test_a_client_asked_to_makes_a_key_for_each_write_kept_across_its_tries():
-    srv = Server("drop", OK, (200, [], {}), (200, {"message": "compacted"}, {}))
-    c = Client(srv.url, retry=Retry(idempotency_keys=True))
-    c.collection("notes").insert({"n": 1})
-    first, again = srv.keys()[:2]
-    assert first and again == first, "the try after a drop carries the first try's key"
-    c.collection("notes").rows()
-    c.query("compact notes")
-    assert srv.keys()[2:] == [None, None], "a read and a compact take none"
 
 
 def run(coro):
@@ -271,10 +304,24 @@ def test_async_sends_again_by_the_same_rule():
             assert await db.query("put notes {n: 1}", idempotency_key="n-1") == {"affected": 1}
         assert keyed.keys() == ["n-1", "n-1"]
 
-        reads = Server("drop", (200, [{"id": 1}], {}))
+        reads = Server("drop", (200, [{"id": 1}], {}), "drop")
         async with AsyncClient(reads.url) as db:
             assert await db.collection("docs").rows() == [{"id": 1}]
-        assert len(reads.seen) == 2
+            # The caller's `read=True`, home: a claim, sent once.
+            with pytest.raises((OSError, asyncio.IncompleteReadError)):
+                await db.call("history", read=True)
+        assert len(reads.seen) == 3
+
+        near = Server("drop", (200, [{"id": 2}], {}))
+        async with AsyncClient(near.url, reads="nearest") as db:
+            assert await db.query("get docs", read=True) == [{"id": 2}]
+        assert len(near.seen) == 2
+
+        landed = Server((503, {"error": "moved", "completed": 1, "at": 1, "retry_after": 1}, {"Retry-After": "1"}), OK)
+        async with AsyncClient(landed.url) as db:
+            with pytest.raises(FennecError):
+                await db.batch([("compact notes", []), ("put notes {n: 1}", [])])
+        assert len(landed.seen) == 1
 
         held = Server((429, {"error": "past its quota of 4 held requests", "quota": "held"}, {}), OK)
         async with AsyncClient(held.url) as db:
@@ -285,13 +332,21 @@ def test_async_sends_again_by_the_same_rule():
     run(go())
 
 
-def test_async_bounds_a_request_whole_and_tries_a_refused_connection_again(monkeypatch):
+def test_async_bounds_the_head_and_each_piece_and_tries_a_refused_connection_again(monkeypatch):
     async def go():
         srv = Server("trickle", OK)
         async with AsyncClient(srv.url, timeout=0.3) as db:
-            with pytest.raises(asyncio.TimeoutError):
-                await db.query("put notes {n: 1}")
-        assert len(srv.seen) == 1
+            assert await db.query("put notes {n: 1}") == {"affected": 1}
+            # Kept, the connection takes the next request.
+            assert await db.query("put notes {n: 2}") == {"affected": 1}
+        assert len(srv.seen) == 2
+
+        for plan in ("hang", "stall"):
+            hung = Server(plan, (200, [{"id": 1}], {}))
+            async with AsyncClient(hung.url, timeout=0.2) as db:
+                with pytest.raises(asyncio.TimeoutError):
+                    await db.collection("docs").rows()
+            assert len(hung.seen) == 1, plan
 
         refused = Server(OK)
         opened = asyncio.open_connection
@@ -307,4 +362,41 @@ def test_async_bounds_a_request_whole_and_tries_a_refused_connection_again(monke
             assert await db.query("put notes {n: 1}") == {"affected": 1}
         assert len(refused.seen) == 1
 
+        # A host of several addresses, each refusing: asyncio joins their
+        # words in one OSError, which is a refusal all the same -- one of
+        # another error among them is not.
+        joined = Server(OK)
+        refusals.append(
+            OSError(
+                f"Multiple exceptions: [Errno {errno.ECONNREFUSED}] Connect call failed ('::1', 8080, 0, 0), "
+                f"[Errno {errno.ECONNREFUSED}] Connect call failed ('127.0.0.1', 8080)"
+            )
+        )
+        async with AsyncClient(joined.url) as db:
+            assert await db.query("put notes {n: 1}") == {"affected": 1}
+        assert len(joined.seen) == 1
+        refusals.append(
+            OSError(
+                f"Multiple exceptions: [Errno {errno.ECONNREFUSED}] Connect call failed ('::1', 8080, 0, 0), "
+                f"[Errno {errno.EHOSTUNREACH}] Connect call failed ('127.0.0.1', 8080)"
+            )
+        )
+        other = Server(OK)
+        async with AsyncClient(other.url) as db:
+            with pytest.raises(OSError):
+                await db.query("put notes {n: 1}")
+        assert other.seen == []
+
     run(go())
+
+
+def test_a_host_s_joined_refusals_are_a_refusal_and_nothing_else_is():
+    from fennecdb import _refused
+
+    r = errno.ECONNREFUSED
+    assert _refused(ConnectionRefusedError(r, "Connection refused"))
+    assert _refused(OSError(f"Multiple exceptions: [Errno {r}] Connect call failed ('::1', 80, 0, 0), [Errno {r}] Connect call failed ('127.0.0.1', 80)"))
+    assert not _refused(OSError(f"Multiple exceptions: [Errno {r}] Connect call failed ('::1', 80, 0, 0), [Errno {errno.ENETUNREACH}] Network is unreachable"))
+    assert not _refused(OSError("Multiple exceptions: "))
+    assert not _refused(ConnectionResetError(errno.ECONNRESET, "reset"))
+    assert not _refused(TimeoutError())

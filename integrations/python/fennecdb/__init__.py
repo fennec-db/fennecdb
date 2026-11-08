@@ -85,6 +85,7 @@ commits each batch once the loop comes back for the next:
 from __future__ import annotations
 
 import asyncio
+import errno
 import http.client
 import json
 import random
@@ -95,7 +96,6 @@ import ssl
 import threading
 import time
 import urllib.parse
-import uuid
 from datetime import datetime
 from typing import Any, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
@@ -304,23 +304,29 @@ def _named(row: Mapping[str, Any]) -> NamedStatement:
 
 
 class Retry(NamedTuple):
-    """How a client sends a request again: only where nothing ran -- a 503,
-    or a quota's 429, naming its wait, after that wait and never sooner; a
-    connection refused -- or where running it twice is harmless: a read, a
-    write under an `Idempotency-Key`, sent again after a timeout or a
-    dropped connection too. A refusal naming no wait is never sent again,
-    nor a write without a key once it may have reached the server.
+    """How a client sends a request again: only where nothing ran, or where
+    running it again changes nothing.
+
+    Nothing ran: a 503, or a quota's 429, naming its wait -- sent after that
+    wait, never sooner, unless its body says statements of a batch were
+    made (`completed`), which the server never answers so; a connection
+    refused; a request not handed to the system whole. Running it again
+    changes nothing: a read the builder made, one sent near (`read=True` on
+    a client with `reads="nearest"`: `Fennec-Read: replica`, which every
+    server runs read-only), and a write under an `Idempotency-Key`, answered
+    from its key while the server keeps it (a day) -- these go again after a
+    reset or a dropped connection too. Nothing goes again after the client's
+    own `timeout`, past which the server may still run it, nor a refusal
+    naming no wait; `read=True` sent home is a claim nothing checks, and
+    goes once.
 
     `attempts` tries at most, their waits -- the server's, or 0.25 s doubling,
     30% jitter on top -- within `max_wait` seconds; past either, the last
-    answer or error is the caller's. `idempotency_keys=True` gives each
-    write sent with no key one of the client's own, which may then go
-    again: off unless asked, since each key is a row the server keeps a day
-    (`_idempotency`). `Client(retry=False)` sends nothing again."""
+    answer or error is the caller's. `Client(retry=False)` sends nothing
+    again."""
 
     attempts: int = 3
     max_wait: float = 10.0
-    idempotency_keys: bool = False
 
 
 def _retry(retry: Retry | bool | None) -> Retry | None:
@@ -329,28 +335,17 @@ def _retry(retry: Retry | bool | None) -> Retry | None:
     if not retry:
         return None
     if not isinstance(retry, Retry) or retry.attempts < 1 or retry.max_wait < 0:
-        raise ValueError(f"retry is True, False or a Retry of attempts from 1 (got {retry!r})")
+        raise ValueError(f"bad retry: {retry!r}")
     return retry
-
-
-# A `compact` takes no key: the server refuses one (400).
-_COMPACT = re.compile(rb'"query":\s*"\s*compact\b', re.I)
-
-
-def _made(retry: Retry | None, path: str, body: bytes, read: bool) -> str | None:
-    """A key of the client's own for a write sent with none, where its
-    `Retry` asks for one: never a read's, nor a `compact`'s."""
-    if retry and retry.idempotency_keys and not read and path in ("/query", "/batch"):
-        if not _COMPACT.search(body):
-            return uuid.uuid4().hex
-    return None
 
 
 def _wait_of(status: int, raw: bytes, header: str | None) -> float | None:
     """The seconds a 503 or a 429 asks a client to wait, where it names any:
     then nothing ran. To the millisecond where the body says it
     (`retry_after_ms`), before `Retry-After` -- whole seconds -- and the
-    body's `retry_after`, which every 503 of the server's carries."""
+    body's `retry_after`, which every 503 of the server's carries. None
+    where statements of a batch were made (`completed`): sent again whole,
+    they were made twice."""
     if status not in (429, 503):
         return None
     try:
@@ -359,6 +354,9 @@ def _wait_of(status: int, raw: bytes, header: str | None) -> float | None:
         body = None
     if not isinstance(body, dict):
         body = {}
+    done = body.get("completed")
+    if isinstance(done, int) and done > 0:
+        return None
     ms = body.get("retry_after_ms")
     if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms > 0:
         return ms / 1000
@@ -382,19 +380,36 @@ def _pause(retry: Retry | None, tries: int, waited: float, wait: float) -> float
     return min(base * (1 + random.random() * 0.3), retry.max_wait - waited)
 
 
-def _bound(sock: socket.socket, end: float | None) -> None:
-    """Gives `sock`'s next wait what is left until `end`, a try's deadline,
-    and gives the try up where nothing is. Within a millisecond either way:
-    a `settimeout` is a system call (0.3 us), and the one a quick request
-    left is as good as set."""
-    if end is None:
-        return
-    left = end - time.monotonic()
-    if left <= 0:
+def _bound(sock: socket.socket, secs: float | None) -> None:
+    """Gives each of `sock`'s next waits `secs`, None for no bound, and
+    gives the request up where none is left. Within a millisecond either
+    way: a `settimeout` is a system call (0.3 us), and the one a quick
+    request left is as good as set."""
+    if secs is not None and secs <= 0:
         raise TimeoutError("timed out")
     was = sock.gettimeout()
-    if was is None or abs(was - left) > 0.001:
-        sock.settimeout(left)
+    if (was is None) != (secs is None) or (secs is not None and abs(was - secs) > 0.001):
+        sock.settimeout(secs)
+
+
+# One refusal in an OSError's words, as asyncio joins every address's
+# error when a host's addresses all fail ("Multiple exceptions: ...").
+_REFUSAL = re.compile(rf"\[(?:Errno {errno.ECONNREFUSED}|WinError 1225)\] [^\[]*")
+
+
+def _refused(e: BaseException) -> bool:
+    """Whether connecting was refused, at every address of the host's where
+    it has several: `asyncio.open_connection` tries each and, their words
+    differing by the address, raises one `OSError` joining them, the
+    refusals in it no `ConnectionRefusedError` any more. A request refused
+    so sent nothing, and any goes again."""
+    if isinstance(e, ConnectionRefusedError):
+        return True
+    said = str(e)
+    rest = said.removeprefix("Multiple exceptions: ")
+    if not isinstance(e, OSError) or rest == said:
+        return False
+    return all(_REFUSAL.fullmatch(part) for part in re.split(r", (?=\[(?:Errno|WinError) )", rest))
 
 
 class _Shared:
@@ -505,9 +520,12 @@ class Client:
     `urlopen`, which opens one a request, a read by id took 152 us against
     57 over the one connection, the server starting a thread for each.
 
-    `timeout` bounds each try of a request whole, seconds from its first
-    byte to its answer's last -- and a `wait` holds it that much longer;
-    None, never. `retry` sends a request again where nothing ran or running
+    `timeout` bounds the seconds to an answer's head -- a `wait` holds it
+    that much longer -- and those between the pieces of its body, which is
+    read for as long as it keeps coming; None, never. A statement that runs
+    long before it answers -- a `compact`, a `create index` -- is given a
+    client with a longer `timeout`: past it, it may still run, and is never
+    sent again. `retry` sends a request again where nothing ran or running
     it twice is harmless (`Retry`); `False`, never.
     """
 
@@ -784,17 +802,18 @@ class Client:
         elif after is not None:
             headers["Fennec-After"] = str(after)
         key = key or self.idempotency_key
-        if not key and self.retry and self.retry.idempotency_keys:
-            key = _made(self.retry, path, body, read)
         if key:
             headers["Idempotency-Key"] = key
         if wait:
             headers["Fennec-Wait"] = _wait_ms(wait)
         timeout = _more(self.timeout, wait)
-        # A read, or a write under a key, may run twice: sent again after a
-        # timeout or a dropped connection too.
-        twice = read or bool(key)
-        status, got, raw = self._send("POST", self._base + path, body, headers, timeout, twice)
+        # What may run twice, sent again after a reset too: a read the
+        # builder made (`_BUILT`), one sent near, which every server runs
+        # read-only (`Fennec-Read`), and a write under a key. The caller's
+        # `read=True` is a claim nothing checks at home: a call it names
+        # may have been made to write since.
+        twice = read is _BUILT or bool(key)
+        status, got, raw = self._send("POST", self._base + path, body, headers, timeout, twice or near)
         # 504: no copy the router reached holds that write in the wait --
         # the write lost in a failover of home, which says where it stands
         # now: the client's position from here on. Asked home with no mark,
@@ -831,14 +850,16 @@ class Client:
     ) -> tuple:
         """A request, its status, headers and body, sent again by the rule
         the router keeps: only what cannot have run, or may run twice. An
-        answer naming its wait -- a 503, a quota's 429 -- ran nothing, nor
-        did a request whose connection was refused or that was not handed
-        to the system whole: any request goes again, after that wait and
-        never sooner. `twice` -- a read, a write under a key -- goes
-        again after a timeout or a dropped connection too, which a write may
-        have landed before. A refusal naming no wait never goes again; past
-        the `Retry`'s tries or its waits, the last answer or error is the
-        caller's."""
+        answer naming its wait -- a 503, a quota's 429 -- ran nothing, unless
+        it says statements of a batch were made (`_wait_of`), nor did a
+        request whose connection was refused or that was not handed to the
+        system whole: any request goes again, after that wait and never
+        sooner. `twice` -- a read the builder made or sent near, a write
+        under a key -- goes again after a reset or a dropped connection too,
+        which a write may have landed before. Nothing goes again after the
+        client's own timeout, past which the server may still run it, nor a
+        refusal naming no wait; past the `Retry`'s tries or its waits, the
+        last answer or error is the caller's."""
         tries, waited = 0, 0.0
         while True:
             tries += 1
@@ -850,12 +871,14 @@ class Client:
                 wait = _wait_of(status, raw, got.get("Retry-After")) if status in (429, 503) else None
                 if wait is None:
                     return status, got, raw
-            except ConnectionRefusedError as e:
-                error, wait = e, 0.0
+            except TimeoutError:
+                # The client's own: a `compact`, a long read may still be
+                # running, and three tries ran a read three times.
+                raise
             except _Unsent as e:
                 error, wait = e.__cause__, 0.0
             except (OSError, http.client.HTTPException) as e:
-                if not twice:
+                if not (twice or isinstance(e, ConnectionRefusedError)):
                     raise
                 error, wait = e, 0.0
             pause = _pause(self.retry, tries, waited, wait)
@@ -869,16 +892,21 @@ class Client:
     def _once(
         self, method: str, path: str, body: bytes | None, headers: dict, timeout: float | None
     ) -> tuple:
-        """One try over this thread's connection, within `timeout` whole:
-        each wait for the server -- the connect, the head, each piece of the
-        body -- is given what is left of it, so one answering a byte at a
-        time is given up as one answering nothing is. A kept connection the
-        server closed while it was idle is found so before the request goes
-        -- its socket reads as ready, the end of the stream -- and a new one
-        is opened in its place: a try on it would fail as though the request
-        may have run."""
+        """One try over this thread's connection: the connect and the
+        answer's head within `timeout` -- each wait given what is left of it
+        -- and each piece of its body within `self.timeout` of the last, so
+        a long answer is read for as long as it comes and one that stops is
+        given up. Bounded whole, a long read failed however steadily it
+        came. A kept connection the server closed while it was idle is found
+        so before the request goes -- its socket reads as ready, the end of
+        the stream -- and a new one is opened in its place: a try on it
+        would fail as though the request may have run."""
         limit = self.timeout if timeout is None else timeout
         end = None if limit is None else time.monotonic() + limit
+
+        def left() -> float | None:
+            return None if end is None else end - time.monotonic()
+
         conn = getattr(self._local, "conn", None)
         if conn is not None and _closed(conn):
             conn.close()
@@ -890,9 +918,13 @@ class Client:
                 conn.timeout = limit
                 conn.connect()
             sock = conn.sock
-            _bound(sock, end)
+            _bound(sock, left())
             try:
                 conn.request(method, path, body, headers)
+            except TimeoutError:
+                # A server that stopped reading: sent again, it would wait as
+                # long ([`TimeoutError`] in `_send`).
+                raise
             except OSError as e:
                 # Not handed to the system whole, as the router judges it:
                 # the server read no request to run.
@@ -900,22 +932,12 @@ class Client:
             # A small request goes at once, the bound before it as good for
             # the head; a large one may take its time going.
             if body is not None and len(body) > 65536:
-                _bound(sock, end)
+                _bound(sock, left())
             resp = conn.getresponse()
-            # `read1` waits once for the socket at most, so each wait is
-            # bounded by what is left; `read` waits for every piece of a
-            # body with the timeout it began with.
-            parts = []
-            while not resp.isclosed():
-                _bound(sock, end)
-                part = resp.read1(1 << 16)
-                if not part:
-                    # Done: 3.10's `read1` leaves a body read whole open,
-                    # and the next request would find it so.
-                    resp.read()
-                    break
-                parts.append(part)
-            raw = b"".join(parts)
+            # `read` gives each wait for a piece of the body the socket's
+            # timeout: the timeout between pieces.
+            _bound(sock, self.timeout)
+            raw = resp.read()
         except BaseException:
             conn.close()
             self._local.conn = None
@@ -1168,10 +1190,11 @@ class AsyncClient:
         wait: float | None = None,
         read: bool = False,
     ) -> Any:
-        key = key or self.idempotency_key or _made(self.retry, path, body, read)
+        key = key or self.idempotency_key
         held = _wait_ms(wait) if wait else None
-        # As `Client._send`: a read, or a write under a key, may run twice.
-        twice = read or bool(key)
+        # As `Client._post`'s: what may run twice -- a read the builder made,
+        # one sent near, a write under a key -- goes again after a reset too.
+        twice = read is _BUILT or bool(key)
         limit = _more(self.timeout, wait)
         async with self._s.lock:
             # A read near, as `Client`'s: marked, after this client's
@@ -1186,10 +1209,14 @@ class AsyncClient:
                 error = None
                 try:
                     status, headers, raw = await self._try(path, body, content_type, key, held, near, limit)
+                    if raw is None:
+                        raw = await self._body(headers)
                     if status == 504 and "Fennec-After" in near:
                         self._s.told(raw, sent)
                         near = {}
                         status, headers, raw = await self._try(path, body, content_type, key, held, near, limit)
+                        if raw is None:
+                            raw = await self._body(headers)
                     wait_s = _wait_of(status, raw, headers.get("retry-after"))
                     if wait_s is None:
                         if 200 <= status < 300:
@@ -1197,12 +1224,15 @@ class AsyncClient:
                                 self._s.answered(int(headers["fennec-seq"]), headers.get("fennec-history"))
                             self._s.replayed = headers.get("idempotent-replayed") == "true"
                         return _answer(status, raw)
-                except ConnectionRefusedError as e:
-                    # Nothing went: any request goes again.
-                    error, wait_s = e, 0.0
-                except (ConnectionError, asyncio.IncompleteReadError, OSError, asyncio.TimeoutError) as e:
+                except (TimeoutError, asyncio.TimeoutError):
+                    # The client's own, as `Client._send`'s: never again.
                     await self.close()
-                    if not twice:
+                    raise
+                except (OSError, asyncio.IncompleteReadError) as e:
+                    await self.close()
+                    # Refused, at every address of the host's: nothing went,
+                    # and any request goes again.
+                    if not (twice or near or _refused(e)):
                         raise
                     error, wait_s = e, 0.0
                 except asyncio.CancelledError:
@@ -1228,11 +1258,12 @@ class AsyncClient:
         extra: dict,
         limit: float | None,
     ) -> Any:
-        """One try, to be awaited, within `limit` whole, connect and all. A
-        kept connection the server closed while it was idle is let go of
-        before the request goes, as `Client` finds one: a try on it would
-        fail as one that may have run. Not a coroutine of its own: one more
-        a request cost 0.4 us."""
+        """One try, to be awaited: the connect, the answer's head and a body
+        in hand with it within `limit` -- a body still to come is left to
+        `_body`, None in its place. A kept connection the server closed
+        while it was idle is let go of before the request goes, as `Client`
+        finds one: a try on it would fail as one that may have run. Not a
+        coroutine of its own: one more a request cost 0.4 us."""
         if self._s.conn is not None and _gone(*self._s.conn):
             self._drop()
         return asyncio.wait_for(self._exchange(path, body, content_type, key, held, extra), limit)
@@ -1249,9 +1280,79 @@ class AsyncClient:
         body: bytes,
         content_type: str,
         key: str | None,
-        held: str | None = None,
-        extra: dict | None = None,
-    ) -> tuple[int, dict, bytes]:
+        held: str | None,
+        extra: dict,
+    ) -> tuple[int, dict, bytes | None]:
+        """The request sent and the answer's head read (`_head`), and its
+        body where the loop holds it whole already -- a head and a body the
+        server wrote at once, as it writes every answer: nothing to wait
+        for. Any other body is `_body`'s, read past the head's bound a piece
+        at a time: one more coroutine and a timer the loop holds cost every
+        request 3.5 us, 6%."""
+        status, headers = await self._head(path, body, content_type, key, held, extra)
+        n = headers.get("content-length")
+        reader = self._s.conn[0]
+        # CPython's buffer, and uvloop's, which runs asyncio's streams: a
+        # reader without one has its body read by `_body`.
+        if n is not None and len(getattr(reader, "_buffer", b"")) >= int(n):
+            raw = await reader.readexactly(int(n))
+            if headers.get("connection", "").lower() == "close":
+                await self.close()
+            return status, headers, raw
+        return status, headers, None
+
+    async def _body(self, headers: dict) -> bytes:
+        """The body of the answer whose `headers` were read, each piece
+        within the timeout of the last (`_Idle`): a long answer is read for
+        as long as it comes, one that stops is given up, its connection
+        with it."""
+        reader, writer = self._s.conn
+        idle = _Idle(writer, self.timeout)
+        try:
+            if "content-length" in headers:
+                raw = await _exactly(reader, int(headers["content-length"]), idle)
+            elif headers.get("transfer-encoding", "").lower() == "chunked":
+                parts = []
+                while True:
+                    idle.tick()
+                    size = int((await reader.readuntil(b"\r\n")).split(b";")[0], 16)
+                    if not size:
+                        break
+                    parts.append(await _exactly(reader, size + 2, idle))
+                idle.tick()
+                await reader.readuntil(b"\r\n")
+                raw = b"".join(p[:-2] for p in parts)
+            else:
+                parts = []
+                while True:
+                    idle.tick()
+                    part = await reader.read(1 << 16)
+                    if not part:
+                        break
+                    parts.append(part)
+                raw = b"".join(parts)
+                self._s.conn = None
+        except (OSError, asyncio.IncompleteReadError):
+            if idle.late:
+                raise asyncio.TimeoutError(f"no piece of the answer within {self.timeout} s") from None
+            raise
+        finally:
+            idle.stop()
+        if headers.get("connection", "").lower() == "close" and self._s.conn:
+            await self.close()
+        return raw
+
+    async def _head(
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        key: str | None,
+        held: str | None,
+        extra: dict,
+    ) -> tuple[int, dict]:
+        """The request sent, over a connection opened where none is kept,
+        and the answer's status and headers."""
         if self._s.conn is None:
             self._s.conn = await asyncio.open_connection(
                 self._host, self._port, ssl=self._tls, server_hostname=self._host if self._tls else None
@@ -1270,7 +1371,7 @@ class AsyncClient:
             head.append(f"Idempotency-Key: {key}")
         if held:
             head.append(f"Fennec-Wait: {held}")
-        for name, value in (extra or {}).items():
+        for name, value in extra.items():
             head.append(f"{name}: {value}")
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + body)
         await writer.drain()
@@ -1281,20 +1382,47 @@ class AsyncClient:
         while (line := await reader.readuntil(b"\r\n")) != b"\r\n":
             name, _, value = line.decode("latin-1").partition(":")
             headers[name.strip().lower()] = value.strip()
-        if "content-length" in headers:
-            raw = await reader.readexactly(int(headers["content-length"]))
-        elif headers.get("transfer-encoding", "").lower() == "chunked":
-            raw = b""
-            while (size := int((await reader.readuntil(b"\r\n")).split(b";")[0], 16)) > 0:
-                raw += await reader.readexactly(size)
-                await reader.readexactly(2)
-            await reader.readuntil(b"\r\n")
-        else:
-            raw = await reader.read()
-            self._s.conn = None
-        if headers.get("connection", "").lower() == "close" and self._s.conn:
-            await self.close()
-        return status, headers, raw
+        return status, headers
+
+
+class _Idle:
+    """The clock of an answer's body: `secs` with nothing read, and its
+    connection is let go of (`late`), the read under way meeting its end. A
+    timer the loop holds, where `wait_for` made a task a wait before 3.12."""
+
+    __slots__ = ("secs", "writer", "loop", "handle", "late")
+
+    def __init__(self, writer: asyncio.StreamWriter, secs: float | None):
+        self.secs, self.writer, self.handle, self.late = secs, writer, None, False
+        self.loop = asyncio.get_running_loop()
+
+    def tick(self) -> None:
+        """Starts the clock again: a piece came, or one is to be read."""
+        if self.handle is not None:
+            self.handle.cancel()
+        if self.secs is not None:
+            self.handle = self.loop.call_later(self.secs, self._late)
+
+    def _late(self) -> None:
+        self.late = True
+        self.writer.transport.abort()
+
+    def stop(self) -> None:
+        if self.handle is not None:
+            self.handle.cancel()
+
+
+async def _exactly(reader: asyncio.StreamReader, n: int, idle: _Idle) -> bytes:
+    """`n` bytes of `reader`, each wait for a piece within `idle`'s clock."""
+    parts = []
+    while n:
+        idle.tick()
+        part = await reader.read(n)
+        if not part:
+            raise asyncio.IncompleteReadError(b"".join(parts), None)
+        parts.append(part)
+        n -= len(part)
+    return parts[0] if len(parts) == 1 else b"".join(parts)
 
 
 def _gone(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
@@ -1334,6 +1462,7 @@ from .builder import (  # noqa: E402
     Param,
     Query,
     Rows,
+    _BUILT,
     _rows,
     and_,
     bucket,
