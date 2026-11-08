@@ -374,8 +374,9 @@ extern "system" {
 /// a mapped drive: where the device its volume is on says it is remote,
 /// or the redirector answers `FILE_REMOTE_PROTOCOL_INFO`, a local file
 /// system refusing the class. The device first: on `windows-latest` the
-/// first handle through `\\localhost\C$` was refused the class, a later
-/// one answered (`a_file_is_mapped_where_its_volume_allows`).
+/// handle `volume` opened through `\\localhost\C$` was refused the class
+/// in one run, and every handle answered it in the next, where the device
+/// said remote each time (`a_file_is_mapped_where_its_volume_allows`).
 fn remote(f: &File) -> bool {
     remote_device(f) || remote_protocol(f).is_ok()
 }
