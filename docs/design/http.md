@@ -1255,9 +1255,16 @@ shutdown never shuts a descriptor a new connection took
 refused request's end sent one. On Windows the list keys a socket's
 `SOCKET` (`conn/windows.rs`), and a shut read side wakes no thread blocked
 reading it -- a connection waiting for its request was cut by the exit
-with a reset -- so its reads are cancelled after the shutdown
-(`CancelIoEx`; std makes every socket overlapped), the read after it
-meeting the shut side ([windows.md](windows.md#7-what-else-windows-differs-in), 7g).
+with a reset -- so the socket's pending I/O is cancelled after the
+shutdown (`CancelIoEx`; std makes every socket overlapped), the read after
+it meeting the shut side. The cancel takes every request on the socket,
+not its read alone: a send blocked on a slow reader fails too, and an
+answer in the middle of its write is cut there, with no `close_notify`,
+where on Unix it goes on through the grace. And Winsock resets a TCP
+connection shut for receiving with bytes queued that the server had not
+read, or arriving after (`SD_RECEIVE`): a client that had sent more -- a
+pipelined request -- reads a reset, not a `close_notify`
+([windows.md](windows.md#7-what-else-windows-differs-in), 7g).
 
 *The key's file.* On Unix a key file open to more than its owner is said
 at the start, its path and mode, never a byte of it (`conn::warn_if_open`),

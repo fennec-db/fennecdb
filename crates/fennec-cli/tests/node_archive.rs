@@ -31,10 +31,48 @@ fn fennec_in_its_group() -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        console();
         // CREATE_NEW_PROCESS_GROUP: the child heads a group, its id the child's.
         cmd.creation_flags(0x0000_0200);
     }
     cmd
+}
+
+/// A console this process shares with the `fennec` it starts, which
+/// Ctrl+Break asks: `GenerateConsoleCtrlEvent` sends to processes of the
+/// caller's console alone. A process started with none -- a runner's step
+/// has one -- is given one (`AllocConsole`), its standard handles kept as
+/// they were, cargo's pipes, as fennec-server's harness does
+/// (`support::windows::console`).
+#[cfg(windows)]
+fn console() {
+    use std::ffi::c_void;
+    use std::sync::Once;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(pids: *mut u32, len: u32) -> u32;
+        fn AllocConsole() -> i32;
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
+    }
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let mut pid = [0u32; 1];
+        // SAFETY: a buffer of one id; the count answered is all this reads.
+        if unsafe { GetConsoleProcessList(pid.as_mut_ptr(), 1) } > 0 {
+            return;
+        }
+        // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE.
+        let which = [-10i32 as u32, -11i32 as u32, -12i32 as u32];
+        // SAFETY: the process's own standard handles, read and put back.
+        unsafe {
+            let kept = which.map(|w| GetStdHandle(w));
+            assert_ne!(AllocConsole(), 0, "{}", std::io::Error::last_os_error());
+            for (w, h) in which.iter().zip(kept) {
+                SetStdHandle(*w, h);
+            }
+        }
+    });
 }
 
 /// Asks `child` to stop as a supervisor does: SIGTERM, and on Windows,

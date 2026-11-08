@@ -306,7 +306,7 @@ mod open {
             let s = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(*fd) });
             let _ = s.shutdown(std::net::Shutdown::Read);
             #[cfg(windows)]
-            super::sock::cancel_reads(&s);
+            super::sock::cancel_io(&s);
             wakers.extend(wake.clone());
         }
         wakers

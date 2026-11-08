@@ -41,9 +41,10 @@ pub fn system_random(n: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Cryptographic randomness. The call fails only on a bad argument, its
-/// page says, as std's own randomness on Windows takes it, so there is no
-/// clock to fall back to here: a refusal is a bug, and says so.
+/// Cryptographic randomness. The call's page names no failure but a bad
+/// argument, so there is no clock to fall back to here: a refusal ends
+/// the caller, naming it. std's own randomness on Windows is another call,
+/// `ProcessPrng` (bcryptprimitives.dll), since Rust 1.78.
 pub fn random_bytes(n: usize) -> Vec<u8> {
     system_random(n).expect("BCryptGenRandom refused the system's preferred generator")
 }

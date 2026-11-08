@@ -19,13 +19,21 @@ extern "system" {
 /// Winsock's (`SD_RECEIVE`) does not, and a connection waiting for its next
 /// request held its thread until the process's exit cut it with a reset,
 /// no `close_notify` sent (`every_tls_end_is_a_close_notify_the_shutdown_s_too`
-/// on Windows CI). Its reads are cancelled instead: std makes every socket
-/// overlapped, so a blocking read is a request on the socket's handle that
-/// `CancelIoEx` ends from another thread, and the read after it meets the
-/// shut read side and fails, ending the connection with its `close_notify`.
-pub fn cancel_reads(sock: &TcpStream) {
+/// on Windows CI). std makes every socket overlapped, so a blocking call is
+/// a request on the socket's handle that `CancelIoEx` ends from another
+/// thread; the read after it meets the shut read side and fails, ending
+/// the connection with its `close_notify`.
+///
+/// It cancels every request on the socket, not its reads alone -- the call
+/// takes no overlapped of std's to name one -- so a send blocked on a slow
+/// reader fails too: an answer in the middle of its write is cut there,
+/// with no `close_notify`, where on Unix it goes on through the shutdown's
+/// grace. And `SD_RECEIVE` itself resets a connection whose client sent
+/// bytes the server had not read, or sends more after it (Winsock's
+/// `shutdown` page). docs/design/windows.md, 7g.
+pub fn cancel_io(sock: &TcpStream) {
     // SAFETY: the socket's own handle, open while it is borrowed; a socket
-    // with no read under way has nothing to cancel, which is no error here.
+    // with nothing under way has nothing to cancel, which is no error here.
     unsafe {
         CancelIoEx(sock.as_raw_socket() as *mut c_void, std::ptr::null_mut());
     }

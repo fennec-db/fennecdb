@@ -262,7 +262,11 @@ at most, so a scan or a client with the wrong CA cannot fill the log.</p>
 kept-alive connection's end, a stream of changes or a replica's stream, and
 each open connection at a shutdown. A client reading a stream to its end can
 tell that end from one cut short. A connection whose write failed gets none,
-and neither does a stream the router relays from a node that broke off.</p>
+and neither does a stream the router relays from a node that broke off. On
+Windows a shutdown also cuts an answer still being written to a slow
+client, which a Unix server lets finish for half a second, and resets a
+connection whose client had sent more than the server read, a pipelined
+request.</p>
 
 <p>A connection refused at <code>--max-connections</code>, or for which no
 thread can be made, is told a TLS <code>internal_error</code> alert, where plain
@@ -373,18 +377,26 @@ left that looked successful to the client but never reached the disk. Under
 more.</p>
 
 <p>Windows sends no signals. There Ctrl+C and Ctrl+Break, closing the
-server's console window and the system shutting down start the same
-shutdown. On a close or a shutdown Windows waits five seconds at most
-before it ends the process: a checkpoint cut short leaves the file whole,
-and the next start links the vectors it would have held. A program that
-stops a server it started sends Ctrl+Break to the server's process group,
-what <code>SIGTERM</code> is elsewhere: start it with
-<code>CREATE_NEW_PROCESS_GROUP</code>, then call
+server's console window, logging off from the session it runs in and the
+system shutting down start the same shutdown. Ctrl+C stops it even when it
+was started in a process group of its own or with <code>start /b</code>,
+which turn Ctrl+C off for the programs they start. On a close, a logoff or
+a shutdown Windows ends the process five seconds after, so the server
+syncs first: every write it acknowledged before the event is on disk
+within a fraction of a second. Only then does it answer held requests,
+end its TLS connections and flush its traces, sync what came meanwhile and
+write the checkpoint, if the five seconds last that long; a checkpoint cut
+short leaves the file whole, and the next start links the vectors it would
+have held. A program that stops a server it started sends Ctrl+Break to
+the server's process group, what <code>SIGTERM</code> is elsewhere: start
+it with <code>CREATE_NEW_PROCESS_GROUP</code>, then call
 <code>GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)</code> from the same
 console. Run as a Windows service, the server goes under a wrapper that
 stops it with Ctrl+C or Ctrl+Break and waits for it before it kills, as
 WinSW and NSSM do; give it the time a final sync takes. A user logging off
-does not stop a server run as a service. Killed
+from another session does not stop a server in the services' session,
+which Windows keeps a service's own process running through; whether it
+does the same for a wrapper's child is not verified yet. Killed
 (<code>taskkill /f</code>, <i>End process</i> in Task Manager's details),
 it gets what <code>kill -9</code> gets.</p>
 

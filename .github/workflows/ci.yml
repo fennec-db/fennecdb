@@ -117,6 +117,8 @@ jobs:
       # without the TLS whose ring wants MSVC: its tests are the Windows
       # job's, whose build is the compiler's word on them.
       - run: cargo clippy -p fennec-server --no-default-features --lib --bins --target x86_64-pc-windows-msvc -- -D warnings
+      # fennec's console handler (`stop`) and its randomness's word.
+      - run: cargo clippy -p fennec-cli --no-default-features --features import,backup,mcp --bins --target x86_64-pc-windows-msvc -- -D warnings
 
       # The native library with the JNI functions the Kotlin binding calls,
       # which the workspace's run builds without.
@@ -338,6 +340,12 @@ jobs:
 
       - name: fennec-server's suite, its servers stopped by Ctrl+Break
         run: cargo test -p fennec-server
+
+      # The system's randomness, BCryptGenRandom's on Windows: a `--dir`
+      # node's and a hooks file's stand-in key, `fennec key`, a sealed
+      # archive's nonce.
+      - name: fennec-http's randomness and crypto
+        run: cargo test -p fennec-http --lib crypto:: -- --nocapture
 
       # After the server's: fennec's lock tests run beside its binary.
       - name: fennec-abi's, fennec's and the native library's suites

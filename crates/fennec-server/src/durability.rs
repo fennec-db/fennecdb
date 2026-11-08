@@ -316,6 +316,11 @@ pub fn run_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: boo
 /// meant a write accepted between `sync` and `exit` could look successful to
 /// the client and never reach the disk; the window was small but silent.
 fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+    // On Windows, where a close, a user's logoff or the system's shutdown
+    // ends the process 5 s after, what was acknowledged is synced before
+    // each wait below (`windows::sync_first`, docs/design/windows.md, 4).
+    #[cfg(windows)]
+    windows::sync_first(db);
     // Claims held until a job comes (`Fennec-Wait`) are answered first, with
     // the nothing they found: left held, each was cut off with the process
     // and its worker learned of the shutdown from a broken connection.
@@ -325,6 +330,8 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // alone, a TLS client read each as cut short.
     fennec_http::conn::end_all(fennec_http::conn::END_GRACE);
     let before = std::mem::take(&mut *BEFORE_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(windows)]
+    windows::sync_first(db);
     for f in before {
         f();
     }
@@ -377,7 +384,7 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::install_signal_handlers;
+pub use windows::{before_the_deadline, install_signal_handlers};
 
 #[cfg(test)]
 mod tests {
