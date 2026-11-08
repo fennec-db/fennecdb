@@ -462,17 +462,23 @@ insert of the documents 72.92M -> 72.95M (+0.03%), a small `get` 780 482
 the builder's own parameters are not noted; a request's body of 1 000
 documents takes 1% longer to make (`normalizeAll`), where a walk of it
 after had taken 8.7%. `as_double` is 159 bytes of the module, which with
-it grew 638 bytes in all, 312 gzip, 338 brotli; it leaves an int an int --
+it grew 649 bytes in all, 336 gzip, 305 brotli; it leaves an int an int --
 changing the kind cost 126 bytes of drop glue -- as no text
-`JSON.stringify` writes is an int rounding to 2^63. Natively
-(`fennec_http::handle`, in-loop
-instructions, seven alternating runs, `MallocNanoZone=0`, load under 6): a
-`get` answering 1 000 rows of four float columns, half of them whole floats
-past 1e15, 3.631M -> 3.556M instructions and 705k -> 569k cycles, as such
-a float now takes `int_into` rather than the shortest digits' search; a
-plain `/query` put 21 289 -> 21 295, flat. Python, .NET, Swift, Kotlin and Dart
-write such a double with a point or an exponent, which the server reads as
-the float it is; a Go struct document goes through `encoding/json` whole,
+`JSON.stringify` writes is an int rounding to 2^63. Natively, by `make
+instr-compare` (eight identities a build, seven runs each, the load under
+4), `query_json`'s `get` of 1 000 rows of four float columns, half the rows
+whole and half with a fraction (`examples/json_numbers.rs`): whole floats
+in [1e15, 1e16) 3.820M -> 3.488M instructions (-8.7%), in [2^53, 9e18)
+4.046M -> 3.592M (-11.2%), under a million -3.3%, none whole -0.5%, int
+columns -14.7%. `int_into` writes its digits and sign with one `push_str`,
+as `num::f64_into` does; pushed a `char` at a time, as it had been, the
+first two were +2.6% and +1.0% against main. A plain `/query` put
+(`replays`): +75 and +22 instructions (22 017 -> 22 092, 22 060 -> 22 081)
+in two sets, the second inside two standard errors, and one traced call of
+`handle` 4 instructions more of its own code (`Collection::index_scalar`
+and `Value::coerce_as` 2 each), the rest the allocator's draw. Python,
+.NET, Swift, Kotlin and Dart write such a double with a point or an
+exponent, which the server reads as the float it is; a Go struct document goes through `encoding/json` whole,
 so there such a number belongs in an `int64`, as the languages page says.
 `tests/mixed_numbers.rs` (`a_number_read_back_through_json_finds_its_row`)
 reads every kind of field's numbers back from the JSON a server answers and

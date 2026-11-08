@@ -79,23 +79,29 @@ fn needs_escape(w: u64) -> bool {
 /// `n` in decimal: `to_string` allocated a `String` for every int a row
 /// held, and copied it.
 pub fn int_into(out: &mut String, n: i64) {
-    let mut digits = [0u8; 20];
-    let mut at = digits.len();
+    // `i64::MIN`'s 19 digits and its sign.
+    let mut text = [0u8; 20];
+    let mut at = text.len();
     let mut m = n.unsigned_abs();
     loop {
         at -= 1;
-        digits[at] = b'0' + (m % 10) as u8;
+        text[at] = b'0' + (m % 10) as u8;
         m /= 10;
         if m == 0 {
             break;
         }
     }
     if n < 0 {
-        out.push('-');
+        at -= 1;
+        text[at] = b'-';
     }
-    for &d in &digits[at..] {
-        out.push(d as char);
-    }
+    // One `push_str`, as `num::f64_into` writes. Pushed a `char` at a time,
+    // a `get` of 1 000 rows of four float columns, half whole from 1e15 up
+    // -- each going out as every digit of its int (`num_into`) -- took 2.6%
+    // more instructions than their shortest digits had; this way 8.7%
+    // fewer, and int columns 14.7% fewer (`examples/json_numbers.rs`).
+    // SAFETY: every byte is a digit or `-`, ASCII.
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&text[at..]) });
 }
 
 /// A float: a whole one short of 2^63 either side as the int it is, every
@@ -1345,6 +1351,23 @@ mod tests {
             parse_object_listing_exact(body, "params").unwrap()[1].1,
             Value::List(vec![Value::List(vec![Value::Float(19.99), Value::Int(1)])])
         );
+    }
+
+    /// `int_into` writes what `to_string` does, the sign and `i64::MIN`'s
+    /// 19 digits within its buffer, onto what `out` held.
+    #[test]
+    fn an_int_is_written_as_to_string_writes_it() {
+        let mut ints = vec![0, 1, -1, 9, -9, 10, -10, i64::MAX, i64::MIN, i64::MIN + 1];
+        let mut p = 1i64;
+        while let Some(q) = p.checked_mul(10) {
+            ints.extend([p - 1, p, p + 1, -p, -(p - 1), q / 10 * 7]);
+            p = q;
+        }
+        for n in ints {
+            let mut out = String::from("x");
+            int_into(&mut out, n);
+            assert_eq!(out, format!("x{n}"));
+        }
     }
 
     /// Every whole float written out reads back as a number `cmp_value`
