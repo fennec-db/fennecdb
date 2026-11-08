@@ -452,8 +452,9 @@ impl Value {
             // and short of 2^24 (`whole_f32s`, `Database::exactly`) -- a whole
             // one is the int it came from, as the exact read makes it, so a
             // `[timestamp]` takes it too. What else comes here is a vector
-            // built in Rust, its `f32`s the numbers it holds: 2^63 is past
-            // every int, and refused as the float it is.
+            // built in Rust, or one a binding marked exact
+            // (`fennec_abi::EXACT`), its `f32`s the numbers it holds: 2^63 is
+            // past every int, and refused as the float it is.
             (DataType::List(inner), Value::Vector(v)) => {
                 // What an `[int]` and a `[float]` mostly take, made at once,
                 // each element what the way below makes of it: a call of

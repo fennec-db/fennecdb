@@ -75,14 +75,25 @@ pub fn prepare(sql: &str, params_src: &str, vectors: &[u8]) -> Result<Prepared> 
     Ok(Prepared { stmts, params })
 }
 
+/// The top bit of a vector's place ([`with_vectors`]): its sender marks so a
+/// vector each of whose `f32`s is the number it was handed -- a typed `f32`
+/// array, or numbers each an `f32` holds exactly (`0.5`, an int short of
+/// 2^24) -- which a list of numbers then takes as it came
+/// ([`exact_noting`]). One unmarked may be the `f32`s of numbers its sender
+/// rounded, `0.1` or 16777217, and is asked for again as JSON: the bindings
+/// mark what they can, so an `[int]` of small ints goes over in one call, as
+/// before lists were read as written, rather than two or as digits.
+pub const EXACT: u32 = 1 << 31;
+
 /// The parameters with each vector handed over as `f32`s put in its place:
-/// for each, its place among the parameters and its length as two
-/// little-endian `u32`s, then its values, where the JSON holds `null`.
-/// Written out as text and read back, a page of 200 768-dim vectors spent
-/// most of its time on the numbers' digits, both sides of the call.
+/// for each, its place among the parameters -- [`EXACT`] set where it is
+/// marked -- and its length as two little-endian `u32`s, then its values,
+/// where the JSON holds `null`. Written out as text and read back, a page of
+/// 200 768-dim vectors spent most of its time on the numbers' digits, both
+/// sides of the call.
 pub fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Value>> {
     while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
-        let at = u32::from_le_bytes([a0, a1, a2, a3]) as usize;
+        let at = (u32::from_le_bytes([a0, a1, a2, a3]) & !EXACT) as usize;
         let n = u32::from_le_bytes([n0, n1, n2, n3]) as usize;
         let body = n.checked_mul(4).and_then(|len| rest.split_at_checked(len));
         let slot = params.get_mut(at).filter(|p| p.is_null());
@@ -100,15 +111,23 @@ pub fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Valu
 
 /// Whether the parameter at `at` was handed over as `f32`s ([`with_vectors`]).
 #[inline(always)]
-pub fn apart(mut bytes: &[u8], at: usize) -> bool {
+pub fn apart(bytes: &[u8], at: usize) -> bool {
+    apart_as(bytes, at).is_some()
+}
+
+/// Whether the parameter at `at` was handed over as `f32`s, and if so
+/// whether marked [`EXACT`].
+#[inline(always)]
+pub fn apart_as(mut bytes: &[u8], at: usize) -> Option<bool> {
     while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
-        if u32::from_le_bytes([a0, a1, a2, a3]) as usize == at {
-            return true;
+        let word = u32::from_le_bytes([a0, a1, a2, a3]);
+        if (word & !EXACT) as usize == at {
+            return Some(word & EXACT != 0);
         }
         let n = u32::from_le_bytes([n0, n1, n2, n3]) as usize;
         bytes = rest.get(n.saturating_mul(4)..).unwrap_or_default();
     }
-    false
+    None
 }
 
 /// A list of numbers a json field is handed, or a path compared with, read
@@ -149,12 +168,27 @@ pub fn exact_noting(
     let mut text = false;
     let mut as_json = String::new();
     let mut needed: Vec<usize> = Vec::new();
+    let mut trusted: Vec<usize> = Vec::new();
     for s in &p.stmts {
         let mut need = db.exactly(s);
         text |= need.text;
-        // A vector handed over apart is the `f32`s of numbers the page may
-        // have rounded (`1.00000001` is 1 as an `f32`): a list of numbers
-        // asks for it as JSON, as a json field does, whatever it holds.
+        // A vector its sender marked exact is the numbers it was handed: a
+        // list of numbers takes it as it came, and nothing of it is asked
+        // for again. Every other handed over apart is the `f32`s of numbers
+        // the page may have rounded (`1.00000001` is 1 as an `f32`): a list
+        // of numbers asks for it as JSON, as a json field does, whatever it
+        // holds.
+        let params = &mut need.params;
+        need.lists.retain(|&i| match apart_as(vectors, i) {
+            Some(true) => {
+                if let Ok(at) = params.binary_search(&i) {
+                    params.remove(at);
+                }
+                trusted.push(i);
+                false
+            }
+            _ => true,
+        });
         need.apart(&|i| apart(vectors, i));
         need.settle(&p.params);
         for i in need.params {
@@ -169,6 +203,25 @@ pub fn exact_noting(
     }
     if !as_json.is_empty() {
         return Err(Refused::Exact(as_json));
+    }
+    // A vector marked exact the engine takes as it came where its `f32`s
+    // are the integers written; any other is made the list of the numbers
+    // its `f32`s are, a whole one an int as JSON says it, which the engine
+    // takes as read as written. After every statement was asked: one that
+    // hands it a json field asked for it as JSON above.
+    for i in trusted {
+        if let Some(Value::Vector(v)) = p.params.get(i) {
+            if !fennec_core::value::whole_f32s(v) {
+                let listed = v
+                    .iter()
+                    .map(|&f| match f.abs() < 9.223_372e18 && (f as i64) as f32 == f {
+                        true => Value::Int(f as i64),
+                        false => Value::Float(f as f64),
+                    })
+                    .collect();
+                p.params[i] = Value::List(listed);
+            }
+        }
     }
     if text {
         p.stmts = fennec_ql::parse_exact(sql)?;
@@ -742,6 +795,58 @@ mod tests {
             r.contains(r#"[{"xs":[1,-2],"fs":[3]},{"xs":[16777217],"fs":[0.1]}]"#),
             "{r}"
         );
+    }
+
+    /// A vector its sender marked [`EXACT`] -- each `f32` the number it was
+    /// handed -- is taken as it came by an `[int]`, a `[float]` and a
+    /// `[timestamp]`, nothing asked for again; one unmarked, as an older
+    /// binding hands it, is asked for as JSON, as is a marked one a json
+    /// field is handed, which keeps an int apart from a float. An element
+    /// its type refuses is refused naming it, as from JSON.
+    #[test]
+    fn a_vector_marked_exact_is_taken_by_a_list_of_numbers() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection t (xs [int], fs [float], ts [timestamp], j json)",
+            "",
+            &[],
+        );
+        let vector = |at: u32, v: &[f32]| {
+            let mut b = [at.to_le_bytes(), (v.len() as u32).to_le_bytes()].concat();
+            v.iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let marked = [
+            vector(EXACT, &[1.0, -2.0, 1_073_741_824.0]),
+            vector(1 | EXACT, &[0.5, 0.25, 3.0]),
+            vector(2 | EXACT, &[86_400_000.0]),
+        ]
+        .concat();
+        let put = "put t {xs: $1, fs: $2, ts: $3}";
+        let mut p = prepare(put, "[null, null, null]", &marked).unwrap();
+        let mut anew = false;
+        assert!(exact_noting(&db, &mut p, put, "[null, null, null]", &marked, &mut anew).is_ok());
+        assert!(!anew);
+        let r = run(&mut db, put, "[null, null, null]", &marked);
+        assert_eq!(r, r#"{"kind":"affected","count":1}"#);
+        let r = run(&mut db, "get t select xs, fs, ts", "", &[]);
+        assert!(
+            r.contains(r#"[{"xs":[1,-2,1073741824],"fs":[0.5,0.25,3],"ts":["1970-01-02T00:00:00Z"]}]"#),
+            "{r}"
+        );
+        let asked = |at: usize| {
+            format!(
+                r#"{{"kind":"error","message":"a field keeping numbers as written is handed a list of them sent over as f32s","exact":[{at}]}}"#
+            )
+        };
+        assert_eq!(run(&mut db, "put t {xs: $1}", "[null]", &vector(0, &[1.0])), asked(0));
+        assert_eq!(
+            run(&mut db, "put t {j: $1}", "[null]", &vector(EXACT, &[1.0])),
+            asked(0)
+        );
+        let r = run(&mut db, "put t {xs: $1}", "[null]", &vector(EXACT, &[1.0, 0.5]));
+        assert!(r.contains("field `xs`, element 1"), "{r}");
     }
 
     /// A number past an int's range is refused naming its field, never
