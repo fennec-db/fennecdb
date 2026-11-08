@@ -575,8 +575,11 @@ class Fennec {
       final f = vectorOf(params[i]);
       if (f == null) continue;
       json[i] = null;
+      // Marked exact where each `f32` is the number handed: an `[int]` or a
+      // `[float]` takes it as it came, in one call (`fennec_abi::EXACT`).
+      final at = exactVector(params[i]) ? i | 1 << 31 : i;
       final b = ByteData(8 + 4 * f.length)
-        ..setUint32(0, i, Endian.little)
+        ..setUint32(0, at, Endian.little)
         ..setUint32(4, f.length, Endian.little);
       for (var k = 0; k < f.length; k++) {
         // A -0 goes as 0, as JSON writes it: either way, one vector.

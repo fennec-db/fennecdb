@@ -147,6 +147,40 @@ void main() {
     await db.close();
   });
 
+  test('a list each of whose numbers an f32 holds is never asked for', () async {
+    // It goes over apart, marked exact, and the library takes it as it
+    // came, 2^24 an int all the same; one an f32 does not hold is asked for.
+    final db = await Fennec.memory();
+    await db.execute('create collection l (xs [int], fs [float], e vector<2>)');
+    const put = 'put l {xs: \$1, fs: \$2, e: \$3}';
+    await db.execute(put, [
+      [1, -2, 16777216],
+      [0.5, 0.25],
+      [0.1, 0.2]
+    ]);
+    expect(askedPlaces(db, put), isNull);
+    await db.execute(put, [
+      [3],
+      [0.1],
+      Float32List.fromList([1, 2])
+    ]);
+    expect(askedPlaces(db, put), {1});
+    final rows = await db.query('get l select xs, fs order id');
+    expect([
+      for (final r in rows) r['xs']
+    ], [
+      [1, -2, 16777216],
+      [3]
+    ]);
+    expect([
+      for (final r in rows) r['fs']
+    ], [
+      [0.5, 0.25],
+      [0.1]
+    ]);
+    await db.close();
+  });
+
   test('a list of numbers keeps its numbers and is asked for once', () async {
     // The library asks for a list sent as `f32`s again as JSON, and the
     // binding sends the text's lists so at once from its second call on.

@@ -77,7 +77,7 @@ impl DataType {
     pub fn keeps_numbers(&self) -> bool {
         match self {
             DataType::Json | DataType::Geo => true,
-            DataType::List(t) => t.keeps_numbers() || t.is_number(),
+            DataType::List(t) => t.is_number() || t.keeps_numbers(),
             _ => false,
         }
     }

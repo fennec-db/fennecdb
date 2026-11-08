@@ -214,8 +214,8 @@ fn a_list_of_numbers_is_kept_as_written_or_refused() {
         db.exactly(&put),
         fennec_core::engine::Exactly {
             text: false,
-            params: vec![0],
-            lists: Vec::new(),
+            params: (&[0][..]).into(),
+            lists: Default::default(),
         }
     );
     // A parameter read as written goes in as it is.

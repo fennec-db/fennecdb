@@ -724,6 +724,9 @@ fn the_header_declares_what_the_library_exports() {
             "{name}"
         );
     }
+    assert!(header.contains(&format!(
+        "#define FENNEC_VECTOR_EXACT {FENNEC_VECTOR_EXACT:#x}u"
+    )));
 }
 
 #[test]

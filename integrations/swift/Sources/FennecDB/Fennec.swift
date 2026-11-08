@@ -530,9 +530,12 @@ public final class Fennec: @unchecked Sendable {
         var json = params
         var vectors: [UInt8] = []
         for (i, p) in params.enumerated() where !asJson.contains(i) {
-            guard let f = vector(p) else { continue }
+            guard let (f, exact) = vector(p) else { continue }
             json[i] = .null
-            append(UInt32(i), &vectors)
+            // Marked exact where each `Float` is the number handed: an
+            // `[int]` or a `[float]` takes it as it came, in one call
+            // (`fennec_abi::EXACT`).
+            append(UInt32(i) | (exact ? 1 << 31 : 0), &vectors)
             append(UInt32(f.count), &vectors)
             for x in f {
                 // A -0 goes as 0, as JSON writes it: either way, one vector.
@@ -570,20 +573,29 @@ public final class Fennec: @unchecked Sendable {
         }
     }
 
-    private static func vector(_ v: Value) -> [Float]? {
+    /// A vector's `Float`s, and whether each is the number it was made of:
+    /// a `[Float]`'s are, an int of at most 2^24 in size is, and a `Double`
+    /// a `Float` holds is (`0.5`) -- where `0.1` and 16777217 are not.
+    private static func vector(_ v: Value) -> ([Float], Bool)? {
         switch v {
-        case .floats(let f) where !f.isEmpty: return f
+        case .floats(let f) where !f.isEmpty: return (f, true)
         case .array(let a) where !a.isEmpty:
             var out: [Float] = []
             out.reserveCapacity(a.count)
+            var exact = true
             for x in a {
                 switch x {
-                case .int(let n): out.append(Float(n))
-                case .double(let d) where d.isFinite: out.append(Float(d))
+                case .int(let n):
+                    exact = exact && n.magnitude <= 1 << 24
+                    out.append(Float(n))
+                case .double(let d) where d.isFinite:
+                    let f = Float(d)
+                    exact = exact && Double(f) == d
+                    out.append(f)
                 default: return nil
                 }
             }
-            return out
+            return (out, exact)
         default: return nil
         }
     }

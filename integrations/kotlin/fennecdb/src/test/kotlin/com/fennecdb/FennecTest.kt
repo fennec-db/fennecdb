@@ -99,6 +99,26 @@ class FennecTest {
         db.close()
     }
 
+    /**
+     * A list each of whose numbers a Float holds goes over apart, marked
+     * exact, and the library takes it as it came: nothing is asked for
+     * again, 2^24 an int all the same; one it does not hold is.
+     */
+    @Test
+    fun aListAFloatHoldsIsNeverAskedFor() = runBlocking {
+        val db = Fennec.memory()
+        db.execute("create collection l (xs [int], fs [float], e vector<2>)")
+        val put = "put l {xs: \$1, fs: \$2, e: \$3}"
+        db.execute(put, listOf(1, -2, 16777216), listOf(0.5, 0.25), listOf(0.1, 0.2))
+        assertNull(db.asked[put])
+        db.execute(put, listOf(3L), listOf(0.1), floatArrayOf(1f, 2f))
+        assertEquals(setOf(1), db.asked[put])
+        val rows = db.query("get l select xs, fs order id")
+        assertEquals(listOf(listOf(1L, -2L, 16777216L), listOf(3L)), rows.map { it["xs"] })
+        assertEquals(listOf(listOf(0.5, 0.25), listOf(0.1)), rows.map { it["fs"] })
+        db.close()
+    }
+
     @Test
     fun errorsCarryTheirKind() = runBlocking {
         val db = Fennec.memory()

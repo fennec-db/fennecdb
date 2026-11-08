@@ -28,11 +28,14 @@ pub enum Tok {
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
     /// Numbers alone between brackets, as written: what [`tokenize_values`]
-    /// makes of the list [`Tok::Vector`] stands for. Natively alone: the
-    /// browser module reads them a token a number, and a token holding
-    /// `Value`s took their comparison into it with the tokens', 0.4 KB.
+    /// makes of the list [`Tok::Vector`] stands for, by its place among the
+    /// lists it read ([`Listed`]). Natively alone: the browser module reads
+    /// them a token a number, and a token holding `Value`s took their
+    /// comparison into it with the tokens', 0.4 KB. Held in the token, the
+    /// `Value`s made every token's drop a walk of their kinds, some 15
+    /// instructions a token of every text (`tools/instr/trace.py`).
     #[cfg(not(target_arch = "wasm32"))]
-    Values(Vec<fennec_core::value::Value>),
+    Values(usize),
     LBrace,
     RBrace,
     LParen,
@@ -99,7 +102,7 @@ impl Tok {
             Tok::Keys(_) => "a path with a quoted key".into(),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
             #[cfg(not(target_arch = "wasm32"))]
-            Tok::Values(v) => format!("a list of {}", v.len()),
+            Tok::Values(_) => "a list of numbers".into(),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
             Tok::LParen => "`(`".into(),
@@ -317,9 +320,23 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 /// written, into the list the parser makes of their tokens (`Tok::Values`)
 /// where [`tokenize_vectors`] reads a vector: what `parse_exact` reads,
 /// natively. The browser module reads them a token a number, as it did.
-pub(crate) fn tokenize_values(src: &str) -> Result<Vec<Token>> {
-    lex::<false>(src, cfg!(not(target_arch = "wasm32")))
+pub(crate) fn tokenize_values(src: &str) -> Result<(Vec<Token>, Listed)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut listed = Listed::new();
+        let toks = lex_with(src, false, true, None, Some(&mut listed))?;
+        Ok((toks, listed))
+    }
+    #[cfg(target_arch = "wasm32")]
+    Ok((lex::<false>(src, false)?, ()))
 }
+
+/// The lists [`tokenize_values`] read as written, each its token's by its
+/// place ([`Tok::Values`]); none in the browser module.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Listed = Vec<Vec<fennec_core::value::Value>>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type Listed = ();
 
 /// [`tokenize_vectors`], each list read into a vector kept as written
 /// beside ([`Kept`]): what a long `put` is read with
@@ -327,7 +344,7 @@ pub(crate) fn tokenize_values(src: &str) -> Result<Vec<Token>> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn tokenize_kept(src: &str) -> Result<(Vec<Token>, Kept)> {
     let mut kept = Kept::default();
-    let toks = lex_with(src, true, false, Some(&mut kept))?;
+    let toks = lex_with(src, true, false, Some(&mut kept), None)?;
     Ok((toks, kept))
 }
 
@@ -767,6 +784,8 @@ fn lex<const VECTORS: bool>(src: &str, values: bool) -> Result<Vec<Token>> {
         values,
         #[cfg(not(target_arch = "wasm32"))]
         None,
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
 }
 
@@ -776,6 +795,7 @@ fn lex_with(
     vectors: bool,
     values: bool,
     #[cfg(not(target_arch = "wasm32"))] mut kept: Option<&mut Kept>,
+    #[cfg(not(target_arch = "wasm32"))] mut listed: Option<&mut Listed>,
 ) -> Result<Vec<Token>> {
     // The browser module reads a list as written a token a number, and
     // carries no code for the other way (`tokenize_values`).
@@ -887,12 +907,13 @@ fn lex_with(
                         }
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    true => match values_at(src, b, i) {
-                        Some((v, end)) => {
+                    true => match (values_at(src, b, i), listed.as_deref_mut()) {
+                        (Some((v, end)), Some(listed)) => {
                             i = end;
-                            Tok::Values(v)
+                            listed.push(v);
+                            Tok::Values(listed.len() - 1)
                         }
-                        None => {
+                        _ => {
                             i += 1;
                             Tok::LBracket
                         }

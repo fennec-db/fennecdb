@@ -162,7 +162,7 @@ fn a_json_list_inside_an_inner_get_is_read_as_written() {
         "get merchants where name = $2 and id in (get orders select merchant where meta = $1)",
     )
     .unwrap();
-    assert_eq!(db.exactly(&stmt).params, vec![0]);
+    assert_eq!(*db.exactly(&stmt).params, [0]);
 }
 
 /// A comparison with a json field or a point under a call -- `case`,

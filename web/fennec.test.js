@@ -910,6 +910,46 @@ test('a text whose list the module asked for as JSON sends it so at once after',
   db.close();
 });
 
+test('a list each of whose numbers an f32 holds goes over apart and is never asked for', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  let calls = 0;
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (src, imports) => {
+    const made = await instantiate(src, imports);
+    const real = (made instanceof WebAssembly.Instance ? made : made.instance).exports;
+    const query = real.fennec_query;
+    const exports = {
+      ...real,
+      fennec_query(...args) {
+        calls++;
+        return query(...args);
+      },
+    };
+    return { instance: { exports } };
+  };
+  let db;
+  try {
+    db = await Fennec.open(wasm);
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+  db.run('create collection l (xs [int], fs [float], e vector<2>)');
+  const put = 'put l {xs: $1, fs: $2, e: $3}';
+  // Marked exact, its place's top bit set, and taken as it came: one call,
+  // 2^24 an int all the same, and a vector of tenths beside it.
+  calls = 0;
+  db.run(put, [[1, -2, 16777216], new Float64Array([0.5, 0.25]), [0.1, 0.2]]);
+  assert.equal(calls, 1);
+  // One an f32 does not hold is asked for as JSON.
+  calls = 0;
+  db.run(put, [[3], [0.1], new Float32Array([1, 2])]);
+  assert.equal(calls, 2);
+  const rows = db.rows('get l select xs, fs order id');
+  assert.deepEqual(rows.map((r) => r.xs), [[1, -2, 16777216], [3]]);
+  assert.deepEqual(rows.map((r) => r.fs), [[0.5, 0.25], [0.1]]);
+  db.close();
+});
+
 test('a write that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

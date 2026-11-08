@@ -13581,12 +13581,116 @@ impl Database {
 pub struct Exactly {
     pub text: bool,
     /// Their places, ascending, each once.
-    pub params: Vec<usize>,
+    pub params: Places,
     /// Those of `params` given a list of numbers alone, ascending.
-    pub lists: Vec<usize>,
+    pub lists: Places,
+}
+
+/// Places among a statement's parameters, ascending, each once: up to
+/// [`Places::FEW`] held in place, more in a `Vec`. Every statement handing
+/// an `[int]` a parameter names it twice, in `lists` and in `params`, and
+/// is asked twice a call, by its caller and as it runs: in `Vec`s, those
+/// four allocations were most of what an app's `put` of an `[int]` beside
+/// its vector cost over one with no list, some 1 200 instructions of 2 500
+/// (`ffi_bench lists`, `tools/instr/trace.py`). A statement names more
+/// than four rarely: a `put` of rows a parameter each, which spills.
+#[derive(Clone, Default)]
+pub struct Places {
+    /// How many of `few` hold places; none where `more` holds them.
+    n: usize,
+    few: [usize; Places::FEW],
+    /// Every place, once there are more than `FEW`.
+    more: Vec<usize>,
+}
+
+impl Places {
+    pub const FEW: usize = 4;
+
+    /// `i` among the places, ascending, once. Asked `contains` at each, a
+    /// page of 1 000 documents' parameters was quadratic; a place mostly
+    /// comes after the ones before it, and is pushed.
+    pub fn note(&mut self, i: usize) {
+        if self.more.is_empty() && self.n < Places::FEW && (self.n == 0 || self.few[self.n - 1] < i)
+        {
+            self.few[self.n] = i;
+            self.n += 1;
+            return;
+        }
+        let Err(at) = self.binary_search(&i) else {
+            return;
+        };
+        if self.more.is_empty() && self.n < Places::FEW {
+            self.few.copy_within(at..self.n, at + 1);
+            self.few[at] = i;
+            self.n += 1;
+            return;
+        }
+        if self.more.is_empty() {
+            self.more.extend_from_slice(&self.few[..self.n]);
+            self.n = 0;
+        }
+        self.more.insert(at, i);
+    }
+
+    /// The places `keep` keeps, in their order: one `retain` for every
+    /// use, where each closure made a copy of its own, 185 bytes of the
+    /// browser module each.
+    pub fn retain(&mut self, keep: &dyn Fn(usize) -> bool) {
+        if self.more.is_empty() {
+            let mut n = 0;
+            for j in 0..self.n {
+                if keep(self.few[j]) {
+                    self.few[n] = self.few[j];
+                    n += 1;
+                }
+            }
+            self.n = n;
+            return;
+        }
+        self.more.retain(|&i| keep(i));
+        // Back in place where they fit: `more` is empty exactly where they
+        // are held there.
+        if self.more.len() <= Places::FEW {
+            self.n = self.more.len();
+            self.few[..self.n].copy_from_slice(&self.more);
+            self.more = Vec::new();
+        }
+    }
+}
+
+impl std::ops::Deref for Places {
+    type Target = [usize];
+
+    fn deref(&self) -> &[usize] {
+        match self.more.is_empty() {
+            true => &self.few[..self.n],
+            false => &self.more,
+        }
+    }
+}
+
+impl From<&[usize]> for Places {
+    fn from(v: &[usize]) -> Places {
+        let mut out = Places::default();
+        v.iter().for_each(|&i| out.note(i));
+        out
+    }
+}
+
+impl PartialEq for Places {
+    fn eq(&self, other: &Places) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for Places {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
 }
 
 impl Exactly {
+    #[inline]
     pub fn is_needed(&self) -> bool {
         self.text || !self.params.is_empty()
     }
@@ -13601,9 +13705,10 @@ impl Exactly {
     /// number its sender may have rounded, and its caller takes it out of
     /// `lists` first. So a parameter the server read as written at once,
     /// as its statement's last request asked (`api::parse_query`), is not
-    /// read again.
+    /// read again. `lists` is left as it was, for a caller to tell a list
+    /// of numbers' place from another's.
     pub fn settle(&mut self, values: &[Value]) {
-        let lists = std::mem::take(&mut self.lists);
+        let lists = &self.lists;
         kept(&mut self.params, &|i| match values.get(i) {
             Some(v) if lists.binary_search(&i).is_ok() => crate::query::holds_rounded(v),
             Some(v) => crate::query::holds_vector(v),
@@ -13622,27 +13727,21 @@ impl Exactly {
     fn finish(&mut self) {
         let always = &self.params;
         kept(&mut self.lists, &|i| always.binary_search(&i).is_err());
-        for &i in &self.lists {
+        for &i in self.lists.iter() {
             noted(&mut self.params, i);
         }
     }
 }
 
-/// `i` among the places `v` holds ascending, each once. Asked `contains`
-/// at each, a page of 1 000 documents' parameters was quadratic; a place
-/// mostly comes after the ones before it, and is pushed. Not sorted after:
-/// a sort of `usize`s was 2 KB of the browser module.
-fn noted(v: &mut Vec<usize>, i: usize) {
-    if let Err(at) = v.binary_search(&i) {
-        v.insert(at, i);
-    }
+/// `i` among the places `v` holds ascending, each once ([`Places::note`]).
+/// Not sorted after: a sort of `usize`s was 2 KB of the browser module.
+fn noted(v: &mut Places, i: usize) {
+    v.note(i);
 }
 
-/// The places of `v` that `keep` keeps, in their order: one `retain` for
-/// every use, where each closure made a copy of its own, 185 bytes of the
-/// browser module each.
-fn kept(v: &mut Vec<usize>, keep: &dyn Fn(usize) -> bool) {
-    v.retain(|&i| keep(i));
+/// The places of `v` that `keep` keeps, in their order ([`Places::retain`]).
+fn kept(v: &mut Places, keep: &dyn Fn(usize) -> bool) {
+    v.retain(keep);
 }
 
 impl Database {
@@ -13660,6 +13759,9 @@ impl Database {
             return Ok(());
         }
         let mut need = self.exactly(stmt);
+        if !need.is_needed() {
+            return Ok(());
+        }
         need.settle(params);
         let param = need
             .params
@@ -13726,13 +13828,37 @@ impl<'a> Known<'a> {
         }
     }
 
-    /// Whether `name` is a list of numbers alone, which takes a vector of
-    /// whole `f32`s as the integers written (`DataType::holds_numbers`): a
-    /// value given it is read again only where it holds another.
-    fn numbers(self, name: &str) -> bool {
-        match self {
-            Known::Schema(schema, true) => schema.field(name).is_some_and(|f| f.ty.holds_numbers()),
-            _ => false,
+    /// What `e`, given the field `name`, needs ([`given`]): nothing where
+    /// the field keeps no list of numbers, and where it is a list of
+    /// numbers alone, which takes a vector of whole `f32`s as the integers
+    /// written (`DataType::holds_numbers`), only what holds another
+    /// ([`given_list`]). One look among the fields, asked of every `put`
+    /// handing a parameter. Out of line: inlined, the walk's closure over
+    /// a `put`'s pairs grew past what `exactly` inlined, 100 instructions
+    /// a call.
+    #[inline(never)]
+    fn give(self, name: &str, e: &Expr, out: &mut Exactly) {
+        let list = match self {
+            Known::Schema(schema, true) => {
+                // A path's field: a byte loop, where `split_once` searched.
+                let field = match name.bytes().position(|b| b == b'.') {
+                    Some(at) => &name[..at],
+                    None => name,
+                };
+                let Some(f) = schema.field(field) else {
+                    return;
+                };
+                if !f.ty.keeps_numbers() {
+                    return;
+                }
+                field.len() == name.len() && f.ty.holds_numbers()
+            }
+            Known::Unknown => false,
+            _ => return,
+        };
+        match list {
+            true => given_list(e, out),
+            false => given(e, out),
         }
     }
 
@@ -13794,11 +13920,8 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
     // values (`Known::Schema(_, false)`), checked once.
     let any = !matches!(k, Known::Schema(_, false));
     let mut pair = |(key, e): &(String, Expr)| {
-        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
-            match k.numbers(key) {
-                true => given_list(e, out),
-                false => given(e, out),
-            }
+        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) {
+            k.give(key, e, out);
         }
         // A literal or a parameter holds no call and no inner `get`: a
         // `put`'s values, nearly all of them one, are not walked. Walked,
@@ -16421,7 +16544,33 @@ fn near_vector(v: Value) -> Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::wider;
+    use super::{wider, Places};
+
+    /// Places stay ascending and once each, in place up to four and in a
+    /// `Vec` past them, and go back in place as a `retain` leaves four.
+    #[test]
+    fn places_are_ascending_once_each_in_place_or_spilled() {
+        let mut p = Places::default();
+        for i in [3, 1, 3, 0, 2] {
+            p.note(i);
+        }
+        assert_eq!(*p, [0, 1, 2, 3]);
+        assert!(p.more.is_empty());
+        p.note(9);
+        p.note(5);
+        assert_eq!(*p, [0, 1, 2, 3, 5, 9]);
+        assert!(!p.more.is_empty());
+        p.retain(&|i| i != 5 && i != 0);
+        assert_eq!(*p, [1, 2, 3, 9]);
+        assert!(p.more.is_empty());
+        p.retain(&|i| i > 2);
+        assert_eq!(*p, [3, 9]);
+        p.note(4);
+        assert_eq!(*p, [3, 4, 9]);
+        assert_eq!(p, Places::from(&[9, 4, 3][..]));
+        p.retain(&|_| false);
+        assert!(p.is_empty());
+    }
 
     /// The beam widened past tombstones saturates at the most a `usize`
     /// holds: `ef 4294967295` is all a wasm32 build's holds, and one

@@ -32,6 +32,21 @@ List<double>? vectorOf(Object? v) {
   return null;
 }
 
+/// Whether each `f32` of [vectorOf]'s is the number it was made of: a
+/// [Float32List]'s are, an int of at most 2^24 in size is, and a `double`
+/// an `f32` holds is (`0.5`) -- where `0.1` and 16777217 are not.
+bool exactVector(Object? v) {
+  if (v is Float32List) return true;
+  final f = Float32List(1);
+  bool held(num x) {
+    if (x is int) return x.abs() <= 1 << 24;
+    f[0] = x.toDouble();
+    return f[0] == x;
+  }
+
+  return v is List && v.every((x) => x is num && held(x));
+}
+
 /// JSON, as the engine reads it: a whole `double` as an integer, as
 /// JavaScript writes one; JSON has no word for a NaN or an infinity, and a
 /// typed field refuses the `null` it goes as.

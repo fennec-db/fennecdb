@@ -93,6 +93,23 @@ struct Note: Codable, Equatable, FennecValue {
         try await db.close()
     }
 
+    /// A list each of whose numbers a `Float` holds goes over apart, marked
+    /// exact, and the library takes it as it came: nothing is asked for
+    /// again, 2^24 an int all the same; one it does not hold is.
+    @Test func aListAFloatHoldsIsNeverAskedFor() async throws {
+        let db = try Fennec.memory()
+        try await db.execute("create collection l (xs [int], fs [float], e vector<2>)")
+        let put = "put l {xs: $1, fs: $2, e: $3}"
+        try await db.execute(put, [1, -2, 16777216] as [Int], [0.5, 0.25] as [Double], [0.1, 0.2] as [Double])
+        #expect(db.askedPlaces(put).isEmpty)
+        try await db.execute(put, [3] as [Int], [0.1] as [Double], [Float(1), 2])
+        #expect(db.askedPlaces(put) == [1])
+        let r = try await db.query("get l select xs, fs order id")
+        #expect(r.map { $0["xs"] } == [.array([.int(1), .int(-2), .int(16777216)]), .array([.int(3)])])
+        #expect(r.map { $0["fs"] } == [.array([.double(0.5), .double(0.25)]), .array([.double(0.1)])])
+        try await db.close()
+    }
+
     @Test func errorsCarryTheirKind() async throws {
         let db = try Fennec.memory()
         try await db.execute("create collection t (a int @unique)")

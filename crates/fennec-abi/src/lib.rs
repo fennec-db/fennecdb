@@ -17,6 +17,7 @@
 //! which is what a page downloads.
 
 use fennec_core::collate;
+use fennec_core::engine::Places;
 use fennec_core::json;
 use fennec_core::prelude::*;
 
@@ -165,34 +166,61 @@ pub fn exact_noting(
     if !vectored {
         return Ok(());
     }
+    // A statement alone, as nearly every call is, asked here: where it
+    // needs nothing read again, as a vector's put does, that is all, and
+    // the rest is out of line. Inline whole it grew the native library's
+    // call past what its caller inlined, some 80 instructions a call
+    // (`tools/instr/trace.py`).
+    let first = match p.stmts.as_slice() {
+        [s] => {
+            let need = db.exactly(s);
+            if !need.is_needed() {
+                return Ok(());
+            }
+            Some(need)
+        }
+        _ => None,
+    };
+    exact_needed(db, p, sql, params_src, vectors, anew, first)
+}
+
+/// [`exact_noting`] past its quick answer, `first` the first statement's
+/// [`Exactly`](fennec_core::engine::Exactly) where it was asked.
+#[inline(never)]
+fn exact_needed(
+    db: &Database,
+    p: &mut Prepared,
+    sql: &str,
+    params_src: &str,
+    vectors: &[u8],
+    anew: &mut bool,
+    mut first: Option<fennec_core::engine::Exactly>,
+) -> std::result::Result<(), Refused> {
     let mut text = false;
     let mut as_json = String::new();
-    let mut needed: Vec<usize> = Vec::new();
-    let mut trusted: Vec<usize> = Vec::new();
+    // Neither allocates for the few places a statement names
+    // (`engine::Places`): asked of every call handing a vector.
+    let mut needed = Places::default();
+    let mut trusted = Places::default();
     for s in &p.stmts {
-        let mut need = db.exactly(s);
+        let mut need = first.take().unwrap_or_else(|| db.exactly(s));
         text |= need.text;
         // A vector its sender marked exact is the numbers it was handed: a
         // list of numbers takes it as it came, and nothing of it is asked
-        // for again. Every other handed over apart is the `f32`s of numbers
-        // the page may have rounded (`1.00000001` is 1 as an `f32`): a list
-        // of numbers asks for it as JSON, as a json field does, whatever it
-        // holds.
-        let params = &mut need.params;
-        need.lists.retain(|&i| match apart_as(vectors, i) {
-            Some(true) => {
-                if let Ok(at) = params.binary_search(&i) {
-                    params.remove(at);
-                }
-                trusted.push(i);
-                false
-            }
-            _ => true,
-        });
-        need.apart(&|i| apart(vectors, i));
+        // for again -- one of whole `f32`s short of 2^24 as the vector it
+        // is, the engine's own (`settle` drops it), any other made the list
+        // of its numbers below. Every other handed over apart is the `f32`s
+        // of numbers the page may have rounded (`1.00000001` is 1 as an
+        // `f32`): a list of numbers asks for it as JSON, as a json field
+        // does, whatever it holds.
+        need.apart(&|i| apart_as(vectors, i) == Some(false));
         need.settle(&p.params);
-        for i in need.params {
-            needed.push(i);
+        for &i in need.params.iter() {
+            if need.lists.binary_search(&i).is_ok() && apart_as(vectors, i) == Some(true) {
+                trusted.note(i);
+                continue;
+            }
+            needed.note(i);
             if apart(vectors, i) {
                 if !as_json.is_empty() {
                     as_json.push(',');
@@ -204,23 +232,20 @@ pub fn exact_noting(
     if !as_json.is_empty() {
         return Err(Refused::Exact(as_json));
     }
-    // A vector marked exact the engine takes as it came where its `f32`s
-    // are the integers written; any other is made the list of the numbers
-    // its `f32`s are, a whole one an int as JSON says it, which the engine
-    // takes as read as written. After every statement was asked: one that
-    // hands it a json field asked for it as JSON above.
-    for i in trusted {
+    // After every statement was asked: one that hands it a json field
+    // asked for it as JSON above. A whole `f32` is an int, as JSON says it.
+    for &i in trusted.iter() {
         if let Some(Value::Vector(v)) = p.params.get(i) {
-            if !fennec_core::value::whole_f32s(v) {
-                let listed = v
-                    .iter()
-                    .map(|&f| match f.abs() < 9.223_372e18 && (f as i64) as f32 == f {
+            let listed = v
+                .iter()
+                .map(
+                    |&f| match f.abs() < 9.223_372e18 && (f as i64) as f32 == f {
                         true => Value::Int(f as i64),
                         false => Value::Float(f as f64),
-                    })
-                    .collect();
-                p.params[i] = Value::List(listed);
-            }
+                    },
+                )
+                .collect();
+            p.params[i] = Value::List(listed);
         }
     }
     if text {
@@ -234,7 +259,7 @@ pub fn exact_noting(
     // read again, and every use of it answers alike.
     if !needed.is_empty() {
         let mut written = json::parse_params_exact(params_src)?;
-        for &i in &needed {
+        for &i in needed.iter() {
             if let (Some(p), Some(w)) = (p.params.get_mut(i), written.get_mut(i)) {
                 *p = std::mem::replace(w, Value::Null);
             }
@@ -832,7 +857,9 @@ mod tests {
         assert_eq!(r, r#"{"kind":"affected","count":1}"#);
         let r = run(&mut db, "get t select xs, fs, ts", "", &[]);
         assert!(
-            r.contains(r#"[{"xs":[1,-2,1073741824],"fs":[0.5,0.25,3],"ts":["1970-01-02T00:00:00Z"]}]"#),
+            r.contains(
+                r#"[{"xs":[1,-2,1073741824],"fs":[0.5,0.25,3],"ts":["1970-01-02T00:00:00Z"]}]"#
+            ),
             "{r}"
         );
         let asked = |at: usize| {
@@ -840,12 +867,20 @@ mod tests {
                 r#"{{"kind":"error","message":"a field keeping numbers as written is handed a list of them sent over as f32s","exact":[{at}]}}"#
             )
         };
-        assert_eq!(run(&mut db, "put t {xs: $1}", "[null]", &vector(0, &[1.0])), asked(0));
+        assert_eq!(
+            run(&mut db, "put t {xs: $1}", "[null]", &vector(0, &[1.0])),
+            asked(0)
+        );
         assert_eq!(
             run(&mut db, "put t {j: $1}", "[null]", &vector(EXACT, &[1.0])),
             asked(0)
         );
-        let r = run(&mut db, "put t {xs: $1}", "[null]", &vector(EXACT, &[1.0, 0.5]));
+        let r = run(
+            &mut db,
+            "put t {xs: $1}",
+            "[null]",
+            &vector(EXACT, &[1.0, 0.5]),
+        );
         assert!(r.contains("field `xs`, element 1"), "{r}");
     }
 

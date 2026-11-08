@@ -123,6 +123,10 @@ pub const FENNEC_OPEN_IN_MEMORY: u32 = 2;
 /// does: an app that updates its rows grew its file without bound.
 pub const FENNEC_OPEN_NO_AUTO_COMPACT: u32 = 4;
 
+/// `fennec_query`'s vectors: a place's top bit, set where each `f32` is the
+/// number the caller was handed (`fennec_abi::EXACT`).
+pub const FENNEC_VECTOR_EXACT: u32 = fennec_abi::EXACT;
+
 /// When a file opened without `FENNEC_OPEN_NO_AUTO_COMPACT` is compacted, and
 /// how often it is looked at: a test's few megabytes want a lower floor and
 /// a shorter look than an app's.

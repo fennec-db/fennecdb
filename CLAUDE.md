@@ -401,7 +401,10 @@ Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, lea
 
 ### `crates/fennec-abi/CLAUDE.md`
 
-Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.json`, run by `web/` too.
+Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.json`, run by `web/` too; the marking of vectors binds the bindings' and `web/fennec.js`'s.
+
+*Vector parameters*
+- A vector marked exact is a list of numbers as it came.
 
 *The native library and sync*
 - A replica's sync is a state machine; the network is the binding's.

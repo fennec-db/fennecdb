@@ -314,15 +314,15 @@ fn a_vector_of_whole_numbers_is_not_read_again() {
     let put = fennec_ql::parse_one("put t {e: $1, xs: $2, fs: $3}").unwrap();
     let mut n = db.exactly(&put);
     assert_eq!(
-        (n.params.clone(), n.lists.clone()),
+        (n.params.to_vec(), n.lists.to_vec()),
         (vec![1, 2], vec![1, 2])
     );
     let quick = json::parse_params("[[0.1, 0.2, 0.3], [1, 2], [0.5]]").unwrap();
     n.settle(&quick);
-    assert_eq!(n.params, [2]);
+    assert_eq!(*n.params, [2]);
     let mut n = db.exactly(&put);
     n.settle(&json::parse_params("[[0.1, 0.2, 0.3], [16777217], [1]]").unwrap());
-    assert_eq!(n.params, [1]);
+    assert_eq!(*n.params, [1]);
 }
 
 /// Read with no database at hand, a list a list of numbers cannot take as

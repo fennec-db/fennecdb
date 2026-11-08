@@ -346,6 +346,9 @@ struct Noting {
     noted: u32,
     /// The vectors the parse made of lists of numbers, noted or not.
     vectors: u32,
+    /// The lists the lexer read as written, each its token's
+    /// (`Tok::Values`), taken as the parser meets them: [`parse_exact`]'s.
+    listed: crate::lexer::Listed,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -361,6 +364,7 @@ impl Noting {
                 doc: false,
                 noted: 0,
                 vectors: 0,
+                listed: Vec::new(),
             }
         }
         #[cfg(target_arch = "wasm32")]
@@ -492,13 +496,14 @@ pub fn read_listed(stmt: &mut Statement, listing: &mut Listing) -> bool {
 /// at a time, which is slower than the vector [`parse`] makes, so a text is
 /// read so only where [`parse_for`] finds a json field given one.
 pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
-    statements(
-        src,
-        crate::lexer::tokenize_values(src)?,
-        true,
-        Noting::off(),
-    )
-    .map(|(s, _)| s)
+    let (toks, _listed) = crate::lexer::tokenize_values(src)?;
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut noting = Noting::off();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        noting.listed = _listed;
+    }
+    statements(src, toks, true, noting).map(|(s, _)| s)
 }
 
 /// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
@@ -2023,7 +2028,7 @@ impl Parser {
             // `[3]` is a vector of one to the lexer, a list of one read as
             // written.
             #[cfg(not(target_arch = "wasm32"))]
-            let one = matches!(self.peek(), Tok::Values(v) if v.len() == 1);
+            let one = matches!(self.peek(), Tok::Values(k) if self.noting.listed[*k].len() == 1);
             #[cfg(target_arch = "wasm32")]
             let one = false;
             if one || matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
@@ -6241,8 +6246,8 @@ impl Parser {
                 return Ok(Expr::Lit(Value::Vector(v)));
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Tok::Values(v) => {
-                let v = std::mem::take(v);
+            Tok::Values(k) => {
+                let v = std::mem::take(&mut self.noting.listed[*k]);
                 self.i += 1;
                 return Ok(Expr::Lit(Value::List(v)));
             }
@@ -6932,7 +6937,7 @@ mod tests {
                 (a, b) => panic!("{text}: {a:?} against {b:?}"),
             }
             read_at_once += crate::lexer::tokenize_values(&text)
-                .is_ok_and(|t| t.iter().any(|t| matches!(t.tok, Tok::Values(_))))
+                .is_ok_and(|(t, _)| t.iter().any(|t| matches!(t.tok, Tok::Values(_))))
                 as u32;
             match (parse_exact(&text), parse_plain(&text, true)) {
                 (Ok(a), Ok(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}"), "{text}"),
