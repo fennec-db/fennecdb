@@ -518,8 +518,8 @@ fn explain_names_the_index_the_prefix_and_the_range() {
     assert!(p.contains("owner fixed, a range on created"), "{p}");
 }
 
-/// `NaN` compares equal to everything: a row holding one is apart, the
-/// walks step aside while it is there, and a range's rows take it to test.
+/// `NaN` equals `NaN` and is above every number: a part's last key, which
+/// the walks and the ranges take where the scan does.
 #[test]
 fn nan_rows_match_what_the_scan_says_they_match() {
     let (mut ix, mut plain) = twins(150);
@@ -532,10 +532,7 @@ fn nan_rows_match_what_the_scan_says_they_match() {
     }
     check(&ix, &plain, "with a NaN");
     let p = plan(&ix, "get c where status = \"open\" order score limit 5");
-    assert!(
-        p.contains("not walked, it holds a value it cannot order"),
-        "{p}"
-    );
+    assert!(p.contains("order: walked the index on"), "{p}");
 }
 
 fn refused(db: &mut Database, sql: &str) -> Error {

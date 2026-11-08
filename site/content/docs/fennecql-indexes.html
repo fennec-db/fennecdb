@@ -426,8 +426,8 @@ made to order, a text escaped and ended, a descending field's bytes
 inverted — so an equality on its first fields is a run of the keys and a
 range on the next one is a run inside it. A text in a collation is kept as
 written and compared in it. <code>null</code> stands below every value of a
-field, as <code>order</code> puts it; a row holding a float's
-<code>NaN</code>, which compares equal to everything, or a json value no
+field, as <code>order</code> puts it, and a float's <code>NaN</code> above
+every other value, past <code>+inf</code>; a row holding a json value no
 order has a place for (a boolean, a list, an object, an int no float holds)
 is held apart: while one is, the index is walked for no
 <code>order</code>, and a filter's run takes those rows with it, each

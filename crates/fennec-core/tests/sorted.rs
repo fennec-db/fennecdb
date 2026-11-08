@@ -310,8 +310,8 @@ fn an_index_created_later_gives_the_same_answers() {
     check(&later, &plain, "index created later, then a write");
 }
 
-/// `NaN` compares equal to everything under `cmp_value`, so it matches every
-/// inclusive comparison and no strict one, and a walk has no place for it.
+/// `NaN` equals `NaN` and is above every number under `cmp_value`, so the
+/// index keys it last and a walk takes it there.
 #[test]
 fn nan_rows_match_what_the_scan_says_they_match() {
     let (mut ix, mut plain) = twins(120);
@@ -331,7 +331,8 @@ fn nan_rows_match_what_the_scan_says_they_match() {
         for o in ["", "order f desc limit 5", "order f limit 5 offset 2"] {
             let q = format!("get c select n, f {f} {o}");
             let (a, b) = (rows(&ix, &q, &[]), rows(&plain, &q, &[]));
-            // NaN != NaN, so compare the ids and treat the values bitwise.
+            // `==` finds a NaN unequal to itself: compare the ids, and the
+            // values by their text.
             let key = |rs: Vec<(u64, Vec<Value>)>| {
                 rs.into_iter()
                     .map(|(id, vs)| (id, format!("{vs:?}")))

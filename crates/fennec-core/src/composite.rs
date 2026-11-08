@@ -21,11 +21,11 @@
 //! own, so ties are in ascending id, the order the scan leaves them in.
 //!
 //! Every answer is the scan's, row for row: `null` is a part's lowest
-//! value, as `cmp_value` puts it below every value, and a value the order
-//! has no place for -- a float's `NaN`, which compares equal to everything,
-//! or a json part's boolean, list, object or int past 2^53 -- puts its row
-//! apart: while one is held no walk answers, and a range's rows take the
-//! rows apart with them as candidates to test.
+//! value, as `cmp_value` puts it below every value, a float's `NaN` its
+//! highest, every `NaN` one key ([`float_key`]), and a value the order has
+//! no place for -- a json part's boolean, list, object or int past 2^53 --
+//! puts its row apart: while one is held no walk answers, and a range's
+//! rows take the rows apart with them as candidates to test.
 //!
 //! Derived data like the other ordered index: built by the first statement
 //! that reads it after an open and by `create index`, kept on write, never
@@ -224,7 +224,7 @@ fn put_part(out: &mut Vec<u8>, p: &Part, v: &Value) -> bool {
             false
         }
         (Kind::Int | Kind::Time, Value::Int(i) | Value::Timestamp(i)) => num(out, int_key(*i)),
-        (Kind::Float, Value::Float(f)) if !f.is_nan() => num(out, float_key(*f)),
+        (Kind::Float, Value::Float(f)) => num(out, float_key(*f)),
         (Kind::Bool, Value::Bool(b)) => {
             out.push(if *b { TRUE } else { FALSE });
             false
@@ -592,7 +592,7 @@ impl CompositeIndex {
         let v = match (p.kind, v) {
             (Kind::Int | Kind::Time, Value::Int(_) | Value::Timestamp(_)) => v.clone(),
             (Kind::Time, Value::Text(t)) => Value::Timestamp(crate::time::parse(t).ok()?),
-            (Kind::Float, Value::Float(f)) if !f.is_nan() => v.clone(),
+            (Kind::Float, Value::Float(_)) => v.clone(),
             (Kind::Float, Value::Int(i)) => Value::Float(crate::value::exact_float(*i)?),
             (Kind::Bool, Value::Bool(_)) | (Kind::Text, Value::Text(_)) => v.clone(),
             (Kind::Json, v)

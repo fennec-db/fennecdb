@@ -248,7 +248,8 @@ fn every_order_path_names_itself() {
         ],
     );
 
-    // `NaN` has no place in an order, so an index holding one is not walked.
+    // `NaN` is the last key of an order, so an index holding one is walked,
+    // its `NaN` last ascending and first descending.
     let mut db = Database::new();
     exec(&mut db, "create collection f (x float @sorted)");
     exec(&mut db, "put f [{x: 1.5}, {x: 2.5}]");
@@ -259,13 +260,18 @@ fn every_order_path_names_itself() {
     .unwrap();
     check(
         &db,
-        "get f order x limit 2",
+        "get f order x desc limit 2",
         &[],
-        &[
-            "order: the ordered index on x not walked, it holds a NaN",
-            "order: x, every key read",
-        ],
+        &["order: walked the ordered index on x desc, 2 rows"],
     );
+    let r = db
+        .query(
+            &fennec_ql::parse_one("get f order x desc limit 2").unwrap(),
+            &[],
+        )
+        .unwrap();
+    let ids: Vec<u64> = r.rows().unwrap().rows.iter().map(|r| r.id).collect();
+    assert_eq!(ids, [3, 2]);
 }
 
 #[test]

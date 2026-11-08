@@ -297,15 +297,12 @@ impl Value {
     /// `cmp_value` compares an int and a float by their true values: the
     /// float -2^63 finds the row holding `i64::MIN`, which it is, and 2^63
     /// nothing, which no int is; 2^53 + 1 finds no `float`, which none
-    /// holds, where `as` would have made it 2^53. `NaN` is no key: `=`
-    /// finds it equal to every value, which no bucket holds -- a filter's
-    /// is answered by the scan, and the bucket of its bits, which a float
-    /// field's `@hash` looked in, found none of the rows the scan finds.
+    /// holds, where `as` would have made it 2^53. A `NaN` is a `float`'s
+    /// key like any other, every `NaN` the same one ([`Value::cmp_value`];
+    /// `hash_key` files them under one key whatever their bits), and no
+    /// `int`'s.
     pub(crate) fn key_as(self, ty: &DataType) -> Option<Value> {
-        match self {
-            Value::Float(f) if f.is_nan() => None,
-            v => v.coerce_as(ty, Fit::Key).ok(),
-        }
+        self.coerce_as(ty, Fit::Key).ok()
     }
 
     /// The one body of [`Value::coerce`] and [`Value::key_as`], a number
@@ -454,7 +451,9 @@ impl Value {
         }
     }
 
-    /// Total ordering for sorting/comparison. Null counts as the smallest.
+    /// Total ordering for sorting/comparison. Null counts as the smallest;
+    /// a `NaN` equals a `NaN`, whatever its bits, and is greater than every
+    /// other number, `+inf` included: PostgreSQL's order ([`floats`]).
     pub fn cmp_value(&self, other: &Value) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (self, other) {
@@ -466,13 +465,12 @@ impl Value {
             // compared equal, and an ordered index, which keys ints exactly,
             // would then disagree with the scan about their order.
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            // `NaN` equal to every float. An arm of its own, so two floats
-            // never ask whether a tie needs a second look (below): through
-            // the last arm, as they went before, an order by a float took
-            // 0.3% more instructions for that; this way 1.5% fewer than
-            // before, and an order by an int 0.6% fewer, the dispatch laid
-            // out anew.
-            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            // An arm of its own, so two floats never ask whether a tie
+            // needs a second look (below): through the last arm, as they
+            // went before, an order by a float took 0.3% more instructions
+            // for that; this way 1.5% fewer than before, and an order by an
+            // int 0.6% fewer, the dispatch laid out anew.
+            (Value::Float(a), Value::Float(b)) => floats(*a, *b),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
@@ -505,9 +503,7 @@ impl Value {
             }
             (Value::Sparse(da, a), Value::Sparse(db, b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    let o =
-                        x.0.cmp(&y.0)
-                            .then(x.1.partial_cmp(&y.1).unwrap_or(Ordering::Equal));
+                    let o = x.0.cmp(&y.0).then(floats(x.1 as f64, y.1 as f64));
                     if o != Ordering::Equal {
                         return o;
                     }
@@ -525,9 +521,11 @@ impl Value {
                 }
                 a.len().cmp(&b.len())
             }
+            // An `f32` as the `f64` it widens to, a `NaN` as a `NaN`: one
+            // rule, one copy of it.
             (Value::Vector(a), Value::Vector(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    let o = x.partial_cmp(y).unwrap_or(Ordering::Equal);
+                    let o = floats(*x as f64, *y as f64);
                     if o != Ordering::Equal {
                         return o;
                     }
@@ -549,13 +547,31 @@ impl Value {
                 (Some(a), Some(b)) => match a.partial_cmp(&b) {
                     Some(Ordering::Equal) if a.abs() >= EVERY_INT => tie(self, other),
                     Some(o) => o,
-                    None => Ordering::Equal,
+                    // A `NaN`, which only a float is: above the other.
+                    None => a.is_nan().cmp(&b.is_nan()),
                 },
                 // Incomparable types fall back to type rank. This used to
                 // return Equal: `year = "abc"` matched every row.
                 _ => self.type_rank().cmp(&other.type_rank()),
             },
         }
+    }
+}
+
+/// Two floats in PostgreSQL's order: by their values, `-0.0` equal to
+/// `0.0`, and a `NaN` equal to a `NaN` and greater than every other float,
+/// `+inf` included. A `NaN` equalled every value before, the one
+/// comparison left that was no order -- `NaN = 3`, `NaN = 5` and `3 < 5`
+/// at once -- so a sort over a float field holding one could panic in the
+/// standard library ("does not correctly implement a total order"), and an
+/// index, which keys a value in one place, could not give the scan's
+/// answer. The `NaN` test is asked only where `partial_cmp` finds no
+/// order, so two numbers pay nothing for it (docs/design/indexes.md#sorted).
+#[inline]
+fn floats(a: f64, b: f64) -> std::cmp::Ordering {
+    match a.partial_cmp(&b) {
+        Some(o) => o,
+        None => a.is_nan().cmp(&b.is_nan()),
     }
 }
 
@@ -782,7 +798,7 @@ mod tests {
     fn by_i128(i: i64, f: f64) -> Ordering {
         let far = 2f64.powi(127);
         if f.is_nan() {
-            return Equal;
+            return Less;
         }
         if f >= far {
             return Less;
@@ -868,6 +884,120 @@ mod tests {
         );
     }
 
+    /// A value of every kind at the edges `cmp_value` meets: `NaN`s of
+    /// every sign and payload, the infinities, both zeros, ints and floats
+    /// where a float's precision changes, the kinds that compare by rank,
+    /// and the values holding numbers -- a list, an object, a vector of
+    /// `f32`s and a sparse one.
+    fn edges() -> Vec<Value> {
+        let nans = [
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7FF8_0000_0000_0001),
+            f64::from_bits(0xFFF0_0000_0000_0001),
+        ];
+        let mut floats = vec![
+            0.0,
+            -0.0,
+            2.5,
+            -2.5,
+            3.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            I64_END,
+            -I64_END,
+        ];
+        floats.extend(nans);
+        for e in [53, 60] {
+            let p = 2f64.powi(e);
+            floats.extend([p, -p, f64::from_bits(p.to_bits() + 1)]);
+        }
+        let mut out = vec![
+            Value::Null,
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Text(String::new()),
+            Value::Text("a".into()),
+            Value::Bytes(vec![0xFF]),
+        ];
+        out.extend(floats.iter().map(|f| Value::Float(*f)));
+        for i in [
+            0,
+            3,
+            -1,
+            1 << 53,
+            (1 << 53) + 1,
+            1 << 60,
+            (1 << 60) + 1,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            out.extend([Value::Int(i), Value::Timestamp(i)]);
+        }
+        let f32s = [0.0, -0.0, 1.0, f32::INFINITY, f32::NAN, -f32::NAN];
+        for a in f32s {
+            out.push(Value::Vector(vec![a, 1.0]));
+            out.push(Value::Sparse(4, vec![(1, a)]));
+        }
+        for f in [nans[0], nans[1], 1.0, f64::INFINITY, -0.0] {
+            out.push(Value::List(vec![Value::Float(f), Value::Int(1)]));
+            out.push(Value::Object(vec![("k".into(), Value::Float(f))]));
+        }
+        out.push(Value::List(vec![Value::Int(1)]));
+        out
+    }
+
+    /// PostgreSQL's order for `NaN`, and a total order over every kind:
+    /// `NaN` equals `NaN` whatever its bits, and is greater than every
+    /// other number, `+inf` included -- inside a list, an object or a
+    /// vector too. It equalled every number, so `NaN = 3`, `NaN = 5` and
+    /// `3 < 5` held at once, which a sort cannot keep.
+    #[test]
+    fn cmp_value_is_a_total_order_with_nan_above_every_number() {
+        let vs = edges();
+        for a in &vs {
+            assert_eq!(a.cmp_value(a), Equal, "{a:?}");
+            for b in &vs {
+                assert_eq!(a.cmp_value(b), b.cmp_value(a).reverse(), "{a:?} {b:?}");
+            }
+        }
+        for a in &vs {
+            for b in &vs {
+                let ab = a.cmp_value(b);
+                if ab == Greater {
+                    continue;
+                }
+                for c in &vs {
+                    let bc = b.cmp_value(c);
+                    if bc == Greater {
+                        continue;
+                    }
+                    let want = if ab == Less || bc == Less {
+                        Less
+                    } else {
+                        Equal
+                    };
+                    assert_eq!(a.cmp_value(c), want, "{a:?} {b:?} {c:?}");
+                }
+            }
+        }
+        let nan = Value::Float(f64::NAN);
+        for v in &vs {
+            let want = match v {
+                Value::Float(f) if f.is_nan() => Equal,
+                Value::Int(_) | Value::Float(_) | Value::Timestamp(_) => Greater,
+                _ => continue,
+            };
+            assert_eq!(nan.cmp_value(v), want, "{v:?}");
+        }
+        let (zero, minus) = (Value::Float(0.0), Value::Float(-0.0));
+        assert_eq!(zero.cmp_value(&minus), Equal);
+        let v = |a: f32| Value::Vector(vec![a]);
+        assert_eq!(v(f32::NAN).cmp_value(&v(-f32::NAN)), Equal);
+        assert_eq!(v(f32::NAN).cmp_value(&v(f32::INFINITY)), Greater);
+    }
+
     #[test]
     fn a_number_is_exactly_the_other_kind_or_none() {
         for i in ints() {
@@ -893,7 +1023,12 @@ mod tests {
         );
         assert_eq!(key(Value::Float(I64_END), &int), None);
         assert_eq!(key(Value::Float(2.5), &int), None);
-        assert_eq!(key(Value::Float(f64::NAN), &float), None);
+        let nan = key(Value::Float(-f64::NAN), &float);
+        assert!(
+            matches!(nan, Some(Value::Float(f)) if f.is_nan()),
+            "{nan:?}"
+        );
+        assert_eq!(key(Value::Float(f64::NAN), &int), None);
         assert_eq!(key(Value::Int((1 << 53) + 1), &float), None);
         let f60 = Value::Float((1u64 << 60) as f64);
         assert_eq!(key(Value::Int(1 << 60), &float), Some(f60));

@@ -1253,7 +1253,7 @@ fn same_expr(a: &Expr, b: &Expr) -> bool {
 }
 
 /// Two lists of values, the same ones in any order: their encodings
-/// sorted -- a total order, as `NaN` is not -- and compared. Sorted as
+/// sorted -- the very values, bit for bit -- and compared. Sorted as
 /// byte slices, whose sort the binary holds already; read in a loop, as
 /// `collect` into an `Option` built a copy of its own (628 bytes).
 fn same_values(xs: &[Expr], ys: &[Expr]) -> bool {

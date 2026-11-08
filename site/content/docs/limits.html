@@ -421,8 +421,7 @@ what you might expect.</p>
     index cannot narrow is tested on each row the walk passes, and one that
     has not filled the page within an eighth of the collection hands the query
     back to the scan — at worst about 1.25× the scan alone. An order over two
-    keys, or over a <code>float</code> field holding a <code>NaN</code>, which
-    has no place in an order, takes the sorting path. Without
+    keys takes the sorting path. Without
     <code>order</code>, a scan stops at <code>offset + limit</code>
     matches.</li>
   <li><b>Two collations: Unicode's root and Turkish.</b>

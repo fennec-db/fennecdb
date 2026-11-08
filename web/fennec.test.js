@@ -629,6 +629,34 @@ test('an int and a float compare by their true values, through every index, in t
   db.close();
 });
 
+test('a NaN equals a NaN and is above every number, through every index, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (x float, xh float @hash, xs float @sorted, a float, z int, @sorted(a, z))');
+  // JSON carries no NaN; a vector function over an infinity makes one:
+  // `1e39` is past every f32, and inf * 0 is NaN.
+  const nan = 'dot([1e39], [0])';
+  for (const v of ['3.5', nan, '1e300', nan, '-2']) {
+    db.run(`put t {x: ${v}, xh: ${v}, xs: ${v}, a: ${v}, z: 0}`);
+  }
+  const ids = (sql) => db.rows(sql).map((r) => r.id);
+  for (const [field, rest] of [['x', ''], ['xh', ''], ['xs', ''], ['a', ', z']]) {
+    assert.deepEqual(ids(`get t select id order ${field}${rest}`), [5, 1, 3, 2, 4], field);
+    assert.deepEqual(ids(`get t select id order ${field} desc${rest}`), [2, 4, 3, 1, 5], field);
+    assert.deepEqual(ids(`get t select id where ${field} > 5 order id`), [2, 3, 4], field);
+    assert.deepEqual(ids(`get t select id where ${field} = ${nan} order id`), [2, 4], field);
+    assert.deepEqual(ids(`get t select id where ${field} < ${nan} order id`), [1, 3, 5], field);
+  }
+  // Written out as JSON writes an infinity: null.
+  assert.equal(db.rows('get t select x where id = 2')[0].x, null);
+  assert.equal(db.rows('get t select xh, count(*) as n group xh').length, 4);
+  assert.equal(db.rows('get t select count(distinct x) as d')[0].d, 4);
+  db.run('create collection u (x float @unique)');
+  db.run(`put u {x: ${nan}}`);
+  assert.throws(() => db.run(`put u {x: ${nan}}`), /unique/);
+  db.close();
+});
+
 test('a number from 2^53 on is read by the module as the double it is, and finds its rows', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

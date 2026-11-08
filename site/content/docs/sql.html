@@ -300,7 +300,9 @@ where <code>x</code> is not null — and <code>sum</code> over none is null.
 A null sorts first ascending and last descending, as in SQLite and MySQL —
 PostgreSQL's default is the other way round — so <code>NULLS FIRST</code>
 is read after <code>ASC</code> and <code>NULLS LAST</code> after
-<code>DESC</code>, and either other way is refused. <code>x LIKE
+<code>DESC</code>, and either other way is refused. A float's
+<code>NaN</code> is PostgreSQL's: equal to a <code>NaN</code>, greater than
+every other number, last ascending. <code>x LIKE
 'a%'</code> in a select list is null for a null.</p>
 
 <p><b><code>&lt;&gt;</code> is <code>!=</code>, null and all.</b> One could

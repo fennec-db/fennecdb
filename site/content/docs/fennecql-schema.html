@@ -25,10 +25,18 @@ is, up to 2<sup>63</sup> either side — 2<sup>60</sup> as
 1152921504606846976, not the shortest digits 1152921504606847000, another
 int — and read back, or sent again as a parameter, it finds its rows; the
 JavaScript and Go clients send a number of 2<sup>53</sup> and up so too
-(<a href="languages.html">languages</a>). A float's <code>NaN</code>
-equals every value where it is compared, but is no key: <code>= NaN</code>
-is answered by the scan, and a <code>lookup</code> whose parent holds
-<code>NaN</code> finds no child. A list of numbers given an <code>[int]</code> or a
+(<a href="languages.html">languages</a>). A float's <code>NaN</code> is
+one value, ordered as PostgreSQL orders it: it equals a <code>NaN</code>,
+whatever its bits, and is greater than every other number,
+<code>+inf</code> included, wherever values are compared — <code>where</code>,
+<code>order</code> (last ascending, first descending), <code>min</code> and
+<code>max</code>, <code>group</code>, <code>count(distinct …)</code>,
+<code>facet</code>, every index and <code>lookup</code>; so <code>x &gt; 5</code>
+takes the <code>NaN</code> rows, and a <code>@unique</code> field holds one
+<code>NaN</code>. JSON writes one as <code>null</code>, as it does an
+infinity; one reaches a field through the native APIs and the Rust crate, an
+import of PostgreSQL's or SQLite's, or a vector function over an infinity
+(<code>dot([1e39], [0])</code>). A list of numbers given an <code>[int]</code> or a
 <code>[float]</code> is still read as a vector's <code>f32</code>s, exact to
 2<sup>24</sup> (<a href="limits.html#fixed-limits">limits</a>).</p>
 
@@ -160,8 +168,7 @@ typed field's does, a whole float filed as the int it equals so that
 <code>3</code> and <code>3.0</code> share a bucket, as do the int and the
 float 2<sup>60</sup>; an equality or an <code>in</code> reaches it with null, a
 boolean, text and a number, and anything else — a list, an object, a
-timestamp, which equals the text it reads as, a float's <code>NaN</code>,
-which equals every value — is answered by the scan. <code>@unique</code> refuses a value held twice as a field's does,
+timestamp, which equals the text it reads as — is answered by the scan. <code>@unique</code> refuses a value held twice as a field's does,
 <code>3</code> and <code>3.0</code> the same value.
 <code>@sorted</code> orders the numbers as <code>f64</code>s and the text by
 its bytes, every number before every text; a value it has no place for —

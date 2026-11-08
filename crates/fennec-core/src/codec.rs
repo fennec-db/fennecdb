@@ -242,19 +242,31 @@ pub fn geo_value((lon, lat): (f64, f64)) -> Value {
 
 /// [`encode_value`] of a value a group, a set of distinct values or a facet
 /// counts by: `-0.0` as `0.0`, which `=` holds equal and SQL makes one row
-/// of -- adding `+0.0` turns it into `0.0` and leaves every other float
-/// alone. Written here, a float's bytes put once: a `Value` made again
-/// went through `encode_value`'s own match a second time, and a group by
-/// a float over a million rows took 1.9% longer that way; this way as long
-/// as before (ABBA, functions aligned to 64 bytes on both sides).
+/// of, and every `NaN` as one ([`key_float`]). Written here, a float's
+/// bytes put once: a `Value` made again went through `encode_value`'s own
+/// match a second time, and a group by a float over a million rows took
+/// 1.9% longer that way; this way as long as before (ABBA, functions
+/// aligned to 64 bytes on both sides).
 #[inline]
 pub fn encode_key(out: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Float(f) => {
             out.push(TAG_FLOAT);
-            out.extend_from_slice(&(f + 0.0).to_le_bytes());
+            out.extend_from_slice(&key_float(*f).to_le_bytes());
         }
         v => encode_value(out, v),
+    }
+}
+
+/// The float a key files `f` as, the one of those `=` finds equal to it:
+/// `-0.0` as `0.0` -- adding `+0.0` turns it into `0.0` and leaves every
+/// other float alone -- and every `NaN`, of whatever sign or payload, as
+/// `f64::NAN`, which `cmp_value` finds equal to each.
+#[inline]
+pub fn key_float(f: f64) -> f64 {
+    match f.is_nan() {
+        true => f64::NAN,
+        false => f + 0.0,
     }
 }
 
