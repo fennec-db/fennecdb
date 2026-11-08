@@ -96,9 +96,10 @@ jobs:
   # is kept (tools/windows-zip-check.ps1), as a .deb and an .rpm are. CI's
   # `windows (release zip)` job runs the same two scripts on every change,
   # so a tag meets no step here CI has not run. Unsigned, and named by its
-  # checksum in SHA256SUMS with the rest. x86_64 alone: aarch64 waits on
-  # the arm64 runner (the design's slice 5). A tag from before the scripts
-  # -- a dispatch for an older one -- builds none, and says so.
+  # checksum in SHA256SUMS with the rest. x86_64 and aarch64, each on a
+  # runner of its own architecture, which runs what it built. A tag from
+  # before the scripts -- a dispatch for an older one -- builds none, and
+  # says so.
   windows:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -107,6 +108,7 @@ jobs:
       matrix:
         include:
           - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { name: aarch64-windows, os: windows-11-arm, target: aarch64-pc-windows-msvc }
     defaults:
       run:
         shell: bash

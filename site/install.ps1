@@ -5,8 +5,8 @@
 #
 # Read it first: open https://fennecdb.com/install.ps1 in a browser. It
 #
-#   - takes the release's zip for this machine: x86_64, which an arm64
-#     Windows 11 runs too;
+#   - takes the release's zip for this machine, x86_64 or arm64 (an arm64
+#     Windows 11 runs the x86_64 one where a release has no other);
 #   - downloads the zip and the release's SHA256SUMS from GitHub, over https,
 #     and checks the zip against the sum before it unpacks it;
 #   - puts fennec.exe and fennec-server.exe in a bin folder of your own: no
@@ -47,8 +47,8 @@ function Write-FennecUsage {
     Write-Host '  FENNEC_INSTALL  installs into $env:FENNEC_INSTALL\bin; default $env:LOCALAPPDATA\fennecdb'
     Write-Host '  FENNEC_FROM     a folder holding a release''s zip and SHA256SUMS, nothing downloaded'
     Write-Host ''
-    Write-Host 'Windows 10 or Windows Server 2016 and later, on x86_64, and on arm64 under'
-    Write-Host 'Windows 11''s emulation. On macOS and Linux: curl -fsSL https://fennecdb.com/install.sh | sh'
+    Write-Host 'Windows 10 or Windows Server 2016 and later, on x86_64 or arm64.'
+    Write-Host 'On macOS and Linux: curl -fsSL https://fennecdb.com/install.sh | sh'
 }
 
 # The machine's processor, not this process's: an x64 PowerShell on an arm64
@@ -67,7 +67,7 @@ function Get-FennecArch {
         'AMD64' { return 'x86_64' }
         'ARM64' { return 'aarch64' }
     }
-    throw "no fennecdb release for the processor '$arch' (x86_64 only, which an arm64 Windows 11 runs too). The Docker image, ghcr.io/fennec-db/fennec-server, is another way."
+    throw "no fennecdb release for the processor '$arch' (x86_64 and arm64 only). The Docker image, ghcr.io/fennec-db/fennec-server, is another way."
 }
 
 # The base URL releases come from: https, or http to this machine for a test.
@@ -203,7 +203,7 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
         throw 'this installer is for Windows; on macOS and Linux: curl -fsSL https://fennecdb.com/install.sh | sh'
     }
     if (-not [Environment]::Is64BitOperatingSystem) {
-        throw 'no fennecdb release for 32-bit Windows (x86_64 only)'
+        throw 'no fennecdb release for 32-bit Windows (x86_64 and arm64 only)'
     }
 
     $from = $env:FENNEC_FROM
@@ -220,8 +220,8 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     }
     $bindir = Get-FennecBin
 
-    # x86_64 where the release has no build for an arm64 machine: Windows 11
-    # runs it under its emulation.
+    # x86_64 where a release has no build for an arm64 machine -- one from
+    # before arm64's -- which Windows 11 runs under its emulation.
     $arch = Get-FennecArch
     $targets = @("$arch-pc-windows-msvc")
     if ($arch -ne 'x86_64') { $targets += 'x86_64-pc-windows-msvc' }

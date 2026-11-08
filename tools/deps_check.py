@@ -32,13 +32,18 @@ EXEMPT = {
 CLOSED = ("fennec-core", "fennec-ql", "fennec-abi", "fennec-wasm", "fennec-ffi")
 
 # fennec-tls's whole tree, normal and build edges, as Cargo.lock resolves it
-# for the targets the binaries ship for (TLS_TARGETS; the Windows zip's takes
-# the same less libc). Its Cargo.toml names two crates; these are what they bring, and
+# for the targets the binaries ship for (TLS_TARGETS). The Windows zips' take
+# the same less libc, and on aarch64 ring's windows-sys besides --
+# Microsoft's declarations of the Windows API, windows-targets and
+# windows_aarch64_msvc beneath it, an import library and a build script that
+# names its folder to the linker, read at 0.52.6 (docs/design/windows.md,
+# decision 6). Its Cargo.toml names two crates; these are what they bring, and
 # a rustls feature turned on (aws-lc-rs, brotli), a default moved or a
 # `cargo update` changes them without a line of any Cargo.toml changing. A
 # difference fails the check: read what came in or moved (what it is, who
 # publishes it, its build.rs), then write the list again. A build script
-# here is one tools/image-cargo.sh names by version too.
+# here that the image's Linux builds run is one tools/image-cargo.sh names by
+# version too.
 TLS_TREE = {
     "cc@1.4.6",
     "cfg-if@1.0.5",
@@ -55,6 +60,9 @@ TLS_TREE = {
     "subtle@2.6.1",
     "untrusted@0.9.0",
     "webpki-roots@1.0.11",
+    "windows-sys@0.52.0",
+    "windows-targets@0.52.6",
+    "windows_aarch64_msvc@0.52.6",
     "zeroize@1.9.0",
 }
 TLS_TARGETS = (
@@ -63,6 +71,7 @@ TLS_TARGETS = (
     "aarch64-linux-android",
     "aarch64-apple-ios",
     "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 )
 
 
