@@ -166,11 +166,13 @@ pub fn exact_noting(
     if !vectored {
         return Ok(());
     }
-    // A statement alone, as nearly every call is, asked here: where it
-    // needs nothing read again, as a vector's put does, that is all, and
-    // the rest is out of line. Inline whole it grew the native library's
-    // call past what its caller inlined, some 80 instructions a call
-    // (`tools/instr/trace.py`).
+    // A statement alone, as nearly every call is, asked here natively:
+    // where it needs nothing read again, as a vector's put does, that is
+    // all, and the rest is out of line. Inline whole it grew the native
+    // library's call past what its caller inlined, some 80 instructions a
+    // call (`tools/instr/trace.py`). The browser module keeps one body:
+    // split, `exactly` was made twice, 1.1 KB.
+    #[cfg(not(target_arch = "wasm32"))]
     let first = match p.stmts.as_slice() {
         [s] => {
             let need = db.exactly(s);
@@ -181,12 +183,15 @@ pub fn exact_noting(
         }
         _ => None,
     };
+    #[cfg(target_arch = "wasm32")]
+    let first = None;
     exact_needed(db, p, sql, params_src, vectors, anew, first)
 }
 
 /// [`exact_noting`] past its quick answer, `first` the first statement's
 /// [`Exactly`](fennec_core::engine::Exactly) where it was asked.
-#[inline(never)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(never))]
+#[cfg_attr(target_arch = "wasm32", inline(always))]
 fn exact_needed(
     db: &Database,
     p: &mut Prepared,

@@ -13593,7 +13593,10 @@ pub struct Exactly {
 /// four allocations were most of what an app's `put` of an `[int]` beside
 /// its vector cost over one with no list, some 1 200 instructions of 2 500
 /// (`ffi_bench lists`, `tools/instr/trace.py`). A statement names more
-/// than four rarely: a `put` of rows a parameter each, which spills.
+/// than four rarely: a `put` of rows a parameter each, which spills. The
+/// browser module keeps them in a `Vec`, as before: held in place they
+/// were 0.6 KB of it, for a call a page makes far less often than an app.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Default)]
 pub struct Places {
     /// How many of `few` hold places; none where `more` holds them.
@@ -13603,6 +13606,33 @@ pub struct Places {
     more: Vec<usize>,
 }
 
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Default)]
+pub struct Places(Vec<usize>);
+
+#[cfg(target_arch = "wasm32")]
+impl Places {
+    pub fn note(&mut self, i: usize) {
+        if let Err(at) = self.0.binary_search(&i) {
+            self.0.insert(at, i);
+        }
+    }
+
+    pub fn retain(&mut self, keep: &dyn Fn(usize) -> bool) {
+        self.0.retain(|&i| keep(i));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Deref for Places {
+    type Target = [usize];
+
+    fn deref(&self) -> &[usize] {
+        &self.0
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Places {
     pub const FEW: usize = 4;
 
@@ -13610,17 +13640,17 @@ impl Places {
     /// page of 1 000 documents' parameters was quadratic; a place mostly
     /// comes after the ones before it, and is pushed.
     pub fn note(&mut self, i: usize) {
-        if self.more.is_empty() && self.n < Places::FEW && (self.n == 0 || self.few[self.n - 1] < i)
-        {
-            self.few[self.n] = i;
-            self.n += 1;
-            return;
-        }
         let Err(at) = self.binary_search(&i) else {
             return;
         };
         if self.more.is_empty() && self.n < Places::FEW {
-            self.few.copy_within(at..self.n, at + 1);
+            // Those past `at` a step on, none where it comes last: a loop,
+            // where `copy_within` kept a range's panic in the module.
+            let mut j = self.n;
+            while j > at {
+                self.few[j] = self.few[j - 1];
+                j -= 1;
+            }
             self.few[at] = i;
             self.n += 1;
             return;
@@ -13651,13 +13681,17 @@ impl Places {
         // Back in place where they fit: `more` is empty exactly where they
         // are held there.
         if self.more.len() <= Places::FEW {
-            self.n = self.more.len();
-            self.few[..self.n].copy_from_slice(&self.more);
+            self.n = 0;
+            for &i in &self.more {
+                self.few[self.n] = i;
+                self.n += 1;
+            }
             self.more = Vec::new();
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::ops::Deref for Places {
     type Target = [usize];
 
@@ -13840,11 +13874,12 @@ impl<'a> Known<'a> {
     fn give(self, name: &str, e: &Expr, out: &mut Exactly) {
         let list = match self {
             Known::Schema(schema, true) => {
-                // A path's field: a byte loop, where `split_once` searched.
-                let field = match name.bytes().position(|b| b == b'.') {
-                    Some(at) => &name[..at],
-                    None => name,
-                };
+                // A path's field: a byte loop, where `split_once` searched;
+                // `get`, as `&name[..at]` kept a slice's panic, its
+                // formatting of a `char` and the Unicode tables it reads,
+                // 4.5 KB of the browser module.
+                let at = name.bytes().position(|b| b == b'.');
+                let field = at.and_then(|at| name.get(..at)).unwrap_or(name);
                 let Some(f) = schema.field(field) else {
                     return;
                 };
@@ -16548,6 +16583,7 @@ mod tests {
 
     /// Places stay ascending and once each, in place up to four and in a
     /// `Vec` past them, and go back in place as a `retain` leaves four.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn places_are_ascending_once_each_in_place_or_spilled() {
         let mut p = Places::default();

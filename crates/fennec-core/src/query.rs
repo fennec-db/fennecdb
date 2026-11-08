@@ -3442,10 +3442,10 @@ pub enum Alter {
 /// Whether `v` is or holds a vector: what a reader with no schema makes of a
 /// list of numbers alone.
 ///
-/// Inline, the rest out of line ([`holds_vector_within`]): asked of every
-/// literal and parameter of a statement handing a vector, nearly all a
-/// number or a vector, its call was some 20 instructions each.
-#[inline]
+/// Inline natively, the rest out of line ([`holds_vector_within`]): asked
+/// of every literal and parameter of a statement handing a vector, nearly
+/// all a number or a vector, its call was some 20 instructions each.
+#[cfg_attr(not(target_arch = "wasm32"), inline)]
 pub fn holds_vector(v: &Value) -> bool {
     match v {
         Value::Vector(_) => true,
