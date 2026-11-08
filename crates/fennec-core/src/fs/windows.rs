@@ -166,19 +166,17 @@ pub(super) fn sync_dir(path: &Path) -> io::Result<()> {
 /// to, flushed through that handle, and its directory flushed: what
 /// `swap_in` does on a Unix with `rename`, `sync_dir` and an open.
 pub(super) fn swap(from: &Path, to: &Path) -> io::Result<File> {
-    mark_unindexed(from);
+    if let Ok(image) = OpenOptions::new()
+        .access_mode(FILE_RW_ATTRIBUTES)
+        .open(from)
+    {
+        mark_unindexed(&image);
+    }
     tried_again(|| std::fs::rename(from, to))?;
     let f = tried_again(|| OpenOptions::new().read(true).write(true).open(to))?;
     flush_renamed(&f)?;
     flush_parent(to)?;
     Ok(f)
-}
-
-/// Has a file `o` creates kept out of Windows Search's content index:
-/// one handle fewer that may refuse a rename over it. Applied where the
-/// open makes the database's file; an existing file keeps its attributes.
-pub(super) fn unindexed(o: &mut OpenOptions) -> &mut OpenOptions {
-    o.attributes(FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
 }
 
 /// `FILE_BASIC_INFO`: the times (0 leaves one as it is) and the attributes.
@@ -195,18 +193,15 @@ const FILE_RW_ATTRIBUTES: u32 = 0x0080 | 0x0100;
 /// Valid only alone, so never kept beside another attribute.
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
-/// A rewrite's image kept out of the content index ([`unindexed`]) before
-/// it is renamed into the database's place, through a handle of its own:
-/// the image is made by the code every system shares. Advice, as
-/// `madvise` is on a Unix: refused, the file is indexed as before.
-fn mark_unindexed(path: &Path) {
+/// The file `f` is open on kept out of Windows Search's content index --
+/// one handle fewer that may refuse a rename over it -- through a handle
+/// that may read and write its attributes: a database's file as its open
+/// makes it, a rewrite's image before it is renamed into the database's
+/// place. `CreateFileW` takes no such attribute at the making (CI found
+/// it unset), so it is set after. Advice, as `madvise` is on a Unix:
+/// refused, the file is indexed as before.
+pub(super) fn mark_unindexed(f: &File) {
     use std::os::windows::fs::MetadataExt;
-    let Ok(f) = OpenOptions::new()
-        .access_mode(FILE_RW_ATTRIBUTES)
-        .open(path)
-    else {
-        return;
-    };
     let Ok(was) = f.metadata().map(|m| m.file_attributes()) else {
         return;
     };
@@ -562,33 +557,42 @@ pub(super) mod tests {
     /// stays until the last handle goes; `e<n>` for a refusal, its Win32
     /// error (5 access denied, 32 sharing violation, 87 invalid
     /// parameter). Asserted, so a Windows update that changes one fails CI
-    /// before a server meets it (docs/design/windows.md, decision 2).
+    /// before a server meets it (docs/design/windows.md, decision 2, which
+    /// holds the tables as `windows-latest` answered them).
     type Table = [[&'static str; 7]; 9];
 
+    /// A read-only view refuses nothing, in this process or another,
+    /// whatever its opener shared: neither a rename over the file, POSIX or
+    /// classic, nor a delete, nor a rename away. Only a handle does -- the
+    /// classic rename over any, everything over one not sharing delete.
     const NTFS: Table = [
         ["ok", "ok", "ok", "ok", "ok", "ok", "ok"],
         ["ok", "ok", "e5", "ok", "ok", "ok", "ok"],
-        ["e32", "e32", "e32", "e32", "e32", "e32", "e32"],
-        ["ok", "ok", "e5", "e5", "e5", "ok", "ok"],
-        ["ok", "ok", "e5", "e5", "e5", "ok", "ok"],
-        ["ok", "ok", "e5", "e5", "e5", "ok", "ok"],
-        ["e32", "e32", "e32", "e32", "e32", "e32", "e32"],
-        ["ok", "ok", "e5", "e5", "e5", "ok", "ok"],
-        ["ok", "ok", "e5", "e5", "e5", "ok", "ok"],
+        ["e32", "e5", "e5", "e32", "e32", "e32", "e32"],
+        ["ok", "ok", "ok", "ok", "ok", "ok", "ok"],
+        ["ok", "ok", "ok", "ok", "ok", "ok", "ok"],
+        ["ok", "ok", "e5", "ok", "ok", "ok", "ok"],
+        ["e32", "e5", "e5", "e32", "e32", "e32", "e32"],
+        ["ok", "ok", "ok", "ok", "ok", "ok", "ok"],
+        ["ok", "ok", "ok", "ok", "ok", "ok", "ok"],
     ];
 
+    /// ReFS answers as NTFS, cell for cell.
     const REFS: Table = NTFS;
 
+    /// No POSIX semantics (87); std's rename and delete fall back to the
+    /// classic ones, which a view refuses as a handle does, but for a
+    /// rename of the file away.
     const FAT32: Table = [
         ["e87", "ok", "ok", "e87", "ok", "e87", "ok"],
         ["e87", "e5", "e5", "e87", "ok, pending", "e87", "ok"],
-        ["e32", "e32", "e32", "e32", "e32", "e32", "e32"],
-        ["e87", "e5", "e5", "e5", "e5", "e87", "ok"],
-        ["e87", "e5", "e5", "e5", "e5", "e87", "ok"],
-        ["e87", "e5", "e5", "e5", "e5", "e87", "ok"],
-        ["e32", "e32", "e32", "e32", "e32", "e32", "e32"],
-        ["e87", "e5", "e5", "e5", "e5", "e87", "ok"],
-        ["e87", "e5", "e5", "e5", "e5", "e87", "ok"],
+        ["e87", "e5", "e5", "e32", "e32", "e32", "e32"],
+        ["e87", "e5", "e5", "e87", "e5", "e87", "ok"],
+        ["e87", "e5", "e5", "e87", "e5", "e87", "ok"],
+        ["e87", "e5", "e5", "e87", "e5", "e87", "ok"],
+        ["e87", "e5", "e5", "e32", "e32", "e32", "e32"],
+        ["e87", "e5", "e5", "e87", "e5", "e87", "ok"],
+        ["e87", "e5", "e5", "e87", "e5", "e87", "ok"],
     ];
 
     /// What each file system answers: its table, whether it reports POSIX

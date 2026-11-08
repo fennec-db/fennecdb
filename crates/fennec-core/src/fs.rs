@@ -453,28 +453,20 @@ impl FileSink {
         // renames over it, leaving the link a link.
         let path = resolved(path.as_ref());
         // An existing file is the database: never truncated.
-        #[cfg(not(windows))]
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)?;
-        // Made out of the search indexer's reach, one handle fewer that
-        // may refuse a rename over it.
-        #[cfg(windows)]
-        let mut file = windows::unindexed(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false),
-        )
-        .open(&path)?;
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
             let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+            // Out of the search indexer's reach, one handle fewer that may
+            // refuse a rename over it.
+            #[cfg(windows)]
+            windows::mark_unindexed(&file);
             file.write_all(&MAGIC[..])?;
             file.flush()?;
             file.seek(SeekFrom::Start(0))?;
