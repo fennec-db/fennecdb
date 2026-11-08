@@ -13,8 +13,8 @@ runner beside QEMU.
 `load` writes until the server stops answering -- the cut -- with a thread
 each: single puts, `/batch`es of 8 with an `Idempotency-Key`'d write between
 them, a document written over and over, a `/batch` past 16 MiB (a spill)
-written over 2 s after the last, and a `compact` half a second after the
-last.
+written over half a second after the last, and a `compact` a fifth of a
+second after the last.
 Every write is logged before it is sent and again once a 2xx answers it, a
 line each, flushed: DIR/events-N.jsonl, the host's record of what the server
 acknowledged, kept outside the guest.
@@ -47,12 +47,12 @@ CHURN_LEN = 2048
 # block spills (kind 10) before it lands (kind 11).
 SPILL_DOCS = 40
 SPILL_LEN = 512 * 1024
-# Paced so that most cuts land in a compact (about 2 s each, half a second
-# apart) and many in a spill (1.4 to 5.4 s each, 2 s apart): run 1 had a
-# compact in flight at two cuts of five with 1.5 s between, a spill at none
-# with 5 s.
-SPILL_EVERY = 2.0
-COMPACT_EVERY = 0.5
+# Paced so that most cuts land in a compact and many in a spill: a compact
+# took 0.03 to 1.4 s and a spill 0.4 to 0.6 s in run 2, whose pauses of
+# 0.5 s and 2 s left a compact in flight at three cuts of five and a spill
+# at none.
+SPILL_EVERY = 0.5
+COMPACT_EVERY = 0.2
 IDEM_EVERY = 3  # an Idempotency-Key'd write after every third batch
 BASE = 10_000_000  # a cut's ids and versions: N * BASE + its own count
 
@@ -159,14 +159,12 @@ class Load:
         while True:
             q = self.next_q()
             try:
-                t0 = time.monotonic()
                 status, headers, body, fields = send(s, q)
             except (OSError, http.client.HTTPException) as e:
                 self.note(ev="error", op=op, q=q, what=f"{type(e).__name__}: {e}"[:200])
                 return
-            ms = round((time.monotonic() - t0) * 1000, 1)
             if 200 <= status < 300:
-                self.note(ev="ack", op=op, q=q, ms=ms, status=status, **fields)
+                self.note(ev="ack", op=op, q=q, status=status, **fields)
             else:
                 self.note(ev="fail", op=op, q=q, status=status, body=body[:500].decode("utf-8", "replace"))
                 return
@@ -352,7 +350,8 @@ class Check:
                     during += 1
         print(f"LOAD {during} writes sent and acknowledged within a compact")
         for op, what in (("x", f"spills of {SPILL_DOCS * SPILL_LEN >> 20} MiB"), ("k", "compacts")):
-            ms = [e["ms"] for q, e in self.acked.items() if self.sent[q]["op"] == op]
+            # From its send line, after the pause before it, to its answer.
+            ms = [(e["t"] - self.sent[q]["t"]) * 1000 for q, e in self.acked.items() if self.sent[q]["op"] == op]
             if ms:
                 print(f"LOAD {what} took {min(ms):.0f} to {max(ms):.0f} ms")
         if self.cut_at is not None:
