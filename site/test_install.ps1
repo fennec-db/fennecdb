@@ -94,8 +94,11 @@ function Run([string] $exe, [string[]] $argv, [string] $out, [hashtable] $vars =
 }
 
 function Text([string] $path) {
-    if (Test-Path -LiteralPath $path) { return [IO.File]::ReadAllText($path) }
-    return ''
+    # Opened shared for writing: a running server holds its own stderr file
+    # open for writing, and File.ReadAllText refuses to share with a writer.
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $f = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try { return (New-Object IO.StreamReader($f)).ReadToEnd() } finally { $f.Dispose() }
 }
 
 function Marked([string] $path) {

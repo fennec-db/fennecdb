@@ -502,30 +502,6 @@ jobs:
           $zip = Get-Item dist/*.zip
           ./site/test_install.ps1 -Zip $zip.FullName -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1')
 
-      # MEASUREMENT, ONE RUN (slice 5; removed before review): the two
-      # programs with the C runtime a DLL, as before +crt-static, their
-      # bytes and their zip's, and the check refusing them.
-      - name: Without +crt-static, measured once
-        if: ${{ !cancelled() }}
-        env:
-          CARGO_TARGET_DIR: target-dynamic
-        run: |
-          set -eu
-          t=${{ matrix.target }}
-          cargo build --profile cli --target "$t" -p fennec-cli
-          cargo build --release --target "$t" -p fennec-server
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          s=fennec-v$v-$t
-          mkdir -p dyn/$s
-          cp target-dynamic/$t/cli/fennec.exe target-dynamic/$t/release/fennec-server.exe LICENSE README.md CONTRIBUTING.md dyn/$s/
-          (cd dyn && "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -a -c -f "$s.zip" "$s")
-          echo "dynamic CRT: zip $(wc -c < dyn/$s.zip), fennec.exe $(wc -c < dyn/$s/fennec.exe), fennec-server.exe $(wc -c < dyn/$s/fennec-server.exe)"
-          echo "static CRT:  zip $(wc -c < dist/$s.zip)"
-          if pwsh -NoProfile -File tools/windows-zip-check.ps1 -Version "$v" -Zip "dyn/$s.zip" > dyn/check.out 2>&1; then
-            echo "the check took the dynamic zip"; cat dyn/check.out; exit 1
-          fi
-          grep "imports" dyn/check.out
-
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
