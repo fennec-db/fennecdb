@@ -69,7 +69,12 @@ fn send(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> (u16, Option
 
 fn ok(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Option<String> {
     let (status, tag) = send(db, cfg, req);
-    assert!(status < 300, "{} {}: {status}", req.method.name(), req.target);
+    assert!(
+        status < 300,
+        "{} {}: {status}",
+        req.method.name(),
+        req.target
+    );
     tag
 }
 
@@ -98,7 +103,11 @@ fn main() {
     let mut tags: Vec<Option<String>> = vec![None; ROWS + 1];
     if mode == "if-match" && routed {
         for (id, tag) in tags.iter_mut().enumerate().skip(1) {
-            *tag = ok(&db, &cfg, &request(Method::Get, &format!("/t/{id}"), &[], ""));
+            *tag = ok(
+                &db,
+                &cfg,
+                &request(Method::Get, &format!("/t/{id}"), &[], ""),
+            );
         }
     }
     let row = format!(r#"{{"id":1,"n":12345,"name":"{name}"}}"#);
@@ -115,17 +124,29 @@ fn main() {
             let set = || format!(r#"{{"n":{i}}}"#);
             match (mode.as_str(), routed) {
                 ("get", _) | ("row", false) => {
-                    ok(&db, &cfg, &request(Method::Get, &format!("/t?id=eq.{id}"), &[], ""));
+                    ok(
+                        &db,
+                        &cfg,
+                        &request(Method::Get, &format!("/t?id=eq.{id}"), &[], ""),
+                    );
                 }
                 ("row", true) => {
-                    ok(&db, &cfg, &request(Method::Get, &format!("/t/{id}"), &[], ""));
+                    ok(
+                        &db,
+                        &cfg,
+                        &request(Method::Get, &format!("/t/{id}"), &[], ""),
+                    );
                 }
                 ("patch", _) | ("patch-row" | "if-match", false) => {
                     let target = format!("/t?id=eq.{id}");
                     ok(&db, &cfg, &request(Method::Patch, &target, &[], &set()));
                 }
                 ("patch-row", true) => {
-                    ok(&db, &cfg, &request(Method::Patch, &format!("/t/{id}"), &[], &set()));
+                    ok(
+                        &db,
+                        &cfg,
+                        &request(Method::Patch, &format!("/t/{id}"), &[], &set()),
+                    );
                 }
                 ("if-match", true) => {
                     let tag = tags[id].take().expect("the row's tag");

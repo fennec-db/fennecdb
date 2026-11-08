@@ -169,7 +169,9 @@ fn operations(doc: &Value) -> Vec<Operation> {
 fn body(id: &str) -> &'static str {
     match id {
         "insertRows" => r#"{"t":"x"}"#,
-        "updateRows" | "updateRowsPut" | "updateAll" | "updateAllPut" => r#"{"t":"y"}"#,
+        "updateRows" | "updateRowsPut" | "updateAll" | "updateAllPut" | "updateRow" | "putRow" => {
+            r#"{"t":"y"}"#
+        }
         "nearRows" => r#"{"vector":[1,0],"limit":1,"where":"t != \"z\"","select":["t"]}"#,
         "query" | "adminQuery" => r#"{"query":"get c"}"#,
         "batch" => "{\"query\":\"get c\"}\n",
@@ -183,6 +185,7 @@ fn body(id: &str) -> &'static str {
 /// The path with its placeholders named as the fixtures are.
 fn filled(path: &str) -> String {
     path.replace("{collection}", "c")
+        .replace("{id}", "1")
         .replace("{tenant}", "acme")
         .replace("{statement}", "s")
         .replace("{hook}", "stripe")

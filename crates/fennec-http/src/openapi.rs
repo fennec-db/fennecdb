@@ -123,6 +123,9 @@ enum Answer {
     Data(u16, &'static str, &'static str),
     /// JSON: status, schema, what it is.
     Json(u16, &'static str, &'static str),
+    /// JSON with the row's `ETag` (`crate::conditional`): status, schema,
+    /// what it is.
+    Tagged(u16, &'static str, &'static str),
     /// No body: status, what it means.
     Empty(u16, &'static str),
     /// Server-sent events.
@@ -310,6 +313,59 @@ const OPS: &[Op] = &[
         id: "deleteAll",
         summary: "Delete every row",
         params: WRITE,
+        answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were deleted"),
+        ..DEFAULT
+    },
+    // A row by its id, and its tag: optimistic concurrency by HTTP's own
+    // preconditions (`crate::conditional`).
+    Op {
+        path: "/{collection}/{id}",
+        id: "readRow",
+        head: true,
+        summary: "The row of that id, its tag in ETag; 304 where If-None-Match names that tag, \
+                  412 where If-Match names another, 404 where there is no such row",
+        params: &["IfMatch", "IfNoneMatchRow", "FennecAfter", "FennecHistory", "FennecRead"],
+        answer: Answer::Tagged(200, r##"{"$ref":"#/components/schemas/Document"}"##, "The row"),
+        ..DEFAULT
+    },
+    Op {
+        method: "put",
+        path: "/{collection}/{id}",
+        id: "putRow",
+        summary: "Write the body as the row of that id, whole: 201 where it made it, 200 over \
+                  it; under If-Match only over the row tagged, under If-None-Match: * only \
+                  where there is none (412 else, nothing written)",
+        params: &["IfMatch", "IfNoneMatchRow", "IdempotencyKey"],
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        answer: Answer::Tagged(
+            200,
+            r##"{"$ref":"#/components/schemas/Outcome"}"##,
+            "Written over the row; a conditional write's ETag is the row's new tag",
+        ),
+        ..DEFAULT
+    },
+    Op {
+        method: "patch",
+        path: "/{collection}/{id}",
+        id: "updateRow",
+        summary: "Set the body's fields on the row of that id; under If-Match only where it is \
+                  the row tagged (* any), else 412 and nothing written",
+        params: &["IfMatch", "IfNoneMatchRow", "IdempotencyKey"],
+        body: Body::Json(r##"{"$ref":"#/components/schemas/Document"}"##),
+        answer: Answer::Tagged(
+            200,
+            r##"{"$ref":"#/components/schemas/Outcome"}"##,
+            "How many were updated; a conditional write's ETag is the row's new tag",
+        ),
+        ..DEFAULT
+    },
+    Op {
+        method: "delete",
+        path: "/{collection}/{id}",
+        id: "deleteRow",
+        summary: "Delete the row of that id; under If-Match only where it is the row tagged \
+                  (* any), else 412 and nothing deleted",
+        params: &["IfMatch", "IfNoneMatchRow", "IdempotencyKey"],
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Outcome"}"##, "How many were deleted"),
         ..DEFAULT
     },
@@ -1258,6 +1314,17 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
         // it reads was written.
         o.push_str(r##","304":{"$ref":"#/components/responses/NotModified"}"##);
     }
+    // A row's preconditions (`crate::conditional`): a GET naming its tag
+    // is 304, a write or a read they refuse 412, a PUT making the row 201.
+    if op.params.contains(&"IfNoneMatchRow") && op.method == "get" {
+        o.push_str(r##","304":{"$ref":"#/components/responses/RowNotModified"}"##);
+    }
+    if op.method == "put" && op.params.contains(&"IfNoneMatchRow") {
+        o.push_str(r##","201":{"$ref":"#/components/responses/RowMade"}"##);
+    }
+    if op.params.contains(&"IfMatch") {
+        o.push_str(r##","412":{"$ref":"#/components/responses/PreconditionFailed"}"##);
+    }
     match op.auth {
         Auth::Open => {}
         // Its signature is its token: every refusal before it verifies is
@@ -1274,7 +1341,7 @@ fn answer_into(o: &mut String, answer: Answer, head: bool) {
     const SEQ: &str = r##","Fennec-Seq":{"$ref":"#/components/headers/FennecSeq"},"Fennec-History":{"$ref":"#/components/headers/FennecHistory"}"##;
     let (status, what, media, schema, seq) = match answer {
         Answer::Data(s, schema, what) => (s, what, "application/json", schema, true),
-        Answer::Json(s, schema, what) => (
+        Answer::Json(s, schema, what) | Answer::Tagged(s, schema, what) => (
             s,
             if what.is_empty() { "Done" } else { what },
             "application/json",
@@ -1341,6 +1408,9 @@ fn answer_into(o: &mut String, answer: Answer, head: bool) {
     str_into(o, what);
     o.push_str(r#","headers":{"#);
     o.push_str(ID);
+    if matches!(answer, Answer::Tagged(..)) {
+        o.push_str(r##","ETag":{"$ref":"#/components/headers/ETag"}"##);
+    }
     if seq {
         o.push_str(SEQ);
         if matches!(answer, Answer::Lines) {
@@ -1389,6 +1459,7 @@ const COMPONENTS: &str = r##"{
 "router":{"type":"http","scheme":"bearer","description":"fennec-shard's --token: its admin's."}},
 "parameters":{
 "collection":{"name":"collection","in":"path","required":true,"description":"A collection's name.","schema":{"type":"string"}},
+"id":{"name":"id","in":"path","required":true,"description":"A row's id: digits alone.","schema":{"type":"integer","minimum":0}},
 "tenant":{"name":"tenant","in":"path","required":true,"description":"A tenant's name: its file on its node.","schema":{"type":"string"}},
 "statement":{"name":"statement","in":"path","required":true,"description":"A named statement (create statement).","schema":{"type":"string"}},
 "hook":{"name":"hook","in":"path","required":true,"description":"A webhook consumer: a line of the hooks file, or a tenant's hook.","schema":{"type":"string"}},
@@ -1416,6 +1487,8 @@ const COMPONENTS: &str = r##"{
 "FennecHistory":{"name":"Fennec-History","in":"header","description":"The history Fennec-After's change is of, as an answer named it.","schema":{"type":"string"}},
 "FennecRead":{"name":"Fennec-Read","in":"header","description":"replica: a read a router may answer from a read replica; every server runs it read-only.","schema":{"type":"string","enum":["replica"]}},
 "IfNoneMatch":{"name":"If-None-Match","in":"header","description":"A read's last ETag: 304 while nothing it reads was written.","schema":{"type":"string"}},
+"IfMatch":{"name":"If-Match","in":"header","description":"The row's ETag (a list of them), or *: answered or written only where the row is one tagged (* any row there), compared strongly, under the write lock that writes it; else 412 and nothing written.","schema":{"type":"string"}},
+"IfNoneMatchRow":{"name":"If-None-Match","in":"header","description":"A read: the row's last ETag, 304 while it is that row. A write: *, made only where there is no such row (a PUT's create), or tags it must not be; else 412 and nothing written.","schema":{"type":"string"}},
 "StripeSignature":{"name":"Stripe-Signature","in":"header","description":"A Stripe hook's signature.","schema":{"type":"string"}},
 "WebhookId":{"name":"webhook-id","in":"header","description":"A Standard Webhooks event's id (or svix-id).","schema":{"type":"string"}},
 "WebhookTimestamp":{"name":"webhook-timestamp","in":"header","description":"A Standard Webhooks event's time (or svix-timestamp).","schema":{"type":"string"}},
@@ -1427,7 +1500,8 @@ const COMPONENTS: &str = r##"{
 "FennecSeq":{"description":"The change the answer was read at, or the write landed as.","schema":{"type":"integer"}},
 "FennecHistory":{"description":"The history Fennec-Seq is of.","schema":{"type":"string"}},
 "FennecNext":{"description":"The since of the next page.","schema":{"type":"integer"}},
-"RetryAfter":{"description":"Seconds to wait before coming back.","schema":{"type":"integer"}}},
+"RetryAfter":{"description":"Seconds to wait before coming back.","schema":{"type":"integer"}},
+"ETag":{"description":"The row's tag: a hash of the row as the token is shown it, the same on every server for the same row. On a write, where it was sent with a precondition: the row's tag as the write left it.","schema":{"type":"string"}}},
 "schemas":{
 "Error":{"type":"object","required":["error"],"properties":{"error":{"type":"string"},"retry_after":{"type":"integer","description":"Seconds to wait, as Retry-After says."},"retry_after_ms":{"type":"integer","description":"A quota's wait, to the millisecond."},"quota":{"type":"string","description":"The quota refused."},"reason":{"type":"string","description":"A require's else words."},"at":{"type":"integer","description":"The statement of a batch that stopped."},"completed":{"type":"integer"},"binding":{"type":"string"},"outcome":{"type":"string","enum":["unknown"],"description":"A write whose outcome the server cannot know."},"seq":{"type":"integer"},"history":{"type":"string"}}},
 "Document":{"type":"object","description":"A document: its fields, id among them.","additionalProperties":true},
@@ -1468,7 +1542,10 @@ const COMPONENTS: &str = r##"{
 "Unverified":{"description":"The event did not verify: its headers, scheme, time, size, hook or signature, one answer for each.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unauthorized":{"description":"No token, or a wrong one.","headers":{"WWW-Authenticate":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unavailable":{"description":"Come back after Retry-After seconds. Fennec-Unserved (as the connection was taken) or, from fennec-shard, Fennec-Unsent: 1 says the request never ran.","headers":{"Retry-After":{"$ref":"#/components/headers/RetryAfter"},"Fennec-Unserved":{"schema":{"type":"string","enum":["ceiling","no_thread"]}},"Fennec-Unsent":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"allOf":[{"$ref":"#/components/schemas/Error"},{"required":["retry_after"]}]}}}},
-"NotModified":{"description":"Unchanged since the If-None-Match tag: no body, the read not run.","headers":{"ETag":{"schema":{"type":"string"}}}}}}"##;
+"NotModified":{"description":"Unchanged since the If-None-Match tag: no body, the read not run.","headers":{"ETag":{"schema":{"type":"string"}}}},
+"RowNotModified":{"description":"The row is the one the If-None-Match tag names: no body.","headers":{"ETag":{"$ref":"#/components/headers/ETag"}}},
+"RowMade":{"description":"The row was made: there was none of that id.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"},"ETag":{"$ref":"#/components/headers/ETag"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Outcome"}}}},
+"PreconditionFailed":{"description":"If-Match or If-None-Match did not hold for the row as the write lock found it: nothing written.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}}}}"##;
 
 #[cfg(test)]
 mod tests {

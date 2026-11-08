@@ -1682,6 +1682,8 @@ fn operation(req: &Request, shape: &str) -> &'static str {
         (Method::Post, [_, "near"]) => "near",
         (Method::Get | Method::Head, _) => "get",
         (Method::Post, _) => "insert",
+        // `PUT /<name>/<id>` writes its row whole.
+        (Method::Put, [_, _]) if api::row_name(req).is_some() => "put",
         (Method::Patch | Method::Put, _) => "set",
         (Method::Delete, _) => "del",
         _ => "other",
@@ -2507,7 +2509,10 @@ fn rest_write(
         stmt: &stmt,
         bound,
         mask: mask.as_ref(),
-        row: routed.row.zip(row.name).map(|(id, name)| (name, id, row.pre)),
+        row: routed
+            .row
+            .zip(row.name)
+            .map(|(id, name)| (name, id, row.pre)),
     };
     rest_run(db, cfg, who, key, guard, run, ready)
 }
@@ -5421,7 +5426,16 @@ mod tests {
                 name: None,
                 pre: conditional::Preconditions::default(),
             };
-            let resp = rest_write(&b, &cfg, &req, &Who::Full, None, early.as_ref(), &mut ready, row);
+            let resp = rest_write(
+                &b,
+                &cfg,
+                &req,
+                &Who::Full,
+                None,
+                early.as_ref(),
+                &mut ready,
+                row,
+            );
             let body = String::from_utf8_lossy(&resp.body);
             assert_eq!(resp.status, 201, "{change}: {body}");
             let routed = api::route(&a, &req).unwrap();

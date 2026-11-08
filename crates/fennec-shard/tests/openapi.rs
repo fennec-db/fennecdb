@@ -191,6 +191,7 @@ fn operations(doc: &Value) -> Vec<Operation> {
             };
             let target = path
                 .replace("{collection}", "c")
+                .replace("{id}", "1")
                 .replace("{tenant}", "acme")
                 .replace("{statement}", "s")
                 .replace("{hook}", "stripe")
@@ -219,7 +220,9 @@ fn operations(doc: &Value) -> Vec<Operation> {
 fn body(id: &str) -> &'static str {
     match id {
         "insertRows" => r#"{"t":"x"}"#,
-        "updateRows" | "updateRowsPut" | "updateAll" | "updateAllPut" => r#"{"t":"y"}"#,
+        "updateRows" | "updateRowsPut" | "updateAll" | "updateAllPut" | "updateRow" | "putRow" => {
+            r#"{"t":"y"}"#
+        }
         "nearRows" => r#"{"vector":[1,0],"limit":1}"#,
         "query" => r#"{"query":"get c"}"#,
         "batch" => "{\"query\":\"get c\"}\n",

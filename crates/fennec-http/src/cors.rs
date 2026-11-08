@@ -20,9 +20,11 @@ pub fn allows(cors: Option<&str>, req: &Request) -> bool {
 fn headers(origin: &str) -> [(&'static str, &str); 6] {
     [
         ("Access-Control-Allow-Origin", origin),
+        // `PUT` writes a row whole (`PUT /<name>/<id>`), and a page holds
+        // a write to the row it read with `If-Match`.
         (
             "Access-Control-Allow-Methods",
-            "GET, POST, PATCH, DELETE, OPTIONS",
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         ),
         // A page's replica sends each write under an `Idempotency-Key`
         // and reads the `Fennec-Seq` of its answer, which tells it when a
@@ -42,7 +44,7 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         (
             "Access-Control-Allow-Headers",
             "content-type, authorization, idempotency-key, fennec-after, fennec-history, fennec-wait, \
-             fennec-read, if-none-match, mcp-protocol-version, mcp-method, mcp-name",
+             fennec-read, if-match, if-none-match, mcp-protocol-version, mcp-method, mcp-name",
         ),
         (
             "Access-Control-Expose-Headers",
