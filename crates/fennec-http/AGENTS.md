@@ -310,12 +310,16 @@ never a field an older router would skip (RELEASING.md).
 
 **[The OpenAPI document is held to the routes.](../../docs/design/http.md#openapi)**
 `GET /_openapi.json` is written once a process from one table
-(`openapi::OPS`), the binary's whatever the flags, so it asks no token. A
-route gets its row in the same change: `every_route_the_server_matches_is_documented`
-reads every route the dispatcher's code matches and finds each in the
-table, a route in a form the scan does not read teaching it that form;
-fennec-server's `tests/openapi.rs` sends every operation a file's server
-and a tenant node serve, none answered 404 or 405.
+(`openapi::OPS`), the binary's whatever the flags, so it asks no token
+and names no build (`DOCUMENT_VERSION`). A route gets its row in the same
+change: `every_route_the_server_matches_is_documented` reads every route
+fennec-http's and fennec-shard's dispatchers match and finds each in the
+table at every place its code serves it (`REGIONS`: a new routing function
+gets its region), a route in a form the scan does not read teaching it that
+form; fennec-server's and fennec-shard's `tests/openapi.rs` send every
+operation a file's server, a tenant node and a router list, none answered
+404 or 405, each whose `security` asks a token 401 without one, a HEAD
+only where listed.
 
 ### Held writes
 

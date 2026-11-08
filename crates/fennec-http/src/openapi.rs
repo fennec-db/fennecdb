@@ -7,13 +7,15 @@
 //! row each, written out as JSON once a process, the first time it is
 //! asked ([`document`]). The dispatcher does not read it -- a table match
 //! on every request was a cost the hot path does not pay -- so the two are
-//! held to each other by tests: `tests` below reads every route pattern the
-//! dispatcher's code matches (a `(Method::X, [..])` arm, a `segments() ==
-//! [..]`, a first segment or a path prefix of the server's own) and finds
-//! each in the table, and `fennec-server`'s `tests/openapi.rs` sends a
-//! request to every operation of the document a file's server and a
-//! tenant node serve, answered neither 404 nor 405. A route added without
-//! its row fails the first; a row without its route, the second.
+//! held to each other by tests: `tests` below reads every route pattern
+//! fennec-http's and fennec-shard's dispatchers match (a slice pattern
+//! against a request's segments, in whatever form the code writes it, a
+//! segment by its index, a path or its prefix) and finds each in the table
+//! where its code serves it, and `fennec-server`'s and `fennec-shard`'s
+//! `tests/openapi.rs` send a request to every operation of the document a
+//! file's server, a tenant node and a router serve, answered neither 404
+//! nor 405. A route added without its row fails the first; a row without
+//! its route, the second.
 //!
 //! The document is the binary's, not the server's: the same for every
 //! server of a kind, whatever its flags or its data, so it asks no token
@@ -37,8 +39,9 @@ pub enum Kind {
     /// tenant's below `/t/{tenant}`.
     Node,
     /// `fennec-shard`: each tenant's routes below `/t/{tenant}`, forwarded
-    /// to its node -- what a tenant's client calls. The router's own
-    /// `/_shard/` routes are its admin's, in the sharding reference.
+    /// to its node -- what a tenant's client calls -- and the router's own
+    /// at its root. Its `/_shard/` routes are its admin's, in the sharding
+    /// reference.
     Router,
 }
 
@@ -72,6 +75,8 @@ const FILE: u8 = 1;
 const NODE: u8 = 2;
 /// Each tenant, below `/t/{tenant}` on its node and through a router.
 const TENANT: u8 = 4;
+/// `fennec-shard`, at its root.
+const ROUTER: u8 = 8;
 
 /// What an operation takes for a token.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,6 +93,8 @@ enum Auth {
     /// The server's token or the admin token; none where the server holds
     /// neither (`metrics::allowed`).
     Scrape,
+    /// The router's `--token`; none where it holds none (`Router::refused`).
+    Router,
     /// No token: the event's signature, against the hook's secrets.
     Signed,
     /// No token at all.
@@ -141,8 +148,16 @@ struct Op {
     id: &'static str,
     tag: &'static str,
     summary: &'static str,
-    /// The flag a server serves it under, `""` for none.
+    /// The flags a server serves it under, `""` for none.
     flag: &'static str,
+    /// Below a tenant, where they differ: a node's tenants keep their
+    /// change feed with `--replication-token` and their hooks' secrets
+    /// through `/_admin/`, `--cdc` and `--hooks` being a file's alone.
+    tenant_flag: Option<&'static str>,
+    /// A GET that answers HEAD too: listed as a `head` operation of its
+    /// own. Not every GET does -- the stream, the change feed and the
+    /// admin's reads answer GET alone.
+    head: bool,
     auth: Auth,
     /// Query and header parameters, by their name in `components`.
     params: &'static [&'static str],
@@ -158,6 +173,8 @@ const DEFAULT: Op = Op {
     tag: "Collections",
     summary: "",
     flag: "",
+    tenant_flag: None,
+    head: false,
     auth: Auth::Token,
     params: &[],
     body: Body::None,
@@ -199,6 +216,7 @@ const OPS: &[Op] = &[
     // The collections, over REST.
     Op {
         id: "info",
+        head: true,
         summary: "The server's version and its collections' names",
         params: READ,
         answer: Answer::Json(200, r##"{"$ref":"#/components/schemas/Info"}"##, "Version and names"),
@@ -207,6 +225,7 @@ const OPS: &[Op] = &[
     Op {
         path: "/collections",
         id: "listCollections",
+        head: true,
         summary: "Every collection's schema",
         params: READ,
         answer: Answer::Json(200, r##"{"$ref":"#/components/schemas/Schemas"}"##, "The schemas"),
@@ -215,6 +234,7 @@ const OPS: &[Op] = &[
     Op {
         path: "/{collection}",
         id: "readRows",
+        head: true,
         summary: "The rows the query string's filter matches; ?count their number, \
                   select and group aggregates, facet each value's count",
         params: ROWS,
@@ -297,8 +317,9 @@ const OPS: &[Op] = &[
         method: "post",
         path: "/{collection}/near",
         id: "nearRows",
-        summary: "The rows nearest a vector, nearest first",
-        params: READ,
+        summary: "The rows nearest a vector, nearest first; the query string's filter and the \
+                  body's where ANDed, a match making it hybrid",
+        params: &["Filter", "Where", "FennecAfter", "FennecHistory", "FennecRead"],
         body: Body::Json(r##"{"$ref":"#/components/schemas/Near"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Rows"}"##, "The rows"),
         ..DEFAULT
@@ -361,9 +382,11 @@ const OPS: &[Op] = &[
         path: "/_hooks/{hook}",
         id: "hook",
         tag: "Webhooks",
-        summary: "Another service's event, verified by its signature in place of a token; \
-                  every refusal before it verifies is one 401",
+        summary: "Another service's event, verified by its signature in place of a token, \
+                  against the --hooks file's secrets or, below a tenant, those the node's \
+                  /_admin/ routes set; every refusal before it verifies is one 401",
         flag: "--hooks",
+        tenant_flag: Some("--admin-token"),
         auth: Auth::Signed,
         params: &[
             "StripeSignature",
@@ -381,6 +404,7 @@ const OPS: &[Op] = &[
     Op {
         path: "/_schema",
         id: "schema",
+        head: true,
         tag: "Schema",
         summary: "The schema as a description, its bound, scheduled and webhook statements beside it",
         params: &["As"],
@@ -416,6 +440,7 @@ const OPS: &[Op] = &[
         tag: "Change data capture",
         summary: "Every write on disk after `since` (or a consumer's place), a JSON line each",
         flag: "--cdc",
+        tenant_flag: Some("--replication-token"),
         auth: Auth::Full,
         params: &[
             "Since",
@@ -435,6 +460,7 @@ const OPS: &[Op] = &[
         tag: "Change data capture",
         summary: "Each consumer, where it is and how far behind",
         flag: "--cdc",
+        tenant_flag: Some("--replication-token"),
         auth: Auth::Full,
         answer: Answer::Json(200, r#"{"type":"array","items":{"type":"object"}}"#, "The consumers"),
         ..DEFAULT
@@ -446,6 +472,7 @@ const OPS: &[Op] = &[
         tag: "Change data capture",
         summary: "Make a consumer at `since` or the last write (201); one already there stays put (200)",
         flag: "--cdc",
+        tenant_flag: Some("--replication-token"),
         auth: Auth::Full,
         body: Body::Optional(r##"{"$ref":"#/components/schemas/Since"}"##),
         answer: Answer::Json(201, OBJECT, "Made"),
@@ -458,6 +485,7 @@ const OPS: &[Op] = &[
         tag: "Change data capture",
         summary: "Move a consumer: commit what it read, or go back",
         flag: "--cdc",
+        tenant_flag: Some("--replication-token"),
         auth: Auth::Full,
         body: Body::Json(r##"{"$ref":"#/components/schemas/Since"}"##),
         answer: Answer::Json(200, OBJECT, "Moved"),
@@ -470,6 +498,7 @@ const OPS: &[Op] = &[
         tag: "Change data capture",
         summary: "Forget a consumer",
         flag: "--cdc",
+        tenant_flag: Some("--replication-token"),
         auth: Auth::Full,
         answer: Answer::Json(200, OBJECT, "Forgotten"),
         ..DEFAULT
@@ -477,6 +506,7 @@ const OPS: &[Op] = &[
     // Replication.
     Op {
         path: "/_replication",
+        at: FILE | TENANT | ROUTER,
         id: "replicationStream",
         tag: "Replication",
         summary: "The stream a replica is fed: a body with no end",
@@ -488,6 +518,7 @@ const OPS: &[Op] = &[
     },
     Op {
         path: "/_replication/status",
+        at: FILE | TENANT | ROUTER,
         id: "replicationStatus",
         tag: "Replication",
         summary: "Where this server's replication stands",
@@ -499,6 +530,7 @@ const OPS: &[Op] = &[
     Op {
         method: "post",
         path: "/_replication/promote",
+        at: FILE | TENANT | ROUTER,
         id: "promote",
         tag: "Replication",
         summary: "Promote this replica: it takes writes from now on",
@@ -525,6 +557,7 @@ const OPS: &[Op] = &[
         path: "/_whoami",
         at: FILE | NODE | TENANT,
         id: "whoami",
+        head: true,
         tag: "Server",
         summary: "Who the server takes the token for: its roles, its rules, the statements it may call",
         answer: Answer::Json(200, r##"{"$ref":"#/components/schemas/Whoami"}"##, "The token's reading"),
@@ -533,6 +566,7 @@ const OPS: &[Op] = &[
     Op {
         path: "/_stats/statements",
         id: "statementStats",
+        head: true,
         tag: "Server",
         summary: "Each statement's count and time, by its shape",
         auth: Auth::Full,
@@ -540,13 +574,35 @@ const OPS: &[Op] = &[
         ..DEFAULT
     },
     Op {
+        method: "delete",
+        path: "/_stats/statements",
+        id: "resetStatementStats",
+        tag: "Server",
+        summary: "Start the counts again",
+        auth: Auth::Full,
+        answer: Answer::Empty(204, "Reset"),
+        ..DEFAULT
+    },
+    Op {
         path: "/_stats/statements",
         at: NODE,
         id: "nodeStatementStats",
+        head: true,
         tag: "Server",
         summary: "Every tenant's statements, by shape, each named",
         auth: Auth::Admin,
         answer: Answer::Json(200, OBJECT, "The counts"),
+        ..DEFAULT
+    },
+    Op {
+        method: "delete",
+        path: "/_stats/statements",
+        at: NODE,
+        id: "nodeResetStatementStats",
+        tag: "Server",
+        summary: "Start every tenant's counts again",
+        auth: Auth::Admin,
+        answer: Answer::Empty(204, "Reset"),
         ..DEFAULT
     },
     Op {
@@ -564,6 +620,7 @@ const OPS: &[Op] = &[
         path: "/_metrics",
         at: FILE | NODE,
         id: "metrics",
+        head: true,
         tag: "Server",
         summary: "Counters and gauges, Prometheus's text format",
         auth: Auth::Scrape,
@@ -571,9 +628,21 @@ const OPS: &[Op] = &[
         ..DEFAULT
     },
     Op {
+        path: "/_metrics",
+        at: ROUTER,
+        id: "routerMetrics",
+        head: true,
+        tag: "Server",
+        summary: "The router's counters and gauges and its directory's, Prometheus's text format",
+        auth: Auth::Router,
+        answer: Answer::Metrics,
+        ..DEFAULT
+    },
+    Op {
         path: "/_health",
         at: FILE | NODE,
         id: "health",
+        head: true,
         tag: "Server",
         summary: "Whether the server is up: no token, no lock",
         auth: Auth::Open,
@@ -582,8 +651,9 @@ const OPS: &[Op] = &[
     },
     Op {
         path: "/_studio/",
-        at: FILE | NODE,
+        at: FILE | NODE | ROUTER,
         id: "studio",
+        head: true,
         tag: "Server",
         summary: "fennec studio's page: the token is the page's to send",
         flag: "--studio",
@@ -593,8 +663,9 @@ const OPS: &[Op] = &[
     },
     Op {
         path: "/_studio/{file}",
-        at: FILE | NODE,
+        at: FILE | NODE | ROUTER,
         id: "studioFile",
+        head: true,
         tag: "Server",
         summary: "One of the studio's files",
         flag: "--studio",
@@ -604,8 +675,9 @@ const OPS: &[Op] = &[
     },
     Op {
         path: PATH,
-        at: FILE | NODE,
+        at: FILE | NODE | ROUTER,
         id: "openapi",
+        head: true,
         tag: "Server",
         summary: "This document",
         auth: Auth::Open,
@@ -619,6 +691,7 @@ const OPS: &[Op] = &[
         id: "adminStats",
         tag: "Admin",
         summary: "The node's tenants, disk, memory and open tenants",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -628,6 +701,7 @@ const OPS: &[Op] = &[
         id: "adminOpen",
         tag: "Admin",
         summary: "The open tenants: name, memory, frozen",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Json(200, r#"{"type":"array","items":{"type":"object"}}"#, "The open tenants"),
         ..DEFAULT
@@ -638,6 +712,7 @@ const OPS: &[Op] = &[
         id: "adminTenants",
         tag: "Admin",
         summary: "The tenants' names on disk",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Json(200, r#"{"type":"array","items":{"type":"string"}}"#, "The names"),
         ..DEFAULT
@@ -648,6 +723,7 @@ const OPS: &[Op] = &[
         id: "adminSizes",
         tag: "Admin",
         summary: "Each tenant's bytes on disk",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -657,6 +733,7 @@ const OPS: &[Op] = &[
         id: "adminQuotas",
         tag: "Admin",
         summary: "Every tenant's quota and usage",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Json(200, r#"{"type":"array","items":{"type":"object"}}"#, "The quotas"),
         ..DEFAULT
@@ -668,6 +745,7 @@ const OPS: &[Op] = &[
         id: "adminCreate",
         tag: "Admin",
         summary: "Make an empty tenant (409 if there is one)",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Json(201, OBJECT, "Made: {created, lineage, instance}"),
         ..DEFAULT
@@ -679,6 +757,7 @@ const OPS: &[Op] = &[
         id: "adminDelete",
         tag: "Admin",
         summary: "Close and remove a tenant",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Empty(204, "Removed"),
         ..DEFAULT
@@ -689,6 +768,7 @@ const OPS: &[Op] = &[
         id: "adminQuota",
         tag: "Admin",
         summary: "A tenant's quota, what is set and its usage",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -699,6 +779,7 @@ const OPS: &[Op] = &[
         id: "adminSetQuota",
         tag: "Admin",
         summary: "Set a tenant's quota over the node's, the whole set replaced",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(r##"{"$ref":"#/components/schemas/Quota"}"##),
         ..DEFAULT
@@ -709,6 +790,7 @@ const OPS: &[Op] = &[
         id: "adminHooks",
         tag: "Admin",
         summary: "A tenant's webhook consumers, never a secret",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -719,6 +801,7 @@ const OPS: &[Op] = &[
         id: "adminSetHook",
         tag: "Admin",
         summary: "Set a hook's scheme and secrets, kept beside the tenant's file",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(OBJECT),
         ..DEFAULT
@@ -730,6 +813,7 @@ const OPS: &[Op] = &[
         id: "adminDeleteHook",
         tag: "Admin",
         summary: "Remove a hook's secrets",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -739,6 +823,7 @@ const OPS: &[Op] = &[
         id: "adminHookSecrets",
         tag: "Admin",
         summary: "A tenant's hook secrets whole, for a router copying them onto a copy",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -749,6 +834,7 @@ const OPS: &[Op] = &[
         id: "adminSetHookSecrets",
         tag: "Admin",
         summary: "Install a tenant's hook secrets whole, their version kept",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(OBJECT),
         ..DEFAULT
@@ -760,6 +846,7 @@ const OPS: &[Op] = &[
         id: "adminSchema",
         tag: "Admin",
         summary: "Apply a description to a tenant, as /_schema/apply does",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(r##"{"$ref":"#/components/schemas/Description"}"##),
         ..DEFAULT
@@ -771,6 +858,7 @@ const OPS: &[Op] = &[
         id: "adminQuery",
         tag: "Admin",
         summary: "A read of a tenant, answered as /query answers it; a write is refused",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(r##"{"$ref":"#/components/schemas/Query"}"##),
         answer: Answer::Data(200, r##"{"$ref":"#/components/schemas/Answer"}"##, "The read's answer"),
@@ -783,6 +871,7 @@ const OPS: &[Op] = &[
         id: "adminReclaim",
         tag: "Admin",
         summary: "Remove a tenant's file only where it carries one of the instances named",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Json(OBJECT),
         ..DEFAULT
@@ -794,6 +883,7 @@ const OPS: &[Op] = &[
         id: "adminFreeze",
         tag: "Admin",
         summary: "Refuse a tenant's writes, once those in flight landed",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -804,6 +894,7 @@ const OPS: &[Op] = &[
         id: "adminThaw",
         tag: "Admin",
         summary: "Take a tenant's writes again",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -813,6 +904,7 @@ const OPS: &[Op] = &[
         id: "adminExport",
         tag: "Admin",
         summary: "A tenant's whole image",
+        flag: "--admin-token",
         auth: Auth::Admin,
         answer: Answer::Image,
         ..DEFAULT
@@ -824,6 +916,7 @@ const OPS: &[Op] = &[
         id: "adminImport",
         tag: "Admin",
         summary: "Install an image as a new tenant",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Image,
         answer: Answer::Json(201, OBJECT, "Installed: {imported, lineage, instance}"),
@@ -835,6 +928,7 @@ const OPS: &[Op] = &[
         id: "adminLineage",
         tag: "Admin",
         summary: "A tenant's lineage and history",
+        flag: "--admin-token",
         auth: Auth::Admin,
         ..DEFAULT
     },
@@ -845,6 +939,7 @@ const OPS: &[Op] = &[
         id: "adminPromote",
         tag: "Admin",
         summary: "This node's copy of a tenant takes its writes",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Optional(OBJECT),
         ..DEFAULT
@@ -856,6 +951,7 @@ const OPS: &[Op] = &[
         id: "adminFollow",
         tag: "Admin",
         summary: "Follow the tenant's primary at `from`, or this node's upstream",
+        flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Optional(OBJECT),
         ..DEFAULT
@@ -867,7 +963,7 @@ const OPS: &[Op] = &[
         id: "adminGrantLease",
         tag: "Admin",
         summary: "A router's grant of the node's lease",
-        flag: "--lease",
+        flag: "--admin-token --lease",
         auth: Auth::Admin,
         body: Body::Json(OBJECT),
         ..DEFAULT
@@ -878,47 +974,54 @@ const OPS: &[Op] = &[
         id: "adminLease",
         tag: "Admin",
         summary: "The node's lease as it runs",
-        flag: "--lease",
+        flag: "--admin-token --lease",
         auth: Auth::Admin,
         ..DEFAULT
     },
 ];
 
-/// Every operation of the document of `kind`: its path there, its id there
-/// and its row.
-fn operations(kind: Kind) -> Vec<(String, String, &'static Op)> {
+/// One operation of a document: its path there, its id there, the flags it
+/// is served under there, and its row.
+struct Listed {
+    path: String,
+    id: String,
+    flag: &'static str,
+    op: &'static Op,
+}
+
+/// Every operation of the document of `kind`.
+fn operations(kind: Kind) -> Vec<Listed> {
     let mut out = Vec::new();
-    // A node's own routes come first, then each tenant's under its prefix.
+    // A node's and a router's own routes come first, then each tenant's
+    // under its prefix.
     let (root, under) = match kind {
         Kind::File => (FILE, 0),
         Kind::Node => (NODE, TENANT),
-        Kind::Router => (0, TENANT),
+        Kind::Router => (ROUTER, TENANT),
     };
     for op in OPS.iter().filter(|op| op.at & root != 0) {
-        out.push((op.path.to_string(), op.id.to_string(), op));
+        out.push(Listed {
+            path: op.path.to_string(),
+            id: op.id.to_string(),
+            flag: op.flag,
+            op,
+        });
     }
     for op in OPS.iter().filter(|op| op.at & under != 0) {
         let path = match op.path {
             "/" => "/t/{tenant}".to_string(),
             p => format!("/t/{{tenant}}{p}"),
         };
-        // An id is the document's: a node holds `/_whoami` and each
-        // tenant's both.
-        let id = match kind {
-            Kind::Node => {
-                let mut id = String::from("tenant");
-                let mut first = op.id.chars();
-                id.extend(first.next().map(|c| c.to_ascii_uppercase()));
-                id.push_str(first.as_str());
-                id
-            }
-            _ => op.id.to_string(),
-        };
-        out.push((path, id, op));
-    }
-    if kind == Kind::Router {
-        let spec = OPS.iter().find(|op| op.path == PATH).expect("listed");
-        out.push((PATH.to_string(), spec.id.to_string(), spec));
+        // An id is the document's: a node and a router hold `/_whoami` or
+        // `/_replication` and each tenant's both, and a tenant's operation
+        // has one id through either, so a client written from a node's
+        // document calls a router.
+        let mut id = String::from("tenant");
+        let mut first = op.id.chars();
+        id.extend(first.next().map(|c| c.to_ascii_uppercase()));
+        id.push_str(first.as_str());
+        let flag = op.tenant_flag.unwrap_or(op.flag);
+        out.push(Listed { path, id, flag, op });
     }
     out
 }
@@ -936,8 +1039,12 @@ fn build(kind: Kind) -> String {
             Kind::Router => "fennecdb: fennec-shard",
         },
     );
+    // The document's own version, not the binary's: a document asking no
+    // token must not tell what a build is -- a version is what a scan
+    // matches against advisories, and `GET /` names it only to a token.
+    // Moved by hand where an operation's contract changes.
     o.push_str(r#","version":"#);
-    str_into(&mut o, env!("CARGO_PKG_VERSION"));
+    str_into(&mut o, DOCUMENT_VERSION);
     o.push_str(r#","description":"#);
     let mut about = String::from(match kind {
         Kind::File => "fennec-server's REST API over one database file.",
@@ -947,8 +1054,8 @@ fn build(kind: Kind) -> String {
         }
         Kind::Router => {
             "fennec-shard's REST API: each tenant's routes below /t/{tenant}, forwarded to \
-             its node. The router's own /_shard/ routes are its admin's, in the sharding \
-             reference."
+             its node, and the router's own at the root. Its /_shard/ routes are its \
+             admin's, in the sharding reference."
         }
     });
     about.push_str(ABOUT);
@@ -958,9 +1065,9 @@ fn build(kind: Kind) -> String {
     o.push_str(r#","servers":[{"url":"/"}],"security":[{"token":[]},{"jwt":[]}],"tags":["#);
     let ops = operations(kind);
     let mut tags: Vec<&str> = Vec::new();
-    for (_, _, op) in &ops {
-        if !tags.contains(&op.tag) {
-            tags.push(op.tag);
+    for l in &ops {
+        if !tags.contains(&l.op.tag) {
+            tags.push(l.op.tag);
         }
     }
     for (i, t) in tags.iter().enumerate() {
@@ -980,7 +1087,7 @@ fn build(kind: Kind) -> String {
     o.push_str(r#"],"paths":{"#);
     // One path item a path, its operations in the table's order.
     let mut done: Vec<&str> = Vec::new();
-    for (path, _, _) in &ops {
+    for Listed { path, .. } in &ops {
         if done.contains(&path.as_str()) {
             continue;
         }
@@ -1002,12 +1109,16 @@ fn build(kind: Kind) -> String {
             o.push_str("],");
         }
         let mut first = true;
-        for (_, id, op) in ops.iter().filter(|(p, _, _)| p == path) {
+        for l in ops.iter().filter(|l| &l.path == path) {
             if !first {
                 o.push(',');
             }
             first = false;
-            operation_into(&mut o, id, op);
+            operation_into(&mut o, l, false);
+            if l.op.head {
+                o.push(',');
+                operation_into(&mut o, l, true);
+            }
         }
         o.push('}');
     }
@@ -1017,13 +1128,16 @@ fn build(kind: Kind) -> String {
     o
 }
 
+/// `info.version`: the document's, not the binary's (see [`build`]).
+const DOCUMENT_VERSION: &str = "1";
+
 const ABOUT: &str = " A request takes `Authorization: Bearer` with the server's token \
 (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy \
 rules; a server started with neither takes requests with no token. Every answer carries \
 X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about \
 it, and a 503 says when to come back in Retry-After and its body's retry_after. A route \
-marked x-fennec-flag is served under that flag. A GET answers HEAD too, and every path \
-answers a CORS preflight under --http-cors.";
+marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head \
+operation beside it, and every path answers a CORS preflight under --http-cors.";
 
 /// Each tag an operation names, and what its routes are.
 const TAGS: &[(&str, &str)] = &[
@@ -1069,17 +1183,26 @@ const TAGS: &[(&str, &str)] = &[
     ),
 ];
 
-fn operation_into(o: &mut String, id: &str, op: &Op) {
-    str_into(o, op.method);
+/// A row's operation, or with `head` the HEAD beside its GET: its status
+/// and headers, no body, its id the GET's with `Head` after it.
+fn operation_into(o: &mut String, l: &Listed, head: bool) {
+    let op = l.op;
+    str_into(o, if head { "head" } else { op.method });
     o.push_str(r#":{"operationId":"#);
-    str_into(o, id);
+    match head {
+        true => str_into(o, &format!("{}Head", l.id)),
+        false => str_into(o, &l.id),
+    }
     o.push_str(r#","tags":["#);
     str_into(o, op.tag);
     o.push_str(r#"],"summary":"#);
-    str_into(o, op.summary);
-    if !op.flag.is_empty() {
+    match head {
+        true => str_into(o, &format!("The GET's head: {}", op.summary)),
+        false => str_into(o, op.summary),
+    }
+    if !l.flag.is_empty() {
         o.push_str(r#","x-fennec-flag":"#);
-        str_into(o, op.flag);
+        str_into(o, l.flag);
     }
     let security = match op.auth {
         Auth::Token => None,
@@ -1087,6 +1210,7 @@ fn operation_into(o: &mut String, id: &str, op: &Op) {
         Auth::Admin => Some(r#"[{"admin":[]}]"#),
         Auth::Replication => Some(r#"[{"replication":[]}]"#),
         Auth::Scrape => Some(r#"[{"token":[]},{"admin":[]},{}]"#),
+        Auth::Router => Some(r#"[{"router":[]},{}]"#),
         Auth::Signed | Auth::Open => Some("[]"),
     };
     if let Some(s) = security {
@@ -1128,20 +1252,24 @@ fn operation_into(o: &mut String, id: &str, op: &Op) {
         o.push_str("}}}");
     }
     o.push_str(r#","responses":{"#);
-    answer_into(o, op.answer);
+    answer_into(o, op.answer, head);
     if op.params.contains(&"IfNoneMatch") {
         // A read polled with If-None-Match is answered so while nothing
         // it reads was written.
         o.push_str(r##","304":{"$ref":"#/components/responses/NotModified"}"##);
     }
-    if !matches!(op.auth, Auth::Open | Auth::Signed) {
-        o.push_str(r##","401":{"$ref":"#/components/responses/Unauthorized"}"##);
+    match op.auth {
+        Auth::Open => {}
+        // Its signature is its token: every refusal before it verifies is
+        // this one answer, whatever failed.
+        Auth::Signed => o.push_str(r##","401":{"$ref":"#/components/responses/Unverified"}"##),
+        _ => o.push_str(r##","401":{"$ref":"#/components/responses/Unauthorized"}"##),
     }
     o.push_str(r##","503":{"$ref":"#/components/responses/Unavailable"}"##);
     o.push_str(r##","default":{"$ref":"#/components/responses/Refused"}}}"##);
 }
 
-fn answer_into(o: &mut String, answer: Answer) {
+fn answer_into(o: &mut String, answer: Answer, head: bool) {
     const ID: &str = r##""X-Request-Id":{"$ref":"#/components/headers/RequestId"}"##;
     const SEQ: &str = r##","Fennec-Seq":{"$ref":"#/components/headers/FennecSeq"},"Fennec-History":{"$ref":"#/components/headers/FennecHistory"}"##;
     let (status, what, media, schema, seq) = match answer {
@@ -1219,6 +1347,10 @@ fn answer_into(o: &mut String, answer: Answer) {
             o.push_str(r##","Fennec-Next":{"$ref":"#/components/headers/FennecNext"}"##);
         }
     }
+    if head {
+        o.push_str("}}");
+        return;
+    }
     o.push_str(r#"},"content":{"#);
     str_into(o, media);
     o.push_str(r#":{"schema":"#);
@@ -1253,7 +1385,8 @@ const COMPONENTS: &str = r##"{
 "token":{"type":"http","scheme":"bearer","description":"The server's token (--http-token): every collection, unscoped."},
 "jwt":{"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"A scoped token: a JSON Web Token signed under --jwt-secret or --jwt-keys (HS256, RS256, ES256), held to the --policy rules at every level, on a node bound to the tenant it names."},
 "admin":{"type":"http","scheme":"bearer","description":"A tenant node's --admin-token."},
-"replication":{"type":"http","scheme":"bearer","description":"--replication-token: what a replica, an archiver or a router sends."}},
+"replication":{"type":"http","scheme":"bearer","description":"--replication-token: what a replica, an archiver or a router sends."},
+"router":{"type":"http","scheme":"bearer","description":"fennec-shard's --token: its admin's."}},
 "parameters":{
 "collection":{"name":"collection","in":"path","required":true,"description":"A collection's name.","schema":{"type":"string"}},
 "tenant":{"name":"tenant","in":"path","required":true,"description":"A tenant's name: its file on its node.","schema":{"type":"string"}},
@@ -1307,7 +1440,21 @@ const COMPONENTS: &str = r##"{
 "Answer":{"description":"A statement's answer: its rows, a count, or what a write did.","oneOf":[{"$ref":"#/components/schemas/Rows"},{"$ref":"#/components/schemas/Faceted"},{"$ref":"#/components/schemas/Outcome"}]},
 "Query":{"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"A FennecQL statement, or SQL's spelling of one."},"params":{"description":"$1, $2 by position, or $name by name.","oneOf":[{"type":"array"},{"type":"object"}]}}},
 "Call":{"type":"object","properties":{"params":{"type":"object","description":"The statement's arguments by name."}}},
-"Near":{"type":"object","required":["vector"],"properties":{"vector":{"type":"array","items":{"type":"number"}},"field":{"type":"string","description":"The vector field, where the collection has several."},"limit":{"type":"integer","minimum":1}}},
+"Near":{"type":"object","required":["vector"],"properties":{
+"vector":{"description":"What to rank by: a vector field's numbers, a point's [longitude, latitude], or a sparse field's text form {index:value,...}/dimension, as pgvector's sparsevec writes it.","oneOf":[{"type":"array","items":{"type":"number"},"minItems":1},{"type":"string"}]},
+"field":{"type":"string","description":"The vector, sparse or point field, where the collection has several."},
+"limit":{"type":"integer","minimum":0},
+"offset":{"type":"integer","minimum":0},
+"ef":{"type":"integer","minimum":0,"description":"The graph search's beam: how many candidates it keeps."},
+"exact":{"type":"boolean","description":"true: every row compared, no index."},
+"where":{"type":"string","description":"A FennecQL filter, ANDed with the query string's."},
+"select":{"description":"The fields to answer: a list, or one field's name.","oneOf":[{"type":"array","items":{"type":"string"}},{"type":"string"}]},
+"match":{"type":"string","description":"Words BM25 ranks too over a @text field: a hybrid search, the two rankings fused by reciprocal rank."},
+"match_field":{"type":"string","description":"The @text field match ranks, where the collection has several."},
+"match_fuzzy":{"description":"true, or the most edits a word of match may take.","oneOf":[{"type":"boolean"},{"type":"integer","minimum":0,"maximum":2}]},
+"match_prefix":{"type":"boolean","description":"The last word of match a prefix."},
+"fuse_k":{"type":"integer","minimum":0,"maximum":1000000,"description":"The fusion's rank offset."},
+"candidates":{"type":"integer","minimum":1,"maximum":10000,"description":"How many candidates each side ranks."}}},
 "Info":{"type":"object","properties":{"fennecdb":{"type":"string"},"collections":{"type":"array","items":{"type":"string"}}}},
 "Schemas":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"fields":{"type":"array","items":{"type":"object"}}}}},
 "Description":{"type":"object","description":"A schema description, as Schema in code sends it.","properties":{"format":{"type":"integer"},"fennecql":{"type":"string"},"migrations":{"type":"array"}}},
@@ -1318,6 +1465,7 @@ const COMPONENTS: &str = r##"{
 "JsonRpc":{"type":"object","description":"A JSON-RPC 2.0 message (MCP).","properties":{"jsonrpc":{"const":"2.0"},"id":{},"method":{"type":"string"},"params":{},"result":{},"error":{}}}},
 "responses":{
 "Refused":{"description":"A refusal: its status says what to do about it.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
+"Unverified":{"description":"The event did not verify: its headers, scheme, time, size, hook or signature, one answer for each.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unauthorized":{"description":"No token, or a wrong one.","headers":{"WWW-Authenticate":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unavailable":{"description":"Come back after Retry-After seconds. Fennec-Unserved (as the connection was taken) or, from fennec-shard, Fennec-Unsent: 1 says the request never ran.","headers":{"Retry-After":{"$ref":"#/components/headers/RetryAfter"},"Fennec-Unserved":{"schema":{"type":"string","enum":["ceiling","no_thread"]}},"Fennec-Unsent":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"allOf":[{"$ref":"#/components/schemas/Error"},{"required":["retry_after"]}]}}}},
 "NotModified":{"description":"Unchanged since the If-None-Match tag: no body, the read not run.","headers":{"ETag":{"schema":{"type":"string"}}}}}}"##;
@@ -1386,7 +1534,8 @@ mod tests {
             assert_eq!(text(get(&doc, "openapi")), "3.1.0");
             let info = get(&doc, "info").expect("info");
             assert!(!text(get(info, "title")).is_empty());
-            assert_eq!(text(get(info, "version")), env!("CARGO_PKG_VERSION"));
+            // The document's version, never the binary's: it asks no token.
+            assert_eq!(text(get(info, "version")), DOCUMENT_VERSION);
             let paths = members(get(&doc, "paths"));
             assert!(!paths.is_empty());
             let mut ids = Vec::new();
@@ -1444,11 +1593,16 @@ mod tests {
     fn no_route_is_listed_twice() {
         for kind in [Kind::File, Kind::Node, Kind::Router] {
             let ops = operations(kind);
-            for (i, (path, _, op)) in ops.iter().enumerate() {
+            for (i, l) in ops.iter().enumerate() {
                 let twice = ops[i + 1..]
                     .iter()
-                    .any(|(p, _, o)| p == path && o.method == op.method);
-                assert!(!twice, "{kind:?}: {} {path} twice", op.method);
+                    .any(|o| o.path == l.path && o.op.method == l.op.method);
+                assert!(!twice, "{kind:?}: {} {} twice", l.op.method, l.path);
+                assert!(
+                    !l.op.head || l.op.method == "get",
+                    "{}: HEAD beside a GET alone",
+                    l.id
+                );
             }
         }
     }
@@ -1462,80 +1616,517 @@ mod tests {
         ),
         (
             "_shard",
-            "the router's admin routes, named here only by the audit log",
+            "the router's admin routes, in the sharding reference",
         ),
     ];
+
+    /// Where the routes a function matches are served, so a pattern is
+    /// looked for in the rows of every place its code serves it -- a file's
+    /// root, a node's, a router's, below a tenant -- never in another's.
+    /// The most specific region holding a pattern is its: a file, or a
+    /// directory of them (`/` last), then a function, then a call in it
+    /// from which on the function serves elsewhere. `below` is the
+    /// segments the function's slices start after, as `admin::handle`
+    /// matches `&segs[1..]` below `_admin`.
+    struct Region {
+        file: &'static str,
+        func: &'static str,
+        after: &'static str,
+        at: u8,
+        below: &'static [&'static str],
+    }
+
+    const REGIONS: &[Region] = &[
+        // A database's routes: a file's server's, and each tenant's once
+        // `route_tenant` cut its prefix.
+        Region {
+            file: "fennec-http/src/",
+            func: "",
+            after: "",
+            at: FILE | TENANT,
+            below: &[],
+        },
+        // Before a tenant is routed: a file's root and a node's.
+        Region {
+            file: "fennec-http/src/lib.rs",
+            func: "serve_connection",
+            after: "",
+            at: FILE | NODE,
+            below: &[],
+        },
+        Region {
+            file: "fennec-http/src/lib.rs",
+            func: "serve_connection",
+            after: "route_tenant(",
+            at: FILE | TENANT,
+            below: &[],
+        },
+        Region {
+            file: "fennec-http/src/lib.rs",
+            func: "route_tenant",
+            after: "",
+            at: NODE,
+            below: &[],
+        },
+        Region {
+            file: "fennec-http/src/admin.rs",
+            func: "",
+            after: "",
+            at: NODE,
+            below: &["_admin"],
+        },
+        Region {
+            file: "fennec-http/src/node_stream.rs",
+            func: "",
+            after: "",
+            at: NODE,
+            below: &[],
+        },
+        // The audit's names for a node's admin routes and a router's.
+        Region {
+            file: "fennec-http/src/audit.rs",
+            func: "",
+            after: "",
+            at: NODE,
+            below: &[],
+        },
+        // A replica's stream: a file's, a tenant's and a router's
+        // directory's.
+        Region {
+            file: "fennec-http/src/replication.rs",
+            func: "",
+            after: "",
+            at: FILE | TENANT | ROUTER,
+            below: &[],
+        },
+        Region {
+            file: "fennec-http/src/studio.rs",
+            func: "",
+            after: "",
+            at: FILE | NODE | ROUTER,
+            below: &[],
+        },
+        // The router: its own routes at its root, a tenant's forwarded.
+        Region {
+            file: "fennec-shard/src/",
+            func: "",
+            after: "",
+            at: ROUTER,
+            below: &[],
+        },
+        Region {
+            file: "fennec-shard/src/lib.rs",
+            func: "admin",
+            after: "",
+            at: ROUTER,
+            below: &["_shard"],
+        },
+        Region {
+            file: "fennec-shard/src/region.rs",
+            func: "",
+            after: "",
+            at: ROUTER,
+            below: &["_shard"],
+        },
+        Region {
+            file: "fennec-shard/src/readers.rs",
+            func: "reads_only",
+            after: "",
+            at: ROUTER,
+            below: &["_shard"],
+        },
+    ];
+
+    /// The region of a pattern in `file`, in function `func`, whose code
+    /// has passed the calls `passed`.
+    fn region(file: &str, func: &str, passed: &[&str]) -> &'static Region {
+        REGIONS
+            .iter()
+            .filter(|r| match r.file.ends_with('/') {
+                true => file.starts_with(r.file),
+                false => file == r.file,
+            })
+            .filter(|r| r.func.is_empty() || r.func == func)
+            .filter(|r| r.after.is_empty() || passed.contains(&r.after))
+            .max_by_key(|r| {
+                (
+                    !r.file.ends_with('/'),
+                    !r.func.is_empty(),
+                    !r.after.is_empty(),
+                )
+            })
+            .unwrap_or(&REGIONS[0])
+    }
 
     /// A route pattern the dispatcher matches, read from its source.
     #[derive(Debug)]
     struct Pattern {
-        at: String,
+        file: String,
+        func: String,
+        /// Where its code serves it: `FILE`, `NODE`, `ROUTER`, `TENANT`.
+        at: u8,
         method: Option<String>,
-        /// Each segment's literals, empty for any.
-        segments: Vec<Vec<String>>,
+        /// Each segment, a literal or `None` for any.
+        segments: Vec<Option<String>>,
         /// Whether more segments may follow.
         open: bool,
+        /// Whether `segments` are the path's last, any before them.
+        tail: bool,
     }
 
-    /// Every route pattern in the server's code, in the forms its
-    /// dispatcher matches a request by: a `(Method::X | .., [..])` arm, a
-    /// `segments() == [..]` or `.as_slice() == [..]`, a `matches!(..
-    /// .as_slice(), [..])`, a first segment (`Some(&"_x")`) and a path or
-    /// its prefix (`path == "/_x"`, `starts_with("/_x")`). A route written
-    /// in another form is one this list must learn.
+    /// Every route pattern in fennec-http's and fennec-shard's code.
     fn patterns() -> Vec<Pattern> {
-        let mut files = Vec::new();
-        let mut dirs = vec![std::path::PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src"
-        ))];
-        while let Some(d) = dirs.pop() {
-            for e in std::fs::read_dir(&d).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    dirs.push(p);
-                } else if p.extension().is_some_and(|x| x == "rs") {
-                    files.push(p);
+        let mut out = Vec::new();
+        for krate in ["fennec-http", "fennec-shard"] {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(krate)
+                .join("src");
+            let mut dirs = vec![root.clone()];
+            while let Some(d) = dirs.pop() {
+                for e in std::fs::read_dir(&d).unwrap() {
+                    let p = e.unwrap().path();
+                    if p.is_dir() {
+                        dirs.push(p);
+                    } else if p.extension().is_some_and(|x| x == "rs") {
+                        let rel = p.strip_prefix(&root).unwrap().to_string_lossy();
+                        let name = format!("{krate}/src/{}", rel.replace('\\', "/"));
+                        let src = std::fs::read_to_string(&p).unwrap();
+                        scan(&name, &code_of(&src), &mut out);
+                    }
                 }
             }
-        }
-        let mut out = Vec::new();
-        for f in files {
-            let name = f.file_name().unwrap().to_string_lossy().into_owned();
-            let src = std::fs::read_to_string(&f).unwrap();
-            // The code, not its tests or its comments.
-            let src = src.split("#[cfg(test)]\nmod ").next().unwrap();
-            let code: String = src
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
-            // `admin::handle` matches the segments after `_admin`.
-            let prefix: &[&str] = if name == "admin.rs" { &["_admin"] } else { &[] };
-            scan(&name, &code, prefix, &mut out);
         }
         out
     }
 
-    fn scan(at: &str, code: &str, prefix: &[&str], out: &mut Vec<Pattern>) {
-        let mut push = |method: Option<String>, segments: Vec<Vec<String>>, open: bool| {
-            let segments = prefix
-                .iter()
-                .map(|p| vec![p.to_string()])
-                .chain(segments)
+    /// The code of a source file as the scan reads it: its tests and its
+    /// comment lines cut, its whitespace one space.
+    fn code_of(src: &str) -> String {
+        let src = src.split("#[cfg(test)]\nmod ").next().unwrap();
+        let code: Vec<&str> = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        code.join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Which bytes of `code` are inside a string or a char literal, so
+    /// that a bracket or an anchor in one is not code.
+    fn literals(code: &str) -> Vec<bool> {
+        let b = code.as_bytes();
+        let mut lit = vec![false; b.len()];
+        let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
+        let mut i = 0;
+        while i < b.len() {
+            let start = i;
+            let end = match b[i] {
+                // `r"..."`, `r#"..."#`, `br#"..."#`: no escapes.
+                b'r' if (i == 0
+                    || !ident(i - 1)
+                    || (b[i - 1] == b'b' && (i < 2 || !ident(i - 2))))
+                    && b[i + 1..]
+                        .iter()
+                        .position(|&c| c != b'#')
+                        .map(|n| b[i + 1 + n])
+                        == Some(b'"') =>
+                {
+                    let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                    let close: Vec<u8> = std::iter::once(b'"')
+                        .chain(std::iter::repeat_n(b'#', hashes))
+                        .collect();
+                    let from = i + 2 + hashes;
+                    b[from..]
+                        .windows(close.len())
+                        .position(|w| w == close.as_slice())
+                        .map_or(b.len(), |n| from + n + close.len())
+                }
+                b'"' => {
+                    let mut j = i + 1;
+                    while j < b.len() && b[j] != b'"' {
+                        j += if b[j] == b'\\' { 2 } else { 1 };
+                    }
+                    j + 1
+                }
+                // A char literal, not a lifetime: `'x'`, `'\''`, `'\u{..}'`.
+                b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                    let j = (i + 3).min(b.len());
+                    j + b[j..].iter().position(|&c| c == b'\'').unwrap_or(0) + 1
+                }
+                b'\'' => {
+                    let ch = code[i + 1..].chars().next().map_or(1, char::len_utf8);
+                    match b.get(i + 1 + ch) {
+                        Some(b'\'') => i + 2 + ch,
+                        _ => i + 1,
+                    }
+                }
+                _ => i + 1,
+            };
+            let end = end.min(b.len());
+            if end > start + 1 {
+                lit[start..end].iter_mut().for_each(|l| *l = true);
+            }
+            i = end;
+        }
+        lit
+    }
+
+    /// The index of the bracket closing the one at `open`.
+    fn closing(code: &str, lit: &[bool], open: usize) -> usize {
+        let mut depth = 0;
+        for (i, c) in code.bytes().enumerate().skip(open) {
+            if lit[i] {
+                continue;
+            }
+            match c {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => {}
+            }
+        }
+        code.len()
+    }
+
+    /// The first of `stops` in `code[from..to]` at no depth below `from`,
+    /// or where a bracket opened before it closes.
+    fn until(code: &str, lit: &[bool], from: usize, to: usize, stops: &[&str]) -> usize {
+        let mut depth = 0i32;
+        let mut i = from;
+        while i < to {
+            if !lit[i] {
+                let rest = &code[i..to];
+                if depth == 0 && stops.iter().any(|s| rest.starts_with(s)) {
+                    return i;
+                }
+                match code.as_bytes()[i] {
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            return i;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        to
+    }
+
+    /// Whether an expression is a request's segments, or a slice of them.
+    fn routeish(expr: &str, vars: &[String]) -> bool {
+        expr.contains("segments()")
+            || vars.iter().any(|v| {
+                expr.match_indices(v.as_str()).any(|(i, _)| {
+                    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    !word(expr[..i].chars().next_back())
+                        && !word(expr[i + v.len()..].chars().next())
+                })
+            })
+    }
+
+    /// Where a segment test reads: `.first()`, `.get(2)`, `.last()`.
+    enum Index {
+        At(usize),
+        Last,
+    }
+
+    fn index_of(expr: &str) -> Index {
+        let mut best = (0, Index::At(0));
+        for (pat, ix) in [
+            (".first()", Some(0)),
+            (".peek()", Some(0)),
+            (".last()", None),
+        ] {
+            if let Some(i) = expr.rfind(pat) {
+                if i >= best.0 {
+                    best = (i, ix.map_or(Index::Last, Index::At));
+                }
+            }
+        }
+        if let Some(i) = expr.rfind(".get(") {
+            let n: String = expr[i + 5..]
+                .chars()
+                .take_while(char::is_ascii_digit)
                 .collect();
-            out.push(Pattern {
-                at: at.into(),
-                method,
-                segments,
-                open,
-            });
-        };
+            if let (true, Ok(n)) = (i >= best.0, n.parse()) {
+                best = (i, Index::At(n));
+            }
+        }
+        best.1
+    }
+
+    /// A slice pattern's segments, `[` at `open`: each a literal, its
+    /// alternatives (`"plan" | "apply"`) or any; `..` more of them.
+    fn slice_at(code: &str, lit: &[bool], open: usize) -> (Vec<Vec<String>>, bool, bool) {
+        let close = closing(code, lit, open);
+        let (mut segments, mut open_end, mut tail) = (Vec::new(), false, false);
+        let mut at = open + 1;
+        while at < close {
+            let end = until(code, lit, at, close, &[","]);
+            let part = code[at..end].trim();
+            at = end + 1;
+            if part.is_empty() {
+                continue;
+            }
+            if part == ".." || part.ends_with(" @ ..") {
+                match segments.is_empty() {
+                    true => tail = true,
+                    false => open_end = true,
+                }
+                continue;
+            }
+            let words: Option<Vec<String>> = part
+                .split('|')
+                .map(|w| {
+                    let w = w.trim().trim_start_matches('&');
+                    w.strip_prefix('"')
+                        .and_then(|w| w.strip_suffix('"'))
+                        .map(str::to_string)
+                })
+                .collect();
+            segments.push(words.unwrap_or_default());
+        }
+        (segments, open_end, tail)
+    }
+
+    /// Every slice pattern in `code[from..to]` outside another slice: a
+    /// pattern's alternatives, a tuple's slice.
+    fn slices_in(code: &str, lit: &[bool], from: usize, to: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut i = from;
+        while i < to {
+            if !lit[i] && code.as_bytes()[i] == b'[' {
+                out.push(i);
+                i = closing(code, lit, i);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Each `Some(&"word")` in `code[from..to]`: a segment test's word.
+    fn words_in(code: &str, lit: &[bool], from: usize, to: usize) -> Vec<String> {
+        code[from..to]
+            .match_indices("Some(&\"")
+            .filter(|(i, _)| !lit[from + i])
+            .filter_map(|(i, m)| {
+                let w = &code[from + i + m.len()..to];
+                w.find('"').map(|e| w[..e].to_string())
+            })
+            .collect()
+    }
+
+    /// Every route pattern in `code`, the code of `file`, in each form the
+    /// dispatchers match a request by: a slice pattern against its
+    /// segments -- a `(Method::X | .., [..])` arm, the arms of a `match`
+    /// on them, a `matches!`, a `let` or `if let`, an `== [..]` --
+    /// alternatives and all; a segment by its index (`.first()`,
+    /// `.get(2)`, `.last()` against `Some(&"x")`, compared or matched);
+    /// and a path (`path == "/x"`, `starts_with`, `strip_prefix`,
+    /// `path.contains`). A route written in another form is one this
+    /// must learn.
+    fn scan(file: &str, code: &str, out: &mut Vec<Pattern>) {
+        let lit = literals(code);
+        let b = code.as_bytes();
+        let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
+        let mut vars: Vec<String> = Vec::new();
+        let mut func = String::new();
+        let mut passed: Vec<&str> = Vec::new();
         let mut i = 0;
         while i < code.len() {
+            if lit[i] || (i > 0 && ident(i - 1) && ident(i)) {
+                i += 1;
+                continue;
+            }
             let rest = &code[i..];
-            // `(Method::A | Method::B, [..])`
+            if let Some(after) = rest.strip_prefix("fn ") {
+                let name: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    func = name;
+                    passed.clear();
+                }
+            }
+            for call in REGIONS.iter().map(|r| r.after).filter(|a| !a.is_empty()) {
+                if rest.starts_with(call) && !passed.contains(&call) {
+                    passed.push(call);
+                }
+            }
+            let r = region(file, &func, &passed);
+            let mut push = |method: Option<&str>,
+                            segs: Vec<Vec<String>>,
+                            open: bool,
+                            tail: bool,
+                            slice: bool| {
+                let below = r.below.iter().map(|w| vec![w.to_string()]);
+                let segs: Vec<Vec<String>> = match slice {
+                    true => below.chain(segs).collect(),
+                    false => segs,
+                };
+                if segs.iter().all(Vec::is_empty) && !(slice && method.is_some()) {
+                    return;
+                }
+                // One pattern for each choice of the alternatives: each
+                // must be served, not one of them.
+                let mut choices: Vec<Vec<Option<String>>> = vec![Vec::new()];
+                for seg in &segs {
+                    let opts: Vec<Option<String>> = match seg.is_empty() {
+                        true => vec![None],
+                        false => seg.iter().cloned().map(Some).collect(),
+                    };
+                    choices = choices
+                        .iter()
+                        .flat_map(|c| {
+                            opts.iter()
+                                .map(move |o| [c.clone(), vec![o.clone()]].concat())
+                        })
+                        .collect();
+                }
+                for segments in choices {
+                    out.push(Pattern {
+                        file: file.into(),
+                        func: func.clone(),
+                        at: r.at,
+                        method: method.map(str::to_ascii_lowercase),
+                        segments,
+                        open,
+                        tail,
+                    });
+                }
+            };
+            // A segment's word at its index, the leading ones any but
+            // what the region says it is below.
+            let indexed = |index: Index, word: String| -> (Vec<Vec<String>>, bool) {
+                match index {
+                    Index::Last => (vec![vec![word]], true),
+                    Index::At(n) => {
+                        let mut segs: Vec<Vec<String>> = (0..n)
+                            .map(|k| {
+                                r.below
+                                    .get(k)
+                                    .map(|w| vec![w.to_string()])
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        segs.push(vec![word]);
+                        (segs, false)
+                    }
+                }
+            };
+            // `(Method::A | Method::B, [..])`, and `req.method ==
+            // Method::A && req.segments() == [..]`.
             if let Some(after) = rest.strip_prefix("Method::") {
                 let mut methods = Vec::new();
                 let mut s = after;
@@ -1543,142 +2134,383 @@ mod tests {
                     let end = s
                         .find(|c: char| !c.is_ascii_alphanumeric())
                         .unwrap_or(s.len());
-                    methods.push(s[..end].to_ascii_lowercase());
+                    methods.push(&s[..end]);
                     s = &s[end..];
                     match s.strip_prefix(" | Method::") {
                         Some(more) => s = more,
                         None => break,
                     }
                 }
-                if let Some(pattern) = s.strip_prefix(", [") {
-                    let (segments, open) = slice(pattern);
-                    for m in methods {
-                        push(Some(m), segments.clone(), open);
+                let at = code.len() - s.len();
+                let slice = match s.strip_prefix(", [") {
+                    Some(_) => Some(at + 2),
+                    None => s
+                        .strip_prefix(" && ")
+                        .and_then(|t| {
+                            t.find(" == [")
+                                .filter(|&e| routeish(&t[..e], &vars) && !t[..e].contains("&&"))
+                        })
+                        .map(|e| at + 4 + e + 4),
+                };
+                if let Some(mut open) = slice {
+                    loop {
+                        let (segs, more, tail) = slice_at(code, &lit, open);
+                        for m in &methods {
+                            push(Some(*m), segs.clone(), more, tail, true);
+                        }
+                        let close = closing(code, &lit, open);
+                        match code[close + 1..].starts_with(" | [") {
+                            true => open = close + 4,
+                            false => break,
+                        }
                     }
                 }
-                // Past every method read: `Method::Head` after `Method::Get |`
-                // is this arm's, not one of its own.
-                i = code.len() - s.len();
+                // Past every method read: `Method::Head` after `Method::Get
+                // |` is this arm's, not one of its own.
+                i = at;
                 continue;
             }
-            for anchor in ["segments() == [", "as_slice() == [", "as_slice(), ["] {
-                if let Some(pattern) = rest.strip_prefix(anchor) {
-                    let (segments, open) = slice(pattern);
-                    push(None, segments, open);
+            // `match <segments> { arms }`.
+            if rest.starts_with("match ") {
+                let from = i + 6;
+                let brace = until(code, &lit, from, code.len(), &["{"]);
+                let scrutinee = &code[from..brace.min(code.len())];
+                if brace < code.len() && routeish(scrutinee, &vars) {
+                    let end = closing(code, &lit, brace);
+                    let mut arm = brace + 1;
+                    while arm < end {
+                        let arrow = until(code, &lit, arm, end, &["=>"]);
+                        if arrow >= end {
+                            break;
+                        }
+                        for open in slices_in(code, &lit, arm, arrow) {
+                            let (segs, more, tail) = slice_at(code, &lit, open);
+                            push(None, segs, more, tail, true);
+                        }
+                        for w in words_in(code, &lit, arm, arrow) {
+                            let (segs, tail) = indexed(index_of(scrutinee), w);
+                            push(None, segs, true, tail, false);
+                        }
+                        // The arm's body: a block, or an expression to its
+                        // comma.
+                        let body = arrow + 2 + usize::from(code[arrow + 2..].starts_with(' '));
+                        arm = match code.as_bytes().get(body) {
+                            Some(b'{') => closing(code, &lit, body) + 1,
+                            _ => until(code, &lit, body, end, &[","]),
+                        };
+                        arm += usize::from(code[arm..].starts_with(" ,"));
+                        arm += usize::from(code[arm..].starts_with(','));
+                    }
                 }
             }
-            for anchor in ["Some(&\"", "path == \"/", "starts_with(\"/"] {
+            // `matches!(<segments>, [..] | [..])`.
+            if rest.starts_with("matches!(") {
+                let open = i + 8;
+                let close = closing(code, &lit, open);
+                let comma = until(code, &lit, open + 1, close, &[","]);
+                let expr = &code[open + 1..comma.min(close)];
+                if comma < close && routeish(expr, &vars) {
+                    for o in slices_in(code, &lit, comma, close) {
+                        let (segs, more, tail) = slice_at(code, &lit, o);
+                        push(None, segs, more, tail, true);
+                    }
+                    for w in words_in(code, &lit, comma, close) {
+                        let (segs, tail) = indexed(index_of(expr), w);
+                        push(None, segs, true, tail, false);
+                    }
+                }
+            }
+            // `let [..] = <segments> else`, `if let (_, [..]) = (..)`; and
+            // a name given the segments, read as them from then on.
+            if rest.starts_with("let ") {
+                let from = i + 4;
+                let eq = until(code, &lit, from, code.len(), &[" = ", ";"]);
+                if code[eq..].starts_with(" = ") {
+                    let pattern = &code[from..eq];
+                    let to = until(code, &lit, eq + 3, code.len(), &[" else", " {", ";"]);
+                    let expr = code[eq + 3..to].trim();
+                    if routeish(expr, &vars) {
+                        for o in slices_in(code, &lit, from, eq) {
+                            let (segs, more, tail) = slice_at(code, &lit, o);
+                            push(None, segs, more, tail, true);
+                        }
+                        for w in words_in(code, &lit, from, eq) {
+                            let (segs, tail) = indexed(index_of(expr), w);
+                            push(None, segs, true, tail, false);
+                        }
+                        let named = pattern.chars().all(|c| c.is_alphanumeric() || c == '_');
+                        // `let segs = req.segments();`, `let rest =
+                        // &segs[1..];` -- never `let name = match segs ..`.
+                        let whole = !expr.contains(' ')
+                            && (expr.ends_with("segments()")
+                                || expr.ends_with(".as_slice()")
+                                || (expr.starts_with('&') && expr.ends_with("..]")));
+                        if named && whole && !vars.iter().any(|v| v == pattern) {
+                            vars.push(pattern.to_string());
+                        }
+                    }
+                }
+            }
+            // `<segments> == [..]`, `<segment> == Some(&"x")`.
+            for (cmp, slice) in [
+                (" == [", true),
+                (" != [", true),
+                (" == Some(&\"", false),
+                (" != Some(&\"", false),
+            ] {
+                if !rest.starts_with(cmp) {
+                    continue;
+                }
+                let back = &code[i.saturating_sub(80)..i];
+                let left = ["&& ", "|| ", "if ", "{ ", "; ", "return ", "= ", "=> "]
+                    .iter()
+                    .filter_map(|d| back.rfind(d).map(|p| p + d.len()))
+                    .max()
+                    .map_or(back, |p| &back[p..]);
+                if !routeish(left, &vars) {
+                    continue;
+                }
+                match slice {
+                    true => {
+                        let (segs, more, tail) = slice_at(code, &lit, i + cmp.len() - 1);
+                        push(None, segs, more, tail, true);
+                    }
+                    false => {
+                        let w = &code[i + cmp.len()..];
+                        let word = w[..w.find('"').unwrap_or(0)].to_string();
+                        let (segs, tail) = indexed(index_of(left), word);
+                        push(None, segs, true, tail, false);
+                    }
+                }
+            }
+            // A path, or its prefix.
+            for anchor in [
+                "path == \"/",
+                "starts_with(\"/",
+                "strip_prefix(\"/",
+                "path.contains(\"",
+            ] {
                 if let Some(word) = rest.strip_prefix(anchor) {
                     let word = &word[..word.find('"').unwrap_or(0)];
-                    let segments: Vec<Vec<String>> = word
+                    let segs: Vec<Vec<String>> = word
                         .split('/')
                         .filter(|s| !s.is_empty())
                         .map(|s| vec![s.to_string()])
                         .collect();
-                    if !segments.is_empty() {
-                        push(None, segments, true);
-                    }
+                    push(None, segs, true, false, false);
                 }
             }
             i += rest.chars().next().map_or(1, char::len_utf8);
         }
     }
 
-    /// A slice pattern's segments, read up to its `]`: a literal or its
-    /// alternatives (`"plan" | "apply"`), anything else any segment, `..`
-    /// more of them.
-    fn slice(pattern: &str) -> (Vec<Vec<String>>, bool) {
-        let body = &pattern[..pattern.find(']').unwrap_or(0)];
-        let mut segments = Vec::new();
-        let mut open = false;
-        for part in body.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            if part.ends_with("..") {
-                open = true;
-                continue;
+    /// Whether `want` reads `have`, a row's path: a literal its literal, a
+    /// name (any) its placeholder -- never a word for a placeholder, so a
+    /// new `/word` is no collection's path.
+    fn fits(want: &[Option<String>], open: bool, tail: bool, have: &[&str]) -> bool {
+        let one = |w: &Option<String>, h: &&str| match (w, h.starts_with('{')) {
+            (None, true) => true,
+            (Some(w), false) => w == h,
+            _ => false,
+        };
+        match (tail, open) {
+            (true, _) => {
+                have.len() >= want.len()
+                    && want
+                        .iter()
+                        .zip(&have[have.len() - want.len()..])
+                        .all(|(w, h)| one(w, h))
             }
-            let words: Vec<String> = part
-                .split('|')
-                .map(str::trim)
-                .filter_map(|w| w.strip_prefix('"').and_then(|w| w.strip_suffix('"')))
-                .map(str::to_string)
-                .collect();
-            segments.push(words);
+            (false, true) => {
+                have.len() >= want.len() && want.iter().zip(have).all(|(w, h)| one(w, h))
+            }
+            (false, false) => {
+                have.len() == want.len() && want.iter().zip(have).all(|(w, h)| one(w, h))
+            }
         }
-        (segments, open)
     }
 
+    /// Whether every place `p`'s code serves it has its row.
     fn documented(p: &Pattern) -> bool {
-        let first = p.segments.first().and_then(|s| s.first());
-        if first.is_some_and(|w| UNDOCUMENTED.iter().any(|(u, _)| u == w)) {
-            return true;
-        }
-        let method = match p.method.as_deref() {
-            // A preflight is every path's; a HEAD is its GET's.
-            Some("options") => return true,
-            Some("head") => Some("get"),
-            m => m,
-        };
-        // A path below a tenant is a tenant's route, as a file's server
-        // has it.
-        let (wanted, at) = match p.segments.split_first() {
-            Some((t, [_, rest @ ..])) if t == &["t"] => (rest, TENANT),
-            _ => (&p.segments[..], FILE | NODE),
-        };
-        OPS.iter().any(|op| {
-            if op.at & at == 0 || method.is_some_and(|m| m != op.method) {
-                return false;
+        if let Some(Some(first)) = p.segments.first() {
+            if UNDOCUMENTED.iter().any(|(u, _)| u == first) {
+                return true;
             }
-            let segs: Vec<&str> = op.path.split('/').filter(|s| !s.is_empty()).collect();
-            let fits = match p.open {
-                true => segs.len() >= wanted.len(),
-                false => segs.len() == wanted.len(),
-            };
-            // A placeholder stands for a name, never one of the server's
-            // own words: `/_x` is no collection's path.
-            fits && wanted
-                .iter()
-                .zip(&segs)
-                .all(|(want, have)| match have.starts_with('{') {
-                    true => !want.iter().any(|w| w.starts_with('_')),
-                    false => want.is_empty() || want.iter().any(|w| w == have),
+        }
+        // A preflight is every path's; a HEAD is a GET's listed with it.
+        let (method, head) = match p.method.as_deref() {
+            Some("options") => return true,
+            Some("head") => (Some("get"), true),
+            m => (m, false),
+        };
+        // A path below `/t/<tenant>` is a tenant's, wherever its code is.
+        let (at, segs, open) = match p.segments.split_first() {
+            Some((Some(t), rest)) if t == "t" && !p.tail => (
+                TENANT,
+                rest.get(1..).unwrap_or(&[]),
+                p.open || rest.is_empty(),
+            ),
+            _ => (p.at, &p.segments[..], p.open),
+        };
+        [FILE, NODE, ROUTER, TENANT]
+            .into_iter()
+            .filter(|bit| at & bit != 0)
+            .all(|bit| {
+                // A node's or a router's path whose first segment is any
+                // is a tenant's: `.get(2)` of `/t/<tenant>/_hooks`.
+                let (rows, segs) = match bit {
+                    NODE | ROUTER if segs.len() >= 2 && segs[0].is_none() && !p.tail => {
+                        (TENANT, &segs[2..])
+                    }
+                    _ => (bit, segs),
+                };
+                OPS.iter().any(|op| {
+                    let have: Vec<&str> = op.path.split('/').filter(|s| !s.is_empty()).collect();
+                    op.at & rows != 0
+                        && method.is_none_or(|m| m == op.method)
+                        && (!head || op.head)
+                        && fits(segs, open, p.tail, &have)
                 })
-        })
+            })
     }
 
-    /// Every route the dispatcher matches is in the document: a route
-    /// added without its row in [`OPS`] fails here.
+    /// Every route the dispatchers match is in the document: a route added
+    /// without its row in [`OPS`] fails here.
     #[test]
     fn every_route_the_server_matches_is_documented() {
         let all = patterns();
         // The scan reads what it should: the forms above, in the files that
         // route.
-        assert!(all.len() > 60, "{}", all.len());
+        assert!(all.len() > 150, "{}", all.len());
         for at in [
-            "lib.rs",
-            "admin.rs",
-            "cdc.rs",
-            "api.rs",
-            "replication.rs",
-            "node_stream.rs",
+            "fennec-http/src/lib.rs",
+            "fennec-http/src/admin.rs",
+            "fennec-http/src/cdc.rs",
+            "fennec-http/src/api.rs",
+            "fennec-http/src/hooks.rs",
+            "fennec-http/src/replication.rs",
+            "fennec-http/src/node_stream.rs",
+            "fennec-http/src/studio.rs",
+            "fennec-shard/src/lib.rs",
+            "fennec-shard/src/readers.rs",
         ] {
-            assert!(all.iter().any(|p| p.at == at), "nothing read in {at}");
+            assert!(all.iter().any(|p| p.file == at), "nothing read in {at}");
         }
-        let missing: Vec<&Pattern> = all.iter().filter(|p| !documented(p)).collect();
+        let missing: Vec<String> = all
+            .iter()
+            .filter(|p| !documented(p))
+            .map(|p| {
+                format!(
+                    "{} {} (served at {:#b}): {}",
+                    p.file,
+                    p.func,
+                    p.at,
+                    route(p)
+                )
+            })
+            .collect();
         assert!(
             missing.is_empty(),
             "routes the server matches that the OpenAPI document (openapi.rs's OPS) \
-             leaves out: {missing:#?}"
+             leaves out where their code serves them:\n{}",
+            missing.join("\n")
         );
     }
 
-    /// The scan finds what it should, and a route no row lists is one it
-    /// refuses.
-    #[test]
-    fn the_scan_finds_a_route_left_out() {
+    /// A pattern as a route: its method (`any`), its segments' words (`*`
+    /// any).
+    fn route(p: &Pattern) -> String {
+        let segs: Vec<&str> = p
+            .segments
+            .iter()
+            .map(|s| s.as_deref().unwrap_or("*"))
+            .collect();
+        format!(
+            "{} /{}",
+            p.method.as_deref().unwrap_or("any"),
+            segs.join("/")
+        )
+    }
+
+    /// The routes `code`, as `file`'s, that the table leaves out.
+    fn left_out(file: &str, code: &str) -> Vec<String> {
         let mut out = Vec::new();
-        let code = r#"match (req.method, segs) { (Method::Get | Method::Head, ["_nosuch", name]) => 1, (Method::Put, ["_schema", "plan"]) => 2 } if req.segments() == ["_whoami"] {} if p.starts_with("/_elsewhere/") {}"#;
-        scan("x.rs", code, &[], &mut out);
-        let found: Vec<bool> = out.iter().map(documented).collect();
-        assert_eq!(found, [false, false, false, true, false], "{out:#?}");
+        scan(file, code, &mut out);
+        assert!(!out.is_empty(), "nothing read in {code}");
+        out.iter().filter(|p| !documented(p)).map(route).collect()
+    }
+
+    /// The scan reads each form a dispatcher matches a route by, and
+    /// reports the route no row lists: one snippet a form, beside a
+    /// route of the same form that the table holds.
+    #[test]
+    fn the_scan_finds_a_route_left_out_in_every_form() {
+        const HTTP: &str = "fennec-http/src/x.rs";
+        let cases: &[(&str, &str, &[&str])] = &[
+            // A method's arm, its slice's alternatives each a route.
+            (
+                HTTP,
+                r#"match (req.method, segs.as_slice()) { (Method::Get | Method::Head, ["_nosuch", name]) => 1, (Method::Post, ["_schema", "plan" | "_nosuch"]) => 2, (Method::Post, ["query"]) => 3 }"#,
+                &["get /_nosuch/*", "head /_nosuch/*", "post /_schema/_nosuch"],
+            ),
+            // A HEAD the table does not list beside its GET.
+            (
+                HTTP,
+                r#"match (req.method, seg) { (Method::Get | Method::Head, ["_changes"]) => 1 }"#,
+                &["head /_changes"],
+            ),
+            // `== [..]`, the method before it read with it.
+            (
+                HTTP,
+                r#"if req.method == Method::Post && req.segments() == ["_nosuch"] {} if req.segments() == ["batch"] {}"#,
+                &["post /_nosuch", "any /_nosuch"],
+            ),
+            // `matches!` with alternatives past the first `]`.
+            (
+                HTTP,
+                r#"let s = req.segments(); if matches!(s.as_slice(), ["query"] | ["_call", _] | ["_nosuch"]) {}"#,
+                &["any /_nosuch"],
+            ),
+            // The arms of a `match` on the segments.
+            (
+                HTTP,
+                r#"match req.segments().as_slice() { ["_call", name] => Some(name), ["_nosuch", ..] => None, _ => { let x = [1]; None } }"#,
+                &["any /_nosuch"],
+            ),
+            // `let .. else` and `if let`.
+            (
+                HTTP,
+                r#"let seg = req.segments(); let [name, "nosuch"] = seg.as_slice() else { return }; let [name, "changes"] = seg.as_slice() else { return }; if let (Some(t), ["_nosuch"]) = (&tenant, req.segments().as_slice()) {}"#,
+                &["any /*/nosuch", "any /_nosuch"],
+            ),
+            // A path's prefix, cut or looked for.
+            (
+                HTTP,
+                r#"if let Some(h) = req.path.strip_prefix("/_nosuch/") {} if req.path.contains("_nosuch2") {} if req.path.starts_with("/_nosuch3") || req.path == "/_mcp" {}"#,
+                &["any /_nosuch", "any /_nosuch2", "any /_nosuch3"],
+            ),
+            // A segment by its index: a word is no collection's path.
+            (
+                HTTP,
+                r#"if req.segments().first() == Some(&"nosuch") {} if req.segments().last() != Some(&"nosuch2") {} match req.segments().first() { Some(&"_nosuch") => 1, Some(&"_schema") => 2, _ => 0 }"#,
+                &["any /nosuch", "any /nosuch2", "any /_nosuch"],
+            ),
+            // A node's root is not a file's: `/query` is a file's alone.
+            (
+                "fennec-http/src/lib.rs",
+                r#"fn route_tenant(req: &Request) { let segs = req.segments(); if segs.as_slice() == ["query"] {} if segs.as_slice() == ["_whoami"] {} if segs.get(2) == Some(&"_nosuch") {} }"#,
+                &["any /query", "any /*/*/_nosuch"],
+            ),
+            // A router's root, and a tenant's through it.
+            (
+                "fennec-shard/src/x.rs",
+                r#"match req.segments().first() { Some(&"_health") => 1, Some(&"_metrics") => 2, Some(&"_shard") => 3, _ => 0 } match req.segments().get(2) { Some(&"_nosuch") => 1, _ => 0 }"#,
+                &["any /_health", "any /*/*/_nosuch"],
+            ),
+        ];
+        for (file, code, want) in cases {
+            let got = left_out(file, code);
+            assert_eq!(&got, want, "{code}");
+        }
     }
 }

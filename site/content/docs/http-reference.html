@@ -144,18 +144,29 @@ answer and its status, the refusal's <code>{"error": ...}</code> and a
 <code>Fennec-After</code>, <code>Fennec-Read</code>,
 <code>X-Request-Id</code>, <code>Retry-After</code>), the tokens a route
 takes — the server's, a scoped JSON Web Token, a node's admin token, the
-replication token — and a subscription as <code>text/event-stream</code>. It
-asks no token: it is the binary's, the same for every server of its kind
-whatever its flags or data, so a route served only under a flag says so
-(<code>x-fennec-flag</code>). A file's server describes its routes; a tenant
-node (<code>--dir</code>) its own at the root, <code>/_admin/</code> marked
-with the admin token, and each tenant's below <code>/t/{tenant}</code>;
-<code>fennec-shard</code> what a tenant's client calls through it, the
-tenant's routes alone (its <code>/_shard/</code> routes are in the <a
+replication token, a router's <code>--token</code> — and a subscription as
+<code>text/event-stream</code>. It asks no token: it is the binary's, the
+same for every server of its kind whatever its flags or data, so a route
+served only under a flag says so (<code>x-fennec-flag</code>) as each place
+serves it — a file's <code>/_changes</code> under <code>--cdc</code>, a
+node's tenants' under <code>--replication-token</code>; a file's hook under
+<code>--hooks</code>, a tenant's under <code>--admin-token</code>, whose
+routes set its secrets — and its <code>info.version</code> is the
+document's own, never the build's, which only a token reads. A GET that
+answers <code>HEAD</code> lists a <code>head</code> operation beside it;
+the others (the change stream, a replica's stream and status, a
+subscription, the admin's reads) answer GET alone. A file's server
+describes its routes; a tenant node (<code>--dir</code>) its own at the
+root, <code>/_admin/</code> marked with the admin token, and each tenant's
+below <code>/t/{tenant}</code>; <code>fennec-shard</code> what a tenant's
+client calls through it, with the same operation ids as a node's
+(<code>tenantQuery</code>), and its own <code>/_metrics</code>,
+<code>/_studio/</code> and <code>/_replication</code> (its
+<code>/_shard/</code> routes are in the <a
 href="/docs/sharding-reference">sharding reference</a>). Every route the
 server answers is in it, and nothing else: CI sends each operation of the
-document to a running server and finds each route of the server's code in
-the document.</p>
+document to a running server, a node and a router, with its token and
+without, and finds each route of their code in the document.</p>
 
 <pre data-lang="bash">curl -s http://127.0.0.1:8080/_openapi.json -o fennecdb.json
 
