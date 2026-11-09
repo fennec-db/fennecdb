@@ -2805,6 +2805,80 @@ test('vectors handed over as f32s store what JSON stored', { skip: wasm ? false 
   assert.equal(f32s.rows('get t where n = 10').length, 0);
 });
 
+// A sync's replica writes the server's rows as `put <c> $1`, the rows one
+// parameter, where it wrote the builder's text, a parameter a value: the
+// rows a stream hands it must land as they did, every type, written over
+// a held id as `put` writes, and refused in the same words.
+test("the server's rows land through put <c> $1 as through the builder's text", { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const [built, param] = [await Fennec.open(wasm), await Fennec.open(wasm)];
+  for (const db of [built, param]) {
+    db.run(`create collection t (title text @text, n int @sorted, f float, ok bool, at timestamp,
+      loc geo, meta json, xs [int], fs [float], tags [text], sp sparse<8>, b bytes,
+      e vector<3> @hnsw(cosine), u text @unique, k text @hash)`);
+  }
+  // As a stream's line has them: the server's text, parsed. A whole number
+  // past 2^53 is the double JSON.parse reads, which goes back as its
+  // shortest digits -- 2^60 as 1152921504606847000 -- and is read as 2^60.
+  const rows = (text) => JSON.parse(text);
+  const both = async (list) => {
+    const errors = [];
+    for (const write of [() => built.from('t').insert(list), () => param.query('put t $1', [list])]) {
+      errors.push(await write().then(() => null, (e) => e.message));
+    }
+    assert.equal(errors[0], errors[1]);
+    assert.deepEqual(built.snapshot(), param.snapshot());
+    assert.deepEqual(built.rows('get t'), param.rows('get t'));
+    return errors[0];
+  };
+  const seed = rows(`[
+    {"id": 1, "title": "one", "n": 1152921504606846977, "f": 19.99, "ok": true,
+     "at": "2026-01-02T03:04:05.678Z", "loc": [29.012345678912345, 41.09876543210987],
+     "meta": {"price": [19.99, 1, 16777217], "big": -1152921504606846977, "deep": {"x": null, "s": "t"}},
+     "xs": [1, 2, 16777217, 9007199254740993], "fs": [0.1, 0.5, 1e300], "tags": ["x", "y"],
+     "sp": "{1:0.1,3:-2.5}/8", "b": [0, 255, 7], "e": [0.1, -0, 1e-40], "u": "k1", "k": "a"},
+    {"id": 2, "title": null, "n": 1152921504606847489, "f": -0.0, "ok": null, "at": null,
+     "loc": null, "meta": [1, 2.5, -0], "xs": [], "fs": null, "tags": [], "sp": null,
+     "b": [], "e": [3.4028234663852886e38, -1, 0.3333333333333333], "u": "k2", "k": null},
+    {"id": 7, "meta": "text", "n": -9223372036854774784, "e": null, "u": null},
+    {"id": 9, "meta": {"a": {"b": {"c": [[1, 2], {"d": 1e-7}]}}}, "at": 1767323045678}
+  ]`);
+  assert.equal(await both(seed), null);
+  // The doubles JSON.parse read, every digit of their ints: neither the
+  // shortest digits written nor the int the server sent.
+  for (const db of [built, param]) {
+    assert.equal(db.rows('get t where n = 1152921504606846976 select id')[0]?.id, 1);
+    assert.equal(db.rows('get t where n = 1152921504606847000').length, 0);
+    assert.equal(db.rows('get t where n = 1152921504606847488 select id')[0]?.id, 2);
+    assert.equal(db.rows('get t where n = -9223372036854774784 select id')[0]?.id, 7);
+    assert.deepEqual(db.rows('get t where id = 1 select xs')[0].xs, [1, 2, 16777217, 2 ** 53]);
+    assert.equal(db.rows('get t where meta.big = -1152921504606846976 select id')[0]?.id, 1);
+    assert.equal(db.rows('get t where u = "k2" select id')[0]?.id, 2);
+  }
+  // A change: held ids written over, a field left out made null, a new row.
+  assert.equal(
+    await both(rows(`[
+      {"id": 2, "title": "two", "u": "k3", "e": [0, 0, 1], "loc": [-180, -85.05112878]},
+      {"id": 1, "title": "one again", "n": 2, "u": "k1", "meta": {"price": [1.5]}},
+      {"id": 12, "title": "new", "u": "k2", "sp": "{8:1}/8", "xs": [-16777216]}
+    ]`)),
+    null,
+  );
+  assert.equal(built.rows('get t where id = 2')[0].n, null);
+  // Refused alike, nothing of the chunk landing: a held unique value, a
+  // vector of another dimension, a number past an int, a field not there.
+  for (const bad of [
+    '[{"id": 20, "u": "k1"}]',
+    '[{"id": 21, "title": "ok"}, {"id": 22, "e": [1, 2]}]',
+    '[{"id": 23, "n": 9223372036854775807}]',
+    '[{"id": 24, "nope": 1}]',
+    '[{"id": 25, "b": [256]}]',
+  ]) {
+    assert.ok(await both(rows(bad)), bad);
+  }
+  assert.equal(built.rows('get t where id >= 20').length, 0);
+});
+
 // The distance kernels sum in one fixed order -- eight running sums, reduced
 // pairwise -- and the SIMD build must keep it: a graph built in the browser
 // is then the graph built natively. This is that order written out with

@@ -1189,6 +1189,53 @@ test('a number from 2^53 on goes from a replica to the server as every digit, ra
   }
 });
 
+// The replica writes a seed's and a change's rows as `put <c> $1`, the rows
+// one parameter -- but a collection with a vector, which keeps the
+// builder's text -- and each lands as the server holds it: a vector's f32s,
+// a whole number past 2^53 every digit of its int, a json field's numbers,
+// a time, a point, a sparse vector.
+test('a seed and a change land in the replica as the server holds them, a vector and a number past 2^53 among them', opts, async () => {
+  const s = await server();
+  await s.run('create collection v (n int, e vector<3> @hnsw(cosine))');
+  await s.run('create collection p (n int, m json, at timestamp, loc geo, u text @unique, sp sparse<4>, xs [float])');
+  await s.run('put v [{n: 1152921504606847232, e: [0.1, -0.5, 3.4e38]}, {n: 2, e: [1e-40, 0, 1]}]');
+  await s.run(`put p [
+    {n: 1152921504606847232, m: {big: -1152921504606846976, xs: [19.99, 16777217]}, at: "2026-01-02T03:04:05.678Z",
+     loc: [29.0123456789, 41.0987654321], u: "a", sp: "{1:0.5,4:-2}/4", xs: [0.1, 1e300]},
+    {n: null, m: [1, 2.5], u: "b"}
+  ]`);
+  const db = await sync({
+    url: s.url,
+    local: await Fennec.open(wasm),
+    leader: false,
+    shapes: [{ collection: 'v' }, { collection: 'p' }],
+  });
+  const same = async (c) => assert.deepEqual(db.local.rows(`get ${c} order id`), await s.run(`get ${c} order id`), c);
+  try {
+    await db.ready();
+    await same('v');
+    await same('p');
+    const ids = (c) => db.local.rows(`get ${c} where n = 1152921504606847232 select id`).length;
+    assert.equal(ids('v'), 1, 'the vector collection holds every digit of the int');
+    assert.equal(ids('p'), 1, 'the parameter holds every digit of the int');
+    assert.equal(db.local.rows('get p where m.big = -1152921504606846976').length, 1);
+    // Its f32s, written as the shortest digits reading back as each.
+    assert.deepEqual(db.local.rows('get v where n = 2 select e')[0].e.map(Math.fround), [Math.fround(1e-40), 0, 1]);
+    // A change: written over a held row and a new one, through the stream.
+    await s.run('put v {id: 1, n: -1152921504606847232, e: [0.3, 0.2, 0.1]}');
+    await s.run('put p [{id: 2, n: 1152921504606846976, u: "c", loc: [-180, -85.05112878]}, {u: "d", m: {d: 1e-7}}]');
+    await until(() => db.local.rows('get v where id = 1')[0]?.n < 0, 'the change to v');
+    await until(() => db.local.rows('get p').length === 3, 'the change to p');
+    await same('v');
+    await same('p');
+    assert.equal(db.local.rows('get v where n = -1152921504606847232').length, 1);
+    assert.equal(db.local.rows('get p where n = 1152921504606846976 select u')[0]?.u, 'c');
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 // `@fennecdb/web/client`: no module at all, the queries run on the server
 // and a live query follows its subscriptions.
 test("a live query over HTTP follows the server's writes, with no module", { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {

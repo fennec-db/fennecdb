@@ -533,6 +533,19 @@ single writes at 1 000 a second took 0.8 ms at p99, where they took 212 to
 (<code>make seed-bench</code>).</p>
 </details>
 
+<details class="deep"><summary>What a seed costs in the page</summary>
+<p>The replica writes a seed's rows, and a change's, 500 at a time, each
+chunk one parameter (<code>put &lt;collection&gt; $1</code>) whose values
+are made their fields' types as a statement's would be. From the seed's
+event to <code>ready()</code>, 100 000 rows of a text, a float and a json
+field took 192 ms in Node on an M1, against 295 when they went as statement
+text, and 300 000 took 550 ms against 825; rows holding a point went in
+twice as fast. A collection with a vector or a bytes field still goes as
+statement text, which hands its vectors to the module as <code>f32</code>s:
+as one parameter they are digits read one at a time, and rows of a 32-dim
+vector took 1.7 times as long.</p>
+</details>
+
 <h2>Limits</h2>
 
 <p>A few things sync does not do, or does differently from what you might

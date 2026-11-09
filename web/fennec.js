@@ -1504,6 +1504,25 @@ const SYNC_STATE = [
 const PUT_SHAPE = 'put _sync_shapes {id: $1, collection: $2, shape: $3, cursor: $4, seeded: $5}';
 const PUT_OP = 'put _sync_queue {id: $1, path: $2, body: $3, key: $4, undo: $5, label: $6}';
 const PUT_TEMP = 'put _sync_temps {id: $1, collection: $2, key: $3, op: $4, until: $5}';
+/**
+ * The server's rows a statement writes into the replica (`#putRows`), as
+ * `put <c> $1`'s one parameter or as the builder's text. A chunk bounds
+ * what a statement holds at once, in the page's heap and in the module's
+ * memory, which never shrinks: a 300 000-row seed of 1 000 rows a
+ * statement was as fast as of 500 but left the module at 38 MB against
+ * 29, and 2 000 to 10 000 were up to 2.3% slower, the page's peak 27 to
+ * 61 MB higher (docs/design/js-client.md#the-servers-rows).
+ */
+const PUT_ROWS = 500;
+/**
+ * A vector's or bytes' type: the builder's text hands its value to the
+ * module as `f32`s (`vectorsApart`), where in a parameter it is digits the
+ * module reads a number at a time -- a seed of 32-dim vectors' rows took
+ * 1.7x as long so, 128-dim 2.4x, 512 bytes a row 1.6x.
+ */
+const APART = /^(vector<|bytes$)/;
+/** Whether a field of `schema` is `APART`'s. */
+const apartIn = (schema) => !!schema?.fields.some((f) => APART.test(f.type));
 /** An answer with no `Fennec-Seq`: no stream is known to be past it. */
 const NO_SEQ = Number.MAX_SAFE_INTEGER;
 /** The longest a server's `retry_after` is waited: `setTimeout` fires at once past 2^31 ms. */
@@ -2228,6 +2247,7 @@ export class FennecSync {
   async #remake(s, schema) {
     const c = s.collection;
     const had = this.#local.schemas().some((x) => x.name === c);
+    s.apart = apartIn(schema);
     if (had) {
       const fields = new Set(schema.fields.map((f) => f.name));
       const rows = (this.#local.run(`get ${c}`).rows ?? []).map((r) =>
@@ -2235,7 +2255,7 @@ export class FennecSync {
       );
       this.#local.run(`drop collection ${c}`);
       this.#local.run(schemaDDL(schema));
-      await this.#insertChunked(c, rows);
+      await this.#putRows(s, rows);
       // The code's schema checked again: the server's changed under it.
       const d = declared.get(this);
       if (d) checked(this.#remote, d, 'follow').catch((e) => this.#onError?.(e));
@@ -2409,7 +2429,7 @@ export class FennecSync {
     const dropped = this.#temps.filter((t) => t.collection === c && t.op === 0 && t.until <= seq);
     this.#deleteLocal('_sync_temps', dropped.map((t) => t.temp));
     this.#temps = this.#temps.filter((t) => !dropped.includes(t));
-    await this.#insertChunked(c, rows);
+    await this.#putRows(s, rows);
     // Every id but the temporary rows kept: a row an unanswered write
     // deleted is not held, so a seed lacking it names it too. After the
     // rows, so a seed that fails part way marks nothing.
@@ -2427,7 +2447,7 @@ export class FennecSync {
     if (msg.schema || !this.#fits(s, puts)) return this.#refresh(s);
     this.#reconcile(s, puts);
     this.#deleteLocal(s.collection, msg.dels ?? []);
-    await this.#insertChunked(s.collection, puts);
+    await this.#putRows(s, puts);
     if (this.#queue.length) this.#heard(s.collection, [...puts.map((r) => r.id), ...(msg.dels ?? [])]);
     const seq = msg.seq ?? s.cursor;
     this.#dropPassed(s.collection, seq);
@@ -2517,12 +2537,24 @@ export class FennecSync {
   }
 
   /**
-   * A large seed fits in a single statement, but the generated text runs
-   * into megabytes; writing in chunks keeps peak memory low.
+   * The server's rows of `s`'s collection written into the replica: `put`,
+   * as the builder's `insert` sends, so a held id is written over -- a row
+   * that stayed keeps its vector's node -- in chunks (`PUT_ROWS`). The rows
+   * go as one parameter, which the module reads as a body's documents, each
+   * value made its field's type as the builder's text has it made
+   * (`Database::document_of`), so the same rows land: with no text built
+   * and parsed again, a parameter a value, a seed of 100 000 rows of a
+   * text, a float and a json field went from its event to `ready()` in
+   * 192 ms against the text's 295, of points in 163 against 357. A
+   * collection with a vector or bytes field keeps the builder's text,
+   * which hands their lists apart as `f32`s (`APART`).
    */
-  async #insertChunked(collection, rows, size = 500) {
-    for (let i = 0; i < rows.length; i += size) {
-      await from(collection).bind(this.#localExec).insert(rows.slice(i, i + size));
+  async #putRows(s, rows) {
+    const c = ident(s.collection, 'collection');
+    for (let i = 0; i < rows.length; i += PUT_ROWS) {
+      const chunk = rows.slice(i, i + PUT_ROWS);
+      if (s.apart) await from(c).bind(this.#localExec).insert(chunk);
+      else await this.#local.query(`put ${c} $1`, [chunk]);
     }
   }
 
@@ -2591,6 +2623,7 @@ export class FennecSync {
       const schema = schemas.find((x) => x.name === s.collection);
       s.made = !!schema;
       s.fields = new Set(schema?.fields.map((f) => f.name));
+      s.apart = apartIn(schema);
     }
     this.#flushing = this.#queue.length > 0;
     if (this.#allSeeded) this.#resolveReady();
@@ -2961,6 +2994,8 @@ function normalizeShape(raw, url) {
     attempt: 0,
     made: false,
     fields: new Set(),
+    // Whether its rows go by the builder's text (`#putRows`).
+    apart: false,
     rebuild: false,
     fresh: false,
   };
