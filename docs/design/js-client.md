@@ -359,6 +359,78 @@ about 2 us in Node, the module 33 bytes, `make wasm-speed`'s `put` as it
 was. A `load` (`restore`, `openFile`) runs every live query, since the
 image's counter may be the cursor's. The client grew 1.9 KB gzip.
 
+## The server's rows
+
+Not an invariant, but what a change to how a replica writes rows keeps: a
+sync's replica writes the rows its streams hand it -- a seed's, a change's,
+and its own rows again when the server's schema changed (`#putRows` in
+`web/fennec.js`) -- as `put <c> $1`, a chunk of the rows the one parameter,
+where it wrote the builder's `insert`, a text of `{f: $n, ...}` documents, a
+parameter a value. Both are `put`, which writes over a held id -- the
+builder's `.insert()` sends `put` -- so a row that stayed keeps its vector's
+node, and what `#reconcile` and `#deleteLocal` do before the write, taking
+out the temporary rows a key matched and the ids a seed lacks, is as it was;
+a replica's collection declares a `@unique` field `@hash` either way
+(`schemaDDL`). The module reads a parameter's documents as a body's
+(`Database::document_of`): each member through `doc_field`, made its
+field's type by `set_field`, as `build_docs` makes a literal document's, and
+a list of numbers below the top of a parameter as written (`json::parse_value_at`),
+so the rows and the refusals are the same. `web/fennec.test.js` writes the
+rows a stream's text parses to both ways -- a whole number past 2^53, a json
+field's numbers and a wide one in it, a time, a point, a sparse vector, an
+`[int]` holding 16777217, a `[float]` holding 0.1, bytes, a vector holding
+`-0` and a subnormal, nulls, a field left out, `@unique`, `@hnsw` -- holds
+the two images to the byte, and the refusals of a held unique value, a
+vector of another dimension, an int past 64 bits, a field not there and a
+byte past 255 to their words.
+
+A whole number past 2^53 is the double `JSON.parse` read from the stream's
+line; `JSON.stringify` writes its shortest digits (2^60 as
+1152921504606847000), and the module reads such an int, at any depth of a
+parameter, as the double JavaScript held (`as_double` walks lists and
+objects, [indexes.md](indexes.md#sorted)), so the replica holds 2^60
+either way, as `web/fennec.sync.test.js` checks with every digit of it in a
+filter, a seed's and a change's, beside a vector's `f32`s read back as the
+server holds them.
+
+A collection with a `vector<N>` or `bytes` field keeps the builder's text
+(`APART`). The text hands a list of numbers that is a parameter of its own
+to the module as `f32`s (`vectorsApart`); inside `$1` a vector is digits the
+module reads a number at a time and rounds to an `f32` -- the same `f32`s,
+as JavaScript's and Rust's roundings of a double agree -- at a cost: rows of
+a 32-dim vector took 1.7x as long that way (a 300 000-row seed's 743 ms ->
+1 296), 128-dim 2.4x and 512 bytes a row 1.6x, where 4 and 8 dims went
+faster as a parameter and 16 as fast. `[int]` and `[float]` go by the parameter: the text
+hands them apart too, but a list of numbers keeps them as written, so the
+module makes a marked one the list of its numbers again and asks for an
+unmarked one as JSON (`Refused::Exact`), and rows of a 16-element `[int]`
+took 2.3x as long by the text, of a `[float]` 2.2x.
+
+A chunk is 500 rows, as the builder's text's was. It bounds what a statement
+holds at once, in the page's heap and in the module's memory, which never
+shrinks. Of 300 000 rows of a text, a float and a json field, 1 000 a
+statement was as fast as 500 and left the module at 38 MB against 29; 2 000
+to 10 000 were up to 2.3% slower, and the page's peak 27 to 61 MB higher.
+
+Measured in Node 26 on an M1 at a load of 2 of its 8 cores, a process
+a run, the median of three: a seed handed to `sync()` as one event of a
+stand-in `fetch`, from the event to `ready()`, `web/fennec.js` of `main`
+against the parameter's:
+
+| rows of | 10 000 | 100 000 | 300 000 | peak RSS at 300 000 | the module at 300 000 |
+|---|---|---|---|---|---|
+| a text, a float and a json field | 46 -> 29 ms | 295 -> 192 | 825 -> 550 | 373 -> 379 MB | 29 -> 29 MB |
+| a text, a float, an int, a time, a bool | 59 -> 39 | 400 -> 265 | 1 135 -> 767 | 460 -> 465 | 46 -> 29 |
+| a text and a point | 55 -> 27 | 357 -> 163 | 994 -> 468 | 368 -> 379 | 28 -> 29 |
+| a text and a 32-dim vector (the text kept) | 58 -> 58 | 390 -> 386 | 1 133 -> 1 122 | 886 -> 886 | 78 -> 78 |
+
+The peak RSS rose 5 to 11 MB at 300 000 rows -- the page's heap, which it
+gives back; the module's memory, which it keeps, was within 1 MB of
+`main`'s or 17 MB below it -- and went down below that, 217 -> 188 MB and
+238 -> 217 at 100 000. The write alone, apart from the event's parse and
+the rest of a seed, went 1.7x as fast for the first row type (748 -> 429
+ms at 300 000) and 2.6x for points (917 -> 353).
+
 ## Retries
 
 **A client sends a request again only where it cannot have run or may run
