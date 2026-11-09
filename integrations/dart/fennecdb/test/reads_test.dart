@@ -212,7 +212,12 @@ class Wire {
   final HttpServer _server;
   final String? target;
   final List<Scripted> script;
-  final HttpClient _client = HttpClient();
+  // The answer's bytes go back as they came: left to inflate a gzip answer,
+  // the client would hand on the inflated body under the server's
+  // `content-encoding: gzip`, which the app's client then fails to inflate
+  // ("Filter error, bad data") -- seen with the server made to gzip
+  // loopback answers (`--http-gzip-local`).
+  final HttpClient _client = HttpClient()..autoUncompress = false;
 
   /// Every request's head so far.
   final List<Map<String, String>> heads = [];
