@@ -591,3 +591,15 @@ those pages. The playground is now the studio in a frame of a fixed size,
 which moves nothing around it as it loads. With the fonts
 held back 600 ms the swap moves nothing but one text run of FennecQL's page
 at 390 px (0.0004), where a line breaks at another word.
+
+## Lighthouse
+
+`site/lighthouse/` runs Lighthouse CI over `site/dist` (home, docs index,
+`docs/fennecql`, playground): `make site`, then `npm ci && node run.mjs`
+there (`CHROME_PATH` when Chrome is not where Lighthouse looks). It serves
+the build itself on port 0, with the edge's compression and `_headers`.
+`lighthouserc.cjs` holds the budgets; CI runs it as `site-lighthouse.yml`
+for pull requests touching the site. Measured, every page scores 100 in all
+four categories. Accessibility, best practices and SEO are held at 100,
+the same on every run; performance and the timings, measured on a shared
+runner, a little under. A floor is raised, never lowered to pass.

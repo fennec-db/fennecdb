@@ -1,0 +1,13 @@
+{
+  "name": "fennecdb-site-lighthouse",
+  "private": true,
+  "type": "module",
+  "description": "Lighthouse CI over the built fennecdb site (site/dist); CI's `site-lighthouse` job",
+  "scripts": {
+    "lighthouse": "node run.mjs"
+  },
+  "devDependencies": {
+    "@lhci/cli": "0.16.0",
+    "lighthouse": "13.6.0"
+  }
+}
