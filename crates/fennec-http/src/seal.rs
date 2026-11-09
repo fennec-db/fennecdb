@@ -130,6 +130,13 @@ fn open_frames(key: &Key, bytes: &[u8]) -> io::Result<(Vec<u8>, usize, u64, bool
     let mut out = Vec::with_capacity(bytes.len());
     let (mut pos, mut index, mut last) = (MAGIC.len(), 0u64, false);
     while let Some(head) = bytes.get(pos..pos + HEAD) {
+        // Zeros from a frame's head to the end are a frame cut short: an
+        // append whose length reached the disk before its bytes, as a
+        // database's open reads them. A frame's head holds a random nonce,
+        // never zeros.
+        if head == [0; HEAD] && bytes[pos..].iter().all(|&b| b == 0) {
+            break;
+        }
         let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
         let Some(frame) = bytes.get(pos + HEAD..pos + HEAD + len + TAG) else {
             break;
@@ -235,6 +242,15 @@ mod tests {
         let cut = &file[..file.len() - 3];
         let (plain, end, frames) = open_appended(&k, cut).unwrap();
         assert_eq!((plain.len(), end, frames), (200, whole, 5));
+        // Zeros to the end, as an append whose length reached the disk
+        // before its bytes leaves them, are a frame cut short; zeros with a
+        // byte after them are a frame that does not open.
+        let mut zeros = file[..whole].to_vec();
+        zeros.resize(whole + 4096, 0);
+        let (plain, end, frames) = open_appended(&k, &zeros).unwrap();
+        assert_eq!((plain.len(), end, frames), (200, whole, 5));
+        zeros.push(1);
+        assert!(open_appended(&k, &zeros).is_err());
         // Sealed whole, a file is no appended one.
         assert!(open_appended(&k, &seal_whole(&k, b"x").unwrap()).is_err());
     }

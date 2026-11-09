@@ -196,6 +196,27 @@ install() {
     gssh 'bcdedit /enum {default}' | tr -d '\r' | grep -E 'bootstatuspolicy|recoveryenabled' | sed 's/^/BCD /' || true
 }
 
+# What the file held when a server could not open it, into a log the run
+# uploads: its length, and its last 64 KiB and the 4 KiB around the byte the
+# error names ("... at <n>") as hex (dump.ps1). Run 42533808035 kept no file
+# and said "unknown record kind 0" alone. Never fails the step itself.
+file_dump() {
+    local tag=$1
+    local out=$VM/server-$tag-file.log at name
+    at=$(tr -d '\r' < "$VM/server-$tag.log" | grep -oE ' at [0-9]+' | tail -1 | grep -oE '[0-9]+' || true)
+    {
+        gscp "$HERE/dump.ps1" Administrator@127.0.0.1:dump.ps1 &&
+            gssh "powershell -NoProfile -ExecutionPolicy Bypass -File dump.ps1 ${at:+-At $at}" | tr -d '\r'
+        for name in tail at; do
+            gscp "Administrator@127.0.0.1:$name.bin" "$VM/$name.bin" 2>/dev/null || continue
+            echo "== $name.bin"
+            od -A d -t x1z "$VM/$name.bin"
+            rm -f "$VM/$name.bin"
+        done
+    } > "$out" 2>&1 || true
+    echo "FILE what the server found: $out"
+}
+
 # The server over a session of its own, its output the host's file: the
 # session ends with QEMU. The token comes from the file the host copied in,
 # never the command line (argv shows up in a process listing) nor the log.
@@ -210,6 +231,7 @@ serve() {
         if ! kill -0 "$sp" 2>/dev/null; then
             echo "SERVER $tag exited before it answered"
             tr -d '\r' < "$VM/server-$tag.log"
+            file_dump "$tag"
             return 1
         fi
         code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8080/_health || true)

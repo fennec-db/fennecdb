@@ -324,7 +324,54 @@ whole, so a record cut short inside it -- or an image longer than the file --
 is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
 every record after it. A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
-append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
+append in flight looks torn from outside. Zeros to the end of the
+file are a torn tail too when they start at a record's head (`zero_tail`),
+cut the same way: Windows power-cut run 42533808035, its disk's cache lost
+at the cut, came back with a file its server refused, "unknown record kind
+0". NTFS journals a file's length, not its bytes, so an append's new length
+can reach the disk before the bytes do -- a flush of the volume's log
+commits it, and the `.beside` image of the compact in flight, flushed
+beside the file, may have been one -- and after the cut the append reads as
+zeros, bytes the file claims and the disk never took (ext4's
+`data=writeback` can do the same). The run kept no file, so this is the
+cause read from the error, not seen. Such an append was never answered as
+durable: `--sync always` answers after the file's own `FlushFileBuffers`,
+which writes its bytes. No kind is 0, so a zero head is no record; the
+zeros are cut only where they run to the end and start at that head
+itself: at the image's end (`body_end`; an image is renamed into place
+whole, whatever its last byte), or after a byte that is not zero. A zero
+byte before the head may be the previous record's own last byte -- a
+document ending in a 0 or a `false` -- or the disk's zeros starting inside
+that record: its length fits the file, so it reads as whole, and the
+rule's first version (#559 as first pushed), which cut any zero head with
+zeros to the end, opened a file whose 8 000-byte text, zeroed from the
+4 KiB page after its head, read back as 4 001 NULs. Neither can be told
+from the other, so both are refused; so are zeros then any other byte, and
+a zero head inside the image. An unknown kind's refusal names the byte it starts
+at, the image's too, so the next such failure says where.
+
+What this does not cover: a record whose length fits the file but whose
+later bytes are the disk's zeros loads as it reads wherever no zero head
+follows it -- the zeros ending at its own end, whole records after it, or
+at the file's end. So it was before the rule too: nothing in a record
+tells its own bytes from the disk's. That takes a checksum on each record,
+a format change not made yet: what it costs each write, and an open that
+checks it without reading the whole file, are to be measured first.
+
+The archive judges its segments' heads with the same `zero_tail`
+(`archive::entries`): a zero tail is cut where 11 zeros were read as a
+write each, and any other zero head is refused once, where a run with a
+byte after it was scanned again at each 11 zeros (a MiB of them, 9.8 s). A
+sealed segment's frames (`seal::open_frames`) cut a frame head of zeros to
+the end as a frame cut short; zeros inside a frame fail its tag. Judged
+only at a head that reads as no kind, so a walk's known records pay
+nothing; the browser module grew 369 bytes (845 749 to 846 118): 259 for
+the cut and the refusals' offsets, 31 of them the image's, and 110 for the
+byte before a zero head and `Walk`'s `edge` (a check that indexes the byte
+before took 140, one that sets aside `Walk` and judges the head in the load
+131).
+
+The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again,
 and in an image carries behind the counter the index of the data record right
 after it (`Store::image_index`) -- each live document's id, payload length and

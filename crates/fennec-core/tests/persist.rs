@@ -203,6 +203,233 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
     }
 }
 
+/// Zeros from a record's head to the end are a torn tail too: an append
+/// whose length reached the disk before its bytes, as Windows power-cut run
+/// 42533808035 left one ("unknown record kind 0"). Cut as a torn tail is,
+/// mapped or read into memory, after a tail or right after the image; a
+/// read-only open reads up to them and cuts nothing.
+#[cfg(feature = "std-fs")]
+#[test]
+fn zeros_to_the_end_are_cut_as_a_torn_tail() {
+    use std::io::Write;
+    for zeros in [1usize, 4096, 1 << 20] {
+        for (way, tail) in [("mapped", true), ("in-memory", true), ("image", false)] {
+            let tag = format!("zeros-{zeros}-{way}");
+            let (dir, path) = tmp_path(&tag);
+            let open = |p: &std::path::Path| match way {
+                "in-memory" => fennec_core::fs::open_in_memory(p),
+                _ => fennec_core::fs::open(p),
+            };
+            {
+                let mut db = open(&path).expect("open");
+                run(&mut db, "create collection t (a text)");
+                run(&mut db, r#"put t {a: "one"}"#);
+                db.checkpoint().expect("checkpoint");
+                if tail {
+                    run(&mut db, r#"put t {a: "two"}"#);
+                }
+                db.sync().expect("sync");
+            }
+            let rows: Vec<u64> = (1..=1 + tail as u64).collect();
+            let whole = std::fs::metadata(&path).unwrap().len();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&vec![0; zeros]).unwrap();
+            drop(f);
+            let len = || std::fs::metadata(&path).unwrap().len();
+            {
+                let mut db = fennec_core::fs::open_read_only(&path).expect("read-only open");
+                assert_eq!(ids(&mut db, "t"), rows, "{tag}");
+            }
+            assert_eq!(len(), whole + zeros as u64, "{tag}: the read-only open cut");
+            {
+                let mut db = open(&path).expect("the open after the cut");
+                assert_eq!(ids(&mut db, "t"), rows, "{tag}");
+                assert_eq!(len(), whole, "{tag}");
+                run(&mut db, r#"put t {a: "after"}"#);
+                db.sync().expect("sync");
+            }
+            let mut db = open(&path).expect("the open after that");
+            let mut want = rows.clone();
+            want.push(rows.len() as u64 + 1);
+            assert_eq!(ids(&mut db, "t"), want, "{tag}");
+            drop(db);
+            cleanup(dir, path);
+        }
+    }
+}
+
+/// Zeros with anything after them are no torn tail, and zeros inside the
+/// checkpoint image are damage, as a record cut short there is: each
+/// refuses the open, naming the byte, and leaves the file as it was.
+#[cfg(feature = "std-fs")]
+#[test]
+fn zeros_before_a_byte_or_inside_the_image_refuse_the_open() {
+    let (dir, path) = tmp_path("zeros-refused");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "one"}"#);
+        run(&mut db, r#"put t {a: "two"}"#);
+        db.checkpoint().expect("checkpoint");
+        run(&mut db, r#"put t {a: "three"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    let refused = |bad: &[u8], says: &str| {
+        std::fs::write(&path, bad).unwrap();
+        let err = fennec_core::fs::open(&path)
+            .err()
+            .unwrap_or_else(|| panic!("opened, where it {says}"));
+        assert!(err.to_string().contains(says), "{err}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bad,
+            "the open wrote to the file"
+        );
+    };
+    for zeros in [1usize, 4096, 1 << 20] {
+        let mut bad = good.clone();
+        bad.resize(good.len() + zeros, 0);
+        bad.push(3);
+        refused(&bad, &format!("unknown record kind 0 at {}", good.len()));
+    }
+    // The image's data record, past the counter header: zeroed alone, the
+    // tail's record after it; zeroed to the end, inside the image still --
+    // or, after a zero byte, a head that is no kind.
+    let mut pos = 8 + 17;
+    let (data, end) = loop {
+        let kind = good[pos];
+        let mut p = pos + 1;
+        let _cid = varint(&good, &mut p);
+        let len = varint(&good, &mut p) as usize;
+        if kind == 3 {
+            break (pos, p + len);
+        }
+        pos = p + len;
+    };
+    let mut bad = good.clone();
+    bad[data..end].fill(0);
+    refused(&bad, &format!("unknown record kind 0 at {data}"));
+    let mut bad = good.clone();
+    bad[data..].fill(0);
+    let says = match good[data - 1] {
+        0 => format!("unknown record kind 0 at {data}"),
+        _ => format!("checkpoint image at {data}"),
+    };
+    refused(&bad, &says);
+
+    std::fs::write(&path, &good).unwrap();
+    let mut db = fennec_core::fs::open(&path).expect("the mended file");
+    assert_eq!(ids(&mut db, "t"), vec![1, 2, 3]);
+    drop(db);
+    cleanup(dir, path);
+}
+
+/// Zeros from a 4 KiB boundary inside a record to the end, as a power cut
+/// leaves a record whose head and first page reached the disk: the
+/// record's length still fits, so it reads as whole, and the zero head
+/// after it follows a zero byte -- the disk's, not a record's own. Cut
+/// there, the open went on and read the big text back as NULs; it is
+/// refused, mapped and in memory, and the file left as it was.
+#[cfg(feature = "std-fs")]
+#[test]
+fn zeros_from_inside_a_record_refuse_the_open() {
+    let (dir, path) = tmp_path("zeros-inside");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, &format!(r#"put t {{a: "{}"}}"#, "x".repeat(8000)));
+        run(&mut db, r#"put t {a: "small"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    // The big record, by its heads: no image, so the walk is plain.
+    let mut pos = 8;
+    let (big, next) = loop {
+        let mut p = pos + 1;
+        let _cid = varint(&good, &mut p);
+        let len = varint(&good, &mut p) as usize;
+        if len > 8000 {
+            break (pos, p + len);
+        }
+        pos = p + len;
+    };
+    let page = (big / 4096 + 1) * 4096;
+    assert!(
+        big + 16 < page && page < next && next < good.len(),
+        "{big} {page} {next}"
+    );
+    let mut bad = good.clone();
+    bad[page..].fill(0);
+    for way in ["mapped", "in-memory"] {
+        std::fs::write(&path, &bad).unwrap();
+        let err = match way {
+            "mapped" => fennec_core::fs::open(&path),
+            _ => fennec_core::fs::open_in_memory(&path),
+        }
+        .err()
+        .unwrap_or_else(|| panic!("{way}: opened a record with the disk's zeros in it"));
+        let says = format!("unknown record kind 0 at {next}");
+        assert!(err.to_string().contains(&says), "{way}: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bad, "{way}: the open wrote");
+    }
+    std::fs::write(&path, &good).unwrap();
+    let mut db = fennec_core::fs::open(&path).expect("the mended file");
+    assert_eq!(ids(&mut db, "t"), vec![1, 2]);
+    drop(db);
+    cleanup(dir, path);
+}
+
+/// A record may end in a zero byte of its own -- here an int 0 -- and a zero
+/// head after one cannot be told from the disk's zeros starting inside it:
+/// cut only at the image's end, which a whole image is renamed into place
+/// to be whatever its last byte; in the tail, refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_zero_head_after_a_zero_byte_is_cut_only_at_the_image_end() {
+    use std::io::Write;
+    for way in ["mapped", "in-memory"] {
+        let (dir, path) = tmp_path(&format!("zero-byte-{way}"));
+        let open = |p: &std::path::Path| match way {
+            "mapped" => fennec_core::fs::open(p),
+            _ => fennec_core::fs::open_in_memory(p),
+        };
+        let zeros = |p: &std::path::Path| {
+            let mut f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+            f.write_all(&[0; 4096]).unwrap();
+        };
+        {
+            let mut db = open(&path).expect("open");
+            run(&mut db, "create collection t (n int)");
+            run(&mut db, "put t {n: 0}");
+            db.checkpoint().expect("checkpoint");
+            db.sync().expect("sync");
+        }
+        let image = std::fs::read(&path).unwrap();
+        assert_eq!(image.last(), Some(&0), "{way}: the image's last byte");
+        zeros(&path);
+        {
+            let mut db = open(&path).expect("zeros at the image's end");
+            assert_eq!(ids(&mut db, "t"), vec![1], "{way}");
+            assert_eq!(std::fs::read(&path).unwrap(), image, "{way}: not cut");
+            run(&mut db, "put t {n: 0}");
+            db.sync().expect("sync");
+        }
+        let tail = std::fs::read(&path).unwrap();
+        assert_eq!(tail.last(), Some(&0), "{way}: the tail's last byte");
+        zeros(&path);
+        let bad = std::fs::read(&path).unwrap();
+        let err = open(&path).err().expect("a zero head after a zero byte");
+        let says = format!("unknown record kind 0 at {}", tail.len());
+        assert!(err.to_string().contains(&says), "{way}: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bad, "{way}: the open wrote");
+        cleanup(dir, path);
+    }
+}
+
 /// A record cut short inside the checkpoint image is not a crash's torn
 /// tail -- an image is written beside the file and renamed over it whole --
 /// but a damaged or truncated file. The open refuses it and leaves every

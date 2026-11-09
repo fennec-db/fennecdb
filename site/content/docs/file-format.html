@@ -64,7 +64,22 @@ sit close together, and a small gap takes a byte.</p>
 
 <p>A crash in the middle of an append leaves the last record cut short, in its
 header or its body: the open loads everything before it and cuts it off the
-file, so there is no separate recovery step after a crash.</p>
+file, so there is no separate recovery step after a crash. Zeros to the
+end of the file are cut the same way when they start at a record's head:
+after a power cut, NTFS (or ext4 with <code>data=writeback</code>) can give
+back a file whose length grew while the append's bytes never reached the
+disk. No record kind is 0, so zeros right after a record that ends in a
+byte other than zero, or right after the checkpoint image, are read as
+such an append, one never acknowledged as durable. Zeros right after a
+zero byte may instead have started inside the record before, which the
+open cannot tell from that record's own last byte, and zeros followed by
+any other byte are damage: the open refuses both, naming the byte where
+the zero head is (<code>unknown record kind 0 at 123456</code>).</p>
+
+<p>Records carry no checksum yet. A record whose length fits the file but
+whose later bytes the disk lost in a power cut reads back with zeros in
+place of them wherever no zero head follows it. A checksum on each record
+is a format change still to be measured.</p>
 
 <p>On Linux a sync goes to <code>&lt;file&gt;.sync</code> beside the
 file: a log of fixed size holding what the file took since its last own
