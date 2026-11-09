@@ -658,6 +658,17 @@ fn verify_says_what_an_archive_can_restore() {
     let v = Archive::new(&torn).unwrap().verify().unwrap();
     assert!(v.torn > 0 && v.last < p.seq(), "{v:?}");
 
+    // Zeros after its last record, an append whose length reached the disk
+    // before its bytes: a torn tail, every write before it there. Read as
+    // records, each 11 zeros were a write.
+    let zeros = copy_of(&arch, &d.join("zeros"));
+    let last = named(&zeros, "writes-").pop().unwrap();
+    let mut bytes = std::fs::read(&last).unwrap();
+    bytes.resize(bytes.len() + 4096, 0);
+    std::fs::write(&last, bytes).unwrap();
+    let v = Archive::new(&zeros).unwrap().verify().unwrap();
+    assert_eq!((v.last, v.torn), (p.seq(), 4096), "{v:?}");
+
     // Cut short before the last segment's end: no restore passes it.
     let cut = copy_of(&arch, &d.join("cut"));
     let first = named(&cut, "writes-").remove(0);

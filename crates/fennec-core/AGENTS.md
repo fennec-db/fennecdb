@@ -45,9 +45,12 @@ reached `ROOM_SHARE` of that room or the process faults
 `[kind][collection-id][length][body]`, its length read even when empty;
 `head` writes a head (the counter's `image_head` aside), `record_at` reads
 it, `Walk` walks them. A torn tail is cut on open (on Windows by a second
-open, the first's views gone: `fs::windows::cut_and_open`), a torn image
-refused, and the file only grows; a tool that only looks opens with
-`fs::open_read_only`, which cuts, creates and writes nothing. A new record
+open, the first's views gone: `fs::windows::cut_and_open`), zeros from a
+record's head to the end one too (`whole_record`: a length the disk took
+before the bytes), zeros then any other byte refused, a torn image
+refused, and an unknown kind's refusal names its byte; the file only
+grows; a tool that only looks opens with `fs::open_read_only`, which
+cuts, creates and writes nothing. A new record
 kind, index kind, type tag or graph version is a number a binary from
 before refuses (a graph's, rebuilds from), never one it would misread.
 

@@ -221,6 +221,13 @@ fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
     let mut out = Vec::new();
     let mut pos = LOG_MAGIC.len();
     while pos + 8 < data.len() {
+        // Zeros from a record's head to the end are a torn tail, as a
+        // database's open reads them (`whole_record`): an append whose
+        // length reached the disk before its bytes. No kind is 0: read on,
+        // every 11 of them were a write of its own.
+        if data[pos + 8] == 0 && data[pos + 8..].iter().all(|&b| b == 0) {
+            break;
+        }
         let time = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
         let Some(len) = record_len(&data[pos + 8..]) else {
             break;

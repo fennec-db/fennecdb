@@ -611,8 +611,9 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
 
 /// The whole records of a file, from `pos`: what a load, a repoint and the
 /// search for the last graphs each walk. It stops at the end or at a record
-/// cut short -- `torn`, `pos` where it starts -- which is the walker's to
-/// judge: a crash's torn tail, or damage inside an image.
+/// cut short or zeros to the end ([`whole_record`]) -- `torn`, `pos` where
+/// it starts -- which is the walker's to judge: a crash's torn tail, or
+/// damage inside an image. A kind it does not know it refuses.
 struct Walk<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -972,12 +973,24 @@ impl Block {
 
 /// Whether the record at `at` is all there, rather than cut short where the
 /// bytes end -- in its header or its body -- as a crash in the middle of an
-/// append leaves the last one. Only the kinds written with a length are
-/// judged: a kind this version does not know is the loader's to refuse, and
-/// the counter header is only ever written by a rewrite, whole or not at all.
+/// append leaves the last one. The counter header is only ever written by
+/// a rewrite, whole or not at all; a kind this version does not know is
+/// refused here, by where it is.
+///
+/// Zeros from a head to the end are a torn tail too. No kind is 0: they
+/// are an append whose length reached the disk before its bytes -- NTFS
+/// journals a file's length, not its bytes, so a flush of the volume's
+/// log, another file's included, can commit a length whose bytes a power
+/// cut then loses (read from Windows power-cut run 42533808035, which
+/// kept no file; ext4's `data=writeback` can do the same). Never a
+/// durable write's: `--sync always` answers once the file's own flush
+/// returned, which writes its bytes. Zeros followed by anything else are
+/// no such tail, and refused. Judged only once a head reads as no kind: a
+/// walk's known records pay nothing.
 fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
+    let kind = bytes[at];
     if !matches!(
-        bytes[at],
+        kind,
         REC_CREATE
             | REC_DROP
             | REC_DATA
@@ -991,7 +1004,11 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
             | REC_SPILL
             | REC_LAND
     ) {
-        return Ok(true);
+        return match kind {
+            REC_SEQ => Ok(true),
+            0 if bytes[at..].iter().all(|&b| b == 0) => Ok(false),
+            _ => Err(unknown_kind(kind, at)),
+        };
     }
     let mut pos = at + 1;
     let mut len = 0;
@@ -1004,6 +1021,14 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
         };
     }
     Ok(len <= (bytes.len() - pos) as u64)
+}
+
+/// A record of a kind this version does not know, by the byte it starts
+/// at: the one thing the next such failure is read from once the file is
+/// gone (the power-cut run's said "unknown record kind 0" alone).
+#[cold]
+fn unknown_kind(kind: u8, at: usize) -> Error {
+    Error::Corrupt(format!("unknown record kind {kind} at {at}"))
 }
 
 /// Where the last graph record of each index starts, by collection id and
@@ -5763,7 +5788,7 @@ impl Database {
                         ));
                     }
                 }
-                other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
+                other => return Err(unknown_kind(other, r.at)),
             }
         }
         if walk.torn {
@@ -5772,11 +5797,12 @@ impl Database {
             // file and renamed over it whole. One cut short inside it is a
             // damaged or truncated file, and cutting the file there -- as a
             // torn tail is cut -- destroyed every record after it, intact
-            // ones included.
+            // ones included. Zeros to the end inside it are the same damage.
             if walk.pos < body_end {
-                return Err(Error::Corrupt(
-                    "a record of the checkpoint image runs past the end of the file".into(),
-                ));
+                return Err(Error::Corrupt(format!(
+                    "a record of the checkpoint image at {} runs past the end of the file",
+                    walk.pos
+                )));
             }
             whole = walk.pos;
         }

@@ -324,7 +324,29 @@ whole, so a record cut short inside it -- or an image longer than the file --
 is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
 every record after it. A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
-append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
+append in flight looks torn from outside. Zeros from a record's head to the
+end of the file are a torn tail too (`whole_record`), cut the same way:
+Windows power-cut run 42533808035, its disk's cache lost at the cut, came
+back with a file its server refused, "unknown record kind 0". NTFS journals
+a file's length, not its bytes, so an append's new length can reach the
+disk before the bytes do -- a flush of the volume's log commits it, and the
+`.beside` image of the compact in flight, flushed beside the file, may have
+been one -- and after the cut the append reads as zeros, bytes the file
+claims and the disk never took (ext4's `data=writeback` can do the same). The run kept
+no file, so this is the cause read from the error, not seen. Such an
+append was never answered as durable: `--sync always` answers after the
+file's own `FlushFileBuffers`, which writes its bytes. Only zeros to the
+end: no kind is 0, so a zero head is no record, and zeros then any other
+byte are no append the disk lost the bytes of but damage, refused, as is a
+zero head before the image's `body_end`. An unknown kind's refusal names
+the byte it starts at, the image's too, so the next such failure says
+where. The archive reads its segments so (`archive::entries`, a zero tail
+cut where 11 zeros were read as a write each, and `seal::open_frames`, a
+frame head of zeros to the end a frame cut short). A record whose head and
+some of its body landed, zeros after, is still refused: its length cannot
+tell its own zeros from the disk's. Judged only at a head that reads as no
+kind, so a walk's known records pay nothing; the browser module grew 259
+bytes (845 749 to 846 008), 31 of them the image's byte. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again,
 and in an image carries behind the counter the index of the data record right
 after it (`Store::image_index`) -- each live document's id, payload length and
