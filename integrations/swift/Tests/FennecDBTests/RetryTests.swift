@@ -39,6 +39,33 @@
             #expect(seen[1].at - seen[0].at >= 0.3)
         }
 
+        /// A 429 that names its wait only in `Retry-After` is sent again
+        /// after that wait.
+        @Test func a429NamingItsWaitOnlyInTheHeaderIsSentAgainAfterIt() async throws {
+            let s = try Stub(.answer(429, #"{"error":"slow down"}"#, ["retry-after": "1"]), .answer(200, wrote))
+            defer { s.close() }
+            #expect(try await Fennec.connect(url: s.url).execute("put notes {n: 1}") == 1)
+            let seen = s.seen
+            #expect(seen.count == 2)
+            #expect(seen[1].at - seen[0].at >= 1.0)
+        }
+
+        /// Cancelled in the pause before a retry, a request ends there and
+        /// nothing goes again.
+        @Test func aCancelInThePauseBeforeARetryEndsTheRequest() async throws {
+            let s = try Stub(.answer(503, #"{"error":"busy","retry_after_ms":5000}"#), .answer(200, "[]"))
+            defer { s.close() }
+            let db = Fennec.connect(url: s.url)
+            let (paused, signal) = AsyncStream<Void>.makeStream()
+            db.pausing = { _ in signal.yield() }
+            let task = Task { try await db.from("docs").rows() }
+            for await _ in paused { break }
+            task.cancel()
+            let e = await failure { try await task.value }
+            #expect(e is CancellationError)
+            #expect(s.seen.count == 1)
+        }
+
         /// A connection refused sent nothing: any request goes again, a
         /// write without a key too.
         @Test func aConnectionRefusedIsTriedAgainWhateverTheRequest() async throws {

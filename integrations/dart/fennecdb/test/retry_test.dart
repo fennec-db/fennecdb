@@ -167,6 +167,18 @@ void main() {
     expect(s.seen[1].at - s.seen[0].at, greaterThanOrEqualTo(const Duration(milliseconds: 300)));
   });
 
+  // A 429 that names its wait only in `Retry-After` is sent again after it.
+  test('a 429 naming its wait only in the header is sent again after it', () async {
+    final s = await Stub.start([
+      Answer(429, '{"error":"slow down"}', {'retry-after': '1'}),
+      Answer(200, wrote),
+    ]);
+    addTearDown(s.close);
+    expect(await Fennec.connect(s.url).execute('put notes {n: 1}'), 1);
+    expect(s.seen, hasLength(2));
+    expect(s.seen[1].at - s.seen[0].at, greaterThanOrEqualTo(const Duration(seconds: 1)));
+  });
+
   // A connection refused sent nothing: any request goes again, a write
   // without a key too. The first connect is sent to a port that refuses --
   // the local end of a live connection of the test's own, so no other can

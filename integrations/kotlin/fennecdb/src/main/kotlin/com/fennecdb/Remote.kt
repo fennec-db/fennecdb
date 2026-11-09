@@ -484,7 +484,7 @@ class FennecRemote private constructor(
         // Each wait for a piece of the answer -- its head, then each between
         // the pieces of its body -- not the whole: a long answer is read for
         // as long as it comes. A held request is answered once it writes, or
-        // at the end of its wait.
+        // at the end of its wait: the head's wait alone, reset once it is in.
         c.readTimeout = (shared.timeout + (held ?: 0L)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         // A request that must go once goes with its length fixed. Its body
         // buffered, the JVM's HttpURLConnection sends a POST again on its own
@@ -514,6 +514,9 @@ class FennecRemote private constructor(
     private fun exchange(c: HttpURLConnection, payload: ByteArray): Reply {
         c.outputStream.use { it.write(payload) }
         val status = c.responseCode
+        // The head is in: a held request's wait is over, each gap in the body
+        // is bounded by the timeout alone.
+        c.readTimeout = shared.timeout.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val body = (if (status >= 400) c.errorStream else c.inputStream)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: ""
         parsing?.invoke()
         return Reply(status, runCatching { if (body.isEmpty()) null else Json.parse(body) }.getOrNull(), c)

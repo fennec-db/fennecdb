@@ -1,5 +1,9 @@
 package com.fennecdb
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.BufferedInputStream
 import java.io.IOException
@@ -48,6 +52,33 @@ class RetryTest {
             assertEquals(1L, Fennec.connect(s.url).runBlocking("put notes {n: 1}").affected)
             assertEquals(2, s.seen.size)
             assertTrue(s.seen[1].at - s.seen[0].at >= 300_000_000L)
+        }
+    }
+
+    /** A 429 that names its wait only in `Retry-After` is sent again after that wait. */
+    @Test
+    fun a429NamingItsWaitOnlyInTheHeaderIsSentAgainAfterIt() = runBlocking<Unit> {
+        val slow = Stub.Act.Answer(429, """{"error":"slow down"}""", mapOf("retry-after" to "1"))
+        Stub(slow, Stub.Act.Answer(200, wrote)).use { s ->
+            assertEquals(1L, Fennec.connect(s.url).execute("put notes {n: 1}"))
+            assertEquals(2, s.seen.size)
+            assertTrue(s.seen[1].at - s.seen[0].at >= 1_000_000_000L)
+        }
+    }
+
+    /** Cancelled in the pause before a retry, a request ends there and nothing goes again. */
+    @Test
+    fun aCancelInThePauseBeforeARetryEndsTheRequest() = runBlocking<Unit> {
+        val busy = Stub.Act.Answer(503, """{"error":"busy","retry_after_ms":5000}""")
+        Stub(busy, Stub.Act.Answer(200, "[]")).use { s ->
+            val db = Fennec.connect(s.url)
+            val paused = CompletableDeferred<Unit>()
+            db.pausing = { paused.complete(Unit) }
+            val job = launch(Dispatchers.IO) { db.from("docs").rows() }
+            paused.await()
+            job.cancelAndJoin()
+            assertTrue(job.isCancelled)
+            assertEquals(1, s.seen.size)
         }
     }
 

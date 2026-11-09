@@ -488,7 +488,7 @@ class FennecRemote {
   /// A connect past `HttpClient.connectionTimeout`, which it says as a
   /// [SocketException] of no OS error: the connection's own timeout.
   static bool _timedOut(Object e) =>
-      e is SocketException && e.osError == null && e.message.startsWith('HTTP connection timed out');
+      e is SocketException && (e.osError == null && e.message.startsWith('HTTP connection timed out') || e.message.contains('timed out'));
 
   /// A connection refused: it sent nothing.
   static bool _refused(Object e) => e is SocketException && e.osError?.errorCode == _refusedCode;

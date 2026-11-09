@@ -261,7 +261,9 @@ public final class FennecRemote: @unchecked Sendable {
         req.timeoutInterval = timeout
         if let held, held > 0 {
             req.setValue(String(Int(held * 1000)), forHTTPHeaderField: "fennec-wait")
-            // Held that long before the first byte of its answer.
+            // Held that long before the first byte of its answer: the head's
+            // wait alone (`read`), each gap in the body is bounded by
+            // `timeout` again.
             req.timeoutInterval = timeout + held
         }
         // A read near: marked for the tenant's read replica in the router's
@@ -332,7 +334,7 @@ public final class FennecRemote: @unchecked Sendable {
             var answer: (Data, HTTPURLResponse?)?
             var failure: Error?
             do {
-                let (data, response) = try await session.data(for: req)
+                let (data, response) = try await read(req)
                 let http = response as? HTTPURLResponse
                 if let s = http?.statusCode, s == 503 || s == 429 {
                     let v = try? Value.parse(bytes: Array(data))
@@ -347,6 +349,7 @@ public final class FennecRemote: @unchecked Sendable {
                 let code = (error as? URLError)?.code
                 // The connection's own timeout: a `compact`, a long read may
                 // still be running, and three tries ran a read three times.
+                if code == .cancelled { throw FennecRemote.unreached(error) }
                 if code == .timedOut || !(twice || code == .cannotConnectToHost) { throw FennecRemote.unreached(error) }
                 failure = error
             }
@@ -362,6 +365,37 @@ public final class FennecRemote: @unchecked Sendable {
             pausing?(w)
             try await Task.sleep(nanoseconds: UInt64(w * 1_000_000_000))
             n += 1
+        }
+    }
+
+    /// The answer, the head waited for as long as `req` says (a held
+    /// write's wait on top of `timeout`), then each gap between the pieces
+    /// of its body for `timeout` alone -- URLSession has one interval for
+    /// both, so the body's gaps are watched here.
+    private func read(_ req: URLRequest) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: req)
+        let gap = timeout
+        let beat = Beat()
+        return try await withThrowingTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                var data = Data()
+                for try await b in bytes {
+                    data.append(b)
+                    beat.touch()
+                }
+                return data
+            }
+            group.addTask {
+                while true {
+                    try await Task.sleep(nanoseconds: UInt64(min(gap, 0.05) * 1_000_000_000))
+                    if beat.idle >= gap { throw URLError(.timedOut) }
+                }
+            }
+            defer { group.cancelAll() }
+            while let r = try await group.next() {
+                if let r { return (r, response) }
+            }
+            throw URLError(.unknown)
         }
     }
 
@@ -530,5 +564,21 @@ extension Fennec {
         retry: FennecRemote.Retry? = FennecRemote.Retry()
     ) -> FennecRemote {
         FennecRemote(url: url, token: token, reads: reads, timeout: timeout, retry: retry)
+    }
+}
+
+/// When the last piece of a body came, for `FennecRemote.read`'s watch.
+private final class Beat: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = ProcessInfo.processInfo.systemUptime
+    func touch() {
+        lock.lock()
+        last = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
+    var idle: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return ProcessInfo.processInfo.systemUptime - last
     }
 }
