@@ -553,6 +553,10 @@ for (;;) {
   <li><b>Exactly once.</b> A lease that lapses under a slow worker hands
     its job to another; the work's own check makes the second run
     harmless.</li>
+  <li><b>A process across services.</b> A queue is one database's. Steps
+    in several, each undone if a later one fails, are <a
+    href="/docs/microservices#sagas">a saga</a>, whose failing steps end
+    in the dead letters above.</li>
   <li><b>Claims side by side.</b> They are writes, so each waits for the
     one before: tens of thousands a second, not millions.</li>
 </ul>
