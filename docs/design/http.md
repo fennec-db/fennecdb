@@ -977,7 +977,12 @@ the identity's) and an archive's or a backup's pages
 each event deflated alone and ended with a sync flush, so its client reads
 it whole as it arrives and the stream keeps nothing between events but
 the member's CRC and length. The deflate is fennecdb's own (RFC 1951): no
-crate, not even a test's.
+crate, not even a test's. The global entry (a Cloudflare Worker) passes
+such an answer on with its `Content-Encoding` and `Content-Length` as the
+router wrote them: checked under a real workerd, whose `fetch()` decodes the
+body for the Worker and re-encodes it for a client taking gzip, so the
+client reads the origin's bytes, a length of its own and each stream event
+as it is flushed (`entry.test.js`).
 
 ### What is compressed, and for whom
 

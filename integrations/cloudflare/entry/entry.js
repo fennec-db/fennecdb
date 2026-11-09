@@ -747,6 +747,10 @@ async function send(request, url, regions, cfg, state, tenant) {
 
 /** The answer as the client is given it: the router's, less its hops, its marks and any cookie. */
 export function passed(answer) {
+  // A router's `Content-Encoding: gzip` and its `Content-Length` go on as
+  // they are: checked under workerd (entry.test.js, "relays a router's gzip
+  // answers"), the client gets the origin's bytes with a length its own and
+  // each flushed SSE event as it is written, workerd re-encoding the body.
   const out = new Response(answer.body, answer);
   for (const h of ANSWER_DROPPED) out.headers.delete(h);
   return out;
