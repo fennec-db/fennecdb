@@ -138,6 +138,9 @@ test('a request goes on less its hops, the marks and every address a client clai
       Authorization: 'Bearer t',
       'Idempotency-Key': 'k',
       'Fennec-Wait': '100',
+      // The client's codings go on: the node compresses for them, and
+      // the runtime encodes for the client by the answer's.
+      'Accept-Encoding': 'gzip, br',
       traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
       'Fennec-Router': '9.9.9.9 forged',
       'Fennec-Global': '1',
@@ -153,6 +156,7 @@ test('a request goes on less its hops, the marks and every address a client clai
     authorization: 'Bearer t',
     'idempotency-key': 'k',
     'fennec-wait': '100',
+    'accept-encoding': 'gzip, br',
     traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
     'fennec-home': '1',
     'fennec-client': client,
@@ -178,6 +182,7 @@ test("an answer goes back less its hops, the router's marks and any cookie Acces
       ['Fennec-Seq', '7'],
       ['Set-Cookie', 'CF_Authorization=eyJ.jwt.sig; Path=/; Secure; HttpOnly'],
       ['Set-Cookie', 'other=1'],
+      ['Vary', 'Accept-Encoding'],
     ],
   });
   const out = passed(answer);
@@ -186,6 +191,11 @@ test("an answer goes back less its hops, the router's marks and any cookie Acces
   assert.equal(out.headers.get('fennec-verified'), null);
   assert.equal(out.headers.get('fennec-seq'), '7');
   assert.equal(out.headers.get('content-type'), 'application/json');
+  // What the node's coding varies by goes on with the answer, and the
+  // coding itself, which Cloudflare's runtime encodes the body by.
+  assert.equal(out.headers.get('vary'), 'Accept-Encoding');
+  const zipped = passed(new Response('x', { headers: { 'Content-Encoding': 'gzip' } }));
+  assert.equal(zipped.headers.get('content-encoding'), 'gzip');
 });
 
 test("an answer is a router's where it carries the router's mark, as every answer a router writes does", () => {

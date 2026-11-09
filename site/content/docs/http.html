@@ -103,6 +103,13 @@ the database, so the surface is derived from it.</p>
   keeps the sync policy, the checkpoint, the memory ceiling and the shutdown
   signal in one place — <code>--sync always</code> covers HTTP writes too.</p>
 </div>
+
+<p>An answer of 1 400 bytes or more goes as gzip, five to six times
+smaller, to a client across the network that asks for it — a browser, Go,
+Node's <code>fetch</code>, Swift, OkHttp and Dart all do, and unpack it on
+their own; <code>curl</code> with <code>--compressed</code>. A client on the
+same host or private network gets it as it is, where compressing would only
+add time (<a href="http-reference.html#gzip">Compressed answers</a>).</p>
 </details>
 
 
