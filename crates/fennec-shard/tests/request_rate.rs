@@ -29,7 +29,11 @@ fn ask(addr: &str, method: &str, target: &str, token: &str, body: &str) -> (u16,
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
-    (out[9..12].parse().unwrap(), head.to_string(), body.to_string())
+    (
+        out[9..12].parse().unwrap(),
+        head.to_string(),
+        body.to_string(),
+    )
 }
 
 #[test]
@@ -106,7 +110,10 @@ fn a_callers_429_comes_through_the_router_as_the_node_wrote_it() {
     }
     let (head, body) = held.expect("alice held past --request-rate through the router");
     assert!(head.contains("Retry-After: 1\r\n"), "{head}");
-    assert!(head.contains("Fennec-Shard: 1\r\n"), "the router's answer: {head}");
+    assert!(
+        head.contains("Fennec-Shard: 1\r\n"),
+        "the router's answer: {head}"
+    );
     assert!(body.contains("--request-rate"), "{body}");
     assert!(body.contains("\"retry_after_ms\":"), "{body}");
     let (status, _, body) = ask(&router_addr, "GET", "/t/acme/notes", &bob, "");

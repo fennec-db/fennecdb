@@ -28,7 +28,6 @@ use crate::http::Response;
 /// asks with the server's token, which is never held.
 pub const REQUEST_RATE: u32 = 1000;
 
-
 /// A caller's bucket: refilled at the rate, holding a second's worth, and
 /// when it was last charged, in seconds since its lock's callers were made
 /// ([`Callers::born`]): one clock read a charge and one subtraction, where
@@ -331,7 +330,6 @@ fn too_many(rate: u32, wait_ms: u64) -> Response {
     ));
     Response::json(429, body).header("Retry-After", &secs.to_string())
 }
-
 
 #[cfg(test)]
 mod tests {

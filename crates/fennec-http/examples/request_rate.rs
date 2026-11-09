@@ -91,10 +91,17 @@ fn main() {
     });
     let mut admin = Conn::open(port);
     let q = |sql: String| format!(r#"{{"query":"{sql}"}}"#);
-    let made = admin.ask("POST", "/query", ROOT, &q("create collection t (n int, name text)".into()));
+    let made = admin.ask(
+        "POST",
+        "/query",
+        ROOT,
+        &q("create collection t (n int, name text)".into()),
+    );
     assert_eq!(made, 200);
     for id in 1..=ROWS {
-        let put = q(format!("put t {{id: {id}, n: 0, name: 'xxxxxxxxxxxxxxxxxxxx'}}"));
+        let put = q(format!(
+            "put t {{id: {id}, n: 0, name: 'xxxxxxxxxxxxxxxxxxxx'}}"
+        ));
         assert_eq!(admin.ask("POST", "/query", ROOT, &put), 200);
     }
     let tokens: Arc<Vec<String>> = Arc::new(match mode.as_str() {
@@ -113,7 +120,8 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let threads: Vec<_> = (0..clients)
         .map(|c| {
-            let (tokens, start, stop) = (Arc::clone(&tokens), Arc::clone(&start), Arc::clone(&stop));
+            let (tokens, start, stop) =
+                (Arc::clone(&tokens), Arc::clone(&start), Arc::clone(&stop));
             std::thread::spawn(move || {
                 let mut conn = Conn::open(port);
                 let mut took = Vec::with_capacity(1 << 20);
@@ -146,7 +154,10 @@ fn main() {
         refused += r;
     }
     let elapsed = began.elapsed().as_secs_f64();
-    assert_eq!(refused, 0, "requests answered other than 200: the figures would be theirs");
+    assert_eq!(
+        refused, 0,
+        "requests answered other than 200: the figures would be theirs"
+    );
     all.sort_unstable();
     let at = |q: f64| all[((all.len() as f64 * q) as usize).min(all.len() - 1)] as f64 / 1000.0;
     println!("mode {mode}, {clients} clients, {} requests", all.len());

@@ -149,7 +149,12 @@ impl Node {
     }
 
     fn notes(&self, tenant: &str) -> usize {
-        let a = self.ask(ROOT, "POST", &format!("/t/{tenant}/query"), &query("get notes"));
+        let a = self.ask(
+            ROOT,
+            "POST",
+            &format!("/t/{tenant}/query"),
+            &query("get notes"),
+        );
         assert_eq!(a.status, 200, "{}", a.body);
         a.body.matches("\"owner\"").count()
     }
@@ -157,7 +162,9 @@ impl Node {
 
 /// The number after `"<field>":` in a body.
 fn number(body: &str, field: &str) -> u64 {
-    let at = body.find(&format!("\"{field}\":")).unwrap_or_else(|| panic!("{field}: {body}"));
+    let at = body
+        .find(&format!("\"{field}\":"))
+        .unwrap_or_else(|| panic!("{field}: {body}"));
     let digits: String = body[at + field.len() + 3..]
         .chars()
         .take_while(char::is_ascii_digit)

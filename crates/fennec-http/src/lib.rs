@@ -1108,13 +1108,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             } else {
                 "single"
             };
-            let resp = whoami(
-                cfg,
-                &req,
-                node,
-                tenant.as_ref().map(|t| t.name()),
-                Some(db),
-            );
+            let resp = whoami(cfg, &req, node, tenant.as_ref().map(|t| t.name()), Some(db));
             audit::http(&req, resp.status, peer);
             trace::end(resp.status);
             if cors(resp, cfg)
