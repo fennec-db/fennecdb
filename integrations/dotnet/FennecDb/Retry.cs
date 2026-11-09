@@ -87,10 +87,11 @@ public sealed partial class FennecClient
             catch (Exception e) when (!ct.IsCancellationRequested && e is HttpRequestException or IOException)
             {
                 // .NET's handler sends a request with no content -- a GET here -- again itself, three times at
-                // most, where the server closed the connection before a byte of the answer (ResponseEnded): sent
-                // again here as well, it went out up to twelve times. A request with content it never sends again.
-                var sentAgain = res is null && req.Content is null
-                    && e is HttpRequestException { HttpRequestError: HttpRequestError.ResponseEnded };
+                // most, where the connection ended before a byte of the answer: sent again here as well, it went
+                // out up to twelve times. Which exception it ends in depends on the handler's own policy, so no
+                // content-less request is sent again here after a dropped connection, whatever the exception. A
+                // request with content it never sends again.
+                var sentAgain = res is null && req.Content is null && !Refused(e);
                 res?.Dispose();
                 req.Dispose();
                 if (!(twice || Refused(e)) || sentAgain || !Again(n, waited, TimeSpan.Zero, out pause))

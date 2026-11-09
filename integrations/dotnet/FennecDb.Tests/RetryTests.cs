@@ -272,7 +272,42 @@ public sealed class RetryTests
         using var stub = new Stub(n => n <= 4 ? new(Close: true) : Ok(""));
         using var db = new FennecClient(stub.Url);
         await Assert.ThrowsAsync<HttpRequestException>(() => db.ChangesAsync(0));
-        Assert.Equal(4, stub.Requests);
+        // The handler's own policy sets how many; the client adds none of its own (twelve), and the handler
+        // did send it again.
+        Assert.InRange(stub.Requests, 2, 4);
+    }
+
+    // A cancel during the pause before a retry ends the request: the stub sees the one request.
+    [Fact]
+    public async Task ACancelDuringThePauseEndsTheRequest()
+    {
+        var seen = new TaskCompletionSource();
+        using var stub = new Stub(n =>
+        {
+            if (n == 1) seen.TrySetResult();
+            return n == 1 ? new(503, "{\"error\":\"busy\",\"retry_after_ms\":5000}") : Ok("[]");
+        });
+        using var db = new FennecClient(stub.Url);
+        using var cts = new CancellationTokenSource();
+        var call = db.ExecAsync("put docs {a: 1}", cancellationToken: cts.Token);
+        await seen.Task;
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => call);
+        Assert.Equal(1, stub.Requests);
+    }
+
+    // A 429 naming its wait in retry_after_ms alone is sent again after it.
+    [Fact]
+    public async Task A429GoesAgainAfterItsNamedWait()
+    {
+        using var stub = new Stub(n => n == 1
+            ? new(429, "{\"error\":\"too many\",\"code\":\"too_many\",\"retry_after_ms\":300}")
+            : Ok("{\"affected\":1}"));
+        using var db = new FennecClient(stub.Url);
+        var took = Stopwatch.StartNew();
+        Assert.Equal(1, (await db.ExecAsync("put docs {a: 1}")).Affected);
+        Assert.True(took.Elapsed >= TimeSpan.FromMilliseconds(300), $"sent again after {took.Elapsed}");
+        Assert.Equal(2, stub.Requests);
     }
 
     // A subscription's head is bounded by the Timeout, its body for as long as it is read.

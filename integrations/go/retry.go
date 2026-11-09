@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand/v2"
+	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -57,6 +58,41 @@ var errLate error = lateError{}
 // try counts as a send and refuses past the tries.
 var errSpent = errors.New("fennecdb: the connection ended before an answer, and the request's tries are spent")
 
+// timedOut says whether err is a timeout of the network layer, which a
+// request may still run past.
+func timedOut(err error) bool {
+	return walk(err, func(e error) bool {
+		ne, ok := e.(net.Error)
+		return ok && ne.Timeout()
+	})
+}
+
+// walk says whether f holds for err or any error it wraps. It stands in
+// for errors.As here: As of an interface or a number type draws in
+// reflection the binary of a program using the client did not link, some
+// 8 KB of a small one.
+func walk(err error, f func(error) bool) bool {
+	for err != nil {
+		if f(err) {
+			return true
+		}
+		switch w := err.(type) {
+		case interface{ Unwrap() error }:
+			err = w.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, e := range w.Unwrap() {
+				if walk(e, f) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // ask sends a request and reads its answer, sent again by the rule the
 // router keeps toward its nodes (docs/design/js-client.md#retries): what
 // ran nothing -- a 503 or 429 naming its wait, after it, unless statements
@@ -83,7 +119,10 @@ func (c *Client) ask(ctx context.Context, k call) (answer, error) {
 			}
 		case ctx.Err() != nil, errors.Is(err, errLate), errors.Is(err, errSpent):
 			return a, err
-		case !twice && !refused(err):
+		case !refused(err) && (!twice || timedOut(err)):
+			// A timeout of a caller's own http.Client or of the Transport
+			// (ResponseHeaderTimeout) is the client's timeout as much as errLate
+			// is: the server may still be running the request.
 			return a, err
 		}
 		// 250 ms doubling, or the server's wait; 30% jitter on top, so a
@@ -250,6 +289,8 @@ func seconds(s float64) time.Duration {
 // refused says whether connecting was refused, which sent nothing: a
 // connection's ECONNREFUSED, Windows' WSAECONNREFUSED (10061) its own.
 func refused(err error) bool {
-	var errno syscall.Errno
-	return errors.As(err, &errno) && (errno == syscall.ECONNREFUSED || errno == 10061)
+	return walk(err, func(e error) bool {
+		errno, ok := e.(syscall.Errno)
+		return ok && (errno == syscall.ECONNREFUSED || errno == 10061)
+	})
 }

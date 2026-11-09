@@ -370,3 +370,91 @@ func TestASubscriptionsTimeoutIsItsHeadAlone(t *testing.T) {
 		t.Fatalf("after a quiet stream: %+v", e)
 	}
 }
+
+// A timeout of the caller's own http.Client is the client's timeout as
+// much as WithTimeout is: the server may still be running the request, a
+// read the builder made included.
+func TestACallersHTTPClientTimeoutSendsNothingAgain(t *testing.T) {
+	s := newStub(t, func(n int, r *http.Request) step {
+		if n == 1 {
+			return step{hold: true}
+		}
+		return ok(`[]`)
+	})
+	db := New(s.url(), WithHTTPClient(&http.Client{Timeout: 300 * time.Millisecond}))
+	start := time.Now()
+	_, err := db.From("docs").Rows(context.Background())
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("past the http.Client's timeout: %v", err)
+	}
+	if took := time.Since(start); took < 300*time.Millisecond {
+		t.Fatalf("gave up after %v", took)
+	}
+	if n := s.requests.Load(); n != 1 {
+		t.Fatalf("%d requests", n)
+	}
+}
+
+// A cancel during the pause before a retry ends the request: the stub
+// sees the one request.
+func TestACancelDuringThePauseEndsTheRequest(t *testing.T) {
+	seen := make(chan struct{})
+	s := newStub(t, func(n int, r *http.Request) step {
+		if n == 1 {
+			close(seen)
+			return step{status: 503, body: `{"error":"busy","retry_after_ms":5000}`}
+		}
+		return ok(`[]`)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-seen
+		cancel()
+	}()
+	_, err := New(s.url()).From("docs").Rows(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("after a cancel: %v", err)
+	}
+	if n := s.requests.Load(); n != 1 {
+		t.Fatalf("%d requests", n)
+	}
+}
+
+// A 429 naming its wait in retry_after_ms alone is sent again after it.
+func TestA429GoesAgainAfterItsNamedWait(t *testing.T) {
+	s := newStub(t, func(n int, r *http.Request) step {
+		if n == 1 {
+			return step{status: 429, body: `{"error":"too many","code":"too_many","retry_after_ms":300}`}
+		}
+		return ok(`{"affected":1}`)
+	})
+	start := time.Now()
+	r, err := New(s.url()).Exec(context.Background(), "put docs {a: 1}")
+	if err != nil || r.Affected != 1 {
+		t.Fatalf("after a 429: %+v %v", r, err)
+	}
+	if took := time.Since(start); took < 300*time.Millisecond {
+		t.Fatalf("sent again after %v, before the wait named", took)
+	}
+	if n := s.requests.Load(); n != 2 {
+		t.Fatalf("%d requests", n)
+	}
+}
+
+// A MaxWait of 0 is no waits, as in the other SDKs: the refusal is the
+// caller's at once.
+func TestAZeroMaxWaitIsNoWaits(t *testing.T) {
+	s := newStub(t, func(n int, r *http.Request) step {
+		return step{status: 503, body: `{"error":"busy","retry_after_ms":50}`}
+	})
+	_, err := New(s.url(), WithRetry(Retry{Attempts: 3})).From("docs").Rows(context.Background())
+	var e *Error
+	if !errors.As(err, &e) || e.Status != 503 {
+		t.Fatalf("with no waits: %v", err)
+	}
+	if n := s.requests.Load(); n != 1 {
+		t.Fatalf("%d requests", n)
+	}
+}

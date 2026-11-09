@@ -334,7 +334,12 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     maxWait } }</code>, <code>Retry(attempts, max_wait)</code>,
     <code>WithRetry(fennecdb.Retry{Attempts: 5, MaxWait: 30 *
     time.Second})</code> and <code>Retry = new Retry { Attempts = 5 }</code>
-    set the bounds. The Swift, Kotlin and Dart clients do not retry yet:
+    set the bounds; a <code>maxWait</code> of 0 is no waits, in every
+    client. Retry off does not stop the platform itself: Go's Transport and
+    .NET's handler send a bodiless <code>GET</code> again on a connection
+    that ended under it, and the Go client counts that as a try. A timeout of
+    a caller's own <code>http.Client</code> or Transport is the client's
+    timeout: nothing goes again after it. The Swift, Kotlin and Dart clients do not retry yet:
     they hand every answer and error to the caller as before.</li>
 </ul>
 </details>

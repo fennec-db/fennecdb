@@ -162,21 +162,24 @@ type Retry struct {
 	// where 0.
 	Attempts int
 	// MaxWait bounds the waits between them, all told -- the server's
-	// wait, or 250 ms doubling, 30% jitter on top: 10 seconds where 0. A
-	// wait past what is left is not waited: the refusal is the caller's at
-	// once, its RetryAfter saying when to come back.
+	// wait, or 250 ms doubling, 30% jitter on top. 0 is no waits at all, as
+	// in the other SDKs: nothing needing a wait goes again, and a refusal
+	// is the caller's at once; WithRetry's default is 10 seconds, kept when
+	// WithRetry is not called. A wait past what is left is not waited: the
+	// refusal is the caller's at once, its RetryAfter saying when to come
+	// back.
 	MaxWait time.Duration
 }
 
 // WithRetry sets how often, and for how long, a request is sent again; a
-// zero field is its default.
+// zero Attempts is its default (3), a zero MaxWait no waits.
 func WithRetry(r Retry) Option {
 	return func(c *Client) {
 		if r.Attempts < 1 {
 			r.Attempts = 3
 		}
-		if r.MaxWait <= 0 {
-			r.MaxWait = 10 * time.Second
+		if r.MaxWait < 0 {
+			r.MaxWait = 0
 		}
 		c.retry = r
 	}

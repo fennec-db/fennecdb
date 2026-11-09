@@ -50,8 +50,9 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   or may run twice: a read the builder made or sent near, a `GET` or a write under `WithIdempotencyKey`, after a
   dropped connection too. Never after the client's own `Timeout` or the token's cancellation, nor a refusal naming
   no wait; an `AsRead()` copy's statement sent home, or a call's `read: true`, goes once.
-  `Retry = new Retry { Attempts = 5, MaxWait = TimeSpan.FromSeconds(30) }` sets the tries and waits (3 and 10 s),
-  `Retry = null` sends nothing again ([Retrying a write](https://fennecdb.com/docs/http#idempotency)).
+  `Retry = new Retry { Attempts = 5, MaxWait = TimeSpan.FromSeconds(30) }` sets the tries and waits (3 and 10 s; a `MaxWait` of
+  zero is no waits), `Retry = null` sends nothing again -- .NET's handler itself still sends a content-less request
+  such as a `GET` again, up to three times, where the server closed the connection before a byte of the answer ([Retrying a write](https://fennecdb.com/docs/http#idempotency)).
 - A refusal is a `FennecException` with `Status`, `Code` and the server's message; a failed batch's also says which
   statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`.
   `reason: "insufficient funds"` beside `require: 1` (`require 1 else '...'`, written into the text) comes back as
