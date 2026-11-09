@@ -238,7 +238,7 @@ when a statement is defined or dropped: the server says
 <tbody>
 <tr><td><code>--mcp-max-rows</code></td><td class="n">100</td><td>refused, 413: a <code>query</code> with no <code>limit</code> is asked for one row more than the bound, so a larger answer is known without being fetched</td></tr>
 <tr><td><code>--mcp-max-bytes</code></td><td class="n">64K</td><td>refused, 413, measured on the JSON the model would read; a statement's tool that writes is put back, as past the rows</td></tr>
-<tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's subject, or an address for the server's token</td></tr>
+<tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's subject, or an address for the server's token. A scoped token's request is held to <a href="/docs/http-access#request-rate"><code>--request-rate</code></a> first, as on every route</td></tr>
 </tbody>
 </table>
 

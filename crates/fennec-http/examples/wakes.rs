@@ -80,6 +80,9 @@ fn main() {
         token: Some(ROOT.into()),
         access: Some(Arc::clone(&access)),
         call_rate: u32::MAX,
+        // One customer's writes in a loop, which the default bound holds
+        // to a thousand a second: the bench measures the writes.
+        request_rate: 0,
         ..Config::default()
     };
     let run = |token: &str, q: &str| {

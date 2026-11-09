@@ -1294,7 +1294,9 @@ const ABOUT: &str = " A request takes `Authorization: Bearer` with the server's 
 (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy \
 rules; a server started with neither takes requests with no token. Every answer carries \
 X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about \
-it, and a 503 says when to come back in Retry-After and its body's retry_after. A route \
+it, and a 429 or a 503 says when to come back in Retry-After and its body's retry_after: \
+a scoped token's caller past --request-rate is answered 429 on every route, before anything \
+of the request runs. A route \
 marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head \
 operation beside it, and every path answers a CORS preflight under --http-cors.";
 
@@ -1444,6 +1446,11 @@ fn operation_into(o: &mut String, l: &Listed, head: bool) {
         // this one answer, whatever failed.
         Auth::Signed => o.push_str(r##","401":{"$ref":"#/components/responses/Unverified"}"##),
         _ => o.push_str(r##","401":{"$ref":"#/components/responses/Unauthorized"}"##),
+    }
+    // A scoped token's request is held to its caller's --request-rate on
+    // every route it reaches, before anything of it runs.
+    if op.auth == Auth::Token {
+        o.push_str(r##","429":{"$ref":"#/components/responses/TooManyRequests"}"##);
     }
     o.push_str(r##","503":{"$ref":"#/components/responses/Unavailable"}"##);
     o.push_str(r##","default":{"$ref":"#/components/responses/Refused"}}}"##);
@@ -1706,6 +1713,7 @@ const COMPONENTS: &str = r##"{
 "Refused":{"description":"A refusal: its status says what to do about it.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unverified":{"description":"The event did not verify: its headers, scheme, time, size, hook or signature, one answer for each.","headers":{"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
 "Unauthorized":{"description":"No token, or a wrong one.","headers":{"WWW-Authenticate":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
+"TooManyRequests":{"description":"Come back after Retry-After seconds, or the body's retry_after_ms: a scoped caller past --request-rate or --call-rate, or a tenant past a quota of its node's that waiting makes room in (Fennec-Quota names it). Nothing of the request landed.","headers":{"Retry-After":{"$ref":"#/components/headers/RetryAfter"},"Fennec-Quota":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"allOf":[{"$ref":"#/components/schemas/Error"},{"required":["retry_after"]}]}}}},
 "Unavailable":{"description":"Come back after Retry-After seconds. Fennec-Unserved (as the connection was taken) or, from fennec-shard, Fennec-Unsent: 1 says the request never ran.","headers":{"Retry-After":{"$ref":"#/components/headers/RetryAfter"},"Fennec-Unserved":{"schema":{"type":"string","enum":["ceiling","no_thread"]}},"Fennec-Unsent":{"schema":{"type":"string"}},"X-Request-Id":{"$ref":"#/components/headers/RequestId"}},"content":{"application/json":{"schema":{"allOf":[{"$ref":"#/components/schemas/Error"},{"required":["retry_after"]}]}}}},
 "NotModified":{"description":"Unchanged since the If-None-Match tag: no body, the read not run.","headers":{"ETag":{"schema":{"type":"string"}}}},
 "RowNotModified":{"description":"The row is the one the If-None-Match tag names: no body.","headers":{"ETag":{"$ref":"#/components/headers/ETag"},"Cache-Control":{"$ref":"#/components/headers/NoTransform"}}},

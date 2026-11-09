@@ -151,6 +151,11 @@ names otherwise.](../../docs/design/quotas.md#quotas-in-the-sync)** A synced
 507 naming a `quota` is put back; a retry waits `retry_after_ms` where
 longer than its backoff.
 
+**[A scoped caller is held to `--request-rate` before anything
+runs.](../../docs/design/quotas.md#a-callers-request-rate)** Charged once
+a request, as `authenticate` verifies its token with its database
+(`rate::admitted`), never a held write's run again (`rate::again`).
+
 **[Every 503 says when to come back, in its body
 too.](../../docs/design/quotas.md#retry-after-in-bodies)** Write one with
 `Response::retry_after`. Nothing that landed is told to come back: a

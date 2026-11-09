@@ -603,6 +603,16 @@ fn render(source: Source) -> String {
     );
     out.sample("fennec_refused_total", &[], crate::audit::refused());
     out.family(
+        "fennec_request_rate_refused_total",
+        "counter",
+        "Requests refused 429 for their scoped caller's --request-rate, before anything ran.",
+    );
+    out.sample(
+        "fennec_request_rate_refused_total",
+        &[],
+        crate::rate::refused(),
+    );
+    out.family(
         "fennec_auto_compactions_total",
         "counter",
         "Compacts the server ran on its own (--auto-compact), every database it serves together.",

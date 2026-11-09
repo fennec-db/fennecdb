@@ -16,6 +16,7 @@ mod openapi;
 mod region_leases;
 mod regions;
 mod replicas;
+mod request_rate;
 mod router;
 mod standby;
 mod tls;

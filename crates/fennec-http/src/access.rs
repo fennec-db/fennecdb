@@ -2443,12 +2443,14 @@ fn pinned(e: &Expr, out: &mut Vec<(String, Value)>) {
 }
 
 impl Scope {
-    /// Who a call is counted for against `--call-rate`: the subject and its
-    /// issuer, since a `sub` is unique only within its issuer's.
-    pub fn caller(&self) -> String {
+    /// Who a request and a call are counted for against `--request-rate`
+    /// and `--call-rate` (`rate::keyed`): the issuer and the subject, since
+    /// a `sub` is unique only within its issuer's; `""` for either the
+    /// token lacks.
+    pub fn caller(&self) -> (&str, &str) {
         let iss = self.roles.0.iter().find(|(k, _)| k == "iss");
         let iss = iss.and_then(|(_, v)| v.as_text()).unwrap_or("");
-        format!("{iss}\u{0}{}", self.subject.as_deref().unwrap_or(""))
+        (iss, self.subject.as_deref().unwrap_or(""))
     }
 
     /// The request this scope was made for, its database and

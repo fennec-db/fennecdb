@@ -242,6 +242,9 @@ usage: fennec-server [options]
       --call-rate <n>       calls a second from one scoped token's subject,
                             and runs of the statements bound to its writes
                             (0 = no bound)  default: 100
+      --request-rate <n>    requests a second from one scoped token's subject
+                            to a database, every route; past it 429 with
+                            the wait (0 = no bound)  default: 1000
       --http-max-streams <n>  ceiling on a database's concurrent subscriptions,
                             on a --dir node each tenant's (0 = unlimited)
                             default: 64. Subscriptions (`GET /<name>/changes`)
@@ -777,6 +780,15 @@ fn main() {
                     "--call-max-rows" => http_cfg.call_max_rows = n as usize,
                     _ => http_cfg.call_rate = n.min(u32::MAX as u64) as u32,
                 }
+            }
+            "--request-rate" => {
+                let v = next(&mut i, "--request-rate");
+                http_cfg.request_rate = v.parse::<u32>().unwrap_or_else(|_| {
+                    fail(&format!(
+                        "--request-rate expects requests a second, 0 to {} (0 = no bound), got `{v}`",
+                        u32::MAX
+                    ))
+                });
             }
             "--http-max-streams" => {
                 let v = next(&mut i, "--http-max-streams");

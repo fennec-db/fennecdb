@@ -3,7 +3,7 @@
  "info": {
   "title": "fennecdb: fennec-shard",
   "version": "1",
-  "description": "fennec-shard's REST API: each tenant's routes below /t/{tenant}, forwarded to its node, and the router's own at the root. Its /_shard/ routes are its admin's, in the sharding reference. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 503 says when to come back in Retry-After and its body's retry_after. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
+  "description": "fennec-shard's REST API: each tenant's routes below /t/{tenant}, forwarded to its node, and the router's own at the root. Its /_shard/ routes are its admin's, in the sharding reference. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 429 or a 503 says when to come back in Retry-After and its body's retry_after: a scoped token's caller past --request-rate is answered 429 on every route, before anything of the request runs. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
   "license": {
    "name": "Apache-2.0",
    "identifier": "Apache-2.0"
@@ -489,6 +489,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -525,6 +528,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -577,6 +583,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -613,6 +622,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -704,6 +716,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -777,6 +792,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -833,6 +851,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -894,6 +915,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -954,6 +978,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1003,6 +1030,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1068,6 +1098,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1122,6 +1155,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1165,6 +1201,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1241,6 +1280,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1295,6 +1337,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1368,6 +1413,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1437,6 +1485,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1489,6 +1540,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1566,6 +1620,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1637,6 +1694,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1717,6 +1777,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1781,6 +1844,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1848,6 +1914,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -1969,6 +2038,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -1999,6 +2071,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -2054,6 +2129,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -2568,6 +2646,9 @@
      "401": {
       "$ref": "#/components/responses/Unauthorized"
      },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
      "503": {
       "$ref": "#/components/responses/Unavailable"
      },
@@ -2593,6 +2674,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -2751,6 +2835,9 @@
      },
      "401": {
       "$ref": "#/components/responses/Unauthorized"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
      },
      "503": {
       "$ref": "#/components/responses/Unavailable"
@@ -3927,6 +4014,38 @@
      "application/json": {
       "schema": {
        "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   },
+   "TooManyRequests": {
+    "description": "Come back after Retry-After seconds, or the body's retry_after_ms: a scoped caller past --request-rate or --call-rate, or a tenant past a quota of its node's that waiting makes room in (Fennec-Quota names it). Nothing of the request landed.",
+    "headers": {
+     "Retry-After": {
+      "$ref": "#/components/headers/RetryAfter"
+     },
+     "Fennec-Quota": {
+      "schema": {
+       "type": "string"
+      }
+     },
+     "X-Request-Id": {
+      "$ref": "#/components/headers/RequestId"
+     }
+    },
+    "content": {
+     "application/json": {
+      "schema": {
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/Error"
+        },
+        {
+         "required": [
+          "retry_after"
+         ]
+        }
+       ]
       }
      }
     }

@@ -71,6 +71,7 @@ pub mod node_archive;
 pub mod node_stream;
 pub mod openapi;
 pub mod quota;
+pub mod rate;
 pub mod replication;
 pub mod request_id;
 pub mod schedule;
@@ -166,6 +167,9 @@ pub struct Config {
     /// `--call-rate`: the calls a second one scoped caller makes, 0 for no
     /// bound ([`calls::admitted`]).
     pub call_rate: u32,
+    /// `--request-rate`: the requests a second one scoped caller makes of
+    /// a database, every route counted, 0 for no bound ([`rate::admitted`]).
+    pub request_rate: u32,
     /// Token for `/_admin/` (tenant mode only). Without it the admin
     /// endpoints are off.
     pub admin_token: Option<String>,
@@ -239,6 +243,7 @@ impl Default for Config {
             change_capacity: fennec_core::changes::DEFAULT_CAPACITY,
             call_max_rows: fennec_core::named::CALL_MAX_ROWS,
             call_rate: calls::CALL_RATE,
+            request_rate: rate::REQUEST_RATE,
             admin_token: None,
             max_import: 1 << 30,
             access: None,
@@ -533,9 +538,14 @@ impl Server {
 /// produces no response and takes the connection over -- but it cannot skip
 /// authentication.
 /// The token `req` carries, checked. `db`, where the request runs in one
-/// (`handle`, MCP's endpoint), is what a scoped token's writes charge the
-/// runs of the statements bound to them to, beside `--call-rate`
-/// (`calls::Runs`): in the scope, made for this request alone.
+/// (`handle`, MCP's endpoint, a subscription, `/_whoami`), is what a scoped
+/// token's writes charge the runs of the statements bound to them to,
+/// beside `--call-rate` (`calls::Runs`): in the scope, made for this
+/// request alone. It is also where the request is charged to its caller's
+/// `--request-rate`, once, as its token is verified and before anything of
+/// it runs ([`rate::admitted`]): a check asked again with no database --
+/// a tenant's binding, a `Fennec-After` request's before its wait --
+/// charges nothing.
 fn authenticate(
     cfg: &Config,
     req: &Request,
@@ -566,6 +576,9 @@ fn authenticate(
                     audit::verified();
                     if let Some(db) = db {
                         scope.charge(calls::Runs::to(cfg.call_rate, db));
+                        if let Some(refused) = rate::admitted(cfg.request_rate, db, &scope) {
+                            return Err(refused);
+                        }
                     }
                     Ok(Who::Scoped(Arc::new(scope)))
                 }
@@ -596,12 +609,12 @@ fn whoami(
     req: &Request,
     node: &str,
     tenant: Option<&str>,
-    db: Option<&RwLock<Database>>,
+    db: Option<&Arc<RwLock<Database>>>,
 ) -> Response {
     if !matches!(req.method, Method::Get | Method::Head) {
         return Response::error(405, "/_whoami is read with GET");
     }
-    let who = match authenticate(cfg, req, None) {
+    let who = match authenticate(cfg, req, db) {
         Ok(who) => who,
         Err(deny) => return deny,
     };
@@ -620,7 +633,7 @@ fn whoami(
         Who::Full => out.push_str("\"full\""),
         Who::Scoped(scope) => {
             out.push_str("\"scoped\",");
-            let held = db.map(held::read);
+            let held = db.map(|db| held::read(db));
             scope.summary_into(&mut out, held.as_deref());
         }
     }
@@ -1100,7 +1113,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 &req,
                 node,
                 tenant.as_ref().map(|t| t.name()),
-                Some(&**db),
+                Some(db),
             );
             audit::http(&req, resp.status, peer);
             trace::end(resp.status);
@@ -1186,7 +1199,9 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         // connection over and never returns.
         if is_stream(&req) {
             trace::discard();
-            let who = match authenticate(cfg, &req, None) {
+            // Charged to its caller's `--request-rate` as it opens, once
+            // however long it streams.
+            let who = match authenticate(cfg, &req, Some(db)) {
                 Ok(who) => who,
                 Err(deny) => {
                     audit::http(&req, deny.status, peer);
@@ -1406,7 +1421,9 @@ fn respond(
                 // claim held for two runs was counted as `set ...; set ...`,
                 // a shape of its own beside the claim's.
                 statements::clear();
-                let answer = run();
+                // The client's one request, charged to its caller's
+                // `--request-rate` as it first ran.
+                let answer = rate::again(&run);
                 ran += t.elapsed();
                 // Its tenant's rate of writes let none through: it stays
                 // held, and runs once the rate lets one through, rather

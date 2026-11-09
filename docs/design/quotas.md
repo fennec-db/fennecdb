@@ -1,6 +1,6 @@
 # Quotas and retries
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Quotas and retries*: a tenant's quotas, how the sync meets them, and the wait every 503 names. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Quotas and retries*: a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Tenant quotas
 
@@ -131,6 +131,131 @@ insert refused naming `rows`, the keyed delete behind it landing.
 that code (minified, 12.2 -> 12.5 KB); the native library's code 2.3 KB,
 its file 16 bytes on aarch64-apple-darwin; the browser module not by a
 byte, the sync being outside it.
+
+## A caller's request rate
+
+**A scoped caller is held to `--request-rate` before anything runs**
+(`fennec_http::rate`). A tenant's quotas bound the tenant as a whole, and
+`--call-rate` only a named statement's calls: one user of an app, holding
+a scoped token, could ask a node for reads, writes, subscriptions and
+MCP as fast as one connection goes -- some 45 000 a second for a row by
+id -- and take the node from every neighbour. `--request-rate` (1 000 a
+second unless told, 0 for none) is a token bucket per caller per
+database: the caller a scoped token's issuer and subject
+(`Scope::caller`), as `--call-rate`'s is -- a `sub` is unique only within
+its issuer's, and names a person within its tenant alone -- and the
+database the request runs in, a tenant's own on a node, its file's
+`Database` by address. A token naming no `sub` is counted with every
+other of its issuer's there.
+
+*Where it is charged.* In `authenticate`, as a scoped token checks out
+and only where the request's database is handed in: `handle` (every
+route of a file's server and of a tenant -- REST, `/query`, `/batch`,
+`/_call`, `/_schema`), MCP's endpoint (`mcp::admit`), a subscription as it
+opens (once, however long it streams) and `/_whoami`. The checks asked
+again with no database charge nothing -- a tenant's binding before its
+lookup (`route_tenant`), a `Fennec-After` request's before its wait
+(`admitted`), so a request waiting for a write is charged once, as
+`handle` takes it after the wait -- and neither does a held write's run
+after its first (`rate::again`, set by `respond` around it): a client's
+one request held through ten wakes would otherwise spend eleven of its
+second, and be answered 429 at the run past them, the rows it waited for
+found. Not charged: `/_changes`, which refuses a scoped token (403) before
+it reads anything; a node's root `/_whoami`, which reads no database; the
+admin, replication and hook routes, which take no scoped token. The 429
+goes back as `authenticate`'s refusal, before the request's body is
+parsed, a statement planned or a lock taken: nothing ran, so the clients'
+rule sends it again after the wait ([js-client.md](js-client.md#retries)),
+and a replica's sync waits it out as any 429 (`Sync::on_answer`). Its body
+says the wait to the millisecond (`retry_after_ms`), beside `Retry-After`
+in whole seconds and `retry_after`: a bucket of 1 000 a second refills a
+request in a millisecond, and a client told a second waits a thousand
+times too long. Never `completed`: nothing landed. The token was
+verified, so the refusal waits for nothing (`audit::verified`) and writes
+no audit line -- a caller past its rate is the one client the log would
+fill with lines -- but is counted (`fennec_request_rate_refused_total`)
+for an operator to see a bound biting.
+
+*How it composes.* A call is a request and a call: charged to
+`--request-rate` as its token is verified, then to `--call-rate` once its
+statement is parsed, two buckets, so a `--request-rate` below
+`--call-rate` bounds calls at it, and a request its call's bucket refuses
+has still spent its request. An MCP POST is a request, its `tools/call`
+also charged to `--mcp-calls-per-sec` (`mcp::admitted`, by subject, the
+server's token by address) -- a model's turn, rarer and costlier than a
+request. A tenant's quotas (`requests` in flight, `writes` a second, ...)
+bound the tenant whatever its callers do; this bounds each caller inside
+it. Behind a router a tenant's requests are counted on the node that
+answers them, the router enforcing nothing and passing the 429 and its
+headers through as it passes every answer; a marked read a tenant's
+read replica answers is counted there, in that copy's database.
+
+*The default.* 1 000 a second is ten times `--call-rate`'s 100 (a call is
+a write path, a request most often a read), and a bucket holds a second's
+worth: a page opening with fifty requests, a search box asking at every
+keystroke and a dozen live queries stay under a tenth of it, while a
+caller in a loop gets a fiftieth of what one connection can ask. A service
+asking more says so with `--request-rate 0`, or asks with the server's
+token, which is never held.
+
+*The table.* `--call-rate` kept its callers in one `Mutex`, asked only by
+a call; asked by every scoped request, one lock would be a line every
+core's requests pass through in turn. Both rates' tables are cut into
+sixteen locks by the key (`rate::Table`), as the verified tokens' cache
+is, a lock held for a lookup and a few floats. The key is built on the
+stack -- the database's address, the issuer, a nul, the subject --
+where `--call-rate`'s was a `String` formatted for each call. Each lock's
+callers are one map, swept once a window of those who did not ask for
+one, their buckets full again by then (`Held::take`'s `retain`, some tens
+of microseconds over a few thousand entries, for the one request that
+comes upon it). `--call-rate`'s were two generations a turn apart, every
+caller's entry moved from the older map to the newer as it next called: a
+hash, a free and the newer map grown again by doubling, for each caller
+every second, which the first trace of a scoped request caught (+4 561
+instructions in that one call, 2 915 of them the allocator's). The map
+hashes with a 128-bit multiply fold under a seed `RandomState` draws for
+each lock (`Seeded`): SipHash took some 290 instructions a 40-byte key,
+more than the rest of the charge, and a key is a signed token's issuer and
+subject, a lock holding a few thousand at most, so a seed no client sees is
+defence enough against keys chosen to meet. A bucket's time is seconds
+since its lock's map was made, an `f64`: one clock read and one
+subtraction a charge, where `Instant`s took three, each a `timespec`'s
+carry. `--request-rate`'s table holds 65 536 callers (some 100 bytes
+each, 6.5 MB at the full), and past that lets a new caller through
+unheld, where `--call-rate`'s 16 384 make a newcomer wait for the sweep:
+a bound on by default must not turn a busy server's next user away for
+the table's size, nor let a holder of many tokens fill it and refuse
+everyone else, and a caller still counting is never forgotten, so none
+resets its own bucket by flooding either.
+
+*Out of scope.* Requests with no token, and those of the server's own
+token, are not counted by address: there is no anonymous or per-IP limit.
+A server that asks for no token answers whoever reaches it, and one that
+asks has refused a client without one before any rate is asked (401, the
+wait after a refused token slowing a guesser); limiting addresses is the
+proxy's or the CDN's in front, which sees them before a connection is a
+thread here. Only `/_mcp` holds the server's token's callers by address,
+for its own tool calls.
+
+*What it costs.* Instructions a request through `handle`, a row by id
+(`make instr-compare EXAMPLE=rows MODES=scoped,token,get`, each build as
+eight re-signed identities of seven runs, the mean of their medians): a
+scoped token, one of 1 000 subjects in turn, 31 347 on main and 31 931
+here, +584 (+1.9%, SE 73), where the first cut -- SipHash, `Instant`s and
+two generations -- was +783; the server's token 26 247 and 26 292 (+44, SE
+64) and a server asking none 24 664 and 24 607 (-57, SE 67), each inside
+two standard errors: they pass `rate::admitted` by. The +584 is the
+caller's key (some 110), the lock and its clock (some 90 and the
+system's mutex), the hash and the probe, the bucket's floats. Under load,
+eight keep-alive connections asking a server in the same process for
+three seconds (`make request-rate-bench`, ABBA turns, each started under
+a load of 3, none discarded), scoped requests went 57 544 a second at
+the median of nine runs against main's 57 800 (-0.44%; head 56 743-57 948,
+main 57 034-58 071, main's own runs 1.8% apart), p50 135.8 against 135.0
+us and p99 253 against 249; the server's token 57 955 against 57 925 in
+six runs each. Sixteen threads on eight cores there, every one busy: what
+a request costs in CPU shows whole, and the half a percent is the +584
+instructions, not threads waiting on one another at the locks.
 
 ## Retry-After in bodies
 
