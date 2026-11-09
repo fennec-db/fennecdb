@@ -151,11 +151,38 @@ class Load:
             self.q += 1
             return self.q
 
+    def warm(self, s, op):
+        """Opens the thread's connection with a `/_health` before its first
+        write. Twice a thread lost its connection at its first request, 2 ms
+        after sending it (run 2's cut 1, run 42667944461's cut 5), with the
+        threads opening theirs together: QEMU's user-mode network forwards
+        the port by accepting on the host first and dialing the guest after,
+        so a refusal on the guest's side reaches the client only once it has
+        written -- most likely that, though which side reset it was never
+        seen. A read cannot have written anything, so a reset here is tried
+        again and noted (the check counts them); a connection lost after
+        its first answer is still a finding."""
+        for attempt in range(1, 6):
+            try:
+                status, _, _ = s.request("GET", "/_health")
+            except (OSError, http.client.HTTPException) as e:
+                self.note(ev="warm-retry", op=op, attempt=attempt, what=f"{type(e).__name__}: {e}"[:200])
+                time.sleep(0.2 * attempt)
+                continue
+            if status == 200:
+                return True
+            self.note(ev="warm-retry", op=op, attempt=attempt, what=f"/_health answered {status}")
+            time.sleep(0.2 * attempt)
+        self.note(ev="error", op=op, q=0, what="no connection answered /_health in 5 attempts")
+        return False
+
     def run(self, op, send):
         """`send` makes one write and answers (status, headers, body); a 2xx
         is noted as acknowledged, anything else stops the thread: a refusal
         before the cut is a finding, and after it nothing answers."""
         s = Server(self.args.url, self.token)
+        if not self.warm(s, op):
+            return
         while True:
             q = self.next_q()
             try:
@@ -304,14 +331,17 @@ class Check:
             if e["ev"] == "fail":
                 self.fail(f"the server refused a write before the cut: {e['op']} {e['status']} {e['body'][:200]}")
             # A connection the server dropped while it ran stops its thread
-            # and leaves its write in flight to the end: run 2's cut 1 lost a
-            # thread so at its first request, unexplained, and passed.
+            # and leaves its write in flight to the end; one lost before its
+            # first write is `Load.warm`'s, tried again and counted below.
             elif e["ev"] == "error" and self.cut_at is not None and e["t"] < self.cut_at:
                 sent = self.sent.get(e["q"], {})
                 self.fail(
                     f"a connection failed {self.cut_at - e['t']:.3f} s before the cut, "
                     f"{e['t'] - sent.get('t', e['t']):.3f} s after its write was sent: {e['op']} q={e['q']} {e['what']}"
                 )
+        warm = [e for e in self.ev if e["ev"] == "warm-retry"]
+        if warm:
+            print(f"WARM {len(warm)} first request(s) tried again before any write: " + "; ".join(f"{e['op']} {e['what']}" for e in warm[:6]))
         self.describe_load()
         found = {}
         found["docs"] = self.docs()
