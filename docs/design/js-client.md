@@ -684,7 +684,15 @@ stub that reads a request whole and resets the connection, fresh or kept:
   that must go once costs the JVM that millisecond over a kept connection
   where it was made twice before at a reset. The JVM-only alternative,
   `java.net.http`, is not on Android, bounds no gap of a body, and would be
-  a second transport. `readTimeout` bounds each read, `connectTimeout` the
+  a second transport. Measured on OpenJDK 21 (macOS), 2 000 keyless
+  inserts over one kept connection to a release `fennec-server`: 1 537 us
+  median streamed, 60 us buffered, 192 us through `java.net.http` set to
+  HTTP/1.1, which sends a POST, PUT or DELETE once after a reset but a GET
+  again, and left at its default HTTP/2 asks every plain-http request to
+  upgrade (h2c). Not taken: Android compiles the same sources, so it would
+  be a transport interface with two implementations, change stream and
+  cancel included, for one platform's keyless writes, which a key makes
+  buffered. `readTimeout` bounds each read, `connectTimeout` the
   connect; a coroutine cancelled closes the connection and throws
   `CancellationException`, never an `IOException`, and `delay` ends a wait
   at it; a blocking call's thread interrupted is given up alike
