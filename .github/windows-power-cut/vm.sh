@@ -201,7 +201,8 @@ install() {
 # error names ("... at <n>") as hex (dump.ps1). Run 42533808035 kept no file
 # and said "unknown record kind 0" alone. Never fails the step itself.
 file_dump() {
-    local tag=$1 out=$VM/server-$tag-file.log at name
+    local tag=$1
+    local out=$VM/server-$tag-file.log at name
     at=$(tr -d '\r' < "$VM/server-$tag.log" | grep -oE ' at [0-9]+' | tail -1 | grep -oE '[0-9]+' || true)
     {
         gscp "$HERE/dump.ps1" Administrator@127.0.0.1:dump.ps1 &&

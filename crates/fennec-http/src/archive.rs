@@ -221,12 +221,17 @@ fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
     let mut out = Vec::new();
     let mut pos = LOG_MAGIC.len();
     while pos + 8 < data.len() {
-        // Zeros from a record's head to the end are a torn tail, as a
-        // database's open reads them (`whole_record`): an append whose
-        // length reached the disk before its bytes. No kind is 0: read on,
-        // every 11 of them were a write of its own.
-        if data[pos + 8] == 0 && data[pos + 8..].iter().all(|&b| b == 0) {
-            break;
+        // No kind is 0. Zeros from a record's head -- its time -- to the
+        // end, after a byte that is not zero, are a torn tail, as a
+        // database's open reads them (`zero_tail`): an append whose length
+        // reached the disk before its bytes. Any other zero head is refused,
+        // judged once: read on, every 11 zeros were a write of its own, and
+        // a run with a byte after it was scanned again at each of them.
+        if data[pos + 8] == 0 {
+            if fennec_core::engine::zero_tail(data, pos, LOG_MAGIC.len()) {
+                break;
+            }
+            return Err(corrupt(format!("unknown record kind 0 at {}", pos + 8)));
         }
         let time = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
         let Some(len) = record_len(&data[pos + 8..]) else {

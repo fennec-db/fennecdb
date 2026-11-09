@@ -618,6 +618,10 @@ struct Walk<'a> {
     bytes: &'a [u8],
     pos: usize,
     torn: bool,
+    /// Where a record is known to end whatever its last byte: the walk's
+    /// start, then the image's end once the load has read its counter
+    /// header ([`zero_tail`]).
+    edge: usize,
 }
 
 impl<'a> Walk<'a> {
@@ -626,6 +630,7 @@ impl<'a> Walk<'a> {
             bytes,
             pos,
             torn: false,
+            edge: pos,
         }
     }
 
@@ -633,7 +638,7 @@ impl<'a> Walk<'a> {
         if self.pos >= self.bytes.len() {
             return Ok(None);
         }
-        if !whole_record(self.bytes, self.pos)? {
+        if !whole_record(self.bytes, self.pos, self.edge)? {
             self.torn = true;
             return Ok(None);
         }
@@ -977,17 +982,10 @@ impl Block {
 /// a rewrite, whole or not at all; a kind this version does not know is
 /// refused here, by where it is.
 ///
-/// Zeros from a head to the end are a torn tail too. No kind is 0: they
-/// are an append whose length reached the disk before its bytes -- NTFS
-/// journals a file's length, not its bytes, so a flush of the volume's
-/// log, another file's included, can commit a length whose bytes a power
-/// cut then loses (read from Windows power-cut run 42533808035, which
-/// kept no file; ext4's `data=writeback` can do the same). Never a
-/// durable write's: `--sync always` answers once the file's own flush
-/// returned, which writes its bytes. Zeros followed by anything else are
-/// no such tail, and refused. Judged only once a head reads as no kind: a
-/// walk's known records pay nothing.
-fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
+/// Zeros from a head to the end are a torn tail too, when [`zero_tail`]
+/// says they start there; any other zero head is refused. Judged only once
+/// a head reads as no kind: a walk's known records pay nothing.
+fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !matches!(
         kind,
@@ -1006,7 +1004,7 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
     ) {
         return match kind {
             REC_SEQ => Ok(true),
-            0 if bytes[at..].iter().all(|&b| b == 0) => Ok(false),
+            0 if zero_tail(bytes, at, edge) => Ok(false),
             _ => Err(unknown_kind(kind, at)),
         };
     }
@@ -1021,6 +1019,31 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
         };
     }
     Ok(len <= (bytes.len() - pos) as u64)
+}
+
+/// Whether the bytes from the head at `at` are a torn tail of zeros: an
+/// append whose length reached the disk before its bytes. No kind is 0.
+/// NTFS journals a file's length, not its bytes, so a flush of the
+/// volume's log, another file's included, can commit a length whose bytes
+/// a power cut then loses (read from Windows power-cut run 42533808035,
+/// which kept no file; ext4's `data=writeback` can do the same). Never a
+/// durable write's: `--sync always` answers once the file's own flush
+/// returned, which writes its bytes.
+///
+/// Only zeros to the end that start at the head itself: at `edge`, where
+/// a record is known to end (a walk's start, the image's end; `at` is never
+/// before it), or after a byte that is not zero. A zero byte before the
+/// head may be the previous record's own last one, or the disk's zeros
+/// starting inside that record, whose length still fits: cut there, an
+/// open went on and read that record back with NULs in it. That is
+/// refused, as zeros followed by any other byte are. A record whose later
+/// bytes are the disk's zeros, with no zero head after them, still loads
+/// as it reads: only a checksum would show it
+/// (docs/design/storage.md#file-format). The archive judges its segments'
+/// heads with this too.
+pub fn zero_tail(bytes: &[u8], at: usize, edge: usize) -> bool {
+    (at == edge || bytes.get(at.wrapping_sub(1)) != Some(&0))
+        && bytes.get(at..).is_some_and(|z| z.iter().all(|&b| b == 0))
 }
 
 /// A record of a kind this version does not know, by the byte it starts
@@ -5779,6 +5802,9 @@ impl Database {
                     seq_base = u64::from_le_bytes(w);
                     w.copy_from_slice(&r.body[8..16]);
                     body_end = walk.pos.saturating_add(u64::from_le_bytes(w) as usize);
+                    // Written whole and renamed into place, the image ends
+                    // with a record whatever its last byte.
+                    walk.edge = body_end;
                     // An image that says it is longer than the file was cut
                     // short between two of its records, which no record's own
                     // length can show.

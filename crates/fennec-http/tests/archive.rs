@@ -668,6 +668,16 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, bytes).unwrap();
     let v = Archive::new(&zeros).unwrap().verify().unwrap();
     assert_eq!((v.last, v.torn), (p.seq(), 4096), "{v:?}");
+    // Zeros with a byte after them are no torn tail: refused at the first
+    // zero head, judged once (a MiB of them was read again at each 11).
+    let mut bytes = std::fs::read(&last).unwrap();
+    let at = bytes.len() - 4096 + 8;
+    bytes.resize(bytes.len() + (1 << 20), 0);
+    bytes.push(1);
+    std::fs::write(&last, bytes).unwrap();
+    let e = Archive::new(&zeros).unwrap().verify().unwrap_err();
+    let says = format!("unknown record kind 0 at {at}");
+    assert!(e.to_string().contains(&says), "{e}");
 
     // Cut short before the last segment's end: no restore passes it.
     let cut = copy_of(&arch, &d.join("cut"));
