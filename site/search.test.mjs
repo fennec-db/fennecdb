@@ -172,7 +172,11 @@ test('the vector image holds every section, and the cache\'s vectors reach it', 
 test('a question the words miss finds its page by its meaning', () => {
   // Each: the words leave the page off the ten shown, the meaning puts it there.
   for (const [q, url, within, chance] of [
-    ['keep data on a phone', 'docs/mobile', 1],
+    // Second since 2b1d8a34: the home page's opening now says what this
+    // asks -- one database for the page, the phone and the server, a copy
+    // on the device that works offline -- and stands first; mobile's own
+    // section is the next.
+    ['keep data on a phone', 'docs/mobile', 2],
     // Neither Turkish question holds a word of the docs. The words found
     // only prefixes (`telefonda` reaches `tell`, `veri` `version`, `durdurmak`
     // `durable`) and do not vote beside the meaning (`holdsWord`), so a page
