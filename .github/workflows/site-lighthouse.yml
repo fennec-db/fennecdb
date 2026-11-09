@@ -1,0 +1,72 @@
+name: site-lighthouse
+
+# Lighthouse CI over the built website (site/lighthouse/): the home page,
+# the docs index, a long docs page and the playground, their four scores
+# and their LCP, CLS and TBT held to the budgets in lighthouserc.cjs. Only
+# for a pull request that changes what the site is made of or serves; the
+# deploy (site.yml) builds the same way.
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'studio/**'
+      - 'web/fennec.js'
+      - 'web/builder.js'
+      - 'web/http.js'
+      - 'web/client.js'
+      - 'integrations/builder-golden.json'
+      - 'web/golden.mjs'
+      - 'crates/fennec-wasm/**'
+      - 'crates/fennec-abi/**'
+      - 'crates/fennec-core/**'
+      - 'crates/fennec-ql/**'
+      - '.github/workflows/site-lighthouse.yml'
+  workflow_dispatch:
+
+jobs:
+  lighthouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: site-cargo-
+
+      # As the deploy's build has them: minified assets, and the brotli
+      # figures build.py checks the site's quoted sizes against.
+      - name: Install esbuild and brotli
+        run: |
+          npm install -g esbuild@0.28.2
+          sudo apt-get install -y --no-install-recommends brotli
+
+      # No Cloudflare token: a section new since the committed vectors goes
+      # without one, which the scores do not depend on.
+      - name: Build the wasm module and the site
+        run: make site
+
+      - name: Install Lighthouse CI
+        working-directory: site/lighthouse
+        run: npm ci
+
+      # Served from site/dist on port 0, Chrome's files read first
+      # (warm-chrome.mjs): a cold runner's first launch outlasts
+      # chrome-launcher's 25 s.
+      - name: Lighthouse
+        working-directory: site/lighthouse
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: node run.mjs
