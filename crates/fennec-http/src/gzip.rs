@@ -112,6 +112,32 @@ pub fn encode(resp: &mut Response, req: &Request, cfg: &crate::Config) {
     encode_cold(resp, req, cfg);
 }
 
+/// [`encode`] for a body that is the same bytes every time (the OpenAPI
+/// document): `packed` is its gzip, made once a process by the caller, so a
+/// request pays no deflate of a document that never changes.
+pub fn encode_packed(
+    resp: &mut Response,
+    req: &Request,
+    cfg: &crate::Config,
+    packed: impl FnOnce() -> &'static [u8],
+) {
+    let Some(min) = cfg.gzip else {
+        return;
+    };
+    if resp.status != 200 || resp.body.len() < min || req.method == crate::http::Method::Head {
+        return;
+    }
+    resp.extra.push(("Vary".into(), "Accept-Encoding".into()));
+    if !wanted(req, cfg) {
+        return;
+    }
+    let packed = packed();
+    if packed.len() < resp.body.len() {
+        resp.body = packed.to_vec();
+        resp.extra.push(("Content-Encoding".into(), "gzip".into()));
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn encode_cold(resp: &mut Response, req: &Request, cfg: &crate::Config) {

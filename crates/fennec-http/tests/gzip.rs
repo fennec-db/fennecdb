@@ -235,3 +235,16 @@ fn a_stream_is_one_member_an_event_a_piece() {
     read_until(&mut zipped, &mut bytes, |b| b.len() >= want.len());
     assert!(bytes[at..want.len()] == want[at..], "the change's piece");
 }
+
+#[test]
+fn the_openapi_document_is_deflated_once_and_served_the_same() {
+    let port = start(true, Some(gzip::MIN_BYTES));
+    let plain = ask(port, "GET", "/_openapi.json", "", "");
+    assert_eq!(plain.status, 200);
+    let a = ask(port, "GET", "/_openapi.json", "", GZIP);
+    let b = ask(port, "GET", "/_openapi.json", "", GZIP);
+    assert_eq!(a.one("content-encoding"), Some("gzip"), "{}", a.head);
+    assert_eq!(a.all("vary"), ["Accept-Encoding"]);
+    assert_eq!(a.body, b.body, "two requests, two different bytes");
+    assert_eq!(a.body, gzipped(&plain.body), "not the document's gzip");
+}

@@ -914,7 +914,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 _ => openapi::Kind::File,
             };
             let mut resp = cors(openapi::answer(kind, &req), cfg);
-            gzip::encode(&mut resp, &req, cfg);
+            gzip::encode_packed(&mut resp, &req, cfg, || openapi::document_gzip(kind));
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }

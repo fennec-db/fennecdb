@@ -56,6 +56,17 @@ pub fn document(kind: Kind) -> &'static [u8] {
     DOCS[kind as usize].get_or_init(|| build(kind).into_bytes())
 }
 
+/// The document of `kind` as gzip, deflated once a process: it never
+/// changes, so a request for it must not pay a deflate each time.
+pub fn document_gzip(kind: Kind) -> &'static [u8] {
+    static PACKED: [OnceLock<Vec<u8>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    PACKED[kind as usize].get_or_init(|| {
+        let mut out = Vec::new();
+        crate::gzip::compress(document(kind), &mut out);
+        out
+    })
+}
+
 /// Whether `req` asks for the document: its path alone, compared before
 /// a segment is made -- every other request pays a length compare.
 #[inline]
