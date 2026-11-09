@@ -1,11 +1,12 @@
 <!--
 title: fennecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that usually needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 338 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One document database for the page, the phone and the server: screens that follow it live, a copy on the device that works offline, search included, and the rules of your data kept in the database itself. The engine compiles to 338 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
   <div class="scene" aria-hidden="true">
     <div class="sky"></div>
+    <canvas class="hero-stars"></canvas>
     <canvas class="sandfield"></canvas>
     <svg class="dunes" viewBox="0 0 1440 420" preserveAspectRatio="none">
       <defs>
@@ -40,88 +41,19 @@ description: One database from the screen to the server: state your screens foll
     <div class="floor"></div>
   </div>
 
-    <div class="hero-in has-mark">
+  <div class="hero-in has-product">
     <div class="hero-col">
       <h1 class="hero-say reveal">Lives anywhere.<br> Hears everything.</h1>
-      <p class="hero-sub reveal">One database from the screen to the server:
-        state your screens follow live, a replica that syncs with your server,
-        a server that usually needs no cache in front of it, a file per
-        tenant in every region, and search built in.</p>
+      <p class="hero-sub reveal">One document database for the page, the phone
+        and the server: screens that follow it live, a copy on the device that
+        works offline, search included, and the rules of your data kept in the
+        database itself.</p>
       <p class="hero-cta reveal">
         <a class="btn btn-fill" href="docs/quickstart.html">Get started</a>
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
       </p>
     </div>
-    <div class="hero-mark" role="img" aria-label="The fennec at the centre; rings travel out from its ears to a phone, a browser window, a server and three tenant files, and each lights as a ring reaches it.">
-      <svg class="ears" viewBox="0 0 480 400" aria-hidden="true">
-        <defs>
-          <radialGradient id="halo">
-            <stop offset="0" stop-color="#4FE0C4" stop-opacity=".38"/>
-            <stop offset="1" stop-color="#4FE0C4" stop-opacity="0"/>
-          </radialGradient>
-          <!-- The rings fade out toward the picture's edge rather than stop at it. -->
-          <radialGradient id="fade" gradientUnits="userSpaceOnUse" cx="240" cy="200" r="250">
-            <stop offset=".7" stop-color="#fff"/>
-            <stop offset="1" stop-color="#000"/>
-          </radialGradient>
-          <mask id="reach" maskUnits="userSpaceOnUse" x="-60" y="-60" width="600" height="520">
-            <rect x="-60" y="-60" width="600" height="520" fill="url(#fade)"/>
-          </mask>
-        </defs>
-        <!-- The rings: one from each ear, a fainter one behind it, each a faint
-             line with the mark's light running around it. The ear tips
-             are the mark's (6 4) and (58 4) at the scale below. -->
-        <g class="ears-moving" mask="url(#reach)">
-          <g transform="translate(172.4 132.2)"><g class="ring"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g><g class="ring late"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g></g>
-          <g transform="translate(307.6 132.2)"><g class="ring right"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g><g class="ring right late"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g></g>
-        </g>
-        <!-- Reduced motion: the rings where they stand a moment after leaving. -->
-        <g class="ears-still" mask="url(#reach)">
-          <g transform="translate(172.4 132.2)"><g class="ring"><circle class="ring-line" r="100"/><circle class="ring-light" r="100" pathLength="1"/></g><g class="ring far"><circle class="ring-line" r="200"/><circle class="ring-light" r="200" pathLength="1"/></g></g>
-          <g transform="translate(307.6 132.2)"><g class="ring"><circle class="ring-line" r="100"/><circle class="ring-light" r="100" pathLength="1"/></g><g class="ring far"><circle class="ring-line" r="200"/><circle class="ring-light" r="200" pathLength="1"/></g></g>
-        </g>
-        <circle class="tip" cx="172.4" cy="132.2" r="5"/>
-        <circle class="tip" cx="307.6" cy="132.2" r="5"/>
-
-        <!-- Each glyph lights as the nearer ear's ring reaches it: its
-             distance from that ear, less its own half-width, at 223 px
-             a second (the ring grows 250 px in 1.12 s). -->
-        <g class="glyph near" transform="translate(70 120)" style="--hit: .39s">
-          <circle class="halo" r="38"/>
-          <rect x="-13" y="-21" width="26" height="42" rx="5"/><path d="M-4 15h8"/>
-          <text y="40">phone</text>
-        </g>
-        <g class="glyph near" transform="translate(410 110)" style="--hit: .40s">
-          <circle class="halo" r="40"/>
-          <rect x="-26" y="-18" width="52" height="36" rx="5"/><path d="M-26 -8h52M-19 -13h.01M-14 -13h.01M-9 -13h.01"/>
-          <text y="38">browser</text>
-        </g>
-        <g class="glyph" transform="translate(420 300)" style="--hit: .83s">
-          <circle class="halo" r="40"/>
-          <rect x="-24" y="-19" width="48" height="17" rx="3"/><rect x="-24" y="2" width="48" height="17" rx="3"/><path d="M-16 -10.5h.01M-16 10.5h.01"/>
-          <text y="39">server</text>
-        </g>
-        <g class="glyph" transform="translate(62 296)" style="--hit: .83s">
-          <circle class="halo" r="34"/>
-          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
-        </g>
-        <g class="glyph" transform="translate(110 340)" style="--hit: .94s">
-          <circle class="halo" r="34"/>
-          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
-        </g>
-        <g class="glyph" transform="translate(162 362)" style="--hit: 1.00s">
-          <circle class="halo" r="34"/>
-          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
-          <text class="aside" x="24" y="5">tenants</text>
-        </g>
-
-        <!-- The fennec, from the logo's own table (fennec.js). -->
-        <g transform="translate(156.8 121.8) scale(2.6)">
-          <path class="fennec" d="{{mark_lines}}"/>
-          {{mark_light}}
-        </g>
-      </svg>
-    </div>
+    <canvas class="hero-win" role="img" aria-label="The product working in three windows. In the page, sutlac is typed and the menu narrows to Sütlaç and Sütlaç ice cream, the word marked and the categories counted, searched in the page's own copy with no request sent. The phone goes offline, searches all the same and adds Fırın sütlaç, which waits in the queue in its file. Back online, it is sent once: fennec-server's log shows the write under its Idempotency-Key and the change going to two screens, and the page's list takes the new row and its Desserts count rolls to 2. Each time something happens, a wave of light runs through the stars from that window; the stars near the pointer brighten and move aside, and a click sends a wave of its own."></canvas>
   </div>
 
 </section>
@@ -129,10 +61,10 @@ description: One database from the screen to the server: state your screens foll
 <nav class="pillars six" aria-label="On this page">
   <a href="#state"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg><b>App state</b><span>A write redraws every screen that reads it</span></a>
   <a href="#sync"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="8" height="16" rx="2"/><path d="M6 17h2"/><path d="M14 9h7l-2.5-2.5M21 15h-7l2.5 2.5"/></svg><b>Local and server</b><span>Written offline, sent once, on every device</span></a>
-  <a href="#writers"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h6l4 4v14H11z"/><path d="M17 3v4h4"/><path d="M2 8h6M2 12h6M2 16h6"/></svg><b>Many writers, one file</b><span>Writes in microseconds, disk syncs shared</span></a>
-  <a href="#traffic"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>Needs no cache in front</b><span>A row by id over HTTP in 0.022 ms</span></a>
+  <a href="#search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M15 15l6 6"/><path d="M7 8.5h6M7 11.5h4"/></svg><b>Search, offline too</b><span>Words, typos and facets, on the device and the server</span></a>
+  <a href="#rules"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 7.5V19l-4 2v-8.5z"/></svg><b>Rules in the database</b><span>Each user their rows; a write that checks its own condition</span></a>
+  <a href="#speed"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>Needs no cache in front</b><span>A row by id over HTTP in 0.022 ms</span></a>
   <a href="#tenants"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><b>Scale by tenant</b><span>A file each, failed over, in every region</span></a>
-  <a href="#search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M15 15l6 6"/><path d="M7 8.5h6M7 11.5h4"/></svg><b>Search built in</b><span>Words, typos and facets, then meaning</span></a>
 </nav>
 
 <section class="band" id="state">
@@ -148,9 +80,19 @@ description: One database from the screen to the server: state your screens foll
       <canvas role="img" aria-label="A new task is written into the app's file. The mark's light runs from the file to the three screens that read the tasks, a list, an open count and today's list, and each redraws with the new row lit. A fourth screen, reading the notes, is not run and stays as it was."></canvas>
     </figure>
 
-    <p class="after rise">Running a query again is the query itself: a page
-      of 50 open todos out of 1 000 to 3 000, ordered by an index, took 0.19 ms,
-      and a write no live query reads costs about 2 µs.
+<div class="rise"><pre data-lang="js">
+const open = db.from('orders')
+  .where('customer', customer).where('status', 'open')
+  .order('placed', 'desc').limit(20);
+const stop = db.live(open, draw);   // again after every write it reads
+</pre></div>
+
+    <dl class="versus rise">
+      <div><dt>A page of 50 open todos out of 1 000 to 3 000, run again</dt><dd><b>0.19 ms</b></dd></div>
+      <div><dt>A write no live query reads</dt><dd><b>about 2 µs</b></dd></div>
+    </dl>
+
+    <p class="after rise">Running a query again is the query itself.
       <a href="docs/javascript.html#state">State in the page</a> and
       <a href="docs/mobile.html#live">live queries in Swift, Kotlin and Dart</a></p>
   </div>
@@ -175,50 +117,65 @@ description: One database from the screen to the server: state your screens foll
       <canvas role="img" aria-label="A phone with no network writes a task: it shows on the phone at once and waits in the queue in the phone's file. When the network is back, the write goes to fennec-server once, under its Idempotency-Key, and the server's change stream puts the task on another device's screen."></canvas>
     </figure>
 
-    <p class="after rise">The browser's sync and the native one in Swift,
-      Kotlin and Dart are held to the same 84 scenarios: offline writes,
-      retries, refusals, dropped streams, restarts. A server following your
-      PostgreSQL hands a commit there to its subscribers 0.09 ms later at the
-      median. <a href="docs/sync.html">Sync</a>,
-      <a href="docs/mobile.html#sync">sync on a phone</a> and
-      <a href="docs/import.html#serving">following PostgreSQL</a></p>
+    <dl class="versus rise">
+      <div><dt>Scenarios the browser's sync and the native one in Swift, Kotlin and Dart are both held to</dt><dd><b>88</b><span>offline writes, retries, refusals, dropped streams, restarts</span></dd></div>
+    </dl>
+
+    <p class="after rise"><a href="docs/sync.html">Sync</a> and
+      <a href="docs/mobile.html#sync">sync on a phone</a></p>
   </div>
 </section>
 
-<section class="band" id="writers">
+<section class="band" id="search">
   <div class="band-in">
-    <h2 class="rise">Many writers, one file</h2>
-    <p class="lede rise">One write runs at a time, and that costs little: a
-      write holds the lock for microseconds, and its fsync runs after the lock
-      is let go, so writers waiting on the disk share one. Readers take a
-      shared lock and run beside them.</p>
+    <h2 class="rise">Search that works with no network</h2>
+    <p class="lede rise">The replica in a page or an app is the same engine as
+      the server, holding the server's indexes. So the search box answers from
+      the device: the same <code>match</code>, typos, facets and highlights,
+      offline, with no second index to keep in step and no search service to
+      call. In the page it is 338 KB of gzipped WebAssembly with no
+      dependencies.</p>
 
-    <figure class="motion rise" data-scenes="writers">
-      <canvas role="img" aria-label="Sixteen writers send writes to one file. They pass the lock one at a time and land quickly; each fsync to the disk covers every write that landed since the last, so several writers are answered by one. Four readers beside them keep reading the whole time."></canvas>
+    <figure class="motion rise" data-scenes="find">
+      <canvas role="img" aria-label="On a phone with no network, three spellings are typed in turn: sutlac without accents, sütlax with a typo and sütl half typed. Each runs into the phone's own index and reaches the same word, sütlaç, and each time the same three rows answer, the word marked in each, with their categories counted."></canvas>
     </figure>
+
+<div class="rise"><pre data-lang="fennecql">
+get products select name, highlight(name, "&lt;mark&gt;", "&lt;/mark&gt;")
+  match name $1 fuzzy prefix
+  where price &lt; 500
+  facet brand top 10, color
+  limit 20
+</pre></div>
+
+    <ul class="points rise">
+      <li><b>Ranked by BM25</b> over a field marked <code>@text</code>; beside <code>order</code> or <code>count</code>, the matches newest first and how many.</li>
+      <li><b>A word typed wrong or half typed</b>, as a search box sends it; typed without accents, it finds them written with them (<code>sutlac</code> finds <code>Sütlaç</code>).</li>
+      <li><b>What matched, marked</b> by <code>highlight()</code> and <code>snippet()</code>, and each brand or colour counted for the sidebar, in the same query.</li>
+      <li><b>Then meaning:</b> a vector field adds <code>near</code>, and <code>fuse</code> puts the two rankings together.</li>
+    </ul>
+
     <dl class="versus rise">
-      <div><dt>Durable writes, 1 writer to 16</dt><dd><b>252 → 516/s</b><span>SQLite 248 → 258</span></dd></div>
-      <div><dt>Rows read beside four writers</dt><dd><b>701 000/s</b><span>SQLite 344 000</span></dd></div>
+      <div><dt>A <code>match</code> over 100 000 documents</dt><dd><b>0.06 ms</b><span>two words, the best ten</span></dd></div>
+      <div><dt>Words within a typo, among FiQA&rsquo;s 135 500</dt><dd><b>14 µs</b><span>one edit; 120 µs at two</span></dd></div>
+      <div><dt>A facet over every row, through <code>@hash</code></dt><dd><b>0.01 ms</b><span>100 000 rows</span></dd></div>
     </dl>
 
-    <p class="after rise">Durable writes, an fsync each, and four reading
-      threads, in one process on an M1. A block of 1 000 writes builds its
-      rows beside the readers and holds them for the 0.15 ms it lands. <a href="docs/benchmarks-requests.html#concurrency">Method
-      and the rest of the table</a></p>
-    <p class="after rise">What a write derives lands in its block: a statement
-      bound to a collection's writes runs once a row, so a ledger line, a
-      counter or a denormalized field is in the file with the write that made
-      it, or neither is, for a crash, a replica and a subscriber. One run by
-      the clock lands each run with the mark of its slot, so a slot runs once,
-      and each is watched: listed with its next slot and last run in fennec
-      studio and every SDK, run now from the studio, counted, traced. A
-      statement may also take another service's events, Stripe's or GitHub's:
-      verified by their signature and taken once by their key, each listed
-      with whether a secret arms it in fennec studio and every SDK, sent a
-      test event from the studio, counted and traced.
-      <a href="docs/fennecql.html#write-bound-statements">Statements bound to writes</a>,
-      <a href="docs/fennecql.html#scheduled-statements">scheduled statements</a>,
-      <a href="docs/webhooks.html">Webhooks from Stripe and GitHub</a></p>
+    <p class="after rise">In one process on an M1. A row&rsquo;s marks cost
+      1 to 3 µs more, and with a typo put into each of BEIR SciFact&rsquo;s
+      queries, <code>fuzzy</code> takes its nDCG@10 from 0.636 back to 0.663,
+      where the queries as written score 0.662.
+      <a href="docs/fennecql-search.html#the-text-clause">Text search</a>,
+      <a href="docs/fennecql-search.html#typos">typos and words begun</a>,
+      <a href="docs/fennecql-search.html#facets">facets</a>,
+      <a href="docs/fennecql-search.html#hybrid">words and meaning together</a> and
+      <a href="docs/benchmarks-text.html#retrieval-quality">how good the answers
+      are</a>; fennecdb beside
+      <a href="docs/vs-postgres.html">PostgreSQL</a>,
+      <a href="docs/vs-sqlite.html">SQLite</a> and
+      <a href="docs/vs-pglite.html">PGlite</a>. The
+      <a href="playground.html">playground</a> runs the same engine in this
+      tab, with fennec studio over it.</p>
   </div>
 </section>
 
@@ -226,17 +183,85 @@ description: One database from the screen to the server: state your screens foll
   <path d="M0 40 C 180 72 320 26 490 52 C 670 80 800 32 980 58 C 1170 84 1300 40 1440 66 L1440 90 L0 90 Z" fill="#1B1233"/>
 </svg>
 
-<section class="band lit" id="traffic">
+<section class="band lit" id="rules">
+  <div class="band-in">
+    <h2 class="rise">The rules live with the data</h2>
+    <p class="lede rise">The page, the phone and an agent reach the database
+      directly, so what the data must obey is kept in it, and every client
+      meets the same rules. A replica's write is checked again by the server,
+      and a write it refuses is put back.</p>
+
+    <figure class="motion rise" data-scenes="rules">
+      <canvas role="img" aria-label="Ada asks to debit 300 from a balance of 120. The request reaches the statement in the database, whose require 1 is not met: nothing is written, and 412, insufficient funds, comes back. Then an order is paid: the order turns paid and a ledger line is added in the same block, and 200 comes back."></canvas>
+    </figure>
+
+<div class="rise"><pre data-lang="fennecql">
+set accounts {balance: balance - $3}
+  where name = $1 and balance &gt;= $3
+  require 1 else 'insufficient funds'
+</pre></div>
+<p class="refusal rise">412 · unmet · "reason": "insufficient funds"</p>
+
+    <ul class="caps three rise">
+      <li><b>Each user, their own rows</b><span>A token from Auth0, Clerk or Firebase, held to a policy: <code>owner = $jwt.sub</code> decides the rows and fields each user reads and writes.</span></li>
+      <li><b>A write that checks itself</b><span>Made only where its condition holds, its writer told why when it does not; in a batch, the rest never runs.</span></li>
+      <li><b>One call, its own authority</b><span>A named statement runs with its own text's authority: a token granted <code>transfer</code> needs no write rule on the accounts.</span></li>
+      <li><b>What a write derives, with it</b><span>A statement bound to <code>set orders</code> adds the ledger line in the same block: a crash, a replica and a subscriber see both or neither.</span></li>
+      <li><b>By the clock</b><span><code>every 1m</code>, or a cron line in a time zone: each slot runs once, and a server down for a day runs the latest slot once.</span></li>
+      <li><b>Another service's events</b><span>Stripe's and GitHub's webhooks, verified by their signature before anything is read, taken once by their key.</span></li>
+    </ul>
+
+    <p class="after rise"><a href="docs/http-access.html#scoped-access">Rules down to the rows</a>,
+      <a href="docs/fennecql-writing.html#require">writes that must find their rows</a>,
+      <a href="docs/fennecql.html#named-statements">named statements</a>,
+      <a href="docs/fennecql.html#write-bound-statements">statements bound to writes</a>,
+      <a href="docs/fennecql.html#scheduled-statements">scheduled statements</a> and
+      <a href="docs/webhooks.html">webhooks from Stripe and GitHub</a></p>
+  </div>
+</section>
+
+<section class="band" id="security">
+  <div class="band-in">
+    <h2 class="rise">Security, from the sign-in to the disk</h2>
+    <p class="lede rise">Every request passes the same checks, from the login to
+      the disk. The server speaks HTTPS itself: no proxy in front.</p>
+
+    <figure class="motion rise" data-scenes="security">
+      <canvas role="img" aria-label="Two users, ada and ben, send requests carrying tokens signed with the server's key. Each passes the token check and the rules, and each reads back only the rows it owns; the other user's rows stay dark. A write of a row owned by the other user is refused with 403. A request with a token signed with another key is held at the door, refused with 401 after a wait that doubles with each attempt, from 100 ms up to 5 s, and each refusal is written to the audit log. Meanwhile backups leave the file sealed, a lock on each, on their way to a bucket."></canvas>
+    </figure>
+    <ul class="caps three rise">
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><b>Sign in safely</b><span>A token for the server, a read-only token for a dashboard. Repeated failures slow down.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M15 9l3 3-3 3"/></svg><b>Your sign-in provider</b><span>Tokens from Auth0, Clerk or Firebase work as they are. Keys rotate without a restart.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11V7a5 5 0 0 1 10 0v4"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M12 15v2"/></svg><b>HTTPS itself</b><span>The server and the router speak HTTPS: no proxy in front.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><b>A record of who did what</b><span>Every refusal, schema change and admin action is written to a log.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>Encrypted backups</b><span>Backups and archives are sealed with a key you hold, and so are copies kept in the browser.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg><b>Little borrowed</b><span>No third-party code in the engine. The server's only outside code is TLS — rustls and ring — its tree pinned and checked.</span></li>
+    </ul>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit" id="speed">
   <div class="band-in">
     <h2 class="rise">Traffic that needs no cache</h2>
     <p class="lede rise">The operating system keeps the pages of the file in
-      memory, and a read decodes the row straight from them. fennecdb copies
-      nothing in between, so there is no buffer pool of its own to warm, evict
-      or keep in step with the database, and a separate cache in front of the
-      server is usually unnecessary while the working set fits in memory.</p>
+      memory, and a read decodes the row straight from them: no buffer pool of
+      its own to warm, evict or keep in step with the database, so a separate
+      cache in front of the server is usually unnecessary while the working set
+      fits in memory. One write runs at a time and holds the lock for
+      microseconds; its fsync runs after the lock is let go, so writers waiting
+      on the disk share one, and readers take a shared lock and run beside
+      them.</p>
 
-    <figure class="motion rise" data-scenes="traffic">
+    <figure class="motion rise" data-scenes="traffic" id="traffic">
       <canvas role="img" aria-label="A cache in front of the server is crossed out and fades away. Requests from eight clients go straight to fennec-server, which reads each row from its file mapped into memory, and the answers come back in the mark's light."></canvas>
+    </figure>
+
+    <figure class="motion rise" data-scenes="writers" id="writers">
+      <canvas role="img" aria-label="Sixteen writers send writes to one file. They pass the lock one at a time and land quickly; each fsync to the disk covers every write that landed since the last, so several writers are answered by one. Four readers beside them keep reading the whole time."></canvas>
     </figure>
 
     <dl class="versus rise">
@@ -245,12 +270,17 @@ description: One database from the screen to the server: state your screens foll
       <div><dt>YCSB C, all reads, 16 clients, buffered</dt><dd><b>18.4 k ops/s</b><span>p99 2.9 ms; Redis 14.0 k, p99 4.0 ms; both in Docker</span></dd></div>
       <div><dt>YCSB B over HTTP, 16 clients, durable</dt><dd><b>18.2 k ops/s</b><span>Redis 9.25 k, PostgreSQL 13.0 k, both in Docker; <a href="docs/benchmarks-ycsb.html#ycsb">every cell</a></span></dd></div>
       <div><dt>Cells where Redis did more operations a second</dt><dd><b>none of 33</b><span>the same durability mode against the same</span></dd></div>
+      <div><dt>Durable writes, 1 writer to 16</dt><dd><b>252 → 516/s</b><span>SQLite 248 → 258</span></dd></div>
+      <div><dt>Rows read beside four writers</dt><dd><b>701 000/s</b><span>SQLite 344 000</span></dd></div>
     </dl>
+
     <p class="after rise">The first two figures are over 10 000 rows on loopback,
       an M1, one <code>POST /query</code> a request on a kept-alive connection
       (<a href="docs/benchmarks-requests.html#requests">method</a>). The YCSB figures are one
       node, 1 000 000 records of 1 KB, fennec-server and Redis 7.4 in Docker
-      (<a href="docs/benchmarks-ycsb.html#ycsb-redis">every cell</a>).</p>
+      (<a href="docs/benchmarks-ycsb.html#ycsb-redis">every cell</a>). The writes
+      are durable, an fsync each, and four reading threads, in one process on an M1
+      (<a href="docs/benchmarks-requests.html#concurrency">method and the rest of the table</a>).</p>
     <p class="after rise">In Docker a read by key spends 0.023 ms inside the server of
       a 0.288 ms round trip and the rest is the network, so over the same network
       a cache in front can take off at most the time spent inside the server, and
@@ -262,12 +292,66 @@ description: One database from the screen to the server: state your screens foll
       reads, not an HTTP or CDN response cache.
       <a href="docs/redis.html#cache-in-front">The figures and their conditions</a>
       and <a href="docs/concepts.html#no-buffer-pool">why there is no buffer pool of its own</a></p>
+
+    <h3 class="sub rise">And the jobs Redis is added for</h3>
+    <ul class="chips rise">
+      <li>rows that expire, <code>@ttl</code></li>
+      <li>job queues with leases</li>
+      <li>rate limits</li>
+      <li>locks with fencing tokens</li>
+      <li>counters and leaderboards</li>
+      <li>streams and pub/sub</li>
+    </ul>
+    <p class="after rise">Each a statement or two a test runs; no LRU eviction, no Lua.
+      <a href="docs/redis.html">Instead of Redis</a> and
+      <a href="docs/queues.html">job queues</a></p>
   </div>
 </section>
 
-<section class="band" id="tenants">
+<section class="band" id="postgres">
   <div class="band-in">
-    <h2 class="rise">Scale by tenant</h2>
+    <h2 class="rise">Start beside your PostgreSQL</h2>
+    <p class="lede rise">Keep PostgreSQL as the record. fennec-server follows a
+      table over logical replication and serves it: its search, the
+      subscriptions that keep screens live and the replicas on devices. Nothing
+      moves until you want it to.</p>
+
+    <figure class="motion rise" data-scenes="follow">
+      <canvas role="img" aria-label="An app commits a row in PostgreSQL. The mark's light runs over logical replication to fennec-server and on to a phone and a page that follow the table, where the row appears. A write sent to the mirror comes back refused with 403: writes go to PostgreSQL. A second commit changes the title on both screens."></canvas>
+    </figure>
+
+    <ul class="points rise">
+      <li>Copied with <code>COPY</code>, then streamed: no <code>psql</code>, no <code>pg_dump</code>.</li>
+      <li>Over TLS, checked as libpq's <code>sslmode</code> says.</li>
+      <li>The mirror is read-only to clients; writes stay in PostgreSQL.</li>
+      <li>Stopped, the same command resumes where it left off.</li>
+    </ul>
+
+<div class="rise"><pre data-lang="bash">
+$ fennec-server --file articles.fennec --http 0.0.0.0:8080 \
+    --http-token "$TOKEN" \
+    --follow postgres://app@db:5432/app \
+    --follow-table docs --follow-into articles \
+    --follow-index "title@text" --follow-index "category@hash"
+</pre></div>
+
+    <dl class="versus rise">
+      <div><dt>From a commit in PostgreSQL to a subscriber</dt><dd><b>0.09 ms</b><span>at the median</span></dd></div>
+      <div><dt>From a commit to visible in the file</dt><dd><b>0.16 ms</b><span>at the median</span></dd></div>
+    </dl>
+
+    <p class="after rise"><a href="docs/import.html#serving">Import and follow</a> and
+      <a href="docs/vs-postgres.html">fennecdb beside PostgreSQL</a></p>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit" id="tenants">
+  <div class="band-in">
+    <h2 class="rise">A file for each tenant, in every region</h2>
     <p class="lede rise">Give each tenant a file of its own. Nodes hold the
       files, a router sends each request to its tenant's node, and each
       tenant has a copy that follows it on another node. With leases the
@@ -298,83 +382,9 @@ description: One database from the screen to the server: state your screens foll
   </div>
 </section>
 
-<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
-  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
-</svg>
-
-<section class="band lit" id="search">
+<section class="band" id="languages">
   <div class="band-in">
-    <h2 class="rise">Search, built in</h2>
-    <p class="lede rise">Mark a text <code>@text</code> and <code>match</code>
-      ranks it by BM25. <code>fuzzy</code> finds a word typed wrong and
-      <code>prefix</code> one half typed, as a search box sends them, and a
-      word typed without accents finds it written with them
-      (<code>sutlac</code> finds <code>Sütlaç</code>);
-      <code>highlight()</code> and <code>snippet()</code> mark what matched,
-      and <code>facet</code> counts each brand or colour over every match for
-      the sidebar, in the same query; beside <code>order</code> or
-      <code>count</code>, <code>match</code> gives the matches newest first
-      and how many there are. A vector field adds search by meaning
-      with <code>near</code>, and <code>fuse</code> puts the two rankings
-      together. It is the same engine in a browser tab, on a phone and on the
-      server, and in the page it is 338 KB of gzipped WebAssembly with no
-      dependencies.</p>
-
-    <figure class="motion rise" data-scenes="search">
-      <canvas role="img" aria-label="The question &ldquo;warm places to sleep outdoors&rdquo; is asked of the documents. The ones holding its words are ranked by them, the words lit: match. Then it lands among the documents placed by meaning, and its five nearest light: near. Then fuse adds one over sixty plus each rank from both lists, and the two documents both found rank first."></canvas>
-    </figure>
-
-    <dl class="versus rise">
-      <div><dt>A <code>match</code> over 100 000 documents</dt><dd><b>0.06 ms</b><span>two words, the best ten</span></dd></div>
-      <div><dt>Words within a typo, among FiQA&rsquo;s 135 500</dt><dd><b>14 µs</b><span>one edit; 120 µs at two</span></dd></div>
-      <div><dt>A facet over every row, through <code>@hash</code></dt><dd><b>0.01 ms</b><span>100 000 rows</span></dd></div>
-    </dl>
-
-    <p class="after rise">In one process on an M1. A row&rsquo;s marks cost
-      1 to 3 µs more, and with a typo put into each of BEIR SciFact&rsquo;s
-      queries, <code>fuzzy</code> takes its nDCG@10 from 0.636 back to 0.663,
-      where the queries as written score 0.662.
-      <a href="docs/fennecql-search.html#the-text-clause">Text search</a>,
-      <a href="docs/fennecql-search.html#typos">typos and words begun</a>,
-      <a href="docs/fennecql-search.html#facets">facets</a>,
-      <a href="docs/fennecql-search.html#hybrid">words and meaning together</a> and
-      <a href="docs/benchmarks-text.html#retrieval-quality">how good the answers
-      are</a>; fennecdb beside
-      <a href="docs/vs-postgres.html">PostgreSQL</a>,
-      <a href="docs/vs-sqlite.html">SQLite</a> and
-      <a href="docs/vs-pglite.html">PGlite</a>. The
-      <a href="playground.html">playground</a> runs the same engine in this
-      tab, with fennec studio over it.</p>
-  </div>
-</section>
-
-<section class="band" id="security">
-  <div class="band-in">
-    <h2 class="rise">Security</h2>
-    <p class="lede rise">Every request passes the same checks, from the login to
-      the disk. The server speaks HTTPS itself: no proxy in front.</p>
-
-    <figure class="motion rise" data-scenes="security">
-      <canvas role="img" aria-label="Two users, ada and ben, send requests carrying tokens signed with the server's key. Each passes the token check and the rules, and each reads back only the rows it owns; the other user's rows stay dark. A write of a row owned by the other user is refused with 403. A request with a token signed with another key is held at the door, refused with 401 after a wait that doubles with each attempt, from 100 ms up to 5 s, and each refusal is written to the audit log. Meanwhile backups leave the file sealed, a lock on each, on their way to a bucket."></canvas>
-    </figure>
-    <ul class="caps three rise">
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><b>Sign in safely</b><span>A token for the server, a read-only token for a dashboard. Repeated failures slow down.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11V7a5 5 0 0 1 10 0v4"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M12 15v2"/></svg><b>Your sign-in provider</b><span>Tokens from Auth0, Clerk or Firebase work as they are. Keys rotate without a restart.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M15 9l3 3-3 3"/></svg><b>Each user, their own rows</b><span>Everyone sees only the rows they may; writing someone else's is refused.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><b>A record of who did what</b><span>Every refusal, schema change and admin action is written to a log.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>Encrypted backups</b><span>Backups and archives are sealed with a key you hold, and so are copies kept in the browser.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg><b>Nothing borrowed</b><span>No third-party code in the engine or the server: nothing upstream to compromise.</span></li>
-    </ul>
-  </div>
-</section>
-
-<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
-  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
-</svg>
-
-<section class="band lit" id="languages">
-  <div class="band-in">
-    <h2 class="rise">Your language</h2>
+    <h2 class="rise">Your language, and the SQL you know</h2>
     <p class="lede rise">Every language reaches the server over plain HTTP and
       JSON, described by <a href="docs/http-reference.html#openapi">an OpenAPI
       document</a> any generator reads, which <a href="docs/http-reference.html#compatibility">only
@@ -384,13 +394,20 @@ description: One database from the screen to the server: state your screens foll
       Each session is the same flow against <code>fennec-server</code>: make a
       collection, write two rows, read them back by a filter and an
       order.</p>
+    <p class="lede rise"><b>SQL is one of them.</b> FennecQL reads SQL's
+      everyday spellings with the same parser — <code>CREATE TABLE</code>,
+      <code>INSERT</code>, <code>SELECT</code>, joins on a key,
+      <code>ON CONFLICT</code>, pgvector's <code>&lt;=&gt;</code> — and what it
+      would answer otherwise than SQL does, it refuses, saying what to write
+      instead. <a href="docs/sql.html">From SQL</a></p>
 
     <!-- Each session is the docs' own example for its language
          (docs/languages.html, run against a server by
          integrations/languages; Swift's, Kotlin's and Dart's read over HTTP
          by their packages' sync tests), and the rows are the answer the
          docs show; the player types them, and without script this list is
-         the section. -->
+         the section. SQL's is the shell's own output, as docs/shell.html
+         shows it. -->
     <div class="sessions rise" id="sessions">
       <div class="session-marks" role="group" aria-label="Language"></div>
       <div class="cast-screen">
@@ -428,6 +445,27 @@ await db.run('create collection if not exists docs (title text @text, year int @
 await db.from('docs').insert({ title: 'Dunes', year: 2021 });
 await db.from('docs').insert({ title: 'Night at the oasis', year: 2024 });
 const rows = await db.from('docs').select('title', 'year').where('year', '&gt;=', 2020).order('year', 'desc').limit(5).rows();
+</pre>
+</li>
+<li data-name="SQL" data-mark="SQL" data-file="fennec shell" data-shell>
+<pre class="typed" data-lang="text" data-bare>
+$ fennec app.fennec
+fennecdb {{version}} — app.fennec
+`.help` for help, `.quit` to exit
+fennec&gt; CREATE TABLE docs (id serial PRIMARY KEY, title text, year integer);
+collection `docs` created
+fennec&gt; CREATE INDEX docs_year ON docs (year);
+index built on `docs.year`
+fennec&gt; INSERT INTO docs (title, year) VALUES ('Dunes', 2021), ('Night at the oasis', 2024);
+2 records (172.29µs)
+fennec&gt; SELECT title, year FROM docs WHERE year &gt;= 2020 ORDER BY year DESC LIMIT 5;
+title               year
+------------------  ----
+Night at the oasis  2024
+Dunes               2021
+(2 rows, 300.33µs)
+fennec&gt; SELECT d.title FROM docs d RIGHT JOIN docs e ON e.id = d.id;
+error: query error: position 27: a join is an inner JOIN or a LEFT JOIN, a RIGHT JOIN a LEFT JOIN with its tables the other way round
 </pre>
 </li>
 <li data-name="Go" data-mark="go" data-file="main.go">
@@ -703,7 +741,12 @@ const { text } = await generateText({
 
     <p class="after rise">Each language's example runs against a real server
       on every change, and Python, JavaScript, Go and .NET have official
-      clients. <a href="docs/languages.html">Examples in your language</a>,
+      clients. An agent reaches the same server over MCP, each tool held to
+      the token's rules, and fennec studio shows the rows, the schema and the
+      live numbers in a browser. <a href="docs/languages.html">Examples in your language</a>,
+      <a href="docs/sql.html">from SQL</a>,
+      <a href="docs/mcp.html">MCP</a>,
+      <a href="docs/studio.html">fennec studio</a>,
       <a href="docs/mobile.html">the database in an app</a>,
       <a href="docs/integrations.html">every integration</a> and
       <a href="docs/import.html">import</a></p>

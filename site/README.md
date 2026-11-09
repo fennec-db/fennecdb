@@ -470,18 +470,28 @@ same lines, and runs the same light once, on its canvases.
 
 ## The hero
 
-The fennec hearing everything: the mark's lines in the middle, rings
-travelling out from its ears, and a phone, a browser window, a server and
-three tenant files around it, each lighting as a ring reaches it -- a write
-landing everywhere it is read. It is an inline SVG in `content/index.html`
-and CSS alone, one 8 s cycle: a ring grows 250 px in 5.6 s, and each glyph
-lights at its `--hit`, its distance from the nearer ear at that pace. The
-mark's path comes from `fennec.js` through `mark.svg` (`{{mark_lines}}` in
-the page, filled by `build.py`), so it cannot drift from the logo. Only
-transform and opacity move; `site.js` pauses it while the hero is off
-screen, and under reduced motion it is a still frame with the rings drawn.
-It replaced a WebGL cloud of documents gathering into an HNSW index, which
-said "vector database" before a word was read.
+The product at work. The right column of the home hero is a canvas
+(`hero.js`) of three windows going through one 14 s story: the page searches
+its own copy of a menu and sends no request; the phone goes offline, still
+searches and adds a row that waits in its queue; back online the row is sent
+once, fennec-server's terminal logs it, and the page's list takes it in, its
+Desserts count rolling to 2. Behind the dunes is a second canvas of stars
+that answer the story -- a brightness wave runs through them from the window
+where each event happens -- and the pointer: stars near it brighten and move
+aside, the windows lean a little by depth, and a click sends a wave. Nothing
+in the hero is a line drawn between things, and nothing overlaps the copy.
+
+`hero.js` draws neither the dunes nor the sand: those are the scene under it
+(`.scene`, `site.js`'s sand and parallax), so the stars sit behind them and
+the windows in front. It is one loop for both canvases, asleep while the hero
+is off screen or the tab is hidden (the `skyAwake` the sand uses), and the
+windows' frames and their 50 px shadows, the dearest thing on the canvas,
+are painted once into sprites. Under reduced motion it draws one frame, the
+story's end. Under 940 px the windows' stage stands under the copy, scaled
+to the width of the page. The canvas is `role="img"` and its label tells the
+story. It replaced the fennec's ears and rings (an SVG and CSS), and before
+them a WebGL cloud of documents gathering into an HNSW index, which said
+"vector database" before a word was read.
 
 ## The header, and the dunes under it
 
@@ -520,13 +530,15 @@ another screen (`flow`); sixteen writers through one lock into one file, an
 fsync covering several writes, readers going on beside them (`writers`);
 requests straight to the server and its mapped file, the cache crossed out
 (`traffic`); tenants moved and failed over onto their copies (`scale`); and a
-question finding its documents by its words and then by meaning, the two
-lists fused (`search`). What moves is the mark's own light, the teal with its glow,
+search box answering on a phone with no network from three spellings of
+one word (`find`); a debit refused by its statement's own condition and an
+order and its ledger line landing in one block (`rules`); and a commit in
+PostgreSQL reaching the screens that follow it (`follow`). What moves is the mark's own light, the teal with its glow,
 so the scenes and the logo read as one.
 
 `motion.js` draws any moment of a scene from the scene's time alone, so a
 section plays its scene while in view and the tab is shown, and stops
-otherwise. A story (state, sync, tenants, search) plays once, holds its last
+otherwise. A story (state, sync, tenants, find, rules, follow) plays once, holds its last
 frame still moving where it moves, and fades into its start; a stream
 (writers, traffic, security) opens and then runs on for good, each event
 drawn from its own number (`hash`), so it never starts again. The stars run
@@ -534,25 +546,31 @@ on the figure's own clock: on the scene's they jumped at every start. Under
 reduced motion each shows the one frame that says everything it does
 (`still`). A scene has two stages, 1280 wide and 480 wide (`stage`): a phone
 draws the narrow one, the same story laid out taller, since the wide stage
-scaled to a phone turned its words to specks. It loads as the first scene
+scaled to a phone turned its words to specks. A scene whose wires run in the
+gaps between wide boxes (`find`, `rules`, `follow`) says `wide` and has no
+narrow layout: a phone gets the wide stage scaled down, with every wire still
+in its gap. It loads as the first scene
 comes near. Every number in it is one the docs measure; the tasks, the
 documents and their places are only examples.
 
 ## The language sessions
 
-The home page's "Your language" plays one small session in each language:
+The home page's "Your language, and the SQL you know" plays one small session in each language:
 the setup shows at once, the statements are typed, then the rows land; it
 goes through the languages on its own, each fading into the next, and a
 click on a mark picks one and stays there. Each session is the docs' own
 example (`docs/languages.html`, `integrations/languages`) and the rows are
-the answer the docs show: change one there, then here. The frameworks and
+the answer the docs show: change one there, then here. SQL's is the
+fennec shell's own output, as `docs/shell.html` shows it, the statements after
+`fennec> ` typed as `$ ` lines are and the refusal in amber; rerun it when the
+shell's words change. The frameworks and
 the imports play when picked. Without script the list in
 `content/index.html` is the section.
 
 ## Motion, and what it costs
 
 `prefers-reduced-motion` is honoured throughout: the sky canvases stop, the
-hero's rings are drawn still, the mark's light is hidden, the
+hero's windows and stars are drawn still, the mark's light is hidden, the
 headline appears whole, each scene shows its still frame, a session shows
 whole, and nothing translates.
 

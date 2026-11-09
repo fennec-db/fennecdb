@@ -353,7 +353,7 @@ html:not(.js) .search-open-btn { display: none; }
 .hero.lost { justify-content: center; min-height: calc(100svh - 66px); padding-bottom: clamp(140px, 22vh, 260px); }
 .hero.lost .hero-q { color: var(--sand-dim); }
 
-.sky, .stars, .sandfield {
+.sky, .stars, .hero-stars, .sandfield {
   position: absolute; top: 0; left: 0; right: 0; height: var(--fold);
   width: 100%;
 }
@@ -984,97 +984,25 @@ tbody tr:last-child td { border-bottom: 0; }
   .pg-window { border-radius: 0; border-width: 1px 0 0; }
 }
 
-/* ============================================================== the redesign
-   The home page's hero is the fennec hearing everything: the mark's lines
-   (`mark_lines` in build.py, from `fennec.js`), rings leaving its ears, and a phone,
-   a browser, a server and tenant files around it, each lighting as a ring
-   reaches it -- a write landing. CSS alone, one 8 s cycle: a ring grows
-   250 px in 1.12 s of a 3.2 s cycle (speed is the point), and each glyph's `--hit` is when it gets there. Only
-   transform and opacity move. */
+/* ======================================================= the hero's product
+   The right column of the home hero is the product at work: a page, a phone
+   and fennec-server's terminal, drawn on a canvas (`hero.js`), in front of
+   the dunes; behind them, a canvas of stars that answer it. Neither draws
+   the dunes or the sand: those are the scene above, and `site.js` moves them.
+   The column is as tall as the first screen allows (the stage is 740 by 640),
+   and under 940 px it stands under the copy at the width of the page. */
 
-.hero-in.has-mark { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); }
-.has-mark .hero-q {
-  margin-top: 34px; font-size: clamp(14px, 1.35vw, 18px);
-  color: var(--sand-2); opacity: .92;
-  padding: 14px 18px; border-left: 2px solid var(--sun);
-  background: linear-gradient(90deg, rgba(21,15,38,.75), rgba(21,15,38,0));
-  border-radius: 0 6px 6px 0; max-width: 100%;
+.hero-in.has-product { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 941px) {
+  .hero-in.has-product { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
 }
-.hero-mark { justify-self: center; width: min(100%, 58vh, 560px); position: relative; }
-.ears { display: block; width: 100%; height: auto; overflow: visible; }
-.ears .fennec {
-  fill: none; stroke: var(--sun); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-  filter: drop-shadow(0 0 14px rgba(244,169,60,.35));
+.hero-win {
+  display: block; width: min(100%, 560px); height: auto; aspect-ratio: 740 / 640;
+  justify-self: center;
 }
-/* A ring is drawn as the mark is: a faint line, and the mark's light --
-   the same teal, the same glow -- running along it, two short lights a ring
-   going round as it grows. The right ear's turn the other way. */
-.ears .ring {
-  opacity: 0; transform: scale(.02); transform-box: fill-box; transform-origin: center;
-  animation: ring 3.2s linear infinite;
+@media (min-width: 941px) {
+  .hero-win { justify-self: end; width: min(100%, calc((var(--fold) - 54px - 50px) * 1.1563)); }
 }
-.ears .ring.late { animation-delay: .18s; }
-.ears .ring-line, .ears .ring-light { fill: none; stroke: var(--oasis); }
-/* The line keeps its width as the ring grows; the light does not, since
-   Chrome measures a non-scaling stroke's dashes on the screen, not along
-   the path's length of 1, and the lights came out a quarter of the ring. */
-.ears .ring-line { stroke-width: 1; opacity: .3; vector-effect: non-scaling-stroke; }
-.ears .ring-light {
-  stroke-width: 3; stroke-linecap: round; stroke-dasharray: .07 .43;
-  filter: drop-shadow(0 0 2px rgba(79,224,196,.95));
-  animation: ring-run 3.2s linear infinite;
-}
-.ears .late .ring-light { stroke-width: 1.7; animation-delay: .18s; }
-.ears .right .ring-light { animation-name: ring-run-back; }
-@keyframes ring {
-  0%   { transform: scale(.02); opacity: 1; }
-  18%  { opacity: .85; }
-  35%  { transform: scale(1);   opacity: 0; }
-  100% { transform: scale(1);   opacity: 0; }
-}
-@keyframes ring-run      { from { stroke-dashoffset: 0; } 35%, to { stroke-dashoffset: -.5; } }
-@keyframes ring-run-back { from { stroke-dashoffset: 0; } 35%, to { stroke-dashoffset: .5; } }
-/* The fennec runs the header mark's light every cycle, from the right ear's
-   tip through every edge, as the rings leave: 0.3 s an edge of the 3.2 s. */
-.ears .mark-light path { animation: hero-run 3.2s cubic-bezier(.4, 0, .6, 1) infinite; }
-@keyframes hero-run {
-  0%           { stroke-dashoffset: .55; }
-  9.4%, 100%  { stroke-dashoffset: -1.1; }
-}
-.ears .tip { fill: var(--oasis); opacity: 0; animation: tip 3.2s ease-out infinite; }
-@keyframes tip { 0% { opacity: .9; } 12%, 100% { opacity: 0; } }
-.ears .glyph rect, .ears .glyph path {
-  fill: rgba(21,15,38,.7); stroke: var(--sand-2); stroke-width: 1.6;
-  stroke-linecap: round; stroke-linejoin: round;
-  animation: lit 3.2s ease-out infinite; animation-delay: var(--hit);
-}
-.ears .halo { fill: url(#halo); opacity: 0; animation: halo 3.2s ease-out infinite; animation-delay: var(--hit); }
-@keyframes lit {
-  0%, 10% { stroke: var(--oasis); }
-  30%, 100% { stroke: var(--sand-2); }
-}
-@keyframes halo { 0% { opacity: 1; } 30%, 100% { opacity: 0; } }
-.ears text { fill: var(--sand-dim); font: 400 11px var(--mono); text-anchor: middle; }
-.ears text.aside { text-anchor: start; }
-.ears-still { display: none; }
-.ears.paused * { animation-play-state: paused; }
-/* Still: the rings drawn where they stand a moment after leaving the ears,
-   and the two glyphs the first has reached lit. */
-@media (prefers-reduced-motion: reduce) {
-  .ears-moving, .ears .tip { display: none; }
-  .ears-still { display: inline; }
-  .ears-still .ring, .ears-still .ring-light { animation-name: none !important; transform: none; opacity: .8; }
-  .ears-still .ring.far { opacity: .35; }
-  .ears .glyph *, .ears .halo { animation-name: none !important; }
-  .ears .glyph.near rect, .ears .glyph.near path { stroke: var(--oasis); }
-  .ears .glyph.near .halo { opacity: .8; }
-}
-@media (max-width: 940px) {
-  .hero-in.has-mark { grid-template-columns: 1fr; }
-  .hero-mark { order: -1; width: min(88vw, 380px); margin-bottom: -8px; }
-}
-/* On a phone the labels would be 8 px: the glyphs say it alone. */
-@media (max-width: 600px) { .ears text { display: none; } }
 
 /* Four ways in, just under the hero, on the page's own night: the page's
    table of contents, each with its mark. */
@@ -1194,6 +1122,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .session-out { box-sizing: border-box; transition: height .35s var(--ease); }
 @media (prefers-reduced-motion: reduce) { .session-out { transition: none; } }
 .session-out .given { color: var(--sand-dim); }
+/* A shell's refusal: the page's amber, not the ember red, so it reads as an
+   answer and not as an alarm. */
+.session-out .t-err { color: var(--sun); }
 .session-out .given span { color: inherit; font-style: normal; }
 .session-out .answer {
   display: inline-block; margin-top: 2px; padding: 8px 14px; border-radius: 8px;
@@ -1232,11 +1163,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .gaps div { padding: 18px 0; border-top: 1px solid var(--rule); }
 .gaps dt { color: var(--star); font-weight: 600; font-size: 18px; margin-bottom: 4px; }
 .gaps dd { margin: 0; color: var(--sand-2); }
-/* A phone's first screen holds the head, the claim and the two ways in; the
-   query and the four links would run down into the dunes. */
-@media (max-width: 600px) {
-  .has-mark .hero-q { display: none; }
-}
 
 /* ------------------------------------------------------- moving pictures */
 
@@ -1257,6 +1183,27 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .motion-steps button[aria-current] { color: var(--star); border-color: var(--rule-hot); }
 .motion-steps button:hover { color: var(--sand); }
+
+/* A section's few plain points, and a row of chips: the jobs a tool is added
+   for, each a pill. A code block in a band is kept to a readable measure, as
+   the text is, rather than run the width of the page. */
+.points {
+  margin: 0 0 clamp(28px, 4vw, 48px); padding-left: 20px; max-width: var(--measure);
+  display: grid; gap: 10px; color: var(--sand-2); font-size: 16px; line-height: 1.55;
+}
+.points b { color: var(--sand); font-weight: 600; }
+.chips { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+.chips li {
+  padding: 8px 14px; border: 1px solid var(--rule); border-radius: 999px;
+  color: var(--sand-2); font-size: 15px;
+}
+.band .code { max-width: 52em; margin: 0 0 clamp(28px, 4vw, 48px); }
+/* What a refused write is told, set under the statement it answers. */
+.refusal {
+  max-width: 52em; margin: calc(-1 * clamp(14px, 2vw, 24px)) 0 clamp(28px, 4vw, 48px);
+  padding: 14px 18px; border: 1px solid var(--rule-hot); border-radius: 9px;
+  background: var(--panel); font: 400 13.5px/1.6 var(--mono); color: var(--sand-2);
+}
 
 /* What the database does: a mark, a name and a line each, in plain words. */
 .caps {
@@ -1355,30 +1302,23 @@ html { scrollbar-color: var(--rule-hot) transparent; }
   background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 100%);
 }
 
-/* The claim in two lines on a wide screen: the text column takes more of
-   the row and the type steps down a little. Only past the phone layout --
-   unscoped, it came after that layout's one column and put a phone's
-   headline in a 200 px column beside an empty one. A phone wraps it as it
-   falls. */
-@media (min-width: 941px) {
-  .hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
-}
-.has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
+/* The claim steps down a little, to fit its column beside the product. */
+.has-product .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
 @media (max-width: 940px) { .hero-say br.wide { display: none; } }
 
-/* The home page's first screen holds the first row of the six ways in: the
-   hero stops a card's height short of the window (header 66 px, a row of
-   cards under 200), so they are on screen and clickable without a scroll. The dune band shrinks
-   with it. */
+/* The home page's first screen is the product: the hero is as tall as the
+   window under the header allows (the stage in its column is sized from the
+   same fold), and the windows stand a little over the dunes. The six ways in
+   are the first thing under it. */
 .home .hero:not(.lost) {
-  --fold: clamp(520px, calc(100svh - 66px - 200px), 820px);
+  --fold: clamp(640px, calc(100svh - 66px), 820px);
   --dune-h: clamp(150px, 22svh, 260px);
-  padding-bottom: clamp(110px, 13vw, 190px);
+  padding-bottom: 50px;
 }
-/* A phone's hero is as tall as its copy. The fold is then the hero's own
-   height, not `auto`: every place that measures from it (the dunes, the
-   sky, the floor) is a calc(), and with `auto` in it each was dropped and
-   the dunes stood at the top of the hero, over the fennec. */
+/* A phone's hero is as tall as its copy and the windows under it. The fold is
+   then the hero's own height, not `auto`: every place that measures from it
+   (the dunes, the sky, the floor) is a calc(), and with `auto` in it each was
+   dropped and the dunes stood at the top of the hero, over the copy. */
 @media (max-width: 940px) {
   .home .hero:not(.lost) { --fold: 100%; min-height: 0; padding-bottom: calc(var(--dune-h) - 10px); }
 }

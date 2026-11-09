@@ -304,16 +304,24 @@ if (fields.length) {
   move();
 }
 
-/* ========================================================= the fennec's ears */
+/* ====================================================== the hero's product */
 
-/* The hero's rings are CSS, so they cost no script; this only stops them
-   while the hero is off screen, where they would keep repainting a picture
-   no one sees. */
-const ears = document.querySelector('.ears');
-if (ears && !still) {
-  new IntersectionObserver((e) => {
-    ears.classList.toggle('paused', !e.some((x) => x.isIntersecting));
-  }).observe(ears);
+/* The page, the phone and the server's terminal, over stars that answer
+   them (`hero.js`): its own module, loaded with the page since the hero is
+   the first screen, and put to sleep by the same `skyAwake` the sand is. The
+   canvas draws text, so it waits for the faces. */
+const heroWin = document.querySelector('.hero-win');
+if (heroWin) {
+  Promise.all([
+    import('./hero.js'),
+    document.fonts.load('600 20px "Bricolage Grotesque"').catch(() => {}),
+    document.fonts.load('400 13px "IBM Plex Mono"').catch(() => {}),
+  ]).then(([m]) => m.start({
+    hero: document.querySelector('.hero'),
+    stage: heroWin,
+    stars: document.querySelector('.hero-stars'),
+    still, awake: skyAwake,
+  }), console.error);
 }
 
 /* ====================================================== typing the headline */
@@ -456,16 +464,21 @@ if (sessions) {
   const runs = (pre) => pre ? [...pre.childNodes].map((n) => [n.nodeType === 1 ? n.className : '', n.textContent]) : [];
   const html = (rs) => rs.map(([c, s]) => c ? `<span class="${c}">${escapeHtml(s)}</span>` : escapeHtml(s)).join('');
 
+  // The shell's refusal (`error: ...`) is plain text in the page, so it is cut
+  // out of its run to be coloured: a calm amber, apart from the rows above it.
+  const refusals = (rs) => rs.flatMap(([c, s]) => c ? [[c, s]] : s.split(/(?<=\n)/).flatMap((ln) =>
+    ln.startsWith('error: ') ? [['t-err', ln.replace(/\n$/, '')], ...(ln.endsWith('\n') ? [['', '\n']] : [])] : [['', ln]]));
+
   const list = [...sessions.querySelectorAll('.session-script > li')].map((li) => {
     const shell = li.hasAttribute('data-shell');
-    const typed = runs(li.querySelector('.typed'));
+    const typed = shell ? refusals(runs(li.querySelector('.typed'))) : runs(li.querySelector('.typed'));
     // When each character of the typed text is drawn: a shell's output
     // lines land whole, a pause after the command; the rest is typed.
     const text = typed.map(([, s]) => s).join('');
     const at = new Float32Array(text.length + 1);
     let t = 0.5, start = 0, typing = false;
     for (const ln of text.split('\n')) {
-      const cmd = !shell || ln.startsWith('$ ') || typing;
+      const cmd = !shell || ln.startsWith('$ ') || ln.startsWith('fennec> ') || typing;
       typing = shell && cmd && ln.endsWith('\\');
       if (!cmd) t += LANDS;
       for (let i = 0; i <= ln.length; i++) {
