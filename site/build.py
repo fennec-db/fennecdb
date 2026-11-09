@@ -1879,13 +1879,7 @@ def _mark(name, cls):
 
 
 MARK = _mark("mark-detail.svg", "mark")
-# The mark's lines alone, for the home page's hero to draw at its own size
-# and in its own line weight: the same table, so the two cannot drift.
-MARK_LINES = re.search(r'<path d="([^"]+)"', open(os.path.join(ROOT, "mark.svg"), encoding="utf-8").read()).group(1)
 MARK_DETAIL = _mark("mark-detail.svg", "mark mark-detail")
-# The light that runs through the mark's edges, each with its delay, for the
-# hero to run again every cycle as the header runs it once.
-MARK_LIGHT = re.search(r'<g class="mark-light".*?</g>', open(os.path.join(ROOT, "mark-detail.svg"), encoding="utf-8").read(), re.S).group(0)
 
 # The band under the header on every page but the home page: the home hero's
 # four ridges, in its colours and its ridge light, cut to the dunes alone
@@ -2140,6 +2134,8 @@ def build():
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("'./motion.js'", f"'./{motion_js}'")
+    hero_js = emit("hero.js", open(os.path.join(ROOT, "hero.js"), encoding="utf-8").read())
+    script = script.replace("'./hero.js'", f"'./{hero_js}'")
     script = script.replace("'./search.js'", f"'./{search_js}'")
     emit("site.js", script)
 
@@ -2215,7 +2211,6 @@ def build():
         page = page.replace("{{content}}", shell)
         page = page.replace("{{scarp}}", SCARP)
         page = page.replace("{{mark}}", MARK).replace("{{mark_detail}}", MARK_DETAIL)
-        page = page.replace("{{mark_lines}}", MARK_LINES).replace("{{mark_light}}", MARK_LIGHT)
 
         for plain, hashed in assets.items():
             page = page.replace(plain, hashed)

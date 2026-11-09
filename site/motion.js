@@ -14,6 +14,9 @@
    Each scene is drawn on one of two stages: 1280 wide for a screen, 480 wide
    for a phone, where the same story is laid out narrower and taller so its
    words stay readable (a wide stage scaled to a phone turned them to specks).
+   A scene whose wires run in the gaps between wide boxes (`find`, `rules`,
+   `follow`) has no narrow layout and says `wide`: a phone gets its wide stage,
+   scaled down, which keeps every wire in its gap.
    One frame says everything the scene does at once, for a reader who asked
    for no motion: a story's last, a stream's `still`. */
 
@@ -762,110 +765,285 @@ const SCENES = [
     },
   },
   {
-    /* A question in plain words. `match` finds the documents holding its
-       words, which light; `near` then finds the ones nearest it by meaning;
-       and `fuse` adds each one's 1 / (60 + rank) from both lists, so what
-       both found comes first. Words first, as a search box asks: meaning is
-       what a vector field adds. The documents, their places and both
-       rankings are an example; the arithmetic of the fusion is fennecdb's. */
-    key: 'search',
-    d: 10,
-    h: 560, nh: 830,
-    draw(c, t, n) {
+    /* Search on a phone with no network: three spellings typed in turn, each
+       sent into the phone's own index, where it reaches the one word it
+       means, and the same rows answer each time. The wires run in the gaps
+       between the boxes, never under a word. */
+    key: 'find',
+    d: 9.6, wide: true,
+    h: 560, nh: 560,
+    draw(c, t) {
       const a = ease(span(t, 0.1, 0.8));
-      const terms = new Set(['warm', 'places', 'to', 'sleep', 'outdoors']);
-      // Where each document sits by meaning; the query's place is Q.
-      const DOCS = {
-        1: ['Sleep outdoors', 300, 305, 'up'], 2: ['Down bag', 330, 360, 'right'],
-        3: ['Warm places', 215, 250, 'up'], 4: ['Heated tent', 265, 365, 'left'],
-        5: ['Campfire', 370, 310, 'right'], 6: ['Warm soup', 110, 170, 'up'],
-        8: ['Quiet places', 450, 150, 'up'],
+      const px = 80, py = 40, pw = 260, ph = 480;
+      const SPELL = ['sutlac', 'sütlax', 'sütl'];
+      const KIND = ['typed without accents', 'typed with a typo', 'half typed'];
+      const SAID = ['accents folded', 'one edit away', 'a prefix'];
+      const T = [0.9, 3.3, 5.7];
+      const WORDS = ['pilav', 'sultan', 'süt', 'sütçü', 'sütlaç', 'şurup'];
+      const ROWS = ['Sütlaç', 'Fırın sütlaç', 'Sütlaç ice cream'];
+      const terms = new Set(['sütlaç']);
+      const ys = [158, 258, 358];
+      let cur = -1;
+      for (let i = 0; i < 3; i++) if (t >= T[i]) cur = i;
+
+      // The phone, with no network all along.
+      box(c, px, py, pw, ph, { r: 30, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
+      box(c, px + pw / 2 - 34, py + 12, 68, 14, { r: 7, fill: P.panel2, stroke: null, alpha: a });
+      mono(c, '9:41', px + 22, py + 44, { alpha: a });
+      dot(c, px + pw - 90, py + 39, 5, P.ember, a);
+      mono(c, 'offline', px + pw - 20, py + 44, { color: P.ember, align: 'right', alpha: a });
+      text(c, 'Menu', px + 16, py + 80, { size: 20, weight: 600, color: P.star, alpha: a });
+      box(c, px + 16, py + 96, pw - 32, 44, { r: 22, fill: P.panel, stroke: cur >= 0 ? P.sun : P.rule, alpha: a });
+      if (cur >= 0) {
+        const s = SPELL[cur], n = Math.min(s.length, Math.floor((t - T[cur]) / 0.11) + 1);
+        const typed = s.slice(0, n);
+        mono(c, typed, px + 34, py + 124, { size: 17, color: P.star, alpha: a });
+        c.font = `400 17px ${MONO}`;
+        const cx = px + 34 + c.measureText(typed).width + 2;
+        if (Math.floor(t * 2.2) % 2 === 0) box(c, cx, py + 108, 2, 22, { r: 1, fill: P.sun, stroke: null, alpha: a });
+      } else mono(c, 'Search the menu', px + 34, py + 124, { size: 16, alpha: a });
+
+      // The rows: they come in once, and each later spelling lights the same ones.
+      const first = T[0] + 2.25;
+      ROWS.forEach((s, i) => {
+        const y = py + 156 + i * 54;
+        const k = ease(span(t, first + i * 0.12, first + 0.4 + i * 0.12));
+        const again = Math.max(...T.slice(1).map((Ti) => flash(t, Ti + 2.25 + i * 0.08, 1, 0)));
+        box(c, px + 16, y + (1 - k) * 8, pw - 32, 44, { r: 8, fill: P.panel, stroke: again > 0.05 ? P.oasis : P.rule, alpha: a * k, glow: again });
+        words(c, s, px + 32, y + 28 + (1 - k) * 8, { size: 17, lit: ease(span(t, first + 0.3 + i * 0.12, first + 0.7 + i * 0.12)), terms, alpha: a * k });
+      });
+      const fk = ease(span(t, first + 0.5, first + 1.1));
+      mono(c, 'category', px + 16, py + 342, { size: 13, alpha: a * fk });
+      [['Desserts', 2], ['Ice cream', 1]].forEach(([s, n], i) => {
+        const y = py + 370 + i * 38;
+        text(c, s, px + 16, y, { size: 15, color: P.sand, alpha: a * fk });
+        mono(c, String(n), px + pw - 16, y, { size: 14, color: P.sand2, align: 'right', alpha: a * fk });
+        box(c, px + 16, y + 8, (pw - 32) * (n / 2) * ease(span(t, first + 0.6 + i * 0.1, first + 1.3 + i * 0.1)), 6, { r: 3, fill: P.sun, stroke: null, alpha: a * fk });
+      });
+      mono(c, 'answered on the device', px + pw / 2, py + ph - 26, { size: 13, color: P.oasis, align: 'center', alpha: a * fk });
+
+      // The phone's own index: the spellings on the left, its words on the right.
+      const ix = 440, iy = 60, iw = 520, ih = 440;
+      box(c, ix, iy, iw, ih, { r: 16, fill: P.deep, stroke: P.rule, alpha: a });
+      mono(c, 'app.fennec on the phone · its index', ix + 24, iy + 36, { size: 15, color: P.hot, alpha: a });
+      const found = Math.max(...T.map((Ti) => t > Ti + 1.65 ? flash(t, Ti + 1.65, 1.2, 0.35) : 0));
+      mark(c, ix + iw - 34, iy + 30, 0.42, a, t - (T[Math.max(0, cur)] + 1.65 - 0.6));
+      WORDS.forEach((w, i) => {
+        const y = 130 + i * 52, hit = i === 4;
+        box(c, 720, y, 180, 40, { r: 8, fill: P.panel, stroke: hit && found > 0.05 ? P.oasis : P.rule, alpha: a, glow: hit ? found : 0 });
+        mono(c, w, 738, y + 26, { size: 17, color: hit && found > 0.05 ? P.oasis : P.sand2, alpha: a });
+      });
+      for (let i = 0; i < 3; i++) {
+        const Ti = T[i], y = ys[i];
+        const on = ease(span(t, Ti + 1.1, Ti + 1.35));
+        // In: from the phone's edge, down the gap, to the spelling's chip.
+        wire(c, [[px + pw, 158], [452, 158], [452, y], [464, y]], P.rule, 1.5, a);
+        streak(c, [[px + pw, 158], [452, 158], [452, y], [464, y]], span(t, Ti + 0.75, Ti + 1.15));
+        mono(c, KIND[i], 464, y - 32, { size: 12.5, color: t > Ti + 1.7 ? P.oasis : P.dim, alpha: a * on });
+        box(c, 464, y - 22, 200, 44, { r: 22, fill: P.panel, stroke: P.sun, alpha: a * on, glow: flash(t, Ti + 1.15, 0.8) * on });
+        mono(c, SPELL[i], 486, y + 6, { size: 18, color: P.star, alpha: a * on });
+        // Across the gap between the columns, to the word it means.
+        const to = i === 2 ? [[664, y], [720, 358]] : [[664, y], [692, y], [692, 358], [720, 358]];
+        wire(c, to, P.rule, 1.5, a * on);
+        streak(c, to, span(t, Ti + 1.3, Ti + 1.65));
+        mono(c, SAID[i], 464, y + 40, { size: 12.5, color: P.oasis, alpha: a * ease(span(t, Ti + 1.7, Ti + 2.0)) });
+      }
+      // And back to the phone's rows, under the words and down the gap.
+      const back = [[900, 358], [924, 358], [924, 472], [400, 472], [400, 270], [px + pw, 270]];
+      wire(c, back, P.rule, 1.5, a);
+      T.forEach((Ti) => streak(c, back, span(t, Ti + 1.75, Ti + 2.25)));
+      chip(c, 'three spellings, one word, the same rows', 700, 532, { size: 17, center: true, color: P.oasis, alpha: ease(span(t, 8.0, 8.5)) });
+    },
+  },
+  {
+    /* The rules kept in the database. A debit with too little money: the
+       statement's own condition is not met, nothing is written, and the
+       writer is told why (412). Then an order is paid, and the ledger line a
+       statement bound to it adds lands in the same block. The users, rows
+       and amounts are an example. */
+    key: 'rules',
+    d: 10, wide: true,
+    h: 560, nh: 560,
+    draw(c, t) {
+      const a = ease(span(t, 0.1, 0.8));
+      const A = ['set accounts {balance: balance - 300}', '  where name = "ada"', '    and balance >= 300', '  require 1 else "insufficient funds"'];
+      const B = ['set orders {status: "paid"} where id = 41', 'bound to it, in the same block:', 'put ledger {order: 41, amount: 300}'];
+      const IN = [[300, 240], [404, 240]], OUT = [[404, 254], [300, 254]];
+      const refused = t >= 2.45 && t < 4.4;
+      const swap = ease(span(t, 4.3, 4.7));
+      const land = 6.45;
+
+      // Ada's app: what it asked, and what it was told.
+      box(c, 60, 150, 240, 260, { r: 18, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
+      text(c, 'ada’s app', 80, 186, { size: 18, weight: 600, color: P.star, alpha: a });
+      const r1 = ease(span(t, 0.6, 0.9)), r2 = ease(span(t, 4.6, 4.9));
+      box(c, 80, 210, 200, 40, { r: 8, fill: P.panel, stroke: t > 3.1 ? P.ember : P.sun, alpha: a * r1 });
+      mono(c, 'debit 300', 98, 236, { size: 15, color: P.sand, alpha: a * r1 });
+      mono(c, '412 · insufficient funds', 80, 276, { size: 13, color: P.ember, alpha: a * ease(span(t, 3.1, 3.4)) });
+      box(c, 80, 300, 200, 40, { r: 8, fill: P.panel, stroke: t > 7.4 ? P.oasis : P.sun, alpha: a * r2, glow: t > 7.4 ? flash(t, 7.4, 1, 0.2) : 0 });
+      mono(c, 'pay order 41', 98, 326, { size: 15, color: P.sand, alpha: a * r2 });
+      mono(c, '200 · paid', 80, 366, { size: 13, color: P.oasis, alpha: a * ease(span(t, 7.4, 7.7)) });
+
+      // The way in and the way back.
+      wire(c, IN, P.rule, 1.5, a);
+      wire(c, OUT, P.rule, 1.5, a, [4, 6]);
+      streak(c, IN, span(t, 1.0, 1.5));
+      streak(c, IN, span(t, 4.9, 5.4));
+      const no = span(t, 2.6, 3.1);
+      if (no > 0 && no < 1) dot(c, ...along(OUT, inOut(no)), 4, P.ember, a);
+      streak(c, OUT, span(t, 7.0, 7.4));
+
+      // The database, and the statement that checks itself.
+      box(c, 380, 60, 500, 440, { r: 20, fill: P.panel, stroke: P.sun, alpha: a, line: 2 });
+      mono(c, 'fennec-server', 404, 96, { size: 16, color: P.hot, alpha: a });
+      mark(c, 846, 92, 0.55, a, t - ((t < 5.4 ? 1.5 : 5.4) - 0.6));
+      const g = t < 4.4 ? flash(t, 1.5, 1) : flash(t, 5.4, 1);
+      box(c, 404, 120, 452, 156, { r: 12, fill: P.deep, stroke: refused ? P.ember : P.rule, alpha: a, glow: refused ? 0 : g });
+      A.forEach((s, i) => {
+        const lit = t > 1.55 + i * 0.22;
+        const col = i === 3 && refused ? P.ember : i === 2 && t > 2.25 && refused ? P.ember : lit ? P.star : P.sand2;
+        mono(c, s, 422, 152 + i * 28, { size: 15, color: col, alpha: a * (1 - swap) });
+      });
+      B.forEach((s, i) => {
+        const lit = t > 5.45 + i * 0.3;
+        mono(c, s, 422, 152 + i * 28, { size: 15, color: i === 1 ? P.dim : lit ? P.star : P.sand2, alpha: a * swap });
+      });
+
+      // The collections the statements write.
+      const cols = [['accounts', 404], ['orders', 560], ['ledger', 716]];
+      cols.forEach(([name, x], i) => {
+        const hit = i === 0 ? (refused ? 1 : 0) : (t > land ? flash(t, land, 1.2, 0.25) : 0);
+        box(c, x, 316, 140, 120, { r: 12, fill: P.deep, stroke: i === 0 && refused ? P.ember : hit > 0.05 ? P.oasis : P.rule, alpha: a, glow: i ? hit : 0 });
+        mono(c, name, x + 14, 342, { size: 13, alpha: a });
+        wire(c, [[x + 70, 276], [x + 70, 316]], P.rule, 1.5, a);
+      });
+      streak(c, [[474, 276], [474, 316]], span(t, 2.0, 2.25));
+      streak(c, [[630, 276], [630, 316]], span(t, 6.1, land));
+      streak(c, [[786, 276], [786, 316]], span(t, 6.1, land));
+      mono(c, 'ada   120', 418, 376, { size: 15, color: refused && t > 2.25 ? P.ember : P.sand, alpha: a });
+      mono(c, 'ben   540', 418, 410, { size: 15, color: P.sand, alpha: a });
+      mono(c, '#40   paid', 574, 376, { size: 15, color: P.sand, alpha: a });
+      const paid = ease(span(t, land, land + 0.35));
+      mono(c, '#41   open', 574, 410 - paid * 10, { size: 15, color: P.sand, alpha: a * (1 - paid) });
+      mono(c, '#41   paid', 574, 420 - paid * 10, { size: 15, color: P.oasis, alpha: a * paid });
+      mono(c, '#40   80', 730, 376, { size: 15, color: P.sand, alpha: a });
+      mono(c, '#41   300', 730, 410 + (1 - paid) * 8, { size: 15, color: P.oasis, alpha: a * paid });
+
+      // One block: the order and its ledger line, both or neither.
+      const one = ease(span(t, land + 0.1, land + 0.45));
+      box(c, 550, 306, 316, 140, { r: 16, fill: null, stroke: P.oasis, alpha: a * one, line: 1.5, dash: [5, 5], glow: flash(t, land + 0.1, 1.2, 0.2) });
+      mono(c, 'one block', 708, 472, { size: 13, color: P.oasis, align: 'center', alpha: a * one });
+
+      const say = (s, from, to, col) => chip(c, s, 640, 532, { size: 17, center: true, color: col, alpha: ease(span(t, from, from + 0.4)) * (1 - ease(span(t, to, to + 0.3))) });
+      say('refused in the database, and told why', 3.1, 4.4, P.sand);
+      say('the order and its ledger line land together, or neither does', 7.0, 99, P.oasis);
+    },
+  },
+  {
+    /* Beside PostgreSQL: a commit there reaches fennec-server over logical
+       replication and, from it, the screens that follow the table. A write
+       sent to the mirror is refused (403): writes stay in PostgreSQL. The
+       0.09 ms is the docs' median from a commit to a subscriber; the rows
+       are an example. */
+    key: 'follow',
+    d: 10, wide: true,
+    h: 560, nh: 560,
+    draw(c, t) {
+      const a = ease(span(t, 0.1, 0.8));
+      const C1 = 1.0, C2 = 6.6;   // the two commits
+      const second = t >= C2;
+      const at = (k) => (second ? C2 : C1) + k;
+      const APP = [[170, 116], [170, 170]];
+      const REP = [[270, 300], [510, 300]];
+      const TO_P = [[780, 250], [850, 250], [850, 165], [930, 165]];
+      const TO_B = [[780, 360], [850, 360], [850, 425], [900, 425]];
+
+      // The app, writing to PostgreSQL as it always has.
+      box(c, 70, 60, 200, 56, { r: 12, fill: P.panel2, stroke: P.rule, alpha: a });
+      mono(c, 'your app', 170, 94, { size: 15, color: P.sand, align: 'center', alpha: a });
+      wire(c, APP, P.rule, 1.5, a);
+      mono(c, second ? 'UPDATE … COMMIT' : 'INSERT … COMMIT', 184, 148, { size: 13, color: P.sun, alpha: a * ease(span(t, at(-0.2), at(0.1))) * (1 - ease(span(t, at(1.6), at(1.9)))) });
+      streak(c, APP, span(t, C1, C1 + 0.35));
+      streak(c, APP, span(t, C2, C2 + 0.35));
+
+      // PostgreSQL: the record.
+      const pg = Math.max(t > C1 + 0.35 ? flash(t, C1 + 0.35, 1) : 0, t > C2 + 0.35 ? flash(t, C2 + 0.35, 1) : 0);
+      box(c, 70, 170, 200, 250, { r: 16, fill: P.panel, stroke: P.sand2, alpha: a, line: 1.8, glow: pg });
+      disk(c, 170, 220, { alpha: a, glow: pg });
+      text(c, 'PostgreSQL', 170, 286, { size: 19, weight: 600, color: P.star, align: 'center', alpha: a });
+      mono(c, 'the record', 170, 308, { size: 13, align: 'center', alpha: a });
+      for (let i = 0; i < 4; i++) {
+        const k = i < 3 ? 1 : ease(span(t, C1 + 0.35, C1 + 0.7));
+        const lit = i === 3 ? Math.max(t > C1 + 0.35 ? flash(t, C1 + 0.35, 1.2) : 0, t > C2 + 0.35 ? flash(t, C2 + 0.35, 1.2) : 0) : 0;
+        box(c, 90, 330 + i * 21, 160, 13, { r: 4, fill: lit > 0.05 ? `rgba(79,224,196,${0.3 + 0.5 * lit})` : P.panel2, stroke: null, alpha: a * k });
+      }
+      mono(c, 'writes go to PostgreSQL', 170, 452, { size: 13, color: P.sun, align: 'center', alpha: a * ease(span(t, 5.6, 6.0)) });
+
+      // Logical replication, to fennec-server.
+      wire(c, REP, P.rule, 2, a);
+      mono(c, 'logical replication', 390, 284, { size: 13, color: P.sand2, align: 'center', alpha: a });
+      mono(c, 'pgoutput, over TLS', 390, 326, { size: 12, align: 'center', alpha: a });
+      streak(c, REP, span(t, at(0.5), at(1.1)));
+
+      const got = at(1.1);
+      const sg = t > got ? flash(t, got, 0.9) : 0;
+      box(c, 510, 190, 270, 220, { r: 16, fill: P.panel, stroke: P.sun, alpha: a, line: 2, glow: sg });
+      mark(c, 645, 248, 1.0, a, t - (got - 0.6));
+      mono(c, 'fennec-server', 645, 318, { size: 16, color: P.hot, align: 'center', alpha: a });
+      mono(c, '--follow', 645, 342, { size: 13, color: P.sand2, align: 'center', alpha: a });
+      [['title@text', 526, 0.15], ['category@hash', 632, 0.25]].forEach(([s, x, d]) => {
+        const w = chip(c, s, x, 378, { size: 13, font: MONO, weight: 400, alpha: a, color: P.sand2 });
+        const gl = t > got + d ? flash(t, got + d, 0.8) : 0;
+        if (gl > 0.02) box(c, x, 365, w, 26, { r: 13, fill: null, stroke: P.oasis, alpha: a * gl, glow: gl });
+      });
+
+      // The screens that follow the table.
+      wire(c, TO_P, P.rule, 1.5, a);
+      wire(c, TO_B, P.rule, 1.5, a);
+      streak(c, TO_P, span(t, at(1.35), at(1.75)));
+      streak(c, TO_B, span(t, at(1.35), at(1.75)));
+      const arrive = at(1.75);
+      const lit = (t > C1 + 1.75 ? flash(t, C1 + 1.75, 1.2, 0.3) : 0) * (second && t > C2 + 1.75 ? 0 : 1) + (second && t > C2 + 1.75 ? flash(t, C2 + 1.75, 1.2, 0.3) : 0);
+      const inK = ease(span(t, C1 + 1.75, C1 + 2.1));
+      const ed = ease(span(t, C2 + 1.75, C2 + 2.1));
+      const row = (x, y, w, h, size) => {
+        box(c, x, y + (1 - inK) * 8, w, h, { r: 7, fill: P.panel, stroke: lit > 0.05 ? P.oasis : P.rule, alpha: a * inK, glow: lit });
+        text(c, 'Fennec ears', x + 12, y + h / 2 + 5 + (1 - inK) * 8 - ed * 8, { size, color: P.oasis, alpha: a * inK * (1 - ed) });
+        text(c, 'Fennec ears, explained', x + 12, y + h / 2 + 5 + (1 - ed) * 8, { size, color: P.oasis, alpha: a * ed });
       };
-      const NEAR = [2, 4, 1, 5, 3], MATCH = [1, 3, 6, 8];
-      const fused = Object.keys(DOCS).map(Number).map((id) => {
-        const rm = MATCH.indexOf(id) + 1, rn = NEAR.indexOf(id) + 1;
-        return { id, rm, rn, s: (rm ? 1 / (60 + rm) : 0) + (rn ? 1 / (60 + rn) : 0) };
-      }).sort((x, y) => y.s - x.s || x.id - y.id).slice(0, 5);
-
-      const k = n ? 0.82 : 1, ox = n ? -6 : 0, oy = n ? -6 : 0;
-      const at = (x, y) => [ox + x * k, oy + y * k + (n ? 20 : 0)];
-      const Q = at(300, 350);
-      const COL = n ? [10, 167, 324] : [600, 830, 1060], cw = n ? 146 : 200;
-      const top = n ? 448 : 112, row0 = n ? 506 : 172, step = n ? 52 : 60, rh = n ? 44 : 50;
-      const ts = n ? 13.5 : 16;
-
-      // The question.
-      const qa = ease(span(t, 0.3, 0.9));
-      chip(c, '“warm places to sleep outdoors”', n ? 240 : 30, n ? 28 : 46, { size: n ? 15 : 18, color: P.star, alpha: qa, center: n });
-
-      // The documents, by meaning: a sky of them, these few named.
-      const r = rng(11);
-      for (let i = 0; i < 46; i++) {
-        let x, y;
-        do { x = 40 + r() * 490; y = 100 + r() * 410; } while (Math.hypot(x - 300, y - 350) < 150);
-        dot(c, ...at(x, y), 2.2, P.sand2, a * 0.45);
-      }
-      // The words first, from 1.5 s; then the meaning, from 2.9 s.
-      const matchK = (id) => { const i = MATCH.indexOf(id); return i < 0 ? 0 : ease(span(t, 1.5 + i * 0.25, 1.8 + i * 0.25)); };
-      const nearK = (id) => { const i = NEAR.indexOf(id); return i < 0 ? 0 : ease(span(t, 3.8 + i * 0.18, 4.2 + i * 0.18)); };
-      for (const [id, [s, x0, y0, side]] of Object.entries(DOCS)) {
-        const [x, y] = at(x0, y0);
-        const nk = nearK(+id), mk = matchK(+id);
-        streak(c, [Q, [x, y]], span(t, 3.6 + NEAR.indexOf(+id) * 0.18, 4.0 + NEAR.indexOf(+id) * 0.18), { tail: 0.5, w: 2 });
-        if (nk > 0.5) line(c, ...Q, x, y, P.oasis, 1, a * 0.35);
-        if (mk > 0) box(c, x - 9, y - 9, 18, 18, { r: 9, fill: null, stroke: P.sun, alpha: a * mk, line: 1.4 });
-        if (nk > 0) glow(c, x, y, 4, a * nk); else dot(c, x, y, 4, P.sand, a);
-        const o = { size: n ? 12 : 13, color: nk > 0.5 ? P.oasis : P.sand2, alpha: a };
-        if (side === 'up') mono(c, s, x, y - 13, { ...o, align: 'center' });
-        else if (side === 'left') mono(c, s, x - 12, y + 18, { ...o, align: 'right' });
-        else mono(c, s, x + 12, y + 5, o);
-      }
-      // For `near` the query lands among them, and its rings go out.
-      const land = ease(span(t, 2.9, 3.4));
-      if (land > 0) {
-        streak(c, [n ? [240, 46] : [180, 64], Q], span(t, 2.9, 3.4), { tail: 0.4, w: 2.5 });
-        for (const d of [0, 0.35]) {
-          const rr = span(t, 3.4 + d, 4.5 + d);
-          if (rr > 0 && rr < 1) box(c, Q[0] - 90 * k * rr, Q[1] - 90 * k * rr, 180 * k * rr, 180 * k * rr, { r: 90 * k * rr, fill: null, stroke: P.oasis, alpha: (1 - rr) * 0.8, line: 1.5 });
-        }
-        if (t > 3.4) glow(c, ...Q, 6, a);
-      }
-
-      // The three rankings, the words' first.
-      const head = [['match', 'by the words'], ['near', 'by meaning'], ['fuse', '1 / (60 + rank), added']];
-      head.forEach(([h, sub], i) => {
-        const ha = ease(span(t, [1.2, 3.7, 5.3][i], [1.6, 4.1, 5.7][i]));
-        text(c, h, COL[i], top, { size: n ? 16 : 19, weight: 600, color: i === 2 ? P.oasis : P.star, alpha: ha });
-        mono(c, sub, COL[i], top + (n ? 18 : 22), { size: n ? 10.5 : 13, alpha: ha });
+      // A phone.
+      box(c, 930, 40, 160, 250, { r: 26, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
+      box(c, 980, 50, 60, 12, { r: 6, fill: P.panel2, stroke: null, alpha: a });
+      text(c, 'Articles', 946, 96, { size: 16, weight: 600, color: P.star, alpha: a });
+      ['Desert nights', 'Sand dunes'].forEach((s, i) => {
+        box(c, 946, 110 + i * 44, 128, 36, { r: 7, fill: P.panel, alpha: a });
+        text(c, s, 958, 133 + i * 44, { size: 14, color: P.sand, alpha: a });
       });
-      const rowAt = (col, i) => [COL[col], row0 + i * step];
-      const card = (x, y, id, rank, alpha, { lit = 0, stroke = P.rule, score = null, g = 0 } = {}) => {
-        box(c, x, y, cw, rh, { r: 8, fill: P.panel, stroke, alpha, glow: g });
-        mono(c, String(rank), x + 10, y + (score ? 20 : rh / 2 + 5), { size: 12, alpha });
-        words(c, DOCS[id][0], x + (n ? 24 : 30), y + (score ? 20 : rh / 2 + 5), { size: ts, lit, terms, alpha });
-        if (score) mono(c, score, x + (n ? 24 : 30), y + rh - 9, { size: n ? 10.5 : 12, color: P.oasis, alpha });
-      };
-      MATCH.forEach((id, i) => {
-        const ma = ease(span(t, 1.5 + i * 0.25, 1.8 + i * 0.25));
-        card(...rowAt(0, i), id, i + 1, ma, { lit: ease(span(t, 1.8 + i * 0.25, 2.2 + i * 0.25)) });
+      row(946, 198, 128, 36, 13);
+      // A page.
+      box(c, 900, 330, 320, 190, { r: 14, fill: P.deep, alpha: a });
+      box(c, 900, 330, 320, 40, { r: 14, fill: P.panel2, alpha: a });
+      [P.ember, P.sun, P.oasis].forEach((col, i) => dot(c, 920 + i * 15, 350, 4.5, col, a));
+      mono(c, 'docs.my-app.com', 976, 355, { size: 13, alpha: a });
+      ['Desert nights', 'Sand dunes'].forEach((s, i) => {
+        box(c, 920, 386 + i * 40, 280, 32, { r: 7, fill: P.panel, alpha: a });
+        text(c, s, 934, 407 + i * 40, { size: 15, color: P.sand, alpha: a });
       });
-      NEAR.forEach((id, i) => card(...rowAt(1, i), id, i + 1, ease(span(t, 4.2 + i * 0.15, 4.5 + i * 0.15)), { stroke: P.rule }));
-      // Fusion: each document flies in from the lists it is on.
-      fused.forEach((f, i) => {
-        const go = 5.6 + i * 0.25, m = inOut(span(t, go, go + 0.7));
-        if (m <= 0) return;
-        const [tx, ty] = rowAt(2, i);
-        for (const [col, rank] of [[0, f.rm], [1, f.rn]]) {
-          if (!rank || m >= 1) continue;
-          const [sx, sy] = rowAt(col, rank - 1);
-          box(c, lerp(sx, tx, m), lerp(sy, ty, m), cw, rh, { r: 8, fill: P.panel2, stroke: P.oasis, alpha: 0.7 * (1 - m * 0.5), glow: 0.5 });
-        }
-        if (m < 1) return;
-        const both = f.rm && f.rn;
-        const parts = [f.rm && `1/${60 + f.rm}`, f.rn && `1/${60 + f.rn}`].filter(Boolean).join(' + ');
-        card(tx, ty, f.id, i + 1, a, { lit: 1, stroke: both ? P.oasis : P.rule, g: both ? flash(t, go + 0.7, 1, 0.4) : 0, score: parts });
-      });
-      chip(c, 'found by both, ranked first', n ? 240 : 920, n ? 800 : 500, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 7.4, 8)) });
+      row(920, 466, 280, 32, 15);
+      mono(c, '0.09 ms', 792, 300, { size: 14, color: P.oasis, alpha: a * ease(span(t, C1 + 1.9, C1 + 2.3)) });
+      mono(c, 'commit to subscriber', 792, 318, { size: 12, alpha: a * ease(span(t, C1 + 1.9, C1 + 2.3)) });
+
+      // A write sent to the mirror: refused, and back.
+      const go = span(t, 4.5, 4.95), back = span(t, 5.15, 5.6);
+      const rev = [...TO_B].reverse();
+      if (go > 0 && go < 1) dot(c, ...along(rev, inOut(go)), 3.6, P.sand, a);
+      if (back > 0 && back < 1) dot(c, ...along(TO_B, inOut(back)), 3.6, P.ember, a);
+      mono(c, '403 · read-only mirror', 1060, 314, { size: 13, color: P.ember, align: 'center', alpha: a * ease(span(t, 5.5, 5.8)) * (1 - ease(span(t, 7.2, 7.5))) });
+
+      const say = (s, from, to, col) => chip(c, s, 640, 532, { size: 17, center: true, color: col, alpha: ease(span(t, from, from + 0.4)) * (1 - ease(span(t, to, to + 0.3))) });
+      say('PostgreSQL keeps the record; fennec-server follows it', 1.0, 4.2, P.sand);
+      say('the mirror is read-only: writes go to PostgreSQL', 4.5, 6.4, P.sand);
+      say('every commit reaches the screens that follow it', 6.7, 99, P.oasis);
     },
   },
   {
@@ -1065,10 +1243,12 @@ export function still(key) {
   return s.stream ? s.still : s.d;
 }
 
-/* The stage scene `key` is drawn on: a screen's, or a phone's. */
+/* The stage scene `key` is drawn on: a screen's, or a phone's. A scene that
+   says `wide` has no narrow layout (its wires run in the gaps between wide
+   boxes), so a phone gets the wide stage scaled down. */
 export function stage(key, narrow) {
   const s = SCENE[key];
-  return narrow ? { w: NW, h: s.nh } : { w: W, h: s.h };
+  return narrow && !s.wide ? { w: NW, h: s.nh } : { w: W, h: s.h };
 }
 
 /* Draws scene `key` at `t` seconds of its own into a context of any size.
@@ -1085,6 +1265,6 @@ export function render(c, key, t, width, height, narrow = false, clock = t) {
   c.save();
   const end = cycle(key);
   c.globalAlpha = ease(span(t, 0, 0.45)) * (1 - ease(span(t, end - 0.6, end)));
-  scene.draw(c, t, narrow);
+  scene.draw(c, t, narrow && !scene.wide);
   c.restore();
 }
