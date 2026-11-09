@@ -1006,20 +1006,26 @@ const SCENES = [
       const lit = (t > C1 + 1.75 ? flash(t, C1 + 1.75, 1.2, 0.3) : 0) * (second && t > C2 + 1.75 ? 0 : 1) + (second && t > C2 + 1.75 ? flash(t, C2 + 1.75, 1.2, 0.3) : 0);
       const inK = ease(span(t, C1 + 1.75, C1 + 2.1));
       const ed = ease(span(t, C2 + 1.75, C2 + 2.1));
+      // A title is set at the row's size or smaller, never past the row's
+      // edge: the edited one ran out of the phone's row, 22 letters in 128 px.
+      const fit = (s, w, size) => {
+        c.font = `400 ${size}px ${SANS}`;
+        return Math.min(size, size * (w - 24) / c.measureText(s).width);
+      };
       const row = (x, y, w, h, size) => {
         box(c, x, y + (1 - inK) * 8, w, h, { r: 7, fill: P.panel, stroke: lit > 0.05 ? P.oasis : P.rule, alpha: a * inK, glow: lit });
-        text(c, 'Fennec ears', x + 12, y + h / 2 + 5 + (1 - inK) * 8 - ed * 8, { size, color: P.oasis, alpha: a * inK * (1 - ed) });
-        text(c, 'Fennec ears, explained', x + 12, y + h / 2 + 5 + (1 - ed) * 8, { size, color: P.oasis, alpha: a * ed });
+        text(c, 'Fennec ears', x + 12, y + h / 2 + 5 + (1 - inK) * 8 - ed * 8, { size: fit('Fennec ears', w, size), color: P.oasis, alpha: a * inK * (1 - ed) });
+        text(c, 'Fennec ears, explained', x + 12, y + h / 2 + 5 + (1 - ed) * 8, { size: fit('Fennec ears, explained', w, size), color: P.oasis, alpha: a * ed });
       };
       // A phone.
-      box(c, 930, 40, 160, 250, { r: 26, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
-      box(c, 980, 50, 60, 12, { r: 6, fill: P.panel2, stroke: null, alpha: a });
+      box(c, 930, 40, 200, 250, { r: 26, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
+      box(c, 1000, 50, 60, 12, { r: 6, fill: P.panel2, stroke: null, alpha: a });
       text(c, 'Articles', 946, 96, { size: 16, weight: 600, color: P.star, alpha: a });
       ['Desert nights', 'Sand dunes'].forEach((s, i) => {
-        box(c, 946, 110 + i * 44, 128, 36, { r: 7, fill: P.panel, alpha: a });
+        box(c, 946, 110 + i * 44, 168, 36, { r: 7, fill: P.panel, alpha: a });
         text(c, s, 958, 133 + i * 44, { size: 14, color: P.sand, alpha: a });
       });
-      row(946, 198, 128, 36, 13);
+      row(946, 198, 168, 36, 14);
       // A page.
       box(c, 900, 330, 320, 190, { r: 14, fill: P.deep, alpha: a });
       box(c, 900, 330, 320, 40, { r: 14, fill: P.panel2, alpha: a });
