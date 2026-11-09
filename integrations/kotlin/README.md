@@ -132,7 +132,16 @@ write carries the key, make a write once however often it is sent.
 builder's reads, and an `asRead()` copy's, to the tenant's read replica near
 the app through a fennec-shard router (`Fennec-Read: replica`), each after the
 furthest position an answer from home named to the connection or any copy of
-it (`Fennec-After`, `Fennec-History`); writes go home.
+it (`Fennec-After`, `Fennec-History`); writes go home. A request goes again
+only where it cannot have run -- a 503, or a 429 naming its wait, after that
+wait; a connection refused -- or may run twice: a read the builder made or
+sent near, a write under a key, after a dropped connection too. Nothing goes
+again after the connection's own `timeout` (milliseconds to an answer's head
+and between the pieces of its body, 30 000 unless given) or once the
+coroutine is cancelled: `Fennec.connect(url, token, timeout = ..., retry =
+FennecRemote.Retry(attempts, maxWait))` (3 tries, 10 000 ms of waits),
+`null` for none. A request that must go once is sent with its length fixed,
+which the JVM's `HttpURLConnection` never sends again on its own.
 
 ## Named statements
 

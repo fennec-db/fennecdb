@@ -444,9 +444,15 @@ class Fennec {
   /// server, through the same builder ([FennecRemote]). With `reads:
   /// Reads.nearest` the builder's reads go to the tenant's read replica near
   /// the app, where a fennec-shard router has one, after the app's own writes
-  /// ([Reads]).
-  static FennecRemote connect(String url, {String? token, Reads reads = Reads.home}) =>
-      FennecRemote(url, token: token, reads: reads);
+  /// ([Reads]). [timeout] bounds the wait for an answer's head and between
+  /// the pieces of its body; [retry] is how a request goes again where it
+  /// cannot have run or may run twice, null for never ([RetryPolicy]).
+  static FennecRemote connect(String url,
+          {String? token,
+          Reads reads = Reads.home,
+          Duration timeout = const Duration(seconds: 30),
+          RetryPolicy? retry = const RetryPolicy()}) =>
+      FennecRemote(url, token: token, reads: reads, timeout: timeout, retry: retry);
 
   /// A database in memory alone.
   static Future<Fennec> memory() async {

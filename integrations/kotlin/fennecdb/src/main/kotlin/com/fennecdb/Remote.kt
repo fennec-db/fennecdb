@@ -2,11 +2,17 @@ package com.fennecdb
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import kotlin.math.ceil
+import kotlin.random.Random
 
 /**
  * A fennec-server over HTTP, with no file on the device: every query goes to
@@ -18,7 +24,10 @@ import java.net.URL
  * val open = db.from("todos").where("done", false).rows()
  * ```
  *
- * The requests are `HttpURLConnection`'s, so TLS is the system's.
+ * The requests are `HttpURLConnection`'s, so TLS is the system's. A request
+ * goes again only where it cannot have run or may run twice ([Retry]), and
+ * the timeout bounds the wait for an answer's head and each wait between the
+ * pieces of its body.
  */
 class FennecRemote private constructor(
     url: String,
@@ -33,9 +42,43 @@ class FennecRemote private constructor(
     private val held: Long? = null,
     /** This copy's requests only read ([asRead], the builder's reads). */
     private val reading: Boolean = false,
+    /**
+     * This copy's requests are the builder's reads ([from]): reads the
+     * builder made, which may run twice -- unlike an [asRead] text, a claim
+     * nothing checks at home.
+     */
+    private val built: Boolean = false,
 ) {
-    internal constructor(url: String, token: String?, reads: Reads = Reads.HOME) :
-        this(url, Shared(token, reads), null)
+    internal constructor(url: String, token: String?, reads: Reads = Reads.HOME, timeout: Long = 30_000, retry: Retry? = Retry()) :
+        this(url, Shared(token, reads, timeout, retry), null) {
+        require(timeout > 0) { "a timeout is milliseconds, above 0" }
+    }
+
+    /**
+     * How a connection sends a request again: only where nothing ran, or
+     * where running it again changes nothing (docs/design/js-client.md#retries).
+     *
+     * Nothing ran: a 503, or a quota's 429, naming its wait -- sent after that
+     * wait, never sooner, unless its body says statements of a batch were
+     * made (`completed`) -- and a connection refused. Running it again changes
+     * nothing: a read the builder made, one sent near (`Fennec-Read: replica`,
+     * which every server runs read-only), and a write under an
+     * `Idempotency-Key` -- these go again after a reset or a dropped connection
+     * too. Never after the connection's own timeout, past which the server may
+     * still run it, nor once the coroutine is cancelled or the thread
+     * interrupted, nor after a refusal naming no wait; an [asRead] text sent
+     * home is a claim nothing checks, and goes once.
+     *
+     * [attempts] tries at most, their waits -- the server's, or 250 ms
+     * doubling, 30% jitter on top -- within [maxWait] milliseconds; past
+     * either, the last answer or error is the caller's. `retry = null` on
+     * `Fennec.connect` sends nothing again.
+     */
+    data class Retry(val attempts: Int = 3, val maxWait: Long = 10_000) {
+        init {
+            require(attempts >= 1 && maxWait >= 0) { "bad retry: $attempts attempts, $maxWait ms" }
+        }
+    }
 
     /**
      * Where a connection's reads go. [HOME], the default: every request to
@@ -49,7 +92,10 @@ class FennecRemote private constructor(
      */
     enum class Reads { HOME, NEAREST }
 
-    private class Shared(@Volatile var token: String?, val reads: Reads) {
+    private class Shared(@Volatile var token: String?, val reads: Reads, val timeout: Long, val retry: Retry?) {
+        /** The tests' probe, called with each wait before a request goes again; null, as it always is outside them. */
+        @Volatile var pausing: ((Long) -> Unit)? = null
+
         /** The furthest position an answer from home named, which a read near is sent after: an answer that arrives late is not the last. */
         private var at: Position? = null
 
@@ -81,6 +127,22 @@ class FennecRemote private constructor(
 
     /** Where this connection's reads go ([Fennec.Companion.connect]'s `reads`). */
     val reads: Reads get() = shared.reads
+
+    /**
+     * Milliseconds to an answer's head, a [withWait] copy's wait on top, and
+     * between the pieces of its body ([Fennec.Companion.connect]'s `timeout`).
+     */
+    val timeout: Long get() = shared.timeout
+
+    /** How a request goes again, null for never ([Fennec.Companion.connect]'s `retry`). */
+    val retry: Retry? get() = shared.retry
+
+    /** The tests' probe of each wait before a request goes again. */
+    internal var pausing: ((Long) -> Unit)?
+        get() = shared.pausing
+        set(value) {
+            shared.pausing = value
+        }
 
     /** A fresh token for the requests from here on. */
     fun setToken(token: String?) {
@@ -163,10 +225,11 @@ class FennecRemote private constructor(
 
     /**
      * The query builder, its queries run on the server -- its reads as an
-     * [asRead] copy's, near on a connection reading near.
+     * [asRead] copy's, near on a connection reading near, and sent again
+     * after a reset as reads the builder made ([Retry]).
      */
     fun from(collection: String): Query {
-        val reader = asRead()
+        val reader = FennecRemote(url, shared, idempotencyKey, held, reading = true, built = true)
         return Query.from(collection).bind(
             { text, params -> runList(text, params) },
             { text, params -> reader.runList(text, params) },
@@ -282,14 +345,18 @@ class FennecRemote private constructor(
      * connection: a read blocked in `HttpURLConnection` heeds no interrupt,
      * and a held claim given up went on waiting for the server's answer.
      */
-    private suspend fun posting(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> =
-        sending { sent ->
-            val c = withContext(Dispatchers.IO) { open(path, type, key, sent) }
-            suspendCancellableCoroutine { cont ->
-                cont.invokeOnCancellation { c.disconnect() }
-                Dispatchers.IO.asExecutor().execute { cont.resumeWith(runCatching { exchange(c, payload) }) }
-            }
+    private suspend fun posting(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> {
+        val body = payload.encodeToByteArray()
+        return sending(key) { sent, twice ->
+            asking(twice, {
+                val c = withContext(Dispatchers.IO) { open(path, type, key, sent, body.size, twice) }
+                suspendCancellableCoroutine { cont ->
+                    cont.invokeOnCancellation { c.disconnect() }
+                    Dispatchers.IO.asExecutor().execute { cont.resumeWith(runCatching { exchange(c, body) }) }
+                }
+            }) { delay(it) }
         }
+    }
 
     private fun send(text: String, params: List<Any?>, key: String?): Answer {
         val body = Json.write(mapOf("query" to text, "params" to params.map { Values.normalize(it) }))
@@ -301,22 +368,32 @@ class FennecRemote private constructor(
      * refusal as a [FennecException] with its status and, for a batch, where
      * it stopped.
      */
-    private fun post(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> =
-        sending { sent -> exchange(open(path, type, key, sent), payload) }
+    private fun post(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> {
+        val body = payload.encodeToByteArray()
+        return sending(key) { sent, twice ->
+            asking(twice, { exchange(open(path, type, key, sent, body.size, twice), body) }) { Thread.sleep(it) }
+        }
+    }
 
     /**
      * A request made by [request] -- handed the mark of a read near, or
-     * null -- and its answer read. A read near is marked for the tenant's
-     * read replica in the router's region, after the furthest position home
-     * named to this connection, which the replica waits for: that change of
-     * that history.
+     * null, and whether it may run twice -- and its answer read. A read near
+     * is marked for the tenant's read replica in the router's region, after
+     * the furthest position home named to this connection, which the replica
+     * waits for: that change of that history.
      */
-    private inline fun sending(request: (Near?) -> Reply): Triple<Any, Long?, Boolean> {
-        if (!reading || shared.reads != Reads.NEAREST) return finish(request(null), near = false)
+    private inline fun sending(key: String?, request: (Near?, Boolean) -> Reply): Triple<Any, Long?, Boolean> {
+        // What may run twice, sent again after a reset too: a read the
+        // builder made, one sent near, which every server runs read-only
+        // (`Fennec-Read`), and a write under a key. An [asRead] text sent
+        // home is a claim nothing checks: a statement it calls may have been
+        // made to write since.
+        val twice = built || (key ?: idempotencyKey) != null
+        if (!reading || shared.reads != Reads.NEAREST) return finish(request(null, twice), near = false)
         // A position of change 0 is none: nothing to wait for, as Go and
         // .NET send none.
         val sent = shared.position()?.takeIf { it.seq > 0 }
-        val reply = request(Near(sent))
+        val reply = request(Near(sent), true)
         // 504: no copy holds that write in the wait -- home had none
         // either, lost in a failover. Home says where it stands, which the
         // connection takes as its position, lower or not (`told`); asked
@@ -325,10 +402,68 @@ class FennecRemote private constructor(
             val home = reply.v as? Row
             val at = home?.long("seq")
             if (home != null && at != null) shared.told(sent, Position(at, home.string("history")))
-            return finish(request(null), near = false)
+            return finish(request(null, twice), near = false)
         }
         return finish(reply, near = true)
     }
+
+    /**
+     * A request made by [once], sent again by the rule
+     * (docs/design/js-client.md#retries, [Retry]): what ran nothing -- a 503
+     * or 429 naming its wait, after it, unless statements of a batch landed
+     * (`completed`); a connection refused -- and, where [twice], a reset or a
+     * dropped connection too. Never after the connection's own timeout, which
+     * a request may still run past, nor once the coroutine is cancelled (a
+     * `CancellationException`, never an `IOException`) or the thread
+     * interrupted. Each wait goes through [pause]: `delay` for a suspending
+     * call, `Thread.sleep` for a blocking one.
+     */
+    private inline fun asking(twice: Boolean, once: () -> Reply, pause: (Long) -> Unit): Reply {
+        val r = shared.retry
+        var waited = 0L
+        var n = 0
+        while (true) {
+            var wait = 0L
+            var reply: Reply? = null
+            var failure: IOException? = null
+            try {
+                val got = once()
+                reply = got
+                if (got.status == 503 || got.status == 429) {
+                    val body = got.v as? Row
+                    if (!((body?.long("completed") ?: 0L) > 0L)) {
+                        wait = waitOf(body, got.c.getHeaderField("retry-after"))?.let { ceil(it * 1000).toLong() } ?: 0L
+                    }
+                }
+                if (wait == 0L) return got
+            } catch (e: InterruptedIOException) {
+                // The connection's own timeout (`SocketTimeoutException`): a
+                // `compact`, a long read may still be running, and three tries
+                // ran a read three times. Or the thread interrupted.
+                throw unreached(e)
+            } catch (e: IOException) {
+                if (!twice && e !is ConnectException) throw unreached(e)
+                failure = e
+            }
+            // 250 ms doubling, or the server's wait; 30% jitter on top, so a
+            // server back up is not met by every client at once.
+            val base = maxOf(wait, 250L shl minOf(n, 30))
+            if (r == null || n + 1 >= r.attempts || waited + base > r.maxWait) {
+                if (failure != null) throw unreached(failure)
+                return reply!!
+            }
+            val w = minOf((base * (1 + Random.nextDouble() * 0.3)).toLong(), r.maxWait - waited)
+            waited += w
+            shared.pausing?.invoke(w)
+            pause(w)
+            n++
+        }
+    }
+
+    private fun unreached(e: IOException) = FennecException(
+        FennecException.Code.IO,
+        if (e is SocketTimeoutException) "no answer within the timeout: ${e.message}" else "the server could not be reached: ${e.message}",
+    )
 
     /** A read near's mark: the position it is sent after, null for none. */
     private class Near(val after: Position?)
@@ -342,12 +477,24 @@ class FennecRemote private constructor(
      */
     private class Reply(val status: Int, val v: Any?, val c: HttpURLConnection)
 
-    private fun open(path: String, type: String, key: String?, near: Near?): HttpURLConnection {
+    private fun open(path: String, type: String, key: String?, near: Near?, length: Int, twice: Boolean): HttpURLConnection {
         val c = URL("$url$path").openConnection() as HttpURLConnection
         c.requestMethod = "POST"
-        c.connectTimeout = 10_000
-        // A held request is answered once it writes, or at the end of its wait.
-        c.readTimeout = 60_000 + (held ?: 0L).toInt()
+        c.connectTimeout = shared.timeout.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        // Each wait for a piece of the answer -- its head, then each between
+        // the pieces of its body -- not the whole: a long answer is read for
+        // as long as it comes. A held request is answered once it writes, or
+        // at the end of its wait: the head's wait alone, reset once it is in.
+        c.readTimeout = (shared.timeout + (held ?: 0L)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        // A request that must go once goes with its length fixed. Its body
+        // buffered, the JVM's HttpURLConnection sends a POST again on its own
+        // when the answer's head fails -- a reset, a connection closed before
+        // it (`sun.net.http.retryPost`) -- and Android's, OkHttp's, one it
+        // can send again: a keyless write made twice. Streamed, neither does,
+        // and the JVM's asks a kept connection whether the server closed it
+        // before it is used, a wait of a millisecond (`available()`); a
+        // request that may run twice is spared it, and may be sent again so.
+        if (!twice) c.setFixedLengthStreamingMode(length)
         c.setRequestProperty("content-type", type)
         shared.token?.let { c.setRequestProperty("authorization", "Bearer $it") }
         (key ?: idempotencyKey)?.let { c.setRequestProperty("idempotency-key", it) }
@@ -363,14 +510,14 @@ class FennecRemote private constructor(
         return c
     }
 
-    private fun exchange(c: HttpURLConnection, payload: String): Reply {
-        val (status, body) = try {
-            c.outputStream.use { it.write(payload.encodeToByteArray()) }
-            val status = c.responseCode
-            status to ((if (status >= 400) c.errorStream else c.inputStream)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: "")
-        } catch (e: IOException) {
-            throw FennecException(FennecException.Code.IO, "the server could not be reached: ${e.message}")
-        }
+    /** The request sent and its answer read; an [IOException] is [asking]'s to judge. */
+    private fun exchange(c: HttpURLConnection, payload: ByteArray): Reply {
+        c.outputStream.use { it.write(payload) }
+        val status = c.responseCode
+        // The head is in: a held request's wait is over, each gap in the body
+        // is bounded by the timeout alone.
+        c.readTimeout = shared.timeout.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val body = (if (status >= 400) c.errorStream else c.inputStream)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: ""
         parsing?.invoke()
         return Reply(status, runCatching { if (body.isEmpty()) null else Json.parse(body) }.getOrNull(), c)
     }
@@ -405,16 +552,27 @@ class FennecRemote private constructor(
          */
         fun refused(status: Int, r: Row?, retryAfter: String?): FennecException {
             val quota = r?.string("quota")
-            val ms = r?.double("retry_after_ms")?.takeIf { it > 0 }?.let { it / 1000 }
             return FennecException(
                 if (quota == null) code(status) else FennecException.Code.QUOTA,
                 r?.string("error") ?: "HTTP $status", null,
                 status = status, at = r?.int("at"), completed = r?.int("completed"),
                 quota = quota,
-                retryAfter = ms ?: retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
+                retryAfter = waitOf(r, retryAfter),
                 reason = r?.string("reason"),
                 binding = r?.string("binding"),
             )
+        }
+
+        /**
+         * The seconds an answer asks a client to wait, where it names any: to
+         * the millisecond where the body says it (`retry_after_ms`) --
+         * `Retry-After` is whole seconds, and a bucket of 600 rows a second
+         * refills a row in 1.7 ms -- then the header, then the body's
+         * `retry_after`, which a 503 of the server's carries.
+         */
+        fun waitOf(r: Row?, header: String?): Double? {
+            r?.double("retry_after_ms")?.takeIf { it > 0 && it.isFinite() }?.let { return it / 1000 }
+            return listOf(header?.trim()?.toDoubleOrNull(), r?.double("retry_after")).firstOrNull { it != null && it > 0 && it.isFinite() }
         }
 
         /** An HTTP status as the error kind the engine would have said; the status itself is the error's `status`. */
@@ -484,9 +642,14 @@ internal data class Position(val seq: Long, val history: String?) {
  * server, through the same builder. With `reads = FennecRemote.Reads.NEAREST`
  * the builder's reads go to the tenant's read replica near the app, where a
  * fennec-shard router has one, after the app's own writes ([FennecRemote.Reads]).
+ * [timeout] is milliseconds to an answer's head and between the pieces of its
+ * body; [retry] how a request goes again where it cannot have run or may run
+ * twice, null for never ([FennecRemote.Retry]).
  */
 fun Fennec.Companion.connect(
     url: String,
     token: String? = null,
     reads: FennecRemote.Reads = FennecRemote.Reads.HOME,
-): FennecRemote = FennecRemote(url, token, reads)
+    timeout: Long = 30_000,
+    retry: FennecRemote.Retry? = FennecRemote.Retry(),
+): FennecRemote = FennecRemote(url, token, reads, timeout, retry)

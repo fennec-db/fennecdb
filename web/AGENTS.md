@@ -56,3 +56,8 @@ the caller's abort or a refusal naming no wait. `timeout` bounds the wait
 for the head and each between the body's pieces (`textOf`), a stream's its
 head alone; the client makes no key. Python's `Client` and `AsyncClient`
 keep the same rule (`_send`, `_post`, `_BUILT`).
+Swift's, Kotlin's and Dart's `FennecRemote` keep it too (`ask`, `asking`,
+`_ask`; the builder's reads a `built` copy, never `asRead()`'s), a task, a
+coroutine or `withAbort` given up sending nothing again; Kotlin sends what
+must go once with its length fixed, which the JVM's `HttpURLConnection`
+never sends again on its own.
