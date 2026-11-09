@@ -1354,3 +1354,111 @@ html { scrollbar-color: var(--rule-hot) transparent; }
    under a language's tab, not under FennecQL's, which is the statement. */
 .builder-sends .code { margin: 0; }
 .langs.builder.on:has(> .lang[data-name="FennecQL"]:not([hidden])) > .builder-sends { display: none; }
+
+/* ================================================================ download */
+
+/* The page opens on the same dune band as the docs (`{{scarp}}`), then the
+   system's tabs and the command for it. The tabs are the language tabs
+   (site.js, `data-detect`): without script every system shows, one under
+   another, under its name. */
+.band.dl-top { padding-top: clamp(8px, 2vw, 28px); padding-bottom: clamp(48px, 6vw, 84px); }
+.dl-eyebrow { margin: 0 0 14px; font: 500 13.5px/1.4 var(--mono); color: var(--sand-dim); letter-spacing: .02em; }
+.dl-title {
+  margin: 0; font: 700 clamp(40px, 5.4vw, 72px)/1.02 var(--sans); letter-spacing: -.04em;
+  background: linear-gradient(168deg, var(--star) 8%, var(--sun-hot) 50%, var(--ember) 98%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.dl-lede { margin: 20px 0 0; max-width: 40em; color: var(--sand-2); font-size: 19px; line-height: 1.6; }
+.dl .langs { margin: 36px 0 0; }
+.dl .lang-tabs { gap: 8px; margin-bottom: 14px; }
+.dl .lang-tabs button { padding: 13px 22px; font-size: 15.5px; }
+.dl .langs:not(.on) .lang::before { font-size: 20px; margin-top: 34px; }
+.dl-panel {
+  padding: clamp(16px, 3vw, 28px); border: 1px solid var(--rule); border-radius: 14px;
+  background: rgba(21,15,38,.9);
+}
+.dl-say { margin: 0 0 14px; color: var(--sand-dim); font: 400 13.5px/1.5 var(--mono); }
+.dl-notice {
+  margin: 0 0 16px; padding: 14px 16px; border: 1px solid rgba(255,206,115,.4); border-radius: 10px;
+  background: rgba(255,206,115,.06); color: var(--sand); font-size: 15.5px; line-height: 1.55;
+}
+.dl-notice b { color: var(--sun-hot); font-weight: 600; }
+/* A command is a code block, with its copy button always shown (a page that
+   exists to be copied from) and its text kept out from under the button. */
+.dl .code { margin: 0; max-width: none; }
+.dl .code pre { padding-right: 100px; }
+.dl .code .code-copy { opacity: 1; }
+/* A command wraps rather than scroll: scrolled, its end would run under the
+   button on a phone. */
+.dl .code code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A package's two-line URLs stay whole and scroll, under a strip of their
+   own for the button, so a URL is never broken mid-word. */
+.dl-alt .code code { white-space: pre; overflow-wrap: normal; }
+.dl-alt .code pre { padding: 40px 14px 12px; }
+.dl-main .code { border-color: var(--rule-hot); box-shadow: 0 30px 70px -40px rgba(255,122,61,.5); }
+.dl-main .code pre { padding: 20px 100px 20px 22px; }
+.dl-main .code code { font-size: clamp(14px, 1.7vw, 17px); }
+.dl-main .code-copy { top: 50%; transform: translateY(-50%); right: 12px; }
+.dl-under { margin: 14px 0 0; max-width: 52em; color: var(--sand-2); font-size: 15.5px; line-height: 1.6; }
+.dl-alts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 14px; margin: 24px 0 0; }
+.dl-alt { min-width: 0; padding: 16px; border: 1px solid var(--rule); border-radius: 12px; background: #110C20; }
+.dl-name { margin: 0 0 10px; font: 600 16px/1.2 var(--sans); color: var(--star); }
+.dl-note { margin: 10px 0 0; color: var(--sand-dim); font-size: 14.5px; line-height: 1.5; }
+.dl-files { margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.dl-files a {
+  display: inline-flex; align-items: center; min-height: 40px; padding: 0 12px;
+  border: 1px solid var(--rule-hot); border-radius: 8px; background: #0A0716;
+  font: 400 13px/1 var(--mono); text-decoration: none;
+}
+.dl-files a:hover { border-color: var(--sand-dim); }
+
+/* The scene's own size, so the canvas holds its place before the module
+   loads (site.js sets the same from `stage`). */
+.motion[data-scenes="install"] canvas { aspect-ratio: 1280 / 480; }
+@media (max-width: 600px) { .motion[data-scenes="install"] canvas { aspect-ratio: 480 / 1150; } }
+.motion-cap { margin: 12px 0 0; max-width: var(--measure); color: var(--sand-dim); font-size: 14.5px; line-height: 1.5; }
+
+.dl-facts {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--rule); border-left: 1px solid var(--rule);
+}
+.dl-facts li {
+  display: grid; gap: 8px; align-content: start; margin: 0; padding: 20px 20px 22px;
+  border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+}
+.dl-facts b { font: 650 17px/1.25 var(--sans); color: var(--star); letter-spacing: -.01em; }
+.dl-facts span { color: var(--sand-2); font-size: 15px; line-height: 1.55; }
+
+.dl-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.dl-card { min-width: 0; padding: 22px; border: 1px solid var(--rule); border-radius: 14px; background: #110C20; }
+.dl-card p { margin: 0; color: var(--sand-2); font-size: 15px; line-height: 1.55; }
+.dl-k { margin: 0 0 14px; font: 500 15px/1.3 var(--mono); color: var(--sun-hot); overflow-wrap: anywhere; }
+.dl-card .dl-fig { margin: 0 0 12px; color: var(--sand-dim); font: 400 13px/1.45 var(--mono); }
+.dl-fig b { display: block; margin-bottom: 4px; font: 650 30px/1 var(--sans); color: var(--oasis); letter-spacing: -.02em; }
+
+.dl-pkgs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.dl-pkg { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 18px; border: 1px solid var(--rule); border-radius: 14px; background: #110C20; }
+.dl-lang { display: flex; align-items: center; gap: 12px; margin: 0; font: 600 16.5px/1.2 var(--sans); color: var(--star); }
+.dl-glyph {
+  display: grid; place-items: center; flex: none; min-width: 36px; height: 36px; padding: 0 5px;
+  border: 1.5px solid var(--sand-dim); border-radius: 9px; box-sizing: border-box;
+  font: 500 12.5px/1 var(--mono); color: var(--sand-2);
+}
+.dl-where { margin: 0; color: var(--sand-dim); font-size: 14.5px; line-height: 1.5; }
+.dl-pkg .code pre { padding: 12px 100px 12px 14px; }
+.dl-pkg .code code { font-size: 13px; }
+
+.dl-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 40px; }
+.dl-two h3 { margin: 0 0 12px; font: 600 20px/1.25 var(--sans); color: var(--star); }
+.dl-two p { margin: 12px 0 0; color: var(--sand-2); font-size: 15.5px; line-height: 1.6; }
+.dl-two > div > p:first-child { margin-top: 0; }
+
+@media (max-width: 1060px) {
+  .dl-facts, .dl-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dl-pkgs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .dl-facts, .dl-cards, .dl-pkgs, .dl-two { grid-template-columns: minmax(0, 1fr); }
+  .dl .lang-tabs button { flex: 1 1 auto; text-align: center; }
+}

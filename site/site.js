@@ -624,7 +624,7 @@ if (motions.length) {
       canvas.height = Math.round(w * dpr * sh / sw);
     };
     const draw = () => {
-      mod.render(canvas.getContext('2d'), keys[at], t, canvas.width, canvas.height, narrow.matches, clock);
+      mod.render(canvas.getContext('2d'), keys[at], t, canvas.width, canvas.height, narrow.matches, clock, fig.dataset);
       const d = mod.cycle(keys[at]);
       steps.forEach((b, i) => {
         b.toggleAttribute('aria-current', i === at);
@@ -728,6 +728,15 @@ for (const box of document.querySelectorAll('[data-langs]')) {
     const at = panels.findIndex((p) => p.dataset.name === kept);
     if (at >= 0) start = at;
   } catch {}
+  // The Download page's tabs are the systems, `data-detect`: the tab is the
+  // one for the machine reading, from its user agent, macOS where it says
+  // nothing; a choice kept by a panel that keeps nothing never overrides it.
+  if (box.hasAttribute('data-detect')) {
+    const ua = navigator.userAgent || '';
+    const os = /Win/i.test(ua) ? 'Windows' : /Mac|iPhone|iPad/i.test(ua) ? 'macOS' : /Linux|X11|Android/i.test(ua) ? 'Linux' : 'macOS';
+    const at = panels.findIndex((p) => p.dataset.name === os);
+    if (at >= 0) start = at;
+  }
   show(start, false);
 }
 

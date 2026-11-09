@@ -553,6 +553,21 @@ in its gap. It loads as the first scene
 comes near. Every number in it is one the docs measure; the tasks, the
 documents and their places are only examples.
 
+## The download page
+
+`content/download.html`, served at `/download`: the tabs are the language
+tabs (`data-detect` picks macOS, Linux or Windows from the user agent,
+macOS where it says nothing; without script all four systems show), and
+every version in it is `{{version}}`, so the page is right for the release
+the build was made from and says no date. The scene `install` is the
+install script run: its terminal lines are `install.sh`'s `say` lines for a
+first install on an Apple silicon Mac, the release is the figure's
+`data-version`, and the checksum is a bar the width of 64 hex digits, never
+digits that would be no file's sum. On a phone its boxes stand in a column
+and the terminal wraps at its width. Change a `say` line of `install.sh`
+and change the scene's lines with it. Its `338 KB` is held to the module (`CLAIMS`); the image's `7 MB` is, as on the
+Install page, not.
+
 ## The language sessions
 
 The home page's "Your language, and the SQL you know" plays one small session in each language:
@@ -613,7 +628,7 @@ at 390 px (0.0004), where a line breaks at another word.
 ## Lighthouse
 
 `site/lighthouse/` runs Lighthouse CI over `site/dist` (home, docs index,
-`docs/fennecql`, playground): `make site`, then `npm ci && node run.mjs`
+`docs/fennecql`, playground, download): `make site`, then `npm ci && node run.mjs`
 there (`CHROME_PATH` when Chrome is not where Lighthouse looks). It serves
 the build itself on port 0, with the edge's compression and `_headers`.
 `lighthouserc.cjs` holds the budgets; CI runs it as `site-lighthouse.yml`

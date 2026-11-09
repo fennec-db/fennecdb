@@ -1,0 +1,328 @@
+<!--
+title: Download — fennecdb
+description: Download fennecdb: one command for macOS, Linux or Windows puts fennec-server and the fennec shell in your home directory with no sudo, checked against the release's SHA256SUMS. Homebrew, .deb, .rpm, tarballs, the Docker image and a package for each language too.
+-->
+
+{{scarp}}
+
+<section class="band dl-top" aria-labelledby="dl-title">
+  <div class="band-in dl">
+    <p class="dl-eyebrow">Download · release {{version}}</p>
+    <h1 class="dl-title" id="dl-title">Download fennecdb</h1>
+    <p class="dl-lede">Two programs, <code>fennec-server</code> and the shell
+      <code>fennec</code>, as a download for your machine, and a package for
+      each language that reaches them. One command puts both in your home
+      directory, with no sudo.</p>
+
+    <div class="langs" data-langs data-detect data-key="fennec-download" data-tabs="Your system">
+
+<div class="lang" data-name="macOS" data-keep="false">
+<div class="dl-panel">
+<p class="dl-say">macOS on Apple silicon and Intel · arm64 and x86_64</p>
+<div class="dl-main"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh</pre></div>
+<p class="dl-under">Puts <code>fennec-server</code> and <code>fennec</code> in
+<code>~/.fennecdb/bin</code> and edits no shell file: it prints the line that
+puts them on your <code>PATH</code>. Read it before it runs:
+<a href="https://fennecdb.com/install.sh">install.sh</a>.</p>
+<div class="dl-alts">
+  <div class="dl-alt">
+    <p class="dl-name">Homebrew</p>
+    <pre data-lang="bash">brew install fennec-db/tap/fennecdb</pre>
+    <p class="dl-note">The release's own binaries, checked against their
+    SHA-256. <code>brew upgrade fennecdb</code> takes the next release.</p>
+  </div>
+  <div class="dl-alt">
+    <p class="dl-name">A tarball</p>
+    <p class="dl-files"><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-aarch64-apple-darwin.tar.gz">aarch64-apple-darwin</a><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-x86_64-apple-darwin.tar.gz">x86_64-apple-darwin</a></p>
+    <p class="dl-note">A folder holding the two programs: nothing needs
+    installing, run them from there.</p>
+  </div>
+</div>
+</div>
+</div>
+
+<div class="lang" data-name="Linux" data-keep="false">
+<div class="dl-panel">
+<p class="dl-say">Linux on arm64 and x86_64 · static binaries, no libc to match</p>
+<div class="dl-main"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh</pre></div>
+<p class="dl-under">Puts both programs in <code>~/.fennecdb/bin</code>, no sudo, and
+edits no shell file. It needs <code>curl</code>, or a <code>wget</code> that
+checks certificates.</p>
+<div class="dl-alts">
+  <div class="dl-alt">
+    <p class="dl-name">Debian, Ubuntu · .deb</p>
+    <pre data-lang="bash">curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennecdb_{{version}}-1_amd64.deb
+sudo apt install ./fennecdb_{{version}}-1_amd64.deb</pre>
+    <p class="dl-note">arm64 on an ARM machine. Installs both in
+    <code>/usr/bin</code> and depends on nothing.</p>
+  </div>
+  <div class="dl-alt">
+    <p class="dl-name">Fedora, RHEL · .rpm</p>
+    <pre data-lang="bash">curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennecdb-{{version}}-1.x86_64.rpm
+sudo dnf install ./fennecdb-{{version}}-1.x86_64.rpm</pre>
+    <p class="dl-note">aarch64 on an ARM machine.</p>
+  </div>
+  <div class="dl-alt">
+    <p class="dl-name">Homebrew</p>
+    <pre data-lang="bash">brew install fennec-db/tap/fennecdb</pre>
+    <p class="dl-note">The release's own binaries, checked against their SHA-256.</p>
+  </div>
+  <div class="dl-alt">
+    <p class="dl-name">A tarball</p>
+    <p class="dl-files"><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-x86_64-unknown-linux-musl.tar.gz">x86_64-unknown-linux-musl</a><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-aarch64-unknown-linux-musl.tar.gz">aarch64-unknown-linux-musl</a></p>
+    <p class="dl-note">A folder holding the two programs: run them from there.</p>
+  </div>
+</div>
+</div>
+</div>
+
+<div class="lang" data-name="Windows" data-keep="false">
+<div class="dl-panel">
+<p class="dl-say">Windows 10 and 11, Windows Server 2016 and later · x86_64 and arm64 · PowerShell 5.1 or 7</p>
+<p class="dl-notice"><b>Releases after 0.1.12 carry a Windows build</b>, for
+x86_64 and for arm64. On a release that lists no zip for your processor, the
+script names the missing file and installs nothing.</p>
+<div class="dl-main"><pre data-lang="powershell">irm https://fennecdb.com/install.ps1 | iex</pre></div>
+<p class="dl-under">Installs <code>fennec-server.exe</code> and
+<code>fennec.exe</code> in <code>%LOCALAPPDATA%\fennecdb\bin</code>, with no
+administrator. It touches no profile and no <code>PATH</code>: it prints the
+line that puts the folder on this session's <code>PATH</code>.</p>
+<div class="dl-alts">
+  <div class="dl-alt">
+    <p class="dl-name">The zip</p>
+    <p class="dl-files"><a href="https://github.com/fennec-db/fennecdb/releases/latest">x86_64-pc-windows-msvc</a><a href="https://github.com/fennec-db/fennecdb/releases/latest">aarch64-pc-windows-msvc</a></p>
+    <p class="dl-note">Not signed. Check its sum, then <code>Unblock-File</code>
+    it before you unpack it, or SmartScreen warns of a program in it.</p>
+  </div>
+</div>
+</div>
+</div>
+
+<div class="lang" data-name="Docker" data-keep="false">
+<div class="dl-panel">
+<p class="dl-say">Anywhere Docker runs · amd64 and arm64 · fennec-server alone, 7 MB</p>
+<div class="dl-main"><pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
+  ghcr.io/fennec-db/fennec-server:{{version}}</pre></div>
+<p class="dl-under">No shell and no libc in the image. Its data lives in
+<code>/data</code>, kept here in a volume. A container listens beyond
+localhost, so the server asks for a token. <a
+href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
+</div>
+</div>
+
+    </div>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit" id="what-it-does">
+  <div class="band-in">
+    <h2 class="rise">What the one command does</h2>
+    <p class="lede rise">It asks GitHub for the latest release over https, checks
+      your machine's tarball before it unpacks anything, and puts the two
+      programs where you can see them. What you watch here is what
+      <code>install.sh</code> prints.</p>
+
+    <figure class="motion rise" data-scenes="install" data-version="{{version}}">
+      <canvas role="img" aria-label="The install command is typed in a terminal. The script asks GitHub for the latest release, v{{version}}, and picks the tarball for this machine. The tarball's SHA-256 is compared with its line in the release's SHA256SUMS and matches, and only then is it unpacked: fennec-server and fennec land in ~/.fennecdb/bin. The terminal prints that the two are installed, that fennec-server {{version}} starts, the export line that puts the folder on the PATH, and where a first query is."></canvas>
+      <figcaption class="motion-cap">The terminal's lines are <code>install.sh</code>'s
+        own, for a first install on an Apple silicon Mac. The checksum is drawn
+        as a bar: the sum is your file's.</figcaption>
+    </figure>
+
+    <ul class="dl-facts rise">
+      <li><b>No sudo</b><span>Your home directory, and no shell file edited: it prints the
+        <code>PATH</code> line and leaves that to you.</span></li>
+      <li><b>Checked before it is unpacked</b><span>Against the release's
+        <code>SHA256SUMS</code>. That sum comes from the same release as the file,
+        so it catches a damaged or cut-short download, not a release someone
+        replaced.</span></li>
+      <li><b>Nothing runs till its last line</b><span>The script is functions,
+        started by <code>main "$@"</code> at its end, so a download cut short
+        runs nothing.</span></li>
+      <li><b>Gone in one line</b><span>To remove it, delete
+        <code>~/.fennecdb</code>. To pin a release,
+        <code>FENNEC_VERSION={{version}}</code>.</span></li>
+    </ul>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band" id="what-you-get">
+  <div class="band-in">
+    <h2 class="rise">What you get</h2>
+    <p class="lede rise">The same engine in each: the server's file, the shell's,
+      the one in a page and the one in an app are one format.</p>
+
+    <div class="dl-cards rise">
+      <div class="dl-card">
+        <p class="dl-k">fennec-server</p>
+        <p class="dl-fig">HTTP and JSON, from every language</p>
+        <p>The server: one file is one database, with live queries, sync to
+          devices, search, rules and tenants, and HTTPS of its own.</p>
+      </div>
+      <div class="dl-card">
+        <p class="dl-k">fennec</p>
+        <p class="dl-fig">the shell, over a .fennec file</p>
+        <p>Opens a file and runs FennecQL or SQL's everyday spellings, and
+          imports SQLite and PostgreSQL.</p>
+      </div>
+      <div class="dl-card">
+        <p class="dl-k">ghcr.io/fennec-db/fennec-server</p>
+        <p class="dl-fig"><b>7 MB</b> the image, amd64 and arm64</p>
+        <p><code>fennec-server</code> alone: no shell, no libc, its data in
+          <code>/data</code>.</p>
+      </div>
+      <div class="dl-card">
+        <p class="dl-k">@fennecdb/web</p>
+        <p class="dl-fig"><b>338 KB</b> of gzipped WebAssembly with no dependencies</p>
+        <p>The client, and the database in a page: the same match, typos and
+          facets, offline.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit" id="every-way">
+  <div class="band-in">
+    <h2 class="rise">Every way, every machine</h2>
+    <p class="lede rise">Pick the way that suits your machine; each installs the
+      release's own binaries.</p>
+
+    <div class="tbl rise">
+<table>
+<thead><tr><th scope="col">Way</th><th scope="col">Gives you</th><th scope="col">On</th></tr></thead>
+<tbody>
+<tr><td><a href="docs/install.html#install-script">The install script</a></td><td><code>fennec-server</code> and <code>fennec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="docs/install.html#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64 and arm64. Releases after 0.1.12 carry a Windows build</td></tr>
+<tr><td><a href="docs/install.html#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="docs/install.html#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
+<tr><td><a href="docs/install.html#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="docs/install.html#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
+<tr><td><a href="docs/install.html#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language, below</td></tr>
+<tr><td><a href="docs/install.html#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
+</tbody>
+</table>
+    </div>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band" id="packages">
+  <div class="band-in dl">
+    <h2 class="rise">A package for your language</h2>
+    <p class="lede rise">Every language reaches the server over plain HTTP and
+      JSON. These packages do the typing for you, each on its standard
+      library alone, and Swift, Kotlin and Dart can keep the database in the
+      app.</p>
+
+    <div class="dl-pkgs rise">
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">py</span>Python</p>
+        <pre data-lang="bash">pip install fennecdb</pre>
+        <p class="dl-where">PyPI · an official client</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">js</span>JavaScript, TypeScript</p>
+        <pre data-lang="bash">npm install @fennecdb/web</pre>
+        <p class="dl-where">npm · the client, and the database in a page</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">go</span>Go</p>
+        <pre data-lang="bash">go get github.com/fennec-db/fennecdb/integrations/go</pre>
+        <p class="dl-where">an official client, from the repository</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">C#</span>.NET</p>
+        <pre data-lang="bash">dotnet add package FennecDb</pre>
+        <p class="dl-where">NuGet · an official client</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">sw</span>Swift</p>
+        <pre data-lang="text">https://github.com/fennec-db/fennecdb</pre>
+        <p class="dl-where">Swift Package Manager · the product <code>FennecDB</code>, the database in the app</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">kt</span>Kotlin, Java</p>
+        <pre data-lang="text">com.fennecdb:fennecdb-android</pre>
+        <p class="dl-where">Maven Central · the AAR; <code>com.fennecdb:fennecdb</code> for the JVM</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">dart</span>Dart, Flutter</p>
+        <pre data-lang="bash">flutter pub add fennecdb_flutter</pre>
+        <p class="dl-where">pub.dev · or <code>fennecdb</code> in Dart alone</p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">rs</span>Rust</p>
+        <p class="dl-where"><code>fennec-core</code> and <code>fennec-ql</code> from the repository: the engine as a library, with no dependencies. <a href="docs/embedding.html">Embedded Rust</a></p>
+      </div>
+      <div class="dl-pkg">
+        <p class="dl-lang"><span class="dl-glyph" aria-hidden="true">$_</span>Java, PHP, Ruby</p>
+        <p class="dl-where">Nothing to install: the language's own HTTP client, against the server's OpenAPI document. <a href="docs/languages.html">Your language</a></p>
+      </div>
+    </div>
+    <p class="after rise">React, Cloudflare and LangChain have packages of their
+      own: <a href="docs/integrations.html">Integrations</a>.</p>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit" id="check">
+  <div class="band-in dl">
+    <h2 class="rise">Check it, or build it</h2>
+
+    <div class="dl-two rise">
+      <div>
+        <h3>Check a download</h3>
+        <pre data-lang="bash">curl -LO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+# Linux: sha256sum -c --ignore-missing SHA256SUMS</pre>
+        <p>A release lists every file with its checksum in <code>SHA256SUMS</code>;
+          the <a href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release page</a>
+          lists the files.</p>
+      </div>
+      <div>
+        <h3>From source, and the studio's desktop app</h3>
+        <p>For a build the releases do not have, clone the repository and build
+          with <code>cargo</code> and <code>make</code>:
+          <a href="docs/build.html">Build from source</a>.</p>
+        <p>fennec studio's desktop app (beta) is a window on the studio a
+          <code>fennec-server</code> serves, one server per file. It is built from
+          the repository with <code>make studio-desktop</code>:
+          <a href="docs/studio.html#desktop">Desktop app</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band" id="next">
+  <div class="band-in">
+    <h2 class="rise">Installed. Now a first query</h2>
+    <ul class="cards rise">
+      <li><a href="docs/quickstart.html">Quickstart</a><p>Run the server and write a row, from the language you already use.</p></li>
+      <li><a href="docs/shell.html">The shell</a><p>Open a file in <code>fennec</code> and query it, in FennecQL or SQL.</p></li>
+      <li><a href="docs/server.html">Server</a><p>Tokens, durability, limits and containers.</p></li>
+    </ul>
+  </div>
+</section>

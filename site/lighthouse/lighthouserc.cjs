@@ -14,7 +14,7 @@ const site = (process.env.SITE_URL || 'http://localhost:8788').replace(/\/$/, ''
 module.exports = {
   ci: {
     collect: {
-      url: [`${site}/`, `${site}/docs/`, `${site}/docs/fennecql`, `${site}/playground`],
+      url: [`${site}/`, `${site}/docs/`, `${site}/docs/fennecql`, `${site}/playground`, `${site}/download`],
       numberOfRuns: Number(process.env.LHCI_RUNS || 2),
       settings: {
         chromeFlags: '--headless=new --no-sandbox',
