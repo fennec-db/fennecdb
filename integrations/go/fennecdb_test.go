@@ -896,7 +896,8 @@ func TestATenantsQuota(t *testing.T) {
 		res.Body.Close()
 	}
 	admin(http.MethodPut, "/_admin/tenants/acme", "")
-	acme := fennecdb.New(node, fennecdb.WithTenant("acme"))
+	// The refusals as they come: a 429 naming its wait goes again after it.
+	acme := fennecdb.New(node, fennecdb.WithTenant("acme"), fennecdb.WithoutRetry())
 	must(acme.Exec(ctx, "create collection notes (t text)")).of(t)
 	must(acme.Exec(ctx, "put notes [{t: $1}, {t: $2}]", "a", "b")).of(t)
 	_, err := acme.Exec(ctx, "put notes {t: $1}", "c")
@@ -932,7 +933,8 @@ func TestATenantBeingMovedSaysWhenToComeBack(t *testing.T) {
 		res.Body.Close()
 	}
 	admin(http.MethodPut, "/_admin/tenants/acme")
-	acme := fennecdb.New(node, fennecdb.WithTenant("acme"))
+	// The 503 as it comes, which goes again after its wait otherwise.
+	acme := fennecdb.New(node, fennecdb.WithTenant("acme"), fennecdb.WithoutRetry())
 	must(acme.Exec(ctx, "create collection notes (t text)")).of(t)
 	admin(http.MethodPost, "/_admin/tenants/acme/freeze")
 	_, err := acme.Exec(ctx, "put notes {t: $1}", "a")

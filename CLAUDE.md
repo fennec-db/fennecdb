@@ -426,7 +426,7 @@ Covers `crates/fennec-ffi/`.
 
 ### `web/CLAUDE.md`
 
-Covers `web/`; its retry rule binds Python's clients (`integrations/python/`) too.
+Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), Go's (`integrations/go/`) and .NET's (`integrations/dotnet/`) too.
 
 *The JS client and Cloudflare*
 - One module and a client entry, by where the queries run.

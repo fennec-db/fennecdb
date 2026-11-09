@@ -169,6 +169,17 @@ replica, <code>Subscribe</code>, <code>Changes</code> and
 endpoint</a> and its <a href="http-reference.html">reference</a> (<a href="https://github.com/fennec-db/fennecdb/tree/main/integrations/go">integrations/go</a>);
 a refusal is an <code>*fennecdb.Error</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
+A request goes again only where that is safe: one the server says ran
+nothing -- a 503, or a 429 naming its wait -- after that wait, and one whose
+connection was refused; a read the builder made or sent near, a
+<code>GET</code> or a write under <code>IdempotencyKey</code>, after a
+dropped connection too, and nothing after the client's own timeout or the
+<code>ctx</code>'s end (<a href="http.html#idempotency">Retrying a
+write</a>). <code>WithTimeout</code> bounds the wait for an answer's head
+and between the pieces of its body, 30 s unless given;
+<code>WithRetry(fennecdb.Retry{Attempts: 5, MaxWait: 30 *
+time.Second})</code> sets the tries and waits, three and 10 s unless given,
+and <code>WithoutRetry()</code> turns it off.
 A <code>[]float32</code> goes out as the decimals that read back as each
 <code>f32</code>, so a vector round-trips to the bit. A whole
 <code>float64</code> from 2<sup>53</sup> on, a parameter or in a map or a
@@ -283,6 +294,16 @@ of the <a href="http.html">HTTP endpoint</a> and its
 a refusal is a <code>FennecException</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0) and, where its
 <code>require</code> said why, the <code>Reason</code>.
+A request goes again only where that is safe, by the rule the other
+clients keep (<a href="http.html#idempotency">Retrying a write</a>):
+after a 503 or 429's wait, a refused connection, or -- for a read the
+builder made or sent near, a <code>GET</code> or a write under
+<code>WithIdempotencyKey</code> -- a dropped one, and never after the
+client's own <code>Timeout</code>, which bounds the wait for an answer's
+head and between the pieces of its body, or the token's cancellation.
+<code>Retry = new Retry { Attempts = 5, MaxWait =
+TimeSpan.FromSeconds(30) }</code> sets the tries and waits, three and 10 s
+unless given, and <code>Retry = null</code> turns it off.
 A <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
 as the decimals that read back as each float.</p>
 <p>Without the SDK, <code>HttpClient</code> and <code>System.Text.Json</code>:</p>

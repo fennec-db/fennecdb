@@ -43,7 +43,15 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   client's writes.
 - `SubscribeAsync(collection, [new("year", "gte.2024")])` is an `IAsyncEnumerable<Event>` of `seed` and `change` events (SSE).
 - `ChangesAsync(since, wait)` reads every write on disk (`/_changes`); `HealthAsync()` asks `/_health`.
-- `FennecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout` and an `HttpClient` of your own.
+- `FennecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout`, `Retry` and an `HttpClient` of your
+  own. `Timeout` bounds the wait for an answer's head and between the pieces of its body, 30 s unless given; a
+  subscription's, its head alone.
+- A request goes again only where it ran nothing -- a 503 or 429 naming its wait, after it; a refused connection --
+  or may run twice: a read the builder made or sent near, a `GET` or a write under `WithIdempotencyKey`, after a
+  dropped connection too. Never after the client's own `Timeout` or the token's cancellation, nor a refusal naming
+  no wait; an `AsRead()` copy's statement sent home, or a call's `read: true`, goes once.
+  `Retry = new Retry { Attempts = 5, MaxWait = TimeSpan.FromSeconds(30) }` sets the tries and waits (3 and 10 s),
+  `Retry = null` sends nothing again ([Retrying a write](https://fennecdb.com/docs/http#idempotency)).
 - A refusal is a `FennecException` with `Status`, `Code` and the server's message; a failed batch's also says which
   statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`.
   `reason: "insufficient funds"` beside `require: 1` (`require 1 else '...'`, written into the text) comes back as

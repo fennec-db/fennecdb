@@ -56,3 +56,11 @@ the caller's abort or a refusal naming no wait. `timeout` bounds the wait
 for the head and each between the body's pieces (`textOf`), a stream's its
 head alone; the client makes no key. Python's `Client` and `AsyncClient`
 keep the same rule (`_send`, `_post`, `_BUILT`).
+Go's `Client` (`ask`, `try`, `built`) and .NET's `FennecClient`
+(`AskAsync`, `built`) keep it too, a GET -- the change stream's, a
+subscription's head, the health check's -- among what may run twice, and
+count a send their platform makes on its own as a try: Go's Transport
+sends a request carrying an `Idempotency-Key` again itself, given its
+body only through `try`'s `GetBody`, refused past the tries; .NET's
+handler sends a GET again itself, three times at most, which `AskAsync`
+then does not repeat (`ResponseEnded`).
