@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), and the OpenAPI document and the compatibility it is held to (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -956,6 +956,230 @@ pushed; its 29 bytes are written into the head with the answer, past
 +1 280 bytes (`put_row_refused`, `off_row`, the line scans), its
 `__const` +4 096 (the refusals' words and the OpenAPI document's headers,
 some 1 200 bytes, the rest the section's alignment).
+
+## Compressed answers
+
+**An answer past `--http-gzip` goes as gzip where its client takes it,
+never one carrying a tag** (`gzip.rs`, `gzip::encode`, `gzip::Stream`).
+An answer of `--http-gzip`'s bytes or more (1 400 by default), JSON,
+NDJSON or text, says `Vary: Accept-Encoding`; it goes as gzip (RFC 1952)
+where the request's `Accept-Encoding` names `gzip` or `x-gzip` with a
+weight above zero, or `*` with gzip unnamed (`gzip::accepts`), its client
+is not on the server's host or a private network (`gzip::local`, unless
+`--http-gzip-local`), and the compressed body is the shorter. It is
+compressed after the books -- its time in `/_metrics` and the statement
+counts is its statement's, as the `writev`'s is -- and goes out in the one
+`writev` every answer does, its `Content-Length` the compressed one. An
+answer carrying an `ETag` -- a row's, with its `no-transform`, a read's
+poll, a studio file's -- goes as it is, as does a `HEAD` (its length is
+the identity's) and an archive's or a backup's pages
+(`application/octet-stream`). A subscription's stream is one gzip member,
+each event deflated alone and ended with a sync flush, so its client reads
+it whole as it arrives and the stream keeps nothing between events but
+the member's CRC and length. The deflate is fennecdb's own (RFC 1951): no
+crate, not even a test's. The global entry (a Cloudflare Worker) passes
+such an answer on with its `Content-Encoding` and `Content-Length` as the
+router wrote them: checked under a real workerd, whose `fetch()` decodes the
+body for the Worker and re-encodes it for a client taking gzip, so the
+client reads the origin's bytes, a length of its own and each stream event
+as it is flushed (`entry.test.js`).
+
+### What is compressed, and for whom
+
+The answers that compress are the ones that are text: a `/query` page of
+rows, a seed, `/_changes`' NDJSON, the OpenAPI document. A body under
+1 400 bytes and its head are one TCP segment either way (1 460 bytes of
+payload at Ethernet's MTU), so compressing it saves no packet, and its
+fixed cost -- the tables, the block's two codes, some 4 to 7 us on an M1
+for 158 to 1 483 bytes -- is the largest share of what it saves; Express
+and Fastify start at 1 KiB, Tomcat and Spring at 2 KiB. Under the bytes an
+answer costs one compare and nothing else: `encode` is the length test,
+its body `#[cold]`.
+
+Who takes gzip decides most of it: browsers, Go's `net/http`, Node's
+`fetch`, `URLSession`, OkHttp, Dart's `HttpClient`, `requests` and
+`httpx` send `Accept-Encoding: gzip` on their own and inflate what comes,
+so a server compressing for every client that asks would compress for an
+app on its own host and a service on its own network too. Measured end to
+end -- `fennec-server` on an M1, a Python client inflating with zlib, the
+link loopback or a proxy sending the server's bytes on at a set rate, the
+median of 5 (`get users limit N` over rows of 155 bytes; a seed the whole
+collection's):
+
+| link | `/query`, 1 000 rows (150 KB) | `/query`, 10 000 rows (1.5 MB) | seed, 100 000 rows (15.4 MB) | seed, 300 000 rows (46.5 MB) |
+| --- | ---: | ---: | ---: | ---: |
+| loopback | 0.71 -> 1.29 ms (0.55x) | 5.31 -> 10.93 ms (0.49x) | 82 -> 131 ms (0.62x) | 246 -> 394 ms (0.63x) |
+| 1 Gbit | 1.67 -> 1.58 ms (1.05x) | 12.8 -> 11.4 ms (1.12x) | 187 -> 140 ms (1.33x) | |
+| 200 Mbit | 6.59 -> 1.72 ms (3.8x) | 61.8 -> 13.9 ms (4.4x) | 709 -> 234 ms (3.0x) | 2 096 -> 732 ms (2.9x) |
+| 50 Mbit | 25.2 -> 6.3 ms (4.0x) | 246 -> 48.6 ms (5.1x) | 2 580 -> 615 ms (4.2x) | 7 673 -> 1 732 ms (4.4x) |
+
+(identity -> gzip; the bytes on the wire 5.25x, 5.46x, 5.54x and 5.59x
+fewer.) Compressing breaks even at about 1 Gbit and doubles the time on
+loopback: a client on the server's host, or on a LAN or a cloud network
+at 10 Gbit and up, would only wait longer for its answer, and the server
+spend 3.5 ms of CPU a megabyte doing it. So such a client -- loopback, RFC
+1918, link-local and IPv6's unique local addresses, judged on the client
+a router names or the global entry named (`audit::client_ip`), never the
+router's own address -- is answered as it is, as it was before
+compression, and every other one in gzip: a browser or a phone across the
+internet, at 4 to 5 times the speed at 50 Mbit. CGNAT's 100.64/10 is not
+local: a carrier's or a VPN's over the internet. `--http-gzip-local`
+compresses for local clients too, behind a load balancer that compresses
+nothing (AWS's ALB) or over a slow private link; `--http-gzip off`
+compresses for none.
+
+Rejected: compressing for every client that asks (the loopback row, an
+app's own host and network made slower by default); off by default (every
+browser and phone across the internet left at a fifth of the speed,
+for the sake of clients the address tells apart); measuring each
+connection's round trip (`TCP_INFO`'s `tcpi_rtt`, macOS's
+`TCP_CONNECTION_INFO` in whole milliseconds, Windows' `SIO_TCP_INFO`): the
+truest signal of a fast link, but three platforms' socket options for what
+the address says nearly as well, and a router's node would see the
+router's.
+
+### Tags stay with their bodies
+
+A strong `ETag` names one representation, its content coding with it (RFC
+9110 8.8.3), and `If-Match` compares it strongly: a row's tag is its JSON
+as sent ([Row tags](#row-tags)), which a gzip body is not. A tagged
+answer is never compressed rather than given a tag of its own per coding
+-- Apache's `"<tag>-gzip"`, which then failed every `If-None-Match` that
+sent it back until the server learned to strip it (its bug 45023): a row
+by id is one row, mostly under the bytes anyway, and a poll's 304 has no
+body to compress.
+
+### A stream
+
+A seed is an event inside the stream, so `Content-Encoding` covers the
+whole stream: the head says `Content-Encoding: gzip` and `Vary:
+Accept-Encoding` (a stream sent as it is says no `Vary`: nothing keeps a
+`no-cache` stream), the member's header goes with it, and each event,
+the keep-alive's comment too, is a piece of the member (`Events::send`):
+deflated alone where it is `--http-gzip`'s bytes or more, in stored
+blocks under them, and ended with the empty stored block zlib's
+`Z_SYNC_FLUSH` writes, 5 bytes, so an inflater has every bit of the event
+the moment it arrives and hands it on. After a stored block too, which
+ends on a byte already: Go's `compress/flate` copies a stored block into
+its window and hands it on only at the next flush, so a change sent
+stored alone waited in a Go client for the event after, where Python's
+and Node's zlib handed it on at once (found with `net/http` against the
+server; `gzip`'s test holds every piece to the mark). No window is carried from one event to the
+next: zlib's streaming deflate keeps 256 KB a stream for its window and
+hash chains, where a stream here keeps 8 bytes, the CRC and the length,
+and the tables a seed is compressed with (sized to it: 24 KB for a 2 KB
+event, 320 KB at most) are let go as it is sent. A live event of a few
+rows loses the window's matches against the seed, and one under the bytes
+is stored -- a change is mostly small, and a stored piece costs 5 bytes.
+The stream's end writes the member's end (`Drop for Events`): Node's zlib
+and Go's `gzip.Reader` read a member cut short as an error. Not after a
+failed write, though: a client stalled past `stream_write_timeout` would
+hold the stream's slot for another timeout's worth of a write it will not
+read. Measured
+(`fennec-server --http-gzip-local`, a Python client per stream, the
+server's RSS from `ps` after every stream had its seed and then 5
+changes):
+
+| streams | seed | identity | gzip |
+| ---: | ---: | ---: | ---: |
+| 200 | 88 KB | +122 KB a stream, +126 after the changes | +134 KB, +146 |
+| 100 | 897 KB | +608 KB, +618 | +679 KB, +698 |
+
+The 10-20% more is the allocator keeping the seed's freed tables per
+thread (each stream is one), not the stream: what a stream holds of the
+compression between events is its 8 bytes.
+
+### The compressor
+
+LZ77 over hash chains of 4 bytes: a 2^15-entry head table at most (sized
+to the input, from 256), each position's predecessor in a 32 KiB ring,
+up to 8 candidates looked at, greedy, a match of 32 taken at once, the
+positions inside a match of 6 or fewer hashed too and those of a longer
+one skipped (zlib's fast levels' trade), and a run with nothing found
+stepping on faster (LZ4's and Snappy's, so a base64 field is stored, not
+searched byte by byte). Each 16 384 symbols are a block, written as
+whichever of a dynamic Huffman code, the fixed code and stored blocks is
+the shortest: code lengths by Moffat and Katajainen's in-place method,
+held to 15 bits (7 for the code-length code) by folding the longest down
+until Kraft's sum is one again (miniz's `enforce_max_code_size`), at
+least two codes in each. CRC-32 is slice-by-8 (1.9 GB/s), its tables made
+at compile time. `make gzip-bench` (`examples/gzip.rs`), on an M1, best
+of 15, against the system's zlib through Python (`zlib.compressobj`, the
+time of the call):
+
+| input | bytes | ours | zlib -1 | zlib -6 |
+| --- | ---: | ---: | ---: | ---: |
+| 10 rows | 1 483 | 3.25x, 205 MB/s | 3.05x, 115 MB/s | 3.42x, 91 MB/s |
+| 1 000 rows | 151 232 | 5.28x, 283 MB/s | 4.54x, 286 MB/s | 5.79x, 108 MB/s |
+| 10 000 rows | 1 532 185 | 5.50x, 287 MB/s | 4.71x, 273 MB/s | 6.05x, 108 MB/s |
+| 300 000 rows | 46 858 979 | 5.64x, 297 MB/s | 4.83x, 277 MB/s | 6.17x, 111 MB/s |
+| noise | 1 048 576 | 1.00x, 620 MB/s | 1.00x, 61 MB/s | 1.00x, 59 MB/s |
+
+zlib -1's speed at nearer -6's size. Of the knobs, on 10 000 rows: 4
+candidates rather than 8, 11% faster for 3% more bytes; hashing inside
+matches up to 16 bytes rather than 6, 0.1% fewer bytes for 13% of the
+speed; taking a match at once from 64 rather than 32, 0.3% more bytes and
+4% slower. Rejected: flate2 or miniz_oxide (zero dependencies, not even a
+test's: the tests inflate with Python's zlib, an inflater not ours, over
+random, repetitive, incompressible and mixed inputs and every block
+boundary, and a stream piece by piece); zlib -6's lazy matching and longer
+chains, 9% fewer bytes than ours at 38% of the speed; Brotli and zstd,
+which `net/http`, OkHttp and Dart's client do not inflate on their own.
+
+### BREACH
+
+BREACH (2013) reads a secret out of a compressed body that also reflects
+what an attacker sent: with the victim's credentials sent for them
+(cookies), it makes the victim's browser ask again and again, each time
+with a guess, and watches the encrypted answer's length shrink where the
+guess matches the secret. Its classic target, a CSRF token or session id
+in the page, is not in fennecdb's answers: a token travels in
+`Authorization`, never echoed, and HTTP/1.1's headers are never
+compressed; an attacker's page cannot make a browser send a bearer token
+the way it sends a cookie, so it cannot repeat a victim's request at will.
+Where it could still apply is in the data: one answer holding rows an
+attacker can write and rows they cannot read -- a collection shared by
+users, read under one token -- watched on the wire by an attacker who can
+also make the victim read again. So: each live event is compressed alone,
+never with another event's window, so an attacker's write lands in its own
+piece and no other row's bytes shorten it; a tagged answer -- a poll, a
+row -- is never compressed; and `--http-gzip off` is the switch for a
+deployment where one read mixes attacker-written rows with secrets and an
+attacker may watch its clients' traffic. A seed or a whole `/query` page
+still compresses rows together: a reseed forced by overflowing the change
+ring would take thousands of writes a guess.
+
+### Through the router and the entry
+
+The router forwards the client's `Accept-Encoding` with its other headers
+and passes `Content-Encoding`, `Vary` and the node's body back as they
+came, its `Content-Length` the compressed body's; it reads no forwarded
+body it relays, and its own answers -- refusals, a merge across tenants --
+go as they are. The node judges a client by the address the router names
+in `Fennec-Router` (or the entry named in `Fennec-Client`), so a client
+across the internet behind a router on the node's own network is
+compressed for and one beside the router is not (`tests/gzip.rs` in
+fennec-shard). The global entry passes the router's answer on with its
+headers (`passed`): Cloudflare's runtime inflates a body a Worker's
+`fetch` received and compresses it again by the `Content-Encoding` the
+answer says, for the client's own `Accept-Encoding` -- the edge's to
+choose.
+
+### Cost
+
+An answer under the bytes: one compare. `make instr-compare` against main
+(8 re-signed identities a build, 7 rounds each):
+
+| | main | gzip | |
+| --- | ---: | ---: | --- |
+| `GET /t?id=eq.<id>` (`rows get`) | 24 677 | 24 630 | -48, inside two standard errors |
+| `GET /t/<id>` (`rows row`) | 19 366 | 19 367 | +1, inside two standard errors |
+| `put` through `/query` (`replays put`) | 21 201 | 21 194 | -7, inside two standard errors |
+| `put` under an `Idempotency-Key` (`replays keyed`) | 83 800 | 83 814 | +14, inside two standard errors |
+
+The server's release binary grows 33 056 bytes (+0.48%, 6 842 080 to
+6 875 136 on macOS arm64): `__text` +27 008, `__const` +8 192 (the CRC's
+tables). The browser module holds none of it.
 
 ## Connections without a thread
 

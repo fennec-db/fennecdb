@@ -21,6 +21,7 @@ import { createHmac } from 'node:crypto';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
+import zlib from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { running, serve } from './dev.mjs';
@@ -33,6 +34,8 @@ const ready = (await cluster.built()) && (await access(new URL('node_modules/.bi
 const skip = ready ? false : 'needs wrangler (npm ci) and fennec-server and fennec-shard (cargo build -p fennec-server -p fennec-shard)';
 // CI builds both and installs wrangler (make cloudflare-test): skipped
 // there, these would pass unrun.
+// The gzip relay below needs wrangler alone: its origin is a stand-in.
+const wrangler = await access(new URL('node_modules/.bin/wrangler', import.meta.url)).then(() => false, () => 'needs wrangler (npm ci)');
 if (skip && process.env.CI) throw new Error(`entry.test.js cannot run: ${skip}`);
 
 after(() => {
@@ -138,6 +141,9 @@ test('a request goes on less its hops, the marks and every address a client clai
       Authorization: 'Bearer t',
       'Idempotency-Key': 'k',
       'Fennec-Wait': '100',
+      // The client's codings go on: the node compresses for them, and
+      // the runtime encodes for the client by the answer's.
+      'Accept-Encoding': 'gzip, br',
       traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
       'Fennec-Router': '9.9.9.9 forged',
       'Fennec-Global': '1',
@@ -153,6 +159,7 @@ test('a request goes on less its hops, the marks and every address a client clai
     authorization: 'Bearer t',
     'idempotency-key': 'k',
     'fennec-wait': '100',
+    'accept-encoding': 'gzip, br',
     traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
     'fennec-home': '1',
     'fennec-client': client,
@@ -178,6 +185,7 @@ test("an answer goes back less its hops, the router's marks and any cookie Acces
       ['Fennec-Seq', '7'],
       ['Set-Cookie', 'CF_Authorization=eyJ.jwt.sig; Path=/; Secure; HttpOnly'],
       ['Set-Cookie', 'other=1'],
+      ['Vary', 'Accept-Encoding'],
     ],
   });
   const out = passed(answer);
@@ -186,6 +194,11 @@ test("an answer goes back less its hops, the router's marks and any cookie Acces
   assert.equal(out.headers.get('fennec-verified'), null);
   assert.equal(out.headers.get('fennec-seq'), '7');
   assert.equal(out.headers.get('content-type'), 'application/json');
+  // What the node's coding varies by goes on with the answer, and the
+  // coding itself, which Cloudflare's runtime encodes the body by.
+  assert.equal(out.headers.get('vary'), 'Accept-Encoding');
+  const zipped = passed(new Response('x', { headers: { 'Content-Encoding': 'gzip' } }));
+  assert.equal(zipped.headers.get('content-encoding'), 'gzip');
 });
 
 test("an answer is a router's where it carries the router's mark, as every answer a router writes does", () => {
@@ -1281,5 +1294,84 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
     assert.equal(refused.status, 401);
     // Still not the rest.
     assert.equal((await request(`${front.url}/_replication`)).status, 404);
+  });
+});
+
+// Checked under a real workerd: the entry passes a router's `Content-Encoding:
+// gzip` answer on with its compressed `Content-Length`, and the client gets
+// the origin's bytes, the length its own, each flushed SSE event as it is
+// written -- workerd's fetch() hands the Worker the decoded body, but a
+// Response built from it and sent on is re-encoded by the runtime for a
+// client taking gzip, with the length dropped or recomputed.
+describe('the entry relays a router\'s gzip answers', { skip: wrangler, timeout: 120_000 }, () => {
+  let stub;
+  let front;
+  let state;
+  const JSON_BODY = JSON.stringify({ rows: Array.from({ length: 300 }, (_, i) => ({ id: i, title: `note ${i} the same words again` })) });
+  const events = ['event: seed\ndata: {}\n\n', 'event: change\ndata: {"n":1}\n\n', 'event: change\ndata: {"n":2}\n\n'];
+
+  before(async () => {
+    stub = await standIn((req, res) => {
+      if (req.url.startsWith('/t/stream/')) {
+        // One gzip member, each event ended with a sync flush, the next
+        // held back until the test has the one before.
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+        const z = zlib.createGzip();
+        z.on('data', (d) => res.write(d));
+        let i = 0;
+        const send = () => {
+          z.write(events[i++]);
+          z.flush(() => (i < events.length ? setTimeout(send, 1500) : (z.end(), setTimeout(() => res.end(), 100))));
+        };
+        send();
+        return;
+      }
+      const packed = zlib.gzipSync(JSON_BODY);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': packed.length, Vary: 'Accept-Encoding' });
+      res.end(packed);
+    });
+    state = await mkdtemp(join(tmpdir(), 'fennecdb-entry-gzip-'));
+    front = await serve('entry', state, { REGIONS: JSON.stringify({ stub: [stub.url] }), DEFAULT_REGION: 'stub' });
+  });
+
+  after(async () => {
+    await front?.stop();
+    stub?.close();
+    if (state) await rm(state, { recursive: true, force: true });
+  });
+
+  /** One request as a client that takes gzip makes it: the bytes as they came, undecoded. */
+  const raw = (path) =>
+    new Promise((ok, no) => {
+      http.get(`${front.url}${path}`, { headers: { 'Accept-Encoding': 'gzip' }, agent: false }, ok).on('error', no);
+    });
+
+  test('a whole answer reaches the client as the origin\'s bytes, its length its own', async () => {
+    const res = await raw('/t/acme/notes');
+    const chunks = [];
+    for await (const c of res) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['content-encoding'], 'gzip');
+    assert.equal(zlib.gunzipSync(body).toString(), JSON_BODY);
+    assert.equal(Number(res.headers['content-length']), body.length);
+  });
+
+  test('a stream gives each event without waiting for the next', async () => {
+    const res = await raw('/t/stream/notes/changes');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['content-encoding'], 'gzip');
+    const src = res.pipe(zlib.createGunzip());
+    let text = '';
+    const stamps = [];
+    src.setEncoding('utf8');
+    for await (const c of src) {
+      text += c;
+      stamps.push([Date.now(), text.length]);
+    }
+    assert.equal(text, events.join(''));
+    // The first event arrived well before the last was written (3 s later).
+    assert.ok(stamps.at(-1)[0] - stamps[0][0] >= 1000, 'the events arrived together, at the end');
+    assert.ok(stamps[0][1] <= events[0].length + events[1].length);
   });
 });

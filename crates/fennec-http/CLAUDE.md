@@ -165,15 +165,6 @@ which a client sends again whole.
 
 ### The HTTP server
 
-**[An agent's MCP tool is a statement, held to the token as `/query`
-is.](../../docs/design/http.md#mcp)** A model's filter goes in parsed, never as
-text, and a read past `--mcp-max-rows` or `--mcp-max-bytes` is refused,
-never cut. The origin is asked before the token, and with no token only a
-`Host` naming localhost or an address is answered; `write` never changes a
-schema or compacts. A named statement the token may call is a `call_<name>`
-tool, its answer held to the bounds before a write's block lands
-(`mcp::land`).
-
 **[An `Idempotency-Key` makes a write
 once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
 `_idempotency` row are one block, the key the subject's for a scoped token
@@ -298,6 +289,14 @@ they write (a read's is its poll). A scoped token's conditional write is a
 `ETag` is worked out under the lock (`tag_after`); an answer carrying a
 row's tag says `Cache-Control: no-transform` (`Response::no_transform`),
 or a proxy compressing it weakens the tag `If-Match` compares strongly.
+
+**[An answer past `--http-gzip` goes as gzip where its client takes it,
+never one carrying a tag.](../../docs/design/http.md#compressed-answers)**
+JSON, NDJSON or text that long says `Vary: Accept-Encoding`, gzipped where
+`gzip::wanted` (taken, the named client not local) and it shrinks, still one
+`writev`; never with an `ETag` or `no-transform`, nor a `HEAD`. A stream is
+one member, each event deflated alone and sync-flushed (`gzip::Stream`):
+nothing kept between events. The deflate is ours, no crate.
 
 **[A connection no thread can be made for is answered
 503.](../../docs/design/http.md#connections-without-a-thread)** Both accept loops

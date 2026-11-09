@@ -58,6 +58,7 @@ pub mod conn;
 pub mod cors;
 pub mod crypto;
 pub mod dial;
+pub mod gzip;
 pub mod held;
 pub mod hooks;
 pub mod http;
@@ -158,6 +159,14 @@ pub struct Config {
     /// Stall ceiling while writing to a subscriber. A client that does not
     /// read must not hold a thread forever.
     pub stream_write_timeout: Duration,
+    /// `--http-gzip`: an answer this many bytes or more goes as gzip to a
+    /// client that takes it ([`gzip::encode`]), a stream's events too
+    /// ([`gzip::Stream`]); `None` (`off`), never.
+    pub gzip: Option<usize>,
+    /// `--http-gzip-local`: a client on this host or a private network
+    /// ([`gzip::local`]) is answered in gzip too: behind a load balancer
+    /// that does not compress, or over a slow private link.
+    pub gzip_local: bool,
     /// Entry count of the change ring: how far behind a subscriber may fall.
     /// On overflow the subscriber is reseeded.
     pub change_capacity: usize,
@@ -240,6 +249,8 @@ impl Default for Config {
             max_streams: 64,
             stream_keepalive: Duration::from_secs(20),
             stream_write_timeout: Duration::from_secs(30),
+            gzip: Some(gzip::MIN_BYTES),
+            gzip_local: false,
             change_capacity: fennec_core::changes::DEFAULT_CAPACITY,
             call_max_rows: fennec_core::named::CALL_MAX_ROWS,
             call_rate: calls::CALL_RATE,
@@ -902,7 +913,8 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 Backend::Tenants(_) => openapi::Kind::Node,
                 _ => openapi::Kind::File,
             };
-            let resp = cors(openapi::answer(kind, &req), cfg);
+            let mut resp = cors(openapi::answer(kind, &req), cfg);
+            gzip::encode_packed(&mut resp, &req, cfg, || openapi::document_gzip(kind));
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -1322,7 +1334,10 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         // it from closing.
         drop(tenant);
         audit::http(&req, resp.status, peer);
-        let resp = cors(resp, cfg);
+        let mut resp = cors(resp, cfg);
+        // After the books: an answer's time is its statement's, and its
+        // compression is its write's, as the `writev` is.
+        gzip::encode(&mut resp, &req, cfg);
         timing::lap(timing::Phase::Books);
         let written = resp.write(&mut out, keep_alive, head_only);
         // Answered and written: a shutdown waits for it no more.

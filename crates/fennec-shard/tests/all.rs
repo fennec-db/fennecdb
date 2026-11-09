@@ -8,6 +8,7 @@
 mod chunked;
 mod cors;
 mod fanout;
+mod gzip;
 mod hooks;
 mod leases;
 mod listen;

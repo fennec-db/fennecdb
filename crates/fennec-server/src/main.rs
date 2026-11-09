@@ -254,6 +254,15 @@ usage: fennec-server [options]
                             --tenant-max-held bound each tenant's share
       --http-keepalive <s>  keep-alive interval while a subscription is silent
                             default: 20. Proxies drop silent connections
+      --http-gzip <bytes|off>  an answer (JSON, NDJSON, text) this long or
+                            longer goes as gzip to a client whose
+                            Accept-Encoding takes it, a subscription's
+                            events too; never one carrying an ETag, nor
+                            to a client on this host or a private network
+                            default: 1400. off: never
+      --http-gzip-local     compress for a client on this host or a private
+                            network too: behind a load balancer that does
+                            not compress, or over a slow private link
       --changes <n>         entry count of the change ring  default: 4096.
                             It decides how far behind a subscriber may fall:
                             on overflow that subscriber is reseeded. At 100
@@ -806,6 +815,19 @@ fn main() {
                 }
                 http_cfg.stream_keepalive = Duration::from_secs(secs);
             }
+            "--http-gzip" => {
+                let v = next(&mut i, "--http-gzip");
+                http_cfg.gzip = match v.as_str() {
+                    "off" => None,
+                    _ => match v.parse::<usize>() {
+                        Ok(n) if n > 0 => Some(n),
+                        _ => fail(&format!(
+                            "--http-gzip expects a size in bytes above 0, or off, got `{v}`"
+                        )),
+                    },
+                };
+            }
+            "--http-gzip-local" => http_cfg.gzip_local = true,
             "--changes" => {
                 let v = next(&mut i, "--changes");
                 http_cfg.change_capacity = v

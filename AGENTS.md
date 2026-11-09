@@ -346,7 +346,6 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - Every 503 says when to come back, in its body too.
 
 *The HTTP server*
-- An agent's MCP tool is a statement, held to the token as `/query` is.
 - An `Idempotency-Key` makes a write once.
 - Refusals and schema changes are logged; a refusal waits.
 - Every request has an id, in its answer and every line it wrote.
@@ -359,6 +358,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
+- An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag.
 - A connection no thread can be made for is answered 503.
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
@@ -368,6 +368,13 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `Fennec-Wait` holds a `set` or a `del` that writes nothing until it can
 - A write wakes the held writes reading what it wrote, a row going to the group ranking it first
 - One held request looks for every group, and a group finding nothing looks among the rows written since
+
+### `crates/fennec-http/src/mcp/CLAUDE.md`
+
+Covers `crates/fennec-http/src/mcp/`.
+
+*The HTTP server*
+- An agent's MCP tool is a statement, held to the token as `/query` is.
 
 ### `crates/fennec-server/CLAUDE.md`
 

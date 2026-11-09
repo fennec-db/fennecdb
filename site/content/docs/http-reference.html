@@ -658,6 +658,60 @@ buffer grows as its bytes arrive, never by the size a chunk declares.</p>
 </details>
 
 
+<h2 id="gzip">Compressed answers</h2>
+
+<p>An answer of 1 400 bytes or more — a page of rows, a subscription's
+seed, <code>/_changes</code> — goes as gzip to a client whose
+<code>Accept-Encoding</code> takes it, five to six times smaller. Browsers,
+Go, Node's <code>fetch</code>, Swift, OkHttp and Dart ask for it and
+unpack it on their own; nothing to set. A client on the server's own host
+or private network gets the answer as it is, since there compressing only
+adds time.</p>
+
+<pre data-lang="bash">curl -s --compressed http://db.example.com/query \
+  -d '{"query": "get docs limit 1000"}' -o /dev/null -w '%{size_download} bytes\n'
+# 28576 bytes for 1 000 rows of some 150 bytes; 150103 without --compressed</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>--http-gzip &lt;bytes|off&gt;</code></td><td class="n">1400</td><td>The size from which an answer is compressed; <code>off</code>, never.</td></tr>
+<tr><td><code>--http-gzip-local</code></td><td class="n">off</td><td>Compress for a client on this host or a private network too: behind a load balancer that does not compress, or over a slow private link.</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>What is compressed, for whom, and what it costs</summary>
+<p>Measured end to end, a page of 10 000 rows (1.5 MB) came in 246 ms as
+it is and 49 ms as gzip at 50 Mbit, 62 and 14 ms at 200 Mbit, and broke
+even at 1 Gbit; on loopback it took 11 ms rather than 5. So a client on
+loopback, a private address (RFC 1918, link-local, IPv6 unique local) is
+answered as it is; behind a <a href="sharding.html">router</a> the node
+judges by the client the router names, not the router. A subscription's
+100 000-row seed, 15.4 MB, came in 0.6 s rather than 2.6 at 50 Mbit.</p>
+<ul>
+  <li><b>JSON, NDJSON and text</b> are compressed; an archive or a backup
+    never is.</li>
+  <li><b>An answer carrying an <code>ETag</code></b> — a row by id, a
+    polled read — goes as it is: its tag names those bytes, and a
+    conditional write compares it strongly
+    (<a href="#conditional">Writing over the row you read</a>).</li>
+  <li><b>Every answer that may be compressed says <code>Vary:
+    Accept-Encoding</code></b>, so a cache keeps the two apart.</li>
+  <li><b>A subscription</b> is one gzip stream, each event in it readable
+    the moment it arrives; the server keeps nothing of the compression
+    between events.</li>
+  <li><b>Secrets.</b> A token is never in a body, so the BREACH attack's
+    usual target is not there. Where one read mixes rows an attacker can
+    write with rows they must not learn, and they may watch your clients'
+    traffic, start the server with <code>--http-gzip off</code>.</li>
+</ul>
+<p>The compressor is fennecdb's own, about 290 MB/s on an Apple M1: no
+library was added for it.</p>
+</details>
+
+
 <h2>The data ceiling</h2>
 
 <p>With <code>--max-memory</code>, writes that would grow the data past the
@@ -775,6 +829,9 @@ the rows matching your filter, then each change to them as it happens.</p>
     tenant node each tenant's own -- and each one of
     <code>--max-connections</code> too, which a node's tenants share
     (<a href="sharding-reference.html#quota-bounds">a tenant's share</a>).</li>
+  <li><b>In gzip</b> where the client asks for it and is across the
+    network, the seed five to six times smaller, each event readable as it
+    arrives (<a href="#gzip">Compressed answers</a>).</li>
   <li><b>A row reaching its <code>@ttl</code></b> is told as a deletion at
     its time, as a write would be, not when the sweep deletes it a minute
     and its grace later.</li>

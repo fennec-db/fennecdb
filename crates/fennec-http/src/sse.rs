@@ -340,12 +340,21 @@ pub fn serve(
         }
     };
 
-    if write_head(out, cfg, at).is_err() {
+    // The stream is one gzip member where the client takes gzip, each event
+    // a piece of it its client reads whole as it comes.
+    let gz = cfg.gzip.filter(|_| crate::gzip::wanted(req, cfg));
+    let Ok(stream) = write_head(out, cfg, at, gz.is_some()) else {
         return;
-    }
+    };
     // A client stalled during the stream must not hold the thread forever:
     // the write timeout returns an error and the loop exits.
     let _ = out.set_write_timeout(Some(cfg.stream_write_timeout));
+    let conn: &crate::conn::Conn = out;
+    let out = &mut Events {
+        conn,
+        gz: stream.zip(gz),
+        broken: false,
+    };
 
     // A scoped subscriber is told of a row leaving only if it was sent the
     // row. The shape's rule -- a changed id that does not match is a
@@ -426,7 +435,7 @@ pub fn serve(
     let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
     // The one shutdown wakes the stream to end it, its end over TLS a
     // `close_notify` its client reads as the end it is.
-    out.on_ending({
+    conn.on_ending({
         let hub = Arc::clone(hub);
         move || hub.nudge()
     });
@@ -575,7 +584,7 @@ pub fn serve(
         // `--max-streams` slot till its next change.
         let now = Instant::now();
         if !sent && now.saturating_duration_since(wrote) >= cfg.stream_keepalive {
-            let alive = out.write_all(b": keepalive\n\n").and_then(|()| out.flush());
+            let alive = out.send(b": keepalive\n\n");
             if alive.is_err() {
                 return;
             }
@@ -1392,7 +1401,7 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// read reached for an index are kept where they still hold ([`Kept`]),
 /// rather than answered again under the lock.
 fn seed(
-    out: &mut &crate::conn::Conn,
+    out: &mut Events,
     db: &Arc<RwLock<Database>>,
     (sub, reach, view, lists): (
         &mut api::Subscription,
@@ -1596,16 +1605,70 @@ fn error_json(e: &Error) -> String {
 
 /// A single SSE event. `data` is single-line JSON, so no line splitting is
 /// needed -- the JSON encoder never produces a `\n`.
-fn event(out: &mut &crate::conn::Conn, name: &str, data: &str) -> std::io::Result<()> {
-    out.write_all(format!("event: {name}\ndata: {data}\n\n").as_bytes())?;
-    out.flush()
+fn event(out: &mut Events, name: &str, data: &str) -> std::io::Result<()> {
+    out.send(format!("event: {name}\ndata: {data}\n\n").as_bytes())
+}
+
+/// A stream's events as they go out: as written, or where its client takes
+/// gzip each a piece of one member, deflated alone past `--http-gzip`'s
+/// bytes and stored under them, ending on a byte its client's inflater
+/// reads whole ([`crate::gzip::Stream`]). Between events it holds the
+/// member's CRC and length and nothing else: no window, no tables, however
+/// many streams are open (docs/design/http.md#compressed-answers).
+struct Events<'a> {
+    conn: &'a crate::conn::Conn,
+    gz: Option<(crate::gzip::Stream, usize)>,
+    /// A write failed: the client gone or stalled past
+    /// `stream_write_timeout`, so the member's end is not written after.
+    broken: bool,
+}
+
+impl Events<'_> {
+    /// `bytes` out and flushed: an event, or the keep-alive's comment.
+    fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut out = self.conn;
+        let sent = match &mut self.gz {
+            None => out.write_all(bytes),
+            Some((stream, min)) => {
+                let mut piece = Vec::with_capacity(bytes.len() / 4 + 16);
+                stream.piece(bytes, *min, &mut piece);
+                out.write_all(&piece)
+            }
+        }
+        .and_then(|()| out.flush());
+        self.broken |= sent.is_err();
+        sent
+    }
+}
+
+impl Drop for Events<'_> {
+    /// The member's end, where the stream ends with its client still
+    /// there: an inflater that holds a member cut short for an error
+    /// (Node's zlib, Go's `gzip.Reader`) reads the end it is. Not after a
+    /// failed write: a stalled client would hold the stream's slot another
+    /// `stream_write_timeout` for it.
+    fn drop(&mut self) {
+        if let (Some((stream, _)), false) = (&self.gz, self.broken) {
+            let mut end = Vec::with_capacity(10);
+            stream.finish(&mut end);
+            let mut out = self.conn;
+            let _ = out.write_all(&end).and_then(|()| out.flush());
+        }
+    }
 }
 
 /// A stream's head; `at` where the database stood as the stream opened,
 /// which its head names: the change its seed is at or after, and the
 /// history every event's `seq` is a change of. A refusal is answered whole
-/// in its place, as every route's is (`Response::write`).
-fn write_head(out: &mut &crate::conn::Conn, cfg: &Config, at: crate::At) -> std::io::Result<()> {
+/// in its place, as every route's is (`Response::write`). Where `gzip`,
+/// the head says `Content-Encoding: gzip` and the member's own header goes
+/// with it, the member begun.
+fn write_head(
+    out: &mut &crate::conn::Conn,
+    cfg: &Config,
+    at: crate::At,
+    gzip: bool,
+) -> std::io::Result<Option<crate::gzip::Stream>> {
     // `X-Accel-Buffering: no` turns off proxy buffering (nginx); otherwise
     // events pile up, arrive in bulk, and the stream stops being "live".
     let mut head = String::from(
@@ -1633,9 +1696,17 @@ fn write_head(out: &mut &crate::conn::Conn, cfg: &Config, at: crate::At) -> std:
         }
     });
     crate::audit::push_verified(&mut head);
+    // `Vary` only where the stream is compressed: nothing keeps a stream
+    // (`no-cache`), and one sent as it is is every client's.
+    if gzip {
+        head.push_str("Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
+    }
     head.push_str("\r\n");
-    out.write_all(head.as_bytes())?;
-    out.flush()
+    let mut head = head.into_bytes();
+    let stream = gzip.then(|| crate::gzip::Stream::start(&mut head));
+    out.write_all(&head)?;
+    out.flush()?;
+    Ok(stream)
 }
 
 #[cfg(test)]

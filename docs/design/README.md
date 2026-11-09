@@ -16,7 +16,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
+- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
@@ -197,3 +197,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 152. [The OpenAPI document is held to the routes](http.md#openapi) (added after the move, under *The HTTP server*)
 153. [A client sends a request again only where it cannot have run or may run twice, and bounds every request in time](js-client.md#retries) (added after the move, under *The JS client and Cloudflare*)
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
+155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
