@@ -130,10 +130,85 @@ from a fresh read.</p>
 </ul>
 </details>
 
+<h2 id="sagas">A process across services (sagas)</h2>
+
+<p>An order touches payments and stock, each a database of its own, and no
+transaction spans them. Run the process as a saga: a row that says where it
+stands, steps that are safe to send twice, and a write that undoes each step
+if a later one fails.</p>
+
+<pre data-lang="ts">import { connect } from '@fennecdb/web/client';
+
+const orders = connect('https://orders.internal', { token: 'orders token' });
+const payments = connect('https://payments.internal', { token: 'payments token' });
+const stock = connect('https://stock.internal', { token: 'stock token' });
+
+// The saga is a row in the owning service's database: one write begins it.
+await orders.run(
+  "put sagas {id: $1, state: 'running', next: 'pay', done: [], deadline: now() + 600000}",
+  ['ord-1142'],
+  { idempotencyKey: 'ord-1142:begin' },
+);
+
+// A step is a write under a key from the saga and the step: sent again, it is made once.
+await payments.run('put charges {id: $1, amount: $2}', ['ord-1142', 129.5], { idempotencyKey: 'ord-1142:pay' });
+await stock.run('put holds {id: $1, sku: $2, qty: $3}', ['ord-1142', 'TENT-1', 2], { idempotencyKey: 'ord-1142:reserve' });
+
+// A step that fails after one before it was made: the undo, in reverse order, each under a key too.
+await payments.run('del charges where id = $1', ['ord-1142'], { idempotencyKey: 'ord-1142:undo-pay' });
+</pre>
+
+<ul>
+  <li><b>The next step comes from the change stream.</b> The orchestrator
+  follows the saga collection's writes (<code>/_changes</code>, above): a
+  write that sets <code>next</code> to <code>reserve</code> is the order to
+  run that step, and the step's result is written to the saga row in turn.
+  The row and its event are one record, so a crash loses neither.</li>
+  <li><b>A retry makes the step once.</b> The key is the saga's id and the
+  step's name, so a worker that dies after the write and runs the step again
+  gets the first answer back (<a href="/docs/http#idempotency">Retrying a
+  write</a>). Keys are kept a day unless <code>--idempotency-ttl</code> says
+  otherwise; a saga that outlives them should write by id, so a repeat leaves
+  what the first left.</li>
+  <li><b>Compensation is ordinary writes.</b> Set the saga's
+  <code>state</code> to <code>compensating</code> and run the undo of each
+  step in <code>done</code>, last first, each under its own key. An undo
+  must be safe when the step it undoes never landed.</li>
+  <li><b>A step that keeps failing is parked.</b> Run steps as jobs, and
+  after the fifth attempt the job has no ready time: a dead letter for a
+  person to read (<a href="/docs/queues#fail">Fail, back off,
+  dead-letter</a>).</li>
+  <li><b>A step times out by the clock.</b> A <a
+  href="/docs/fennecql#scheduled-statements">scheduled statement</a> turns a
+  saga past its <code>deadline</code> to <code>compensating</code>, and the
+  stream carries that to the orchestrator like any other write.</li>
+  <li><b>A step that must not act on a state changed underneath it.</b>
+  Read the saga row, which comes with an <code>ETag</code>, and write the
+  next state with <code>If-Match</code>: if the timeout, or a second
+  orchestrator, moved it first, the answer is 412, nothing is written, and
+  you read the row again (<a href="/docs/http#optimistic">Optimistic
+  concurrency</a>).</li>
+</ul>
+
+<pre data-lang="fennecql">create statement time_out_sagas every 1m
+as set sagas {state: 'compensating'}
+   where state = 'running' and deadline &lt; now() order deadline limit 1000</pre>
+
+<details class="deep"><summary>What the saga leaves to you</summary>
+<p>fennecdb gives the pieces; the saga is yours. It runs each step at least
+once and in order, never as one atomic whole: another service can read the
+state between a step and its undo, so write a step so that state is one a
+reader may see, such as a hold, not a sale.</p>
+</details>
+
 <h2>What it is not</h2>
 
 <p>It is not a message broker. To keep events for a long time or share them
 with many teams, relay them into one.</p>
+
+<p>It does not do two-phase commit across databases, and has no global
+transaction. A <code>/batch</code> is atomic within one database only; a
+process across services is a saga, above.</p>
 
 <details class="deep"><summary>What it leaves to a broker</summary>
 <p>A consumer reads one database's writes; there are no topics,
