@@ -2675,12 +2675,15 @@ func (b *Builder) send(ctx context.Context, text string, params []any) ([]byte, 
 }
 
 // sendRead is send for a read: a client made WithReadsNearest marks it for
-// a read replica near it.
+// a read replica near it, and a dropped connection sends it again
+// (built), the builder's mark -- never Read's, a claim nothing checks.
 func (b *Builder) sendRead(ctx context.Context, text string, params []any) ([]byte, head, error) {
 	if b.client == nil {
 		return b.send(ctx, text, params)
 	}
-	return b.client.Read().query(ctx, text, params)
+	d := b.client.Read()
+	d.built = true
+	return d.query(ctx, text, params)
 }
 
 func (b *Builder) answer(ctx context.Context) ([]byte, error) {

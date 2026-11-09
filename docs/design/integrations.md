@@ -27,7 +27,9 @@ as it through an `f64`, which is how the server reads a number, but for
 `json::TIE`, which goes as its `f64`'s text: `encoding/json` wrote its
 shortest `f32` text and the server stored the float above. A request is
 bounded through its context or token, never the HTTP client's timeout,
-which would cut a subscription short. `make go-test` and `make
+which would cut a subscription short -- each try's own, its head and each
+piece of its body -- and sent again by `FennecHttp`'s rule, as Python's
+is ([js-client.md](js-client.md#retries)). `make go-test` and `make
 dotnet-test` start the servers they need (`FENNEC_SERVER`, else
 `target/debug/fennec-server`), CI runs both, and `make languages-test`
 runs the docs' Go and C# examples through each SDK too (`go-sdk`,

@@ -51,7 +51,16 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenn
   reads was written. The tag names a change, not the statement: send it only with the request it came from.
 - `Subscribe(ctx, collection, url.Values{"year": {"gte.2024"}})` is a channel of `seed` and `change` events (SSE).
 - `Changes(ctx, since, wait)` reads every write on disk (`/_changes`); `Health(ctx)` asks `/_health`.
-- `WithTenant("acme")` sends everything under `/t/acme/`; `WithTimeout`, `WithHTTPClient` as they say.
+- `WithTenant("acme")` sends everything under `/t/acme/`; `WithHTTPClient` as it says. `WithTimeout` bounds the
+  wait for an answer's head and between the pieces of its body, 30 s unless given; a subscription's, its head alone.
+- A request goes again only where it ran nothing -- a 503 or 429 naming its wait, after it; a refused connection --
+  or may run twice: a read the builder made or sent near, a `GET` or a write under `IdempotencyKey`, after a dropped
+  connection too. Never after the client's own timeout or the `ctx`'s end, nor a refusal naming no wait; a `Read()`
+  copy's statement sent home goes once. `WithRetry(fennecdb.Retry{Attempts: 5, MaxWait: 30 * time.Second})` sets
+  the tries and waits (3 and 10 s; a `MaxWait` of 0 is no waits). A timeout of your own `http.Client` or Transport
+  is the client's timeout: nothing goes again after it. `WithoutRetry()` sends nothing again, yet Go's Transport
+  itself sends a bodiless `GET` again on a pooled connection that ended under it. A send `net/http`'s Transport makes on its
+  own counts as a try ([Retrying a write](https://fennecdb.com/docs/http#idempotency)).
 - A refusal is an `*fennecdb.Error` with `Status`, `Code` and `Message`, for `errors.As`; a failed `Batch`'s also
   says which statement stopped it, `At` (from 0; -1 otherwise), and how many stayed applied, `Completed`.
   `Reason("insufficient funds")` beside `Require(1)` (`require 1 else '...'`, written into the text) comes back

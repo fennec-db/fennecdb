@@ -539,7 +539,8 @@ public sealed class ClientTests(Servers servers)
             Assert.True((await http.SendAsync(req)).IsSuccessStatusCode, path);
         }
         await Admin(HttpMethod.Put, "/_admin/tenants/acme", "");
-        using var acme = new FennecClient(node, new FennecClientOptions { Tenant = "acme" });
+        // The refusals as they come: a 429 naming its wait goes again after it.
+        using var acme = new FennecClient(node, new FennecClientOptions { Tenant = "acme", Retry = null });
         await acme.ExecAsync("create collection notes (t text)");
         await acme.ExecAsync("put notes [{t: $1}, {t: $2}]", ["a", "b"]);
         var full = await Assert.ThrowsAsync<FennecException>(() => acme.ExecAsync("put notes {t: $1}", ["c"]));
@@ -568,7 +569,8 @@ public sealed class ClientTests(Servers servers)
             Assert.True((await http.SendAsync(req)).IsSuccessStatusCode, path);
         }
         await Admin(HttpMethod.Put, "/_admin/tenants/acme");
-        using var acme = new FennecClient(node, new FennecClientOptions { Tenant = "acme" });
+        // The 503 as it comes, which goes again after its wait otherwise.
+        using var acme = new FennecClient(node, new FennecClientOptions { Tenant = "acme", Retry = null });
         await acme.ExecAsync("create collection notes (t text)");
         await Admin(HttpMethod.Post, "/_admin/tenants/acme/freeze");
         var moved = await Assert.ThrowsAsync<FennecException>(() => acme.ExecAsync("put notes {t: $1}", ["a"]));

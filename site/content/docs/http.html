@@ -265,8 +265,8 @@ after a timeout cannot write it twice: a repeat gets the first answer back.</p>
   <li><b>One key per write.</b> The same key with a different request is
     refused (422).</li>
   <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
-  <li><b>The JavaScript, Python, Swift, Kotlin and Dart clients retry for
-    you, by one rule:</b>
+  <li><b>The JavaScript, Python, Go, .NET, Swift, Kotlin and Dart clients
+    retry for you, by one rule:</b>
     a request goes again only where it ran nothing — a 503, or a quota's
     429, naming its wait, sent after that wait and never sooner; a
     connection refused — or where running it twice is harmless: a read the
@@ -291,7 +291,18 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     A text given <code>{ read: true }</code> (<code>read=True</code>) and
     sent home is a claim nothing checks: a call to <code>history</code>
     stops being a read once the statement is made to log a row, so it goes
-    once, as a write without a key does.</li>
+    once, as a write without a key does — so does a Go
+    <code>Read()</code> copy's and a .NET <code>AsRead()</code> copy's.
+    A <code>GET</code> — the change stream, a subscription's head, the
+    health check — is a read by its route.</li>
+  <li><b>What the platform sends again on its own counts:</b> Go's
+    <code>net/http</code> sends a request carrying an
+    <code>Idempotency-Key</code> again itself when a pooled connection dies
+    under it, and the Go client counts that send as one of its tries, none
+    with retry off. Go's and .NET's own HTTP stacks may still send a
+    <code>GET</code> once more, or three times in .NET, where the server
+    closed the connection before answering — a read, which changes
+    nothing.</li>
 </ul>
 <ul>
   <li><b>Bounded:</b> three tries at most and 10 s of waits between them:
@@ -299,8 +310,8 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     before <code>Retry-After</code> — or 250 ms doubling where it names
     none, with up to 30% jitter on top. A wait past what is left of the 10
     s is not waited: the refusal is thrown at once, its
-    <code>retryAfter</code> (<code>retry_after</code> in Python) saying
-    when to come back. Past the tries, the last error, with what the server
+    <code>retryAfter</code> (<code>retry_after</code> in Python,
+    <code>RetryAfter</code> in Go and .NET) saying when to come back. Past the tries, the last error, with what the server
     said.</li>
   <li><b>A timeout bounds the wait for an answer's head</b>, 30 s unless
     given, a held write's <code>wait</code> on top, <b>and each wait between
@@ -311,22 +322,30 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     nothing goes again after it: give a statement that runs long before it
     answers — a <code>compact</code>, a <code>create index</code> — a
     client with a longer <code>timeout</code>. A JavaScript caller's
-    <code>signal</code> still gives a request up sooner, and nothing it gave
-    up is sent again; so do a Swift task or a Kotlin coroutine cancelled,
-    and a Dart <code>withAbort(future)</code> copy's future.</li>
+    <code>signal</code>, a Go <code>ctx</code> and a .NET
+    <code>CancellationToken</code> still give a request up sooner, and
+    nothing they gave up is sent again; so do a Swift task or a Kotlin
+    coroutine cancelled, and a Dart <code>withAbort(future)</code> copy's
+    future.</li>
   <li><b>The client makes no key:</b> a write goes again after a dropped
     connection only under the <code>idempotencyKey</code>
     (<code>idempotency_key</code>) its caller passed, one it can send again
     after a restart too.</li>
-  <li><b>Off, or wider:</b> <code>{ retry: false }</code> and
-    <code>retry=False</code> send nothing again; <code>{ retry: { attempts,
-    maxWait } }</code> and <code>Retry(attempts, max_wait)</code> set the
-    bounds; Swift's, Kotlin's and Dart's <code>Fennec.connect</code> take
+  <li><b>Off, or wider:</b> <code>{ retry: false }</code>,
+    <code>retry=False</code>, Go's <code>WithoutRetry()</code> and .NET's
+    <code>Retry = null</code> send nothing again; <code>{ retry: { attempts,
+    maxWait } }</code>, <code>Retry(attempts, max_wait)</code>,
+    <code>WithRetry(fennecdb.Retry{Attempts: 5, MaxWait: 30 *
+    time.Second})</code> and <code>Retry = new Retry { Attempts = 5 }</code>
+    set the bounds; a <code>maxWait</code> of 0 is no waits, in every
+    client. Retry off does not stop the platform itself: Go's Transport and
+    .NET's handler send a bodiless <code>GET</code> again on a connection
+    that ended under it, and the Go client counts that as a try. A timeout of
+    a caller's own <code>http.Client</code> or Transport is the client's
+    timeout: nothing goes again after it. Swift's, Kotlin's and Dart's <code>Fennec.connect</code> take
     <code>retry: nil</code> (<code>null</code>) and a
     <code>FennecRemote.Retry</code> (Dart's <code>RetryPolicy</code>)
-    (<a href="/docs/mobile#retries">Without a file</a>). The Go and .NET
-    clients do not retry yet: they hand every answer and error to the
-    caller as before.</li>
+    (<a href="/docs/mobile#retries">Without a file</a>).</li>
 </ul>
 </details>
 

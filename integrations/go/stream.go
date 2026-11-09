@@ -42,35 +42,31 @@ func (c *Client) Subscribe(ctx context.Context, collection string, filter url.Va
 	if q := filter.Encode(); q != "" {
 		path += "?" + q
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	// Its head within the timeout, sent again as a GET is; its body for as
+	// long as the caller reads.
+	a, err := c.ask(ctx, call{method: http.MethodGet, url: path, accept: "text/event-stream", stream: true})
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "text/event-stream")
-	c.headers(req)
-	res, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
+	res := a.res
 	if res.StatusCode != http.StatusOK {
-		defer res.Body.Close()
-		raw, _ := io.ReadAll(res.Body)
 		// A stream near waits for the client's position as a read does,
 		// and a 504 is a read near's: no copy holds it, home either --
 		// the write lost in a failover of home, which says where it
 		// stands, the client's position from here on -- and the stream
 		// opens home with no mark. Taken as an error, every stream near
 		// after it was refused for good.
-		if c.toldBy(req, res.StatusCode, raw) {
+		if c.toldBy(a.sent, res.StatusCode, a.raw) {
 			home := *c
 			home.read, home.after = false, 0
 			return home.Subscribe(ctx, collection, filter)
 		}
-		return nil, errorOf(res.StatusCode, raw)
+		return nil, errorOf(res.StatusCode, a.raw)
 	}
 	out := make(chan Event, 16)
 	go func() {
 		defer close(out)
+		defer a.end()
 		defer res.Body.Close()
 		send := func(e Event) bool {
 			select {

@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -42,6 +41,11 @@ type Client struct {
 	// the builder's reads).
 	near bool
 	read bool
+	// built: this copy's request is a read the builder made, marked by the
+	// builder itself -- never by Read, a claim nothing checks -- which may
+	// go again after a dropped connection.
+	built bool
+	retry Retry
 	// The furthest position an answer from home named, shared by the
 	// copies: a read near is sent after it.
 	pos *position
@@ -132,10 +136,58 @@ func WithToken(token string) Option { return func(c *Client) { c.token = token }
 // requests are bounded by WithTimeout through their context instead.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.http = hc } }
 
-// WithTimeout bounds each request, 30 seconds unless given; 0 is none. A
-// subscription is bounded by its context alone, and Changes waits its
-// wait on top.
+// WithTimeout bounds the wait for an answer's head, 30 seconds unless
+// given, and each wait between the pieces of its body: a long answer is
+// read for as long as it keeps coming, one that stops is given up. 0 is
+// none. A subscription's is its head alone; Changes and Wait wait their
+// wait on top of the head's. Nothing goes again after it, since the
+// server may still be running the request: a statement that runs long
+// before it answers -- a compact, a create index -- wants a client with a
+// longer timeout.
 func WithTimeout(d time.Duration) Option { return func(c *Client) { c.timeout = d } }
+
+// Retry is how often, and for how long, a client sends a request again
+// (WithRetry): only where it cannot have run, or may run twice. Cannot
+// have run: a 503, or a quota's 429, naming its wait -- sent after that
+// wait, never sooner, unless its body says statements of a batch were
+// made (Completed) -- and a connection refused. May run twice, and so goes
+// again after a dropped connection too: a read the builder made, one sent
+// near (a Read copy of a client WithReadsNearest), a write under an
+// IdempotencyKey, and a GET -- Changes, Subscribe's head, Health. Nothing
+// goes again after the client's own timeout or the context's end, nor a
+// refusal naming no wait; a Read copy's statement sent home is a claim
+// nothing checks, and goes once. The client makes no key.
+type Retry struct {
+	// Attempts is the tries a request is given, the first among them: 3
+	// where 0.
+	Attempts int
+	// MaxWait bounds the waits between them, all told -- the server's
+	// wait, or 250 ms doubling, 30% jitter on top. 0 is no waits at all, as
+	// in the other SDKs: nothing needing a wait goes again, and a refusal
+	// is the caller's at once; WithRetry's default is 10 seconds, kept when
+	// WithRetry is not called. A wait past what is left is not waited: the
+	// refusal is the caller's at once, its RetryAfter saying when to come
+	// back.
+	MaxWait time.Duration
+}
+
+// WithRetry sets how often, and for how long, a request is sent again; a
+// zero Attempts is its default (3), a zero MaxWait no waits.
+func WithRetry(r Retry) Option {
+	return func(c *Client) {
+		if r.Attempts < 1 {
+			r.Attempts = 3
+		}
+		if r.MaxWait < 0 {
+			r.MaxWait = 0
+		}
+		c.retry = r
+	}
+}
+
+// WithoutRetry sends nothing again: every answer and error is the
+// caller's as it came.
+func WithoutRetry() Option { return func(c *Client) { c.retry = Retry{Attempts: 1} } }
 
 // WithTenant sends every request under /t/<tenant>/: one tenant of a node
 // started with --dir, or of a fennec-shard router.
@@ -162,6 +214,7 @@ func New(url string, opts ...Option) *Client {
 		base:    root,
 		http:    &http.Client{},
 		timeout: 30 * time.Second,
+		retry:   Retry{Attempts: 3, MaxWait: 10 * time.Second},
 		pos:     &position{},
 	}
 	for _, o := range opts {
@@ -656,36 +709,15 @@ type head struct {
 	notModified bool
 }
 
-// do sends one request and reads its answer whole: the body of a 2xx, an
-// *Error otherwise. extra lengthens the timeout by a wait the server holds
-// the answer for.
+// do sends a request -- again where ask's rule lets it -- and reads its
+// answer whole: the body of a 2xx, an *Error otherwise. extra lengthens
+// the head's timeout by a wait the server holds the answer for.
 func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte, extra time.Duration) ([]byte, head, error) {
-	if c.timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.timeout+extra+c.wait)
-		defer cancel()
-	}
-	var rd io.Reader
-	if body != nil {
-		rd = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
+	a, err := c.ask(ctx, call{method: method, url: c.base + path, ctype: ctype, body: body, extra: extra})
 	if err != nil {
 		return nil, head{}, err
 	}
-	if ctype != "" {
-		req.Header.Set("Content-Type", ctype)
-	}
-	c.headers(req)
-	res, err := c.http.Do(req)
-	if err != nil {
-		return nil, head{}, err
-	}
-	defer res.Body.Close()
-	raw, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, head{}, err
-	}
+	res, raw := a.res, a.raw
 	// A 304 is an answer only to a request that named one.
 	if res.StatusCode == http.StatusNotModified && c.tag != "" {
 		return nil, head{etag: res.Header.Get("ETag"), notModified: true}, nil
@@ -693,7 +725,7 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 	// Asked home with no mark after a read near's 504, it is answered with
 	// what home holds.
 	near := c.read && c.near
-	if c.toldBy(req, res.StatusCode, raw) {
+	if c.toldBy(a.sent, res.StatusCode, raw) {
 		home := *c
 		home.read, home.after = false, 0
 		return home.do(ctx, method, path, ctype, body, extra)
@@ -723,8 +755,8 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 // the write lost in a failover of home, which says where it stands, taken
 // here as the client's position from then on (one the caller named with
 // After is not the client's to take). The request goes home with no mark.
-func (c *Client) toldBy(req *http.Request, status int, raw []byte) bool {
-	if status != http.StatusGatewayTimeout || !(c.read && c.near) || req.Header.Get("Fennec-After") == "" {
+func (c *Client) toldBy(sent http.Header, status int, raw []byte) bool {
+	if status != http.StatusGatewayTimeout || !(c.read && c.near) || sent.Get("Fennec-After") == "" {
 		return false
 	}
 	var told struct {
@@ -732,8 +764,8 @@ func (c *Client) toldBy(req *http.Request, status int, raw []byte) bool {
 		History string  `json:"history"`
 	}
 	if c.after == 0 && json.Unmarshal(raw, &told) == nil && told.Seq != nil {
-		sent, _ := strconv.ParseUint(req.Header.Get("Fennec-After"), 10, 64)
-		c.pos.told(sent, req.Header.Get("Fennec-History"), *told.Seq, told.History)
+		after, _ := strconv.ParseUint(sent.Get("Fennec-After"), 10, 64)
+		c.pos.told(after, sent.Get("Fennec-History"), *told.Seq, told.History)
 	}
 	return true
 }

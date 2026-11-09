@@ -493,8 +493,71 @@ reads a close as it comes whenever it waits.
 Streams and polls keep their own loops and take the server's wait as a
 floor: a stream opened again waits `max(backoff, retryAfter)`, and a
 poll's round goes through `#ask`, sent again after a reset where its query
-is a builder's. The Go and .NET clients name the wait (`RetryAfter`) and
-send nothing again yet.
+is a builder's.
+
+**Go's and .NET's clients keep the rule** (`integrations/go/retry.go`,
+`ask` and `try`; `integrations/dotnet/FennecDb/Retry.cs`, `AskAsync`), by
+the same bounds: `WithRetry(fennecdb.Retry{Attempts, MaxWait})` and
+`WithoutRetry()`, `FennecClientOptions.Retry` (`new Retry { Attempts,
+MaxWait }`) and `Retry = null`. The builder marks its reads itself -- Go's
+`built`, set by `sendRead`, .NET's `built` from `RunReadAsync` -- never by
+`Read()` or `AsRead()`, the caller's claim. A GET -- `Changes`, a
+subscription's head, `Health` -- is a read by its route, and may run twice
+as Python's `changes` may. A refusal is told by the system's error: Go's
+`syscall.ECONNREFUSED`, Windows' 10061 its own, and .NET's
+`SocketError.ConnectionRefused` anywhere in the exception's chain. Each try
+has a context or token of its own, made from the caller's: the head is
+bounded by the timeout (a held wait on top), each read of the body by the
+timeout again -- Go's `gaps`, its timer `Reset` at each read; .NET's
+`BodyAsync`, `CancelAfter` at each read -- and a stream's (`Subscribe`,
+`SubscribeAsync`) by its head alone, which had no bound but the caller's.
+The client's own timeout is told from the caller's end by what ended the
+try: Go's `errLate`, which `errors.Is` takes for `context.DeadlineExceeded`
+as it took the context's before; .NET's a `TaskCanceledException` around a
+`TimeoutException`, as `HttpClient.Timeout` throws it.
+
+**A send the platform makes on its own is a try.** Go's `net/http`
+Transport sends a request again itself on a pooled connection that ended
+under it: any request where nothing was written, and, written whole, one it
+takes for idempotent -- a GET, or one carrying an `Idempotency-Key` whose
+body it can take again (`GetBody`, which `http.NewRequest` sets for a
+`bytes.Reader`): the router's rule, which is Go's. Uncounted, and under
+`WithoutRetry` too, a keyed write went out as often as its pooled
+connections died under it, and with the client's loop on top up to three
+times that. `try` gives the Transport the body again only through a
+`GetBody` of its own, which counts the send as a try and refuses one past
+the tries (`errSpent`); a body not yet read when the connection ended --
+nothing written -- goes without it, sending nothing that ran. A GET has no
+body to hold it by: the Transport may still send one once more for each
+pooled connection that died under it, a read, which `WithoutRetry` does
+not stop. .NET's `SocketsHttpHandler` sends a request without content again
+itself, any method, where the server closed the connection before a byte
+of the answer (`_canRetry`), three times at most
+(`MaxConnectionFailureRetries`), a fresh connection or a pooled one; never
+one with content, which every POST of the client has (`ByteArrayContent`).
+A GET whose connection the server closed so has gone out four times when
+`AskAsync` sees it (`HttpRequestError.ResponseEnded` before its head), and
+goes no more: sent again by the loop, it went out up to twelve times. The
+tests run the clients against a stub that answers its n-th request by a
+script over real connections -- a reset with linger 0, a close, a refused
+port, a head that never comes, a body in pieces -- each on port 0
+(`retry_test.go`, `RetryTests.cs`): `TestTheTransportsOwnResendIsATry`
+fails with `GetBody` left uncounted, the keyed write sent twice under
+`WithoutRetry`, and `AGetTheHandlerSentAgainIsNotSentAgainHere` counts the
+handler's four sends, a fifth without the `ResponseEnded` check.
+
+Their cost, measured against a server answering at once in-process, five
+rounds alternated, begun under a load of 1.8 on 8 cores (medians): Go's
+builder read 41.56 -> 41.60 us, `Exec` 39.84 -> 39.89 us and a 256 KB
+answer 149.8 -> 149.3 us, within the noise, with 3 allocations a request
+more (the try's context with its cause, its timer, `GetBody`), about 50 B;
+.NET's builder read 49.2 -> 49.9 us and `ExecAsync` 39.9 -> 40.4 us, 1%,
+240 and 310 B a request more (`AskAsync`'s and `BodyAsync`'s state, the
+try's token source, the request's maker), and a 256 KB answer 1 475 ->
+1 323 us and 2.11 -> 1.84 MB: a body of a length the server gave is read
+into one array of it, where `ReadAsByteArrayAsync` copied it out of a
+buffer. A Go program reading through the builder grew 8 904 466 ->
+8 941 986 bytes, `FennecDb.dll` 159 744 -> 167 936.
 
 Cost, measured against a server answering at once, rounds alternated:
 `FennecHttp.run` of a builder read 5.00 -> 5.83 us over a `fetch`

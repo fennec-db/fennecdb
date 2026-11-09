@@ -14,9 +14,17 @@ public sealed class FennecClientOptions
     /// <summary>Sends every request under <c>/t/&lt;tenant&gt;/</c>: a tenant of a node started with --dir, or of a fennec-shard router.</summary>
     public string? Tenant { get; init; }
 
-    /// <summary>Bounds each request, 30 seconds unless given; <see cref="Timeout.InfiniteTimeSpan"/> is none.
-    /// A subscription is bounded by its token alone, and <see cref="FennecClient.ChangesAsync"/> waits its wait on top.</summary>
+    /// <summary>Bounds the wait for an answer's head, 30 seconds unless given, and each wait between the pieces of
+    /// its body: a long answer is read for as long as it keeps coming, one that stops is given up;
+    /// <see cref="Timeout.InfiniteTimeSpan"/> is none. A subscription's is its head alone;
+    /// <see cref="FennecClient.ChangesAsync"/> and <see cref="FennecClient.WithWait"/> wait their wait on top of the
+    /// head's. Nothing goes again after it, since the server may still be running the request: a statement that
+    /// runs long before it answers -- a compact, a create index -- wants a client with a longer Timeout.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How often, and for how long, a request is sent again (<see cref="FennecDb.Retry"/>): three tries and
+    /// 10 seconds of waits unless given; <c>null</c> sends nothing again.</summary>
+    public Retry? Retry { get; init; } = new();
 
     /// <summary>Sends the requests through this client rather than one of its own, which is then not disposed.
     /// Its own Timeout, if it has one, also cuts a subscription short.</summary>
@@ -48,6 +56,7 @@ public sealed partial class FennecClient : IDisposable
     readonly string _base;
     readonly string? _token;
     readonly TimeSpan _timeout;
+    readonly Retry? _retry;
     readonly Position _seq;
     readonly long _after;
     readonly string? _key;
@@ -123,6 +132,9 @@ public sealed partial class FennecClient : IDisposable
         _base = options.Tenant is null ? _root : $"{_root}/t/{Uri.EscapeDataString(options.Tenant)}";
         _token = options.Token;
         _timeout = options.Timeout;
+        if (options.Retry is { } r && (r.Attempts < 1 || r.MaxWait < TimeSpan.Zero))
+            throw new ArgumentOutOfRangeException(nameof(options), $"bad retry: {r}");
+        _retry = options.Retry;
         _owns = options.HttpClient is null;
         // Its own client has no timeout of its own: a subscription lasts as
         // long as it is read, and each request is bounded through its token.
@@ -133,8 +145,8 @@ public sealed partial class FennecClient : IDisposable
 
     FennecClient(FennecClient from, long after, string? key, TimeSpan wait, bool read)
     {
-        (_http, _owns, _root, _base, _token, _timeout, _seq, _near) =
-            (from._http, false, from._root, from._base, from._token, from._timeout, from._seq, from._near);
+        (_http, _owns, _root, _base, _token, _timeout, _retry, _seq, _near) =
+            (from._http, false, from._root, from._base, from._token, from._timeout, from._retry, from._seq, from._near);
         (_after, _key, _wait, _read) = (after, key, wait, read);
     }
 
@@ -183,9 +195,11 @@ public sealed partial class FennecClient : IDisposable
         return RowsOf(body);
     }
 
-    /// <summary>A builder's read: this client's own request, marked as one where it reads near.</summary>
+    /// <summary>A builder's read: this client's own request, marked as one where it reads near, and sent again
+    /// after a dropped connection (<c>built</c>) -- the builder's mark, never <see cref="AsRead"/>'s, a claim
+    /// nothing checks.</summary>
     internal Task<(byte[], Head)> RunReadAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct) =>
-        (_near && !_read ? AsRead() : this).RunAsync(query, parameters, ct);
+        (_near && !_read ? AsRead() : this).RunAsync(query, parameters, ct, built: true);
 
     /// <summary>Runs one FennecQL statement and maps its rows to <typeparamref name="T"/>, a record or a class,
     /// by property name, whatever its case. A <c>float[]</c> property reads a vector back as the f32s the server holds.</summary>
@@ -326,13 +340,17 @@ public sealed partial class FennecClient : IDisposable
         var q = string.Join("&", (filter ?? []).Select(kv =>
             $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
         if (q.Length > 0) url += "?" + q;
-        using var req = Request(HttpMethod.Get, url);
-        req.Headers.Accept.ParseAdd("text/event-stream");
-        using var res = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
-        if (!res.IsSuccessStatusCode)
+        // Its head within the Timeout, sent again as a GET is; its body for as long as the caller reads.
+        using var answered = await AskAsync(() =>
         {
-            var raw = await res.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            var r = Request(HttpMethod.Get, url);
+            r.Headers.Accept.ParseAdd("text/event-stream");
+            return r;
+        }, TimeSpan.Zero, twice: true, stream: true, cancellationToken).ConfigureAwait(false);
+        var (res, req) = (answered.Res, answered.Req);
+        if (res.StatusCode != System.Net.HttpStatusCode.OK)
+        {
+            var raw = answered.Raw!;
             // A stream near waits for the client's position as a read does, and a 504 is a read near's: no copy
             // holds it, home either -- the write lost in a failover of home, which says where it stands, the
             // client's position from here on -- and the stream opens home with no mark. Taken as an error, every
@@ -418,11 +436,10 @@ public sealed partial class FennecClient : IDisposable
     /// answer. A tenant's is its node's.</summary>
     public async Task HealthAsync(CancellationToken cancellationToken = default)
     {
-        using var cts = Bounded(TimeSpan.Zero, cancellationToken);
-        using var res = await _http.GetAsync(_root + "/_health", cts.Token).ConfigureAwait(false);
-        if (!res.IsSuccessStatusCode)
-            throw FennecException.From((int)res.StatusCode,
-                await res.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false));
+        using var answered = await AskAsync(() => new HttpRequestMessage(HttpMethod.Get, _root + "/_health"),
+            TimeSpan.Zero, twice: true, stream: false, cancellationToken).ConfigureAwait(false);
+        if (!answered.Res.IsSuccessStatusCode)
+            throw FennecException.From((int)answered.Res.StatusCode, Encoding.UTF8.GetString(answered.Raw!));
     }
 
     /// <summary>Disposes the HttpClient the client made; one handed in is left to its owner.</summary>
@@ -437,11 +454,12 @@ public sealed partial class FennecClient : IDisposable
     /// a read nobody marked.</summary>
     internal readonly record struct Head(long Seq, bool Replayed, long? Next);
 
-    internal Task<(byte[], Head)> RunAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct)
+    internal Task<(byte[], Head)> RunAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct,
+        bool built = false)
     {
         using var buf = new MemoryStream();
         Params.WriteBody(buf, query, parameters);
-        return SendAsync(HttpMethod.Post, "/query", "application/json", buf.ToArray(), TimeSpan.Zero, ct);
+        return SendAsync(HttpMethod.Post, "/query", "application/json", buf.ToArray(), TimeSpan.Zero, ct, built);
     }
 
     CancellationTokenSource Bounded(TimeSpan extra, CancellationToken ct)
@@ -471,25 +489,33 @@ public sealed partial class FennecClient : IDisposable
         return req;
     }
 
-    // One request, its answer read whole: the body of a 2xx, a FennecException otherwise. The body goes as
-    // bytes with its length, which every hop takes: the global entry refuses one past a mebibyte without it.
+    // A request -- again where AskAsync's rule lets it -- its answer read whole: the body of a 2xx, a
+    // FennecException otherwise. The body goes as bytes with its length, which every hop takes: the global entry
+    // refuses one past a mebibyte without it. built: a read the builder made.
     async Task<(byte[], Head)> SendAsync(HttpMethod method, string path, string? contentType, byte[]? body,
-        TimeSpan extra, CancellationToken ct)
+        TimeSpan extra, CancellationToken ct, bool built = false)
     {
-        using var cts = Bounded(extra, ct);
-        using var req = Request(method, _base + path);
-        if (body is not null)
-        {
-            req.Content = new ByteArrayContent(body);
-            req.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType!);
-        }
-        using var res = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
-        var raw = await res.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
-        // Asked home with no mark after a read near's 504, it is answered with what home holds.
+        var url = _base + path;
         var near = _read && _near;
+        // What may run twice: a read the builder made, one sent near, which every server runs read-only
+        // (Fennec-Read), a write under a key, and a GET. AsRead sent home is a claim nothing checks: a call it
+        // names may have been made to write since.
+        var twice = built || near || _key is not null || method == HttpMethod.Get;
+        using var answered = await AskAsync(() =>
+        {
+            var r = Request(method, url);
+            if (body is not null)
+            {
+                r.Content = new ByteArrayContent(body);
+                r.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType!);
+            }
+            return r;
+        }, extra, twice, stream: false, ct).ConfigureAwait(false);
+        var (res, req, raw) = (answered.Res, answered.Req, answered.Raw!);
+        // Asked home with no mark after a read near's 504, it is answered with what home holds.
         if (SentHome(req, (int)res.StatusCode, raw))
             return await new FennecClient(this, 0, _key, _wait, false)
-                .SendAsync(method, path, contentType, body, extra, ct).ConfigureAwait(false);
+                .SendAsync(method, path, contentType, body, extra, ct, built).ConfigureAwait(false);
         if (!res.IsSuccessStatusCode)
             throw FennecException.From((int)res.StatusCode, Encoding.UTF8.GetString(raw));
         long seq = 0;
