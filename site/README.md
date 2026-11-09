@@ -600,5 +600,6 @@ there (`CHROME_PATH` when Chrome is not where Lighthouse looks). It serves
 the build itself on port 0, with the edge's compression and `_headers`.
 `lighthouserc.cjs` holds the budgets; CI runs it as `site-lighthouse.yml`
 for pull requests touching the site. Measured, every page scores 100 in all
-four categories; the floors sit a little under, and are raised, never
-lowered, to pass.
+four categories. Accessibility, best practices and SEO are held at 100,
+the same on every run; performance and the timings, measured on a shared
+runner, a little under. A floor is raised, never lowered to pass.
