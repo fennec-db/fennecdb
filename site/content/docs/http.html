@@ -265,7 +265,8 @@ after a timeout cannot write it twice: a repeat gets the first answer back.</p>
   <li><b>One key per write.</b> The same key with a different request is
     refused (422).</li>
   <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
-  <li><b>The JavaScript, Python, Go and .NET clients retry for you, by one rule:</b>
+  <li><b>The JavaScript, Python, Go, .NET, Swift, Kotlin and Dart clients
+    retry for you, by one rule:</b>
     a request goes again only where it ran nothing — a 503, or a quota's
     429, naming its wait, sent after that wait and never sooner; a
     connection refused — or where running it twice is harmless: a read the
@@ -323,7 +324,9 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     client with a longer <code>timeout</code>. A JavaScript caller's
     <code>signal</code>, a Go <code>ctx</code> and a .NET
     <code>CancellationToken</code> still give a request up sooner, and
-    nothing they gave up is sent again.</li>
+    nothing they gave up is sent again; so do a Swift task or a Kotlin
+    coroutine cancelled, and a Dart <code>withAbort(future)</code> copy's
+    future.</li>
   <li><b>The client makes no key:</b> a write goes again after a dropped
     connection only under the <code>idempotencyKey</code>
     (<code>idempotency_key</code>) its caller passed, one it can send again
@@ -339,8 +342,10 @@ so is a 500, a write's <code>outcome: "unknown"</code> among them. So is a
     .NET's handler send a bodiless <code>GET</code> again on a connection
     that ended under it, and the Go client counts that as a try. A timeout of
     a caller's own <code>http.Client</code> or Transport is the client's
-    timeout: nothing goes again after it. The Swift, Kotlin and Dart clients do not retry yet:
-    they hand every answer and error to the caller as before.</li>
+    timeout: nothing goes again after it. Swift's, Kotlin's and Dart's <code>Fennec.connect</code> take
+    <code>retry: nil</code> (<code>null</code>) and a
+    <code>FennecRemote.Retry</code> (Dart's <code>RetryPolicy</code>)
+    (<a href="/docs/mobile#retries">Without a file</a>).</li>
 </ul>
 </details>
 

@@ -367,6 +367,8 @@ twice, and bounds every request in time.** `FennecHttp` (`web/http.js`,
 (`integrations/python/fennecdb/__init__.py`, `_send` and `_post`) keep
 the rule the router keeps toward its nodes
 ([router.md](router.md#pooled-connections)), which is Go `net/http`'s.
+Swift's, Kotlin's and Dart's `FennecRemote` keep it too (`ask`, `asking`,
+`_ask`), over HTTP stacks that send again on their own (below).
 
 *Cannot have run:* an answer that says nothing ran -- a 503, every one of
 which names its wait ([quotas.md](quotas.md#retry-after-in-bodies)), the
@@ -491,8 +493,7 @@ reads a close as it comes whenever it waits.
 Streams and polls keep their own loops and take the server's wait as a
 floor: a stream opened again waits `max(backoff, retryAfter)`, and a
 poll's round goes through `#ask`, sent again after a reset where its query
-is a builder's. The Swift, Kotlin and Dart clients name the wait
-(`RetryAfter`) and send nothing again yet.
+is a builder's.
 
 **Go's and .NET's clients keep the rule** (`integrations/go/retry.go`,
 `ask` and `try`; `integrations/dotnet/FennecDb/Retry.cs`, `AskAsync`), by
@@ -577,3 +578,77 @@ through the client entry 34 137 -> 36 032 bytes, 11 052 -> 11 794 brotli
 messages and `#send`'s own parse gone took back 116 bytes and the clock
 between a body's pieces cost 122. The modules as served, which carry their
 comments, 57 -> 58 KB brotli.
+
+**Swift, Kotlin and Dart keep the rule over HTTP stacks of their
+platforms', each measured for what it sends again on its own** against a
+stub that reads a request whole and resets the connection, fresh or kept:
+
+- URLSession sends a POST once: a reset or a connection closed before the
+  answer is `networkConnectionLost`, a refusal `cannotConnectToHost`, the
+  client's own timeout `timedOut`. A GET it sends again on its own over a
+  kept connection, which `FennecRemote` sends none of. `timeoutInterval`
+  bounds each wait for a piece of the answer -- its head, then each gap of
+  its body -- which is the timeout as `FennecHttp` has it; a held write's
+  wait goes on top of each, not of the head alone. A cancelled task throws
+  `CancellationError`, and `Task.sleep` ends a wait at the cancel.
+- The JVM's `HttpURLConnection` sends a POST whose body it buffered again
+  on its own once the answer's head fails -- a reset, a connection closed
+  before it -- over a fresh connection or a kept one alike
+  (`sun.net.http.retryPost`, read once for the process): a keyless write
+  the server ran was made twice. Streamed with its length fixed
+  (`setFixedLengthStreamingMode`) it never is, nor by Android's
+  `HttpURLConnection` (OkHttp), which sends again only a body it holds.
+  Streamed, though, the JVM asks a kept connection whether the server
+  closed it before using it, by a read with a 1 ms timeout
+  (`HttpClient.available()`): over a kept connection to a stub, in the
+  gradle:8-jdk17 container, 63 us a POST buffered, 2.4 ms streamed; 186 us
+  either way with keep-alive off. So only what must go once is streamed --
+  a write without a key, a text sent home, a batch -- and a builder read,
+  one sent near or a write under a key goes buffered, which the JVM may
+  send once more after a reset: what the rule lets them do anyway, an
+  uncounted try. Android's OkHttp makes the same 1 ms check before every
+  POST over a kept connection, streamed or not (`isHealthy`, read in its
+  source, not measured here), so there streaming costs nothing. A request
+  that must go once costs the JVM that millisecond over a kept connection
+  where it was made twice before at a reset. The JVM-only alternative,
+  `java.net.http`, is not on Android, bounds no gap of a body, and would be
+  a second transport. `readTimeout` bounds each read, `connectTimeout` the
+  connect; a coroutine cancelled closes the connection and throws
+  `CancellationException`, never an `IOException`, and `delay` ends a wait
+  at it; a blocking call's thread interrupted is given up alike
+  (`InterruptedIOException`).
+- `dart:io`'s `HttpClient` sends nothing again on its own, and bounds
+  nothing but the connect (`connectionTimeout`, said as a
+  `SocketException` with no OS error, taken for the client's own timeout):
+  `close().timeout` bounds the head, aborting the request, and
+  `Stream.timeout` each gap of the body. A `Future` cannot be cancelled, so
+  a copy holds what gives its requests up: `withAbort(future)` aborts the
+  one under way and ends a wait between tries. A refusal is the
+  platform's ECONNREFUSED: 61 on Apple's, 111 on Linux and Android, 10061
+  on Windows. The bounds are a `RetryPolicy`, not a `Retry`:
+  `package:test` exports a `Retry` of its own, and a test importing both
+  named neither.
+
+The bounds are `FennecHttp`'s -- three tries, 10 s of waits, a 30 s
+timeout -- Swift's in seconds (`FennecRemote.Retry(attempts:maxWait:)`),
+Kotlin's in milliseconds (`FennecRemote.Retry(attempts, maxWait)`), Dart's
+`Duration`s, given to `Fennec.connect` with `timeout`; `retry: nil`
+(`null`) sends nothing again. Swift's and Kotlin's timeout was 60 s a
+read before, Kotlin's connect 10 s, and Dart's requests had no bound but
+the connect's. The builder's reads go through a copy of their own
+(`built`), never `asRead()`'s, a claim nothing checks at home. Dart's two
+timers cost nothing measured: a POST and its answer over a kept
+connection to a server in the same process, rounds alternated, a median
+of 63.1 us unbounded and 63.3-64.1 us bounded, within the noise. Swift's
+loop adds no I/O, and URLSession bounded each wait before too, by 60 s.
+
+Each SDK's tests (`RetryTests.swift`, `RetryTest.kt`, `retry_test.dart`)
+run against a scripted server on loopback, port 0. A refusal is made of a
+port held as the local end of a live connection: a connect to it is
+refused, and once the client says it is waiting (`pausing`, the tests'
+probe) a listener binds beside it (`SO_REUSEPORT`), the port never free
+in between. A socket bound but not listening will not do: macOS answers a
+connect to it with nothing, and the connect waits out its timeout. Dart's
+first connect is sent there by `IOOverrides`. Taking streaming mode away
+fails Kotlin's keyless write and its `asRead()` text: the JVM sent each
+twice.

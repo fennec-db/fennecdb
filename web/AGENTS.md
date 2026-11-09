@@ -64,3 +64,8 @@ sends a request carrying an `Idempotency-Key` again itself, given its
 body only through `try`'s `GetBody`, refused past the tries; .NET's
 handler sends a GET again itself, three times at most, which `AskAsync`
 then does not repeat (`ResponseEnded`).
+Swift's, Kotlin's and Dart's `FennecRemote` keep it too (`ask`, `asking`,
+`_ask`; the builder's reads a `built` copy, never `asRead()`'s), a task, a
+coroutine or `withAbort` given up sending nothing again; Kotlin sends what
+must go once with its length fixed, which the JVM's `HttpURLConnection`
+never sends again on its own.

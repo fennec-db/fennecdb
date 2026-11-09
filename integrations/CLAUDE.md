@@ -15,8 +15,9 @@ builder tab on the site is a golden case's chain rendered by
 page's or written from the case, the JS and Python tabs run by its
 `--check`, the others tests of their SDKs (`make docs-builder`); a
 builder's API change owes its renderer. Go's and .NET's SDKs bound a request by its context or token, never the HTTP client's
-timeout; Python's, Go's and .NET's clients send a request again by
-`FennecHttp`'s rule (web/CLAUDE.md); a store checks its names against FennecQL's and passes
+timeout; Python's, Go's and .NET's clients, and Swift's, Kotlin's and
+Dart's `FennecRemote`, send a request again by `FennecHttp`'s rule
+(web/CLAUDE.md); a store checks its names against FennecQL's and passes
 values as parameters.
 
 **[The desktop app is a window on a studio a `fennec-server` serves, one
