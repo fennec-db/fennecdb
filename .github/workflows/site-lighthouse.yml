@@ -23,6 +23,9 @@ on:
       - '.github/workflows/site-lighthouse.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   lighthouse:
     runs-on: ubuntu-latest
