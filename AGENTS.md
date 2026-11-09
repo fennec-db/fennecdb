@@ -342,6 +342,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 *Quotas and retries*
 - A tenant is held to its quota by its node, a block as it lands.
 - A quota is a refusal where waiting makes no room, a wait the server names otherwise.
+- A scoped caller is held to `--request-rate` before anything runs.
 - Every 503 says when to come back, in its body too.
 
 *The HTTP server*

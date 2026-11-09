@@ -395,7 +395,9 @@ end
     and a broken statement (409). <code>--call-rate</code> holds a scoped
     token to 100 calls a second for each subject and issuer in each tenant,
     <code>0</code> for none, and answers 429 with <code>Retry-After</code> past it; the
-    server's token is not held. <code>--call-max-rows</code> bounds the rows
+    server's token is not held. A call is a request too: it is held to
+    <a href="#request-rate"><code>--request-rate</code></a> first, then to
+    <code>--call-rate</code>. <code>--call-max-rows</code> bounds the rows
     one call examines (<a href="/docs/limits#fixed-limits">Limits</a>).</li>
   <li id="wakes"><b>Waking a bound statement.</b> A statement bound to a
     collection's writes (<a href="/docs/fennecql#write-bound-statements">Statements bound to
@@ -662,6 +664,27 @@ messages   read,insert  where room in (get members select room where user = $jwt
     <code>--jwt-unbound-tenants</code>, and one holding it as
     <code>null</code>, <code>""</code> or anything else naming no tenant is
     refused even then (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
+  <li id="request-rate"><b>Requests a second.</b> <code>--request-rate</code>
+    holds each caller — a scoped token's subject and issuer — to 1 000
+    requests a second in each database, a tenant's apart, every route
+    counted: a collection's reads and writes, <code>/query</code>,
+    <code>/batch</code>, a call, <code>/_whoami</code>, MCP and a
+    subscription as it opens, once however long it streams. Past it the
+    request is answered 429 as its token is taken, before anything of it
+    runs, with <code>Retry-After</code> in whole seconds and the body's
+    <code>retry_after</code> and <code>retry_after_ms</code>, the wait to
+    the millisecond; every SDK sends it again after that wait. A bucket
+    holds a second's worth, so a page opening with fifty requests is never
+    held; a write held by <code>Fennec-Wait</code> is one request however
+    many times it runs. A call counts as a request and then as a call
+    (<code>--call-rate</code>), an MCP tool call as a request and then
+    against <code>--mcp-calls-per-sec</code>; a tenant's quotas are its
+    own besides. A token naming no <code>sub</code> is counted with every
+    other of its issuer's. The server's token, and a server asking for no
+    token, is never held; <code>--request-rate 0</code> holds no one. Past
+    the requests of the server's own token, nothing is counted by address:
+    a client with no token is the server's to keep out, and one in front
+    of it to slow down.</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>

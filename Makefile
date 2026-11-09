@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -320,7 +320,9 @@ endif
 ## group-float,group-int,group-list,hash-list: values compared and keyed
 ## over 100 000 rows, a list's in a group and a `@hash` too; EXAMPLE=rows
 ## MODES=get,row,patch,patch-row,if-match: a row by id read and written
-## over REST, by a filter and by its path, and under `If-Match`);
+## over REST, by a filter and by its path, and under `If-Match`;
+## MODES=scoped,token,get: that read under a scoped token, one of 1 000
+## subjects in turn, under the server's token and under none);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET
@@ -431,6 +433,15 @@ shard-bench:
 ## (crates/fennec-http/examples/quotas.rs)
 quota-bench:
 	$(CARGO) run --release -p fennec-http --example quotas -- 20000
+
+## What scoped callers' requests cost a server asked from CLIENTS (8)
+## keep-alive connections at once for SECS (3) seconds, --request-rate's
+## table among it: a row by id as one of 1 000 subjects in turn
+## (MODE=scoped) or under the server's token (MODE=token), its rate and
+## p50/p99; one process, a connection a client
+## (crates/fennec-http/examples/request_rate.rs)
+request-rate-bench:
+	$(CARGO) run --release -p fennec-http --example request_rate -- $(or $(MODE),scoped) $(or $(CLIENTS),8) $(or $(SECS),3)
 
 ## How late a tenant node runs its tenants' scheduled statements: ten
 ## thousand tenants due at once, each opened, run and closed in turn -- a

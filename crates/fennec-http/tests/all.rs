@@ -30,6 +30,7 @@ mod prepared;
 mod providers;
 mod reach;
 mod replication;
+mod request_rate;
 mod require;
 mod scheduled;
 mod schema;

@@ -15,6 +15,12 @@
 //!     without the route, `patch`'s request.
 //!   * `tag`: the tag of a row whose text is BYTES bytes alone, N times
 //!     (`conditional::tag`); `sha`: its SHA-256, which a poll's tag takes.
+//!   * `scoped`: `get`'s request under a scoped JSON Web Token (the policy
+//!     `t read`), one of 1 000 subjects in turn, as a server's users ask:
+//!     what a scoped caller pays, `--request-rate` among it, its default
+//!     never reached (each subject asks some twenty times a run).
+//!   * `token`: `get`'s request under the server's token, which no rate
+//!     holds.
 //!
 //! 500 rows of an int and a text of BYTES (40) bytes, written over in
 //! turn, in a file as a server under `--sync <ms>` writes it. It prints ns
@@ -30,6 +36,10 @@ use std::time::Instant;
 
 const ROUNDS: usize = 9;
 const ROWS: usize = 500;
+/// The subjects `scoped` asks as, in turn.
+const CALLERS: usize = 1000;
+const ROOT: &str = "root-token";
+const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 
 fn request(method: Method, target: &str, headers: &[(&str, &str)], body: &str) -> Request {
     let (path, query) = match target.split_once('?') {
@@ -87,19 +97,52 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.fennec");
     let db = Arc::new(RwLock::new(fennec_core::fs::open(&path).unwrap()));
-    let cfg = Config::default();
+    // `scoped` and `token` ask a server holding a token and a policy, the
+    // rest one asking for none.
+    let held = matches!(mode.as_str(), "scoped" | "token");
+    let access = Arc::new(fennec_http::access::Access::new(SECRET, "t read\n").unwrap());
+    let cfg = match held {
+        true => Config {
+            token: Some(ROOT.into()),
+            access: Some(Arc::clone(&access)),
+            ..Config::default()
+        },
+        false => Config::default(),
+    };
+    let root = format!("Bearer {ROOT}");
+    let admin: &[(&str, &str)] = match held {
+        true => &[("Authorization", root.as_str())],
+        false => &[],
+    };
+    let tokens: Vec<String> = match mode.as_str() {
+        "scoped" => (0..CALLERS)
+            .map(|i| {
+                let claims = format!(r#"{{"sub":"user-{i}"}}"#);
+                format!("Bearer {}", access.mint(&claims).unwrap())
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let query = |sql: &str| {
         let body = format!(r#"{{"query":"{sql}"}}"#);
-        ok(&db, &cfg, &request(Method::Post, "/query", &[], &body));
+        ok(&db, &cfg, &request(Method::Post, "/query", admin, &body));
     };
     query("create collection t (n int, name text)");
     let name = "x".repeat(bytes);
     for id in 1..=ROWS {
         query(&format!("put t {{id: {id}, n: 0, name: '{name}'}}"));
     }
+    // Every subject's token checked once before the loop, as a server's
+    // users' are by the time they ask again: the loop reads them from the
+    // verified tokens' cache.
+    for (i, token) in tokens.iter().enumerate() {
+        let auth = [("Authorization", token.as_str())];
+        let target = format!("/t?id=eq.{}", i % ROWS + 1);
+        ok(&db, &cfg, &request(Method::Get, &target, &auth, ""));
+    }
     // Whether this build answers a row by its path: one from before the
     // route reads `/t/1` as no path it takes.
-    let routed = send(&db, &cfg, &request(Method::Get, "/t/1", &[], "")).0 == 200;
+    let routed = send(&db, &cfg, &request(Method::Get, "/t/1", admin, "")).0 == 200;
     let mut tags: Vec<Option<String>> = vec![None; ROWS + 1];
     if mode == "if-match" && routed {
         for (id, tag) in tags.iter_mut().enumerate().skip(1) {
@@ -154,6 +197,15 @@ fn main() {
                     let req = request(Method::Patch, &format!("/t/{id}"), &headers, &set());
                     tags[id] = ok(&db, &cfg, &req);
                 }
+                ("scoped", _) => {
+                    let auth = [("Authorization", tokens[i % CALLERS].as_str())];
+                    let target = format!("/t?id=eq.{id}");
+                    ok(&db, &cfg, &request(Method::Get, &target, &auth, ""));
+                }
+                ("token", _) => {
+                    let target = format!("/t?id=eq.{id}");
+                    ok(&db, &cfg, &request(Method::Get, &target, admin, ""));
+                }
                 ("tag", _) => {
                     let t = fennec_http::conditional::tag(std::hint::black_box(row.as_bytes()));
                     sink ^= t.as_str().as_bytes()[1];
@@ -163,7 +215,10 @@ fn main() {
                     sink ^= d[0];
                 }
                 (other, _) => {
-                    panic!("no mode {other}: get, row, patch, patch-row, if-match, tag or sha")
+                    panic!(
+                        "no mode {other}: get, row, patch, patch-row, if-match, scoped, token, \
+                         tag or sha"
+                    )
                 }
             }
         }
