@@ -110,7 +110,15 @@ builder's -- carries the key, so it lands once however often it is sent.
 reads, and an `asRead()` copy's, to the tenant's read replica near the app
 through a fennec-shard router (`Fennec-Read: replica`), each after the
 furthest position an answer from home named to the connection or any copy of
-it (`Fennec-After`, `Fennec-History`); writes go home.
+it (`Fennec-After`, `Fennec-History`); writes go home. A request goes again
+only where it cannot have run -- a 503, or a 429 naming its wait, after that
+wait; a connection refused -- or may run twice: a read the builder made or
+sent near, a write under a key, after a dropped connection too. Nothing goes
+again after the connection's own `timeout` (to an answer's head and between
+the pieces of its body, 30 s unless given) or once a `withAbort(future)`
+copy's future completes, which gives its requests up:
+`Fennec.connect(url, timeout: ..., retry: RetryPolicy(attempts: ...,
+maxWait: ...))` (3 tries, 10 s of waits), `null` for none.
 
 The query builder makes the text the JavaScript builder makes of the same
 chain, to the byte: `integrations/builder-golden.json` holds the chains,

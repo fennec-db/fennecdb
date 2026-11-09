@@ -567,6 +567,33 @@ let open = try await db.from("todos").where("done", false).rows()</pre>
 <code>replica.remote</code> is the same, for what the replica does not
 hold. Live queries are the file's alone.</p>
 
+<p id="retries">A request goes again only where that is safe: one the
+server says ran nothing -- a 503, or a 429 naming its wait -- after that
+wait and never sooner, unless it says statements of a batch landed
+(<code>completed</code>), and one whose connection was refused; a read the
+builder made, one sent near or a write under an idempotency key after a
+dropped connection too. A text sent home without a key,
+<code>asRead()</code> or not, goes once, as a write without a key does, and
+nothing goes again after the connection's own timeout or once the caller
+gives it up
+(<a href="/docs/http#idempotency">Retrying a write</a>). The
+<code>timeout</code> bounds the wait for an answer's head and each wait
+between the pieces of its body -- 30 s unless given, longer for a
+<code>compact</code> -- and <code>retry</code> the tries: three, their
+waits within 10 s, unless given, and none at all as <code>nil</code>
+(<code>null</code>).</p>
+
+<pre data-lang="swift">let db = Fennec.connect(url: "https://api.example.com", token: jwt, timeout: 60,
+                        retry: FennecRemote.Retry(attempts: 5, maxWait: 30))</pre>
+
+<p>Kotlin's are milliseconds, <code>Fennec.connect(url, token = jwt, timeout
+= 60_000, retry = FennecRemote.Retry(attempts = 5, maxWait = 30_000))</code>,
+Dart's <code>Duration</code>s, <code>Fennec.connect(url, token: jwt,
+timeout: const Duration(minutes: 1), retry: const RetryPolicy(attempts: 5,
+maxWait: Duration(seconds: 30)))</code>. Kotlin sends a request that must go
+once with its length fixed: the JVM's <code>HttpURLConnection</code> sends a
+buffered POST again on its own after a reset, a keyless write made twice.</p>
+
 <p>Several writes that must land together are one <code>batch</code>
 (<code>POST /batch</code>): the builder's <code>toInsert</code>,
 <code>toUpdate</code> and <code>toDelete</code> under one write lock, all
@@ -604,7 +631,8 @@ Kotlin's in milliseconds, Dart's a <code>Duration</code> -- is a copy whose
 <code>set</code>s and <code>del</code>s the server holds while they write
 nothing, a worker's claim waiting there for a job
 (<a href="/docs/queues#wait">Waiting for a job</a>); cancelling the task or
-the coroutine gives it up.</p>
+the coroutine gives it up, as Dart's <code>withAbort(future)</code> -- a copy
+whose requests are given up once the future completes -- does.</p>
 
 <p>An app far from its tenant's home reads near itself where the tenant has
 a <a href="/docs/sharding-read-replicas#read-replicas">read replica</a> in the app's

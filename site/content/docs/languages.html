@@ -426,9 +426,10 @@ goes to the library as its bytes. A live query for SwiftUI, where the file goes
 and a replica a server keeps in step are on
 <a href="mobile.html">Mobile and native apps</a>. A device reaches a
 server through TLS: <code>URLSession</code> makes the requests; over it,
-<code>remote.batch([...], idempotencyKey:)</code> lands statements whole
-and <code>withIdempotencyKey</code> makes a write once
-(<a href="mobile.html#connect">Without a file</a>).</p>
+<code>remote.batch([...], idempotencyKey:)</code> lands statements whole,
+<code>withIdempotencyKey</code> makes a write once, and a request goes
+again only where that is safe, within its <code>timeout</code>
+(<a href="mobile.html#retries">Without a file</a>).</p>
 <p><a href="https://github.com/fennec-db/fennecdb/tree/main/examples/swift">Full example</a>: Notes, a SwiftUI app over a file, its list a <code>LiveQuery</code>, and a CLI.</p>
 </div>
 
@@ -468,8 +469,9 @@ replica a server keeps in step is <code>Fennec.sync</code>
 (<a href="mobile.html">Mobile and native apps</a>). A device reaches a
 server through TLS: <code>HttpURLConnection</code> makes the requests; over
 it, <code>remote.batch(listOf(...), idempotencyKey = id)</code> lands
-statements whole and <code>withIdempotencyKey</code> makes a write once
-(<a href="mobile.html#connect">Without a file</a>).</p>
+statements whole, <code>withIdempotencyKey</code> makes a write once, and
+a request goes again only where that is safe, within its
+<code>timeout</code> (<a href="mobile.html#retries">Without a file</a>).</p>
 <p><a href="https://github.com/fennec-db/fennecdb/tree/main/examples/kotlin-android">Full example</a>: Notes, a Compose app over a file, its list a live <code>Flow</code>, and a JVM CLI.</p>
 </div>
 
@@ -508,9 +510,10 @@ Live queries are <code>Stream</code>s, and a replica a server keeps in step
 is <code>Fennec.openSynced</code> (<a href="mobile.html">Mobile and native
 apps</a>). A device reaches a server through TLS: <code>dart:io</code>'s
 <code>HttpClient</code> makes the requests; over it,
-<code>remote.batch([...], idempotencyKey: id)</code> lands statements whole
-and <code>withIdempotencyKey</code> makes a write once
-(<a href="mobile.html#connect">Without a file</a>).</p>
+<code>remote.batch([...], idempotencyKey: id)</code> lands statements whole,
+<code>withIdempotencyKey</code> makes a write once, and a request goes
+again only where that is safe, within its <code>timeout</code>
+(<a href="mobile.html#retries">Without a file</a>).</p>
 <p><a href="https://github.com/fennec-db/fennecdb/tree/main/examples/flutter">Full example</a>: Notes, a Flutter app over a file, its list a <code>StreamBuilder</code> over a live query.</p>
 </div>
 

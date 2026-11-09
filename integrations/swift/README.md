@@ -130,7 +130,15 @@ write once however often it is sent. `Fennec.connect(url:token:reads:
 tenant's read replica near the app through a fennec-shard router
 (`Fennec-Read: replica`), each after the furthest position an answer from
 home named to the connection or any copy of it (`Fennec-After`,
-`Fennec-History`); writes go home.
+`Fennec-History`); writes go home. A request goes again only where it
+cannot have run -- a 503, or a 429 naming its wait, after that wait; a
+connection refused -- or may run twice: a read the builder made or sent
+near, a write under a key, after a dropped connection too. Nothing goes
+again after the connection's own `timeout` (seconds to an answer's head and
+between the pieces of its body, 30 unless given) or once the task is
+cancelled: `Fennec.connect(url:token:timeout:retry:)`, `retry:
+FennecRemote.Retry(attempts:maxWait:)` (3 tries, 10 s of waits), `nil` for
+none.
 
 ## Named statements
 

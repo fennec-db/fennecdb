@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'fennec.dart';
 import 'query.dart';
@@ -64,21 +66,81 @@ class _Position {
   bool isPast(_Position? q) => q == null || isOfAnotherLineage(q) || term > q.term || (term == q.term && seq > q.seq);
 }
 
+/// How a connection sends a request again: only where nothing ran, or where
+/// running it again changes nothing (docs/design/js-client.md#retries).
+///
+/// Nothing ran: a 503, or a quota's 429, naming its wait -- sent after that
+/// wait, never sooner, unless its body says statements of a batch were made
+/// (`completed`) -- and a connection refused. Running it again changes
+/// nothing: a read the builder made, one sent near (`Fennec-Read: replica`,
+/// which every server runs read-only), and a write under an
+/// `Idempotency-Key` -- these go again after a reset or a dropped connection
+/// too. Never after the connection's own timeout, past which the server may
+/// still run it, nor once the caller aborts ([FennecRemote.withAbort]), nor
+/// after a refusal naming no wait; an [FennecRemote.asRead] text sent home is
+/// a claim nothing checks, and goes once.
+///
+/// [attempts] tries at most, their waits -- the server's, or 250 ms
+/// doubling, 30% jitter on top -- within [maxWait]; past either, the last
+/// answer or error is the caller's. `retry: null` on [Fennec.connect] sends
+/// nothing again.
+class RetryPolicy {
+  final int attempts;
+  final Duration maxWait;
+
+  const RetryPolicy({this.attempts = 3, this.maxWait = const Duration(seconds: 10)});
+}
+
 /// What a connection and the copies [FennecRemote.withIdempotencyKey],
 /// [FennecRemote.withWait] and [FennecRemote.asRead] make of it share, as Go's
 /// and .NET's copies share theirs: the connections, the token and the
 /// furthest position.
 class _Shared {
-  final HttpClient client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  final HttpClient client;
   final Reads reads;
+  final Duration timeout;
+  final RetryPolicy? retry;
   String? token;
 
   /// The furthest position an answer from home named, which a read near is
   /// sent after: an answer that arrives late is not the last.
   _Position? at;
 
-  _Shared(this.token, this.reads);
+  _Shared(this.token, this.reads, this.timeout, this.retry) : client = HttpClient()..connectionTimeout = timeout;
 }
+
+/// What a [FennecRemote.withAbort] copy's requests are given up by: the
+/// requests under way, aborted as the trigger completes, and the waits
+/// between tries, ended.
+class _Abort {
+  bool fired = false;
+  final requests = <HttpClientRequest>{};
+  final waits = <Completer<void>>{};
+
+  _Abort(Future<void> trigger) {
+    trigger.then<void>((_) => _fire(), onError: (Object _) => _fire());
+  }
+
+  void _fire() {
+    fired = true;
+    for (final r in requests) {
+      r.abort(const HttpException('aborted'));
+    }
+    for (final w in waits) {
+      if (!w.isCompleted) w.complete();
+    }
+  }
+}
+
+final _random = Random();
+
+/// ECONNREFUSED as the platform numbers it: a connection refused sent
+/// nothing, and any request goes again.
+final int _refusedCode = Platform.isLinux || Platform.isAndroid
+    ? 111
+    : Platform.isWindows
+        ? 10061
+        : 61;
 
 /// A fennec-server over HTTP, with no file on the device: every query goes
 /// to the server (`POST /query`), through the same builder. What
@@ -89,7 +151,10 @@ class _Shared {
 /// final open = await db.from('todos').where('done', false).rows();
 /// ```
 ///
-/// The requests are `dart:io`'s `HttpClient`'s, so TLS is the platform's.
+/// The requests are `dart:io`'s `HttpClient`'s, so TLS is the platform's. A
+/// request goes again only where it cannot have run or may run twice
+/// ([RetryPolicy]), and [timeout] bounds the wait for an answer's head and each
+/// wait between the pieces of its body.
 class FennecRemote {
   final String url;
   final _Shared _shared;
@@ -101,22 +166,50 @@ class FennecRemote {
   /// This copy's requests only read ([asRead], the builder's reads).
   final bool _reading;
 
-  FennecRemote(String url, {String? token, Reads reads = Reads.home})
+  /// This copy's requests are the builder's reads ([from]): reads the
+  /// builder made, which may run twice -- unlike an [asRead] text, a claim
+  /// nothing checks at home.
+  final bool _built;
+
+  /// What gives this copy's requests up ([withAbort]), null for nothing.
+  final _Abort? _abort;
+
+  FennecRemote(String url,
+      {String? token,
+      Reads reads = Reads.home,
+      Duration timeout = const Duration(seconds: 30),
+      RetryPolicy? retry = const RetryPolicy()})
       : url = url.endsWith('/') ? url.substring(0, url.length - 1) : url,
-        _shared = _Shared(token, reads),
+        _shared = _Shared(token, reads, timeout, retry),
         _idempotencyKey = null,
         _wait = null,
-        _reading = false;
+        _reading = false,
+        _built = false,
+        _abort = null {
+    if (timeout <= Duration.zero) throw FennecException(FennecCode.misuse, 'bad timeout: $timeout');
+    if (retry != null && (retry.attempts < 1 || retry.maxWait.isNegative)) {
+      throw FennecException(FennecCode.misuse, 'bad retry: ${retry.attempts} attempts, ${retry.maxWait}');
+    }
+  }
 
-  FennecRemote._copy(FennecRemote of, String? key, Duration? wait, bool reading)
+  FennecRemote._copy(FennecRemote of, String? key, Duration? wait, bool reading, {bool built = false, _Abort? abort})
       : url = of.url,
         _shared = of._shared,
         _idempotencyKey = key,
         _wait = wait,
-        _reading = reading;
+        _reading = reading,
+        _built = built,
+        _abort = abort ?? of._abort;
 
   /// Where this connection's reads go ([Fennec.connect]'s `reads`).
   Reads get reads => _shared.reads;
+
+  /// How long to an answer's head, a [withWait] copy's wait on top, and
+  /// between the pieces of its body ([Fennec.connect]'s `timeout`).
+  Duration get timeout => _shared.timeout;
+
+  /// How a request goes again, null for never ([Fennec.connect]'s `retry`).
+  RetryPolicy? get retry => _shared.retry;
 
   /// The token the requests carry; set a fresh one for the requests from
   /// here on.
@@ -174,6 +267,20 @@ class FennecRemote {
   /// ```
   FennecRemote asRead() => FennecRemote._copy(this, _idempotencyKey, _wait, true);
 
+  /// A copy whose requests are given up once [trigger] completes: the one
+  /// under way is aborted, its connection closed -- a held claim the server
+  /// gives up at once -- a wait before another try ends, and nothing goes
+  /// again; the call throws a [FennecException] ([FennecCode.io]). Copies
+  /// made of it keep the trigger.
+  ///
+  /// ```dart
+  /// final gone = Completer<void>();
+  /// final claim = db.withAbort(gone.future).withWait(const Duration(seconds: 30)).run(q);
+  /// gone.complete(); // the screen closed
+  /// ```
+  FennecRemote withAbort(Future<void> trigger) =>
+      FennecRemote._copy(this, _idempotencyKey, _wait, _reading, built: _built, abort: _Abort(trigger));
+
   /// Runs FennecQL on the server with [params] for `$1`, `$2` ... A key for
   /// one write is [withIdempotencyKey]'s: Dart takes no named parameter
   /// beside the optional [params].
@@ -214,7 +321,14 @@ class FennecRemote {
     // send none.
     final at = _shared.at;
     final sent = near && at != null && at.seq > 0 ? at : null;
-    var (status, body, headers) = await _send(path, type, payload, key, near, sent);
+    // What may run twice, sent again after a reset too: a read the builder
+    // made, one sent near, which every server runs read-only
+    // (`Fennec-Read`), and a write under a key. An [asRead] text sent home
+    // is a claim nothing checks: a statement it calls may have been made to
+    // write since.
+    final twice = _built || (key ?? _idempotencyKey) != null;
+    final bytes = utf8.encode(payload);
+    var (status, body, headers) = await _ask(path, type, bytes, key, near, sent, twice || near);
     // 504: no copy holds that write in the wait -- home had none either,
     // lost in a failover. Home says where it stands, which the connection
     // takes as its position, lower or not; asked home again with no mark,
@@ -234,7 +348,7 @@ class FennecRemote {
         if (identical(_shared.at, sent) && (p.term >= sent.term || p.isOfAnotherLineage(sent))) _shared.at = p;
       }
       near = false;
-      (status, body, headers) = await _send(path, type, payload, key, false, null);
+      (status, body, headers) = await _ask(path, type, bytes, key, false, null, twice);
     }
     final Object? v;
     try {
@@ -255,12 +369,90 @@ class FennecRemote {
     return (v, seq, headers.value('idempotent-replayed') == 'true');
   }
 
-  /// The request sent -- marked as a read near after [after] where [near] --
-  /// and its answer's status, body and head.
-  Future<(int, String, HttpHeaders)> _send(
-      String path, String type, String payload, String? key, bool near, _Position? after) async {
+  /// The request and its answer's status, body and head, sent again by the
+  /// rule (docs/design/js-client.md#retries, [RetryPolicy]): what ran
+  /// nothing -- a 503 or 429 naming its wait, after it, unless statements of
+  /// a batch landed (`completed`); a connection refused -- and, where
+  /// [twice], a reset or a dropped connection too. Never after the connection's own
+  /// timeout, which a request may still run past, nor once the caller
+  /// aborted. `HttpClient` sends nothing again of its own.
+  Future<(int, String, HttpHeaders)> _ask(
+      String path, String type, List<int> bytes, String? key, bool near, _Position? after, bool twice) async {
+    final r = _shared.retry;
+    final abort = _abort;
+    var waited = Duration.zero;
+    for (var n = 0;; n++) {
+      var wait = Duration.zero;
+      (int, String, HttpHeaders)? got;
+      Object? failure;
+      try {
+        got = await _once(path, type, bytes, key, near, after);
+        final (status, body, headers) = got;
+        if (status == 503 || status == 429) {
+          final v = _decoded(body);
+          final m = v is Map ? v : null;
+          final done = m?['completed'];
+          if (!(done is num && done > 0)) wait = _waitOf(m, headers.value('retry-after')) ?? Duration.zero;
+        }
+        if (wait == Duration.zero) return got;
+      } catch (e) {
+        if (abort != null && abort.fired) throw FennecException(FennecCode.io, 'the request was aborted');
+        // The connection's own timeout: a `compact`, a long read may still be
+        // running, and three tries ran a read three times.
+        if (e is TimeoutException || _timedOut(e)) {
+          throw FennecException(FennecCode.io, 'no answer within the timeout of ${_shared.timeout}: $e');
+        }
+        if (e is! IOException) rethrow;
+        if (!(twice || _refused(e))) throw FennecException(FennecCode.io, 'the server could not be reached: $e');
+        failure = e;
+      }
+      // 250 ms doubling, or the server's wait; 30% jitter on top, so a
+      // server back up is not met by every client at once.
+      final backoff = Duration(milliseconds: 250 << min(n, 30));
+      final base = wait > backoff ? wait : backoff;
+      if (r == null || n + 1 >= r.attempts || waited + base > r.maxWait) {
+        if (failure != null) throw FennecException(FennecCode.io, 'the server could not be reached: $failure');
+        return got!;
+      }
+      final jittered = Duration(microseconds: (base.inMicroseconds * (1 + _random.nextDouble() * 0.3)).round());
+      final left = r.maxWait - waited;
+      final w = jittered < left ? jittered : left;
+      waited += w;
+      await _pause(w, abort);
+      if (abort != null && abort.fired) throw FennecException(FennecCode.io, 'the request was aborted');
+    }
+  }
+
+  /// [wait] waited, or less where [abort] fires first.
+  static Future<void> _pause(Duration wait, _Abort? abort) async {
+    final done = Completer<void>();
+    final timer = Timer(wait, () {
+      if (!done.isCompleted) done.complete();
+    });
+    abort?.waits.add(done);
+    if (abort != null && abort.fired) done.complete();
     try {
-      final req = await _shared.client.postUrl(Uri.parse('$url$path'));
+      await done.future;
+    } finally {
+      timer.cancel();
+      abort?.waits.remove(done);
+    }
+  }
+
+  /// The request sent -- marked as a read near after [after] where [near] --
+  /// and its answer's status, body and head: the connect within the timeout
+  /// (`connectionTimeout`), the head within it, a held write's wait on top,
+  /// and each piece of the body within it of the last -- so a long answer is
+  /// read for as long as it comes, and one that stops is given up.
+  Future<(int, String, HttpHeaders)> _once(
+      String path, String type, List<int> bytes, String? key, bool near, _Position? after) async {
+    final req = await _shared.client.postUrl(Uri.parse('$url$path'));
+    final abort = _abort;
+    if (abort != null) {
+      if (abort.fired) req.abort(const HttpException('aborted'));
+      abort.requests.add(req);
+    }
+    try {
       req.headers.set('content-type', type);
       final t = _shared.token;
       if (t != null) req.headers.set('authorization', 'Bearer $t');
@@ -278,14 +470,41 @@ class FennecRemote {
       }
       // Sent with its length, which every hop takes: the global entry
       // refuses a body past a mebibyte without one.
-      final bytes = utf8.encode(payload);
       req.contentLength = bytes.length;
       req.add(bytes);
-      final res = await req.close();
-      return (res.statusCode, await res.transform(utf8.decoder).join(), res.headers);
-    } on IOException catch (e) {
-      throw FennecException(FennecCode.io, 'the server could not be reached: $e');
+      final head = _shared.timeout + (w ?? Duration.zero);
+      final res = await req.close().timeout(head, onTimeout: () {
+        // The connection closed: past its timeout a request is given up.
+        req.abort(TimeoutException('no answer within $head', head));
+        throw TimeoutException('no answer within $head', head);
+      });
+      final body = await res.timeout(_shared.timeout).transform(utf8.decoder).join();
+      return (res.statusCode, body, res.headers);
+    } finally {
+      abort?.requests.remove(req);
     }
+  }
+
+  /// A connect past `HttpClient.connectionTimeout`, which it says as a
+  /// [SocketException] of no OS error: the connection's own timeout.
+  static bool _timedOut(Object e) =>
+      e is SocketException && e.osError == null && e.message.startsWith('HTTP connection timed out');
+
+  /// A connection refused: it sent nothing.
+  static bool _refused(Object e) => e is SocketException && e.osError?.errorCode == _refusedCode;
+
+  /// How long an answer asks a client to wait, where it names any: to the
+  /// millisecond where the body says it (`retry_after_ms`) -- `Retry-After`
+  /// is whole seconds, and a bucket of 600 rows a second refills a row in
+  /// 1.7 ms -- then the header, then the body's `retry_after`, which a 503 of
+  /// the server's carries.
+  static Duration? _waitOf(Map? m, String? header) {
+    final ms = m?['retry_after_ms'];
+    if (ms is num && ms > 0 && ms.isFinite) return Duration(microseconds: (ms * 1000).round());
+    for (final said in [double.tryParse(header?.trim() ?? ''), m?['retry_after']]) {
+      if (said is num && said > 0 && said.isFinite) return Duration(microseconds: (said * 1000000).round());
+    }
+    return null;
   }
 
   static Object? _decoded(String body) {
@@ -304,8 +523,10 @@ class FennecRemote {
   Future<int> execute(String text, [List<Object?> params = const []]) async => (await run(text, params)).affected;
 
   /// The query builder, its queries run on the server -- its reads as an
-  /// [asRead] copy's, near on a connection reading near.
-  Query from(String collection) => Query.from(collection).bind(run, read: asRead().run);
+  /// [asRead] copy's, near on a connection reading near, and sent again after
+  /// a reset as reads the builder made ([RetryPolicy]).
+  Query from(String collection) =>
+      Query.from(collection).bind(run, read: FennecRemote._copy(this, _idempotencyKey, _wait, true, built: true).run);
 
   /// Calls the named statement [name] on the server: `call <name> $1` with
   /// [args], a map of values by name, as `$1` -- [Call] makes the text, so
@@ -365,13 +586,7 @@ class FennecRemote {
   /// `Retry-After`, or the same in the body.
   static FennecException refused(int status, Map? m, String? retryAfter) {
     final quota = m?['quota'] as String?;
-    final ms = (m?['retry_after_ms'] as num?)?.toInt();
-    final secs = int.tryParse(retryAfter ?? '') ?? (m?['retry_after'] as num?)?.toInt();
-    final wait = ms != null && ms > 0
-        ? Duration(milliseconds: ms)
-        : secs == null
-            ? null
-            : Duration(seconds: secs);
+    final wait = _waitOf(m, retryAfter);
     return FennecException.http(
         quota == null ? _code(status) : FennecCode.quota, m?['error'] as String? ?? 'HTTP $status',
         status: status,
