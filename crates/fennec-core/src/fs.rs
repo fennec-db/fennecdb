@@ -567,27 +567,21 @@ impl FileSink {
             *past = self.durable.load(Ordering::Acquire);
         }
     }
+}
 
-    /// Appends `parts`, one after the other, as one append.
-    fn append_parts(&mut self, parts: &[&[u8]]) -> Result<()> {
-        let len: usize = parts.iter().map(|p| p.len()).sum();
-        self.appended += len as u64;
+impl Sink for FileSink {
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        self.appended += bytes.len() as u64;
         // A record the buffer could not hold is written where it lies, as
         // the buffer would have been once it held it: copied in first, a
         // block of 50 000 768-dim rows was 154 MB more of heap for the
         // time of the write, which macOS's allocator then kept.
-        if len >= WRITE_BUF {
-            let mut disk = lock(&self.disk);
-            for p in parts {
-                disk.write_through(&self.pending, p)?;
-            }
-            return Ok(());
+        if bytes.len() >= WRITE_BUF {
+            return lock(&self.disk).write_through(&self.pending, bytes);
         }
         let held = {
             let mut pending = lock(&self.pending);
-            for p in parts {
-                pending.extend_from_slice(p);
-            }
+            pending.extend_from_slice(bytes);
             pending.len()
         };
         // Written behind the database: by the caller once it lets the lock
@@ -610,14 +604,15 @@ impl FileSink {
         }
         Ok(())
     }
-}
-
-impl Sink for FileSink {
-    fn append(&mut self, bytes: &[u8]) -> Result<()> {
-        self.append_parts(&[bytes])
-    }
+    /// A replica's record, its claim this file's, as its parts: each
+    /// appended in turn, the file a stream of bytes. Apart from
+    /// [`Self::append`], which a lone write's record takes: a loop over one
+    /// part there cost every write.
     fn record_parts(&mut self, _seq: u64, _original: &[u8], parts: &[&[u8]]) -> Result<()> {
-        self.append_parts(parts)
+        for p in parts {
+            self.append(p)?;
+        }
+        Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn durable(&self) -> Option<Arc<AtomicU64>> {

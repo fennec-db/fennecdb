@@ -195,7 +195,7 @@ to the files.
 
 ### `crates/fennec-core/CLAUDE.md`
 
-Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-wasm/` and `web/` too.
+Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-wasm/` and `web/` too, the file format's fennec-http's archive segments (`archive.rs`).
 
 *Storage*
 - No buffer pool of its own, and the file is mapped.

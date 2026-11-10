@@ -974,11 +974,15 @@ fn a_head_lost_before_vectors_is_judged_by_the_records_after_them() {
 }
 
 /// Stale bytes past the durable point that read as a record of no checksum
-/// -- a newline is kind 10, a tab kind 9 -- or as the counter's head, which
-/// is at the front alone: judged as a head no record reads from, by the
-/// records after them. Nothing after them claiming the file durable past
-/// them, they are cut; read as a plain record after checked ones they were
-/// refused at once, and a stray 6 read as a counter moved the image's end.
+/// -- a newline is kind 10, a tab kind 9, a 4 a graph's whose field does
+/// not read -- or as the counter's head, which is at the front alone:
+/// judged as a head no record reads from, by the records after them.
+/// Nothing after them claiming the file durable past them, they are cut;
+/// read as a plain record after checked ones they were refused at once, a
+/// stray 6 read as a counter moved the image's end, and a 4 was refused by
+/// the walk that looks for each index's last graph before the load, its
+/// field read as a name ("varint ended early", "invalid utf8": 2 or 3 of
+/// 300 random stale tails in review).
 #[cfg(feature = "std-fs")]
 #[test]
 fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
@@ -994,7 +998,13 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
         good
     };
     let (last, _) = *heads(&good).last().unwrap();
-    let stale: [&[u8]; 3] = [b"\n\0\x05hello", b"\t\0\x03abc", &[6; 17]];
+    let stale: [&[u8]; 5] = [
+        b"\n\0\x05hello",
+        b"\t\0\x03abc",
+        &[6; 17],
+        b"\x04\0\x05\xff\xff\xff\xff\xff",
+        b"\x04\x01\x03\x02\xc3\x28",
+    ];
     for bytes in stale {
         let mut bad = good.clone();
         bad.extend_from_slice(bytes);

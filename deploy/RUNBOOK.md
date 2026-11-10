@@ -870,7 +870,9 @@ is not stopped by it: an upgraded node sends a follower that does not say
 it reads checksums -- a replica on a node from before, an archiver from
 before -- each record and image as a node from before wrote it, so the
 usual order holds (archivers, routers, then nodes, a node at a time) and
-replicas keep following through it. What does not wait: a move, a restore
+replicas keep following through it. An upgraded archiver writes each
+record a node from before sends it with a checksum of its own, so its
+images and restores read every write through the window. What does not wait: a move, a restore
 or a failover that puts a tenant's file from an upgraded node onto a node
 from before. A move fails at its install (`the image does not load: ...
 unknown record kind ...`), the tenant staying on its source with all it
@@ -878,8 +880,9 @@ held; a failover onto an older replica promotes a node whose file is its
 own and opens. So upgrade every node of a region within one window, and
 move no tenant between nodes of two versions meanwhile. An open after a
 power cut that cut a torn tail logs it (`cut N bytes at X (M records) off
-its file's end`): bytes written after the last completed sync, none of them a
-write answered as durable; one refused names the damaged record and the
+its file's end, a torn tail: no whole record after it says a sync covered
+it`): bytes written after the last completed sync, as far as the file's
+records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 

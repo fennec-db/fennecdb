@@ -231,21 +231,21 @@ fn writes(record: &[u8]) -> u64 {
 }
 
 /// How [`entries`] takes damage in a segment's records -- a record failing
-/// its checksum, a head no record reads from -- past a record that carries
-/// one: what a reader does (`verify`, a restore, an image's assembly),
-/// refusing damage with a whole record after it, found as a database's open
-/// finds one (`fennec_core::engine::judge_after`: by heads past a record
-/// that frames, a byte at a time past one that does not), and cutting it
-/// otherwise; or what the archiver going on does ([`Archive::position`]),
-/// cutting it whatever follows and taking the writes after it again from
-/// its primary. A record whose head or length runs past the segment's end
-/// is its end, either way, nothing after it looked at. A segment's records
-/// claim nothing of its own syncs -- their claims are their primary's
-/// file's -- so a reader cannot tell a power cut's hole in the writes the
-/// archiver had not yet synced from damage in those it had.
+/// its checksum, a head no record reads from, a record carrying none after
+/// one that does -- past a record that carries one: what a reader does
+/// (`verify`, a restore, an image's assembly), judging it as a database's
+/// open does (`fennec_core::engine::judge_after`: by heads past a record
+/// that frames, a byte at a time past one that does not) by the segment's
+/// own claims, which [`Archive::take`] writes into each record -- refused
+/// where a whole record after it says the segment was synced past it, cut
+/// as a power cut's hole otherwise; or what the archiver going on does
+/// ([`Archive::position`]), cutting it whatever follows and taking the
+/// writes after it again from its primary. A record whose head or length
+/// runs past the segment's end is its end, either way, nothing after it
+/// looked at.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Damage {
-    Refuse,
+    Judge,
     Cut,
 }
 
@@ -272,6 +272,10 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
     // is judged as `damage` says, and before it as a segment from before
     // checksums always was.
     let mut checked = false;
+    // How far the segment was synced, by the newest claim of a whole
+    // record before the damage: what a judgment's look past it filters the
+    // records it sums by.
+    let mut durable = LOG_MAGIC.len();
     // Damage, where it starts: the entry's time, its record's head, which
     // a refusal names, and where the record ends if its head frames.
     let mut stopped: Option<(usize, usize, Option<usize>)> = None;
@@ -306,29 +310,40 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
         };
         let record = &data[pos + 8..pos + 8 + len];
         // A record whose checksum fails -- its length on the disk, part of
-        // its bytes not -- is damage, judged as `damage` says.
-        match fennec_core::engine::checksum_holds(record) {
-            Some(false) => {
+        // its bytes not -- is damage, judged as `damage` says; so is one
+        // carrying none after one that does, which an archiver framing
+        // every record it takes never writes: stale bytes, or a flipped
+        // bit, read as a write they would have moved every number after.
+        match fennec_core::engine::checked_claim(record, pos + 8) {
+            Some((false, _)) => {
                 stopped = Some((pos, pos + 8, Some(pos + 8 + len)));
                 break;
             }
-            Some(true) => checked = true,
+            Some((true, claimed)) => {
+                checked = true;
+                durable = durable.max(claimed);
+            }
+            None if checked => {
+                stopped = Some((pos, pos + 8, None));
+                break;
+            }
             None => {}
         }
         out.push((time, pos + 8, pos + 8 + len, writes(record)));
         pos += 8 + len;
     }
-    if let Some((entry, at, ends)) = stopped.filter(|_| damage == Damage::Refuse) {
+    if let Some((entry, at, ends)) = stopped.filter(|_| damage == Damage::Judge) {
         use fennec_core::engine::{judge_after, After, Laid};
         let laid = Laid {
             prefix: 8,
-            durable: None,
+            durable: Some(durable),
         };
         match judge_after(data, at, ends, laid) {
             After::Torn => {}
             After::Whole(whole) => {
                 return Err(corrupt(format!(
-                    "the record at {at} is damaged, with the whole record at {whole} after it"
+                    "the record at {at} is damaged, and the whole record at {whole} says the \
+                     segment was synced past it"
                 )))
             }
             After::Unjudged => {
@@ -353,6 +368,11 @@ struct Segment {
     /// The number the next write gets, and the bytes so far.
     next: u64,
     len: usize,
+    /// The bytes an fsync that completed covered: what each record
+    /// appended claims ([`fennec_core::engine::claimed_into`]), and a
+    /// reader judges damage by. Nothing, until this process synced the
+    /// segment: what a process before it left may not be on the disk.
+    durable: usize,
     dirty: bool,
     synced: Instant,
     /// Sealed: the key, the next frame's index and the writes waiting to be
@@ -400,6 +420,7 @@ impl Segment {
         if self.dirty {
             self.file()?.sync_data()?;
             self.dirty = false;
+            self.durable = self.len;
         }
         self.synced = Instant::now();
         Ok(())
@@ -751,6 +772,12 @@ impl Archive {
                     file: Some(file),
                     next: last + 1,
                     len: end,
+                    // Claimed only once synced, by the sync after the next
+                    // write, which covers them: a crash of the process, not
+                    // the machine, leaves its writes in the page cache, which
+                    // a power cut after can still lose. No sync of its own:
+                    // a node's archiver opens one a tenant.
+                    durable: 0,
                     dirty: false,
                     synced: Instant::now(),
                     sealed: self
@@ -1043,12 +1070,14 @@ impl Archive {
             )));
         }
         let mut pos = 0;
+        let mut entry = Vec::new();
         for &time in times {
             let len = record_len(&records[pos..])
                 .ok_or_else(|| io::Error::other("a write record cut short"))?;
+            let record = &records[pos..pos + len];
             // Numbered by its first write here, as a segment's name is: a
             // block's writes are one record.
-            let n = writes(&records[pos..pos + len]);
+            let n = writes(record);
             let seq = w.at + 1;
             let rolled = self.roll.swap(false, Ordering::SeqCst);
             let s = match &mut w.segment {
@@ -1090,14 +1119,31 @@ impl Archive {
                         file: Some(file),
                         next: seq,
                         len: LOG_MAGIC.len(),
+                        durable: 0,
                         dirty: true,
                         synced: Instant::now(),
                         sealed,
                     })
                 }
             };
-            s.write(&time.to_le_bytes())?;
-            s.write(&records[pos..pos + len])?;
+            // The record as the segment's own: held to its checksum, and
+            // claiming how far the segment was synced, never how far the
+            // primary's file was -- a reader judges a power cut's hole in
+            // what the archiver had not synced by it -- and one from a
+            // primary before checksums framed as this version frames one:
+            // a segment, and an image consolidated from it, then holds no
+            // record without a sum after one with, which a database's open
+            // reads as damage (docs/design/storage.md#file-format).
+            entry.clear();
+            entry.extend_from_slice(&time.to_le_bytes());
+            fennec_core::engine::claimed_into(
+                &mut entry,
+                record,
+                (s.len + 8) as u64,
+                s.durable as u64,
+            )
+            .map_err(|e| io::Error::other(format!("the primary's write {seq}: {e}")))?;
+            s.write(&entry)?;
             s.next += n;
             pos += len;
             w.at = seq + n - 1;
@@ -1158,7 +1204,7 @@ impl Archive {
     fn last_write(&self) -> io::Result<Option<(u64, u64)>> {
         for &first in self.segments()?.iter().rev() {
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes, Damage::Refuse)?;
+            let (list, _) = entries(&bytes, Damage::Judge)?;
             let writes: u64 = list.iter().map(|e| e.3).sum();
             if let Some(e) = list.last() {
                 return Ok(Some((first + writes - 1, e.0)));
@@ -1259,7 +1305,7 @@ impl Archive {
             return Ok(None);
         };
         let bytes = self.read_segment(&self.segment_path(first))?.plain;
-        let (list, _) = entries(&bytes, Damage::Refuse)?;
+        let (list, _) = entries(&bytes, Damage::Judge)?;
         let mut at = first;
         for &(time, _, _, n) in &list {
             if seq < at + n {
@@ -1385,7 +1431,7 @@ impl Archive {
         for (k, &start) in segments.iter().enumerate() {
             let path = self.segment_path(start);
             let read = self.read_segment(&path)?;
-            let (list, end) = entries(&read.plain, Damage::Refuse)
+            let (list, end) = entries(&read.plain, Damage::Judge)
                 .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
             // Only the last may hold no write, caught as it was made: one
             // before it, empty or only its magic, is no segment `take`
@@ -1493,7 +1539,7 @@ impl Archive {
         let mut past = false;
         for &first in &segments {
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes, Damage::Refuse)?;
+            let (list, _) = entries(&bytes, Damage::Judge)?;
             let mut seq = first - 1;
             for &(time, _, _, n) in &list {
                 let from = seq + 1;
@@ -1562,7 +1608,7 @@ impl Archive {
                 continue;
             }
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes, Damage::Refuse)?;
+            let (list, _) = entries(&bytes, Damage::Judge)?;
             let mut seq = first;
             for &(_, start, end, n) in &list {
                 let (from, to) = (seq, seq + n - 1);
@@ -1909,6 +1955,259 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The records a database appends, each write's: what its primary's
+    /// feed would send an archiver.
+    #[derive(Clone, Default)]
+    struct Tap(std::sync::Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl fennec_core::engine::Sink for Tap {
+        fn append(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, _: u64, bytes: &[u8]) -> fennec_core::error::Result<()> {
+            self.0.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+        fn rewrite(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A primary in memory: each write's record, as a primary of this
+    /// version sends it or, `plain`, as one from before checksums does.
+    struct Source {
+        db: fennec_core::engine::Database,
+        tap: Tap,
+    }
+
+    impl Source {
+        fn new() -> Source {
+            let tap = Tap::default();
+            let mut db = fennec_core::engine::Database::new();
+            db.set_sink(Box::new(tap.clone()));
+            Source { db, tap }
+        }
+
+        fn run(&mut self, sql: &str) -> Vec<u8> {
+            self.db
+                .execute(&fennec_ql::parse_one(sql).unwrap())
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            self.tap.0.lock().unwrap().pop().expect("a record")
+        }
+
+        fn image(&self, plain: bool) -> Vec<u8> {
+            let image = self.db.snapshot();
+            match plain {
+                true => fennec_core::engine::plain_image(&image).unwrap(),
+                false => image,
+            }
+        }
+    }
+
+    /// Takes `record` into the archive as the stream's next write, as a
+    /// primary from before checksums sends it where `plain`.
+    fn send(a: &Archive, w: &mut Writer, record: &[u8], plain: bool) -> io::Result<()> {
+        let record = match plain {
+            true => fennec_core::engine::plain_records(record).unwrap(),
+            false => record.to_vec(),
+        };
+        a.take(w, w.at + 1, &[now_ms()], &record)
+    }
+
+    /// The archive restored to `to`, opened: its change and its rows.
+    fn restored_rows(a: &Archive, dir: &Path, to: Target) -> (u64, usize) {
+        let out = dir.join(format!("restored-{}.fennec", fresh_id()));
+        let r = a.restore(&out, to).unwrap();
+        let db = fennec_core::fs::open(&out).unwrap();
+        let n = db.collection("notes").map_or(0, |c| c.store.len());
+        assert_eq!(db.change_seq(), r.seq);
+        drop(db);
+        fs::remove_file(&out).unwrap();
+        (r.seq, n)
+    }
+
+    /// Every record the archive's segments hold carries a checksum.
+    fn all_checked(a: &Archive) {
+        for first in a.segments().unwrap() {
+            let bytes = a.read_segment(&a.segment_path(first)).unwrap().plain;
+            let (list, end) = entries(&bytes, Damage::Judge).unwrap();
+            assert_eq!(end, bytes.len());
+            for (_, start, end, _) in list {
+                let says = fennec_core::engine::checked_claim(&bytes[start..end], start);
+                assert!(matches!(says, Some((true, _))), "{first}: {start}");
+            }
+        }
+    }
+
+    /// An archiver of this version following a primary from before
+    /// checksums -- the first in a rolling upgrade, archivers first -- or
+    /// a replica from before promoted: the plain records it is sent are
+    /// framed as this version frames one, so its first consolidation's
+    /// image, checked, is followed by checked records, and a restore, a
+    /// verify and every consolidation after it read every write. Kept as
+    /// they came, a checked image then plain records opened at the image's
+    /// end, two writes short, and every restore, verify and consolidation
+    /// after was refused, the primary upgraded or not.
+    #[test]
+    fn an_archiver_following_a_primary_from_before_checksums_restores_it_whole() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-plain-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        p.run("put notes {n: 1}");
+        // The image a primary from before sends with its hello.
+        a.add_image(p.db.change_seq(), &p.image(true)).unwrap();
+        let mut w = a.writer().unwrap();
+        for n in 2..4 {
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), true).unwrap();
+        }
+        assert_eq!(a.consolidate().unwrap(), Some(4));
+        let image = a.images().unwrap().last().copied().unwrap();
+        let bytes = fs::read(a.image_path(image.0, image.1)).unwrap();
+        fennec_core::engine::check_records(&bytes).unwrap();
+        assert_ne!(
+            fennec_core::engine::plain_image(&bytes).unwrap(),
+            bytes,
+            "the consolidated image is this version's, checked"
+        );
+        for n in 4..6 {
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), true).unwrap();
+        }
+        all_checked(&a);
+        assert_eq!(restored_rows(&a, &dir, Target::End), (6, 5));
+        assert_eq!(restored_rows(&a, &dir, Target::Change(5)), (5, 4));
+        let v = a.verify().unwrap();
+        assert_eq!((v.last, v.torn), (6, 0));
+        // A second consolidation reads the first's image and the writes
+        // after it, and a third after the primary is upgraded.
+        assert_eq!(a.consolidate().unwrap(), Some(6));
+        send(&a, &mut w, &p.run("put notes {n: 6}"), false).unwrap();
+        send(&a, &mut w, &p.run("put notes {n: 7}"), true).unwrap();
+        assert_eq!(a.consolidate().unwrap(), Some(8));
+        all_checked(&a);
+        assert_eq!(restored_rows(&a, &dir, Target::End), (8, 7));
+        assert_eq!(a.verify().unwrap().last, 8);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A primary of this version, then a replica from before promoted in
+    /// its place, the archive going on in the same history: checked records,
+    /// then plain ones -- each framed as this version frames one -- and an
+    /// image of the promoted replica's, as a version before wrote one, with
+    /// plain records after it. Every restore, verify and consolidation
+    /// reads every write.
+    #[test]
+    fn an_image_from_a_promoted_replica_from_before_checksums_restores() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-promoted-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        for n in 0..3 {
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), false).unwrap();
+        }
+        // Promoted: the replica from before writes plain records.
+        for n in 3..5 {
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), true).unwrap();
+        }
+        assert_eq!(restored_rows(&a, &dir, Target::End), (6, 5));
+        a.add_image(p.db.change_seq(), &p.image(true)).unwrap();
+        for n in 5..7 {
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), true).unwrap();
+        }
+        all_checked(&a);
+        assert_eq!(restored_rows(&a, &dir, Target::End), (8, 7));
+        assert_eq!(restored_rows(&a, &dir, Target::Change(4)), (4, 3));
+        assert_eq!(a.verify().unwrap().last, 8);
+        assert_eq!(a.consolidate().unwrap(), Some(8));
+        send(&a, &mut w, &p.run("put notes {n: 7}"), true).unwrap();
+        assert_eq!(a.consolidate().unwrap(), Some(9));
+        assert_eq!(restored_rows(&a, &dir, Target::End), (9, 8));
+        assert_eq!(a.verify().unwrap().last, 9);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A record the primary sent that fails its checksum is not taken:
+    /// framed anew with its claim, it would read as whole.
+    #[test]
+    fn a_record_failing_its_checksum_is_not_taken() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-failing-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        let mut record = p.run("put notes {n: 1}");
+        let at = record.len() - 6;
+        record[at] ^= 1;
+        let e = send(&a, &mut w, &record, false).unwrap_err();
+        assert!(e.to_string().contains("fails its checksum"), "{e}");
+        assert_eq!(w.at, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A segment's records claim how far the segment was synced as each
+    /// was appended: a power cut's hole in what the archiver had not synced
+    /// yet, whole records after it, is cut by a reader -- a restore, a
+    /// verify -- as the archiver going on cuts it, where a reader judging
+    /// by any whole record refused it until the archiver started again.
+    /// One in what a sync had covered before a record after it was
+    /// appended is refused.
+    #[test]
+    fn a_reader_cuts_a_hole_in_what_the_archiver_had_not_synced() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-hole-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (t text)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        send(&a, &mut w, &p.run("put notes {t: 'a'}"), false).unwrap();
+        // No sync until the test makes one: the one a take makes once
+        // `SYNC_EVERY` passed held off, the clock set ahead.
+        w.segment.as_mut().unwrap().synced = Instant::now() + Duration::from_secs(3600);
+        let long = format!("put notes {{t: '{}'}}", "x".repeat(6000));
+        let mut heads = Vec::new();
+        for _ in 0..4 {
+            heads.push(w.segment.as_ref().unwrap().len + 8);
+            send(&a, &mut w, &p.run(&long), false).unwrap();
+        }
+        let path = w.segment.as_ref().unwrap().path.clone();
+        assert!(w.segment.as_ref().unwrap().durable < heads[1]);
+        let unsynced = fs::read(&path).unwrap();
+        w.sync().unwrap();
+        send(&a, &mut w, &p.run(&long), false).unwrap();
+        let synced = fs::read(&path).unwrap();
+        drop(w);
+        let hole = heads[1] + 1000..heads[1] + 1000 + 4096;
+        // A page of the second long record lost: the records after it claim
+        // nothing synced past it, and a restore takes the writes before it.
+        let mut holed = unsynced.clone();
+        holed[hole.clone()].fill(0);
+        fs::write(&path, &holed).unwrap();
+        assert_eq!(restored_rows(&a, &dir, Target::End), (3, 2));
+        let v = a.verify().unwrap();
+        assert_eq!((v.last, v.torn), (3, holed.len() - (heads[1] - 8)));
+        // The same page, with a record after it appended once the segment
+        // was synced past it: refused.
+        let mut holed = synced.clone();
+        holed[hole].fill(0);
+        fs::write(&path, &holed).unwrap();
+        let e = a.verify().unwrap_err();
+        let says = format!(
+            "the record at {} is damaged, and the whole record at {} says the segment was \
+             synced past it",
+            heads[1],
+            unsynced.len() + 8
+        );
+        assert!(e.to_string().contains(&says), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A segment whose last record -- 4 MiB of vectors' `f32`s -- a crash
     /// cut short ends there: a torn tail, nothing of it looked at, where a
     /// look for a whole record after it, a byte at a time, refused a
@@ -1937,7 +2236,7 @@ mod tests {
         seg.extend_from_slice(&time);
         seg.extend_from_slice(&fennec_core::engine::record(3, 1, &vectors));
         let whole = seg.len();
-        for damage in [Damage::Refuse, Damage::Cut] {
+        for damage in [Damage::Judge, Damage::Cut] {
             for cut in [big + 2, big + (1 << 20), big + (3 << 20), whole - 1] {
                 let (list, end) = entries(&seg[..cut], damage).unwrap();
                 assert_eq!((list.len(), end), (1, big - 8), "cut at {cut}");
@@ -1945,21 +2244,41 @@ mod tests {
         }
         let mut lost = seg.clone();
         lost[big + (1 << 20)..big + (1 << 20) + 4096].fill(0);
-        let (list, end) = entries(&lost, Damage::Refuse).unwrap();
+        let (list, end) = entries(&lost, Damage::Judge).unwrap();
         assert_eq!((list.len(), end), (1, big - 8));
-        // A whole record after them.
+        // A whole record after them, appended once the segment was synced
+        // to its start: it says the damage was on the disk, refused. One
+        // appended with nothing synced says nothing, and the damage is a
+        // power cut's hole in what the archiver had not synced: cut.
         let after = seg.len() + 8;
+        let mut unsynced = seg.clone();
         seg.extend_from_slice(&time);
-        seg.extend_from_slice(&small);
-        let says =
-            format!("the record at {big} is damaged, with the whole record at {after} after it");
+        seg.extend_from_slice(&fennec_core::engine::record_claiming(
+            3,
+            1,
+            b"a write",
+            after as u64,
+            after as u64,
+        ));
+        unsynced.extend_from_slice(&time);
+        unsynced.extend_from_slice(&small);
+        let says = format!(
+            "the record at {big} is damaged, and the whole record at {after} says the segment \
+             was synced past it"
+        );
         for (what, at) in [("a page inside", big + (1 << 20)), ("its head", big)] {
             let mut bad = seg.clone();
             bad[at..at + 4096].fill(0);
-            let e = entries(&bad, Damage::Refuse).unwrap_err();
+            let e = entries(&bad, Damage::Judge).unwrap_err();
             assert!(e.to_string().contains(&says), "{what}: {e}");
             let (list, end) = entries(&bad, Damage::Cut).unwrap();
             assert_eq!((list.len(), end), (1, big - 8), "{what}");
+            let mut bad = unsynced.clone();
+            bad[at..at + 4096].fill(0);
+            for damage in [Damage::Judge, Damage::Cut] {
+                let (list, end) = entries(&bad, damage).unwrap();
+                assert_eq!((list.len(), end), (1, big - 8), "{what}, unsynced");
+            }
         }
     }
 }

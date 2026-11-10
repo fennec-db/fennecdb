@@ -1593,8 +1593,8 @@ impl Tenants {
         };
         if let Some(c) = db.cut_on_open() {
             crate::log!(
-                "tenant {name}: cut {} bytes at {} ({} records) off its file's end, what a crash \
-                 tore or a block that never landed: none of it a write answered as durable",
+                "tenant {name}: cut {} bytes at {} ({} records) off its file's end, a torn tail: \
+                 no whole record after it says a sync covered it",
                 c.bytes,
                 c.at,
                 c.records

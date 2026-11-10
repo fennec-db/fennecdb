@@ -19,7 +19,9 @@
 const POLY: u32 = 0x82F6_3B78;
 
 /// `crc`, the checksum of the bytes before, carried over `bytes`: the
-/// checksum of them all. A new one starts from 0.
+/// checksum of them all. A new one starts from 0. Inlined: a call more, and
+/// its two inversions apart from the register's, on every write.
+#[inline]
 pub fn crc32c(crc: u32, bytes: &[u8]) -> u32 {
     !raw(!crc, bytes)
 }

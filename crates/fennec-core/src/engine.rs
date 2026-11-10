@@ -1150,6 +1150,61 @@ pub fn plain_records(records: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// A record a follower writing a file of its own takes from its primary --
+/// an archiver's segment -- written onto `out` as that file's: held to its
+/// sum where it carries one, and claiming what [`claim_of`] makes of `at`,
+/// where it goes, and `durable`, how far that file was durable -- never the
+/// primary's claim, of the primary's file. In place where the claim fits
+/// the record's width, its sum carried on from its head and body's, as a
+/// replica's land does; framed anew otherwise, a version before checksums'
+/// record among them, so that the file holds no record without a sum after
+/// one with (docs/design/storage.md#file-format).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn claimed_into(out: &mut Vec<u8>, record: &[u8], at: u64, durable: u64) -> Result<()> {
+    let claim = claim_of(at, durable);
+    let r = record_at(record, &mut 0)?;
+    if let Some(c) = r.claim_at {
+        let (head, holds) = r.summed(record).unwrap_or((0, false));
+        if !holds {
+            return Err(Error::Corrupt("a record that fails its checksum".into()));
+        }
+        let w = r.sum_at - c;
+        if claim_width(claim) <= w {
+            let mut trailer = [0u8; CLAIM_MAX + SUM];
+            trailer[..w].copy_from_slice(&claim.to_le_bytes()[..w]);
+            let sum = crc32c(head, &trailer[..w]);
+            trailer[w..w + SUM].copy_from_slice(&sum.to_le_bytes());
+            out.extend_from_slice(&record[..c]);
+            out.extend_from_slice(&trailer[..w + SUM]);
+            return Ok(());
+        }
+    }
+    out.extend_from_slice(&framed_claiming(r.kind, r.cid, r.body, claim));
+    Ok(())
+}
+
+/// What the whole record at the front of `record`, laid at `at` in its
+/// file, says of itself: `None` where it carries no sum, else whether its
+/// sum holds and, where it does, the point it claims every byte before
+/// which was durable as it was appended (0 for none). What an archive's
+/// reader finds how far a segment was synced from ([`claimed_into`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn checked_claim(record: &[u8], at: usize) -> Option<(bool, usize)> {
+    let r = record_at(record, &mut 0).ok()?;
+    let c = r.claim_at?;
+    if !r.holds(record) {
+        return Some((false, 0));
+    }
+    let mut v = [0u8; 4];
+    let raw = &record[c..r.sum_at];
+    v[..raw.len()].copy_from_slice(raw);
+    let point = match u64::from(u32::from_le_bytes(v)) {
+        0 => 0,
+        v => at.saturating_sub(((v - 1) * CLAIM_UNIT) as usize),
+    };
+    Some((true, point))
+}
+
 /// An image ([`Database::snapshot`]) as a version before checksums wrote
 /// one: its records as [`plain_records`] makes them, the counter's head
 /// saying the image's new length.
@@ -1750,7 +1805,10 @@ impl Block {
             let w = claim_width(claim);
             let (h, n) = head(checked_kind(kind, w), cid, end - HEAD_ROOM + w + SUM);
             self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&h[..n]);
-            self.frames.extend_from_slice(&claim.to_le_bytes()[..w]);
+            // All four bytes, then the length cut back to the claim's: a
+            // store of four, where `[..w]` was a call to `memcpy`.
+            self.frames.extend_from_slice(&claim.to_le_bytes());
+            self.frames.truncate(end + w);
             let sum = crc32c(0, &self.frames[HEAD_ROOM - n..]);
             self.frames.extend_from_slice(&sum.to_le_bytes());
             return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
@@ -1951,10 +2009,11 @@ fn whole_unknown(bytes: &[u8], at: usize) -> bool {
 /// head no record reads from -- in a file this version wrote to, past the
 /// point `durable` it was durable to: refused where a whole record after it
 /// claims the file durable past it, the damage then in bytes an fsync
-/// covered, and otherwise a torn tail, which its caller cuts: nothing after
-/// it was covered by an fsync that completed, so no write there was
-/// answered as durable. Refused too where what follows could not be judged
-/// ([`judge_after`]).
+/// covered, and otherwise a torn tail, which its caller cuts: no record
+/// after it says an fsync that completed covered it -- a power cut's loss,
+/// as far as the file can tell (the disk's damage to the last record it
+/// synced reads the same). Refused too where what follows could not be
+/// judged ([`judge_after`]).
 fn judge(
     bytes: &[u8],
     x: usize,
@@ -2074,7 +2133,15 @@ fn survey(bytes: &[u8]) -> Result<Survey> {
     let mut recent = [0usize; RECENT];
     let mut n = 0;
     let mut samples: Vec<usize> = Vec::new();
+    let mut checked = false;
     while let Some(r) = walk.next()? {
+        // A record of no sum after one with is the load's to judge -- stale
+        // bytes past the durable point, a flipped bit before it -- and no
+        // graph it restores: its field read as a name refused the open for
+        // a stale 4 ("varint ended early"), and a name that read would have
+        // passed over the index's last graph.
+        let plain_after = checked && r.kind != REC_SEQ && !r.checked();
+        checked |= r.checked();
         match r.kind {
             REC_SEQ => {
                 let mut w = [0u8; 8];
@@ -2082,6 +2149,7 @@ fn survey(bytes: &[u8]) -> Result<Survey> {
                 body_end = walk.pos.saturating_add(u64::from_le_bytes(w) as usize);
                 walk.edge = body_end;
             }
+            REC_GRAPH if plain_after => continue,
             REC_GRAPH => {
                 // A checked one whose field does not read is the load's to
                 // judge by its sum: a torn tail's, or damage.
@@ -5870,7 +5938,7 @@ impl Database {
     /// What the open cut off the end of the file: a torn tail -- a record
     /// a crash cut short, or failing its sum with nothing after it claiming
     /// the file durable past it -- past the point the file was durable to,
-    /// so never a write answered as durable. For the server to say.
+    /// by what its records say. For the server to say.
     pub fn cut_on_open(&self) -> Option<&Cut> {
         self.cut.as_ref()
     }
@@ -7064,7 +7132,7 @@ impl Database {
             whole = whole.min(at);
         }
         // What a cut takes, said by whoever opened the file: past the point
-        // the file was durable to, so never a write answered as durable. A
+        // the file was durable to, no record after it saying otherwise. A
         // close's mark torn by a power cut after the close is cut and not
         // said: it was no write, and every byte before it was durable.
         self.cut = (whole < bytes.len() && !torn_mark(&bytes[whole..])).then(|| Cut {

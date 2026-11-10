@@ -831,7 +831,14 @@ echo "ok: the binaries from before stop in words at a webhook consumer (op 6)"
 # And this tree's replica follows an old primary, framing each record it
 # takes as this tree frames one -- its file then whole by `fennec verify`,
 # no record without a checksum after one with -- and this tree's server
-# opens the old primary's file and writes to it.
+# opens the old primary's file and writes to it. This tree's archiver,
+# upgraded first, follows the old primary too, framing each record it
+# takes the same way: its own images, checked, are followed by checked
+# records, so this tree's `fennec verify`, a second image of its own and
+# `fennec restore` read every write, and this tree's server opens the
+# restored file whole. Kept as they came, the plain records after its first
+# image opened two writes short, and verify, restore and every image after
+# were refused.
 SUMMED='record kind [12][0-9][0-9]'
 count_is() {
     local at=$1 n=$2
@@ -915,6 +922,10 @@ echo "old types:    $(grep -m1 "$SUMMED" "$WORK/pc-types.log")"
 PO_PID=$!
 PIDS+=($PO_PID)
 PO=$(address "$WORK/po.log")
+"$NEW/fennec" archive "$PO" "$WORK/archiveo" --token r --image-every 1s \
+    2>"$WORK/archivero.log" &
+ARCHIVERO=$!
+PIDS+=($ARCHIVERO)
 query "$PO" "create collection notes (title text)" >/dev/null
 query "$PO" "put notes {title: 'plain'}" >/dev/null
 "$NEW/fennec-server" --file "$WORK/ro.fennec" --http 127.0.0.1:0 \
@@ -925,6 +936,48 @@ RO=$(address "$WORK/ro.log")
 query "$PO" "put notes {title: 'plain too'}" >/dev/null
 count_is "$RO" 2 ||
     fail "this tree's replica did not follow the old primary: $(tail -3 "$WORK/ro.log")"
+# Images of the archiver's own, each after writes it took since the one
+# before: the first over the old primary's image and plain records, the
+# next over that first image and the records after it -- where a kept
+# plain record opened short.
+image_at() {
+    for _ in $(seq 1 600); do
+        grep -q "$1" "$WORK/archivero.log" && return 0
+        sleep 0.05
+    done
+    return 1
+}
+image_at 'image at change [0-9]* (' ||
+    fail "this tree's archiver took no image from the old primary: $(tail -3 "$WORK/archivero.log")"
+query "$PO" "put notes {title: 'plain three'}" >/dev/null
+query "$PO" "put notes {title: 'plain four'}" >/dev/null
+image_at 'image at change 5, taken here' ||
+    fail "this tree's archiver took no image of its own: $(tail -3 "$WORK/archivero.log")"
+query "$PO" "put notes {title: 'plain five'}" >/dev/null
+query "$PO" "put notes {title: 'plain six'}" >/dev/null
+image_at 'image at change 7, taken here' ||
+    fail "this tree's archiver took no second image: $(tail -3 "$WORK/archivero.log")"
+grep -q 'no image taken' "$WORK/archivero.log" &&
+    fail "this tree's archiver refused an image: $(grep -m1 'no image taken' "$WORK/archivero.log")"
+kill "$ARCHIVERO" 2>/dev/null || true
+wait "$ARCHIVERO" 2>/dev/null || true
+TMPDIR="$WORK" "$NEW/fennec" verify "$WORK/archiveo" >"$WORK/verifyo.log" 2>&1 ||
+    fail "this tree's verify refused its archive of the old primary: $(cat "$WORK/verifyo.log")"
+grep -q 'restores changes [0-9]* to 7,' "$WORK/verifyo.log" ||
+    fail "this tree's archive of the old primary holds fewer than its seven changes: \
+$(cat "$WORK/verifyo.log")"
+TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archiveo" "$WORK/restoredo.fennec" \
+    >"$WORK/restoreo.log" 2>&1 ||
+    fail "this tree's restore refused its archive of the old primary: $(cat "$WORK/restoreo.log")"
+"$NEW/fennec-server" --file "$WORK/restoredo.fennec" --http 127.0.0.1:0 \
+    --http-token t 2>"$WORK/restoredo-open.log" &
+RESTOREDO=$!
+PIDS+=($RESTOREDO)
+RDO=$(address "$WORK/restoredo-open.log")
+count_is "$RDO" 6 || fail "this tree's restore of the old primary's archive lost a write"
+kill "$RESTOREDO" 2>/dev/null || true
+wait "$RESTOREDO" 2>/dev/null || true
+echo "new archiver: followed the old primary, two images of its own; verify, restore and open whole"
 kill "$RO_PID" "$PO_PID" 2>/dev/null || true
 wait "$RO_PID" "$PO_PID" 2>/dev/null || true
 "$NEW/fennec" verify "$WORK/ro.fennec" >"$WORK/ro-verify.log" 2>&1 ||
@@ -935,6 +988,6 @@ PIDS+=($!)
 PN=$(address "$WORK/po-new.log")
 query "$PN" "put notes {title: 'summed'}" | grep -q '"error"' &&
     fail "this tree's server took no write on the old primary's file"
-count_is "$PN" 3 || fail "this tree's server lost a write of the old primary's file"
+count_is "$PN" 7 || fail "this tree's server lost a write of the old primary's file"
 echo "new replica:  followed the old primary, its file whole; this tree's server opened the old file and wrote to it"
 echo "ok: a binary from before follows this tree's primary, and stops in words at its file"

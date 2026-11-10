@@ -671,7 +671,8 @@ fn verify_says_what_an_archive_can_restore() {
     // Zeros with a byte after them, in a segment of records carrying
     // checksums: a torn tail where nothing whole follows them, judged once
     // (a MiB of them was read again at each 11), and damage refused where a
-    // whole record does -- found at whatever byte it starts.
+    // whole record does that says the segment was synced past them -- found
+    // at whatever byte it starts.
     let mut bytes = std::fs::read(&last).unwrap();
     let at = bytes.len() - 4096 + 8;
     bytes.resize(bytes.len() + (1 << 20), 0);
@@ -679,40 +680,72 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, &bytes).unwrap();
     let v = Archive::new(&zeros).unwrap().verify().unwrap();
     assert_eq!((v.last, v.torn), (p.seq(), 4096 + (1 << 20) + 1), "{v:?}");
-    let entry = {
+    let first = {
         let rec = &bytes[16..];
         let mut q = 1;
         fennec_core::codec::get_uvarint(rec, &mut q).unwrap();
         let body = fennec_core::codec::get_uvarint(rec, &mut q).unwrap() as usize;
-        bytes[8..16 + q + body].to_vec()
+        rec[..q + body].to_vec()
     };
     let whole = bytes.len() + 8;
-    bytes.extend_from_slice(&entry);
+    // Appended with nothing synced: it says nothing of the zeros, a power
+    // cut's hole, cut.
+    let mut unsynced = bytes.clone();
+    unsynced.extend_from_slice(&bytes[8..16]);
+    fennec_core::engine::claimed_into(&mut unsynced, &first, whole as u64, 0).unwrap();
+    std::fs::write(&last, &unsynced).unwrap();
+    let v = Archive::new(&zeros).unwrap().verify().unwrap();
+    assert_eq!(
+        (v.last, v.torn),
+        (p.seq(), unsynced.len() - (at - 8)),
+        "{v:?}"
+    );
+    // Appended once the segment was synced to it: refused.
+    bytes.extend_from_within(8..16);
+    fennec_core::engine::claimed_into(&mut bytes, &first, whole as u64, whole as u64).unwrap();
     std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&zeros).unwrap().verify().unwrap_err();
-    let says = format!("the record at {at} is damaged, with the whole record at {whole} after it");
+    let says = format!(
+        "the record at {at} is damaged, and the whole record at {whole} says the segment was \
+         synced past it"
+    );
     assert!(e.to_string().contains(&says), "{e}");
 
-    // Each record carries a checksum. The last one failing it -- its length
-    // on the disk, part of its bytes not -- is a torn tail, cut as one cut
-    // short is; one failing before a whole record is damage, refused by
-    // where it starts, and so are zeros across a head before one: the whole
-    // record is found at whatever byte it starts.
+    // Each record carries a checksum and a claim of how far the archiver
+    // had synced the segment. The last one failing its checksum -- its
+    // length on the disk, part of its bytes not -- is a torn tail, cut as one
+    // cut short is; one failing before a whole record that says the segment
+    // was synced past it is damage, refused by where it starts, and so are
+    // zeros across a head before one: the whole record is found at whatever
+    // byte it starts. Before a whole record that says nothing of it -- the
+    // archiver had not synced it -- the same damage is a power cut's hole,
+    // cut. The claims are made here as an archiver that synced before each
+    // write, or never, would have made them: the archiver's own syncs, every
+    // `SYNC_EVERY`, fall where the clock puts them.
     let sums = copy_of(&arch, &d.join("sums"));
     let last = named(&sums, "writes-").pop().unwrap();
-    let good = std::fs::read(&last).unwrap();
-    let mut starts = Vec::new();
-    let mut pos = 8;
-    while pos < good.len() {
-        starts.push(pos + 8);
-        let rec = &good[pos + 8..];
-        let mut p = 1;
-        fennec_core::codec::get_uvarint(rec, &mut p).unwrap();
-        let body = fennec_core::codec::get_uvarint(rec, &mut p).unwrap() as usize;
-        let len = p + body;
-        assert_eq!(fennec_core::engine::checksum_holds(&rec[..len]), Some(true));
-        pos += 8 + len;
-    }
+    let taken = std::fs::read(&last).unwrap();
+    let claimed = |synced: bool| {
+        let mut out = taken[..8].to_vec();
+        let mut starts = Vec::new();
+        let mut pos = 8;
+        while pos < taken.len() {
+            let rec = &taken[pos + 8..];
+            let mut p = 1;
+            fennec_core::codec::get_uvarint(rec, &mut p).unwrap();
+            let body = fennec_core::codec::get_uvarint(rec, &mut p).unwrap() as usize;
+            let len = p + body;
+            assert_eq!(fennec_core::engine::checksum_holds(&rec[..len]), Some(true));
+            out.extend_from_slice(&taken[pos..pos + 8]);
+            let at = out.len();
+            starts.push(at);
+            let durable = if synced { at as u64 } else { 0 };
+            fennec_core::engine::claimed_into(&mut out, &rec[..len], at as u64, durable).unwrap();
+            pos += 8 + len;
+        }
+        (out, starts)
+    };
+    let (good, starts) = claimed(true);
     assert!(starts.len() >= 3, "{starts:?}");
     let mut bytes = good.clone();
     *bytes.last_mut().unwrap() ^= 1;
@@ -725,7 +758,8 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&sums).unwrap().verify().unwrap_err();
     let says = format!(
-        "the record at {} is damaged, with the whole record at {} after it",
+        "the record at {} is damaged, and the whole record at {} says the segment was synced \
+         past it",
         starts[0], starts[1]
     );
     assert!(e.to_string().contains(&says), "{e}");
@@ -734,10 +768,17 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&sums).unwrap().verify().unwrap_err();
     let says = format!(
-        "the record at {} is damaged, with the whole record at {} after it",
+        "the record at {} is damaged, and the whole record at {} says the segment was synced \
+         past it",
         starts[1], starts[2]
     );
     assert!(e.to_string().contains(&says), "{e}");
+    let (unsynced, starts) = claimed(false);
+    let mut bytes = unsynced.clone();
+    bytes[starts[1] - 8..starts[1] + 3].fill(0);
+    std::fs::write(&last, &bytes).unwrap();
+    let v = Archive::new(&sums).unwrap().verify().unwrap();
+    assert_eq!(v.torn, bytes.len() - (starts[1] - 8), "{v:?}");
     // An image's records too, which no open reads to the byte: one flipped
     // inside its documents opens, and verify names it.
     std::fs::write(&last, &good).unwrap();

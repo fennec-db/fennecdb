@@ -1518,12 +1518,26 @@ mod tests {
             &mut body,
             "create statement tally after insert or set or del docs ...",
         );
-        // Framed as this version frames a record, its checksum after it:
-        // the image's records carry theirs.
-        let mut file = g.snapshot();
+        // Written as a version before checksums wrote it, after this
+        // version's image: no file this version writes holds that -- an
+        // archiver frames such a record anew, as a replica does -- so the
+        // open reads it as it reads stale bytes past the point the file was
+        // durable to, a head no record of this version reads from, and cuts
+        // it. Read as a record, a stale `2` there would drop a collection.
+        let image = g.snapshot();
+        let mut file = image.clone();
+        file.push(13);
+        put_uvarint(&mut file, 0);
+        put_uvarint(&mut file, body.len() as u64);
+        file.extend_from_slice(&body);
+        let mut again = Database::new();
+        assert_eq!(again.load(&file).unwrap(), image.len());
+        assert_eq!(again.collection("docs").unwrap().bound, 0);
+        // Framed as this version frames a record, its checksum after it.
+        let mut file = image;
         file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
         let mut again = Database::new();
-        again.load(&file).unwrap();
+        assert_eq!(again.load(&file).unwrap(), file.len());
         assert_eq!(again.collection("docs").unwrap().bound, 7);
         *g = again;
     }

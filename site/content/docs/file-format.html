@@ -53,7 +53,10 @@ refuses a file a current one has written to, naming the record
 (<code>unknown record kind 131 at 8</code>), so roll forward, not back. Its
 replicas and archivers keep following a current primary meanwhile: one
 that does not say it reads checksums is sent each record and image as a
-binary from before wrote them (<a href="replication.html">Replication</a>).</p>
+binary from before wrote them (<a href="replication.html">Replication</a>).
+The other way round, a current replica or archiver following a primary
+from before writes each plain record it takes with a checksum of its own,
+so its file, its archive and every restore from it stay checked.</p>
 
 <p>Inside a data record, each document is
 <code>[op][doc-id][length][fields]</code>, each field a tagged value. A
@@ -118,8 +121,11 @@ open is refused, naming both (<code>the record at 123456 fails its
 checksum, and the whole record at 234567 says the file was durable past
 it</code>), leaving the file as it is. Otherwise the damage is in bytes
 written since the last sync, which a power cut may lose in any order: the
-file is cut there, and the server logs how many bytes and records went.
-None of them was a write answered as durable.</p>
+file is cut there, and the server logs how many bytes and records went
+(<code>a torn tail: no whole record after it says a sync covered
+it</code>). A write answered as durable is among them only where the disk
+damaged the last record it had synced, which no record after it can
+vouch for.</p>
 
 <p>What follows is read record by record where it can be: after a record
 that fails its checksum, from that record's end. A record whose length
