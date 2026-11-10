@@ -348,9 +348,13 @@ packages from a dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 **Without tokens,** the registries trust the workflow itself:
 
 **PyPI.** Signed in as the account that will own `fennecdb`, under
-*Publishing*, add a pending publisher: project `fennecdb`, owner `fennecdb`,
+*Publishing*, add a pending publisher: project `fennecdb`, owner `fennec-db`,
 repository `fennecdb`, workflow `packages.yml`, environment `pypi`. The first
-published release creates the project.
+published release creates the project. `PYPI_API_TOKEN` must then be unset:
+the job publishes with it wherever it is set, and a token scoped to another
+project (`fenecdb`'s, before the rename) fails the upload. The policy does
+not look at the ref, so the `pypi` environment is limited to `main` and
+`v*` tags, as `nuget` is (the NuGet section below has the commands).
 
 **npm.** Create the organization `fennecdb`, which is the `@fennecdb` scope. npm
 trusts a workflow only for a package that already exists, so each package's
@@ -472,7 +476,7 @@ if the tap is ever made again:
    sums to them), and the release job never edits it. The tap's is
    rewritten at each release.
 2. Make a fine-grained personal access token (*Settings*, *Developer
-   settings*, *Fine-grained tokens*): resource owner `fennecdb`, repository
+   settings*, *Fine-grained tokens*): resource owner `fennec-db`, repository
    access *Only select repositories*, `fennec-db/homebrew-tap` alone,
    permission *Contents: Read and write* (Metadata, read-only, comes with
    it) and nothing else. It expires within a year at most: note the date, as
@@ -535,9 +539,10 @@ installs nothing. CI's `windows (release zip)` job runs
 
 **GitHub.** The environments `pypi`, `npm`, `nuget`, `maven`, `pub` and `homebrew` are made the first
 time the workflow runs. A required reviewer on them makes a publish wait for a second
-yes. `homebrew`, which holds a secret of its own, and `nuget`, whose policy
-nuget.org trusts, are limited to `main` and `v*` tags (the Homebrew and
-NuGet sections above).
+yes. `homebrew`, which holds a secret of its own, and `pypi` and `nuget`,
+whose policies PyPI and nuget.org trust, are limited to `main` and `v*`
+tags (the Homebrew, PyPI and NuGet sections above); `npm` is to be, once
+its packages publish by trusted publishing.
 
 **After the first publish.** The docs install what a registry holds: PyPI's
 `fennecdb` since 0.1.5 (`pip install "fennecdb[langchain]"`). Until
