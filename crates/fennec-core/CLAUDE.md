@@ -46,14 +46,14 @@ reached `ROOM_SHARE` of that room or the process faults
 version's end in a claim and CRC32C (`crc.rs`, the kind's `CHECKED` bit
 set); inner ones, the counter's (front only) and older ones none. A claim:
 how far a completed fsync or the open made the file durable (`claim_of`),
-a follower's its own, plain ones framed anew (`claimed_into`).
-`head`/`record_at`/`Walk` write, read, walk them. Below the newest whole
-claim (`survey`) records are read unchecked (`fennec verify`: all), a
-plain one after checked refused; past it damage (a failing sum, a head
-none reads, a plain record) is refused if a whole record after it claims
-past it, else cut, said (`cut_on_open`), a segment by its own claims:
-`judge_after` frames on, scans bytes only past an unframed head, linear
-and bounded; a record past the end is cut unjudged (Windows:
+a record's end (`record_parts`: one lock); a follower's its own, plain
+ones framed anew, never after checked (`claimed_into`).
+Below the newest whole claim (`survey`) records are read unchecked
+(`fennec verify`: all), a plain one after checked refused; past it damage
+(a failing sum, a head none reads, a plain record) is refused if a whole
+record after it claims past it, else cut, said (`cut_on_open`), a segment
+by its own claims: `judge_after` frames on, scans only past an unframed
+head, bounded; a record past the end is cut unjudged (Windows:
 `cut_and_open`). A follower without `sums=1` gets none (`plain_records`).
 Unchecked, zeros to the end are cut only from a head after a nonzero byte
 or the image's end (`zero_tail`); a torn image refused, an unknown kind

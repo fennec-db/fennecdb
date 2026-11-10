@@ -640,12 +640,39 @@ a primary from before, carrying none, is framed afresh with the replica's
 claim, so a replica's file is checked from its first record and stays so
 when it is promoted.
 
+A record whose claim changed goes to the file as its parts -- the head and
+body as they came, then the claim and the sum -- and they are appended
+under one lock (`FileSink::record_parts`): the buffer's, or the disk's for
+a record the buffer cannot hold, so that no durability writes the file
+between them. A replica's syncer takes its durability under the database's
+lock and runs it after, beside the next write, and the point it stores is
+where the bytes it wrote end. Appended a part at a time, as the third
+review's round had it, a sync could write out a record's head and body
+alone and store that point, inside the record; every record after it then
+claimed it, and a power cut that took the trailer alone -- whose bytes no
+fsync covered -- refused the open ("fails its checksum, and the whole
+record at ... says the file was durable past it") where it should cut. The
+fourth review reproduced it by hand: the durable point at the end of a
+20 KB record's body and its trailer zeroed, refused; at the record's start,
+cut. `a_record_in_parts_is_never_split_by_a_sync` appends 20 000 records in
+parts beside a thread that syncs as fast as it can, and holds every point a
+sync stored to a record's end: the loop over the parts failed it in each of
+five runs, the lock in none of fifteen. Every other record is appended
+whole (`Sink::append`), and the durable point is a record's end by that.
+
 *Every reader of records.* `archive::entries` judges a segment's records,
 and an archiver writes them so that it can: `Archive::take` writes each
 record it is sent as the segment's own (`claimed_into`), as a replica's
 land does -- held to its sum, refused where it fails ("the primary's write
-12: a record that fails its checksum", the stream then made again), its
-claim the segment's -- how far the archiver's fsyncs of the segment had
+12: a record that fails its checksum"), and refused where it carries none
+after one that did on the same stream ("... carries no checksum, after
+records that do"): a primary writes all of its records with a sum or none,
+so that is a checked record whose high bit flipped, its claim and sum read
+as its body's end where it was framed anew. Each is damage
+(`InvalidData`): the single archiver makes its stream again, and a node's
+passes over that tenant alone until it follows the node again
+([replication.md](replication.md#a-nodes-archive)). Its
+claim is the segment's -- how far the archiver's fsyncs of the segment had
 reached as it was appended (`Segment::durable`, set as each `sync_data`
 returns; nothing on a segment the archiver went on with after a restart
 until its first sync, which covers what the process before left) -- in
@@ -660,7 +687,7 @@ hold a restore, a `verify` and two consolidations to every write, and
 
 So a reader -- `fennec verify`, `restore`, a moment's read -- judges
 damage in a segment as an open judges a file's (`judge_after`, `Laid {
-prefix: 8, durable: Some(D) }`, D the newest claim of a whole record before
+prefix: 8, durable: D }`, D the newest claim of a whole record before
 the damage): refused where a whole record after it says the segment was
 synced past it ("the record at 1234 is damaged, and the whole record at
 5678 says the segment was synced past it"), and otherwise a power cut's
@@ -753,7 +780,7 @@ code, 30 to 40 of them removable with the format as it is; taken out --
 the claim written as a store of four bytes and the length cut back, where
 `extend_from_slice(&claim[..w])` called `memcpy`; a lone record appended
 as main appended it, where every append went through a loop over its
-parts (`record_parts`, a replica's, alone loops now); `crc32c` inlined --
+parts (`record_parts`, a replica's, alone loops now, under one lock); `crc32c` inlined --
 its own code is 38 instructions fewer a lone `put` than the build before
 by a trace of one `put`'s `handle` (the append's loop over one part -21,
 `crc32c`'s call -20 less 15 inlined into `commit`, the sink's `record` -9,

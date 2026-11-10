@@ -432,6 +432,11 @@ fennec-server --dir /data/n1 --replication-token "$REPL" ...
   <li><b>A tenant restored to an earlier moment, or made again under its
     name,</b> begins a new archive; the one before is kept beside it, and
     answers for the time before.</li>
+  <li><b>One tenant's damage holds up no other.</b> A tenant whose archive
+    does not read is left as it is for you to look at, and one whose stream
+    sends a record failing its checksum is passed over until the archiver
+    connects again; the archiver's log names the tenant, and every other
+    tenant is archived on.</li>
   <li><b><code>--key-file</code>, <code>--image-every</code> and
     <code>--keep</code></b> apply to each tenant's archive.</li>
   <li><b>Under load the archive trails the node.</b> Under <code>--sync

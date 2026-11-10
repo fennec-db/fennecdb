@@ -567,25 +567,12 @@ impl FileSink {
             *past = self.durable.load(Ordering::Acquire);
         }
     }
-}
 
-impl Sink for FileSink {
-    fn append(&mut self, bytes: &[u8]) -> Result<()> {
-        self.appended += bytes.len() as u64;
-        // A record the buffer could not hold is written where it lies, as
-        // the buffer would have been once it held it: copied in first, a
-        // block of 50 000 768-dim rows was 154 MB more of heap for the
-        // time of the write, which macOS's allocator then kept.
-        if bytes.len() >= WRITE_BUF {
-            return lock(&self.disk).write_through(&self.pending, bytes);
-        }
-        let held = {
-            let mut pending = lock(&self.pending);
-            pending.extend_from_slice(bytes);
-            pending.len()
-        };
-        // Written behind the database: by the caller once it lets the lock
-        // go, unless that has fallen behind by `WRITE_HELD`.
+    /// The buffer holding `held` bytes after an append: written behind the
+    /// database -- by the caller once it lets the lock go -- unless that
+    /// has fallen behind by `WRITE_HELD`.
+    #[inline(always)]
+    fn outgrown(&mut self, held: usize) -> Result<()> {
         if held >= WRITE_BUF && !(self.behind && held < WRITE_HELD) {
             // Not while a durability fsyncs the file, whose writes wait for
             // it: this runs under the database's lock, and every request
@@ -604,15 +591,54 @@ impl Sink for FileSink {
         }
         Ok(())
     }
-    /// A replica's record, its claim this file's, as its parts: each
-    /// appended in turn, the file a stream of bytes. Apart from
-    /// [`Self::append`], which a lone write's record takes: a loop over one
-    /// part there cost every write.
-    fn record_parts(&mut self, _seq: u64, _original: &[u8], parts: &[&[u8]]) -> Result<()> {
-        for p in parts {
-            self.append(p)?;
+}
+
+impl Sink for FileSink {
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        self.appended += bytes.len() as u64;
+        // A record the buffer could not hold is written where it lies, as
+        // the buffer would have been once it held it: copied in first, a
+        // block of 50 000 768-dim rows was 154 MB more of heap for the
+        // time of the write, which macOS's allocator then kept.
+        if bytes.len() >= WRITE_BUF {
+            return lock(&self.disk).write_through(&self.pending, bytes);
         }
-        Ok(())
+        let held = {
+            let mut pending = lock(&self.pending);
+            pending.extend_from_slice(bytes);
+            pending.len()
+        };
+        self.outgrown(held)
+    }
+    /// A replica's record, its claim this file's, as its parts: appended
+    /// under one lock -- the buffer's, or the disk's for a record the
+    /// buffer cannot hold -- so that no durability writes the file between
+    /// them. A syncer takes its durability under the database's lock and
+    /// runs it after: appended a part at a time, its fsync could write out
+    /// the head and body alone and store the durable point inside the
+    /// record, which every record after it then claimed, and a power cut
+    /// that took the trailer alone refused the open where it cuts
+    /// (`a_record_in_parts_is_never_split_by_a_sync`). Apart from
+    /// [`Self::append`], which a lone write's record takes: a loop over
+    /// one part there cost every write.
+    fn record_parts(&mut self, _seq: u64, _original: &[u8], parts: &[&[u8]]) -> Result<()> {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        self.appended += len as u64;
+        if len >= WRITE_BUF {
+            let mut disk = lock(&self.disk);
+            for p in parts {
+                disk.write_through(&self.pending, p)?;
+            }
+            return Ok(());
+        }
+        let held = {
+            let mut pending = lock(&self.pending);
+            for p in parts {
+                pending.extend_from_slice(p);
+            }
+            pending.len()
+        };
+        self.outgrown(held)
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn durable(&self) -> Option<Arc<AtomicU64>> {
@@ -1425,6 +1451,59 @@ impl Sink for ReadOnly {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A record appended in parts -- a replica's, its claim made this
+    /// file's -- is never split by a durability, which a syncer runs after
+    /// the database's lock is let go, beside the next append: every point
+    /// it stores as durable is where a record ends. Appended a part at a
+    /// time, one that ran between them stored a point inside the record,
+    /// which every record after it claimed; a power cut that then took its
+    /// trailer alone refused the open where it cuts. Large records too,
+    /// written past the buffer under the disk's lock.
+    #[test]
+    fn a_record_in_parts_is_never_split_by_a_sync() {
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("parts.fennec");
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        let durable = sink.durable().unwrap();
+        let (disk, pending) = (Arc::clone(&sink.disk), Arc::clone(&sink.pending));
+        let mut ends = vec![lock(&disk).end];
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let syncer = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !stop.load(Ordering::Acquire) {
+                    lock(&disk).sync(&pending, u64::MAX, false).unwrap();
+                    seen.push(durable.load(Ordering::Acquire));
+                }
+                seen
+            })
+        };
+        let big = vec![7u8; WRITE_BUF];
+        let trailer = [9u8; 5];
+        for i in 0..20_000 {
+            let body = match i % 500 {
+                0 => &big[..],
+                k => &big[..100 + k],
+            };
+            sink.record_parts(0, &[], &[body, &trailer]).unwrap();
+            ends.push(ends[ends.len() - 1] + (body.len() + trailer.len()) as u64);
+        }
+        stop.store(true, Ordering::Release);
+        let seen = syncer.join().unwrap();
+        assert!(!seen.is_empty());
+        for d in seen {
+            assert!(
+                ends.binary_search(&d).is_ok(),
+                "a sync stored {d} as durable, inside a record"
+            );
+        }
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A durability finds its bytes on disk when a later one got there
     /// first, and runs no fsync of its own; what it wrote is the file's

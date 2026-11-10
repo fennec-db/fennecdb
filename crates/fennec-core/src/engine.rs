@@ -417,18 +417,6 @@ pub fn landed_block(spilled: &[&[u8]], land: &[u8]) -> Result<Vec<u8>> {
     Ok(framed(REC_BLOCK, 0, &body))
 }
 
-/// Whether the whole record at the front of `record` is as it was written:
-/// `Some(true)` where its sum is its own, `Some(false)` where it is not,
-/// and `None` for a record that carries none. What an archive holds each
-/// record of its segments to.
-pub fn checksum_holds(record: &[u8]) -> Option<bool> {
-    if record.is_empty() {
-        return None;
-    }
-    let r = record_at(record, &mut 0).ok()?;
-    r.checked().then(|| r.holds(record))
-}
-
 /// How the records damage is judged among are laid out ([`judge_after`]):
 /// a database file's, or an archive segment's.
 #[derive(Clone, Copy, Debug)]
@@ -436,12 +424,11 @@ pub struct Laid {
     /// The bytes before each record: an archive segment's time, 8; none in
     /// a file.
     pub prefix: usize,
-    /// For a file, the point it was durable to before the damage, the
-    /// survey's: a whole record after the damage refuses it where it claims
-    /// the file durable past it. `None` for an archive's segment, whose
-    /// records' claims are their primary's file's: any whole record after
-    /// the damage refuses it.
-    pub durable: Option<usize>,
+    /// The point the bytes were durable to before the damage -- a file's,
+    /// the survey's; a segment's, the newest claim of a whole record before
+    /// it: a whole record after the damage refuses it where it claims them
+    /// durable past it.
+    pub durable: usize,
 }
 
 /// What the bytes after damage say of it ([`judge_after`]).
@@ -467,8 +454,8 @@ const CLAIM_SLACK: usize = 16 * CLAIM_UNIT as usize;
 /// Damage at `x` -- the head of a record that fails its sum, ending at
 /// `framed`, or, `None`, one no record reads from -- judged by what
 /// follows it, laid out as `laid` says: [`After::Whole`] where a record
-/// after it is whole by its sum and claims the file durable past it (any
-/// whole record, in an archive's segment), [`After::Torn`] where none is.
+/// after it is whole by its sum and claims the bytes durable past it,
+/// [`After::Torn`] where none is.
 ///
 /// Framed first: a record whose head frames -- a kind this version knows,
 /// a length that fits -- holds the damage inside it, and the walk goes on
@@ -500,9 +487,7 @@ pub fn judge_after(bytes: &[u8], x: usize, framed: Option<usize>, laid: Laid) ->
         bytes,
         laid,
         x,
-        floor: laid
-            .durable
-            .map_or(0, |d| d.min(x).saturating_sub(CLAIM_SLACK)),
+        floor: laid.durable.min(x).saturating_sub(CLAIM_SLACK),
         zeros,
         budget: (n.saturating_sub(x) as u64).saturating_mul(16) + (64 << 20),
         base: usize::MAX,
@@ -655,21 +640,14 @@ impl Judging<'_> {
 
     /// Whether the whole record from `r` says the damage was durable.
     fn says(&self, r: usize, end: usize, w: usize) -> bool {
-        match self.laid.durable {
-            None => true,
-            Some(_) => self.claim(r, end, w).is_some_and(|p| p > self.x),
-        }
+        self.claim(r, end, w).is_some_and(|p| p > self.x)
     }
 
     /// Whether the record's claim is one this version could have written
     /// after the durable point: none, or at least [`Self::floor`].
     fn claim_fits(&self, r: usize, end: usize, w: usize) -> bool {
-        match self.laid.durable {
-            None => true,
-            Some(_) => self
-                .claim(r, end, w)
-                .is_some_and(|p| p == 0 || p >= self.floor),
-        }
+        self.claim(r, end, w)
+            .is_some_and(|p| p == 0 || p >= self.floor)
     }
 
     /// Whether the bytes before a record at `r` read as an archive
@@ -1071,10 +1049,20 @@ fn framed_claiming(kind: u8, cid: u32, body: &[u8], claim: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(n + body.len() + w + SUM);
     out.extend_from_slice(&h[..n]);
     out.extend_from_slice(body);
-    out.extend_from_slice(&claim.to_le_bytes()[..w]);
-    let sum = crc32c(0, &out);
-    out.extend_from_slice(&sum.to_le_bytes());
+    closed(&mut out, claim, w);
     out
+}
+
+/// The claim, `w` bytes of it, and the sum of everything before it, after
+/// the head and body of the checked record `out` holds, which has the room
+/// for them: all four bytes of the claim, then the length cut back to its
+/// width -- a store of four, where `[..w]` was a call to `memcpy`.
+fn closed(out: &mut Vec<u8>, claim: u32, w: usize) {
+    let end = out.len() + w;
+    out.extend_from_slice(&claim.to_le_bytes());
+    out.truncate(end);
+    let sum = crc32c(0, out);
+    out.extend_from_slice(&sum.to_le_bytes());
 }
 
 /// The claim of a record appended at `at` in a file durable to `durable`
@@ -1158,16 +1146,32 @@ pub fn plain_records(records: &[u8]) -> Result<Vec<u8>> {
 /// the record's width, its sum carried on from its head and body's, as a
 /// replica's land does; framed anew otherwise, a version before checksums'
 /// record among them, so that the file holds no record without a sum after
-/// one with (docs/design/storage.md#file-format).
+/// one with (docs/design/storage.md#file-format). `checked` says whether
+/// one with came before it on its stream, and is set once one has: a
+/// primary writes all of its records with a sum or none, so one without
+/// after one with is a checked record whose high bit flipped on its way,
+/// refused, never framed anew around its claim and sum.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn claimed_into(out: &mut Vec<u8>, record: &[u8], at: u64, durable: u64) -> Result<()> {
+pub fn claimed_into(
+    out: &mut Vec<u8>,
+    record: &[u8],
+    at: u64,
+    durable: u64,
+    checked: &mut bool,
+) -> Result<()> {
     let claim = claim_of(at, durable);
     let r = record_at(record, &mut 0)?;
+    if r.claim_at.is_none() && *checked {
+        return Err(Error::Corrupt(
+            "a record that carries no checksum, after records that do".into(),
+        ));
+    }
     if let Some(c) = r.claim_at {
         let (head, holds) = r.summed(record).unwrap_or((0, false));
         if !holds {
             return Err(Error::Corrupt("a record that fails its checksum".into()));
         }
+        *checked = true;
         let w = r.sum_at - c;
         if claim_width(claim) <= w {
             let mut trailer = [0u8; CLAIM_MAX + SUM];
@@ -1813,13 +1817,25 @@ impl Block {
             self.frames.extend_from_slice(&sum.to_le_bytes());
             return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
         }
-        let mut body = Vec::with_capacity(self.frames.len() + HEAD_ROOM * self.heads.len());
-        let mut start = HEAD_ROOM;
+        // A block record around each write's: its length counted first,
+        // so that the frames are copied once, after its head, where they
+        // were copied into a body and the body into the record.
+        let (mut len, mut start) = (0, HEAD_ROOM);
         for &(kind, cid, end) in &self.heads {
-            frame_into(&mut body, kind, cid, &self.frames[start..end]);
+            len += head(kind, cid, end - start).1 + end - start;
             start = end;
         }
-        std::borrow::Cow::Owned(framed_claiming(REC_BLOCK, 0, &body, claim))
+        let w = claim_width(claim);
+        let (h, n) = head(checked_kind(REC_BLOCK, w), 0, len + w + SUM);
+        let mut out = Vec::with_capacity(n + len + w + SUM);
+        out.extend_from_slice(&h[..n]);
+        let mut start = HEAD_ROOM;
+        for &(kind, cid, end) in &self.heads {
+            frame_into(&mut out, kind, cid, &self.frames[start..end]);
+            start = end;
+        }
+        closed(&mut out, claim, w);
+        std::borrow::Cow::Owned(out)
     }
 }
 
@@ -2021,10 +2037,7 @@ fn judge(
     durable: usize,
     what: std::fmt::Arguments<'_>,
 ) -> Result<()> {
-    let laid = Laid {
-        prefix: 0,
-        durable: Some(durable),
-    };
+    let laid = Laid { prefix: 0, durable };
     match judge_after(bytes, x, framed, laid) {
         After::Torn => Ok(()),
         After::Whole(at) => Err(Error::Corrupt(format!(

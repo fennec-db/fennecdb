@@ -692,7 +692,7 @@ fn verify_says_what_an_archive_can_restore() {
     // cut's hole, cut.
     let mut unsynced = bytes.clone();
     unsynced.extend_from_slice(&bytes[8..16]);
-    fennec_core::engine::claimed_into(&mut unsynced, &first, whole as u64, 0).unwrap();
+    fennec_core::engine::claimed_into(&mut unsynced, &first, whole as u64, 0, &mut false).unwrap();
     std::fs::write(&last, &unsynced).unwrap();
     let v = Archive::new(&zeros).unwrap().verify().unwrap();
     assert_eq!(
@@ -702,7 +702,8 @@ fn verify_says_what_an_archive_can_restore() {
     );
     // Appended once the segment was synced to it: refused.
     bytes.extend_from_within(8..16);
-    fennec_core::engine::claimed_into(&mut bytes, &first, whole as u64, whole as u64).unwrap();
+    fennec_core::engine::claimed_into(&mut bytes, &first, whole as u64, whole as u64, &mut false)
+        .unwrap();
     std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&zeros).unwrap().verify().unwrap_err();
     let says = format!(
@@ -735,12 +736,20 @@ fn verify_says_what_an_archive_can_restore() {
             fennec_core::codec::get_uvarint(rec, &mut p).unwrap();
             let body = fennec_core::codec::get_uvarint(rec, &mut p).unwrap() as usize;
             let len = p + body;
-            assert_eq!(fennec_core::engine::checksum_holds(&rec[..len]), Some(true));
+            let says = fennec_core::engine::checked_claim(&rec[..len], 0);
+            assert!(matches!(says, Some((true, _))), "{says:?}");
             out.extend_from_slice(&taken[pos..pos + 8]);
             let at = out.len();
             starts.push(at);
             let durable = if synced { at as u64 } else { 0 };
-            fennec_core::engine::claimed_into(&mut out, &rec[..len], at as u64, durable).unwrap();
+            fennec_core::engine::claimed_into(
+                &mut out,
+                &rec[..len],
+                at as u64,
+                durable,
+                &mut false,
+            )
+            .unwrap();
             pos += 8 + len;
         }
         (out, starts)

@@ -334,10 +334,7 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
     }
     if let Some((entry, at, ends)) = stopped.filter(|_| damage == Damage::Judge) {
         use fennec_core::engine::{judge_after, After, Laid};
-        let laid = Laid {
-            prefix: 8,
-            durable: Some(durable),
-        };
+        let laid = Laid { prefix: 8, durable };
         match judge_after(data, at, ends, laid) {
             After::Torn => {}
             After::Whole(whole) => {
@@ -442,6 +439,9 @@ pub(crate) struct Writer {
     segment: Option<Segment>,
     /// Writes taken since [`Self::taken`] was last asked.
     taken: u64,
+    /// A record with a sum came on this stream: one without after it is
+    /// damage ([`fennec_core::engine::claimed_into`]).
+    checked: bool,
 }
 
 /// What a stream's hello did to an archive.
@@ -875,11 +875,18 @@ impl Archive {
                 return w.sync();
             }
             match rx.receive()? {
+                // A record that fails its sum made again: the next stream
+                // sends it again, where the primary's file holds it whole.
                 Message::Writes {
                     first,
                     times,
                     records,
-                } => self.take(&mut w, first, &times, &records)?,
+                } => match self.take(&mut w, first, &times, &records) {
+                    Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                        return Err(io::Error::other(e.to_string()))
+                    }
+                    r => r?,
+                },
                 Message::Alive { .. } => w.sync()?,
                 Message::End(why) => return Err(io::Error::other(why)),
                 _ => return Err(io::Error::other("the primary sent a message it should not")),
@@ -912,6 +919,7 @@ impl Archive {
             images: !self.images()?.is_empty(),
             segment,
             taken: 0,
+            checked: false,
         })
     }
 
@@ -1141,8 +1149,13 @@ impl Archive {
                 record,
                 (s.len + 8) as u64,
                 s.durable as u64,
+                &mut w.checked,
             )
-            .map_err(|e| io::Error::other(format!("the primary's write {seq}: {e}")))?;
+            // Damage, the record's alone: a node's archiver passes over its
+            // tenant and goes on with the others (`NodeArchive::follow`),
+            // where ending the stream had the same record sent again, and
+            // archived no tenant of the node.
+            .map_err(|e| corrupt(format!("the primary's write {seq}: {e}")))?;
             s.write(&entry)?;
             s.next += n;
             pos += len;
@@ -2080,10 +2093,15 @@ mod tests {
         let v = a.verify().unwrap();
         assert_eq!((v.last, v.torn), (6, 0));
         // A second consolidation reads the first's image and the writes
-        // after it, and a third after the primary is upgraded.
+        // after it, and a third after the primary is upgraded and a
+        // replica from before promoted after it, each followed over a
+        // stream of its own.
         assert_eq!(a.consolidate().unwrap(), Some(6));
-        send(&a, &mut w, &p.run("put notes {n: 6}"), false).unwrap();
-        send(&a, &mut w, &p.run("put notes {n: 7}"), true).unwrap();
+        for (n, plain) in [(6, false), (7, true)] {
+            w.park().unwrap();
+            w = a.writer().unwrap();
+            send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), plain).unwrap();
+        }
         assert_eq!(a.consolidate().unwrap(), Some(8));
         all_checked(&a);
         assert_eq!(restored_rows(&a, &dir, Target::End), (8, 7));
@@ -2109,7 +2127,10 @@ mod tests {
         for n in 0..3 {
             send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), false).unwrap();
         }
-        // Promoted: the replica from before writes plain records.
+        // Promoted: the replica from before writes plain records, followed
+        // over a stream of its own.
+        w.park().unwrap();
+        let mut w = a.writer().unwrap();
         for n in 3..5 {
             send(&a, &mut w, &p.run(&format!("put notes {{n: {n}}}")), true).unwrap();
         }
@@ -2131,7 +2152,10 @@ mod tests {
     }
 
     /// A record the primary sent that fails its checksum is not taken:
-    /// framed anew with its claim, it would read as whole.
+    /// framed anew with its claim, it would read as whole. Nor is one with
+    /// none after ones with on the same stream -- a checked record whose
+    /// high bit flipped, its claim and sum read as its body's end. Each is
+    /// damage, a node's archiver passing over its tenant alone.
     #[test]
     fn a_record_failing_its_checksum_is_not_taken() {
         let dir = std::env::temp_dir().join(format!("fennec-archive-failing-{}", fresh_id()));
@@ -2146,7 +2170,16 @@ mod tests {
         record[at] ^= 1;
         let e = send(&a, &mut w, &record, false).unwrap_err();
         assert!(e.to_string().contains("fails its checksum"), "{e}");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         assert_eq!(w.at, 1);
+        record[at] ^= 1;
+        send(&a, &mut w, &record, false).unwrap();
+        let mut flipped = p.run("put notes {n: 2}");
+        flipped[0] &= !0x80;
+        let e = send(&a, &mut w, &flipped, false).unwrap_err();
+        assert!(e.to_string().contains("carries no checksum"), "{e}");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(w.at, 2);
         let _ = fs::remove_dir_all(&dir);
     }
 

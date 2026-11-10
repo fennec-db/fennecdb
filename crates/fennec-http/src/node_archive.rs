@@ -373,9 +373,30 @@ impl NodeArchive {
                             "the node sent tenant `{name}`'s writes before its hello"
                         )));
                     };
-                    self.kept(&name)?.archive.take(w, first, &times, &records)?;
-                    taken += w.taken();
-                    dirty.insert(name);
+                    // A record that fails its sum is its tenant's alone: the
+                    // tenant passed over, as one whose archive does not read
+                    // is, until the stream is made again, and the others go
+                    // on -- ended here, the stream made again sent the same
+                    // record, and no tenant of the node was archived. What
+                    // the tenant took before it is kept.
+                    match self.kept(&name)?.archive.take(w, first, &times, &records) {
+                        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                            report(&format!(
+                                "tenant `{name}`: {e}; not archived until the node is followed \
+                                 again"
+                            ));
+                            if let Some(mut w) = writers.remove(&name) {
+                                w.park()?;
+                            }
+                            dirty.remove(&name);
+                            broken.insert(name);
+                        }
+                        r => {
+                            r?;
+                            taken += w.taken();
+                            dirty.insert(name);
+                        }
+                    }
                 }
                 NodeMessage::Lineage { name, lineage } if !broken.contains(&name) => {
                     if let Some(w) = writers.get_mut(&name) {
@@ -938,5 +959,115 @@ mod tests {
         let read: Vec<String> = lines(&root).unwrap().into_iter().map(|l| l.label).collect();
         assert_eq!(read, ["acme", "acme.00000000000000ff"]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A record of one tenant's that fails its checksum on its way passes
+    /// over that tenant alone, said: the others are archived on in the same
+    /// stream. Ending the stream instead had the node send the same record
+    /// again on the next, and no tenant of the node was archived.
+    #[test]
+    fn a_record_that_fails_its_checksum_passes_over_its_tenant_alone() {
+        use crate::tenants::{Replicated, Tenant, Tenants};
+        let d = std::env::temp_dir().join(format!(
+            "fennec-node-archive-sum-{}-{}",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        let tenants = Arc::new(Tenants::new(d.join("node")).unwrap().with_replication(
+            Replicated {
+                token: "repl".into(),
+                buffer: 8 << 20,
+                upstream: None,
+                sync_on_write: true,
+            },
+        ));
+        let cfg = crate::Config {
+            addr: "127.0.0.1:0".into(),
+            sync_on_write: true,
+            ..crate::Config::default()
+        };
+        let server = crate::Server::with_tenants(Arc::clone(&tenants), cfg);
+        let listener = server.bind().unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _ = server.serve_on(listener);
+        });
+        let exec = |t: &Tenant, sql: &str| {
+            let durable = {
+                let mut g = t.db.write().unwrap();
+                g.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+                g.flush().unwrap()
+            };
+            if let Some(durable) = durable {
+                durable().unwrap();
+            }
+        };
+        let seq = |t: &Tenant| t.db.read().unwrap().change_seq();
+        let made = |name: &str| {
+            let t = tenants.create(name).unwrap();
+            exec(&t, "create collection notes (n int)");
+            exec(&t, "put notes {n: 1}");
+            t
+        };
+        let (bad, good) = (made("bad"), made("good"));
+
+        let root = d.join("root");
+        let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let archiver = {
+            let (root, stop, said) = (root.clone(), Arc::clone(&stop), Arc::clone(&said));
+            std::thread::spawn(move || {
+                let upstream = node_upstream(&url, "repl".into()).unwrap();
+                NodeArchive::new(&root, None)?
+                    .follow(&upstream, &stop, &|m| lock(&said).push(m.to_string()))
+            })
+        };
+        let probe = d.join("probe.fennec");
+        let until = |what: &str, mut cond: Box<dyn FnMut() -> bool + '_>| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !cond() {
+                assert!(Instant::now() < deadline, "{what}: {:?}", lock(&said));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let restores_to = |name: &str| {
+            let _ = fs::remove_file(&probe);
+            Archive::new(root.join(name))
+                .and_then(|a| a.restore(&probe, crate::archive::Target::End))
+                .map_or(0, |r| r.seq)
+        };
+        for t in [&bad, &good] {
+            let at = seq(t);
+            until("archived", Box::new(|| restores_to(t.name()) >= at));
+        }
+
+        // A record of `bad`'s, its body changed on its way.
+        let at = seq(&bad);
+        let mut damaged = fennec_core::engine::record(1, 0, b"a schema, damaged");
+        damaged[3] ^= 1;
+        let feed = bad.repl.as_ref().and_then(|r| r.feed()).unwrap();
+        feed.push_durable(at + 1, &damaged);
+        until(
+            "the damage said",
+            Box::new(|| {
+                lock(&said)
+                    .iter()
+                    .any(|m| m.contains("tenant `bad`") && m.contains("fails its checksum"))
+            }),
+        );
+        for n in 2..4 {
+            exec(&good, &format!("put notes {{n: {n}}}"));
+            let now = seq(&good);
+            until("good archived on", Box::new(|| restores_to("good") >= now));
+        }
+        stop.store(true, Ordering::SeqCst);
+        archiver.join().unwrap().unwrap();
+        let said = lock(&said).clone();
+        assert!(
+            !said.iter().any(|m| m.contains("connecting again")),
+            "the stream went on: {said:?}"
+        );
+        assert_eq!(restores_to("bad"), at);
+        let _ = fs::remove_dir_all(&d);
     }
 }
