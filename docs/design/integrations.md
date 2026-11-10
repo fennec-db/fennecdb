@@ -80,8 +80,8 @@ where it does not (RELEASING.md). NuGet's `FennecDb` is packed, installed
 into a fresh console app and used against a server
 (`integrations/dotnet/package.sh`) and only then pushed with a key
 nuget.org's trusted publishing gives the job for an hour (`NuGet/login`),
-or `NUGET_API_KEY` where no policy answers, its job skipped with a warning
-with neither; the Go
+or `NUGET_API_KEY` where the exchange fails, its job failing with neither,
+and pushed by a job of its own that builds nothing; the Go
 module has no registry, and `release.yml` pushes the tag
 `integrations/go/vX.Y.Z` it is fetched by beside `vX.Y.Z`. With
 `full_text=True` a store indexes its text for BM25 as well and searches by

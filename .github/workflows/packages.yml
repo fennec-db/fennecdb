@@ -2,7 +2,7 @@ name: packages
 
 # PyPI's `fennecdb`, npm's `@fennecdb/web`, `@fennecdb/react`,
 # `@fennecdb/cloudflare` and `@fennecdb/langchain`, NuGet's `FennecDb`
-# (with NUGET_API_KEY, the job below), Maven Central's
+# (by nuget.org's trusted publishing, or NUGET_API_KEY), Maven Central's
 # `com.fennecdb:fennecdb` and `fennecdb-android` (with the Central
 # Portal's token and a signing key) and pub.dev's `fennecdb` and
 # `fennecdb_flutter` (with PUB_CREDENTIALS) go out when
@@ -138,26 +138,23 @@ jobs:
 
   # NuGet's `FennecDb`: packed, installed from the .nupkg into a console app
   # of its own and used against a fennec-server (integrations/dotnet/
-  # package.sh), and only then pushed. The key is nuget.org's trusted
-  # publishing: `NuGet/login` trades the job's OIDC token for a key that
-  # lives an hour, which a policy of the package owner's account
-  # (furkankinyas) grants this repository's packages.yml in the `nuget`
-  # environment -- so it is asked for after the pack, not before. Where no
-  # policy answers, NUGET_API_KEY is used if set; with neither the job warns
-  # and stops, and the other registries go on.
-  nuget:
-    name: NuGet
+  # package.sh) by a job that cannot publish, and only then pushed by one
+  # that holds nothing else: the key is nuget.org's trusted publishing, a
+  # key that lives an hour, which `NuGet/login` trades the job's OIDC token
+  # for under a policy of the package owner's account (furkankinyas) naming
+  # this repository's packages.yml and the `nuget` environment. The build
+  # runs no step that could ask for that token (`id-token: write` is the
+  # push's alone), as PyPI's and npm's build in `build`. Where the exchange
+  # fails, NUGET_API_KEY is used if it is set; with neither the job fails,
+  # naming the exchange's failure, and the other registries go on.
+  nuget-pack:
+    name: NuGet (pack and use)
     runs-on: ubuntu-latest
-    environment:
-      name: nuget
-      url: https://www.nuget.org/packages/FennecDb
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Install the pinned toolchain
         run: rustup show
@@ -167,9 +164,29 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: integrations/dotnet/package.sh dist-nuget
 
-      # The nuget.org account's name, not an email; a failed exchange (no
-      # policy, or one naming another workflow or environment) leaves the
-      # output empty and the key below to answer.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nuget
+          path: dist-nuget/FennecDb.*.nupkg
+          if-no-files-found: error
+
+  nuget:
+    name: NuGet
+    needs: nuget-pack
+    runs-on: ubuntu-latest
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/FennecDb
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: nuget
+          path: dist-nuget
+
+      # The nuget.org account's name, not an email. The action masks the
+      # key before it sets the output.
       - uses: NuGet/login@v1
         id: login
         continue-on-error: true
@@ -183,10 +200,14 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
           FROM: ${{ steps.login.outputs.NUGET_API_KEY && 'trusted publishing' || 'NUGET_API_KEY' }}
+          LOGIN: ${{ steps.login.outcome }}
         run: |
+          if [ "$LOGIN" != success ]; then
+            echo "::warning::nuget.org's trusted publishing gave no key (the NuGet/login step above says why: no policy, or one naming another repository, workflow or environment)"
+          fi
           if [ -z "$NUGET_API_KEY" ]; then
-            echo "::warning::no trusted publishing policy answered and NUGET_API_KEY is not set: FennecDb is not published to NuGet (RELEASING.md, 'Once: the registries' side')"
-            exit 0
+            echo "::error::no key to push FennecDb with: the trusted publishing exchange failed and NUGET_API_KEY is not set (RELEASING.md, 'Once: the registries' side')"
+            exit 1
           fi
           echo "pushing with a key from $FROM"
           dotnet nuget push dist-nuget/FennecDb.*.nupkg --api-key "$NUGET_API_KEY" \
