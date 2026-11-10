@@ -186,6 +186,21 @@ its header or another file's leaves the bytes as they were -- and a macOS
 file keeps no log. A primary's open (`Sink::sync_existing`) and a cut of a
 torn tail fsync the whole file, and clear the flag.
 
+What an fsync covered is also what the next record claims
+([storage.md](storage.md#file-format)): each of these -- `Disk::sync`, its
+sync log's durability, `sync_inherited`, `sync_existing`, a cut's, a
+rewrite's swap -- stores the file's length in `Disk::durable` once the call
+returned, never before, and an append reads it (`Sink::durable`) into the
+record's claim. So a claim never runs ahead of a completed fsync: a
+durability still at the disk claims nothing new, the records appended
+meanwhile claiming the point before it; a failed one stores nothing. No
+fsync is added for it, and a durability that covers nothing appended runs
+none still. A close after it appended something and everything was
+covered appends the 8-byte mark (`REC_SYNCED`) unsynced: a durable point the next open need not look for,
+lost harmlessly. An open hands its durable point to the sink
+(`Sink::set_durable`), the appends after it claiming it until an fsync of
+their own covers more.
+
 ## Writes behind the lock
 
 **Buffered writes are written behind the lock** (`Database::write_behind`,

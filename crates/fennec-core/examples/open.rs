@@ -1,7 +1,7 @@
 //! What opening a file costs, read into memory or mapped: `make open-bench`.
 //!
 //! ```text
-//! cargo run --release -p fennec-core --example open -- write <path> <docs> <body bytes> [h|s|hs|none] [plain]
+//! cargo run --release -p fennec-core --example open -- write <path> <docs> <body bytes> [h|s|hs|none] [plain|unclaimed]
 //! cargo run --release -p fennec-core --example open -- open <path> read|mapped [quick]
 //! cargo run --release -p fennec-core --example open -- compact <path> read|mapped
 //! ```
@@ -9,8 +9,11 @@
 //! `write` streams a file the way a server that never checkpointed leaves
 //! one -- a record per write -- without holding the database, so a file
 //! larger than the machine's memory can be made on it: each record with
-//! its checksum, as this build writes one, or with `plain` as a build
-//! before checksums did, for an open to be timed over both. `open` opens it one
+//! its checksum, claiming every byte before it durable as a server under
+//! `--sync always` leaves it, so that an open checks the last record alone;
+//! with `unclaimed`, claiming nothing, as a file no fsync ever covered,
+//! whose open checks every record; or with `plain` as a build before
+//! checksums wrote it, for an open to be timed over each. `open` opens it one
 //! way or the other, in a process of its own so that the peak RSS is its
 //! own, and then times what a server does next: reads that touch a page
 //! each, a hash lookup, an ordered page, and a scan of every document.
@@ -115,28 +118,48 @@ fn schema(indexes: &str) -> Schema {
     .unwrap()
 }
 
-/// A file-level record: `[kind][collection][length][body]`, and its
-/// checksum after it unless `plain` (`fennec_core::engine::record`).
-fn record(out: &mut Vec<u8>, kind: u8, cid: u64, body: &[u8], plain: bool) {
-    out.clear();
-    if !plain {
-        out.extend_from_slice(&fennec_core::engine::record(kind, cid as u32, body));
-        return;
-    }
-    out.push(kind);
-    put_uvarint(out, cid);
-    put_uvarint(out, body.len() as u64);
-    out.extend_from_slice(body);
+/// How `write` frames a record.
+#[derive(Clone, Copy, PartialEq)]
+enum Framing {
+    /// With its checksum, claiming every byte before it durable.
+    Claimed,
+    /// With its checksum, claiming nothing.
+    Unclaimed,
+    /// As a build before checksums wrote it.
+    Plain,
 }
 
-fn write(path: &str, docs: u64, body: usize, indexes: &str, plain: bool) {
+/// A file-level record appended at `at`: `[kind][collection][length]
+/// [body]`, and its claim and checksum after it unless plain
+/// (`fennec_core::engine::record_claiming`).
+fn record(out: &mut Vec<u8>, kind: u8, cid: u64, body: &[u8], at: u64, framing: Framing) {
+    out.clear();
+    match framing {
+        Framing::Claimed => out.extend_from_slice(&fennec_core::engine::record_claiming(
+            kind, cid as u32, body, at, at,
+        )),
+        Framing::Unclaimed => {
+            out.extend_from_slice(&fennec_core::engine::record(kind, cid as u32, body))
+        }
+        Framing::Plain => {
+            out.push(kind);
+            put_uvarint(out, cid);
+            put_uvarint(out, body.len() as u64);
+            out.extend_from_slice(body);
+        }
+    }
+}
+
+fn write(path: &str, docs: u64, body: usize, indexes: &str, framing: Framing) {
     let sc = schema(indexes);
     let mut f = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(path).unwrap());
     f.write_all(MAGIC).unwrap();
+    let mut at = MAGIC.len() as u64;
     let mut rec = Vec::new();
     // REC_CREATE and REC_DATA, as the write path writes them.
-    record(&mut rec, 1, 1, &sc.encode(), plain);
+    record(&mut rec, 1, 1, &sc.encode(), at, framing);
     f.write_all(&rec).unwrap();
+    at += rec.len() as u64;
     let mut rng = Rng(0x5eed);
     let mut text = String::with_capacity(body + 16);
     let t = Instant::now();
@@ -155,8 +178,9 @@ fn write(path: &str, docs: u64, body: usize, indexes: &str, plain: bool) {
             ],
         };
         let frame = Store::frame(OP_PUT, id, &Store::encode_doc(&sc, &doc));
-        record(&mut rec, 3, 1, &frame, plain);
+        record(&mut rec, 3, 1, &frame, at, framing);
         f.write_all(&rec).unwrap();
+        at += rec.len() as u64;
     }
     f.flush().unwrap();
     let size = std::fs::metadata(path).unwrap().len();
@@ -381,7 +405,11 @@ fn main() {
             args[2].parse().unwrap(),
             args.get(3).map_or(400, |s| s.parse().unwrap()),
             args.get(4).map_or("hs", String::as_str),
-            args.get(5).map(String::as_str) == Some("plain"),
+            match args.get(5).map(String::as_str) {
+                Some("plain") => Framing::Plain,
+                Some("unclaimed") => Framing::Unclaimed,
+                _ => Framing::Claimed,
+            },
         ),
         Some("open") => open(
             &args[1],

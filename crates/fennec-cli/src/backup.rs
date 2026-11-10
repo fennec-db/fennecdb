@@ -34,7 +34,7 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
                      [--force]
        fennec restore --tenants <root-dir> <out-dir>         [--to <time>]
        fennec prune  [--tenants] <archive-dir | root-dir> --keep <7d>
-       fennec verify [--tenants] <archive-dir | root-dir>
+       fennec verify [--tenants] <archive-dir | root-dir | file.fennec>
        fennec key    <key-file>
   each but `key` takes --key-file <path> (or FENNEC_KEY_FILE): the archive's
   files, or the backup file, sealed with it
@@ -68,7 +68,11 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
   verify    reads the archive as a restore would: every image opens at its
             change, the segments run on with none missing, a restore to the
             end opens; says from when to when it can restore, and exits 1
-            when it cannot
+            when it cannot. Given a database file, holds every record of it
+            to its checksum -- the image's and those before the point the
+            file was synced to, which an open reads unchecked -- and exits 1
+            naming the first that fails; on a file no server is writing,
+            whose last record a write in flight would show cut short
 
   --force   backup and restore write a file over one there already, which
             they refuse without it (exit 2): a database is never replaced
@@ -256,6 +260,23 @@ pub fn main(command: &str, args: &[String]) -> i32 {
                 "`fennec verify` takes the archive's directory\n{USAGE}"
             ));
         };
+        if std::path::Path::new(dir).is_file() {
+            let checked = std::fs::File::open(dir)
+                .map_err(|e| e.to_string())
+                .and_then(|mut f| {
+                    fennec_core::engine::check_reader(&mut f).map_err(|e| e.to_string())
+                });
+            return match checked {
+                Ok(n) => {
+                    println!("{dir}: {n} records, each whole by its checksum or carrying none");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("fennec verify: {dir}: {e}");
+                    1
+                }
+            };
+        }
         let iso = |t: u64| fennec_core::time::format_iso(t as i64);
         return match archive(dir).and_then(|a| a.verify()) {
             Ok(v) => {

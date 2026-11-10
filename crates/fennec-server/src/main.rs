@@ -1284,6 +1284,16 @@ fn main() {
             match opened {
                 Ok(db) => {
                     fennec_http::log!("opened: {path}");
+                    if let Some(c) = db.cut_on_open() {
+                        fennec_http::log!(
+                            "{path}: cut {} bytes at {} ({} records) off its end, what a crash \
+                             tore or a block that never landed: none of it a write answered as \
+                             durable",
+                            c.bytes,
+                            c.at,
+                            c.records
+                        );
+                    }
                     #[cfg(windows)]
                     say_volume(path, mmap);
                     db

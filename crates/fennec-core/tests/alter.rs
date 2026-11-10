@@ -675,7 +675,7 @@ fn a_binary_from_before_meets_a_kind_it_refuses() {
     orders(&mut db);
     ok(&mut db, "alter collection orders drop field customer");
     let last = tap.records.lock().unwrap().last().unwrap().clone();
-    assert_eq!(last[0] & 0x7f, 12);
+    assert_eq!(last[0] & 0x1f, 12);
     let schema = db.collection("orders").unwrap().schema.encode();
     assert!(schema.windows(2).any(|w| w == [0, 12]), "{schema:?}");
     let mut file = tap.file.lock().unwrap().clone();

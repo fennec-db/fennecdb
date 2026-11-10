@@ -1518,11 +1518,10 @@ mod tests {
             &mut body,
             "create statement tally after insert or set or del docs ...",
         );
+        // Framed as this version frames a record, its checksum after it:
+        // the image's records carry theirs.
         let mut file = g.snapshot();
-        file.push(13);
-        put_uvarint(&mut file, 0);
-        put_uvarint(&mut file, body.len() as u64);
-        file.extend_from_slice(&body);
+        file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
         let mut again = Database::new();
         again.load(&file).unwrap();
         assert_eq!(again.collection("docs").unwrap().bound, 7);

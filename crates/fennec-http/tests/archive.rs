@@ -668,21 +668,36 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, bytes).unwrap();
     let v = Archive::new(&zeros).unwrap().verify().unwrap();
     assert_eq!((v.last, v.torn), (p.seq(), 4096), "{v:?}");
-    // Zeros with a byte after them are no torn tail: refused at the first
-    // zero head, judged once (a MiB of them was read again at each 11).
+    // Zeros with a byte after them, in a segment of records carrying
+    // checksums: a torn tail where nothing whole follows them, judged once
+    // (a MiB of them was read again at each 11), and damage refused where a
+    // whole record does -- found at whatever byte it starts.
     let mut bytes = std::fs::read(&last).unwrap();
     let at = bytes.len() - 4096 + 8;
     bytes.resize(bytes.len() + (1 << 20), 0);
     bytes.push(1);
-    std::fs::write(&last, bytes).unwrap();
+    std::fs::write(&last, &bytes).unwrap();
+    let v = Archive::new(&zeros).unwrap().verify().unwrap();
+    assert_eq!((v.last, v.torn), (p.seq(), 4096 + (1 << 20) + 1), "{v:?}");
+    let entry = {
+        let rec = &bytes[16..];
+        let mut q = 1;
+        fennec_core::codec::get_uvarint(rec, &mut q).unwrap();
+        let body = fennec_core::codec::get_uvarint(rec, &mut q).unwrap() as usize;
+        bytes[8..16 + q + body].to_vec()
+    };
+    let whole = bytes.len() + 8;
+    bytes.extend_from_slice(&entry);
+    std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&zeros).unwrap().verify().unwrap_err();
-    let says = format!("unknown record kind 0 at {at}");
+    let says = format!("the record at {at} is damaged, with the whole record at {whole} after it");
     assert!(e.to_string().contains(&says), "{e}");
 
     // Each record carries a checksum. The last one failing it -- its length
     // on the disk, part of its bytes not -- is a torn tail, cut as one cut
     // short is; one failing before a whole record is damage, refused by
-    // where it starts.
+    // where it starts, and so are zeros across a head before one: the whole
+    // record is found at whatever byte it starts.
     let sums = copy_of(&arch, &d.join("sums"));
     let last = named(&sums, "writes-").pop().unwrap();
     let good = std::fs::read(&last).unwrap();
@@ -690,11 +705,15 @@ fn verify_says_what_an_archive_can_restore() {
     let mut pos = 8;
     while pos < good.len() {
         starts.push(pos + 8);
-        let (len, holds) = fennec_core::engine::record_holds(&good[pos + 8..]).unwrap();
-        assert!(holds);
+        let rec = &good[pos + 8..];
+        let mut p = 1;
+        fennec_core::codec::get_uvarint(rec, &mut p).unwrap();
+        let body = fennec_core::codec::get_uvarint(rec, &mut p).unwrap() as usize;
+        let len = p + body;
+        assert_eq!(fennec_core::engine::checksum_holds(&rec[..len]), Some(true));
         pos += 8 + len;
     }
-    assert!(starts.len() >= 2, "{starts:?}");
+    assert!(starts.len() >= 3, "{starts:?}");
     let mut bytes = good.clone();
     *bytes.last_mut().unwrap() ^= 1;
     std::fs::write(&last, &bytes).unwrap();
@@ -706,8 +725,17 @@ fn verify_says_what_an_archive_can_restore() {
     std::fs::write(&last, &bytes).unwrap();
     let e = Archive::new(&sums).unwrap().verify().unwrap_err();
     let says = format!(
-        "the record at {} fails its checksum, with whole records after it",
-        starts[0]
+        "the record at {} is damaged, with the whole record at {} after it",
+        starts[0], starts[1]
+    );
+    assert!(e.to_string().contains(&says), "{e}");
+    let mut bytes = good.clone();
+    bytes[starts[1] - 8..starts[1] + 3].fill(0);
+    std::fs::write(&last, &bytes).unwrap();
+    let e = Archive::new(&sums).unwrap().verify().unwrap_err();
+    let says = format!(
+        "the record at {} is damaged, with the whole record at {} after it",
+        starts[1], starts[2]
     );
     assert!(e.to_string().contains(&says), "{e}");
     // An image's records too, which no open reads to the byte: one flipped

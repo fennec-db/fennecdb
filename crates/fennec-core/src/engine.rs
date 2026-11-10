@@ -210,18 +210,47 @@ const REC_LAND: u8 = 11;
 /// and would have taken a field moved for one; this one it refuses. Undone
 /// in a block as an index built is ([`Undo::Altered`]).
 const REC_FIELDS: u8 = 12;
-/// A kind's high bit: the record carries its checksum, CRC32C of its head
-/// and body, in the last [`SUM`] bytes its length counts -- `[kind | 0x80]
-/// [collection][length][body][sum]`. Every record this version writes into
-/// a file has one, the counter's fixed-width head aside; one a version
-/// before wrote has none, and loads as it reads. The length counts the sum
-/// so that a version before frames the record as it is and refuses its
-/// kind in words ("unknown record kind 131"), never reading the sum as the
-/// next record. The records inside a block, a spill or a land carry none:
-/// the one around them covers them (docs/design/storage.md#file-format).
+/// A file's mark that every byte before it was durable: a record of no
+/// body whose claim says so ([`CHECKED`]), appended by a file's sink as
+/// its database closes after an fsync covered everything it wrote
+/// (`fs::FileSink`'s drop) -- the next open then checks nothing behind it.
+/// Not a write, never sent to a replica, and written with no fsync of its
+/// own: lost, the claims before it stand.
+const REC_SYNCED: u8 = 14;
+/// A kind's high bit: the record carries its checksum, CRC32C of its head,
+/// body and claim, in the last [`SUM`] bytes its length counts --
+/// `[kind | 0x80 | width][collection][length][body][claim][sum]`. Every
+/// record this version writes into a file has one, the counter's
+/// fixed-width head aside; one a version before wrote has none, and loads
+/// as it reads. The length counts the claim and the sum so that a version
+/// before frames the record as it is and refuses its kind in words
+/// ("unknown record kind 131"), never reading them as the next record. The
+/// records inside a block, a spill or a land carry none: the one around
+/// them covers them (docs/design/storage.md#file-format).
 const CHECKED: u8 = 0x80;
+/// The two bits under [`CHECKED`] of a checked record's kind byte: its
+/// claim's width in bytes, less one. In the head, so a walk over a file's
+/// heads -- every open's -- finds where a body ends without reading the
+/// record's last page.
+const WIDTH: u8 = 0x60;
+/// The kind itself, under the width.
+const KIND: u8 = 0x1f;
 /// A checked record's checksum: the CRC32C, little-endian, last.
 const SUM: usize = 4;
+/// A checked record's claim, before its sum: 0 for none, or one more than
+/// how many [`CLAIM_UNIT`]s before the record's first byte the file was
+/// durable to when it was appended -- every byte before that point covered
+/// by a completed fsync (or the sync log's), or by a claim the open found
+/// -- little-endian, 1 to this many bytes ([`claim_of`]). What an open
+/// finds the file's durable point by, and checks the records from there
+/// on alone.
+const CLAIM_MAX: usize = 4;
+/// What a claim counts in: a page, rounded up, so that the point it makes
+/// is never past the file's. Counted in bytes, a record more than 254
+/// bytes past the last fsync -- most, between a server's periodic syncs --
+/// claimed in two or three bytes; counted in pages, one byte reaches a
+/// mebibyte back, and the open checks a page more at most.
+const CLAIM_UNIT: u64 = 4096;
 
 const FIELD_ADD: u8 = 1;
 const FIELD_DROP: u8 = 2;
@@ -400,14 +429,57 @@ pub fn checksum_holds(record: &[u8]) -> Option<bool> {
     r.checked().then(|| r.holds(record))
 }
 
-/// The record at the front of `bytes`, when it is one this version frames
-/// and all there: its length, and whether it is as it was written -- its
-/// sum its own, or none carried. `None` at zeros, a kind it does not know,
-/// the counter's head or a record cut short: what no walk reads on from.
-pub fn record_holds(bytes: &[u8]) -> Option<(usize, bool)> {
-    let end = framed_end(bytes, 0)?;
-    let r = record_at(bytes, &mut 0).ok()?;
-    Some((end, r.holds(bytes)))
+/// Where the first record from `from` on starts that is whole by its own
+/// sum -- found at any byte, not by walking from a head, since what stops
+/// a walk may have swallowed the heads after it -- and, `past` given,
+/// claims the file durable past that byte: what damage is judged by
+/// ([`judge`]; an archive's segment, whose records' claims are its
+/// primary's, by any). A head is summed only where its kind is one this
+/// version knows, checked, its collection id and length read and fit, and
+/// its claim passes `past`; and no more is summed than four times the bytes
+/// looked over and 64 MiB: past that, stale bytes making heads by chance,
+/// it answers `Err`, and its caller refuses rather than cut what it could
+/// not judge.
+#[allow(clippy::result_unit_err)]
+pub fn whole_after(
+    bytes: &[u8],
+    from: usize,
+    past: Option<usize>,
+) -> std::result::Result<Option<usize>, ()> {
+    let mut budget = bytes.len().saturating_sub(from).saturating_mul(4) + (64 << 20);
+    for at in from..bytes.len() {
+        let Some((holds, summed)) = whole_at(bytes, at, false, past) else {
+            continue;
+        };
+        if holds {
+            return Ok(Some(at));
+        }
+        budget = budget.checked_sub(summed).ok_or(())?;
+    }
+    Ok(None)
+}
+
+/// Sums again the record of `file` that holds byte `at`: what a test that
+/// changes a record's body to one this version must refuse -- a tag, an op
+/// it does not know -- does, so that the record is whole and refused for
+/// what it holds rather than cut as torn. `false` where no checked record
+/// holds it.
+#[doc(hidden)]
+pub fn resum(file: &mut [u8], at: usize) -> bool {
+    let mut walk = Walk::stopping(file, MAGIC.len());
+    let mut found = None;
+    while let Ok(Some(r)) = walk.next() {
+        if r.at <= at && at < walk.pos {
+            found = r.claim_at.map(|_| (r.at, r.sum_at));
+            break;
+        }
+    }
+    let Some((from, sum_at)) = found else {
+        return false;
+    };
+    let sum = crc32c(0, &file[from..sum_at]);
+    file[sum_at..sum_at + SUM].copy_from_slice(&sum.to_le_bytes());
+    true
 }
 
 /// The body of the whole record at the front of `record` when it is of
@@ -421,15 +493,19 @@ pub fn record_body(record: &[u8], kind: u8) -> Option<&[u8]> {
 }
 
 /// Holds every record of a file's bytes to its sum, the image's too, which
-/// an open never reads: what `fennec verify` asks of each image an archive
-/// keeps, so that a backup no restore could read whole is known before it
-/// is needed. Refused naming the first record that fails, or one cut short.
+/// an open never reads, and those before the point the file was durable
+/// to, which it reads unchecked: what `fennec verify` asks of each image an
+/// archive keeps, and of a database file, so that damage no open would
+/// find is known before a restore or a read needs those bytes. Refused
+/// naming the first record that fails, one cut short, or one carrying no
+/// sum after one that does; the records counted otherwise.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn check_records(bytes: &[u8]) -> Result<()> {
+pub fn check_records(bytes: &[u8]) -> Result<u64> {
     if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC[..] {
         return Err(Error::Corrupt("invalid fennecdb signature".into()));
     }
     let mut walk = Walk::new(bytes, MAGIC.len());
+    let (mut n, mut checked) = (0, false);
     while let Some(r) = walk.next()? {
         if !r.holds(bytes) {
             return Err(Error::Corrupt(format!(
@@ -437,13 +513,118 @@ pub fn check_records(bytes: &[u8]) -> Result<()> {
                 r.at
             )));
         }
+        if r.kind != REC_SEQ {
+            if checked && !r.checked() {
+                return Err(Error::Corrupt(format!(
+                    "the record at {} carries no checksum, after records that do",
+                    r.at
+                )));
+            }
+            checked |= r.checked();
+        }
+        n += 1;
     }
     match walk.torn {
         true => Err(Error::Corrupt(format!(
             "the record at {} runs past the end of the file",
             walk.pos
         ))),
-        false => Ok(()),
+        false => Ok(n),
+    }
+}
+
+/// [`check_records`] over a reader, a stretch at a time: what `fennec
+/// verify` holds an archive's images and a database file to. An image's
+/// data record is its whole store, so read whole an image of 4 GB was 4 GB
+/// of memory twice over (the read, and the open beside it); here each
+/// record is summed as it streams past, the CRC's state carried from one
+/// stretch to the next, and no more than a stretch is held.
+#[cfg(feature = "std-fs")]
+pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
+    use std::io::Read;
+    let io = |e: std::io::Error| Error::Io(e.to_string());
+    let mut r = std::io::BufReader::with_capacity(1 << 20, input);
+    let mut magic = [0u8; MAGIC.len()];
+    r.read_exact(&mut magic)
+        .map_err(|_| Error::Corrupt("invalid fennecdb signature".into()))?;
+    if magic != MAGIC[..] {
+        return Err(Error::Corrupt("invalid fennecdb signature".into()));
+    }
+    let (mut at, mut n, mut checked) = (MAGIC.len() as u64, 0u64, false);
+    let mut chunk = vec![0u8; 1 << 16];
+    let short =
+        |at: u64| Error::Corrupt(format!("the record at {at} runs past the end of the file"));
+    loop {
+        let mut kind = [0u8; 1];
+        if r.read(&mut kind).map_err(io)? == 0 {
+            return Ok(n);
+        }
+        let byte = kind[0];
+        if byte == REC_SEQ {
+            let mut h = [0u8; REC_SEQ_LEN - 1];
+            r.read_exact(&mut h).map_err(|_| short(at))?;
+            at += REC_SEQ_LEN as u64;
+            n += 1;
+            continue;
+        }
+        if !known(byte) {
+            return Err(unknown_kind(byte, at as usize));
+        }
+        // The head's two uvarints, read a byte at a time and kept for the
+        // sum, which covers them.
+        let mut head = vec![byte];
+        let mut vals = [0u64; 2];
+        for v in &mut vals {
+            let mut shift = 0;
+            loop {
+                let mut b = [0u8; 1];
+                r.read_exact(&mut b).map_err(|_| short(at))?;
+                head.push(b[0]);
+                if shift > 63 {
+                    return Err(Error::Corrupt(format!(
+                        "the record at {at} has a bad length"
+                    )));
+                }
+                *v |= u64::from(b[0] & 0x7f) << shift;
+                shift += 7;
+                if b[0] & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+        let len = vals[1];
+        let is_checked = byte & CHECKED != 0;
+        if checked && !is_checked {
+            return Err(Error::Corrupt(format!(
+                "the record at {at} carries no checksum, after records that do"
+            )));
+        }
+        checked |= is_checked;
+        let summed = match is_checked {
+            true => len.checked_sub(SUM as u64).ok_or_else(|| short(at))?,
+            false => len,
+        };
+        let mut crc = crc32c(0, &head);
+        let mut left = summed;
+        while left > 0 {
+            let take = left.min(chunk.len() as u64) as usize;
+            r.read_exact(&mut chunk[..take]).map_err(|_| short(at))?;
+            if is_checked {
+                crc = crc32c(crc, &chunk[..take]);
+            }
+            left -= take as u64;
+        }
+        if is_checked {
+            let mut sum = [0u8; SUM];
+            r.read_exact(&mut sum).map_err(|_| short(at))?;
+            if u32::from_le_bytes(sum) != crc {
+                return Err(Error::Corrupt(format!(
+                    "the record at {at} fails its checksum"
+                )));
+            }
+        }
+        at += head.len() as u64 + len;
+        n += 1;
     }
 }
 
@@ -624,22 +805,126 @@ fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
     Ok(())
 }
 
-/// A record of the file, checked: `[kind | CHECKED][collection id][length]
-/// [body][sum]`, its length counting the sum.
+/// A record of the file, checked: `[kind | CHECKED | width][collection id]
+/// [length][body][claim][sum]`, its length counting the claim and the sum.
+/// One that claims nothing ([`claim_of`]): an image's, a graph's, the
+/// history's, a feed's.
 fn framed(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
-    let (h, n) = head(kind | CHECKED, cid, body.len() + SUM);
-    let mut out = Vec::with_capacity(n + body.len() + SUM);
+    framed_claiming(kind, cid, body, 0)
+}
+
+/// [`framed`], claiming `claim` ([`claim_of`]): a write's record, appended
+/// where the database knows where it goes.
+fn framed_claiming(kind: u8, cid: u32, body: &[u8], claim: u32) -> Vec<u8> {
+    let w = claim_width(claim);
+    let (h, n) = head(checked_kind(kind, w), cid, body.len() + w + SUM);
+    let mut out = Vec::with_capacity(n + body.len() + w + SUM);
     out.extend_from_slice(&h[..n]);
     out.extend_from_slice(body);
+    out.extend_from_slice(&claim.to_le_bytes()[..w]);
     let sum = crc32c(0, &out);
     out.extend_from_slice(&sum.to_le_bytes());
     out
 }
 
-/// A record of the file, as this version writes it: what a test or a tool
-/// writing a file of its own makes one with, `kind` the plain one.
+/// The claim of a record appended at `at` in a file durable to `durable`
+/// (`Sink::durable`): one more than the distance back to it in pages,
+/// rounded up, or 0 -- no claim -- where nothing past the signature is
+/// known durable, or it is not behind the record, or further back than
+/// four bytes count.
+pub(crate) fn claim_of(at: u64, durable: u64) -> u32 {
+    match durable {
+        d if d <= MAGIC.len() as u64 => 0,
+        d if d > at => 0,
+        d => u32::try_from((at - d).div_ceil(CLAIM_UNIT) + 1).unwrap_or(0),
+    }
+}
+
+/// How many bytes a claim takes: the fewest that hold it.
+fn claim_width(claim: u32) -> usize {
+    match claim {
+        0..=0xff => 1,
+        0x100..=0xffff => 2,
+        0x1_0000..=0xff_ffff => 3,
+        _ => 4,
+    }
+}
+
+/// The kind byte of a checked record of `kind` whose claim is `w` bytes.
+fn checked_kind(kind: u8, w: usize) -> u8 {
+    CHECKED | (((w - 1) as u8) << 5) | kind
+}
+
+/// A record of the file, as this version writes it, claiming nothing: what
+/// a test or a tool writing a file of its own makes one with, `kind` the
+/// plain one.
 pub fn record(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
     framed(kind, cid, body)
+}
+
+/// [`record`] appended at `at` in a file every byte before `durable` of
+/// which was durable then: what a tool writes a file as a server would
+/// leave it with (`examples/open.rs`), and a test a file whose durable
+/// point it knows.
+pub fn record_claiming(kind: u8, cid: u32, body: &[u8], at: u64, durable: u64) -> Vec<u8> {
+    framed_claiming(kind, cid, body, claim_of(at, durable))
+}
+
+/// The mark a file's sink appends as its database closes, every byte
+/// before it durable ([`REC_SYNCED`]).
+#[cfg(feature = "std-fs")]
+pub(crate) fn synced_mark() -> Vec<u8> {
+    framed_claiming(REC_SYNCED, 0, &[], 1)
+}
+
+/// `records` as a version before checksums wrote them: each record's claim
+/// and sum taken off, its kind's bits too and its length its body's. What
+/// a primary sends a replica, an archiver or a `restore` that does not say
+/// it reads sums -- an older binary, which refuses a checked record -- so
+/// that it follows through a rolling upgrade (`/_replication`'s `sums`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn plain_records(records: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(records.len());
+    let mut pos = 0;
+    while pos < records.len() {
+        let at = pos;
+        let r = record_at(records, &mut pos)?;
+        if r.checked() {
+            let (h, n) = head(r.kind, r.cid, r.body.len());
+            out.extend_from_slice(&h[..n]);
+            out.extend_from_slice(r.body);
+        } else {
+            out.extend_from_slice(&records[at..pos]);
+        }
+    }
+    Ok(out)
+}
+
+/// An image ([`Database::snapshot`]) as a version before checksums wrote
+/// one: its records as [`plain_records`] makes them, the counter's head
+/// saying the image's new length.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn plain_image(image: &[u8]) -> Result<Vec<u8>> {
+    if image.len() < MAGIC.len() || image[..MAGIC.len()] != MAGIC[..] {
+        return Err(Error::Corrupt("invalid fennecdb signature".into()));
+    }
+    let mut out = image[..MAGIC.len()].to_vec();
+    let mut pos = MAGIC.len();
+    let counter = image.get(pos) == Some(&REC_SEQ);
+    if counter {
+        let h = image
+            .get(pos..pos + REC_SEQ_LEN)
+            .ok_or_else(|| Error::Corrupt("truncated counter header".into()))?;
+        out.extend_from_slice(h);
+        pos += REC_SEQ_LEN;
+    }
+    out.extend_from_slice(&plain_records(&image[pos..])?);
+    if counter {
+        let at = MAGIC.len() + 9;
+        let len = (out.len() - MAGIC.len() - REC_SEQ_LEN) as u64;
+        out[at..at + 8].copy_from_slice(&len.to_le_bytes());
+    }
+    Ok(out)
 }
 
 /// A record inside a block, a spill or a land: `[kind][collection id]
@@ -653,7 +938,8 @@ fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
 /// A checked record written into an [`ImageOut`] as its body is: the head
 /// first, the sum carried over every byte after it, and written last
 /// ([`Self::end`]). An image's records are written so, a data record's
-/// body a stretch of its store at a time.
+/// body a stretch of its store at a time; they claim nothing, the image
+/// being durable whole before it is the database's file.
 pub(crate) struct Summed<'a> {
     out: &'a mut dyn ImageOut,
     sum: u32,
@@ -662,7 +948,7 @@ pub(crate) struct Summed<'a> {
 impl<'a> Summed<'a> {
     /// The head of a record whose body is `len` bytes, written.
     pub(crate) fn begin(out: &'a mut dyn ImageOut, kind: u8, cid: u32, len: usize) -> Result<Self> {
-        let (h, n) = head(kind | CHECKED, cid, len + SUM);
+        let (h, n) = head(checked_kind(kind, 1), cid, len + 1 + SUM);
         out.write(&h[..n])?;
         Ok(Summed {
             out,
@@ -670,8 +956,9 @@ impl<'a> Summed<'a> {
         })
     }
 
-    /// The sum, written: the record is whole.
-    pub(crate) fn end(self) -> Result<()> {
+    /// The claim, none, and the sum, written: the record is whole.
+    pub(crate) fn end(mut self) -> Result<()> {
+        self.write(&[0])?;
         self.out.write(&self.sum.to_le_bytes())
     }
 }
@@ -704,43 +991,77 @@ pub(crate) fn put_record(out: &mut dyn ImageOut, kind: u8, cid: u32, body: &[u8]
 
 /// A record, as a walk over a file or a feed of them finds it.
 struct Rec<'a> {
-    /// Its kind, [`CHECKED`] taken off.
+    /// Its kind, [`CHECKED`] and the width taken off.
     kind: u8,
     cid: u32,
     /// Where it starts, and where its body does, in the bytes walked.
     at: usize,
     body_at: usize,
     body: &'a [u8],
-    /// Where a checked record's sum is -- `usize::MAX` for one too short to
-    /// hold it -- and `None` for a record with none.
-    sum: Option<usize>,
+    /// Where a checked record's claim is, its sum right after it at
+    /// `sum_at` -- both `usize::MAX` for one too short to hold them -- and
+    /// `None` for a record with none.
+    claim_at: Option<usize>,
+    sum_at: usize,
 }
 
 impl Rec<'_> {
     /// Whether the record is as it was written, in `bytes`, the ones it was
-    /// read from: its sum is its head's and body's, or it carries none.
-    /// What a torn tail's zeros or stale bytes inside a record fail.
+    /// read from: its sum is its head's, body's and claim's, or it carries
+    /// none. What a torn tail's zeros or stale bytes inside a record fail.
     fn holds(&self, bytes: &[u8]) -> bool {
-        let Some(s) = self.sum else {
-            return true;
+        match self.claim_at {
+            None => true,
+            Some(_) => self.summed(bytes).is_some_and(|(_, ok)| ok),
+        }
+    }
+
+    /// For a checked record: the sum of its head and body -- what a replica
+    /// carries over the claim it writes in place of its primary's -- and
+    /// whether the record's own sum holds.
+    fn summed(&self, bytes: &[u8]) -> Option<(u32, bool)> {
+        let c = self.claim_at?;
+        let (Some(front), Some(claim), Some(&[a, b, d, e])) = (
+            bytes.get(self.at..c),
+            bytes.get(c..self.sum_at),
+            bytes.get(self.sum_at..self.sum_at.wrapping_add(SUM)),
+        ) else {
+            return Some((0, false));
         };
-        match (bytes.get(self.at..s), bytes.get(s..s.wrapping_add(SUM))) {
-            (Some(summed), Some(&[a, b, c, d])) => {
-                crc32c(0, summed) == u32::from_le_bytes([a, b, c, d])
-            }
-            _ => false,
+        let head = crc32c(0, front);
+        Some((
+            head,
+            crc32c(head, claim) == u32::from_le_bytes([a, b, d, e]),
+        ))
+    }
+
+    /// The point every byte before which a checked record claims was
+    /// durable as it was appended -- `None` where it claims none. Read from
+    /// its claim, which only a sum that holds vouches for. Native only: the
+    /// browser looks for no durable point, and checks every record past
+    /// the image.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn claimed(&self, bytes: &[u8]) -> Option<usize> {
+        let c = self.claim_at?;
+        let raw = bytes.get(c..self.sum_at)?;
+        let mut v = [0u8; 4];
+        v[..raw.len()].copy_from_slice(raw);
+        match u32::from_le_bytes(v) as u64 {
+            0 => None,
+            v => self.at.checked_sub(((v - 1) * CLAIM_UNIT) as usize),
         }
     }
 
     /// Whether it carries a sum.
     fn checked(&self) -> bool {
-        self.sum.is_some()
+        self.claim_at.is_some()
     }
 }
 
-/// The record at `*pos` -- `[kind][collection][length][body]`, or the
-/// counter's fixed-width head -- and `*pos` moved past it: the one place a
-/// head is read.
+/// The record at `*pos` -- `[kind][collection][length][body]`, its claim
+/// and sum after the body where its kind's high bit says, or the counter's
+/// fixed-width head -- and `*pos` moved past it: the one place a head is
+/// read. The claim's width is in the kind byte, so neither is read here.
 fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
     let at = *pos;
     let kind = bytes[at];
@@ -755,7 +1076,8 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
             at,
             body_at: at + 1,
             body,
-            sum: None,
+            claim_at: None,
+            sum_at: 0,
         });
     }
     let mut p = at + 1;
@@ -765,20 +1087,30 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
         .get(p..p.saturating_add(len))
         .ok_or_else(|| Error::Corrupt("a record cut short".into()))?;
     *pos = p + len;
-    let (body, sum) = match kind & CHECKED {
-        0 => (all, None),
-        _ => match len.checked_sub(SUM) {
-            Some(n) => (&all[..n], Some(p + n)),
-            None => (&all[..0], Some(usize::MAX)),
-        },
+    if kind & CHECKED == 0 {
+        return Ok(Rec {
+            kind,
+            cid,
+            at,
+            body_at: p,
+            body: all,
+            claim_at: None,
+            sum_at: 0,
+        });
+    }
+    let trailer = (((kind & WIDTH) >> 5) + 1) as usize + SUM;
+    let (body, claim_at, sum_at) = match len.checked_sub(trailer) {
+        Some(n) => (&all[..n], p + n, p + len - SUM),
+        None => (&all[..0], usize::MAX, usize::MAX),
     };
     Ok(Rec {
-        kind: kind & !CHECKED,
+        kind: kind & KIND,
         cid,
         at,
         body_at: p,
         body,
-        sum,
+        claim_at: Some(claim_at),
+        sum_at,
     })
 }
 
@@ -786,7 +1118,8 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
 /// search for the last graphs each walk. It stops at the end or at a record
 /// cut short or zeros to the end ([`whole_record`]) -- `torn`, `pos` where
 /// it starts -- which is the walker's to judge: a crash's torn tail, or
-/// damage inside an image. A kind it does not know it refuses.
+/// damage inside an image. A kind it does not know it refuses -- or, a walk
+/// [`Self::stopping`], stops at, `refused` saying what it would have said.
 struct Walk<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -795,6 +1128,14 @@ struct Walk<'a> {
     /// start, then the image's end once the load has read its counter
     /// header ([`zero_tail`]).
     edge: usize,
+    /// Whether a head that reads as no record -- a kind this version does
+    /// not know, zeros with a byte after them -- stops the walk rather than
+    /// refuse it: a load's, which judges what stops it by the file's claims
+    /// in a file this version wrote, and refuses as before in one it did
+    /// not.
+    stops: bool,
+    /// What such a head would have been refused as.
+    refused: Option<Error>,
 }
 
 impl<'a> Walk<'a> {
@@ -804,6 +1145,16 @@ impl<'a> Walk<'a> {
             pos,
             torn: false,
             edge: pos,
+            stops: false,
+            refused: None,
+        }
+    }
+
+    /// A walk that stops at a head reading as no record ([`Self::stops`]).
+    fn stopping(bytes: &'a [u8], pos: usize) -> Walk<'a> {
+        Walk {
+            stops: true,
+            ..Walk::new(bytes, pos)
         }
     }
 
@@ -811,11 +1162,18 @@ impl<'a> Walk<'a> {
         if self.pos >= self.bytes.len() {
             return Ok(None);
         }
-        if !whole_record(self.bytes, self.pos, self.edge)? {
-            self.torn = true;
-            return Ok(None);
+        match whole_record(self.bytes, self.pos, self.edge) {
+            Ok(true) => record_at(self.bytes, &mut self.pos).map(Some),
+            Ok(false) => {
+                self.torn = true;
+                Ok(None)
+            }
+            Err(e) if self.stops => {
+                self.refused = Some(e);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
-        record_at(self.bytes, &mut self.pos).map(Some)
     }
 }
 
@@ -1131,14 +1489,18 @@ impl Block {
     /// frame when they are all one collection's writes -- a lone write's
     /// record as it always was -- the record of a lone schema change, and a
     /// block record around each write's record otherwise.
-    fn record(&mut self) -> std::borrow::Cow<'_, [u8]> {
+    /// Claiming `claim` ([`claim_of`]), the same the quota was asked with
+    /// ([`Self::record_len`]).
+    fn record(&mut self, claim: u32) -> std::borrow::Cow<'_, [u8]> {
         let (kind, cid, end) = self.heads[self.heads.len() - 1];
         if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
-            // The header goes into the room before the frames, the sum after
-            // them: the frames are not copied.
+            // The header goes into the room before the frames, the claim and
+            // the sum after them: the frames are not copied.
             self.frames.truncate(end);
-            let (h, n) = head(kind | CHECKED, cid, end - HEAD_ROOM + SUM);
+            let w = claim_width(claim);
+            let (h, n) = head(checked_kind(kind, w), cid, end - HEAD_ROOM + w + SUM);
             self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&h[..n]);
+            self.frames.extend_from_slice(&claim.to_le_bytes()[..w]);
             let sum = crc32c(0, &self.frames[HEAD_ROOM - n..]);
             self.frames.extend_from_slice(&sum.to_le_bytes());
             return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
@@ -1149,7 +1511,7 @@ impl Block {
             frame_into(&mut body, kind, cid, &self.frames[start..end]);
             start = end;
         }
-        std::borrow::Cow::Owned(framed(REC_BLOCK, 0, &body))
+        std::borrow::Cow::Owned(framed_claiming(REC_BLOCK, 0, &body, claim))
     }
 }
 
@@ -1184,12 +1546,17 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     Ok(len <= (bytes.len() - pos) as u64)
 }
 
-/// Whether `kind` is a record's this version reads with a length, checked
-/// or not: every kind but the counter's fixed-width head, which is never
-/// checked.
-fn known(kind: u8) -> bool {
+/// Whether `byte`, a record's first, is a kind this version reads with a
+/// length: every kind but the counter's fixed-width head, which is never
+/// checked -- a checked one whatever its claim's width, a plain one only as
+/// a version before wrote it, and the close's mark only checked.
+fn known(byte: u8) -> bool {
+    let kind = match byte & CHECKED {
+        0 => byte,
+        _ => byte & KIND,
+    };
     matches!(
-        kind & !CHECKED,
+        kind,
         REC_CREATE
             | REC_DROP
             | REC_DATA
@@ -1202,46 +1569,59 @@ fn known(kind: u8) -> bool {
             | REC_BLOCK
             | REC_SPILL
             | REC_LAND
-    )
+    ) || (kind == REC_SYNCED && byte & CHECKED != 0)
 }
 
-/// Where the record at `at` ends, when it is one this version frames and
-/// all there; `None` at zeros, a kind it does not know, the counter's head
-/// or a record cut short -- what no walk reads on from.
-fn framed_end(bytes: &[u8], at: usize) -> Option<usize> {
-    if !bytes.get(at).is_some_and(|&k| known(k)) {
+/// Whether a checked record starts at `at` -- of a kind this version knows,
+/// or any, `any` said -- whole by its own sum, and, `past` given, claiming
+/// the file durable past that byte; `Some` then, with how many bytes its
+/// sum took, and `None` without summing where its head does not read, does
+/// not fit or its claim does not pass.
+fn whole_at(bytes: &[u8], at: usize, any: bool, past: Option<usize>) -> Option<(bool, usize)> {
+    let byte = *bytes.get(at)?;
+    if byte & CHECKED == 0 || byte & KIND == 0 || !(any || known(byte)) {
         return None;
     }
-    let mut p = at + 1;
-    get_uvarint(bytes, &mut p).ok()?;
-    let len = get_uvarint(bytes, &mut p).ok()? as usize;
-    let end = p.checked_add(len)?;
-    (end <= bytes.len()).then_some(end)
-}
-
-/// Whether a record from `pos` on is as it was written: one whose sum is
-/// its own, or one carrying none, whole by its length, which nothing shows
-/// torn. Asked after a record that fails its sum, whose damage is a torn
-/// tail only where nothing written whole follows it; the walk stops where
-/// nothing frames on -- zeros, a kind it does not know, a record cut short
-/// -- so a torn tail's zeros or stale bytes read as no record.
-fn whole_after(bytes: &[u8], mut pos: usize) -> bool {
-    while let Some((len, holds)) = record_holds(&bytes[pos..]) {
-        if holds {
-            return true;
-        }
-        pos += len;
+    let mut q = at + 1;
+    let cid = get_uvarint(bytes, &mut q).ok()?;
+    let len = get_uvarint(bytes, &mut q).ok()?;
+    let w = (((byte & WIDTH) >> 5) + 1) as usize;
+    let end = (q as u64)
+        .checked_add(len)
+        .filter(|&e| e <= bytes.len() as u64)? as usize;
+    if cid > u32::MAX as u64 || (len as usize) < w + SUM {
+        return None;
     }
-    false
+    let (claim_at, sum_at) = (end - SUM - w, end - SUM);
+    if let Some(past) = past {
+        let mut c = [0u8; 4];
+        c[..w].copy_from_slice(&bytes[claim_at..sum_at]);
+        let back = (u32::from_le_bytes(c) as u64).checked_sub(1)? * CLAIM_UNIT;
+        if at.checked_sub(back as usize)? <= past {
+            return None;
+        }
+    }
+    let sum = u32::from_le_bytes(bytes[sum_at..end].try_into().ok()?);
+    Some((crc32c(0, &bytes[at..sum_at]) == sum, sum_at - at))
 }
 
-/// A record that fails its sum with a whole one after it: damage, not a
-/// torn tail, refused naming where it starts.
-#[cold]
-fn failed_sum(at: usize) -> Error {
-    Error::Corrupt(format!(
-        "the record at {at} fails its checksum, with whole records after it"
-    ))
+/// Damage at `x`, at or past the point the file was durable to -- a record
+/// failing its sum, a head no record reads from -- in a file this version
+/// wrote to: refused where a whole record after it claims the file durable
+/// past it, the damage then in bytes an fsync covered, and otherwise a torn
+/// tail, which its caller cuts: nothing after it was covered by an fsync
+/// that completed, so no write there was answered as durable. Refused too
+/// where what follows could not be judged ([`whole_after`]).
+fn judge(bytes: &[u8], x: usize, what: std::fmt::Arguments<'_>) -> Result<()> {
+    match whole_after(bytes, x + 1, Some(x)) {
+        Ok(None) => Ok(()),
+        Ok(Some(at)) => Err(Error::Corrupt(format!(
+            "{what}, and the whole record at {at} says the file was durable past it"
+        ))),
+        Err(()) => Err(Error::Corrupt(format!(
+            "{what}, and what follows it could not be judged"
+        ))),
+    }
 }
 
 /// Whether the bytes from the head at `at` are a torn tail of zeros: an
@@ -1277,37 +1657,110 @@ fn unknown_kind(kind: u8, at: usize) -> Error {
     Error::Corrupt(format!("unknown record kind {kind} at {at}"))
 }
 
-/// Where the last graph record of each index starts, by collection id and
-/// field: the one a load restores. The walk reads record heads alone and
-/// stops where the load would -- at a record cut short, or of a kind it
-/// refuses -- so the load says what is wrong.
-fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
-    let mut last: Vec<(u32, String, usize)> = Vec::new();
-    let mut walk = Walk::new(bytes, MAGIC.len());
-    while walk.pos < bytes.len() {
-        if bytes[walk.pos] != REC_SEQ && !known(bytes[walk.pos]) {
-            break;
+/// What an open cut off a file's end ([`Database::cut_on_open`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cut {
+    /// Where the file now ends.
+    pub at: u64,
+    /// How many bytes went.
+    pub bytes: u64,
+    /// How many records a walk framed among them, the torn one first.
+    pub records: u64,
+}
+
+/// How many records a walk frames from `at` on: what a cut there takes.
+fn records_from(bytes: &[u8], at: usize) -> u64 {
+    let mut walk = Walk::stopping(bytes, at);
+    let mut n = 0;
+    while let Ok(Some(_)) = walk.next() {
+        n += 1;
+    }
+    n
+}
+
+/// What a walk over a file's heads finds before a load reads it: where the
+/// last graph record of each index starts, by collection id and field --
+/// the one a load restores -- and the point the file was durable to, which
+/// the load checks the records from. The walk reads record heads alone and
+/// stops where the load would, so the load says what is wrong.
+#[cfg(not(target_arch = "wasm32"))]
+struct Survey {
+    graphs: Vec<(u32, String, usize)>,
+    durable: usize,
+}
+
+/// The last records past the image carrying a sum that a survey keeps, the
+/// newest of which whose sum holds says how far the file was durable...
+#[cfg(not(target_arch = "wasm32"))]
+const RECENT: usize = 16;
+/// ...and one each this many bytes of them, should every recent one fail:
+/// a power cut that lost pages of more than the last few.
+#[cfg(not(target_arch = "wasm32"))]
+const SAMPLE: usize = 16 << 20;
+
+/// The file's [`Survey`]. Its durable point is the claim of the newest
+/// record whose sum holds, looked for from the newest record back -- a
+/// claim is never more than a page behind an earlier record's, each made
+/// as the file's syncs went on and rounded down to a page from its own
+/// start -- and the image's end where none says more: an image is synced
+/// before it is renamed into place. Below it the load reads records as it reads
+/// the image, unchecked; `fennec verify` checks them all.
+#[cfg(not(target_arch = "wasm32"))]
+fn survey(bytes: &[u8]) -> Result<Survey> {
+    let mut graphs: Vec<(u32, String, usize)> = Vec::new();
+    let mut walk = Walk::stopping(bytes, MAGIC.len());
+    let mut body_end = MAGIC.len();
+    let mut recent = [0usize; RECENT];
+    let mut n = 0;
+    let mut samples: Vec<usize> = Vec::new();
+    while let Some(r) = walk.next()? {
+        match r.kind {
+            REC_SEQ => {
+                let mut w = [0u8; 8];
+                w.copy_from_slice(&r.body[8..16]);
+                body_end = walk.pos.saturating_add(u64::from_le_bytes(w) as usize);
+                walk.edge = body_end;
+            }
+            REC_GRAPH => {
+                // A checked one whose field does not read is the load's to
+                // judge by its sum: a torn tail's, or damage.
+                let field = match crate::codec::decode_str(r.body, &mut 0) {
+                    Ok(f) => f,
+                    Err(_) if r.checked() => continue,
+                    Err(e) => return Err(e),
+                };
+                match graphs
+                    .iter_mut()
+                    .find(|(c, f, _)| *c == r.cid && *f == field)
+                {
+                    Some(l) => l.2 = r.at,
+                    None => graphs.push((r.cid, field, r.at)),
+                }
+            }
+            _ => {}
         }
-        let Some(r) = walk.next()? else { break };
-        if r.kind == REC_GRAPH {
-            // A checked one whose field does not read is the load's to
-            // judge by its sum: a torn tail's, or damage.
-            let field = match crate::codec::decode_str(r.body, &mut 0) {
-                Ok(f) => f,
-                Err(_) if r.checked() => continue,
-                Err(e) => return Err(e),
-            };
-            match last.iter_mut().find(|(c, f, _)| *c == r.cid && *f == field) {
-                Some(l) => l.2 = r.at,
-                None => last.push((r.cid, field, r.at)),
+        if r.at >= body_end && r.checked() {
+            recent[n % RECENT] = r.at;
+            n += 1;
+            if samples.last().is_none_or(|&s| r.at - s >= SAMPLE) {
+                samples.push(r.at);
             }
         }
     }
-    Ok(last)
+    let newest = (0..n.min(RECENT)).map(|k| recent[(n - 1 - k) % RECENT]);
+    let mut durable = body_end;
+    for at in newest.chain(samples.into_iter().rev()) {
+        let r = record_at(bytes, &mut { at })?;
+        if let Some(d) = r.claimed(bytes).filter(|_| r.holds(bytes)) {
+            durable = durable.max(d);
+            break;
+        }
+    }
+    Ok(Survey { graphs, durable })
 }
 
 /// Whether `r` is a graph record a later one of its index replaces, by the
-/// last of each that [`last_graphs`] found: a load never reads it. `None`
+/// last of each that [`survey`] found: a load never reads it. `None`
 /// in the browser, which restores each graph it meets.
 fn superseded(last: &Option<Vec<(u32, String, usize)>>, r: &Rec<'_>) -> bool {
     let Some(last) = last else {
@@ -1408,6 +1861,31 @@ pub trait Sink: Send {
     fn record(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
         let _ = seq;
         self.append(bytes)
+    }
+    /// [`Self::record`] for a record a replica takes from its primary,
+    /// written as `parts` -- its head and body as they came, then its claim
+    /// made this file's and the sum that goes with it -- and passed on as
+    /// `original` where the sink passes writes on: a file's sink copies the
+    /// parts where it would have copied the record, rather than have the
+    /// record copied once more to put them together.
+    fn record_parts(&mut self, seq: u64, original: &[u8], parts: &[&[u8]]) -> Result<()> {
+        let _ = original;
+        self.record(seq, &parts.concat())
+    }
+    /// How far the file is durable: every byte before this point was
+    /// covered by a completed fsync, or the sync log's, or by a claim the
+    /// open found ([`Self::set_durable`]) -- what each record appended
+    /// claims ([`claim_of`]), and an open checks the records from. 0, no
+    /// claim, for every sink but a file's.
+    fn durable(&self) -> u64 {
+        0
+    }
+    /// The point the load found the file durable to, handed over as the
+    /// database takes the sink: the appends claim it until an fsync covers
+    /// more. A file's sink, told it, appends a mark as the database closes
+    /// once an fsync covered everything ([`REC_SYNCED`]).
+    fn set_durable(&mut self, at: u64) {
+        let _ = at;
     }
     /// [`Self::append`] for a record whose durability ([`Self::flush`]) its
     /// caller runs as soon as it lets its lock go -- a graph a server keeps
@@ -4521,6 +4999,11 @@ struct Applied {
     writes: usize,
     was: usize,
     marks: usize,
+    /// A checked record's claim and sum, where they are in its bytes, and
+    /// the sum of its head and body, which the sum of the claim this file
+    /// writes in place of its primary's carries on from; `None` for an
+    /// older primary's record, which carries none and is framed anew.
+    trailer: Option<(usize, u32)>,
 }
 
 /// The records [`Database::land_applied`] hands the sink, from the one at
@@ -4665,6 +5148,13 @@ pub struct Database {
     /// opened, and every record appended since. An atomic because a graph
     /// record is appended under the read lock ([`Database::save_graphs`]).
     appended: std::sync::atomic::AtomicU64,
+    /// Where the load found the file durable to ([`survey`]): handed to the
+    /// sink it is given ([`Self::set_sink`]), which each append's claim is
+    /// made from until an fsync of its own covers more.
+    loaded_durable: u64,
+    /// What the load cut off a torn tail, for whoever opened the file to
+    /// say ([`Self::cut_on_open`]).
+    cut: Option<Cut>,
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
@@ -4902,6 +5392,8 @@ impl Database {
             adoptions: 0,
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
+            loaded_durable: 0,
+            cut: None,
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
             #[cfg(feature = "statements")]
@@ -4990,13 +5482,30 @@ impl Database {
 
     /// Sends every later write to `sink`. What was written before is not
     /// in it: the caller starts it from a [`Self::snapshot`].
-    pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
+    pub fn set_sink(&mut self, mut sink: Box<dyn Sink>) {
+        sink.set_durable(self.loaded_durable);
         *self.sink_mut() = sink;
+    }
+
+    /// What the open cut off the end of the file: a torn tail -- a record
+    /// a crash cut short, or failing its sum with nothing after it claiming
+    /// the file durable past it -- past the point the file was durable to,
+    /// so never a write answered as durable. For the server to say.
+    pub fn cut_on_open(&self) -> Option<&Cut> {
+        self.cut.as_ref()
     }
 
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
     fn sink_mut(&mut self) -> &mut Box<dyn Sink> {
         self.sink.get_mut().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The claim of a record appended at `at` ([`claim_of`]), by how far the
+    /// sink says the file is durable. Native only: a page's sink knows of
+    /// no fsync, and its records claim nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn claim(&mut self, at: u64) -> u32 {
+        claim_of(at, self.sink_mut().durable())
     }
 
     // -------------------------------------------------------------- changes
@@ -5781,8 +6290,11 @@ impl Database {
                 crate::codec::encode_str(&mut buf, field);
                 ix.serialize_graph_into(true, &mut buf);
                 let body = buf.len() - HEAD_ROOM;
-                let (h, hn) = head(REC_GRAPH | CHECKED, c.id, body + SUM);
+                // Claiming nothing: appended under the read lock, where it
+                // lands is known only as it does.
+                let (h, hn) = head(checked_kind(REC_GRAPH, 1), c.id, body + 1 + SUM);
                 buf[HEAD_ROOM - hn..HEAD_ROOM].copy_from_slice(&h[..hn]);
+                buf.push(0);
                 let sum = crc32c(0, &buf[HEAD_ROOM - hn..]);
                 buf.extend_from_slice(&sum.to_le_bytes());
                 let record = &buf[HEAD_ROOM - hn..];
@@ -5839,10 +6351,18 @@ impl Database {
         // restored at all: it would read every vector again for nothing. A
         // browser writes one record of a graph, in an image, and restores
         // each it meets rather than carry the walk.
-        let last = match cfg!(target_arch = "wasm32") {
-            true => None,
-            false => Some(last_graphs(bytes)?),
+        //
+        // The same walk finds how far the file was durable: every record
+        // past that point is checked, and the records before it are read as
+        // the image is. The browser carries neither, and checks every
+        // record past the image.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (last, durable) = {
+            let s = survey(bytes)?;
+            (Some(s.graphs), s.durable)
         };
+        #[cfg(target_arch = "wasm32")]
+        let (last, durable) = (None, 0);
         // The counter is built from two parts: the base written by the
         // checkpoint, and the records appended **after** the image body
         // ended. The boundary is a byte offset (`body_end`), not a record
@@ -5861,7 +6381,7 @@ impl Database {
         // and the map's code was 1.5 KB of the browser module.
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         let mut whole = bytes.len();
-        let mut walk = Walk::new(bytes, pos);
+        let mut walk = Walk::stopping(bytes, pos);
         // The spills since the last write, by where each record and its
         // body start and the body's length: a land takes the ones it names.
         let mut spills: Vec<(usize, usize, usize)> = Vec::new();
@@ -5872,28 +6392,49 @@ impl Database {
         // The index of a data record's frames an image writes after the
         // collection's id counter, for the record right after it alone.
         let mut frames: Option<(u32, &[u8])> = None;
-        // Where a record that fails its sum starts, with nothing whole after
-        // it: a torn tail, cut there.
+        // Where a record that fails its sum starts, nothing after it claiming
+        // the file durable past it: a torn tail, cut there.
         let mut torn_at: Option<usize> = None;
+        // Whether a record carrying a sum came yet: from then on every one
+        // does, this version writing nothing else into a file -- a replica
+        // frames anew what an older primary sends -- so one with none is a
+        // checked record's kind bit flipped, read past its sum otherwise.
+        let mut checked = false;
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
-            // Every record past the image is checked before it is read: an
-            // append whose length reached the disk before all its bytes reads
-            // whole, its later bytes the disk's zeros or stale ones. The image
-            // was synced before it was renamed into place, and its data
+            if r.kind != REC_SEQ {
+                match r.checked() {
+                    true => checked = true,
+                    false if checked => {
+                        return Err(Error::Corrupt(format!(
+                            "the record at {} carries no checksum, after records that do",
+                            r.at
+                        )))
+                    }
+                    false => {}
+                }
+            }
+            // Every record past the point the file was durable to is
+            // checked before it is read: an append whose length reached the
+            // disk before all its bytes reads whole, its later bytes the
+            // disk's zeros or stale ones. One ending before that point was
+            // covered by an fsync, as the image was before it was renamed
+            // into place, and is read as the image is; the image's data
             // records are not read here at all. A graph a later one of its
             // index replaces is never read either.
-            if tail && r.checked() && !superseded(&last, &r) {
-                if !r.holds(bytes) {
-                    if whole_after(bytes, walk.pos) {
-                        return Err(failed_sum(r.at));
-                    }
-                    torn_at = Some(r.at);
-                    break;
-                }
-                // It ends where it says, whatever its last byte: zeros to
-                // the end from here are a torn tail.
-                walk.edge = walk.pos;
+            if tail
+                && r.checked()
+                && walk.pos > durable
+                && !superseded(&last, &r)
+                && !r.holds(bytes)
+            {
+                judge(
+                    bytes,
+                    r.at,
+                    format_args!("the record at {} fails its checksum", r.at),
+                )?;
+                torn_at = Some(r.at);
+                break;
             }
             if matches!(
                 r.kind,
@@ -5909,6 +6450,8 @@ impl Database {
             }
             dead_tail = match r.kind {
                 REC_SPILL => dead_tail.or(Some(r.at)),
+                // A close's mark after them lands nothing either.
+                REC_SYNCED => dead_tail,
                 _ => None,
             };
             let index = frames
@@ -6052,23 +6595,44 @@ impl Database {
                         ));
                     }
                 }
+                // Not a write: the close's mark is read by the survey alone.
+                REC_SYNCED => {}
                 other => return Err(unknown_kind(other, r.at)),
             }
         }
-        if walk.torn {
+        if torn_at.is_none() && (walk.torn || walk.refused.is_some()) {
+            let at = walk.pos;
             // A crash in the middle of an append leaves the last record cut
             // short, and only past the image: an image is written beside the
             // file and renamed over it whole. One cut short inside it is a
             // damaged or truncated file, and cutting the file there -- as a
             // torn tail is cut -- destroyed every record after it, intact
             // ones included. Zeros to the end inside it are the same damage.
-            if walk.pos < body_end {
+            if at < body_end {
+                if let Some(e) = walk.refused {
+                    return Err(e);
+                }
                 return Err(Error::Corrupt(format!(
-                    "a record of the checkpoint image at {} runs past the end of the file",
-                    walk.pos
+                    "a record of the checkpoint image at {at} runs past the end of the file"
                 )));
             }
-            whole = walk.pos;
+            if checked {
+                // In a file this version wrote to, a head no record reads
+                // from is judged as a record failing its sum is: a power
+                // cut's lost bytes -- zeros, stale bytes, a record cut short
+                // -- with nothing after them claiming the file durable past
+                // them. A whole record of a kind this version does not know
+                // is a later version's, refused as before.
+                if whole_at(bytes, at, true, None).is_some_and(|(holds, _)| holds) {
+                    return Err(unknown_kind(bytes[at], at));
+                }
+                judge(bytes, at, format_args!("no whole record starts at {at}"))?;
+            } else if let Some(e) = walk.refused {
+                // One a version before wrote: zeros only where they run to the
+                // end from a head (`zero_tail`), any other byte refused.
+                return Err(e);
+            }
+            whole = at;
         }
         if let Some(at) = torn_at {
             whole = at;
@@ -6076,6 +6640,18 @@ impl Database {
         if let Some(at) = dead_tail {
             whole = whole.min(at);
         }
+        // What a cut takes, said by whoever opened the file: past the point
+        // the file was durable to, so never a write answered as durable.
+        self.cut = (whole < bytes.len()).then(|| Cut {
+            at: whole as u64,
+            bytes: (bytes.len() - whole) as u64,
+            records: records_from(bytes, whole),
+        });
+        // Where appends after the load claim the file durable to until an
+        // fsync of their own covers more: the image's end at least, which
+        // was synced before it was renamed into place, and no further than
+        // the file once cut.
+        self.loaded_durable = (durable.max(body_end).min(whole)) as u64;
         // A database loaded from a file has no *history*, only its current
         // state: the ring is emptied and the horizon is set to the counter.
         // A cursor sitting exactly here (a quiet restart) gets an empty
@@ -6613,7 +7189,14 @@ impl Database {
             b.heads.push((rec, cid, b.frames.len()));
             return Ok(());
         }
-        let frame = framed(rec, cid, payload);
+        #[cfg(not(target_arch = "wasm32"))]
+        let claim = {
+            let at = *self.appended.get_mut();
+            self.claim(at)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let claim = 0;
+        let frame = framed_claiming(rec, cid, payload, claim);
         let seq = self.changes.seq() + 1;
         let r = self.sink_mut().record(seq, &frame);
         self.storage(r)?;
@@ -6959,12 +7542,16 @@ impl Database {
             // A record comes with the sum its primary wrote: one damaged on
             // the way, or read off a disk that lost part of it, is refused
             // rather than landed and written into this file whole.
-            if !r.holds(bytes) {
-                return Err(Error::Corrupt(format!(
-                    "a record of the primary's at {} fails its checksum",
-                    r.at
-                )));
-            }
+            let trailer = match r.summed(bytes) {
+                None => None,
+                Some((head, true)) => r.claim_at.map(|c| (c - r.at, head)),
+                Some((_, false)) => {
+                    return Err(Error::Corrupt(format!(
+                        "a record of the primary's at {} fails its checksum",
+                        r.at
+                    )))
+                }
+            };
             let Rec {
                 kind: rec,
                 cid,
@@ -7013,6 +7600,7 @@ impl Database {
                 writes: notes.len() - noted,
                 was,
                 marks,
+                trailer,
             });
             // Landed once its vectors are in the graph, as a block's are
             // linked before it lands. The batch goes on over the records
@@ -7054,19 +7642,57 @@ impl Database {
         for (k, h) in g.held.iter().enumerate() {
             g.at = k;
             let db = &mut *g.db;
-            let record = &bytes[h.start..h.end];
+            let came = &bytes[h.start..h.end];
             let seq = db.changes.seq() + h.writes as u64;
-            let r = db.handing().record(seq, record);
+            #[cfg(not(target_arch = "wasm32"))]
+            let at = *db.appended.get_mut();
+            // Its claim this file's: the primary's says how far the
+            // primary's file was durable, which this one may not be. Written
+            // in place of it, as wide, and its sum carried on from the head
+            // and body's -- none where this file's claim is wider -- and an
+            // older primary's record framed as this version frames one, so
+            // that a file this version writes holds no record without a sum
+            // after one with.
+            #[cfg(not(target_arch = "wasm32"))]
+            let claim = db.claim(at);
+            #[cfg(target_arch = "wasm32")]
+            let claim = 0;
+            let mut framed_anew = None;
+            let r = match h.trailer {
+                None => {
+                    let r = record_at(came, &mut 0)?;
+                    let fresh = framed_claiming(r.kind, r.cid, r.body, claim);
+                    let r = db.handing().record(seq, &fresh);
+                    framed_anew = Some(fresh);
+                    r
+                }
+                Some((c, head)) => {
+                    let w = came.len() - SUM - c;
+                    let claim = if claim_width(claim) <= w { claim } else { 0 };
+                    let mut trailer = [0u8; CLAIM_MAX + SUM];
+                    trailer[..w].copy_from_slice(&claim.to_le_bytes()[..w]);
+                    match trailer[..w] == came[c..c + w] {
+                        true => db.handing().record(seq, came),
+                        false => {
+                            let sum = crc32c(head, &trailer[..w]);
+                            trailer[w..w + SUM].copy_from_slice(&sum.to_le_bytes());
+                            let parts = [&came[..c], &trailer[..w + SUM]];
+                            db.handing().record_parts(seq, came, &parts)
+                        }
+                    }
+                }
+            };
             if let Err(e) = db.storage(r) {
                 // `g` puts back this one and those after it.
                 db.landing = false;
                 return Err(e);
             }
-            // The frames went into the stores as the primary wrote them,
-            // and the record into the file as it came.
+            // The frames went into the stores as the primary wrote them, and
+            // the record into the file as it came but for its claim, or
+            // framed anew around the same body.
+            let record = framed_anew.as_deref().unwrap_or(came);
             #[cfg(not(target_arch = "wasm32"))]
             if db.mapped {
-                let at = *db.appended.get_mut();
                 handover::note_record(&mut db.landed, &mut db.landed_bytes, at, record);
                 db.landed_writes += h.writes as u64;
             }
@@ -7556,17 +8182,24 @@ impl Database {
         let seq = self.changes.seq() + b.heads.len() as u64;
         #[cfg(not(target_arch = "wasm32"))]
         let at = *self.appended.get_mut();
+        // How far the file was durable as the record goes in, asked once:
+        // an fsync that completes meanwhile on another thread would make
+        // the quota's length another than the record's.
+        #[cfg(not(target_arch = "wasm32"))]
+        let claim = self.claim(at);
+        #[cfg(target_arch = "wasm32")]
+        let claim = 0;
         // A block that spilled lands as the spills it names and the rest.
         #[cfg(not(target_arch = "wasm32"))]
         let land = match b.spilled.is_empty() {
             true => None,
-            false => Some(Self::land_record(b)),
+            false => Some(Self::land_record(b, claim)),
         };
         // A quota is asked with the record's length to the byte, before any
         // of it reaches the file (`limit.rs`).
         #[cfg(not(target_arch = "wasm32"))]
         if self.limit.is_some() {
-            let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
+            let adds = land.as_ref().map_or_else(|| b.record_len(claim), Vec::len);
             let grows = b.grew || self.grows(b, b.spilled_writes);
             let writes = self.app_writes(b, b.spilled_writes);
             self.limited(grows, adds as u64, writes)?;
@@ -7583,7 +8216,7 @@ impl Database {
         } else {
             #[cfg(not(target_arch = "wasm32"))]
             let writes = b.notes.len() as u64;
-            let record = b.record();
+            let record = b.record(claim);
             let r = self.handing().record(seq, &record);
             // Where its frames are in the file, for the handover: the
             // stores hold them as the record does.

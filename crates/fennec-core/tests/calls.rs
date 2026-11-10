@@ -410,10 +410,8 @@ fn a_misread_statement_is_refused_in_the_order_of_every_call() {
     put_uvarint(&mut body, 1);
     encode_str(&mut body, "accounts");
     encode_str(&mut body, text);
-    file.push(13);
-    put_uvarint(&mut file, 0);
-    put_uvarint(&mut file, body.len() as u64);
-    file.extend_from_slice(&body);
+    // With its checksum, as this version writes a record.
+    file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
     let mut db = Database::new();
     db.load(&file).unwrap();
     let e = run(&mut db, "call odd {n: 1}").unwrap_err();

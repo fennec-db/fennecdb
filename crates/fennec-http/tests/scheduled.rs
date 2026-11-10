@@ -720,7 +720,13 @@ fn a_crash_before_the_fsync_runs_the_slot_again_once() {
     let after = len();
     assert!(after > before);
     let bytes = std::fs::read(&path).unwrap();
-    for cut in [before as usize, after as usize - 3] {
+    // The run's record, before the mark a close after an fsync appends.
+    let run_end = match bytes.len() >= 8 && bytes[bytes.len() - 8] == 0x80 | 14 {
+        true => bytes.len() - 8,
+        false => bytes.len(),
+    };
+    assert!(run_end > before as usize);
+    for cut in [before as usize, run_end - 3] {
         std::fs::write(&path, &bytes[..cut]).unwrap();
         let db = opened(&path);
         assert_eq!(

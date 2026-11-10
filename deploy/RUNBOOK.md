@@ -861,21 +861,27 @@ meanwhile -- an older replica connected and behind holding none of it --
 was taken and kept by its key, and its sender's retry is answered from
 that key.
 
-**Record checksums move the format at the first write.** From the release
+**Record checksums move a file at its first write.** From the release
 whose records carry a checksum, every record a node writes -- each write,
-and every record of a checkpoint or a compact -- ends in its CRC32C, its
-kind's high bit set, which every binary from before refuses: nothing has
-to be defined first, a tenant's first write on an upgraded node is one.
-The same order -- archivers, routers, then nodes -- and every node of a
-region within one window: from a node's upgrade until the node holding
-each of its tenants' replicas is upgraded too, that replica stops
-following and connects again (`could not apply a write: corrupt: record
-kind 131 is not a write; connecting again`, or `unknown record kind 136`
-for an image, in its log), an older archiver takes no image of its own and
-its `fennec verify` and `fennec restore` fail, and an older node refuses to
-open a file an upgraded one wrote to. Upgrade the one that stopped and it
-goes on from where it stood: nothing was misread or lost. Files written
-before open as they were.
+and every record of a checkpoint or a compact -- ends in a claim and its
+CRC32C, its kind's high bit set, which every binary from before refuses: a
+file an upgraded node wrote to opens on no node from before. Replication
+is not stopped by it: an upgraded node sends a follower that does not say
+it reads checksums -- a replica on a node from before, an archiver from
+before -- each record and image as a node from before wrote it, so the
+usual order holds (archivers, routers, then nodes, a node at a time) and
+replicas keep following through it. What does not wait: a move, a restore
+or a failover that puts a tenant's file from an upgraded node onto a node
+from before. A move fails at its install (`the image does not load: ...
+unknown record kind ...`), the tenant staying on its source with all it
+held; a failover onto an older replica promotes a node whose file is its
+own and opens. So upgrade every node of a region within one window, and
+move no tenant between nodes of two versions meanwhile. An open after a
+power cut that cut a torn tail logs it (`cut N bytes at X (M records) off
+its file's end`): bytes written after the last completed sync, none of them a
+write answered as durable; one refused names the damaged record and the
+whole one after it that says the file was synced past it -- restore that
+tenant from its archive or a replica, and keep the file for a look.
 
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node

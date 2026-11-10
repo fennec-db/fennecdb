@@ -201,6 +201,22 @@ fn writes(record: &[u8]) -> u64 {
     fennec_core::engine::writes_in(record).unwrap_or(1).max(1)
 }
 
+/// How [`entries`] takes damage in a segment's records -- a record failing
+/// its checksum, a head no record reads from -- past a record that carries
+/// one: what a reader does (`verify`, a restore, an image's assembly),
+/// refusing damage with a whole record after it, found at any byte past it
+/// (`fennec_core::engine::whole_after`), and cutting it otherwise; or what
+/// the archiver going on does ([`Archive::position`]), cutting it whatever
+/// follows and taking the writes after it again from its primary. A
+/// segment's records claim nothing of its own syncs -- their claims are
+/// their primary's file's -- so a reader cannot tell a power cut's hole in
+/// the writes the archiver had not yet synced from damage in those it had.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Damage {
+    Refuse,
+    Cut,
+}
+
 /// A segment's records, and where the last whole one ends -- a crash can
 /// leave a torn one after it.
 ///
@@ -211,7 +227,7 @@ fn writes(record: &[u8]) -> u64 {
 /// as no segment, it made a copy taken then "not an archive segment"
 /// (docs/design/replication.md), and an archiver stopped then could not go
 /// on.
-fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
+fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
     if LOG_MAGIC.starts_with(data) && data.len() < LOG_MAGIC.len() {
         return Ok((Vec::new(), 0));
     }
@@ -220,63 +236,67 @@ fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
     }
     let mut out = Vec::new();
     let mut pos = LOG_MAGIC.len();
-    // Where a record is known to end whatever its last byte: the magic's
-    // end, then each record whose checksum holds.
-    let mut edge = LOG_MAGIC.len();
+    // Whether a record carrying a checksum came yet: from then on damage
+    // is judged as `damage` says, and before it as a segment from before
+    // checksums always was.
+    let mut checked = false;
+    // A torn tail or damage, where it starts: the entry's time, and its
+    // record's head, which a refusal names.
+    let mut stopped: Option<(usize, usize)> = None;
     while pos + 8 < data.len() {
         // No kind is 0. Zeros from a record's head -- its time -- to the
-        // end, after a byte that is not zero or a record whose checksum
-        // holds, are a torn tail, as a database's open reads them
-        // (`zero_tail`): an append whose length reached the disk before its
-        // bytes. Any other zero head is refused, judged once: read on, every
+        // end, after a byte that is not zero, are a torn tail, as a
+        // database's open reads them (`zero_tail`): an append whose length
+        // reached the disk before its bytes. Any other zero head is refused
+        // in a segment from before checksums, judged once: read on, every
         // 11 zeros were a write of its own, and a run with a byte after it
         // was scanned again at each of them.
         if data[pos + 8] == 0 {
-            if fennec_core::engine::zero_tail(data, pos, edge) {
+            if fennec_core::engine::zero_tail(data, pos, LOG_MAGIC.len()) {
                 break;
             }
-            return Err(corrupt(format!("unknown record kind 0 at {}", pos + 8)));
+            if !checked {
+                return Err(corrupt(format!("unknown record kind 0 at {}", pos + 8)));
+            }
+            stopped = Some((pos, pos + 8));
+            break;
         }
         let time = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
         let Some(len) = record_len(&data[pos + 8..]) else {
+            stopped = checked.then_some((pos, pos + 8));
             break;
         };
         let record = &data[pos + 8..pos + 8 + len];
         // A record whose checksum fails -- its length on the disk, part of
-        // its bytes not -- is a torn tail where nothing whole follows it,
-        // as a database's open reads it, and damage refused where something
-        // does.
+        // its bytes not -- is damage, judged as `damage` says.
         match fennec_core::engine::checksum_holds(record) {
-            Some(false) if whole_after(data, pos + 8 + len) => {
-                return Err(corrupt(format!(
-                    "the record at {} fails its checksum, with whole records after it",
-                    pos + 8
-                )))
+            Some(false) => {
+                stopped = Some((pos, pos + 8));
+                break;
             }
-            Some(false) => break,
-            Some(true) => edge = pos + 8 + len,
+            Some(true) => checked = true,
             None => {}
         }
         out.push((time, pos + 8, pos + 8 + len, writes(record)));
         pos += 8 + len;
     }
-    Ok((out, pos))
-}
-
-/// Whether a segment's records from the entry at `pos` on hold one as it
-/// was written -- its checksum its own, or none carried -- before what no
-/// walk reads on from: zeros, a kind no version knows, a record cut short.
-fn whole_after(data: &[u8], mut pos: usize) -> bool {
-    while let Some((len, holds)) = data
-        .get(pos + 8..)
-        .and_then(fennec_core::engine::record_holds)
-    {
-        if holds {
-            return true;
+    if let Some((entry, at)) = stopped.filter(|_| damage == Damage::Refuse) {
+        match fennec_core::engine::whole_after(data, at + 1, None) {
+            Ok(None) => {}
+            Ok(Some(whole)) => {
+                return Err(corrupt(format!(
+                    "the record at {at} is damaged, with the whole record at {whole} after it"
+                )))
+            }
+            Err(()) => {
+                return Err(corrupt(format!(
+                    "the record at {at} is damaged, and what follows it could not be judged"
+                )))
+            }
         }
-        pos += 8 + len;
+        pos = entry;
     }
-    false
+    Ok((out, pos))
 }
 
 /// The segment being written.
@@ -642,7 +662,9 @@ impl Archive {
         for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
             let read = self.read_segment(&path)?;
-            let (list, end) = entries(&read.plain)?;
+            // Damage in the segment going on is cut whatever follows it: the
+            // writes after it are taken again from the primary.
+            let (list, end) = entries(&read.plain, Damage::Cut)?;
             if list.is_empty() {
                 // Made, and stopped before its first write was whole: `take`
                 // creates the file, writes its magic, then the write. It
@@ -670,6 +692,14 @@ impl Archive {
                     Some((whole, _)) => whole,
                     None => end,
                 };
+                if read.sealed.is_none() && cut < read.plain.len() {
+                    crate::log!(
+                        "{}: cut {} bytes at {cut}, a torn tail; the writes after it are taken \
+                         again from the primary",
+                        path.display(),
+                        read.plain.len() - cut
+                    );
+                }
                 let mut file = OpenOptions::new().write(true).open(&path)?;
                 file.set_len(cut as u64)?;
                 file.seek(io::SeekFrom::End(0))?;
@@ -1085,7 +1115,7 @@ impl Archive {
     fn last_write(&self) -> io::Result<Option<(u64, u64)>> {
         for &first in self.segments()?.iter().rev() {
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes)?;
+            let (list, _) = entries(&bytes, Damage::Refuse)?;
             let writes: u64 = list.iter().map(|e| e.3).sum();
             if let Some(e) = list.last() {
                 return Ok(Some((first + writes - 1, e.0)));
@@ -1186,7 +1216,7 @@ impl Archive {
             return Ok(None);
         };
         let bytes = self.read_segment(&self.segment_path(first))?.plain;
-        let (list, _) = entries(&bytes)?;
+        let (list, _) = entries(&bytes, Damage::Refuse)?;
         let mut at = first;
         for &(time, _, _, n) in &list {
             if seq < at + n {
@@ -1295,12 +1325,16 @@ impl Archive {
         };
         // Every record of each image held to its checksum, which an open
         // does not ask of an image's: written whole and renamed into
-        // place, it is read as a whole file is, here alone.
+        // place, it is read as a whole file is, here alone -- a stretch at
+        // a time where it is plain, never held whole beside the open.
         for &(seq, time) in &images {
             self.open_image(seq, time)?;
             let path = self.image_path(seq, time);
-            fennec_core::engine::check_records(&self.read_whole(&path)?)
-                .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            let checked = match &self.key {
+                None => fennec_core::engine::check_reader(&mut fs::File::open(&path)?),
+                Some(_) => fennec_core::engine::check_records(&self.read_whole(&path)?),
+            };
+            checked.map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
         }
         let segments = self.segments()?;
         let (mut covered, mut to, mut torn) = (first, None, 0);
@@ -1308,8 +1342,8 @@ impl Archive {
         for (k, &start) in segments.iter().enumerate() {
             let path = self.segment_path(start);
             let read = self.read_segment(&path)?;
-            let (list, end) =
-                entries(&read.plain).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            let (list, end) = entries(&read.plain, Damage::Refuse)
+                .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
             // Only the last may hold no write, caught as it was made: one
             // before it, empty or only its magic, is no segment `take`
             // leaves, and `position` removes the last before going on.
@@ -1416,7 +1450,7 @@ impl Archive {
         let mut past = false;
         for &first in &segments {
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes)?;
+            let (list, _) = entries(&bytes, Damage::Refuse)?;
             let mut seq = first - 1;
             for &(time, _, _, n) in &list {
                 let from = seq + 1;
@@ -1485,7 +1519,7 @@ impl Archive {
                 continue;
             }
             let bytes = self.read_segment(&self.segment_path(first))?.plain;
-            let (list, _) = entries(&bytes)?;
+            let (list, _) = entries(&bytes, Damage::Refuse)?;
             let mut seq = first;
             for &(_, start, end, n) in &list {
                 let (from, to) = (seq, seq + n - 1);

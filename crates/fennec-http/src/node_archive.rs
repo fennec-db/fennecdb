@@ -623,7 +623,7 @@ fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
     s.set_read_timeout(Some(replication::SILENCE))?;
     s.set_write_timeout(Some(replication::SILENCE))?;
     let request = format!(
-        "POST /_replication/tenants HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
+        "POST /_replication/tenants?sums=1 HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
         crate::dial::authority(&upstream.addr),
         upstream.token,

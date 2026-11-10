@@ -442,10 +442,8 @@ fn hooked_record(name: &str, text: &str, hook: &[u8], change: u64) -> Vec<u8> {
 
 fn with_record(file: &[u8], body: &[u8]) -> Vec<u8> {
     let mut f = file.to_vec();
-    f.push(13);
-    put_uvarint(&mut f, 0);
-    put_uvarint(&mut f, body.len() as u64);
-    f.extend_from_slice(body);
+    // With its checksum, as this version writes a record.
+    f.extend_from_slice(&fennec_core::engine::record(13, 0, body));
     f
 }
 

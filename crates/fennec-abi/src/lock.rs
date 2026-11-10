@@ -80,6 +80,15 @@ impl Sink for Holding {
     fn record(&mut self, seq: u64, bytes: &[u8]) -> CoreResult<()> {
         self.sink.record(seq, bytes)
     }
+    fn record_parts(&mut self, seq: u64, original: &[u8], parts: &[&[u8]]) -> CoreResult<()> {
+        self.sink.record_parts(seq, original, parts)
+    }
+    fn durable(&self) -> u64 {
+        self.sink.durable()
+    }
+    fn set_durable(&mut self, at: u64) {
+        self.sink.set_durable(at)
+    }
     fn append_deferred(&mut self, bytes: &[u8]) -> CoreResult<()> {
         self.sink.append_deferred(bytes)
     }

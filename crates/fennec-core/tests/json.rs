@@ -862,6 +862,9 @@ fn the_file_holds_tags_a_binary_from_before_refuses() {
         + 4;
     let mut damaged = file.clone();
     damaged[at] = 17;
+    // Summed again: a whole record holding a tag this build does not know,
+    // not a torn one, which an open cuts.
+    assert!(fennec_core::engine::resum(&mut damaged, at));
     let e = Database::new().load(&damaged).unwrap_err();
     assert!(matches!(e, Error::Corrupt(_)), "{e}");
 }

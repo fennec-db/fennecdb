@@ -171,11 +171,13 @@ impl Database {
 impl Block {
     /// The length of the record [`Block::record`] makes, worked out without
     /// making it: a block across collections would be copied once more.
-    pub(super) fn record_len(&self) -> usize {
+    pub(super) fn record_len(&self, claim: u32) -> usize {
         let (kind, cid, end) = self.heads[self.heads.len() - 1];
-        // A file's record counts its sum in its length.
-        let whole =
-            |kind: u8, cid: u32, body: usize| head(kind | CHECKED, cid, body + SUM).1 + body + SUM;
+        // A file's record counts its claim and its sum in its length.
+        let w = claim_width(claim);
+        let whole = |kind: u8, cid: u32, body: usize| {
+            head(checked_kind(kind, w), cid, body + w + SUM).1 + body + w + SUM
+        };
         if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
             return whole(kind, cid, end - HEAD_ROOM);
         }

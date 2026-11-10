@@ -488,7 +488,11 @@ pub fn handle(out: &mut &crate::conn::Conn, tenants: &Tenants, req: &Request) ->
         Ok(l) => l,
         Err(e) => return Some(Response::error(400, &e)),
     };
-    serve(out, tenants, streams, listed);
+    // A client that reads checked records says so; one that does not -- an
+    // older archiver -- is sent records and images as a version before
+    // checksums wrote them, as a tenant's stream sends them.
+    let sums = req.query.iter().any(|(k, v)| k == "sums" && v == "1");
+    serve(out, tenants, streams, listed, sums);
     None
 }
 
@@ -535,6 +539,7 @@ fn serve(
     tenants: &Tenants,
     streams: &Arc<NodeStreams>,
     listed: HashMap<String, Followed>,
+    sums: bool,
 ) {
     let _ = out.set_write_timeout(Some(SILENCE));
     // Written without blocking, so a client reading slower than the stream
@@ -574,6 +579,7 @@ fn serve(
         peeked: 0,
         looked: 0,
         images: 0,
+        sums,
     };
     let ended = s.run(&head, names);
     drop(s);
@@ -635,6 +641,8 @@ struct Session<'a> {
     peeked: usize,
     looked: usize,
     images: usize,
+    /// Whether the client reads checked records.
+    sums: bool,
 }
 
 impl Drop for Session<'_> {
@@ -739,6 +747,8 @@ impl Session<'_> {
                     // on the history it began, which the feed holds by now.
                     self.lineage(name, &feed)?;
                     let n = times.len() as u64;
+                    let records = crate::replication::plain_unless(self.sums, records)
+                        .map_err(io::Error::other)?;
                     self.send(b'W', name, &[&u64s(&[first, n]), &u64s(&times), &records])?;
                     self.w.flush()?;
                     cursor = last;
@@ -986,7 +996,14 @@ impl Session<'_> {
         self.send(b'H', name, &[&hello])?;
         self.hello_at.insert(name.into(), now);
         if let Some(image) = image {
-            self.send(b'I', name, &[image])?;
+            match self.sums {
+                true => self.send(b'I', name, &[image])?,
+                false => {
+                    let plain =
+                        fennec_core::engine::plain_image(image).map_err(io::Error::other)?;
+                    self.send(b'I', name, &[&plain])?
+                }
+            }
         }
         self.w.flush()
     }

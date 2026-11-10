@@ -10,12 +10,17 @@ open reads it from start to end in one pass.</p>
 <h2>Records</h2>
 
 <p>Every record is <code>[kind][collection-id][length][body]</code>, and
-every record a current build writes carries a checksum: its kind's high bit
-set (<code>0x80 | kind</code>), and the CRC32C of its head and body in its
-last four bytes, which the length counts —
-<code>[0x80|kind][collection-id][length][body][crc32c]</code>. The records
-inside a block, a spill or a land carry none (the one around them covers
-them), and neither does the change counter's head. These are the kinds:</p>
+every record a current build writes ends in a <em>claim</em> and a
+checksum: its kind byte holds the kind in its low five bits, the claim's
+width (1 to 4 bytes) in the two above and a high bit saying the record
+carries both, and the length counts them —
+<code>[0x80|width|kind][collection-id][length][body][claim][crc32c]</code>,
+the CRC32C covering the head, the body and the claim. The claim says how
+far the file was durable when the record was appended: 0 for nothing
+known, or one more than how many 4 KiB pages before the record every byte
+had been covered by a completed fsync. The records inside a block, a
+spill or a land carry neither (the one around them covers them), and
+neither does the change counter's head. These are the kinds:</p>
 
 <pre data-lang="text">"FENECDB\x01"
   [6][u64 counter][u64 body length]        change counter (optional)
@@ -33,6 +38,7 @@ them), and neither does the change counter's head. These are the kinds:</p>
   [9][0][length][records]                  a block of several records
   [10][0][length][records]                 a block's spill, before it lands
   [11][0][length][spills][records]         a block that spilled, landing
+  [14][0][length]                          closed after a sync (claim 1, no body)
 </pre>
 
 <p>The header, <code>FENECDB</code> and the format's version byte, keeps the
@@ -41,11 +47,13 @@ be a new format, one every earlier binary refuses.</p>
 
 <p>A file written before records carried checksums opens as it did, its
 records read as they are, and takes checked records after them until a
-<code>compact</code> writes it anew. A binary from before checksums refuses
-a file a current one has written to, naming the record
-(<code>unknown record kind 131 at 8</code>), so upgrade every reader — each
-archiver, replica and standby — before any primary, and roll forward, not
-back.</p>
+<code>compact</code> writes it anew; after a checked record, one with no
+checksum is refused as a flipped bit. A binary from before checksums
+refuses a file a current one has written to, naming the record
+(<code>unknown record kind 131 at 8</code>), so roll forward, not back. Its
+replicas and archivers keep following a current primary meanwhile: one
+that does not say it reads checksums is sent each record and image as a
+binary from before wrote them (<a href="replication.html">Replication</a>).</p>
 
 <p>Inside a data record, each document is
 <code>[op][doc-id][length][fields]</code>, each field a tagged value. A
@@ -83,25 +91,35 @@ after a power cut, NTFS (or ext4 with <code>data=writeback</code>) can give
 back a file whose length grew while the append's bytes never reached the
 disk. No record kind is 0, so zeros right after a record whose checksum
 holds, a record that ends in a byte other than zero, or the checkpoint
-image are read as such an append, one never acknowledged as durable. In a
-file from before checksums, zeros right after a zero byte may instead have
+image are read as such an append, one never acknowledged as durable; in a
+file with checksums they are judged as any damage, below. In a file from
+before checksums, zeros right after a zero byte may instead have
 started inside the record before, which the open cannot tell from that
 record's own last byte, and zeros followed by any other byte are damage:
 the open refuses both, naming the byte where the zero head is
 (<code>unknown record kind 0 at 123456</code>).</p>
 
-<p>The open checks every record after the checkpoint image against its
-checksum. The image itself is not read for it: it is written beside the
-file and synced before it is renamed into place, so a power cut cannot
-have torn it, and its documents stay unread until a query needs them. A
-record whose length fits the file but whose later bytes the disk lost —
-zeros or stale bytes where its end should be — fails its checksum: with
-nothing whole after it, it is a torn tail and cut like one; with a whole
-record after it, it is damage rather than a crash's, and the open is
-refused, naming where it starts (<code>the record at 123456 fails its
-checksum, with whole records after it</code>) and leaving the file as it
-is. <code>fennec verify</code> checks every record of an archive's images
-too.</p>
+<p>The open checks only what a power cut can have torn: the records past
+the last point the file says was durable. That point is the claim of the
+newest record whose checksum holds, found from the last few records; a
+server that stops after a sync appends a mark (kind 14) so that its next
+open checks nothing. Everything before the point — the checkpoint image
+too, synced before it was renamed into place — was on the disk before a
+later record said so, and is read as it is, its documents unread until a
+query needs them; <code>fennec verify</code> checks every record, of a file
+(<code>fennec verify data.fennec</code>) or of an archive's images.</p>
+
+<p>Past the point, a record whose length fits the file but whose later
+bytes the disk lost fails its checksum, and a head no record reads from
+(zeros, stale bytes) stops the walk. Either is judged by what follows it:
+when a record after it, whole by its checksum, claims the file durable
+past it, the damaged bytes were synced before and changed since, and the
+open is refused, naming both (<code>the record at 123456 fails its
+checksum, and the whole record at 234567 says the file was durable past
+it</code>), leaving the file as it is. Otherwise the damage is in bytes
+written since the last sync, which a power cut may lose in any order: the
+file is cut there, and the server logs how many bytes and records went.
+None of them was a write answered as durable.</p>
 
 <p>On Linux a sync goes to <code>&lt;file&gt;.sync</code> beside the
 file: a log of fixed size holding what the file took since its last own

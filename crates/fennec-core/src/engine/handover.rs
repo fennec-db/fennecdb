@@ -256,7 +256,9 @@ impl Database {
                 }
             }
         }
-        let record = framed(REC_SPILL, 0, &body);
+        let at = *self.appended.get_mut();
+        let claim = self.claim(at);
+        let record = framed_claiming(REC_SPILL, 0, &body, claim);
         // Asked before the spill is written: refused after, its bytes would
         // stay in the file, dead and past the quota (`limit.rs`).
         if self.limit.is_some() {
@@ -265,9 +267,9 @@ impl Database {
             self.limited(b.grew || grows, record.len() as u64, writes)?;
             b.grew |= grows;
         }
-        // Where the body starts in the record: past its head, the sum after.
-        let head = (record.len() - body.len() - SUM) as u64;
-        let at = *self.appended.get_mut();
+        // Where the body starts in the record: past its head, the claim and
+        // the sum after.
+        let head = (record.len() - body.len() - claim_width(claim) - SUM) as u64;
         let r = self.sink_mut().append(&record);
         self.storage(r)?;
         *self.appended.get_mut() += record.len() as u64;
@@ -353,7 +355,7 @@ impl Database {
     /// The land record of a block that spilled: its spills by where their
     /// bodies are, then the writes since the last ([`Self::land_spilled`]).
     /// Made apart from its append so a quota is asked its length first.
-    pub(super) fn land_record(b: &Block) -> Vec<u8> {
+    pub(super) fn land_record(b: &Block, claim: u32) -> Vec<u8> {
         let mut body = Vec::new();
         put_uvarint(&mut body, b.spilled.len() as u64);
         for &(s, n) in &b.spilled {
@@ -361,7 +363,7 @@ impl Database {
             put_uvarint(&mut body, n);
         }
         body.extend_from_slice(&b.body_from(b.spilled_writes));
-        framed(REC_LAND, 0, &body)
+        framed_claiming(REC_LAND, 0, &body, claim)
     }
 
     /// When an open block spills: once its frames amount to `bytes`

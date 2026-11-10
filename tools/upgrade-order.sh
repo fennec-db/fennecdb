@@ -34,12 +34,13 @@
 # already built and skips their build.
 #
 # Since record checksums (docs/design/storage.md#file-format) a binary from
-# before them stops at the first record this tree writes, before any kind
-# or op a case below is about: each case runs the binaries of CK_BASE, the
-# last main before the checksums (PRE_BIN_DIR, where set, holds them), where
-# it ran this tree's, and the last case holds CK_BASE's to this tree's. Every server listens on port 0, found
-# by its `listening on:` line; everything it started is killed and every
-# path it made removed on its way out.
+# before them refuses a file this tree wrote to at its first record, before
+# any kind or op a case below is about: each case runs the binaries of
+# CK_BASE, the last main before the checksums (PRE_BIN_DIR, where set, holds
+# them), where it ran this tree's, and the last case holds CK_BASE's to this
+# tree's, following its primary and refusing its file. Every server listens
+# on port 0, found by its `listening on:` line; everything it started is
+# killed and every path it made removed on its way out.
 
 set -euo pipefail
 
@@ -811,22 +812,35 @@ echo "old types:    $(grep -m1 "$UNREAD" "$WORK/hooked-types.log")"
 echo "ok: the binaries from before stop in words at a webhook consumer (op 6)"
 
 # Record checksums (docs/design/storage.md#file-format): every record this
-# tree writes ends in its CRC32C, its kind's high bit set and its length
-# counting the sum. A binary from before them -- CK_BASE -- frames such a
-# record by its length and refuses its kind in words, never reading the
-# sum as a record; nothing has to be defined first, a primary's first
-# write is one (RELEASING.md):
+# tree writes into a file ends in its claim and its CRC32C, its kind's high
+# bit set and its length counting them. A binary from before them -- CK_BASE
+# -- frames such a record by its length and refuses its kind in words, so a
+# file this tree wrote to opens in none of them. A follower that does not
+# say it reads them -- every one from before -- is sent each record and
+# image as a binary from before wrote them, so the upgrade goes a binary at
+# a time, a tenant node's replicas on older nodes following on
+# (RELEASING.md):
 #
-#   - an old replica of this tree's primary stops at what it is sent and
-#     holds none of it;
-#   - an old archiver keeps the stream and takes no image of its own, the
-#     old `fennec verify` refusing what it kept;
-#   - the old server and the old `fennec types` refuse the primary's file.
+#   - an old replica of this tree's primary follows it;
+#   - an old archiver keeps the stream and takes its images, the old
+#     `fennec verify` and `fennec restore` reading what it kept, and the old
+#     server opening the file the old restore wrote;
+#   - the old server and the old `fennec types` refuse the primary's own
+#     file, of checked records.
 #
-# And the order the upgrade takes, the other way: this tree's replica
-# follows an old primary, holding its records as they came, and this
-# tree's server opens the old primary's file and writes to it.
-SUMMED='record kind 1[2-4][0-9]'
+# And this tree's replica follows an old primary, framing each record it
+# takes as this tree frames one -- its file then whole by `fennec verify`,
+# no record without a checksum after one with -- and this tree's server
+# opens the old primary's file and writes to it.
+SUMMED='record kind [12][0-9][0-9]'
+count_is() {
+    local at=$1 n=$2
+    for _ in $(seq 1 600); do
+        query "$at" "get notes count" | grep -q "\"count\":$n" && return 0
+        sleep 0.05
+    done
+    return 1
+}
 "$NEW/fennec-server" --file "$WORK/pc.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/pc.log" &
 PC_PID=$!
@@ -844,20 +858,37 @@ query "$PC" "put notes {title: 'summed'}" | grep -q '"error"' &&
     --http-token t --replication-token r --replica-of "$PC" 2>"$WORK/rc.log" &
 PIDS+=($!)
 RC=$(address "$WORK/rc.log")
-said "$WORK/rc.log" "$SUMMED" || fail "the old replica said nothing of a checked record"
-query "$RC" "get notes count" | grep -q '"count":1' &&
-    fail "the old replica took a checked record"
-echo "old replica:  $(grep -m1 "$SUMMED" "$WORK/rc.log")"
+count_is "$RC" 1 || fail "the old replica did not follow this tree's primary"
 query "$PC" "put notes {title: 'again'}" | grep -q '"error"' &&
     fail "this tree's primary refused a write"
-said "$WORK/archiverc.log" "$SUMMED" || fail "the old archiver said nothing of a checked record"
-echo "old archiver: $(grep -m1 "$SUMMED" "$WORK/archiverc.log")"
+count_is "$RC" 2 || fail "the old replica did not take a write after its image"
+grep -q "$SUMMED" "$WORK/rc.log" && fail "the old replica was sent a checked record"
+echo "old replica:  followed this tree's primary, its image and a write after it"
+# The archive holds the three writes once the old verify says so.
+for _ in $(seq 1 600); do
+    TMPDIR="$WORK" "$PRE/fennec" verify "$WORK/archivec" >"$WORK/verifyc-old.log" 2>&1 &&
+        grep -q 'restores changes [0-9]* to 3,' "$WORK/verifyc-old.log" && break
+    sleep 0.05
+done
 kill "$ARCHIVERC" 2>/dev/null || true
 wait "$ARCHIVERC" 2>/dev/null || true
-if TMPDIR="$WORK" "$PRE/fennec" verify "$WORK/archivec" >"$WORK/verifyc-old.log" 2>&1; then
-    fail "the old verify read an archive of checked records"
-fi
-echo "old verify:   $(head -1 "$WORK/verifyc-old.log")"
+grep -q "$SUMMED" "$WORK/archiverc.log" && fail "the old archiver was sent a checked record"
+TMPDIR="$WORK" "$PRE/fennec" verify "$WORK/archivec" >"$WORK/verifyc-old.log" 2>&1 ||
+    fail "the old verify refused what the old archiver kept"
+grep -q 'restores changes [0-9]* to 3,' "$WORK/verifyc-old.log" ||
+    fail "the old archiver kept fewer than the three writes"
+echo "old verify:   $(sed -n 2p "$WORK/verifyc-old.log" | sed 's/^ *//')"
+TMPDIR="$WORK" "$PRE/fennec" restore "$WORK/archivec" "$WORK/restoredc.fennec" \
+    >"$WORK/restorec-old.log" 2>&1 || fail "the old restore refused what the old archiver kept"
+"$PRE/fennec-server" --file "$WORK/restoredc.fennec" --http 127.0.0.1:0 \
+    --http-token t 2>"$WORK/restoredc-open.log" &
+RESTOREDC=$!
+PIDS+=($RESTOREDC)
+RDC=$(address "$WORK/restoredc-open.log")
+count_is "$RDC" 2 || fail "the old server did not open the old restore's file whole"
+kill "$RESTOREDC" 2>/dev/null || true
+wait "$RESTOREDC" 2>/dev/null || true
+echo "old archiver: kept the stream and its images; the old restore's file opens"
 kill "$PC_PID" 2>/dev/null || true
 wait "$PC_PID" 2>/dev/null || true
 "$PRE/fennec-server" --file "$WORK/pc.fennec" --http 127.0.0.1:0 \
@@ -877,8 +908,8 @@ fi
 grep -q "$SUMMED" "$WORK/pc-types.log" || fail "the old \`fennec types\` said nothing of a checked record"
 echo "old types:    $(grep -m1 "$SUMMED" "$WORK/pc-types.log")"
 
-# The upgrade's own order: this tree's replica of an old primary, then this
-# tree's server on the old primary's file.
+# The other way: this tree's replica of an old primary, then this tree's
+# server on the old primary's file.
 "$PRE/fennec-server" --file "$WORK/po.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/po.log" &
 PO_PID=$!
@@ -892,21 +923,18 @@ RO_PID=$!
 PIDS+=($RO_PID)
 RO=$(address "$WORK/ro.log")
 query "$PO" "put notes {title: 'plain too'}" >/dev/null
-for _ in $(seq 1 600); do
-    query "$RO" "get notes count" | grep -q '"count":2' && break
-    sleep 0.05
-done
-query "$RO" "get notes count" | grep -q '"count":2' ||
+count_is "$RO" 2 ||
     fail "this tree's replica did not follow the old primary: $(tail -3 "$WORK/ro.log")"
 kill "$RO_PID" "$PO_PID" 2>/dev/null || true
 wait "$RO_PID" "$PO_PID" 2>/dev/null || true
+"$NEW/fennec" verify "$WORK/ro.fennec" >"$WORK/ro-verify.log" 2>&1 ||
+    fail "this tree's replica of the old primary wrote a file not whole: $(cat "$WORK/ro-verify.log")"
 "$NEW/fennec-server" --file "$WORK/po.fennec" --http 127.0.0.1:0 \
     --http-token t 2>"$WORK/po-new.log" &
 PIDS+=($!)
 PN=$(address "$WORK/po-new.log")
 query "$PN" "put notes {title: 'summed'}" | grep -q '"error"' &&
     fail "this tree's server took no write on the old primary's file"
-query "$PN" "get notes count" | grep -q '"count":3' ||
-    fail "this tree's server lost a write of the old primary's file"
-echo "new replica:  followed the old primary; this tree's server opened its file and wrote to it"
-echo "ok: the binaries from before stop in words at a checked record"
+count_is "$PN" 3 || fail "this tree's server lost a write of the old primary's file"
+echo "new replica:  followed the old primary, its file whole; this tree's server opened the old file and wrote to it"
+echo "ok: a binary from before follows this tree's primary, and stops in words at its file"

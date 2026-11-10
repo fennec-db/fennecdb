@@ -43,24 +43,24 @@ reached `ROOM_SHARE` of that room or the process faults
 
 **[File format](../../docs/design/storage.md#file-format):** a record is
 `[kind][collection-id][length][body]`, its length read even when empty;
-one this version writes ends in its CRC32C (`crc.rs`), its kind's
-`CHECKED` bit set, the length counting the sum -- inner records and the
-counter's head carry none, nor one from before, read as it is.
-`head` writes a head (the counter's `image_head` aside), `record_at` reads
-it, `Walk` walks them. An open holds each record past the image to its
-sum, a graph a later one replaces aside: one failing is a torn tail, cut,
-unless a whole record follows it, refused then naming its byte, as
-`apply`, an archive and `fennec verify` hold them.
-A torn tail is cut on open (on Windows by a second open, the first's
-views gone: `fs::windows::cut_and_open`), zeros to the end one too where
-they start at a head -- after a byte that is not zero or a record whose
-sum holds, or at the image's end (`zero_tail`: a length the disk took
-before the bytes) -- any other zero head refused, a torn image refused,
-and an unknown kind's refusal names its byte; the file only grows; a tool
-that only looks opens with `fs::open_read_only`, which cuts, creates and
-writes nothing. A new record kind, index kind, type tag or graph version
-is a number a binary from before refuses (a graph's, rebuilds from), never
-one it would misread.
+one this version writes ends in a claim and its CRC32C (`crc.rs`), its
+kind's `CHECKED` bit and claim width set -- inner records and the
+counter's head carry none, nor one from before, read as is, refused after
+one with. A claim is how far the file was durable at the append
+(`claim_of`: a completed fsync's or the open's; a replica writes its
+own). `head`/`record_at`/`Walk` write, read, walk heads. Below the
+newest whole claim (`survey`) records are read unchecked, as the image is
+(`fennec verify`: all); past it damage -- a failing sum, a head none
+reads from -- is refused where a whole record after it claims past
+it (`judge`), else cut, said (`cut_on_open`); a follower without
+`sums=1` gets them plain (`plain_records`). With no checked record a torn
+tail is cut on open (Windows: `cut_and_open`), zeros to the end too from a
+head after a nonzero byte or the image's end (`zero_tail`), other zero
+heads refused; a torn image is refused, an unknown kind names its byte; the
+file only grows; a looking tool opens `fs::open_read_only`, writing
+nothing. A new record kind, index kind, type tag or graph version is a
+number a binary from before refuses (a graph's, rebuilds from), never one
+it would misread.
 
 ### Durability
 

@@ -425,7 +425,7 @@ fn count_marks(file: &[u8]) -> usize {
         tail.extend_from_slice(name.as_bytes());
         n += file
             .windows(3 + tail.len())
-            .filter(|w| w[0] & 0x7f == 13 && w[1] == 0 && w[3..] == tail[..])
+            .filter(|w| w[0] & 0x1f == 13 && w[1] == 0 && w[3..] == tail[..])
             .count();
     }
     n
@@ -630,10 +630,8 @@ fn a_schedule_or_a_mark_this_version_does_not_read_is_refused() {
         (vec![7u8, 0], false),
     ] {
         let mut f = file.clone();
-        f.push(13);
-        put_uvarint(&mut f, 0);
-        put_uvarint(&mut f, body.len() as u64);
-        f.extend_from_slice(&body);
+        // With its checksum, as this version writes a record.
+        f.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
         let mut db = Database::new();
         match (db.load(&f), reads) {
             (Ok(_), true) => {}
