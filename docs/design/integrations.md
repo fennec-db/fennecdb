@@ -78,8 +78,10 @@ with a token where the registry's secret holds one (`NPM_TOKEN`,
 `PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
 where it does not (RELEASING.md). NuGet's `FennecDb` is packed, installed
 into a fresh console app and used against a server
-(`integrations/dotnet/package.sh`) and only then pushed with
-`NUGET_API_KEY`, its job skipped with a notice without the secret; the Go
+(`integrations/dotnet/package.sh`) and only then pushed with a key
+nuget.org's trusted publishing gives the job for an hour (`NuGet/login`),
+or `NUGET_API_KEY` where the exchange fails, its job failing with neither,
+and pushed by a job of its own that builds nothing; the Go
 module has no registry, and `release.yml` pushes the tag
 `integrations/go/vX.Y.Z` it is fetched by beside `vX.Y.Z`. With
 `full_text=True` a store indexes its text for BM25 as well and searches by
