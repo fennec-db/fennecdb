@@ -568,7 +568,17 @@ or a 64-bit CRC, code of our own on every target, never an instruction.
 
 *What it costs.* A write sums its record once, as it lands, and its claim
 is a load of an atomic and one byte: five bytes a record past main's
-(1.2% of a file of 400-byte documents). {{INSTR}} In the browser module, in
+(1.2% of a file of 400-byte documents). Counted by `make instr-compare`'s way (tools/instr/compare.py: 8 re-signed
+identities a build, 7 runs each, `replays.rs` through `handle`, main's
+binary built with this branch's example), a lone `put` took 21 391
+instructions against main's 21 236, +155 (+0.73%, outside two standard
+errors): the first version measured +96 for the sum alone, the rest the
+claim's -- the durable point loaded through the sink, its pages counted,
+its byte written and summed. A keyed `put` (a block of two writes) +242
+(+0.29%, just outside two), and a `put` of 100 documents in one record
+(`replays.rs`'s `batch`) -1 576 of 1 010 811 (inside two). The claim is
+what bounds the open: without it the 64 KB file read from the disk took
+3.8 s against 1.5. In the browser module, in
 Node (medians of 15 interleaved rounds), a lone `put` took 3.84 us against
 main's 3.81 and a `put` of 100 documents 131.9 against 131.4 -- inside
 their quartiles; the first version's 1.5% did not show again beside it
