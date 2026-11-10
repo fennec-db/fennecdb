@@ -161,7 +161,7 @@ fn a_definition_is_one_record_of_kind_13_and_one_write() {
     let before = db.change_seq();
     run(&mut db, TRANSFER).unwrap();
     let (seq, record) = tap.last();
-    assert_eq!(record[0], 13, "a record of its own kind");
+    assert_eq!(kind_of(&record), 13, "a record of its own kind");
     assert_eq!(writes_in(&record).unwrap(), 1, "a write the feed counts");
     assert_eq!((seq, db.change_seq()), (before + 1, before + 1));
     let t = db.statements();
@@ -187,7 +187,7 @@ fn a_definition_is_one_record_of_kind_13_and_one_write() {
     // A drop is a record of the kind too.
     run(&mut db, "drop statement transfer").unwrap();
     let (_, record) = tap.last();
-    assert_eq!((record[0], writes_in(&record).unwrap()), (13, 1));
+    assert_eq!((kind_of(&record), writes_in(&record).unwrap()), (13, 1));
     assert!(db.statements().is_empty());
     assert!(refused(run(&mut db, "drop statement transfer")).contains("statement `transfer`"));
     run(&mut db, "drop statement if exists transfer").unwrap();
@@ -204,7 +204,7 @@ fn a_definition_in_a_block_lands_with_its_writes_as_one_record() {
     )
     .unwrap();
     let (seq, record) = tap.last();
-    assert_eq!(record[0], 9, "a block record");
+    assert_eq!(kind_of(&record), 9, "a block record");
     assert_eq!(writes_in(&record).unwrap(), 2);
     assert_eq!(seq, before + 2);
     // Numbered as the block's second write.
@@ -615,10 +615,8 @@ fn the_fixture_reads_back_each_digest_and_marks_another_broken() {
             put_uvarint(&mut body, 1);
             encode_str(&mut body, "accounts");
             encode_str(&mut body, text);
-            file.push(13);
-            put_uvarint(&mut file, 0);
-            put_uvarint(&mut file, body.len() as u64);
-            file.extend_from_slice(&body);
+            // With its checksum, as this version writes a record.
+            file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
             file
         });
         let file = crate::hooked::with_hook(crate::scheduled::with_schedule(with_binding(file)));
@@ -679,10 +677,8 @@ fn a_binding_s_text_in_a_callable_record_is_marked_broken() {
     put_uvarint(&mut body, 1);
     encode_str(&mut body, "accounts");
     encode_str(&mut body, text);
-    file.push(13);
-    put_uvarint(&mut file, 0);
-    put_uvarint(&mut file, body.len() as u64);
-    file.extend_from_slice(&body);
+    // With its checksum, as this version writes a record.
+    file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
     let mut db = opened(&file);
     let credit = db.statements().get("credit").unwrap();
     assert!(credit.tree.is_none());
@@ -718,10 +714,8 @@ fn a_schedule_s_text_in_a_callable_record_is_marked_broken() {
     put_uvarint(&mut body, 1);
     encode_str(&mut body, "accounts");
     encode_str(&mut body, text);
-    file.push(13);
-    put_uvarint(&mut file, 0);
-    put_uvarint(&mut file, body.len() as u64);
-    file.extend_from_slice(&body);
+    // With its checksum, as this version writes a record.
+    file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
     let mut db = opened(&file);
     let zero = db.statements().get("zero").unwrap();
     assert!(zero.tree.is_none());
@@ -757,10 +751,8 @@ fn a_hook_s_text_in_a_callable_record_is_marked_broken() {
     put_uvarint(&mut body, 1);
     encode_str(&mut body, "accounts");
     encode_str(&mut body, text);
-    file.push(13);
-    put_uvarint(&mut file, 0);
-    put_uvarint(&mut file, body.len() as u64);
-    file.extend_from_slice(&body);
+    // With its checksum, as this version writes a record.
+    file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
     let mut db = opened(&file);
     let zero = db.statements().get("zero").unwrap();
     assert!(zero.tree.is_none());
@@ -820,6 +812,25 @@ pub(crate) fn body_at(record: &[u8]) -> usize {
     p
 }
 
+/// A record's kind, the bits that say it carries a checksum and how wide
+/// its claim is taken off.
+pub(crate) fn kind_of(record: &[u8]) -> u8 {
+    match record[0] & 0x80 {
+        0 => record[0],
+        _ => record[0] & 0x1f,
+    }
+}
+
+/// Where a record's body ends: before its claim and checksum, where it
+/// carries them.
+pub(crate) fn body_end(record: &[u8]) -> usize {
+    record.len()
+        - match record[0] & 0x80 {
+            0 => 0,
+            _ => ((record[0] >> 5) & 3) as usize + 1 + 4,
+        }
+}
+
 /// The events `collection`'s writes wake, as its mask holds them.
 fn mask(db: &Database, collection: &str) -> u8 {
     db.collection(collection).unwrap().bound
@@ -854,11 +865,9 @@ fn bound_record_at(
     encode_str(&mut body, collection);
     body.push(events);
     encode_str(&mut body, text);
-    let mut record = vec![13u8];
-    put_uvarint(&mut record, 0);
-    put_uvarint(&mut record, body.len() as u64);
-    record.extend_from_slice(&body);
-    record
+    // As this version writes a record, with its checksum: a file it
+    // wrote holds none without one after one with.
+    fennec_core::engine::record(13, 0, &body)
 }
 
 #[test]
@@ -870,7 +879,7 @@ fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_run_it() {
     run(&mut db, BINDING).unwrap();
     let (seq, record) = tap.last();
     assert_eq!(
-        (record[0], record[body_at(&record)]),
+        (kind_of(&record), record[body_at(&record)]),
         (13, 3),
         "kind 13, op 3"
     );
@@ -1467,11 +1476,9 @@ fn a_number_epoch_3_refuses_marks_a_stored_definition_broken() {
         put_uvarint(&mut body, 1);
         encode_str(&mut body, "a");
         encode_str(&mut body, text);
-        let mut record = vec![13u8];
-        put_uvarint(&mut record, 0);
-        put_uvarint(&mut record, body.len() as u64);
-        record.extend_from_slice(&body);
-        record
+        // As this version writes a record, with its checksum: a file it
+        // wrote holds none without one after one with.
+        fennec_core::engine::record(13, 0, &body)
     };
     let seq = db.change_seq();
     let near = "get a select body match body \"rust\" near e [1, 0, 0]";
@@ -1597,11 +1604,9 @@ fn a_hidden_rounding_epoch_4_marks_a_stored_definition_broken() {
         put_uvarint(&mut body, 1);
         encode_str(&mut body, "a");
         encode_str(&mut body, text);
-        let mut record = vec![13u8];
-        put_uvarint(&mut record, 0);
-        put_uvarint(&mut record, body.len() as u64);
-        record.extend_from_slice(&body);
-        record
+        // As this version writes a record, with its checksum: a file it
+        // wrote holds none without one after one with.
+        fennec_core::engine::record(13, 0, &body)
     };
     let seq = db.change_seq();
     file.extend(record("hidden", hidden, was.digest().unwrap(), seq + 1));
@@ -1681,11 +1686,9 @@ fn a_definition_runs_its_lists_as_written() {
         put_uvarint(&mut body, 1);
         encode_str(&mut body, "na");
         encode_str(&mut body, text);
-        let mut record = vec![13u8];
-        put_uvarint(&mut record, 0);
-        put_uvarint(&mut record, body.len() as u64);
-        record.extend_from_slice(&body);
-        record
+        // As this version writes a record, with its checksum: a file it
+        // wrote holds none without one after one with.
+        fennec_core::engine::record(13, 0, &body)
     };
     let seq = db.change_seq();
     for (i, (name, text)) in texts.iter().enumerate() {
@@ -1734,9 +1737,12 @@ fn an_op_or_an_event_this_version_does_not_read_is_refused() {
     let text = "create statement later after insert entries as set accounts {balance: 0} where \
                 id = new.dst";
     for (op, events) in [(4u8, 1u8), (3, 8), (3, 0)] {
-        let mut record = bound_record("later", text, "entries", events, db.change_seq() + 1);
-        let at = body_at(&record);
-        record[at] = op;
+        let record = bound_record("later", text, "entries", events, db.change_seq() + 1);
+        // The op patched, and the record summed again: a whole record of
+        // an op this version does not know, not a torn one.
+        let mut body = record[body_at(&record)..body_end(&record)].to_vec();
+        body[0] = op;
+        let record = fennec_core::engine::record(13, 0, &body);
         let mut file = db.snapshot();
         file.extend_from_slice(&record);
         let e = Database::new().load(&file).unwrap_err();

@@ -125,6 +125,47 @@ fn the_sync_log_gives_back_what_the_machine_lost() {
     }
 }
 
+/// A reader that writes nothing -- a read-only open, `fennec verify`'s check
+/// -- reads the writes the log holds and the file lost as an open to write
+/// would, writing neither the file nor the log: read as the file stood, the
+/// last durable writes were a torn tail, or damage their sums refused.
+#[test]
+fn a_reader_that_writes_nothing_reads_the_log() {
+    let dir = Dir::new("reader");
+    let path = dir.0.join("db.fennec");
+    for cut_into in [0, 7] {
+        let _ = std::fs::remove_file(&path);
+        let mut db = fs::open(&path).unwrap();
+        run(&mut db, "create collection t (n int)");
+        durable(&mut db);
+        for i in 0..50 {
+            run(&mut db, &format!("put t {{n: {i}}}"));
+            durable(&mut db);
+        }
+        let whole = std::fs::read(&path).unwrap();
+        power_loss(db, &path, cut_into);
+        let lost = std::fs::read(&path).unwrap();
+        let log = std::fs::read(log_of(&path)).unwrap();
+        let read = fs::read_with_sync_log(&path)
+            .unwrap()
+            .expect("the log's writes");
+        assert_eq!(read, whole, "cut {cut_into}");
+        assert_eq!(
+            fennec_core::engine::check_records(&read).unwrap(),
+            fennec_core::engine::check_records(&whole).unwrap()
+        );
+        let mut db = fs::open_read_only(&path).unwrap();
+        assert_eq!(count(&mut db), 50, "cut {cut_into}");
+        drop(db);
+        assert_eq!(std::fs::read(&path).unwrap(), lost, "the file as it was");
+        assert_eq!(std::fs::read(log_of(&path)).unwrap(), log, "the log too");
+        let mut db = fs::open(&path).unwrap();
+        assert_eq!(count(&mut db), 50);
+        drop(db);
+        assert_eq!(fs::read_with_sync_log(&path).unwrap(), None, "applied");
+    }
+}
+
 /// A log full of entries has the file fsynced and begins a generation from
 /// there; a machine lost after it gets back what the new one holds.
 #[test]

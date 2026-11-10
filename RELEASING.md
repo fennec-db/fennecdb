@@ -234,6 +234,44 @@ drives each against `OP6_BASE`, a hook's statement defined over `/query` by
 this tree's primary, beside the server, a replica and `fennec types`
 refusing fennec-core's `tests/statements.fennec`.
 
+**Record checksums move a file at its first write; followers keep
+following.** From the release whose records carry a claim and a checksum
+(`docs/design/storage.md#file-format`), every record a binary writes into a
+file -- a write, a block, a graph, the history, each record of an image a
+compact or a checkpoint writes -- sets its kind's high bit and ends in its
+claim and CRC32C, its length counting them. A binary from before -- a main
+before them, `f29a44a7` -- frames such a record by its length and refuses
+its kind in words ("unknown record kind 131 at 8"), never reading the sum
+as a record, so a file a binary with checksums wrote to opens in no binary
+from before: a primary rolled back after its first write is rolled back
+onto its last backup from before. Nothing has to be defined first: a
+primary's first write after its upgrade is one, and a page's module and an
+app's library write them the same. What a follower is sent, though, is
+what it reads: one with checksums says so (`sums=1` on `/_replication` and
+a node's `POST /_replication/tenants`), and one that does not -- every
+binary from before -- is sent each record and image as a binary from before
+wrote them. So replicas, standbys, a node's tenants' replicas and archivers
+from before keep following an upgraded primary, and what such an archiver
+kept verifies, restores and opens with the binaries from before. The order
+is free but for what moves a file: a tenant's file an upgraded node wrote,
+moved, restored or failed over onto a node from before, is refused there
+-- a move fails at its install, the tenant staying on its source -- so a
+region's nodes are upgraded within one window, before anything moves a
+tenant between them; and its notes say so under the same upgrade heading.
+A router reads no tenant's file and keeps its place. Files from before open
+as they were, their records loading as they read, and take checked records
+after them until a compact writes each anew; a replica with checksums
+following a primary from before frames each record it takes as its own
+version does, its file checked from its first record. `make upgrade-check`
+drives an old replica and an old archiver following this tree's primary --
+the old `fennec verify`, `restore` and server reading what the archiver
+kept -- the old server and `fennec types` refusing the primary's own file,
+and this tree's replica of an old primary, its file whole by `fennec
+verify`, and this tree's server writing to the old primary's file; and it
+drives the cases above with `CK_BASE`'s binaries in this tree's place,
+since a binary from before them refuses a file this tree wrote at its first
+record, before the kind or op the case is about.
+
 **A node recorded at `https://` waits for every router and node.** From
 the release that dials HTTPS (TLS slice 3), a node serving HTTPS
 (`--tls-cert`) is recorded at its `https://host:port` address (`PUT

@@ -10,6 +10,9 @@
 //!     lock).
 //!   * `keyed`: the same, each with a key of its own: the key's lookup,
 //!     the block and the `_idempotency` row.
+//!   * `batch`: N writes of 100 documents each (`put t [{id: 1, n: $1},
+//!     ...]`, the same 100 ids written over), no key: a record of 100
+//!     frames, where `put` writes one of one.
 //!   * `replay`: one keyed write under `--sync always`, then that request
 //!     N times, each a replay. Its block is on disk by then, so the
 //!     durability a replay waits for (`Database::durability`) runs no
@@ -73,6 +76,13 @@ fn main() {
     send(&db, &cfg, &request("create collection t (n int)", "", None));
     let put = "put t {id: $1, n: $2}";
     let replayed = request(put, "1, 1", Some("replayed"));
+    let batch = format!(
+        "put t [{}]",
+        (1..=100)
+            .map(|id| format!("{{id: {id}, n: $1}}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     if mode == "replay" {
         send(&db, &cfg, &replayed);
     }
@@ -92,7 +102,8 @@ fn main() {
                     send(&db, &cfg, &request(put, &params(), Some(&key)))
                 }
                 "replay" => send(&db, &cfg, &replayed),
-                other => panic!("no mode {other}: put, keyed or replay"),
+                "batch" => send(&db, &cfg, &request(&batch, &i.to_string(), None)),
+                other => panic!("no mode {other}: put, keyed, batch or replay"),
             }
         }
         rounds.push(t.elapsed().as_nanos() as f64 / per as f64);

@@ -453,6 +453,10 @@ pub(super) fn cut_and_open(
     whole: usize,
     wrap: Box<super::Wrap<'_>>,
 ) -> crate::error::Result<crate::engine::Database> {
+    // What the load cut, said by the open that cut it: the open after the
+    // cut finds nothing to cut, and the server's log and a test's
+    // `cut_on_open` read None on Windows alone.
+    let said = db.cut_on_open().cloned();
     drop(db);
     sink.mapping = None;
     if CUTTING.with(|c| c.get()) {
@@ -492,7 +496,9 @@ pub(super) fn cut_and_open(
     }
     CUTTING.with(|c| c.set(true));
     let _cutting = Cutting;
-    super::open_mapped_into(db, path, wrap)
+    let mut db = super::open_mapped_into(db, path, wrap)?;
+    db.said_cut(said);
+    Ok(db)
 }
 
 /// `SetEndOfFile`'s refusal of a file a view maps.

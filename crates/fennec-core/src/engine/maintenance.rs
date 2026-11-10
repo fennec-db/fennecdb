@@ -945,18 +945,13 @@ impl Database {
                 p.store.raise_next_id(next);
                 let mut counter = Vec::with_capacity(9);
                 put_uvarint(&mut counter, next);
-                b.side
-                    .write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
-                b.side.write(&counter)?;
+                put_record(&mut b.side, REC_NEXTID, p.cid, &counter)?;
             }
         }
         // Each schedule's last mark as it stands at the swap, after the
         // definitions the image holds: one landed meanwhile, or pending.
         let side = &mut b.side;
-        self.last_marks(&mut |body| {
-            side.write(&record_head(super::REC_STATEMENT, 0, body.len()))?;
-            side.write(body)
-        })?;
+        self.last_marks(&mut |body| put_record(side, super::REC_STATEMENT, 0, body))?;
         let len = b.side.at();
         b.side
             .patch(b.head_at + 1, &self.changes.seq().to_le_bytes())?;
@@ -1070,10 +1065,11 @@ fn copy_writes(
         Ok(())
     })?;
     if !frames.is_empty() {
-        side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
-        let at = side.at();
+        let mut data = Summed::begin(side, REC_DATA, p.cid, frames.len())?;
+        let at = data.at();
         super::handover::note(landed, landed_bytes, p.cid, frames.len(), at);
-        side.write(&frames)?;
+        data.write(&frames)?;
+        data.end()?;
     }
     Ok(())
 }
@@ -1132,8 +1128,7 @@ impl Beside {
         }
         let mut placed = Vec::with_capacity(self.parts.len());
         for p in &self.parts {
-            side.write(&record_head(REC_CREATE, p.cid, p.schema.len()))?;
-            side.write(&p.schema)?;
+            put_record(side, REC_CREATE, p.cid, &p.schema)?;
             let bytes = match p.compact {
                 true => p.store.live_len(),
                 false => p.store.image_len(),
@@ -1145,15 +1140,15 @@ impl Beside {
             if bytes > 0 {
                 p.store.image_index(p.compact, &mut counter);
             }
-            side.write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
-            side.write(&counter)?;
+            put_record(side, REC_NEXTID, p.cid, &counter)?;
             if bytes > 0 {
-                side.write(&record_head(REC_DATA, p.cid, bytes))?;
-                placed.push(Some(side.at()));
+                let mut data = Summed::begin(side, REC_DATA, p.cid, bytes)?;
+                placed.push(Some(data.at()));
                 match p.compact {
-                    true => p.store.write_live(side)?,
-                    false => p.store.write_image(side)?,
+                    true => p.store.write_live(&mut data)?,
+                    false => p.store.write_image(&mut data)?,
                 }
+                data.end()?;
             } else {
                 placed.push(None);
             }
@@ -1161,14 +1156,11 @@ impl Beside {
                 let mut payload = Vec::with_capacity(field.len() + 9 + graph.len());
                 crate::codec::encode_str(&mut payload, field);
                 payload.extend_from_slice(graph);
-                side.write(&record_head(REC_GRAPH, p.cid, payload.len()))?;
-                side.write(&payload)?;
+                put_record(side, REC_GRAPH, p.cid, &payload)?;
             }
         }
         for st in self.statements.iter() {
-            let body = st.encode();
-            side.write(&record_head(super::REC_STATEMENT, 0, body.len()))?;
-            side.write(&body)?;
+            put_record(side, super::REC_STATEMENT, 0, &st.encode())?;
         }
         // The image on disk now, so that the fsync under the lock covers
         // only what is added there.

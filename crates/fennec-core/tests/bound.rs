@@ -413,11 +413,9 @@ fn bound_record(name: &str, text: &str, collection: &str, events: u8, change: u6
     encode_str(&mut body, collection);
     body.push(events);
     encode_str(&mut body, text);
-    let mut record = vec![13u8];
-    put_uvarint(&mut record, 0);
-    put_uvarint(&mut record, body.len() as u64);
-    record.extend_from_slice(&body);
-    record
+    // As this version writes a record, with its checksum: a file it
+    // wrote holds none without one after one with.
+    fennec_core::engine::record(13, 0, &body)
 }
 
 /// Depth one: a binding's writes wake nothing, a chain a file holds --

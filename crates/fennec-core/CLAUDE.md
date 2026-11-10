@@ -42,19 +42,25 @@ reached `ROOM_SHARE` of that room or the process faults
 (`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
 
 **[File format](../../docs/design/storage.md#file-format):** a record is
-`[kind][collection-id][length][body]`, its length read even when empty;
-`head` writes a head (the counter's `image_head` aside), `record_at` reads
-it, `Walk` walks them. A torn tail is cut on open (on Windows by a second
-open, the first's views gone: `fs::windows::cut_and_open`), zeros to the
-end one too where they start at a head -- after a byte that is not zero,
-or at the image's end (`zero_tail`: a length the disk took before the
-bytes) -- any other zero head refused, a torn image refused, and an
-unknown kind's refusal names its byte; no record has a checksum yet, so
-one whose length fits but whose later bytes the disk lost loads as it
-reads; the file only grows; a tool that only looks opens with
-`fs::open_read_only`, which cuts, creates and writes nothing. A new record
-kind, index kind, type tag or graph version is a number a binary from
-before refuses (a graph's, rebuilds from), never one it would misread.
+`[kind][collection-id][length][body]`, its length always read; this
+version's end in a claim and CRC32C (`crc.rs`, the kind's `CHECKED` bit
+set); inner ones, the counter's (front only) and older ones none. A claim:
+how far a completed fsync or the open made the file durable (`claim_of`),
+a record's end (`record_parts`: one lock); a follower's its own, plain
+ones framed anew, never after checked (`claimed_into`).
+Below the newest whole claim (`survey`) records are read unchecked
+(`fennec verify`: all), a plain one after checked refused; past it damage
+(a failing sum, a head none reads, a plain record) is refused if a whole
+record after it claims past it, else cut, said (`cut_on_open`), a segment
+by its own claims: `judge_after` frames on, scans only past an unframed
+head, bounded; a record past the end is cut unjudged (Windows:
+`cut_and_open`). A follower without `sums=1` gets none (`plain_records`).
+Unchecked, zeros to the end are cut only from a head after a nonzero byte
+or the image's end (`zero_tail`); a torn image refused, an unknown kind
+names its byte; the file only grows; a looking tool opens
+`fs::open_read_only`, writing nothing. A new record or index kind, type
+tag or graph version is a number older binaries refuse, never misread (a
+graph's: rebuilds).
 
 ### Durability
 

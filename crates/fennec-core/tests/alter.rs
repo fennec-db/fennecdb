@@ -675,12 +675,15 @@ fn a_binary_from_before_meets_a_kind_it_refuses() {
     orders(&mut db);
     ok(&mut db, "alter collection orders drop field customer");
     let last = tap.records.lock().unwrap().last().unwrap().clone();
-    assert_eq!(last[0], 12);
+    assert_eq!(last[0] & 0x1f, 12);
     let schema = db.collection("orders").unwrap().schema.encode();
     assert!(schema.windows(2).any(|w| w == [0, 12]), "{schema:?}");
     let mut file = tap.file.lock().unwrap().clone();
     let at = file.len() - last.len();
-    file[at] = 13;
+    // Read as another kind it knows, whole by its sum: a plain kind after
+    // checked records is judged as damage, and cut at the end of a file.
+    file[at] = file[at] & !0x1f | 13;
+    assert!(fennec_core::engine::resum(&mut file, at));
     let e = Database::new().load(&file).unwrap_err();
     assert!(matches!(e, Error::Corrupt(_)), "{e}");
 }

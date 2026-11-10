@@ -247,7 +247,15 @@ first image it was an fsync more a tenant of the stream's first pass), and
 refuses a moment `--keep` let go of (`Restoring::LetGo`, exit 1) rather than
 pass the tenant over as never archived; `verify` and `prune` run on every
 line, and `Archive::verify` names a gap an image alone ends. One tenant's
-archive that does not read is left for an operator and the rest go on.
+archive that does not read is left for an operator and the rest go on, and
+so is a tenant whose stream sends a record that fails its checksum or carries
+none after ones that do (`Archive::take`, refused as damage): passed over,
+said, until the archiver follows the node again
+(`a_record_that_fails_its_checksum_passes_over_its_tenant_alone`). Until
+the fourth review of #568 that refusal ended the node's stream, and the next
+sent the same record: no tenant of the node was archived. The single archiver
+makes its stream again, which a record whole in its primary's file then
+passes.
 Measured with `make node-archive-bench` (1 000 tenants of ten rows and one
 of 64 MB, closed when idle, ten written ten times a second from before the
 archiver connected and for 20 s after, under `--sync always`, in turns): the

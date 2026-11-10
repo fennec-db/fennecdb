@@ -1591,6 +1591,15 @@ impl Tenants {
                 (db, Some(feed))
             }
         };
+        if let Some(c) = db.cut_on_open() {
+            crate::log!(
+                "tenant {name}: cut {} bytes at {} ({} records) off its file's end, a torn tail: \
+                 no whole record after it says a sync covered it",
+                c.bytes,
+                c.at,
+                c.records
+            );
+        }
         // A file this open made -- a tenant created -- is on disk with its
         // name before anything says the tenant is there, as a file renamed
         // into a database's place is: its magic fsynced by the database's

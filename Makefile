@@ -1190,11 +1190,17 @@ packaging-test:
 ## `fennec restore` and the server built before the ops stop at it in words.
 ## Then a webhook consumer, op 6, and an event it took, in that fixture: the
 ## server, a replica, an archiver and `fennec types` built before it refuse
-## it in words, and this tree's server opens it.
+## it in words, and this tree's server opens it. Then record checksums: a
+## replica, an archiver, `fennec verify`, the server and `fennec types`
+## built before them stop in words at this tree's first record, and this
+## tree's replica follows a primary from before and its server opens that
+## primary's file; the cases above run CK_BASE's binaries in this tree's
+## place, a binary from before stopping at the checksum first.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
-## last before op 4 -- and OP6_BASE -- 6fb28002, the last before op 6 -- in
-## scratch worktrees: minutes. Not in CI.
+## last before op 4 -- OP6_BASE -- 6fb28002, the last before op 6 -- and
+## CK_BASE -- f29a44a7, the last before checksums -- in scratch worktrees:
+## minutes. Not in CI.
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)

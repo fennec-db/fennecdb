@@ -9,7 +9,7 @@
 //! database's (`Database::allow_schedules`); a run's body is
 //! `Database::run_slot`'s, and a call by hand marks nothing.
 
-use crate::stored::{body_at, opened, refused, run, Tap};
+use crate::stored::{body_at, body_end, kind_of, opened, refused, run, Tap};
 use fennec_core::codec::{encode_str, put_uvarint};
 use fennec_core::engine::{writes_in, ChangeKind, Due, Landing, SlotMark, Times};
 use fennec_core::named::{AHEAD_MAX, GRAMMAR_EPOCH, MAX_SCHEDULED, SCHEDULED_UNRUN};
@@ -88,8 +88,8 @@ fn run_slot(db: &mut Database, body: &str, name: &str, at: i64, skipped: u64) ->
 fn ops_in(record: &[u8]) -> Vec<u8> {
     let mut ops = Vec::new();
     let mut p = body_at(record);
-    let end = record.len();
-    match record[0] {
+    let end = body_end(record);
+    match kind_of(record) {
         13 => return vec![record[p]],
         9 => {}
         _ => return ops,
@@ -130,7 +130,7 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
     run(&mut db, LAPSE).unwrap();
     let (seq, record) = tap.last();
     assert_eq!(
-        (record[0], record[body_at(&record)]),
+        (kind_of(&record), record[body_at(&record)]),
         (13, 4),
         "kind 13, op 4"
     );
@@ -425,7 +425,7 @@ fn count_marks(file: &[u8]) -> usize {
         tail.extend_from_slice(name.as_bytes());
         n += file
             .windows(3 + tail.len())
-            .filter(|w| w[0] == 13 && w[1] == 0 && w[3..] == tail[..])
+            .filter(|w| w[0] & 0x1f == 13 && w[1] == 0 && w[3..] == tail[..])
             .count();
     }
     n
@@ -630,10 +630,8 @@ fn a_schedule_or_a_mark_this_version_does_not_read_is_refused() {
         (vec![7u8, 0], false),
     ] {
         let mut f = file.clone();
-        f.push(13);
-        put_uvarint(&mut f, 0);
-        put_uvarint(&mut f, body.len() as u64);
-        f.extend_from_slice(&body);
+        // With its checksum, as this version writes a record.
+        f.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
         let mut db = Database::new();
         match (db.load(&f), reads) {
             (Ok(_), true) => {}

@@ -350,13 +350,488 @@ from the other, so both are refused; so are zeros then any other byte, and
 a zero head inside the image. An unknown kind's refusal names the byte it starts
 at, the image's too, so the next such failure says where.
 
-What this does not cover: a record whose length fits the file but whose
-later bytes are the disk's zeros loads as it reads wherever no zero head
-follows it -- the zeros ending at its own end, whole records after it, or
-at the file's end. So it was before the rule too: nothing in a record
-tells its own bytes from the disk's. That takes a checksum on each record,
-a format change not made yet: what it costs each write, and an open that
-checks it without reading the whole file, are to be measured first.
+**Checksums.** Every record this version writes into a file ends in a
+claim and a CRC32C: `[kind | 0x80 | (w-1)<<5][collection][length][body]
+[claim][sum]` -- the kind in the low five bits (`KIND`), the claim's width
+`w`, 1 to 4 bytes (`CLAIM_MAX`), in the two above (`WIDTH`), the high bit
+saying the record carries both (`CHECKED`), the length counting them, and
+the sum covering the head, the body and the claim (`framed_claiming`,
+`Summed` and `put_record` write one, `crc.rs` sums). Every top-level record
+carries them -- an image's, a block's, a spill's, a land's, a graph's, the
+history's, a close's mark -- but the counter's fixed-width head, which is
+patched in place and only ever written by a rewrite renamed into place
+whole; the records inside a block, a spill or a land carry none, the one
+around them covering them. An image's data record is written a stretch of
+its store at a time through `Summed`, its sum carried over each stretch, so
+the image is still never a second copy of the data.
+
+*The claim, and the durable point.* A record's claim says how far its file
+was durable when it was appended: 0 for nothing known, or one more than how
+many pages (`CLAIM_UNIT`, 4 096 bytes, rounded up) before the record's first
+byte every byte was covered by an fsync that had completed -- the file's or
+the sync log's (`Disk::sync`, `sync_inherited`, `sync_existing` store the
+file's length in `Disk::durable` once the call returned) -- or by the point
+the open found (`Sink::set_durable`). The append reads that point -- an
+atomic the durability stores from behind the lock, which the database
+takes from the sink as it takes the sink (`Sink::durable`,
+`Database::set_sink`) and reads with no call through it, `claim_of` --
+and writes it; nothing more is written and nothing synced. A claim
+rounded down from its own record may point up to a page before the file's
+start, where an fsync covered less than a page: it claims nothing. A
+record within a mebibyte of the last fsync claims in one byte (two reach
+256 MiB back): under `--sync always` every record claims every byte before
+it, and under the default `--sync 250` the syncer moves the point four
+times a second. A claim counted in bytes took two or three bytes for a
+record more than 254 bytes past the last fsync -- most, between periodic
+syncs; counted in pages the open checks a page more at most. The claim is
+in the trailer, its width in the kind byte: a walk reads a record's head
+alone, never its last page, and an image's data record, its body streamed
+before its sum is known, writes its claim there too (0). The browser
+module claims nothing (its page writes the file and journal whole, with no
+fsync of the module's), and checks every record past the image.
+
+The file's durable point D is the claim of the newest record whose sum
+holds, the image's end where none says more (an image is synced before it
+is renamed into place). The open finds it on the walk over the heads that
+already ran before the load for each index's last graph (`last_graphs`,
+now `survey`): it keeps the last 16 checked records past the image
+(`RECENT`) and one every 16 MiB of them (`SAMPLE`), and sums them from the
+newest back until one holds -- the last record, or the last few, where a
+power cut took more. A claim is a page behind an earlier one's at most (it
+is rounded down from its own record's start), so the newest whole one is
+the point to a page. The walk passes over a record of no sum after one
+with, whatever its kind: the load judges it (below). Taken as a graph's,
+stale bytes past the point starting with a 4 refused the open where their
+field did not read as a name ("varint ended early", "invalid utf8": 2 or
+3 of 300 random stale tails in the third review), and passed over the
+index's last graph where it did. A file's sink closing after it appended something and
+an fsync covered everything appends a mark saying so (`REC_SYNCED`, kind 14, 8
+bytes, its body empty and its claim 1; `FileSink`'s drop, with no fsync of
+its own: lost, the claims before it stand), so a clean stop's next open
+checks nothing; a file opened and closed with nothing written gains no
+byte. The mark is no write, never sent to a follower.
+
+*What an open checks, and why that is enough.* Records ending at or below D
+are read as the image is, unchecked: an fsync that completed covered them
+before the record claiming D was appended, and a power cut takes only what
+no completed fsync covered. Past D the open holds each record to its sum,
+but a graph a later one of its index replaces, which the load never reads
+(in the browser, which restores each graph it meets, each is). What it
+reads that it did not: the records past D, the window since the last
+completed fsync, and the survey's last record or few. Damage at rest below
+D -- a bit the disk flipped in a record it held -- is `fennec verify`'s to
+find, never the open's: it holds every record to its sum (`check_records`;
+`check_reader` streamed, a record summed as it is read rather than the image
+held whole), of an archive's images and, given a file (`fennec verify
+data.fennec`), of the file. An open that meets damage below D anyway -- a head no record
+reads from stops its walk there -- refuses it as damage, by the record that
+claims past it (below).
+
+Measured on this 8 GB M1 (`make open-bench`'s writer, `examples/open.rs`:
+1 GB written as a server that never checkpointed leaves it, every record
+past the image; main's build over the file written without sums, this one
+over the same documents claimed as `--sync always` claims them, over main's
+file -- checking nothing, the noise -- and over a file claiming nothing, the
+worst case, every record checked; medians of seven, the file read into the
+cache before each open or copied past it with `F_NOCACHE` for a read from
+the disk, three for a read into memory from the disk and for 400-byte
+documents from the disk): 1 GB of 64 KB documents opened mapped in 14.4 ms
+against main's 15.7 cached (this build over main's file 13.1), and in 1 529
+against 1 490 from the disk (1 562); read into memory in 329 against 326
+cached, 595 against 716 from the disk. 1 GB of 400-byte documents, 1.2%
+larger with five bytes more a record: mapped 466 ms against 454 cached
+(449), 2 769 against 2 759 from the disk (2 327); read 773 against 746
+cached (699), 933 against 917 from the disk (928). The rows from the disk
+move by about 15% between runs of one build -- this build over main's file
+read 2 327 and main 2 759 -- so 595 against 716 is no speedup, and none of
+them a cost: within the noise. Claiming nothing, the 64 KB file opened in
+124 ms cached and 3 761 from the disk -- every page of the tail read, as
+the first version of this change read every file -- and the 400-byte one
+in 491 and 2 801 mapped, 866 read.
+
+*Cut, or refused.* Past D, damage -- a record failing its sum, or a head no
+record reads from: zeros, stale bytes, a record of no sum after checked
+ones, a counter's head anywhere but the front -- is judged by what follows
+it (`judge_after`). A whole record after it, by its sum, whose claim is
+past the damage says an fsync covered the damaged bytes before that
+record was appended: they were on the disk and changed since, and the
+open is refused, naming both ("the record at 1234 fails its checksum, and
+the whole record at 5678 says the file was durable past it"; "no whole
+record starts at 1234, and ..."), the file left as it is. None found, the
+damage is in bytes written since the last completed fsync, which a power
+cut loses in any order -- a record's later page lost and a later record's
+kept, a hole -- and the file is cut there, with everything after it, said
+by the open (`Database::cut_on_open`, the server logging the bytes, the
+offset and the records cut; on Windows, where the open lets the file's
+views go, cuts and opens again, the cut is carried over that second open,
+which finds nothing to cut -- dropped there, every test of the cut said
+`None` on Windows alone). Under `--sync always` a write is answered once
+the fsync covering it returned, and the next record claims past it, so a
+write answered as durable is cut only where nothing after it says so: the
+disk's damage to the last record it synced reads as a torn tail, and so
+does a head whose length was damaged past the end (below). The log says
+what the open knows -- "a torn tail: no whole record after it says a sync
+covered it" -- where it said "none of it a write answered as durable",
+which those two make false.
+
+*Framed first, a byte at a time last.* What follows the damage is read
+record by record where it can be. A record whose head frames -- a kind this
+version knows, a length that fits the file -- and whose sum fails holds the
+damage inside it, and the judgment goes on at its end, a head at a time,
+as long as that end reads as one more record (the file's end, zeros to it,
+or a head that frames or runs past it): a hole in 4 MiB of vectors costs
+the records after it, not their bytes. A record whose head or length runs
+past the end of the file is a torn tail, whatever came before it, cut as a
+version before cut it with nothing after it looked at. Only a head that
+does not frame, short of the end, is looked past a byte at a time -- every
+version before refused those -- for the next record whole by its sum: one
+summed only where its head frames, its claim is none or one this version
+could have written after D (no more than 16 pages under it,
+`CLAIM_SLACK`: a claim is rounded down a page, and a process after a power
+cut claims from the point its open found), and its end reads as one more;
+from the first whole one the judgment frames again. A long one is checked
+without reading its bytes again: the look keeps the sum of the bytes from
+where it began to every 4 KiB past it (`STRIDE`), and a record's sum is the
+one at its end less the one at its start carried over its length, a
+multiplication in the polynomial's field for each bit of it
+(`crc::crc32c_after`, zlib's `crc32_combine` turned round). Each byte
+summed counts against sixteen times the bytes after the damage and 64 MiB;
+past that the open is refused ("what follows it could not be judged"), as a
+version before refused any head it could not frame, and never for a tear
+at the end, which is never looked past. A head of a kind this version does
+not know whose record is whole by its sum is a later version's, refused as
+before ("unknown record kind 15 at 1234"). A file with no record carrying a
+sum -- one a version before wrote -- keeps the old rule: a record cut short
+at the end or zeros from a head (`zero_tail`, above) cut, any other stop
+refused, a counter's head past the front among them, which read as one
+moved the image's end.
+
+The second version of this change looked past every damage a byte at a
+time, summing every head that framed, within four times the bytes it looked
+over and 64 MiB. The review found the bytes of vectors and of binary or
+compressed bodies read as heads at about one byte in twenty, some with
+lengths of megabytes: a `put` of 8 000 `vector<64>` rows cut 1.2 MB into
+its 2 MB record was refused, where main cut it, and so was a page of zeros
+inside a 1 MB unsynced record of them. Over a head lost before 4 MiB of
+`vector<64>` rows (`a_head_lost_before_vectors_is_judged_by_the_records_
+after_them`), 2 196 heads framed and passed the claim and the end's test,
+225 of them past 16 KiB: summed one by one, 133 MB before the work allowed
+ran out, 120 of them holding all but 2 MB of it; checked from the kept sums,
+9 MB in all, 4 MB of it the sums kept, and the record after the vectors
+found in 17 ms on this M1 (24 ms with the kind tested by two branches, a
+coin each over a vector's bytes, before the bits of `HEADS`). A tear
+(`a_tear_inside_a_large_vector_record_is_cut`, 3 MiB into 4 MiB) and a hole
+in an unsynced record of vectors (`a_page_lost_inside_an_unsynced_vector_
+record_is_cut`) are framed past, not looked through; the same hole where
+the record after it claims past it (`..._synced_vector_record_refuses_the_
+open`) is refused. The open checks such a record only where it ends past
+D, which a claim makes a page short of its own record: a record wholly
+below D is read as the image is, its damage `fennec verify`'s to find.
+
+The first version of this change refused any record failing its sum with a
+whole record after it, and stopped at the first head no record read from,
+cutting there without looking past it. Its review found both wrong: a power
+cut whose cache wrote the unflushed pages out of order -- a hole in one
+record, a later one kept -- left a server that would not start, though it
+lost nothing it answered; and zeros across a record's head in the middle of
+a 202-row file cut it to one row, where main refused. The claim tells the
+two apart; nothing else in a file does (`a_hole_in_an_unsynced_record_
+before_a_whole_one_is_cut`, `a_page_lost_across_heads_before_a_claim_past_
+it_refuses_the_open`, `..._past_the_durable_point_is_cut`). Rejected: a mark
+appended after each fsync naming how far the file was durable (~20 bytes a
+write under `--sync always`, where the next record's claim says it in one);
+a length written beside the file (`<file>.synced`), another file a backup,
+a restore and a rename must keep in step; the claim in the head, written
+before an image's streamed body ends; the tail checked whole, which read
+every page of 1 GB of 64 KB documents from the disk in 4.1 s against main's
+1.5.
+
+*What the judgment leaves.* A head damaged into one whose length runs past
+the end reads as a torn tail and is cut, records after it unseen, as every
+version before cut it; one damaged into a wrong length that fits, ending
+by chance where a head frames, is framed past, the bytes it spans not
+looked through; a whole record claiming past the damage directly
+before a second head that does not frame fails the end's test and is not
+counted, a later one counting in its place where there is one. A record
+of no sum after checked ones, framed by its length, is below the point a
+whole record after it claims, and refused as a flipped bit is. Stale blocks
+of an older file -- FAT32, exFAT and ext4's `data=writeback` give a file's
+new length its old blocks -- may hold that file's whole records past the
+damage, their sums their own and their claims passing by chance: the open
+then refuses where it could have cut, never the other way. That is not
+rare. The third review put stale pages taken from a file written with
+frequent syncs over the lost ones, past a power cut's point: 219 to 228 of
+300 cuts were refused -- the stale file's records whole by their sums,
+their claims past the damage -- and none lost a byte a sync had covered;
+main refused about as often, any head it could not frame. Such a refusal
+is the file left as it is, for a restore from the archive or a replica. A
+seed for the sum written in each file would tell them apart, but every
+file would need it from its first byte (one never compacted has no image
+to carry it), a replica and an archiver would sum each record anew rather
+than carry their primary's sum on, and a restore would sum every record of
+the archive anew under the file's: a field in every header and a sum more
+on every replica's write, for refusals that lose nothing. Not done.
+
+*Which records carry one: the kind's bit, record by record.* A file a
+version before wrote has none, and its records load as they read; once
+this version appends to such a file, it holds both until its next compact
+writes it anew. After a record carrying a sum, every record carries one: a
+record with none after one with is a checked record whose high bit flipped,
+which read so would take its claim and sum as its body -- refused ("the
+record at 1234 carries no checksum, after records that do"). A replica of a
+primary from before frames each record it takes as this version does
+(below), and an archiver does the same (*Every reader of records*), so
+this version never writes a file mixed the other way -- a restore
+assembles one from an archive's image and segments. Before the archiver
+did, the third review found a rolling upgrade's archiver -- upgraded first,
+following a primary from before -- consolidating its first image as this
+version writes one, checked, then keeping the primary's plain records
+after it: an image and two plain `put`s opened at the image's end, two
+writes short, so the restore ("the restored file is at change 2, not
+4"), `verify` and every consolidation after it failed, and went on failing
+after the primary was upgraded; a replica from before promoted did the
+same. A test that met it (fennec-import's mirror, a plain record written
+by hand after a snapshot) had been changed to write a checked one; it now
+holds the open to the cut as well. The open's rule stays: read as a write,
+a stale `2` past the point -- in a file whose tail no fsync covered --
+would drop a collection. What a
+one-bit flag leaves: the first checked record after a version before's (or
+a file's first record) with its bit flipped reads as unchecked, nothing
+before it to say otherwise; its claim and sum are then read as the end of
+its body, which a data record's frames or a schema's decode may refuse and
+may not. `fennec verify` does not find it either. Rejected: a flag in the
+counter's head or a version byte for the whole file -- the four magics stay
+as they are, a file's appends after an open of an old one would have gone
+unchecked until a compact, and a file with no image (a new one, never
+compacted) has no head to carry it; new kinds numbered 14 to 26, a `match`
+arm each where the bit is one mask.
+
+*What a binary from before does, and what it is sent.* It frames a checked
+record by its length, which counts the claim and the sum, and refuses its
+kind in words ("unknown record kind 131 at 8"; v0.1.12: "unknown record
+kind 131"), never reading the sum as a record. A file this version wrote to
+opens in no binary from before, so a rollback after the first write is a
+rollback onto an older file (RELEASING.md). Its followers keep following,
+though: a follower of this version says it reads sums (`sums=1` on
+`/_replication`, and on a node's `POST /_replication/tenants`); one that
+does not -- every one from before -- is sent each record with its claim and
+sum taken off and its kind's bits cleared (`plain_records`), and an image as
+a version before wrote it (`plain_image`, its counter's length patched;
+`replication::plain_unless`). Its bytes are otherwise the primary's, so a
+replica from before lands them, an archiver from before counts a block's
+writes as it did and takes its images, its `fennec verify` and `fennec
+restore` read what it kept, and the server from before opens the file its
+restore wrote (`make upgrade-check`). What stays one way: a tenant moved
+onto a node from before is refused at its install, its file being this
+version's (the tenant stays on its source); and a replica from before
+promoted is a primary writing records with none, which this version's
+replicas and archivers of it take, each framing them anew.
+
+*A replica's records.* A replica's `apply` holds each record its primary
+sends to its sum before landing it ("a record of the primary's at 1234
+fails its checksum"). The claim it came with is the primary's, of the
+primary's file: the replica writes its own into the record before landing
+it (`land_applied`) -- in place where it fits the record's width, else 0,
+and the sum carried on from the head and body's rather than summed again
+(`crc32c(head_body, claim)`: a CRC's state is its value) -- so a replica
+that synced nothing never claims its file durable past what it synced
+(`a_replica_claims_its_own_file_durable_never_its_primarys`). A record from
+a primary from before, carrying none, is framed afresh with the replica's
+claim, so a replica's file is checked from its first record and stays so
+when it is promoted.
+
+A record whose claim changed goes to the file as its parts -- the head and
+body as they came, then the claim and the sum -- and they are appended
+under one lock (`FileSink::record_parts`): the buffer's, or the disk's for
+a record the buffer cannot hold, so that no durability writes the file
+between them. A replica's syncer takes its durability under the database's
+lock and runs it after, beside the next write, and the point it stores is
+where the bytes it wrote end. Appended a part at a time, as the third
+review's round had it, a sync could write out a record's head and body
+alone and store that point, inside the record; every record after it then
+claimed it, and a power cut that took the trailer alone -- whose bytes no
+fsync covered -- refused the open ("fails its checksum, and the whole
+record at ... says the file was durable past it") where it should cut. The
+fourth review reproduced it by hand: the durable point at the end of a
+20 KB record's body and its trailer zeroed, refused; at the record's start,
+cut. `a_record_in_parts_is_never_split_by_a_sync` appends 20 000 records in
+parts beside a thread that syncs as fast as it can, and holds every point a
+sync stored to a record's end: the loop over the parts failed it in each of
+five runs, the lock in none of fifteen. Every other record is appended
+whole (`Sink::append`), and the durable point is a record's end by that.
+
+*Every reader of records.* `archive::entries` judges a segment's records,
+and an archiver writes them so that it can: `Archive::take` writes each
+record it is sent as the segment's own (`claimed_into`), as a replica's
+land does -- held to its sum, refused where it fails ("the primary's write
+12: a record that fails its checksum"), and refused where it carries none
+after one that did on the same stream ("... carries no checksum, after
+records that do"): a primary writes all of its records with a sum or none,
+so that is a checked record whose high bit flipped, its claim and sum read
+as its body's end where it was framed anew. Each is damage
+(`InvalidData`): the single archiver makes its stream again, and a node's
+passes over that tenant alone until it follows the node again
+([replication.md](replication.md#a-nodes-archive)). Its
+claim is the segment's -- how far the archiver's fsyncs of the segment had
+reached as it was appended (`Segment::durable`, set as each `sync_data`
+returns; nothing on a segment the archiver went on with after a restart
+until its first sync, which covers what the process before left) -- in
+place where it fits the record's width, its sum carried on, and framed
+anew otherwise, a primary from before's plain records among them. A
+segment then holds no record without a sum after one with, so neither
+does an image its consolidation writes nor a file a restore assembles;
+`an_archiver_following_a_primary_from_before_checksums_restores_it_whole`
+and `an_image_from_a_promoted_replica_from_before_checksums_restores`
+hold a restore, a `verify` and two consolidations to every write, and
+`make upgrade-check` this tree's archiver of a primary from before.
+
+So a reader -- `fennec verify`, `restore`, a moment's read -- judges
+damage in a segment as an open judges a file's (`judge_after`, `Laid {
+prefix: 8, durable: D }`, D the newest claim of a whole record before
+the damage): refused where a whole record after it says the segment was
+synced past it ("the record at 1234 is damaged, and the whole record at
+5678 says the segment was synced past it"), and otherwise a power cut's
+hole in what the archiver had not synced, cut, the segment's end there
+(`a_reader_cuts_a_hole_in_what_the_archiver_had_not_synced`). A record of
+no sum after one with -- stale bytes, or a flipped bit, read as a write
+that would have moved every number after it -- is damage too. Until the third
+review an archiver kept the primary's records as sent, their claims the
+primary's file's, and a reader judged by any whole record after the damage:
+until the archiver started again and cut it, a power cut's hole in its
+last unsynced writes refused every restore and `verify`, and so did a
+copy of the archive taken then (the third review's LOW). The archiver
+itself, resuming after a crash (`Archive::position`), still cuts the
+damage of the segment it goes on with and everything after it, logged,
+and fetches those writes again from its primary. A judgment there goes by
+heads past a record that frames, a byte at a time only past a head that
+does not, a candidate held to an entry's time before it (under 2^48 ms)
+as well; and a record whose head or length runs past the segment's end is
+that segment's end, nothing of it looked at -- looked through, a segment
+ending in 256 KiB of vectors' `f32`s cut short was refused, so an archiver
+killed mid-append left `fennec verify`, `restore` and `last_write`
+refusing what main took as the segment's end
+(`a_large_record_cut_short_ends_a_segment`, 4 MiB of them). `fennec
+verify` holds every record of each image to its sum as well
+(`check_records`), the one reader that reads an image whole. A sealed
+segment's frame is covered by its tag already, and its plaintext's records
+are judged as a plain segment's, their claims counted in its plaintext. A
+restore copies a segment's records as they are: their claims the
+segment's, they claim less than the restored file holds, which is synced
+whole before it is renamed into place.
+
+*What only looks.* `fennec verify data.fennec` and `fs::open_read_only`
+(`fennec types`) write nothing, the sync log beside the file among it: on
+Linux, after the machine went down, a durable write's bytes may be in the
+log alone until an open to write puts them back (`synclog::recover`), and
+read as the file stood they were a torn tail, or damage their sums
+refused. Both read the file with the log's entries put back in memory
+(`fs::read_with_sync_log`, `synclog::applied`: the same entries `recover`
+writes, read where they differ from the file), the log and the file left as
+they were (`a_reader_that_writes_nothing_reads_the_log`); with no log
+naming the file, `verify` streams it and the open maps it, as before. Where
+a log puts something back, the file is read whole into memory, `verify`'s
+included: as much memory as the file for that one read, after the machine
+went down and before a server or the library opened the file again -- an
+open into memory (`fs::open_in_memory`) holds as much. A reader putting
+the log's entries over the file as it streams would spare `verify` that;
+not built, the case being that window alone. A
+close's mark torn by a power cut after the close is cut by the next open
+and not said as a cut (`torn_mark`): it was no write, and every byte
+before it was durable (`a_torn_close_mark_is_cut_unsaid`).
+
+*The sum.* CRC32C: the instructions compute it -- aarch64's `crc32c`, in
+every Apple chip's target and found at run time elsewhere, and x86_64's
+SSE4.2 `crc32`, found at run time -- three lanes at once over a stretch of
+48 KiB, joined by two multiplications in the polynomial's field (one
+instruction waits three cycles for the one before), and a record's last 7
+bytes in three instructions rather than seven. On this M1 one 1 GiB buffer sums in 49 ms (22 GB/s, three lanes),
+the same bytes as 400-byte records in 75 ms (14 GB/s) and as 60-byte ones
+in 62 ms. Elsewhere,
+wasm32 among them, eight tables a step (slicing-by-8), made at the first
+use rather than carried as 8 KiB of the module: a table a byte, a byte a
+step, made a 100-document `put` in the module 6 us slower than main's
+(134 against 128), each lookup waiting on the one before, about 7 cycles a
+byte. Each way is held to a bitwise CRC over every length around a word
+and a stretch (`crc::tests`), the x86_64 one under Rosetta. Rejected: the
+sync log's 64-bit multiply hash, which promises no burst it finds; xxHash
+or a 64-bit CRC, code of our own on every target, never an instruction.
+
+*What it costs.* A write sums its record once, as it lands, and its claim
+is a load of an atomic and one byte: five bytes a record past main's
+(1.2% of a file of 400-byte documents). Counted by `make instr-compare`'s way (tools/instr/compare.py: 8 re-signed
+identities a build, 7 runs each, `replays.rs` through `handle`, main's
+binary built with this branch's example), a lone `put` took 21 391
+instructions against main's 21 236, +155 (+0.73%, outside two standard
+errors): the first version measured +96 for the sum alone, the rest the
+claim's -- the durable point loaded through the sink, its pages counted,
+its byte written and summed. Measured again after the second review,
++217 (21 407 against 21 190, +1.02%, SE 41) -- the same code in another
+draw of the allocator, each build moving about 70 between runs -- and
++50 against the build before it (inside two standard errors); a trace
+of one `put`'s `handle` (`TRACE=fennec_http::handle`) counts that
+review's change at -3 instructions of fennecdb's own code: the claim
+reads the durable point from the database's own atomic, where it called
+through the sink -- `replays.rs`'s one, a server's three
+(`Holding`, `Tee`, the file's). A keyed `put` (a block of two writes) +242
+(+0.29%, just outside two), and a `put` of 100 documents in one record
+(`replays.rs`'s `batch`) -1 576 of 1 010 811 (inside two). The third
+review put 130 to 150 of a lone `put`'s instructions in this change's own
+code, 30 to 40 of them removable with the format as it is; taken out --
+the claim written as a store of four bytes and the length cut back, where
+`extend_from_slice(&claim[..w])` called `memcpy`; a lone record appended
+as main appended it, where every append went through a loop over its
+parts (`record_parts`, a replica's, alone loops now, under one lock); `crc32c` inlined --
+its own code is 38 instructions fewer a lone `put` than the build before
+by a trace of one `put`'s `handle` (the append's loop over one part -21,
+`crc32c`'s call -20 less 15 inlined into `commit`, the sink's `record` -9,
+a store for the `memcpy` -3), -41 by the plain counts (inside two standard errors). A lone
+`put` measured +192 against main (21 370 against 21 178, +0.91%, SE 29),
+and the trace counts fennecdb's own code at +118 against main's (`commit`
++101, `record_at` +13, `note_record` +3; the allocator's draw -254 there). A keyed `put` +337 (+0.40%, SE 82), its own code +171:
+the block's record framed around its claim and summed (`framed_claiming`
++150, `frame_into` -57). The fourth review's round frames a block record
+in place: its length counted from its heads first, the frames copied once
+after its head, where main and the rounds before copied them into a body
+and the body into the record, one allocation more. A keyed `put` then
+measured -292 against main (83 568 against 83 860, -0.35%, SE 77) and a
+lone `put`, whose path it leaves as it was, +196 (21 365 against 21 169,
++0.93%, SE 40); the trace counts the keyed `put`'s own code at +170
+(`commit` +107 with the length counted, the claim and sum's `closed` +74,
+`frame_into` -57) and a call each of `malloc`, `free` and `memcpy` fewer,
+the allocator's paths for that allocation and the body's copy gone. The
+claim is
+what bounds the open: without it the 64 KB file read from the disk took
+3.8 s against 1.5. In the browser module, in
+Node (medians of 15 interleaved rounds), a lone `put` took 3.84 us against
+main's 3.81 and a `put` of 100 documents 131.9 against 131.4 -- inside
+their quartiles; the first version's 1.5% did not show again beside it
+(131.2), each record summed once (`Block::record`; the journal's sink
+appends it as it came). The module grew 6 607 bytes, 846 118 to 852 725
+(344.5 KB gzip, 284.8 brotli): the first version's 2 168 -- `crc.rs` 758,
+the sum's writers and the tables' builder -- 2 287 for what the first
+review found missing, the look for a whole record past damage (`whole_at`,
+`whole_after`, `judge`: 707), the walk that stops rather than refuses
+(`Walk::next`, +434), the claim's writing and reading (`framed_claiming`,
+`Rec`), the cut said (`Cut`) and 480 of data, the refusals' words; and
+2 152 (+1 370 gzip, +840 brotli) for the second's: the judgment framed
+first (`judge_after` 758, `head_at` 449, `Judging`'s claim and end tests
+277), the sums a look keeps and the field's multiplication, now in every
+build (`Judging::sum` 347, `sum_to` 331, `crc::mul` 86), the load's new
+branches (`load_from` +318), less the look it replaced (`whole_at`,
+`whole_after`: -707). A table of the field's squares made once, where
+they are now made as each length needs them, was 220 bytes more for its
+lock, a 256-byte table of the kind bytes 224 more than its 32 bytes of
+bits, and a `take_while` over the trailing zeros 118 more than a loop.
+The third review's round added 36 (852 761), `crc32c` inlined where it is
+called; what it added for the archive and the survey is native alone. The
+fourth's added 63 (852 824; 344.6 KB gzip, 285.1 brotli): the block
+record's length counted from its heads, less `Laid`'s `None` branches; the
+claim and sum's writer (`closed`) is left to the compiler, which, told to
+inline it into both callers, made the module 51 bytes larger still. The browser opens files a server wrote (`openFile`), so it
+judges damage as a server does; the survey, the downgrade to a follower and
+`fennec verify`'s stream are native alone. A compact of that 1 GB file to
+0.9 GB, its image summed in three lanes as it is written, took 561 to 944 ms
+against main's 574 to 1 072: no difference out of the noise.
 
 The archive judges its segments' heads with the same `zero_tail`
 (`archive::entries`): a zero tail is cut where 11 zeros were read as a

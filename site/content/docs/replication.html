@@ -379,12 +379,28 @@ all came before the oldest image kept — never the one being written.
 <code>fennec prune &lt;dir&gt; --keep 7d</code> does the same once.</p>
 
 <p><code>fennec verify &lt;dir&gt;</code> reads the archive as a restore
-would: every image opens at the change its name says, the segments run on
-from the oldest image with no change missing, only the last segment may end
-in a record cut short, and a restore to the end opens. It prints from when
+would: every image opens at the change its name says and each of its
+records matches its checksum, the segments run on from the oldest image
+with no change missing, only the last segment may end in a record cut
+short or one failing its checksum with nothing whole after it saying the
+segment was synced past it, and a restore to the end opens. It prints from when
 to when the archive can restore, names any gap — changes in no segment
 between two images, where a restore to the end passes but a restore to a
-moment inside cannot — and exits 1 when no restore can be made.</p>
+moment inside cannot — and exits 1 when no restore can be made.
+<code>fennec verify data.fennec</code> holds every record of a database
+file to its checksum, the ones an open trusts as synced too, with what the
+sync log beside it holds put back first, as an open would.</p>
+
+<p>Replicas and archivers keep following a primary of a newer version
+through an upgrade: a follower that does not say it reads record checksums
+(<code>sums=1</code> on <code>/_replication</code>, or on a node's
+<code>POST /_replication/tenants</code>) is sent each record and image as a
+binary from before them wrote it
+(<a href="file-format.html">File format</a>). An archiver writes each
+record it takes with a checksum of its own and how far it had synced the
+segment, a plain one from a primary from before too, so a power cut on
+the archiver's machine leaves an archive a restore reads to its last
+synced write.</p>
 </details>
 
 <h2 id="node-archive">Archiving every tenant of a node</h2>
@@ -416,6 +432,11 @@ fennec-server --dir /data/n1 --replication-token "$REPL" ...
   <li><b>A tenant restored to an earlier moment, or made again under its
     name,</b> begins a new archive; the one before is kept beside it, and
     answers for the time before.</li>
+  <li><b>One tenant's damage holds up no other.</b> A tenant whose archive
+    does not read is left as it is for you to look at, and one whose stream
+    sends a record failing its checksum is passed over until the archiver
+    connects again; the archiver's log names the tenant, and every other
+    tenant is archived on.</li>
   <li><b><code>--key-file</code>, <code>--image-every</code> and
     <code>--keep</code></b> apply to each tenant's archive.</li>
   <li><b>Under load the archive trails the node.</b> Under <code>--sync

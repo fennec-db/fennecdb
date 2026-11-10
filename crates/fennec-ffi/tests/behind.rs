@@ -151,7 +151,27 @@ fn write(h: u64, from: usize, rows: usize) -> String {
 const SCHEMA: &str = "create collection r (k text, n int, e vector<128>)";
 
 fn len(path: &Path) -> u64 {
-    std::fs::metadata(path).unwrap().len()
+    plain(path).len() as u64
+}
+
+/// The file's records as a build before checksums wrote them, a close's
+/// mark left out: what two handles hold alike whatever their syncs, each
+/// record's claim -- how far its own file was durable -- being its file's.
+fn plain(path: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap();
+    let records = fennec_core::engine::plain_records(&bytes[8..]).unwrap();
+    let mut out = bytes[..8].to_vec();
+    let mut pos = 0;
+    while pos < records.len() {
+        let mut p = pos + 1;
+        fennec_core::codec::get_uvarint(&records, &mut p).unwrap();
+        let len = fennec_core::codec::get_uvarint(&records, &mut p).unwrap() as usize;
+        if records[pos] != 14 {
+            out.extend_from_slice(&records[pos..p + len]);
+        }
+        pos = p + len;
+    }
+    out
 }
 
 /// What a test does to the buffer's write a call hands back, before it
@@ -226,7 +246,8 @@ impl Sink for Wrapped {
 /// or sync -- where the appends left up to a mebibyte to the next -- and a
 /// copy taken then opens to every row; a few small writes wait in the
 /// buffer until `fennec_flush`, which writes them all; and the file is, byte
-/// for byte, the one a handle fsyncing every write leaves.
+/// for byte, the one a handle fsyncing every write leaves, but for what each
+/// record claims of its own file's syncs.
 #[test]
 fn the_buffer_written_behind_the_lock_lands_in_the_file() {
     let dir = scratch("lands");
@@ -264,10 +285,7 @@ fn the_buffer_written_behind_the_lock_lands_in_the_file() {
 
     assert_eq!(by_handle(fennec_close, a), (FENNEC_OK, String::new()));
     assert_eq!(by_handle(fennec_close, b), (FENNEC_OK, String::new()));
-    let (x, y) = (
-        std::fs::read(&a_path).unwrap(),
-        std::fs::read(&b_path).unwrap(),
-    );
+    let (x, y) = (plain(&a_path), plain(&b_path));
     assert!(x == y, "{} and {} bytes differ", x.len(), y.len());
     let a = open(&a_path, FENNEC_OPEN_NO_SYNC | FENNEC_OPEN_NO_AUTO_COMPACT);
     assert_eq!(count(a), rows as u64);

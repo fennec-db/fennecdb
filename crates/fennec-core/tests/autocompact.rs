@@ -240,9 +240,11 @@ fn the_dead_bytes_are_counted_as_writes_land_and_found_again_on_open() {
         // The open counts the same from the records it walks.
         let mut db = fennec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
         let again = db.garbage();
+        // The file grew by the close's mark alone: everything it wrote was
+        // synced (`REC_SYNCED`, 8 bytes).
         assert_eq!(
             (again.file, again.live),
-            (g.file, g.live),
+            (g.file + 8, g.live),
             "mapped: {mapped}"
         );
 

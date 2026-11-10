@@ -14,7 +14,7 @@ than the documents: the scan was 5.4 ms of a 36 ms open at 100 000 x 128,
 where every document held one. Anything off means a silent full
 rebuild. A corrupt graph can therefore never lose data. It is restored where
 its last record is -- a checkpoint's image holds one after each collection's
-data; `last_graphs` walks the record heads for it first, since restoring each
+data; `survey` walks the record heads for it first, since restoring each
 record read every vector again -- against the documents as they stood there,
 and the writes after it are applied as the write path would (a touched
 document keeps its node while it holds the same vector, and has it retired for

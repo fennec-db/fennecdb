@@ -830,6 +830,24 @@ impl Sink for Tee {
         self.feed.push(seq, bytes);
         Ok(())
     }
+    /// The parts into the file, its claim this file's; the record to the
+    /// feed as it came, whose followers each make its claim their own.
+    fn record_parts(
+        &mut self,
+        seq: u64,
+        original: &[u8],
+        parts: &[&[u8]],
+    ) -> fennec_core::error::Result<()> {
+        self.file.record_parts(seq, original, parts)?;
+        self.feed.push(seq, original);
+        Ok(())
+    }
+    fn durable(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        self.file.durable()
+    }
+    fn set_durable(&mut self, at: u64) {
+        self.file.set_durable(at)
+    }
     /// The land into the file, which holds the spills; the block to the
     /// feed as the one block record it would have been, which a replica
     /// applies whole -- a land it could not, holding no spill.
@@ -903,13 +921,8 @@ impl Sink for Tee {
 /// The history a history record holds, `[8][0][length][history]`; `None`
 /// for any other record.
 fn history_in(record: &[u8]) -> Option<History> {
-    if record.first() != Some(&fennec_core::history::RECORD) {
-        return None;
-    }
-    let mut pos = 1;
-    fennec_core::codec::get_uvarint(record, &mut pos).ok()?;
-    let len = fennec_core::codec::get_uvarint(record, &mut pos).ok()? as usize;
-    History::decode(record.get(pos..pos.checked_add(len)?)?).ok()
+    let body = fennec_core::engine::record_body(record, fennec_core::history::RECORD)?;
+    History::decode(body).ok()
 }
 
 /// Opens a file for a server that has replicas, or is one, with its writes
@@ -1280,6 +1293,19 @@ pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
+/// Records -- or an image, whose records follow its magic and counter --
+/// as they are where the follower reads checked ones, and as a version
+/// before checksums wrote them where it does not.
+pub(crate) fn plain_unless(sums: bool, bytes: Vec<u8>) -> fennec_core::error::Result<Vec<u8>> {
+    match sums {
+        true => Ok(bytes),
+        false if bytes.starts_with(&fennec_core::engine::MAGIC[..]) => {
+            fennec_core::engine::plain_image(&bytes)
+        }
+        false => fennec_core::engine::plain_records(&bytes),
+    }
+}
+
 /// Feeds a replica: a hello, an image when it needs one, then the writes as
 /// they reach the disk. It takes the connection over and returns when the
 /// replica goes away or has to start again.
@@ -1304,6 +1330,11 @@ fn stream(
         .and_then(|v| u64::from_str_radix(v, 16).ok())
         .unwrap_or(0);
     let force = param("image") == Some("1");
+    // A follower that reads checked records says so. One that does not --
+    // an older binary, which refuses the first -- is sent each record as a
+    // version before checksums wrote it, the image too, so that a rolling
+    // upgrade keeps it following ([`fennec_core::engine::plain_records`]).
+    let sums = param("sums") == Some("1");
     // An archiver says so, and a read replica: no promotion takes a write
     // from either's stream, so no hook's answer waits for it
     // ([`Feed::standby_sent`]).
@@ -1323,6 +1354,13 @@ fn stream(
             (since, g.history().clone(), epoch, None)
         } else {
             (now, g.history().clone(), epoch, Some(g.snapshot()))
+        }
+    };
+    let image = match image.map(|i| plain_unless(sums, i)).transpose() {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = Response::error(500, &e.to_string()).write(out, false, false);
+            return;
         }
     };
     // An image goes out once the primary's disk holds all of it.
@@ -1397,6 +1435,11 @@ fn stream(
         match feed.next(cursor, epoch, MESSAGE) {
             Next::Records(first, last, times, records) => {
                 let n = times.len() as u64;
+                let Ok(records) = plain_unless(sums, records) else {
+                    let _ = message(&mut w, b'E', &[b"a record the feed holds does not read"])
+                        .and_then(|_| w.flush());
+                    return;
+                };
                 let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
                     .and_then(|_| w.flush());
                 if sent.is_err() {
@@ -1566,7 +1609,7 @@ impl Upstream {
         // promotion takes a write from either, so no hook's answer waits
         // for them ([`Feed::standby_sent`]).
         let request = format!(
-            "GET {}/_replication?since={since}&history={history:016x}{}{}{} HTTP/1.1\r\n\
+            "GET {}/_replication?since={since}&history={history:016x}&sums=1{}{}{} HTTP/1.1\r\n\
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
             self.base,
             if image { "&image=1" } else { "" },
@@ -1866,6 +1909,9 @@ impl Follower {
             let Message::Image(bytes) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
             };
+            // Every record held to its sum, which an open does not ask of an
+            // image's: one damaged on the way would be this file's whole.
+            fennec_core::engine::check_records(&bytes).map_err(io::Error::other)?;
             // Loaded before the lock is taken: reads go on meanwhile.
             let mut fresh = Database::new();
             fresh.load(&bytes).map_err(io::Error::other)?;

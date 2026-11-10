@@ -165,22 +165,10 @@ fn entry(log: &[u8], generation: u64, at: u64) -> Option<&[u8]> {
 /// older binary's, or this one's cut of a torn record past the entries)
 /// is not written over again at the next.
 pub(crate) fn recover(main: &File, log_path: &Path) -> io::Result<()> {
-    // Something else at the log's name is no log: the sink then finds it
-    // cannot make one, and fsyncs the file.
-    match std::fs::metadata(log_path) {
-        Ok(m) if m.is_file() => {}
-        Ok(_) => return Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    }
-    let log = std::fs::read(log_path)?;
-    let Some(h) = Header::decode(&log) else {
+    let Some((log, h)) = naming(main, log_path)? else {
         return Ok(());
     };
     let len = main.metadata()?.len();
-    if h.file != identity(main)? || len < h.base || fingerprint(main, h.base)? != h.print {
-        return Ok(());
-    }
     let (mut at, mut pos) = (h.base, HEAD as usize);
     let mut held = Vec::new();
     while let Some(bytes) = log.get(pos..).and_then(|l| entry(l, h.generation, at)) {
@@ -202,6 +190,74 @@ pub(crate) fn recover(main: &File, log_path: &Path) -> io::Result<()> {
     let log = OpenOptions::new().write(true).open(log_path)?;
     log.write_all_at(&[0u8; HEADER], 0)?;
     log.sync_data()
+}
+
+/// The log at `log_path` and its header, where it names `main`: its
+/// inode, and the bytes before the generation's start.
+fn naming(main: &File, log_path: &Path) -> io::Result<Option<(Vec<u8>, Header)>> {
+    // Something else at the log's name is no log: the sink then finds it
+    // cannot make one, and fsyncs the file.
+    match std::fs::metadata(log_path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let log = std::fs::read(log_path)?;
+    let Some(h) = Header::decode(&log) else {
+        return Ok(None);
+    };
+    let len = main.metadata()?.len();
+    if h.file != identity(main)? || len < h.base || fingerprint(main, h.base)? != h.print {
+        return Ok(None);
+    }
+    Ok(Some((log, h)))
+}
+
+/// `main`'s bytes with what the log beside it holds and the file lost put
+/// back, as [`recover`] would write them, writing nothing: what a reader
+/// that writes nothing -- `fennec verify`, `fennec types` -- reads after the
+/// machine went down, the log applied to the file only by the next open
+/// that writes it. Read as they were, the file's last durable writes were
+/// damage its records' sums refused. `None` where no log names the file
+/// or it puts nothing back, the file read as it is.
+pub(crate) fn applied(main: &File, log_path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let Some((log, h)) = naming(main, log_path)? else {
+        return Ok(None);
+    };
+    let len = main.metadata()?.len();
+    let (mut at, mut pos) = (h.base, HEAD as usize);
+    let (mut out, mut held): (Option<Vec<u8>>, Vec<u8>) = (None, Vec::new());
+    while let Some(bytes) = log.get(pos..).and_then(|l| entry(l, h.generation, at)) {
+        let end = at + bytes.len() as u64;
+        let same = match &out {
+            Some(o) => o.get(at as usize..end as usize) == Some(bytes),
+            None => {
+                end <= len && {
+                    held.resize(bytes.len(), 0);
+                    main.read_exact_at(&mut held, at)?;
+                    held == bytes
+                }
+            }
+        };
+        if !same {
+            let o = match &mut out {
+                Some(o) => o,
+                None => {
+                    let mut whole = vec![0; len as usize];
+                    main.read_exact_at(&mut whole, 0)?;
+                    out.insert(whole)
+                }
+            };
+            if o.len() < end as usize {
+                o.resize(end as usize, 0);
+            }
+            o[at as usize..end as usize].copy_from_slice(bytes);
+        }
+        at = end;
+        pos += ENTRY_HEAD + bytes.len();
+    }
+    Ok(out)
 }
 
 /// The log as a sink writes it.

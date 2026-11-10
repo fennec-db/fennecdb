@@ -429,3 +429,164 @@ fn a_replica_keeps_the_nodes_of_vectors_a_rewrite_leaves_alone() {
         rows(&primary, near, std::slice::from_ref(&probe))
     );
 }
+
+/// Where each record of `bytes` -- a file's, from `from` -- starts and
+/// ends, and its kind without the checksum's bits.
+#[cfg(feature = "std-fs")]
+fn records_of(bytes: &[u8], from: usize) -> Vec<(usize, usize, u8)> {
+    let mut out = Vec::new();
+    let mut pos = from;
+    while pos < bytes.len() {
+        let mut p = pos + 1;
+        fennec_core::codec::get_uvarint(bytes, &mut p).unwrap();
+        let len = fennec_core::codec::get_uvarint(bytes, &mut p).unwrap() as usize;
+        let kind = match bytes[pos] & 0x80 {
+            0 => bytes[pos],
+            _ => bytes[pos] & 0x1f,
+        };
+        out.push((pos, p + len, kind));
+        pos = p + len;
+    }
+    out
+}
+
+/// A primary's writes, from its file: what its feed would send.
+#[cfg(feature = "std-fs")]
+fn writes_of(file: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (s, e, kind) in records_of(file, 8) {
+        if matches!(kind, 1 | 2 | 3 | 5 | 9 | 12 | 13) {
+            out.extend_from_slice(&file[s..e]);
+        }
+    }
+    out
+}
+
+/// A record's claim is how far its own file was durable: a replica rewrites
+/// the one its primary's record came with, which was the primary's. Its
+/// primary synced every write; it synced none, so a page of its file lost
+/// to a power cut is a torn tail, cut -- with the primary's claims, the
+/// last record said the file durable past the hole, and the open was
+/// refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_replica_claims_its_own_file_durable_never_its_primarys() {
+    let dir = std::env::temp_dir().join(format!("fennec-replica-claims-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (p_path, r_path) = (dir.join("primary.fennec"), dir.join("replica.fennec"));
+    let mut primary = fennec_core::fs::open(&p_path).unwrap();
+    exec(&mut primary, "create collection t (a text)", &[]);
+    primary.sync().unwrap();
+    for n in 0..200 {
+        let a = Value::Text(format!("row {n:03} {}", "y".repeat(60)));
+        exec(&mut primary, "put t {a: $1}", &[a]);
+        primary.sync().unwrap();
+    }
+    drop(primary);
+    let records = writes_of(&std::fs::read(&p_path).unwrap());
+    let mut replica = fennec_core::fs::open(&r_path).unwrap();
+    replica.follow(vec![(7, 0)]).unwrap();
+    replica.apply(&records).unwrap();
+    replica.write_out().unwrap();
+    let good = std::fs::read(&r_path).unwrap();
+    drop(replica);
+    fennec_core::engine::check_records(&good).expect("the replica's file whole");
+    let all = records_of(&good, 8);
+    let page = (good.len() / 2 / 4096) * 4096;
+    let k = all
+        .iter()
+        .position(|&(s, e, _)| s < page && page < e)
+        .unwrap();
+    let mut bad = good.clone();
+    bad[page..page + 4096].fill(0);
+    std::fs::write(&r_path, &bad).unwrap();
+    let db = fennec_core::fs::open(&r_path).expect("a torn tail, cut");
+    assert_eq!(db.cut_on_open().map(|c| c.at), Some(all[k].0 as u64));
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A replica of a primary from before checksums -- its records sent as
+/// they came, carrying none -- frames each as this version frames one, so
+/// its file holds no record without a checksum after one with, and `fennec
+/// verify` holds every one; a primary of this version's records, sent to
+/// a follower that does not say it reads them (`plain_records`), are the
+/// ones a version before wrote, and its image too (`plain_image`), which
+/// this version opens and writes after.
+#[cfg(feature = "std-fs")]
+#[test]
+fn records_and_images_go_plain_to_a_follower_from_before_and_come_back_framed() {
+    let dir = std::env::temp_dir().join(format!("fennec-replica-plain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (p_path, r_path, i_path) = (
+        dir.join("primary.fennec"),
+        dir.join("replica.fennec"),
+        dir.join("image.fennec"),
+    );
+    let mut primary = fennec_core::fs::open(&p_path).unwrap();
+    exec(
+        &mut primary,
+        "create collection t (a text, n int @hash)",
+        &[],
+    );
+    for n in 0..50 {
+        exec(
+            &mut primary,
+            "put t {a: $1, n: $2}",
+            &[Value::Text(format!("r{n}")), Value::Int(n)],
+        );
+    }
+    primary.begin().unwrap();
+    exec(&mut primary, "put t {a: 'in a block', n: 99}", &[]);
+    exec(&mut primary, "set t {a: 'set'} where n = 3", &[]);
+    primary.commit().unwrap();
+    let image = primary.snapshot();
+    let want = rows(&primary, "get t select a, n", &[]);
+    drop(primary);
+
+    let checked = writes_of(&std::fs::read(&p_path).unwrap());
+    let plain = fennec_core::engine::plain_records(&checked).unwrap();
+    assert!(plain.len() < checked.len());
+    assert!(records_of(&plain, 0)
+        .iter()
+        .all(|&(s, _, _)| plain[s] & 0x80 == 0));
+    // Each record downgraded counts its writes as it did checked: an
+    // archiver from before counts a segment's by them.
+    let writes = |bytes: &[u8]| -> Vec<u64> {
+        records_of(bytes, 0)
+            .iter()
+            .map(|&(s, e, _)| writes_in(&bytes[s..e]).unwrap())
+            .collect()
+    };
+    assert_eq!(writes(&plain), writes(&checked));
+    assert!(
+        writes(&plain).contains(&2),
+        "the block's record holds two writes"
+    );
+
+    let mut replica = fennec_core::fs::open(&r_path).unwrap();
+    replica.follow(vec![(7, 0)]).unwrap();
+    replica.apply(&plain).unwrap();
+    assert_eq!(rows(&replica, "get t select a, n", &[]), want);
+    drop(replica);
+    let file = std::fs::read(&r_path).unwrap();
+    assert!(records_of(&file, 8)
+        .iter()
+        .all(|&(s, _, _)| file[s] & 0x80 != 0));
+    fennec_core::engine::check_records(&file).expect("the replica's file whole");
+
+    let old = fennec_core::engine::plain_image(&image).unwrap();
+    std::fs::write(&i_path, &old).unwrap();
+    let mut db = fennec_core::fs::open(&i_path).expect("an image from before");
+    assert_eq!(rows(&db, "get t select a, n", &[]), want);
+    exec(&mut db, "put t {a: 'after', n: 100}", &[]);
+    drop(db);
+    let file = std::fs::read(&i_path).unwrap();
+    fennec_core::engine::check_records(&file).expect("old records, then checked ones");
+    let db = fennec_core::fs::open(&i_path).expect("reopened");
+    assert_eq!(rows(&db, "get t select a, n", &[]).len(), want.len() + 1);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}
