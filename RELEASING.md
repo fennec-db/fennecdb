@@ -78,7 +78,8 @@ nothing reaches a registry before the notes have had a read.
    `@fennecdb/cloudflare` and `@fennecdb/langchain` to npm, and `FennecDb` to
    NuGet -- packed, installed into a fresh console app and used against a
    server (`integrations/dotnet/package.sh`) before it is pushed, and
-   skipped with a notice where `NUGET_API_KEY` is not set. With their
+   skipped with a warning where neither trusted publishing nor
+   `NUGET_API_KEY` gives it a key. With their
    secrets it also publishes `com.fennecdb:fennecdb` and
    `fennecdb-android` to Maven Central and `fennecdb` and `fennecdb_flutter`
    to pub.dev -- the plugin with the release's dynamic XCFramework and AAR libraries
@@ -364,17 +365,24 @@ first version goes out with a token:
 4. Delete the secret and revoke the token. Later releases publish with the
    workflow's identity alone.
 
-**NuGet.** NuGet takes an API key here, with no OIDC fallback: without the
-secret the `NuGet` job logs a notice and stops, and the other registries go
-on. Signed in to nuget.org as the account that will own `FennecDb`, under
-*API Keys*, create a key with *Push new packages and package versions* for
-the glob pattern `FennecDb` -- the first push creates the package -- then:
+**NuGet.** By trusted publishing: the `NuGet` job trades its OIDC token
+for a key that lives an hour (`NuGet/login`), asked for after the package
+is packed and used. Signed in to nuget.org as the account that will own
+`FennecDb` (`furkankinyas`, which the job names), under *Trusted
+Publishing*, add a policy: package owner that account, GitHub Actions,
+repository owner `fennec-db`, repository `fennecdb`, workflow file
+`packages.yml`, environment `nuget`, scope *Push new packages and package
+versions* -- the first push creates the package. Nothing goes into the
+repository's secrets.
 
-    gh secret set NUGET_API_KEY -R fennec-db/fennecdb
-
-A key expires (365 days at most); a new one goes into the same secret. A
-release published before the secret was set gets its package from a
-dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
+Where no policy answers, the job uses `NUGET_API_KEY` if it is set (under
+*API Keys*, a key with that scope for the glob pattern `FennecDb`, which
+expires within 365 days); with neither it warns and stops, and the other
+registries go on. A key left from before the policy is better deleted
+(`gh secret delete NUGET_API_KEY -R fennec-db/fennecdb`): the policy is
+asked first, and a key for another package's name only fails the push
+where it does not answer. A release published before either was set gets
+its package from a dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 
 **Go.** Nothing to set up: the module is fetched from the repository by its
 tag, and `proxy.golang.org` keeps a version once someone has fetched it.

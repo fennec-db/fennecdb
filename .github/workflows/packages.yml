@@ -138,51 +138,57 @@ jobs:
 
   # NuGet's `FennecDb`: packed, installed from the .nupkg into a console app
   # of its own and used against a fennec-server (integrations/dotnet/
-  # package.sh), and only then pushed. NuGet takes an API key alone here;
-  # without NUGET_API_KEY the job says so and stops, and the other
-  # registries go on.
+  # package.sh), and only then pushed. The key is nuget.org's trusted
+  # publishing: `NuGet/login` trades the job's OIDC token for a key that
+  # lives an hour, which a policy of the package owner's account
+  # (furkankinyas) grants this repository's packages.yml in the `nuget`
+  # environment -- so it is asked for after the pack, not before. Where no
+  # policy answers, NUGET_API_KEY is used if set; with neither the job warns
+  # and stops, and the other registries go on.
   nuget:
     name: NuGet
     runs-on: ubuntu-latest
     environment:
       name: nuget
       url: https://www.nuget.org/packages/FennecDb
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Look for the key
-        id: key
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "::notice::NUGET_API_KEY is not set: FennecDb is not published to NuGet (RELEASING.md, 'Once: the registries' side')"
-            echo "set=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "set=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v7
-        if: steps.key.outputs.set == 'true'
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install the pinned toolchain
-        if: steps.key.outputs.set == 'true'
         run: rustup show
 
       - name: Pack, install and use the package
-        if: steps.key.outputs.set == 'true'
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: integrations/dotnet/package.sh dist-nuget
+
+      # The nuget.org account's name, not an email; a failed exchange (no
+      # policy, or one naming another workflow or environment) leaves the
+      # output empty and the key below to answer.
+      - uses: NuGet/login@v1
+        id: login
+        continue-on-error: true
+        with:
+          user: furkankinyas
 
       # `--skip-duplicate`: a dispatch after a run that failed part of the
       # way pushes again what already went out, and NuGet refuses a version
       # twice.
       - name: Publish
-        if: steps.key.outputs.set == 'true'
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
+          FROM: ${{ steps.login.outputs.NUGET_API_KEY && 'trusted publishing' || 'NUGET_API_KEY' }}
         run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::warning::no trusted publishing policy answered and NUGET_API_KEY is not set: FennecDb is not published to NuGet (RELEASING.md, 'Once: the registries' side')"
+            exit 0
+          fi
+          echo "pushing with a key from $FROM"
           dotnet nuget push dist-nuget/FennecDb.*.nupkg --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json --skip-duplicate
 
