@@ -679,6 +679,51 @@ fn verify_says_what_an_archive_can_restore() {
     let says = format!("unknown record kind 0 at {at}");
     assert!(e.to_string().contains(&says), "{e}");
 
+    // Each record carries a checksum. The last one failing it -- its length
+    // on the disk, part of its bytes not -- is a torn tail, cut as one cut
+    // short is; one failing before a whole record is damage, refused by
+    // where it starts.
+    let sums = copy_of(&arch, &d.join("sums"));
+    let last = named(&sums, "writes-").pop().unwrap();
+    let good = std::fs::read(&last).unwrap();
+    let mut starts = Vec::new();
+    let mut pos = 8;
+    while pos < good.len() {
+        starts.push(pos + 8);
+        let (len, holds) = fennec_core::engine::record_holds(&good[pos + 8..]).unwrap();
+        assert!(holds);
+        pos += 8 + len;
+    }
+    assert!(starts.len() >= 2, "{starts:?}");
+    let mut bytes = good.clone();
+    *bytes.last_mut().unwrap() ^= 1;
+    std::fs::write(&last, &bytes).unwrap();
+    let v = Archive::new(&sums).unwrap().verify().unwrap();
+    let torn = good.len() - (starts[starts.len() - 1] - 8);
+    assert_eq!((v.last, v.torn), (p.seq() - 1, torn), "{v:?}");
+    let mut bytes = good.clone();
+    bytes[starts[0] + 3] ^= 0x40;
+    std::fs::write(&last, &bytes).unwrap();
+    let e = Archive::new(&sums).unwrap().verify().unwrap_err();
+    let says = format!(
+        "the record at {} fails its checksum, with whole records after it",
+        starts[0]
+    );
+    assert!(e.to_string().contains(&says), "{e}");
+    // An image's records too, which no open reads to the byte: one flipped
+    // inside its documents opens, and verify names it.
+    std::fs::write(&last, &good).unwrap();
+    let image = named(&sums, "image-").pop().unwrap();
+    let whole = std::fs::read(&image).unwrap();
+    let mut bytes = whole.clone();
+    let at = whole.len() - 6;
+    bytes[at] ^= 0x01;
+    std::fs::write(&image, &bytes).unwrap();
+    let e = Archive::new(&sums).unwrap().verify().unwrap_err();
+    assert!(e.to_string().contains("fails its checksum"), "{e}");
+    std::fs::write(&image, &whole).unwrap();
+    Archive::new(&sums).unwrap().verify().unwrap();
+
     // Cut short before the last segment's end: no restore passes it.
     let cut = copy_of(&arch, &d.join("cut"));
     let first = named(&cut, "writes-").remove(0);

@@ -301,7 +301,7 @@ fn zeros_before_a_byte_or_inside_the_image_refuse_the_open() {
     // or, after a zero byte, a head that is no kind.
     let mut pos = 8 + 17;
     let (data, end) = loop {
-        let kind = good[pos];
+        let kind = good[pos] & 0x7f;
         let mut p = pos + 1;
         let _cid = varint(&good, &mut p);
         let len = varint(&good, &mut p) as usize;
@@ -329,14 +329,16 @@ fn zeros_before_a_byte_or_inside_the_image_refuse_the_open() {
 }
 
 /// Zeros from a 4 KiB boundary inside a record to the end, as a power cut
-/// leaves a record whose head and first page reached the disk: the
-/// record's length still fits, so it reads as whole, and the zero head
-/// after it follows a zero byte -- the disk's, not a record's own. Cut
-/// there, the open went on and read the big text back as NULs; it is
-/// refused, mapped and in memory, and the file left as it was.
+/// leaves a record whose head and first page reached the disk, in a file
+/// written before records carried a checksum: the record's length still
+/// fits, so it reads as whole, and the zero head after it follows a zero
+/// byte -- the disk's, not a record's own. Cut there, the open went on and
+/// read the big text back as NULs; it is refused, mapped and in memory, and
+/// the file left as it was. A record with a checksum is cut instead
+/// (`a_record_whose_end_the_disk_lost_is_cut`).
 #[cfg(feature = "std-fs")]
 #[test]
-fn zeros_from_inside_a_record_refuse_the_open() {
+fn zeros_from_inside_a_record_without_a_checksum_refuse_the_open() {
     let (dir, path) = tmp_path("zeros-inside");
     {
         let mut db = fennec_core::fs::open(&path).expect("open");
@@ -345,18 +347,8 @@ fn zeros_from_inside_a_record_refuse_the_open() {
         run(&mut db, r#"put t {a: "small"}"#);
         db.sync().expect("sync");
     }
-    let good = std::fs::read(&path).unwrap();
-    // The big record, by its heads: no image, so the walk is plain.
-    let mut pos = 8;
-    let (big, next) = loop {
-        let mut p = pos + 1;
-        let _cid = varint(&good, &mut p);
-        let len = varint(&good, &mut p) as usize;
-        if len > 8000 {
-            break (pos, p + len);
-        }
-        pos = p + len;
-    };
+    let good = without_sums(&std::fs::read(&path).unwrap());
+    let (big, next) = big_record(&good);
     let page = (big / 4096 + 1) * 4096;
     assert!(
         big + 16 < page && page < next && next < good.len(),
@@ -383,13 +375,289 @@ fn zeros_from_inside_a_record_refuse_the_open() {
     cleanup(dir, path);
 }
 
-/// A record may end in a zero byte of its own -- here an int 0 -- and a zero
-/// head after one cannot be told from the disk's zeros starting inside it:
-/// cut only at the image's end, which a whole image is renamed into place
-/// to be whatever its last byte; in the tail, refused.
+/// Where the first record longer than 8 000 bytes starts in a file with no
+/// image, and where it ends.
+#[cfg(feature = "std-fs")]
+fn big_record(file: &[u8]) -> (usize, usize) {
+    let mut pos = 8;
+    loop {
+        let mut p = pos + 1;
+        let _cid = varint(file, &mut p);
+        let len = varint(file, &mut p) as usize;
+        if len > 8000 {
+            return (pos, p + len);
+        }
+        pos = p + len;
+    }
+}
+
+/// A record whose length reached the disk and whose later bytes did not --
+/// zeros from a page inside it, or stale bytes, to the end of the file, or
+/// its middle lost and its end there -- fails its checksum, and with
+/// nothing whole after it is a torn tail: cut, mapped and in memory, as a
+/// record cut short is, and the next write lands where it began. Before
+/// checksums it loaded as it read, or the open was refused.
 #[cfg(feature = "std-fs")]
 #[test]
-fn a_zero_head_after_a_zero_byte_is_cut_only_at_the_image_end() {
+fn a_record_whose_end_the_disk_lost_is_cut() {
+    let (dir, path) = tmp_path("lost-end");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "first"}"#);
+        run(&mut db, &format!(r#"put t {{a: "{}"}}"#, "x".repeat(12000)));
+        run(&mut db, r#"put t {a: "small"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    let (big, next) = big_record(&good);
+    let page = (big / 4096 + 1) * 4096;
+    assert!(big + 16 < page && page + 4096 < next, "{big} {page} {next}");
+    let lost: [(&str, Vec<u8>); 4] = [
+        ("zeros to the end", {
+            let mut b = good.clone();
+            b[page..].fill(0);
+            b
+        }),
+        ("stale bytes to the end", {
+            let mut b = good.clone();
+            b[page..].fill(0xee);
+            b
+        }),
+        ("its middle, the last record", {
+            let mut b = good[..next].to_vec();
+            b[page..page + 4096].fill(0);
+            b
+        }),
+        ("its last byte, the last record", {
+            let mut b = good[..next].to_vec();
+            b[next - 1] ^= 1;
+            b
+        }),
+    ];
+    for (what, bad) in lost {
+        for way in ["mapped", "in-memory"] {
+            std::fs::write(&path, &bad).unwrap();
+            let open = |p: &std::path::Path| match way {
+                "mapped" => fennec_core::fs::open(p),
+                _ => fennec_core::fs::open_in_memory(p),
+            };
+            {
+                let mut db = open(&path).unwrap_or_else(|e| panic!("{what}, {way}: {e}"));
+                assert_eq!(ids(&mut db, "t"), vec![1], "{what}, {way}");
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    good[..big],
+                    "{what}, {way}: cut where the record began"
+                );
+                run(&mut db, r#"put t {a: "after"}"#);
+                db.sync().expect("sync");
+            }
+            let mut db = open(&path).expect("the open after that");
+            assert_eq!(ids(&mut db, "t"), vec![1, 2], "{what}, {way}");
+        }
+    }
+    cleanup(dir, path);
+}
+
+/// A record that fails its checksum with a whole record after it is no
+/// torn tail -- a power cut's lost bytes have nothing whole after them --
+/// but damage: the open is refused naming where it starts, mapped, in
+/// memory and read-only, and the file left as it was. A graph a later one
+/// replaces is never read, and the image's records are never checked by
+/// an open: both open.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_record_failing_its_checksum_before_a_whole_one_is_refused() {
+    let (dir, path) = tmp_path("damaged");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "first"}"#);
+        run(&mut db, &format!(r#"put t {{a: "{}"}}"#, "x".repeat(8000)));
+        run(&mut db, r#"put t {a: "small"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    let (big, next) = big_record(&good);
+    let mut bad = good.clone();
+    bad[big + 4096] ^= 0x10;
+    assert!(big + 4096 < next);
+    let says = format!("the record at {big} fails its checksum, with whole records after it");
+    for way in ["mapped", "in-memory", "read-only"] {
+        std::fs::write(&path, &bad).unwrap();
+        let err = match way {
+            "mapped" => fennec_core::fs::open(&path),
+            "in-memory" => fennec_core::fs::open_in_memory(&path),
+            _ => fennec_core::fs::open_read_only(&path),
+        }
+        .err()
+        .unwrap_or_else(|| panic!("{way}: opened a damaged record"));
+        assert!(err.to_string().contains(&says), "{way}: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bad, "{way}: the open wrote");
+    }
+    // The image's data record, damaged the same way, is not read by an open.
+    std::fs::write(&path, &good).unwrap();
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        db.checkpoint().expect("checkpoint");
+    }
+    let image = std::fs::read(&path).unwrap();
+    let at = image
+        .windows(8000)
+        .position(|w| w.iter().all(|&b| b == b'x'))
+        .unwrap();
+    let mut bad = image.clone();
+    bad[at + 100] = b'y';
+    std::fs::write(&path, &bad).unwrap();
+    let mut db = fennec_core::fs::open(&path).expect("an image is not checked by an open");
+    assert_eq!(ids(&mut db, "t"), vec![1, 2, 3]);
+    drop(db);
+    let err = fennec_core::engine::check_records(&bad).expect_err("check_records reads it");
+    assert!(err.to_string().contains("fails its checksum"), "{err}");
+    fennec_core::engine::check_records(&image).expect("the image whole");
+    cleanup(dir, path);
+}
+
+/// After a record whose checksum holds, zeros from the next head to the end
+/// are a torn tail whatever that record's last byte: the record ends where
+/// it says. Without a checksum, a zero last byte left the zeros refused
+/// (`a_zero_head_after_a_zero_byte_without_a_checksum_is_cut_only_at_the_image_end`).
+#[cfg(feature = "std-fs")]
+#[test]
+fn zeros_after_a_checked_record_are_cut_whatever_its_last_byte() {
+    use std::io::Write;
+    let (dir, path) = tmp_path("zero-sum");
+    let mut db = fennec_core::fs::open(&path).expect("open");
+    run(&mut db, "create collection t (n int)");
+    // A record whose checksum's last byte is 0: one in 256.
+    let mut n = 0;
+    loop {
+        run(&mut db, &format!("put t {{n: {n}}}"));
+        // Into the file, with no fsync: the bytes are what is looked at.
+        db.write_out().expect("write out");
+        if std::fs::read(&path).unwrap().last() == Some(&0) {
+            break;
+        }
+        n += 1;
+        assert!(n < 5000, "no record ended in a zero byte");
+    }
+    drop(db);
+    let whole = std::fs::read(&path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(&[0; 4096]).unwrap();
+    drop(f);
+    let mut db = fennec_core::fs::open(&path).expect("zeros after a checked record");
+    assert_eq!(ids(&mut db, "t").len(), n + 1);
+    assert_eq!(std::fs::read(&path).unwrap(), whole, "cut");
+    drop(db);
+    cleanup(dir, path);
+}
+
+/// A file written before records carried checksums opens as it did, its
+/// image and its tail, mapped and in memory, and takes writes, which carry
+/// one: a file of both kinds opens.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_file_without_checksums_opens_and_takes_checked_records() {
+    let (dir, path) = tmp_path("before-sums");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text, n int @sorted)");
+        run(&mut db, "create collection u (b text @hash)");
+        run(&mut db, r#"put t [{a: "one", n: 1}, {a: "two", n: 2}]"#);
+        db.checkpoint().expect("checkpoint");
+        run(&mut db, r#"put t {a: "three", n: 3}"#);
+        run(&mut db, "del t where n = 1");
+        run(&mut db, r#"put u {b: "x"}"#);
+        db.sync().expect("sync");
+    }
+    let checked = std::fs::read(&path).unwrap();
+    let plain = without_sums(&checked);
+    assert!(plain.len() < checked.len());
+    for way in ["mapped", "in-memory"] {
+        std::fs::write(&path, &plain).unwrap();
+        let open = |p: &std::path::Path| match way {
+            "mapped" => fennec_core::fs::open(p),
+            _ => fennec_core::fs::open_in_memory(p),
+        };
+        {
+            let mut db = open(&path).unwrap_or_else(|e| panic!("{way}: {e}"));
+            assert_eq!(ids(&mut db, "t"), vec![2, 3], "{way}");
+            assert_eq!(ids(&mut db, "u"), vec![1], "{way}");
+            assert_eq!(std::fs::read(&path).unwrap(), plain, "{way}: not cut");
+            run(&mut db, r#"put t {a: "four", n: 4}"#);
+            db.sync().expect("sync");
+        }
+        let both = std::fs::read(&path).unwrap();
+        assert_eq!(&both[..plain.len()], &plain[..]);
+        assert_eq!(
+            both[plain.len()] & 0x80,
+            0x80,
+            "{way}: the new record is checked"
+        );
+        let mut db = open(&path).expect("a file of both kinds");
+        assert_eq!(ids(&mut db, "t"), vec![2, 3, 4], "{way}");
+        run(&mut db, "compact");
+        drop(db);
+        fennec_core::engine::check_records(&std::fs::read(&path).unwrap())
+            .expect("the compacted file is checked whole");
+        let mut db = open(&path).expect("compacted");
+        assert_eq!(ids(&mut db, "t"), vec![2, 3, 4], "{way}");
+    }
+    cleanup(dir, path);
+}
+
+/// `file` as a version before checksums wrote it: each record's checksum
+/// and its kind's bit taken off, its length its body's, and the image's
+/// length put right -- an old file, made of what this build wrote.
+#[cfg(feature = "std-fs")]
+fn without_sums(file: &[u8]) -> Vec<u8> {
+    let mut out = file[..8].to_vec();
+    let mut pos = 8;
+    // Where the image's length is in `out`, and where the image ends in
+    // `file`.
+    let mut image: Option<(usize, usize)> = None;
+    while pos < file.len() {
+        if file[pos] == 6 {
+            let len = u64::from_le_bytes(file[pos + 9..pos + 17].try_into().unwrap());
+            out.extend_from_slice(&file[pos..pos + 17]);
+            image = Some((out.len() - 8, pos + 17 + len as usize));
+            pos += 17;
+        } else {
+            let kind = file[pos];
+            let mut p = pos + 1;
+            let cid = varint(file, &mut p);
+            let len = varint(file, &mut p) as usize;
+            let sum = if kind & 0x80 != 0 { 4 } else { 0 };
+            let body = &file[p..p + len - sum];
+            out.push(kind & 0x7f);
+            fennec_core::codec::put_uvarint(&mut out, cid);
+            fennec_core::codec::put_uvarint(&mut out, body.len() as u64);
+            out.extend_from_slice(body);
+            pos = p + len;
+        }
+        if let Some((at, end)) = image {
+            if pos == end {
+                let n = (out.len() - (at + 8)) as u64;
+                out[at..at + 8].copy_from_slice(&n.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// In a file written before checksums, a record may end in a zero byte of
+/// its own -- here an int 0 -- and a zero head after one cannot be told
+/// from the disk's zeros starting inside it: cut only at the image's end,
+/// which a whole image is renamed into place to be whatever its last byte;
+/// in the tail, refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_zero_head_after_a_zero_byte_without_a_checksum_is_cut_only_at_the_image_end() {
     use std::io::Write;
     for way in ["mapped", "in-memory"] {
         let (dir, path) = tmp_path(&format!("zero-byte-{way}"));
@@ -401,6 +669,10 @@ fn a_zero_head_after_a_zero_byte_is_cut_only_at_the_image_end() {
             let mut f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
             f.write_all(&[0; 4096]).unwrap();
         };
+        let unsum = |p: &std::path::Path| {
+            let plain = without_sums(&std::fs::read(p).unwrap());
+            std::fs::write(p, plain).unwrap();
+        };
         {
             let mut db = open(&path).expect("open");
             run(&mut db, "create collection t (n int)");
@@ -408,6 +680,7 @@ fn a_zero_head_after_a_zero_byte_is_cut_only_at_the_image_end() {
             db.checkpoint().expect("checkpoint");
             db.sync().expect("sync");
         }
+        unsum(&path);
         let image = std::fs::read(&path).unwrap();
         assert_eq!(image.last(), Some(&0), "{way}: the image's last byte");
         zeros(&path);
@@ -418,6 +691,7 @@ fn a_zero_head_after_a_zero_byte_is_cut_only_at_the_image_end() {
             run(&mut db, "put t {n: 0}");
             db.sync().expect("sync");
         }
+        unsum(&path);
         let tail = std::fs::read(&path).unwrap();
         assert_eq!(tail.last(), Some(&0), "{way}: the tail's last byte");
         zeros(&path);
@@ -458,7 +732,7 @@ fn a_record_cut_short_inside_the_image_refuses_the_open_and_cuts_nothing() {
         let _cid = varint(&good, &mut p);
         let len_at = p;
         let len = varint(&good, &mut p);
-        if kind == 3 {
+        if kind & 0x7f == 3 {
             break len_at;
         }
         pos = p + len as usize;

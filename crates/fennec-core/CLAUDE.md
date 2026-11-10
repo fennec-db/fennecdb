@@ -43,18 +43,24 @@ reached `ROOM_SHARE` of that room or the process faults
 
 **[File format](../../docs/design/storage.md#file-format):** a record is
 `[kind][collection-id][length][body]`, its length read even when empty;
+one this version writes ends in its CRC32C (`crc.rs`), its kind's
+`CHECKED` bit set, the length counting the sum -- inner records and the
+counter's head carry none, nor one from before, read as it is.
 `head` writes a head (the counter's `image_head` aside), `record_at` reads
-it, `Walk` walks them. A torn tail is cut on open (on Windows by a second
-open, the first's views gone: `fs::windows::cut_and_open`), zeros to the
-end one too where they start at a head -- after a byte that is not zero,
-or at the image's end (`zero_tail`: a length the disk took before the
-bytes) -- any other zero head refused, a torn image refused, and an
-unknown kind's refusal names its byte; no record has a checksum yet, so
-one whose length fits but whose later bytes the disk lost loads as it
-reads; the file only grows; a tool that only looks opens with
-`fs::open_read_only`, which cuts, creates and writes nothing. A new record
-kind, index kind, type tag or graph version is a number a binary from
-before refuses (a graph's, rebuilds from), never one it would misread.
+it, `Walk` walks them. An open holds each record past the image to its
+sum, a graph a later one replaces aside: one failing is a torn tail, cut,
+unless a whole record follows it, refused then naming its byte, as
+`apply`, an archive and `fennec verify` hold them.
+A torn tail is cut on open (on Windows by a second open, the first's
+views gone: `fs::windows::cut_and_open`), zeros to the end one too where
+they start at a head -- after a byte that is not zero or a record whose
+sum holds, or at the image's end (`zero_tail`: a length the disk took
+before the bytes) -- any other zero head refused, a torn image refused,
+and an unknown kind's refusal names its byte; the file only grows; a tool
+that only looks opens with `fs::open_read_only`, which cuts, creates and
+writes nothing. A new record kind, index kind, type tag or graph version
+is a number a binary from before refuses (a graph's, rebuilds from), never
+one it would misread.
 
 ### Durability
 

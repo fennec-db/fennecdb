@@ -379,9 +379,10 @@ all came before the oldest image kept — never the one being written.
 <code>fennec prune &lt;dir&gt; --keep 7d</code> does the same once.</p>
 
 <p><code>fennec verify &lt;dir&gt;</code> reads the archive as a restore
-would: every image opens at the change its name says, the segments run on
-from the oldest image with no change missing, only the last segment may end
-in a record cut short, and a restore to the end opens. It prints from when
+would: every image opens at the change its name says and each of its
+records matches its checksum, the segments run on from the oldest image
+with no change missing, only the last segment may end in a record cut
+short or one failing its checksum, and a restore to the end opens. It prints from when
 to when the archive can restore, names any gap — changes in no segment
 between two images, where a restore to the end passes but a restore to a
 moment inside cannot — and exits 1 when no restore can be made.</p>

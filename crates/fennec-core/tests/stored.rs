@@ -161,7 +161,7 @@ fn a_definition_is_one_record_of_kind_13_and_one_write() {
     let before = db.change_seq();
     run(&mut db, TRANSFER).unwrap();
     let (seq, record) = tap.last();
-    assert_eq!(record[0], 13, "a record of its own kind");
+    assert_eq!(kind_of(&record), 13, "a record of its own kind");
     assert_eq!(writes_in(&record).unwrap(), 1, "a write the feed counts");
     assert_eq!((seq, db.change_seq()), (before + 1, before + 1));
     let t = db.statements();
@@ -187,7 +187,7 @@ fn a_definition_is_one_record_of_kind_13_and_one_write() {
     // A drop is a record of the kind too.
     run(&mut db, "drop statement transfer").unwrap();
     let (_, record) = tap.last();
-    assert_eq!((record[0], writes_in(&record).unwrap()), (13, 1));
+    assert_eq!((kind_of(&record), writes_in(&record).unwrap()), (13, 1));
     assert!(db.statements().is_empty());
     assert!(refused(run(&mut db, "drop statement transfer")).contains("statement `transfer`"));
     run(&mut db, "drop statement if exists transfer").unwrap();
@@ -204,7 +204,7 @@ fn a_definition_in_a_block_lands_with_its_writes_as_one_record() {
     )
     .unwrap();
     let (seq, record) = tap.last();
-    assert_eq!(record[0], 9, "a block record");
+    assert_eq!(kind_of(&record), 9, "a block record");
     assert_eq!(writes_in(&record).unwrap(), 2);
     assert_eq!(seq, before + 2);
     // Numbered as the block's second write.
@@ -820,6 +820,16 @@ pub(crate) fn body_at(record: &[u8]) -> usize {
     p
 }
 
+/// A record's kind, the bit that says it carries a checksum taken off.
+pub(crate) fn kind_of(record: &[u8]) -> u8 {
+    record[0] & 0x7f
+}
+
+/// Where a record's body ends: before the checksum, where it carries one.
+pub(crate) fn body_end(record: &[u8]) -> usize {
+    record.len() - if record[0] & 0x80 != 0 { 4 } else { 0 }
+}
+
 /// The events `collection`'s writes wake, as its mask holds them.
 fn mask(db: &Database, collection: &str) -> u8 {
     db.collection(collection).unwrap().bound
@@ -870,7 +880,7 @@ fn a_binding_is_one_record_of_op_3_and_the_writes_it_binds_run_it() {
     run(&mut db, BINDING).unwrap();
     let (seq, record) = tap.last();
     assert_eq!(
-        (record[0], record[body_at(&record)]),
+        (kind_of(&record), record[body_at(&record)]),
         (13, 3),
         "kind 13, op 3"
     );

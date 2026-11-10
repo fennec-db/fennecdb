@@ -75,10 +75,7 @@ impl History {
     /// The whole record, as a file holds it: appended to an image, it
     /// replaces the image's history without moving its change counter.
     pub fn record(&self) -> Vec<u8> {
-        let body = self.encode();
-        let mut out = crate::engine::record_head(RECORD, 0, body.len());
-        out.extend_from_slice(&body);
-        out
+        crate::engine::record(RECORD, 0, &self.encode())
     }
 
     /// This history with a fork at change `at` under `id`, taking writes.

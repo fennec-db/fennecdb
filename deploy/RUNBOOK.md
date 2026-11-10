@@ -861,6 +861,22 @@ meanwhile -- an older replica connected and behind holding none of it --
 was taken and kept by its key, and its sender's retry is answered from
 that key.
 
+**Record checksums move the format at the first write.** From the release
+whose records carry a checksum, every record a node writes -- each write,
+and every record of a checkpoint or a compact -- ends in its CRC32C, its
+kind's high bit set, which every binary from before refuses: nothing has
+to be defined first, a tenant's first write on an upgraded node is one.
+The same order -- archivers, routers, then nodes -- and every node of a
+region within one window: from a node's upgrade until the node holding
+each of its tenants' replicas is upgraded too, that replica stops
+following and connects again (`could not apply a write: corrupt: record
+kind 131 is not a write; connecting again`, or `unknown record kind 136`
+for an image, in its log), an older archiver takes no image of its own and
+its `fennec verify` and `fennec restore` fail, and an older node refuses to
+open a file an upgraded one wrote to. Upgrade the one that stopped and it
+goes on from where it stood: nothing was misread or lost. Files written
+before open as they were.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is

@@ -903,13 +903,8 @@ impl Sink for Tee {
 /// The history a history record holds, `[8][0][length][history]`; `None`
 /// for any other record.
 fn history_in(record: &[u8]) -> Option<History> {
-    if record.first() != Some(&fennec_core::history::RECORD) {
-        return None;
-    }
-    let mut pos = 1;
-    fennec_core::codec::get_uvarint(record, &mut pos).ok()?;
-    let len = fennec_core::codec::get_uvarint(record, &mut pos).ok()? as usize;
-    History::decode(record.get(pos..pos.checked_add(len)?)?).ok()
+    let body = fennec_core::engine::record_body(record, fennec_core::history::RECORD)?;
+    History::decode(body).ok()
 }
 
 /// Opens a file for a server that has replicas, or is one, with its writes

@@ -350,13 +350,172 @@ from the other, so both are refused; so are zeros then any other byte, and
 a zero head inside the image. An unknown kind's refusal names the byte it starts
 at, the image's too, so the next such failure says where.
 
-What this does not cover: a record whose length fits the file but whose
-later bytes are the disk's zeros loads as it reads wherever no zero head
-follows it -- the zeros ending at its own end, whole records after it, or
-at the file's end. So it was before the rule too: nothing in a record
-tells its own bytes from the disk's. That takes a checksum on each record,
-a format change not made yet: what it costs each write, and an open that
-checks it without reading the whole file, are to be measured first.
+**Checksums.** Every record this version writes into a file ends in a
+CRC32C of its head and body, its kind's high bit set and its length
+counting the four bytes: `[kind | 0x80][collection][length][body][sum]`
+(`CHECKED`, `SUM`; `framed`, `Summed` and `put_record` write one, `crc.rs`
+sums). Every top-level record carries one -- an image's, a block's, a
+spill's, a land's, a graph's, the history's -- but the counter's
+fixed-width head, which is patched in place and only ever written by a
+rewrite renamed into place whole; the records inside a block, a spill or a
+land carry none, the one around them covering them. An image's data record
+is written a stretch of its store at a time through `Summed`, its sum
+carried over each stretch, so the image is still never a second copy of
+the data.
+
+*Which records carry one: the kind's bit, record by record.* A file a
+version before wrote has none, and its records load as they read; once
+this version appends to such a file, it holds both until its next compact
+writes it anew. Rejected: a flag in the counter's head or a version byte
+for the whole file -- the four magics stay as they are, a file's appends
+after an open of an old one would have gone unchecked until a compact, and
+a file with no image (a new one, never compacted) has no head to carry it;
+new kinds numbered 14 to 26, a `match` arm each where the bit is one mask;
+the sum in the head, before the body -- an image's data record is
+streamed, its sum known only once its body is written, and patched in
+place it would be a seek back into a file written through a buffer, or,
+in a page's chunked image (`Kept`), into a chunk already handed out.
+
+*What a binary from before does.* It frames the record by its length,
+which counts the sum, and refuses its kind in words: "unknown record kind
+131 at 8" (v0.1.12: "unknown record kind 131"); a replica from before
+refuses the first record or the image its primary sends ("record kind 129
+is not a write"), an archiver from before keeps the stream and takes no
+image of its own, and its `fennec verify` and `fennec restore` refuse what
+it kept. Never a misread: a length that did not count the sum would have
+had v0.1.12's archive (`record_len`, a record framed by its length alone)
+read the sum as the next entry's time. A file this version wrote to opens
+in no binary from before, so a rollback after the first write is a
+rollback onto an older file (RELEASING.md).
+
+*What an open checks, and why that is enough.* The open already walks
+every record's head, and every frame's head of a data record past the
+image (`replay_mapped`), but reads neither a frame's payload nor -- where
+the image wrote its frames' index (`adopt_index`) -- the image's data
+record at all, nor a graph a later one of its index replaces
+(`last_graphs`). Checking every record would read the whole file where it
+reads a fraction of it today. It checks the records past the image's end
+(`body_end`), and those are enough: an image is written beside the file
+and synced (`sync_all`, `SideFile::sync`) before it is renamed into place,
+the directory synced after (`fs::sync_dir`), so every byte of it was on
+the disk before any record after it was appended, and a power cut tears
+only what was written since the last flush. A file with no image (a new
+one, never compacted) is all tail and all checked. Within the tail no
+point is known durable: a file says nothing of when it was last flushed,
+and one only ever appended to holds no dead bytes, so it never compacts and
+its tail is all of it. A mark appended after each fsync, naming how far
+the file was durable, was rejected: under `--sync always` it is a record
+of its own after every write, ~20 bytes beside a lone `put`'s ~60, and
+the open would still check every record from the mark on. A graph a later
+one of its index replaces is not checked: the load never reads it, and
+whether it is torn changes nothing (in the browser, which restores each
+graph it meets, each is). What the open reads that it did not: the
+payloads of the tail's documents, which for documents smaller than a page
+are on pages the frame heads' walk faults in anyway, and the bodies of the
+tail's spills. Measured, on this 8 GB M1, a file written as a server that never checkpointed
+leaves one (`make open-bench`'s writer, `examples/open.rs`, every record
+past the image; main's build over the file written without sums, this one
+over the same documents with them): 1 GB of 400-byte documents opened
+mapped in 481 ms against 460 with its pages in the cache (+21 ms), and read
+into memory in 1 043 ms against 966 (median of seven, +77 ms: the sums at
+14 GB/s); 1 GB of 64 KB documents, whose payloads the open never read, in
+117 ms against 12 cached, and from the disk in 4.1 s against 1.5 -- every
+page of the tail read, a fault at a time, where main read one a document.
+An image is not checked, so a file a clean stop checkpointed opens as
+before; a server checkpoints at its stop only with a vector index, though,
+and a file only ever appended to never compacts, so its tail -- and what
+each open reads of it -- is all of it. Not settled: a bounded set needs a
+point the file proves durable, and none is recorded today. Options: a
+length written beside the file after each fsync (`<file>.synced`, as the
+sync log names its file, one `pwrite` a durability and no fsync of its own:
+lost, the last one or the image's end stands), from which the open checks
+on -- the unflushed window alone; a checkpoint once the tail passes a size,
+bounding it by policy; or the tail read ahead in large requests
+(`fs::touch`), which took a compact's 1.2 GB from 3.0 s a fault at a time
+to 0.7 s and would leave the 64 KB case about 1 s, still read whole.
+
+*Cut, or refused.* A record that fails its sum is a torn tail when nothing
+whole follows it (`whole_after`): everything after it is zeros, bytes no
+version frames (a kind none knows, a record cut short) or records failing
+their own sums -- what a power cut leaves, its lost bytes all after the
+last flush, so no write after them was answered as durable (under
+`--sync always` a write is answered after the fsync that would have
+written the failing record too). It is cut, with all after it, as a
+record cut short is. Where a whole record follows it -- one whose sum
+holds, or one carrying none, which nothing shows torn -- it is damage, a
+record durable once and changed since, with durable records after it: the
+open is refused, naming where it starts ("the record at 1234 fails its
+checksum, with whole records after it"), and the file left as it is.
+Rejected: cutting there, which deleted every record after it, intact ones
+included, as a cut inside an image once did; loading it, a write landing
+half the disk's; skipping it, a write half there and the next ones on;
+passing over a failing graph as derived data, its index rebuilt -- kept
+one rule, a graph refused as any record is. A power cut whose cache wrote
+the unflushed pages out of order can leave a hole, a record's later page
+lost and a later record's kept: it reads as damage and is refused, nothing
+lost, the operator deciding; so do stale bytes that frame by chance as a
+record carrying none.
+
+*The zero tail stays.* A zero head is no record and carries no sum, so
+`zero_tail` is still the rule for zeros starting at a head. The sum widens
+it: after a record whose sum holds, zeros to the end are a torn tail
+whatever that record's last byte (`Walk::edge` moves to its end) -- the
+zero byte before them can no longer be the disk's zeros starting inside
+that record, which its sum would have shown. After a record from before,
+the rule is as it was. Zeros inside a record carrying a sum are its sum's
+to find, and the head after it judged as above.
+
+*Every reader of records.* A replica's `apply` holds each record its
+primary sends to its sum before landing it ("a record of the primary's at
+1234 fails its checksum"), and writes it into its file as it came; a
+replica of a primary from before takes records with none, as they came.
+`archive::entries` judges a segment's records as the open judges a tail's,
+its zero-tail edge moving past each record whose sum holds; `fennec
+verify` holds every record of each image to its sum as well
+(`check_records`), the one reader that reads an image whole. A sealed
+segment's frame is covered by its tag already, and its plaintext's
+records are judged as a plain segment's. The browser module checks with
+its tables, to the same bits: `openFile`'s file and `persist`'s journal
+are tails, checked by the load.
+
+*The sum.* CRC32C: the instructions compute it -- aarch64's `crc32c`, in
+every Apple chip's target and found at run time elsewhere, and x86_64's
+SSE4.2 `crc32`, found at run time -- three lanes at once over a stretch of
+48 KiB, joined by two multiplications in the polynomial's field (one
+instruction waits three cycles for the one before), and a record's last 7
+bytes in three instructions rather than seven. On this M1 one 1 GiB buffer sums in 49 ms (22 GB/s, three lanes),
+the same bytes as 400-byte records in 75 ms (14 GB/s) and as 60-byte ones
+in 62 ms. Elsewhere,
+wasm32 among them, eight tables a step (slicing-by-8), made at the first
+use rather than carried as 8 KiB of the module: a table a byte, a byte a
+step, made a 100-document `put` in the module 6 us slower than main's
+(134 against 128), each lookup waiting on the one before, about 7 cycles a
+byte. Each way is held to a bitwise CRC over every length around a word
+and a stretch (`crc::tests`), the x86_64 one under Rosetta. Rejected: the
+sync log's 64-bit multiply hash, which promises no burst it finds; xxHash
+or a 64-bit CRC, code of our own on every target, never an instruction.
+
+*What it costs.* A write sums its record once, as it lands. Counted by `make
+instr-compare`'s way (tools/instr/compare.py: 8 re-signed identities a
+build, 7 runs each, `replays.rs` through `handle`, main's binary built
+with the same example), a lone `put` took 21 300 instructions against main's
+21 204, +96 (+0.45%), of which the trace of one call puts 56 in fennec's
+own code -- `crc32c` 18, `commit` 26 (the sum after the frames), `record_at`
+11 -- and the rest in the allocator's draw; a keyed `put` (a block of two
+writes) +40 (+0.05%, inside two standard errors), and a `put` of 100
+documents in one record (the new `batch` mode) +636 of 1 008 000 (+0.06%,
+inside two). Before a record's last 7 bytes went in three instructions
+rather than a byte each, the lone `put` cost +156. In the browser module,
+in Node, a lone `put` held its time (3.87 to 3.95 us against main's 3.96 to
+4.06) and a `put` of 100 documents took 129.3 to 130.2 us against 127.3 to
+128.0, the sum of its 2.5 KB record through the tables. The module grew 2
+168 bytes, 846 118 to 848 286 (+1 221 gzip, +1 139 brotli): 1 180 of
+code in the engine -- `Summed`, `put_record`, `record_holds` and the
+load's check -- 758 in `crc.rs`, the tables' builder with it, and 176 of
+data, the refusals' words; a table a byte, carried as 1 KiB of data, made
+it 2 497 and the put of 100 documents 6 us slower. A compact of that 1 GB file to 0.9 GB, its image summed in three
+lanes as it is written, took 561 to 944 ms against main's 574 to 1 072:
+no difference out of the noise.
 
 The archive judges its segments' heads with the same `zero_tail`
 (`archive::entries`): a zero tail is cut where 11 zeros were read as a

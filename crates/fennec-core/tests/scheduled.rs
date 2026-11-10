@@ -9,7 +9,7 @@
 //! database's (`Database::allow_schedules`); a run's body is
 //! `Database::run_slot`'s, and a call by hand marks nothing.
 
-use crate::stored::{body_at, opened, refused, run, Tap};
+use crate::stored::{body_at, body_end, kind_of, opened, refused, run, Tap};
 use fennec_core::codec::{encode_str, put_uvarint};
 use fennec_core::engine::{writes_in, ChangeKind, Due, Landing, SlotMark, Times};
 use fennec_core::named::{AHEAD_MAX, GRAMMAR_EPOCH, MAX_SCHEDULED, SCHEDULED_UNRUN};
@@ -88,8 +88,8 @@ fn run_slot(db: &mut Database, body: &str, name: &str, at: i64, skipped: u64) ->
 fn ops_in(record: &[u8]) -> Vec<u8> {
     let mut ops = Vec::new();
     let mut p = body_at(record);
-    let end = record.len();
-    match record[0] {
+    let end = body_end(record);
+    match kind_of(record) {
         13 => return vec![record[p]],
         9 => {}
         _ => return ops,
@@ -130,7 +130,7 @@ fn a_schedule_is_one_record_of_op_4_refused_but_where_a_test_lets_it() {
     run(&mut db, LAPSE).unwrap();
     let (seq, record) = tap.last();
     assert_eq!(
-        (record[0], record[body_at(&record)]),
+        (kind_of(&record), record[body_at(&record)]),
         (13, 4),
         "kind 13, op 4"
     );
@@ -425,7 +425,7 @@ fn count_marks(file: &[u8]) -> usize {
         tail.extend_from_slice(name.as_bytes());
         n += file
             .windows(3 + tail.len())
-            .filter(|w| w[0] == 13 && w[1] == 0 && w[3..] == tail[..])
+            .filter(|w| w[0] & 0x7f == 13 && w[1] == 0 && w[3..] == tail[..])
             .count();
     }
     n

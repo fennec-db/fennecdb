@@ -33,6 +33,7 @@ pub mod changes;
 pub mod codec;
 pub mod collate;
 pub mod composite;
+pub mod crc;
 pub mod declared;
 pub mod engine;
 pub mod error;

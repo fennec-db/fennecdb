@@ -1036,10 +1036,11 @@ test('a file holding named statements opens in the module, which keeps them thro
     'create statement lapse every 15m',
     'create statement stripe_paid(',
   ];
-  // The hook's record, whole: kind 13 of no collection, its length, op 6,
-  // and its body to the hook's name after the text -- the tail the module
-  // keeps unread and writes back as it came, behind the op it came in.
-  const hookRecord = (() => {
+  // The hook's record's body: op 6, then its text and the hook's name after
+  // it -- the tail the module keeps unread and writes back as it came,
+  // behind the op it came in. The record around it is the module's own,
+  // with the checksum each record it writes carries (the fixture's has none).
+  const hookBody = (() => {
     const name = Buffer.from([11, ...Buffer.from('stripe_paid')]);
     const tail = Buffer.from([6, ...Buffer.from('stripe')]);
     const nameAt = file.indexOf(name);
@@ -1049,7 +1050,7 @@ test('a file holding named statements opens in the module, which keeps them thro
       let len = 0, shift = 0, p = at + 2;
       for (; file[p] >= 128; p++, shift += 7) len += (file[p] & 127) * 2 ** shift;
       len += file[p] * 2 ** shift;
-      if (p + 1 + len === end && file[p + 1] === 6) return Buffer.from(file.subarray(at, end));
+      if (p + 1 + len === end && file[p + 1] === 6) return Buffer.from(file.subarray(p + 1, end));
     }
     throw new Error('no op-6 record in the fixture');
   })();
@@ -1065,7 +1066,7 @@ test('a file holding named statements opens in the module, which keeps them thro
   };
   const mark = Buffer.from([5, 5, ...Buffer.from('lapse'), ...zigzag(Date.UTC(2026, 2, 28, 13))]);
   const keeps = (image) => texts.every((t) => Buffer.from(image).includes(t)) &&
-    Buffer.from(image).includes(mark) && Buffer.from(image).includes(hookRecord);
+    Buffer.from(image).includes(mark) && Buffer.from(image).includes(hookBody);
   assert.ok(Buffer.from(file).includes(mark), 'the fixture holds the mark');
   assert.ok(keeps(db.snapshot()), 'each text, the mark and the hook as they came');
   // The module reads a mark's name and version alone, and keeps its bytes:

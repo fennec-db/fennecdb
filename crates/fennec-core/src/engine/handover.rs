@@ -265,7 +265,8 @@ impl Database {
             self.limited(b.grew || grows, record.len() as u64, writes)?;
             b.grew |= grows;
         }
-        let head = (record.len() - body.len()) as u64;
+        // Where the body starts in the record: past its head, the sum after.
+        let head = (record.len() - body.len() - SUM) as u64;
         let at = *self.appended.get_mut();
         let r = self.sink_mut().append(&record);
         self.storage(r)?;

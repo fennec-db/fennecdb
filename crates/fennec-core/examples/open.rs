@@ -1,14 +1,16 @@
 //! What opening a file costs, read into memory or mapped: `make open-bench`.
 //!
 //! ```text
-//! cargo run --release -p fennec-core --example open -- write <path> <docs> <body bytes> [h|s|hs|none]
+//! cargo run --release -p fennec-core --example open -- write <path> <docs> <body bytes> [h|s|hs|none] [plain]
 //! cargo run --release -p fennec-core --example open -- open <path> read|mapped [quick]
 //! cargo run --release -p fennec-core --example open -- compact <path> read|mapped
 //! ```
 //!
 //! `write` streams a file the way a server that never checkpointed leaves
 //! one -- a record per write -- without holding the database, so a file
-//! larger than the machine's memory can be made on it. `open` opens it one
+//! larger than the machine's memory can be made on it: each record with
+//! its checksum, as this build writes one, or with `plain` as a build
+//! before checksums did, for an open to be timed over both. `open` opens it one
 //! way or the other, in a process of its own so that the peak RSS is its
 //! own, and then times what a server does next: reads that touch a page
 //! each, a hash lookup, an ordered page, and a scan of every document.
@@ -113,22 +115,27 @@ fn schema(indexes: &str) -> Schema {
     .unwrap()
 }
 
-/// A file-level record: `[kind][collection][length][body]`.
-fn record(out: &mut Vec<u8>, kind: u8, cid: u64, body: &[u8]) {
+/// A file-level record: `[kind][collection][length][body]`, and its
+/// checksum after it unless `plain` (`fennec_core::engine::record`).
+fn record(out: &mut Vec<u8>, kind: u8, cid: u64, body: &[u8], plain: bool) {
     out.clear();
+    if !plain {
+        out.extend_from_slice(&fennec_core::engine::record(kind, cid as u32, body));
+        return;
+    }
     out.push(kind);
     put_uvarint(out, cid);
     put_uvarint(out, body.len() as u64);
     out.extend_from_slice(body);
 }
 
-fn write(path: &str, docs: u64, body: usize, indexes: &str) {
+fn write(path: &str, docs: u64, body: usize, indexes: &str, plain: bool) {
     let sc = schema(indexes);
     let mut f = std::io::BufWriter::with_capacity(1 << 22, std::fs::File::create(path).unwrap());
     f.write_all(MAGIC).unwrap();
     let mut rec = Vec::new();
     // REC_CREATE and REC_DATA, as the write path writes them.
-    record(&mut rec, 1, 1, &sc.encode());
+    record(&mut rec, 1, 1, &sc.encode(), plain);
     f.write_all(&rec).unwrap();
     let mut rng = Rng(0x5eed);
     let mut text = String::with_capacity(body + 16);
@@ -148,7 +155,7 @@ fn write(path: &str, docs: u64, body: usize, indexes: &str) {
             ],
         };
         let frame = Store::frame(OP_PUT, id, &Store::encode_doc(&sc, &doc));
-        record(&mut rec, 3, 1, &frame);
+        record(&mut rec, 3, 1, &frame, plain);
         f.write_all(&rec).unwrap();
     }
     f.flush().unwrap();
@@ -374,6 +381,7 @@ fn main() {
             args[2].parse().unwrap(),
             args.get(3).map_or(400, |s| s.parse().unwrap()),
             args.get(4).map_or("hs", String::as_str),
+            args.get(5).map(String::as_str) == Some("plain"),
         ),
         Some("open") => open(
             &args[1],

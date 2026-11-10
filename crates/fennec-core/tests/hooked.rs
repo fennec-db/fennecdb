@@ -8,7 +8,7 @@
 //! statements run in name order with its key's row in `_hook_events` as
 //! one block, a held key answered as the first taking was.
 
-use crate::stored::{body_at, opened, refused, run, Tap};
+use crate::stored::{body_at, body_end, kind_of, opened, refused, run, Tap};
 use fennec_core::codec::{encode_str, put_uvarint};
 use fennec_core::engine::{writes_in, ChangeKind, Event, HeldKey, Took, HOOK_EVENTS};
 use fennec_core::named::{event_at, GRAMMAR_EPOCH, HOOKED_UNTAKEN, MAX_HOOKED};
@@ -117,11 +117,12 @@ fn keys(db: &Database) -> Vec<Value> {
 /// (kind 9) records', each with a kind-13 record's op.
 fn kinds_in(record: &[u8]) -> Vec<(u8, Option<u8>)> {
     let mut p = body_at(record);
-    if record[0] != 9 {
-        return vec![(record[0], (record[0] == 13).then(|| record[p]))];
+    let kind = kind_of(record);
+    if kind != 9 {
+        return vec![(kind, (kind == 13).then(|| record[p]))];
     }
     let mut out = Vec::new();
-    while p < record.len() {
+    while p < body_end(record) {
         let kind = record[p];
         let mut q = p + 1;
         fennec_core::codec::get_uvarint(record, &mut q).unwrap();
@@ -151,14 +152,17 @@ fn a_hook_is_one_record_of_op_6_refused_but_where_a_test_lets_it() {
     run(&mut db, STRIPE_PAID).unwrap();
     let (seq, record) = tap.last();
     let p = body_at(&record);
-    assert_eq!((record[0], record[p]), (13, 6), "kind 13, op 6");
+    assert_eq!((kind_of(&record), record[p]), (13, 6), "kind 13, op 6");
     assert_eq!(writes_in(&record).unwrap(), 1);
     assert_eq!(seq, before + 1);
     // The hook's name is the record's tail, after the text.
     let mut tail = Vec::new();
     encode_str(&mut tail, STRIPE_PAID);
     encode_str(&mut tail, "stripe");
-    assert!(record.ends_with(&tail), "the text, then the hook");
+    assert!(
+        record[..body_end(&record)].ends_with(&tail),
+        "the text, then the hook"
+    );
     let s = db.statements().get("stripe_paid").unwrap().clone();
     assert_eq!(s.hook.as_deref(), Some("stripe"));
     assert!(s.tree.is_some() && s.broken.is_none(), "{:?}", s.broken);

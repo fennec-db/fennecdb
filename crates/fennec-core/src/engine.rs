@@ -5,6 +5,7 @@ use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::collate::{self, Collation, TextOrder};
 use crate::composite::CompositeIndex;
+use crate::crc::crc32c;
 use crate::error::{not_built, Error, Result};
 use crate::geo::GeoIndex;
 use crate::history::History;
@@ -209,6 +210,19 @@ const REC_LAND: u8 = 11;
 /// and would have taken a field moved for one; this one it refuses. Undone
 /// in a block as an index built is ([`Undo::Altered`]).
 const REC_FIELDS: u8 = 12;
+/// A kind's high bit: the record carries its checksum, CRC32C of its head
+/// and body, in the last [`SUM`] bytes its length counts -- `[kind | 0x80]
+/// [collection][length][body][sum]`. Every record this version writes into
+/// a file has one, the counter's fixed-width head aside; one a version
+/// before wrote has none, and loads as it reads. The length counts the sum
+/// so that a version before frames the record as it is and refuses its
+/// kind in words ("unknown record kind 131"), never reading the sum as the
+/// next record. The records inside a block, a spill or a land carry none:
+/// the one around them covers them (docs/design/storage.md#file-format).
+const CHECKED: u8 = 0x80;
+/// A checked record's checksum: the CRC32C, little-endian, last.
+const SUM: usize = 4;
+
 const FIELD_ADD: u8 = 1;
 const FIELD_DROP: u8 = 2;
 const FIELD_RENAME: u8 = 3;
@@ -374,6 +388,65 @@ pub fn landed_block(spilled: &[&[u8]], land: &[u8]) -> Result<Vec<u8>> {
     Ok(framed(REC_BLOCK, 0, &body))
 }
 
+/// Whether the whole record at the front of `record` is as it was written:
+/// `Some(true)` where its sum is its own, `Some(false)` where it is not,
+/// and `None` for a record that carries none. What an archive holds each
+/// record of its segments to.
+pub fn checksum_holds(record: &[u8]) -> Option<bool> {
+    if record.is_empty() {
+        return None;
+    }
+    let r = record_at(record, &mut 0).ok()?;
+    r.checked().then(|| r.holds(record))
+}
+
+/// The record at the front of `bytes`, when it is one this version frames
+/// and all there: its length, and whether it is as it was written -- its
+/// sum its own, or none carried. `None` at zeros, a kind it does not know,
+/// the counter's head or a record cut short: what no walk reads on from.
+pub fn record_holds(bytes: &[u8]) -> Option<(usize, bool)> {
+    let end = framed_end(bytes, 0)?;
+    let r = record_at(bytes, &mut 0).ok()?;
+    Some((end, r.holds(bytes)))
+}
+
+/// The body of the whole record at the front of `record` when it is of
+/// `kind`, checked or not; `None` for any other.
+pub fn record_body(record: &[u8], kind: u8) -> Option<&[u8]> {
+    if record.first().is_none_or(|&k| k == REC_SEQ) {
+        return None;
+    }
+    let r = record_at(record, &mut 0).ok()?;
+    (r.kind == kind).then_some(r.body)
+}
+
+/// Holds every record of a file's bytes to its sum, the image's too, which
+/// an open never reads: what `fennec verify` asks of each image an archive
+/// keeps, so that a backup no restore could read whole is known before it
+/// is needed. Refused naming the first record that fails, or one cut short.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn check_records(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC[..] {
+        return Err(Error::Corrupt("invalid fennecdb signature".into()));
+    }
+    let mut walk = Walk::new(bytes, MAGIC.len());
+    while let Some(r) = walk.next()? {
+        if !r.holds(bytes) {
+            return Err(Error::Corrupt(format!(
+                "the record at {} fails its checksum",
+                r.at
+            )));
+        }
+    }
+    match walk.torn {
+        true => Err(Error::Corrupt(format!(
+            "the record at {} runs past the end of the file",
+            walk.pos
+        ))),
+        false => Ok(()),
+    }
+}
+
 /// The writes a record holds, which is how far it moves the change counter:
 /// a data record's frames, a block's records' writes, one for a schema
 /// change, none for what is not a write. A feed counting records by their
@@ -384,9 +457,9 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
     }
     let r = record_at(record, &mut 0)?;
     let body = r.body;
-    match record.first() {
-        Some(&REC_DATA) => frames_in(body),
-        Some(&REC_BLOCK) => {
+    match r.kind {
+        REC_DATA => frames_in(body),
+        REC_BLOCK => {
             let mut n = 0;
             each_inner(body, &mut |kind, _, inner| {
                 n += match kind {
@@ -397,10 +470,10 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
             })?;
             Ok(n)
         }
-        Some(&(REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT)) => Ok(1),
+        REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_STATEMENT => Ok(1),
         // The land's own records; the spills' are counted where it is
         // loaded, since it never travels.
-        Some(&REC_LAND) => {
+        REC_LAND => {
             let (_, rest) = land_parts(body)?;
             let mut n = 0;
             each_inner(rest, &mut |kind, _, inner| {
@@ -551,27 +624,118 @@ fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
     Ok(())
 }
 
-/// `[kind][collection id][length][body]`.
+/// A record of the file, checked: `[kind | CHECKED][collection id][length]
+/// [body][sum]`, its length counting the sum.
 fn framed(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(body.len() + HEAD_ROOM);
-    frame_into(&mut out, kind, cid, body);
+    let (h, n) = head(kind | CHECKED, cid, body.len() + SUM);
+    let mut out = Vec::with_capacity(n + body.len() + SUM);
+    out.extend_from_slice(&h[..n]);
+    out.extend_from_slice(body);
+    let sum = crc32c(0, &out);
+    out.extend_from_slice(&sum.to_le_bytes());
     out
 }
 
+/// A record of the file, as this version writes it: what a test or a tool
+/// writing a file of its own makes one with, `kind` the plain one.
+pub fn record(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
+    framed(kind, cid, body)
+}
+
+/// A record inside a block, a spill or a land: `[kind][collection id]
+/// [length][body]`, with no sum of its own -- the record around it holds it.
 fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
     let (h, n) = head(kind, cid, body.len());
     out.extend_from_slice(&h[..n]);
     out.extend_from_slice(body);
 }
 
+/// A checked record written into an [`ImageOut`] as its body is: the head
+/// first, the sum carried over every byte after it, and written last
+/// ([`Self::end`]). An image's records are written so, a data record's
+/// body a stretch of its store at a time.
+pub(crate) struct Summed<'a> {
+    out: &'a mut dyn ImageOut,
+    sum: u32,
+}
+
+impl<'a> Summed<'a> {
+    /// The head of a record whose body is `len` bytes, written.
+    pub(crate) fn begin(out: &'a mut dyn ImageOut, kind: u8, cid: u32, len: usize) -> Result<Self> {
+        let (h, n) = head(kind | CHECKED, cid, len + SUM);
+        out.write(&h[..n])?;
+        Ok(Summed {
+            out,
+            sum: crc32c(0, &h[..n]),
+        })
+    }
+
+    /// The sum, written: the record is whole.
+    pub(crate) fn end(self) -> Result<()> {
+        self.out.write(&self.sum.to_le_bytes())
+    }
+}
+
+impl ImageOut for Summed<'_> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.sum = crc32c(self.sum, bytes);
+        self.out.write(bytes)
+    }
+    fn write_kept(&mut self, kept: Kept) -> Result<()> {
+        self.sum = crc32c(self.sum, kept.bytes());
+        self.out.write_kept(kept)
+    }
+    fn at(&self) -> u64 {
+        self.out.at()
+    }
+    /// Only ever past the record: a patch inside it would leave its sum
+    /// another body's.
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        self.out.patch(at, bytes)
+    }
+}
+
+/// A checked record of `body`, written into `out` whole.
+pub(crate) fn put_record(out: &mut dyn ImageOut, kind: u8, cid: u32, body: &[u8]) -> Result<()> {
+    let mut w = Summed::begin(out, kind, cid, body.len())?;
+    w.write(body)?;
+    w.end()
+}
+
 /// A record, as a walk over a file or a feed of them finds it.
 struct Rec<'a> {
+    /// Its kind, [`CHECKED`] taken off.
     kind: u8,
     cid: u32,
     /// Where it starts, and where its body does, in the bytes walked.
     at: usize,
     body_at: usize,
     body: &'a [u8],
+    /// Where a checked record's sum is -- `usize::MAX` for one too short to
+    /// hold it -- and `None` for a record with none.
+    sum: Option<usize>,
+}
+
+impl Rec<'_> {
+    /// Whether the record is as it was written, in `bytes`, the ones it was
+    /// read from: its sum is its head's and body's, or it carries none.
+    /// What a torn tail's zeros or stale bytes inside a record fail.
+    fn holds(&self, bytes: &[u8]) -> bool {
+        let Some(s) = self.sum else {
+            return true;
+        };
+        match (bytes.get(self.at..s), bytes.get(s..s.wrapping_add(SUM))) {
+            (Some(summed), Some(&[a, b, c, d])) => {
+                crc32c(0, summed) == u32::from_le_bytes([a, b, c, d])
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether it carries a sum.
+    fn checked(&self) -> bool {
+        self.sum.is_some()
+    }
 }
 
 /// The record at `*pos` -- `[kind][collection][length][body]`, or the
@@ -591,21 +755,30 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
             at,
             body_at: at + 1,
             body,
+            sum: None,
         });
     }
     let mut p = at + 1;
     let cid = get_uvarint(bytes, &mut p)? as u32;
     let len = get_uvarint(bytes, &mut p)? as usize;
-    let body = bytes
+    let all = bytes
         .get(p..p.saturating_add(len))
         .ok_or_else(|| Error::Corrupt("a record cut short".into()))?;
     *pos = p + len;
+    let (body, sum) = match kind & CHECKED {
+        0 => (all, None),
+        _ => match len.checked_sub(SUM) {
+            Some(n) => (&all[..n], Some(p + n)),
+            None => (&all[..0], Some(usize::MAX)),
+        },
+    };
     Ok(Rec {
-        kind,
+        kind: kind & !CHECKED,
         cid,
         at,
         body_at: p,
         body,
+        sum,
     })
 }
 
@@ -959,11 +1132,15 @@ impl Block {
     /// record as it always was -- the record of a lone schema change, and a
     /// block record around each write's record otherwise.
     fn record(&mut self) -> std::borrow::Cow<'_, [u8]> {
-        let (kind, cid, _) = self.heads[0];
+        let (kind, cid, end) = self.heads[self.heads.len() - 1];
         if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
-            // The header goes into the room before the frames.
-            let (h, n) = head(kind, cid, self.frames.len() - HEAD_ROOM);
+            // The header goes into the room before the frames, the sum after
+            // them: the frames are not copied.
+            self.frames.truncate(end);
+            let (h, n) = head(kind | CHECKED, cid, end - HEAD_ROOM + SUM);
             self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&h[..n]);
+            let sum = crc32c(0, &self.frames[HEAD_ROOM - n..]);
+            self.frames.extend_from_slice(&sum.to_le_bytes());
             return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
         }
         let mut body = Vec::with_capacity(self.frames.len() + HEAD_ROOM * self.heads.len());
@@ -987,21 +1164,7 @@ impl Block {
 /// a head reads as no kind: a walk's known records pay nothing.
 fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
-    if !matches!(
-        kind,
-        REC_CREATE
-            | REC_DROP
-            | REC_DATA
-            | REC_GRAPH
-            | REC_ALTER
-            | REC_FIELDS
-            | REC_STATEMENT
-            | REC_NEXTID
-            | REC_HISTORY
-            | REC_BLOCK
-            | REC_SPILL
-            | REC_LAND
-    ) {
+    if !known(kind) {
         return match kind {
             REC_SEQ => Ok(true),
             0 if zero_tail(bytes, at, edge) => Ok(false),
@@ -1019,6 +1182,66 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
         };
     }
     Ok(len <= (bytes.len() - pos) as u64)
+}
+
+/// Whether `kind` is a record's this version reads with a length, checked
+/// or not: every kind but the counter's fixed-width head, which is never
+/// checked.
+fn known(kind: u8) -> bool {
+    matches!(
+        kind & !CHECKED,
+        REC_CREATE
+            | REC_DROP
+            | REC_DATA
+            | REC_GRAPH
+            | REC_ALTER
+            | REC_FIELDS
+            | REC_STATEMENT
+            | REC_NEXTID
+            | REC_HISTORY
+            | REC_BLOCK
+            | REC_SPILL
+            | REC_LAND
+    )
+}
+
+/// Where the record at `at` ends, when it is one this version frames and
+/// all there; `None` at zeros, a kind it does not know, the counter's head
+/// or a record cut short -- what no walk reads on from.
+fn framed_end(bytes: &[u8], at: usize) -> Option<usize> {
+    if !bytes.get(at).is_some_and(|&k| known(k)) {
+        return None;
+    }
+    let mut p = at + 1;
+    get_uvarint(bytes, &mut p).ok()?;
+    let len = get_uvarint(bytes, &mut p).ok()? as usize;
+    let end = p.checked_add(len)?;
+    (end <= bytes.len()).then_some(end)
+}
+
+/// Whether a record from `pos` on is as it was written: one whose sum is
+/// its own, or one carrying none, whole by its length, which nothing shows
+/// torn. Asked after a record that fails its sum, whose damage is a torn
+/// tail only where nothing written whole follows it; the walk stops where
+/// nothing frames on -- zeros, a kind it does not know, a record cut short
+/// -- so a torn tail's zeros or stale bytes read as no record.
+fn whole_after(bytes: &[u8], mut pos: usize) -> bool {
+    while let Some((len, holds)) = record_holds(&bytes[pos..]) {
+        if holds {
+            return true;
+        }
+        pos += len;
+    }
+    false
+}
+
+/// A record that fails its sum with a whole one after it: damage, not a
+/// torn tail, refused naming where it starts.
+#[cold]
+fn failed_sum(at: usize) -> Error {
+    Error::Corrupt(format!(
+        "the record at {at} fails its checksum, with whole records after it"
+    ))
 }
 
 /// Whether the bytes from the head at `at` are a torn tail of zeros: an
@@ -1062,27 +1285,18 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
     let mut last: Vec<(u32, String, usize)> = Vec::new();
     let mut walk = Walk::new(bytes, MAGIC.len());
     while walk.pos < bytes.len() {
-        if !matches!(
-            bytes[walk.pos],
-            REC_SEQ
-                | REC_CREATE
-                | REC_DROP
-                | REC_DATA
-                | REC_GRAPH
-                | REC_ALTER
-                | REC_FIELDS
-                | REC_STATEMENT
-                | REC_NEXTID
-                | REC_HISTORY
-                | REC_BLOCK
-                | REC_SPILL
-                | REC_LAND
-        ) {
+        if bytes[walk.pos] != REC_SEQ && !known(bytes[walk.pos]) {
             break;
         }
         let Some(r) = walk.next()? else { break };
         if r.kind == REC_GRAPH {
-            let field = crate::codec::decode_str(r.body, &mut 0)?;
+            // A checked one whose field does not read is the load's to
+            // judge by its sum: a torn tail's, or damage.
+            let field = match crate::codec::decode_str(r.body, &mut 0) {
+                Ok(f) => f,
+                Err(_) if r.checked() => continue,
+                Err(e) => return Err(e),
+            };
             match last.iter_mut().find(|(c, f, _)| *c == r.cid && *f == field) {
                 Some(l) => l.2 = r.at,
                 None => last.push((r.cid, field, r.at)),
@@ -1090,6 +1304,19 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
         }
     }
     Ok(last)
+}
+
+/// Whether `r` is a graph record a later one of its index replaces, by the
+/// last of each that [`last_graphs`] found: a load never reads it. `None`
+/// in the browser, which restores each graph it meets.
+fn superseded(last: &Option<Vec<(u32, String, usize)>>, r: &Rec<'_>) -> bool {
+    let Some(last) = last else {
+        return false;
+    };
+    r.kind == REC_GRAPH
+        && !last.iter().any(|(_, _, at)| *at == r.at)
+        && crate::codec::decode_str(r.body, &mut 0)
+            .is_ok_and(|field| last.iter().any(|(c, f, _)| *c == r.cid && *f == field))
 }
 
 /// Drops from a load's restored graphs those of collection `name` but the
@@ -1336,12 +1563,6 @@ pub trait Watcher: Send + Sync {
         let _ = before;
         self.notify(db.change_seq());
     }
-}
-
-/// `[kind][collection][length]`, the head every record but the counter has.
-pub(crate) fn record_head(kind: u8, cid: u32, len: usize) -> Vec<u8> {
-    let (h, n) = head(kind, cid, len);
-    h[..n].to_vec()
 }
 
 /// The front of an image: the signature, and the change counter's head,
@@ -5224,9 +5445,7 @@ impl Database {
 
         for name in &self.order {
             let c = &self.collections[name];
-            let sc = c.schema.encode();
-            out.write(&record_head(REC_CREATE, c.id, sc.len()))?;
-            out.write(&sc)?;
+            put_record(out, REC_CREATE, c.id, &c.schema.encode())?;
 
             let compact = compacting.iter().any(|n| n == name);
             let bytes = match compact {
@@ -5243,17 +5462,17 @@ impl Database {
             if bytes > 0 {
                 c.store.image_index(compact, &mut counter);
             }
-            out.write(&record_head(REC_NEXTID, c.id, counter.len()))?;
-            out.write(&counter)?;
+            put_record(out, REC_NEXTID, c.id, &counter)?;
             if bytes > 0 {
-                out.write(&record_head(REC_DATA, c.id, bytes))?;
+                let mut data = Summed::begin(out, REC_DATA, c.id, bytes)?;
                 // The browser maps no file, and its module keeps no list.
                 #[cfg(not(target_arch = "wasm32"))]
-                placed.push((c.id, out.at()));
+                placed.push((c.id, data.at()));
                 match compact {
-                    true => c.store.write_live(out)?,
-                    false => c.store.write_image(out)?,
+                    true => c.store.write_live(&mut data)?,
+                    false => c.store.write_image(&mut data)?,
                 }
+                data.end()?;
             }
 
             // The graph comes *after* the data records: to look the vectors
@@ -5265,8 +5484,7 @@ impl Database {
                 let mut payload = Vec::new();
                 crate::codec::encode_str(&mut payload, field);
                 ix.serialize_graph_into(false, &mut payload);
-                out.write(&record_head(REC_GRAPH, c.id, payload.len()))?;
-                out.write(&payload)?;
+                put_record(out, REC_GRAPH, c.id, &payload)?;
             }
         }
         // After the collections they read, each with its version, epoch
@@ -5276,9 +5494,7 @@ impl Database {
         // 0.15 KB of the browser module, which writes a mark's bytes back
         // as they came.
         for st in self.statements.iter() {
-            let body = st.encode();
-            out.write(&record_head(REC_STATEMENT, 0, body.len()))?;
-            out.write(&body)?;
+            put_record(out, REC_STATEMENT, 0, &st.encode())?;
             #[cfg(feature = "statements")]
             let mark = self.mark_record(st);
             #[cfg(feature = "statements")]
@@ -5286,8 +5502,7 @@ impl Database {
             #[cfg(not(feature = "statements"))]
             let mark = st.last.as_deref();
             if let Some(m) = mark {
-                out.write(&record_head(REC_STATEMENT, 0, m.len()))?;
-                out.write(m)?;
+                put_record(out, REC_STATEMENT, 0, m)?;
             }
         }
         let body_len = out.at() - body_at;
@@ -5566,8 +5781,10 @@ impl Database {
                 crate::codec::encode_str(&mut buf, field);
                 ix.serialize_graph_into(true, &mut buf);
                 let body = buf.len() - HEAD_ROOM;
-                let (h, hn) = head(REC_GRAPH, c.id, body);
+                let (h, hn) = head(REC_GRAPH | CHECKED, c.id, body + SUM);
                 buf[HEAD_ROOM - hn..HEAD_ROOM].copy_from_slice(&h[..hn]);
+                let sum = crc32c(0, &buf[HEAD_ROOM - hn..]);
+                buf.extend_from_slice(&sum.to_le_bytes());
                 let record = &buf[HEAD_ROOM - hn..];
                 self.sink
                     .lock()
@@ -5655,8 +5872,29 @@ impl Database {
         // The index of a data record's frames an image writes after the
         // collection's id counter, for the record right after it alone.
         let mut frames: Option<(u32, &[u8])> = None;
+        // Where a record that fails its sum starts, with nothing whole after
+        // it: a torn tail, cut there.
+        let mut torn_at: Option<usize> = None;
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
+            // Every record past the image is checked before it is read: an
+            // append whose length reached the disk before all its bytes reads
+            // whole, its later bytes the disk's zeros or stale ones. The image
+            // was synced before it was renamed into place, and its data
+            // records are not read here at all. A graph a later one of its
+            // index replaces is never read either.
+            if tail && r.checked() && !superseded(&last, &r) {
+                if !r.holds(bytes) {
+                    if whole_after(bytes, walk.pos) {
+                        return Err(failed_sum(r.at));
+                    }
+                    torn_at = Some(r.at);
+                    break;
+                }
+                // It ends where it says, whatever its last byte: zeros to
+                // the end from here are a torn tail.
+                walk.edge = walk.pos;
+            }
             if matches!(
                 r.kind,
                 REC_CREATE
@@ -5831,6 +6069,9 @@ impl Database {
                 )));
             }
             whole = walk.pos;
+        }
+        if let Some(at) = torn_at {
+            whole = at;
         }
         if let Some(at) = dead_tail {
             whole = whole.min(at);
@@ -6714,13 +6955,23 @@ impl Database {
         let mut notes = std::mem::take(&mut self.spare.notes);
         notes.clear();
         while pos < bytes.len() {
+            let r = record_at(bytes, &mut pos)?;
+            // A record comes with the sum its primary wrote: one damaged on
+            // the way, or read off a disk that lost part of it, is refused
+            // rather than landed and written into this file whole.
+            if !r.holds(bytes) {
+                return Err(Error::Corrupt(format!(
+                    "a record of the primary's at {} fails its checksum",
+                    r.at
+                )));
+            }
             let Rec {
                 kind: rec,
                 cid,
                 at: start,
                 body,
                 ..
-            } = record_at(bytes, &mut pos)?;
+            } = r;
 
             // The graph takes a batch as the graph stands before it: a
             // schema change needs it as it stands after, and ends it.

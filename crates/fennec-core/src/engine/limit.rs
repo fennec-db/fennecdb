@@ -172,16 +172,18 @@ impl Block {
     /// The length of the record [`Block::record`] makes, worked out without
     /// making it: a block across collections would be copied once more.
     pub(super) fn record_len(&self) -> usize {
-        let (kind, cid, _) = self.heads[0];
+        let (kind, cid, end) = self.heads[self.heads.len() - 1];
+        // A file's record counts its sum in its length.
+        let whole =
+            |kind: u8, cid: u32, body: usize| head(kind | CHECKED, cid, body + SUM).1 + body + SUM;
         if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
-            let len = self.frames.len() - HEAD_ROOM;
-            return head(kind, cid, len).1 + len;
+            return whole(kind, cid, end - HEAD_ROOM);
         }
         let (mut body, mut start) = (0, HEAD_ROOM);
         for &(kind, cid, end) in &self.heads {
             body += head(kind, cid, end - start).1 + end - start;
             start = end;
         }
-        head(REC_BLOCK, 0, body).1 + body
+        whole(REC_BLOCK, 0, body)
     }
 }

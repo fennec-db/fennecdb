@@ -234,6 +234,38 @@ drives each against `OP6_BASE`, a hook's statement defined over `/query` by
 this tree's primary, beside the server, a replica and `fennec types`
 refusing fennec-core's `tests/statements.fennec`.
 
+**Record checksums move it at the first write.** From the release whose
+records carry a checksum (`docs/design/storage.md#file-format`), every
+record a binary writes into a file -- a write, a block, a graph, the
+history, each record of an image a compact or a checkpoint writes -- sets
+its kind's high bit and ends in its CRC32C, its length counting it. A
+binary from before -- the last main before them, `f29a44a7` -- frames such
+a record by its length and refuses its kind in words ("unknown record kind
+131 at 8"), never reading the sum as a record. Unlike the moves above,
+nothing has to be defined first: a primary's first write after its
+upgrade is one, and a page's module and an app's library write them the
+same. Its notes name it under the same upgrade heading, in the same order
+-- every archiver; every replica and standby, and every node a move, a
+restore or a failover may put a tenant on; only then any primary -- and
+say that the order runs one way: a file a binary with checksums wrote to
+opens in no binary from before, so a primary rolled back after its first
+write is rolled back onto its last backup from before. A router reads no
+tenant's file and keeps its place. Files from before open as they were,
+their records loading as they read, and take checked records after them
+until a compact writes each anew; a replica with checksums following a
+primary from before writes its records as they came. Where the order is
+not kept, each older binary stops in words: a replica stops at the first
+record or the image its new primary sends, holding none of it; an
+archiver keeps the stream and takes no image of its own, its `fennec
+verify` refusing what it kept, which the new one reads; the server and
+`fennec types` refuse a file the new server wrote; a page's module from
+before refuses what a newer one persisted. `make upgrade-check` drives
+each against `CK_BASE` (`f29a44a7`), beside this tree's replica following
+a primary from before and this tree's server opening its file; and it
+drives the cases above with `CK_BASE`'s binaries in this tree's place,
+since a binary from before them stops at a record's kind bit before it
+reaches the kind or op the case is about.
+
 **A node recorded at `https://` waits for every router and node.** From
 the release that dials HTTPS (TLS slice 3), a node serving HTTPS
 (`--tls-cert`) is recorded at its `https://host:port` address (`PUT

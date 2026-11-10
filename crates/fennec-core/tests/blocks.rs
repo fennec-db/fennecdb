@@ -211,7 +211,7 @@ fn a_block_that_lands_is_one_record_numbered_as_its_last_write() {
     let written = tap.since(seq);
     assert_eq!(written.len(), 1, "one record");
     assert_eq!(written[0].0, seq + 4);
-    assert_eq!(written[0].1[0], 9, "a block record");
+    assert_eq!(written[0].1[0] & 0x7f, 9, "a block record");
     assert_eq!(writes_in(&written[0].1).unwrap(), 4);
     assert_eq!(db.change_seq(), seq + 4);
     assert_eq!(
@@ -229,7 +229,7 @@ fn a_block_that_lands_is_one_record_numbered_as_its_last_write() {
     );
     let written = tap.since(seq);
     assert_eq!(written.len(), 1);
-    assert_eq!((written[0].0, written[0].1[0]), (seq + 3, 3));
+    assert_eq!((written[0].0, written[0].1[0] & 0x7f), (seq + 3, 3));
     assert_eq!(writes_in(&written[0].1).unwrap(), 3);
 
     // A lone write is the record it always was.
@@ -237,7 +237,7 @@ fn a_block_that_lands_is_one_record_numbered_as_its_last_write() {
     exec(&mut db, r#"put notes {k: "z"}"#, &[]);
     let written = tap.since(seq);
     assert_eq!(written.len(), 1);
-    assert_eq!((written[0].0, written[0].1[0]), (seq + 1, 3));
+    assert_eq!((written[0].0, written[0].1[0] & 0x7f), (seq + 1, 3));
 
     // The file reads back to the same answers, at the same change.
     let mut back = Database::new();
@@ -575,7 +575,7 @@ fn a_block_of_schema_changes_lands_as_one_record() {
     );
     let written = tap.since(seq);
     assert_eq!(written.len(), 1, "one record");
-    assert_eq!(written[0].1[0], 9, "a block record");
+    assert_eq!(written[0].1[0] & 0x7f, 9, "a block record");
     // A schema change counts as a write, as it does on its own: four of
     // them, and four documents.
     assert_eq!(writes_in(&written[0].1).unwrap(), 8);
@@ -624,7 +624,7 @@ fn a_block_of_schema_changes_lands_as_one_record() {
         let seq = db.change_seq();
         exec(&mut db, sql, &[]);
         let written = tap.since(seq);
-        assert_eq!((written.len(), written[0].1[0]), (1, kind), "{sql}");
+        assert_eq!((written.len(), written[0].1[0] & 0x7f), (1, kind), "{sql}");
     }
 }
 

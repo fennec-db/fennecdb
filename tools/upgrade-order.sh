@@ -31,7 +31,13 @@
 #
 # NEW_BIN_DIR holds this tree's `fennec-server`, `fennec` and `fennec-shard`
 # (`make upgrade-check` builds them). OLD_BIN_DIR, where set, holds the old ones
-# already built and skips their build. Every server listens on port 0, found
+# already built and skips their build.
+#
+# Since record checksums (docs/design/storage.md#file-format) a binary from
+# before them stops at the first record this tree writes, before any kind
+# or op a case below is about: each case runs the binaries of CK_BASE, the
+# last main before the checksums (PRE_BIN_DIR, where set, holds them), where
+# it ran this tree's, and the last case holds CK_BASE's to this tree's. Every server listens on port 0, found
 # by its `listening on:` line; everything it started is killed and every
 # path it made removed on its way out.
 
@@ -48,7 +54,7 @@ cleanup() {
         [ -n "$p" ] && kill "$p" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    for tree in "$WORK/old" "$WORK/old3" "$WORK/old4" "$WORK/old6"; do
+    for tree in "$WORK/old" "$WORK/old3" "$WORK/old4" "$WORK/old6" "$WORK/pre"; do
         if [ -d "$tree" ]; then
             git -C "$ROOT" worktree remove --force "$tree" 2>/dev/null || true
         fi
@@ -74,6 +80,17 @@ else
     CARGO_TARGET_DIR="$WORK/old-target" "${CARGO:-cargo}" build --quiet \
         --manifest-path "$WORK/old/Cargo.toml" -p fennec-server -p fennec-cli -p fennec-shard
     OLD="$WORK/old-target/debug"
+fi
+
+CK_BASE=${CK_BASE:-f29a44a7}
+if [ -n "${PRE_BIN_DIR:-}" ]; then
+    PRE=$PRE_BIN_DIR
+else
+    echo "building fennec-server, fennec and fennec-shard at $CK_BASE ..."
+    git -C "$ROOT" worktree add --detach --quiet "$WORK/pre" "$CK_BASE"
+    CARGO_TARGET_DIR="$WORK/pre-target" "${CARGO:-cargo}" build --quiet \
+        --manifest-path "$WORK/pre/Cargo.toml" -p fennec-server -p fennec-cli -p fennec-shard
+    PRE="$WORK/pre-target/debug"
 fi
 
 # The address a server said it listens on, waited for.
@@ -104,7 +121,7 @@ query() {
         -d "{\"query\":\"$2\"}" "$1/query"
 }
 
-"$NEW/fennec-server" --file "$WORK/primary.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/primary.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/primary.log" &
 PIDS+=($!)
 PRIMARY=$(address "$WORK/primary.log")
@@ -149,7 +166,7 @@ if TMPDIR="$WORK" "$OLD/fennec" verify "$WORK/archive" >"$WORK/verify-old.log" 2
     fail "the old verify read an archive holding record kind 13"
 fi
 grep -q 'kind 13' "$WORK/verify-old.log" || fail "the old verify said nothing of record kind 13"
-TMPDIR="$WORK" "$NEW/fennec" verify "$WORK/archive" >"$WORK/verify-new.log" 2>&1 ||
+TMPDIR="$WORK" "$PRE/fennec" verify "$WORK/archive" >"$WORK/verify-new.log" 2>&1 ||
     fail "this tree's verify refused the archive the old archiver kept"
 echo "old verify:   $(grep -m1 'kind 13' "$WORK/verify-old.log")"
 echo "new verify:   $(head -1 "$WORK/verify-new.log")"
@@ -162,7 +179,7 @@ if TMPDIR="$WORK" "$OLD/fennec" restore "$WORK/archive" "$WORK/restored-old.fenn
     fail "the old restore read an archive holding record kind 13"
 fi
 grep -q 'kind 13' "$WORK/restore-old.log" || fail "the old restore said nothing of record kind 13"
-TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive" "$WORK/restored.fennec" \
+TMPDIR="$WORK" "$PRE/fennec" restore "$WORK/archive" "$WORK/restored.fennec" \
     >"$WORK/restore-new.log" 2>&1 || fail "this tree's restore refused the archive"
 "$OLD/fennec-server" --file "$WORK/restored.fennec" --http 127.0.0.1:0 \
     >"$WORK/restored-open.log" 2>&1 &
@@ -202,7 +219,7 @@ code=$(admin "$OLD_ROUTER" GET /_shard/tenants/acme)
 # its statement and all, on this tree's node; the move to the old node
 # fails at its install, and the tenant stays on its source, answering what
 # it held.
-"$NEW/fennec-server" --dir "$WORK/n1" --http 127.0.0.1:0 --admin-token a1 \
+"$PRE/fennec-server" --dir "$WORK/n1" --http 127.0.0.1:0 --admin-token a1 \
     >"$WORK/n1.log" 2>&1 &
 PIDS+=($!)
 N1=$(address "$WORK/n1.log")
@@ -210,7 +227,7 @@ N1=$(address "$WORK/n1.log")
     >"$WORK/n2.log" 2>&1 &
 PIDS+=($!)
 N2=$(address "$WORK/n2.log")
-"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
+"$PRE/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
     --token root >"$WORK/router.log" 2>&1 &
 ROUTER_PID=$!
 PIDS+=($ROUTER_PID)
@@ -257,10 +274,10 @@ query "$N2/t/zzz" "create collection notes (title text)" >/dev/null
 query "$N2/t/zzz" "put notes {title: 'kept'}" >/dev/null
 kill "$ROUTER_PID" 2>/dev/null || true
 wait "$ROUTER_PID" 2>/dev/null || true
-"$NEW/fennec" "$WORK/router.fennec" -c "put leftovers {key: 'zzz/n2', tenant: 'zzz', \
+"$PRE/fennec" "$WORK/router.fennec" -c "put leftovers {key: 'zzz/n2', tenant: 'zzz', \
 node: 'n2', why: 'a create taken back', noted: 1, instances: '00000000000000ab'}" \
     >"$WORK/seed.log" 2>&1 || fail "the directory took no row: $(cat "$WORK/seed.log")"
-"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
+"$PRE/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router.fennec" \
     --token root >"$WORK/router2.log" 2>&1 &
 PIDS+=($!)
 ROUTER=$(address "$WORK/router2.log")
@@ -280,7 +297,7 @@ echo "old node:     a reclaim answered 404, the file kept and reported"
 # the old router passes over), a move's freeze and install, and a delete
 # taking each file and its `.instance` away.
 for n in n3 n4 n5; do
-    "$NEW/fennec-server" --dir "$WORK/$n" --http 127.0.0.1:0 --admin-token "a$n" \
+    "$PRE/fennec-server" --dir "$WORK/$n" --http 127.0.0.1:0 --admin-token "a$n" \
         --replication-token r >"$WORK/$n.log" 2>&1 &
     PIDS+=($!)
 done
@@ -340,7 +357,7 @@ echo "old router:   a create, its replica, a move and a delete on this tree's no
 # and a node from before refuses to follow an https:// primary. So every
 # router and node is upgraded before a node is recorded at https://.
 CERTS="$ROOT/crates/fennec-http/tests/certs"
-"$NEW/fennec-server" --dir "$WORK/tls-node" --http 127.0.0.1:0 --admin-token atls \
+"$PRE/fennec-server" --dir "$WORK/tls-node" --http 127.0.0.1:0 --admin-token atls \
     --tls-cert "$CERTS/server.pem" --tls-key "$CERTS/server.key" >"$WORK/tls-node.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 200); do
@@ -355,7 +372,7 @@ plain_refused() {
         "https://localhost:$TLS_PORT/_metrics" |
         grep 'fennec_tls_handshakes_failed_total{reason="plain_http"}' | awk '{print $2}'
 }
-"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/tls-router.fennec" \
+"$PRE/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/tls-router.fennec" \
     --token root --tls-ca "$CERTS/ca.pem" >"$WORK/tls-router.log" 2>&1 &
 PIDS+=($!)
 NEW_ROUTER=$(address "$WORK/tls-router.log")
@@ -415,7 +432,7 @@ fi
 UNREAD='a statement record this version does not read'
 BINDING="create statement paid after set orders where new.status = 'paid' as insert ledger {o: new.id}"
 
-"$NEW/fennec-server" --file "$WORK/p3.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/p3.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/p3.log" &
 PIDS+=($!)
 P3=$(address "$WORK/p3.log")
@@ -460,7 +477,7 @@ if TMPDIR="$WORK" "$OLD3/fennec" restore "$WORK/archive3" "$WORK/restored3-old.f
     fail "the old restore read an archive holding op 3"
 fi
 grep -q "$UNREAD" "$WORK/restore3-old.log" || fail "the old restore said nothing of op 3"
-TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive3" "$WORK/restored3.fennec" \
+TMPDIR="$WORK" "$PRE/fennec" restore "$WORK/archive3" "$WORK/restored3.fennec" \
     >"$WORK/restore3-new.log" 2>&1 || fail "this tree's restore refused the archive"
 "$OLD3/fennec-server" --file "$WORK/restored3.fennec" --http 127.0.0.1:0 \
     >"$WORK/restored3-open.log" 2>&1 &
@@ -478,7 +495,7 @@ echo "old open:     $(grep -m1 "$UNREAD" "$WORK/restored3-open.log")"
 # A move onto an old node: this tree's router places the tenant, its
 # binding and all, on this tree's node; the move to the old one fails at
 # its install, and the tenant stays on its source, its binding running.
-"$NEW/fennec-server" --dir "$WORK/n6" --http 127.0.0.1:0 --admin-token a6 \
+"$PRE/fennec-server" --dir "$WORK/n6" --http 127.0.0.1:0 --admin-token a6 \
     >"$WORK/n6.log" 2>&1 &
 PIDS+=($!)
 N6=$(address "$WORK/n6.log")
@@ -486,7 +503,7 @@ N6=$(address "$WORK/n6.log")
     >"$WORK/n7.log" 2>&1 &
 PIDS+=($!)
 N7=$(address "$WORK/n7.log")
-"$NEW/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router3.fennec" \
+"$PRE/fennec-shard" --listen 127.0.0.1:0 --directory "$WORK/router3.fennec" \
     --token root >"$WORK/router3.log" 2>&1 &
 PIDS+=($!)
 ROUTER3=$(address "$WORK/router3.log")
@@ -538,7 +555,7 @@ kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 3"
 grep -q "$UNREAD" "$WORK/bound-open.log" || fail "the old server said nothing of op 3"
 echo "old open:     $(grep -m1 "$UNREAD" "$WORK/bound-open.log")"
 
-"$NEW/fennec-server" --file "$WORK/bound.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/bound.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/bound-primary.log" &
 PIDS+=($!)
 BOUND=$(address "$WORK/bound-primary.log")
@@ -613,7 +630,7 @@ kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 4"
 grep -q "$UNREAD" "$WORK/scheduled-open.log" || fail "the old server said nothing of op 4"
 echo "old open:     $(grep -m1 "$UNREAD" "$WORK/scheduled-open.log")"
 
-"$NEW/fennec-server" --file "$WORK/scheduled.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/scheduled.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/scheduled-primary.log" &
 PIDS+=($!)
 SCHEDULED=$(address "$WORK/scheduled-primary.log")
@@ -655,7 +672,7 @@ echo "old types:    $(grep -m1 "$UNREAD" "$WORK/scheduled-types.log")"
 # The first schedule, defined as a client defines one, beside an old
 # replica and an old archiver following the primary that defines it.
 SCHEDULE="create statement tidy every 1d as del orders where status = 'void'"
-"$NEW/fennec-server" --file "$WORK/p4.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/p4.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/p4.log" &
 PIDS+=($!)
 P4=$(address "$WORK/p4.log")
@@ -692,7 +709,7 @@ if TMPDIR="$WORK" "$OLD4/fennec" restore "$WORK/archive4b" "$WORK/restored4-old.
     fail "the old restore read an archive holding op 4"
 fi
 grep -q "$UNREAD" "$WORK/restore4-old.log" || fail "the old restore said nothing of op 4"
-TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/archive4b" "$WORK/restored4.fennec" \
+TMPDIR="$WORK" "$PRE/fennec" restore "$WORK/archive4b" "$WORK/restored4.fennec" \
     >"$WORK/restore4-new.log" 2>&1 || fail "this tree's restore refused the archive"
 "$OLD4/fennec-server" --file "$WORK/restored4.fennec" --http 127.0.0.1:0 \
     >"$WORK/restored4-open.log" 2>&1 &
@@ -751,7 +768,7 @@ kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file holding op 6"
 grep -q "$UNREAD" "$WORK/hooked-open.log" || fail "the old server said nothing of op 6"
 echo "old open:     $(grep -m1 "$UNREAD" "$WORK/hooked-open.log")"
 
-"$NEW/fennec-server" --file "$WORK/hooked.fennec" --http 127.0.0.1:0 \
+"$PRE/fennec-server" --file "$WORK/hooked.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/hooked-primary.log" &
 PIDS+=($!)
 HOOKED=$(address "$WORK/hooked-primary.log")
@@ -792,3 +809,104 @@ fi
 grep -q "$UNREAD" "$WORK/hooked-types.log" || fail "the old \`fennec types\` said nothing of op 6"
 echo "old types:    $(grep -m1 "$UNREAD" "$WORK/hooked-types.log")"
 echo "ok: the binaries from before stop in words at a webhook consumer (op 6)"
+
+# Record checksums (docs/design/storage.md#file-format): every record this
+# tree writes ends in its CRC32C, its kind's high bit set and its length
+# counting the sum. A binary from before them -- CK_BASE -- frames such a
+# record by its length and refuses its kind in words, never reading the
+# sum as a record; nothing has to be defined first, a primary's first
+# write is one (RELEASING.md):
+#
+#   - an old replica of this tree's primary stops at what it is sent and
+#     holds none of it;
+#   - an old archiver keeps the stream and takes no image of its own, the
+#     old `fennec verify` refusing what it kept;
+#   - the old server and the old `fennec types` refuse the primary's file.
+#
+# And the order the upgrade takes, the other way: this tree's replica
+# follows an old primary, holding its records as they came, and this
+# tree's server opens the old primary's file and writes to it.
+SUMMED='record kind 1[2-4][0-9]'
+"$NEW/fennec-server" --file "$WORK/pc.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/pc.log" &
+PC_PID=$!
+PIDS+=($PC_PID)
+PC=$(address "$WORK/pc.log")
+"$PRE/fennec" archive "$PC" "$WORK/archivec" --token r --image-every 1s \
+    2>"$WORK/archiverc.log" &
+ARCHIVERC=$!
+PIDS+=($ARCHIVERC)
+query "$PC" "create collection notes (title text)" | grep -q '"error"' &&
+    fail "this tree's primary refused a create"
+query "$PC" "put notes {title: 'summed'}" | grep -q '"error"' &&
+    fail "this tree's primary refused a write"
+"$PRE/fennec-server" --file "$WORK/rc.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$PC" 2>"$WORK/rc.log" &
+PIDS+=($!)
+RC=$(address "$WORK/rc.log")
+said "$WORK/rc.log" "$SUMMED" || fail "the old replica said nothing of a checked record"
+query "$RC" "get notes count" | grep -q '"count":1' &&
+    fail "the old replica took a checked record"
+echo "old replica:  $(grep -m1 "$SUMMED" "$WORK/rc.log")"
+query "$PC" "put notes {title: 'again'}" | grep -q '"error"' &&
+    fail "this tree's primary refused a write"
+said "$WORK/archiverc.log" "$SUMMED" || fail "the old archiver said nothing of a checked record"
+echo "old archiver: $(grep -m1 "$SUMMED" "$WORK/archiverc.log")"
+kill "$ARCHIVERC" 2>/dev/null || true
+wait "$ARCHIVERC" 2>/dev/null || true
+if TMPDIR="$WORK" "$PRE/fennec" verify "$WORK/archivec" >"$WORK/verifyc-old.log" 2>&1; then
+    fail "the old verify read an archive of checked records"
+fi
+echo "old verify:   $(head -1 "$WORK/verifyc-old.log")"
+kill "$PC_PID" 2>/dev/null || true
+wait "$PC_PID" 2>/dev/null || true
+"$PRE/fennec-server" --file "$WORK/pc.fennec" --http 127.0.0.1:0 \
+    >"$WORK/pc-old-open.log" 2>&1 &
+OPEN=$!
+PIDS+=($OPEN)
+for _ in $(seq 1 600); do
+    kill -0 "$OPEN" 2>/dev/null || break
+    sleep 0.05
+done
+kill -0 "$OPEN" 2>/dev/null && fail "the old server opened a file of checked records"
+grep -q "$SUMMED" "$WORK/pc-old-open.log" || fail "the old server said nothing of a checked record"
+echo "old open:     $(grep -m1 "$SUMMED" "$WORK/pc-old-open.log")"
+if "$PRE/fennec" types "$WORK/pc.fennec" >"$WORK/pc-types.log" 2>&1; then
+    fail "the old \`fennec types\` read a file of checked records"
+fi
+grep -q "$SUMMED" "$WORK/pc-types.log" || fail "the old \`fennec types\` said nothing of a checked record"
+echo "old types:    $(grep -m1 "$SUMMED" "$WORK/pc-types.log")"
+
+# The upgrade's own order: this tree's replica of an old primary, then this
+# tree's server on the old primary's file.
+"$PRE/fennec-server" --file "$WORK/po.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/po.log" &
+PO_PID=$!
+PIDS+=($PO_PID)
+PO=$(address "$WORK/po.log")
+query "$PO" "create collection notes (title text)" >/dev/null
+query "$PO" "put notes {title: 'plain'}" >/dev/null
+"$NEW/fennec-server" --file "$WORK/ro.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r --replica-of "$PO" 2>"$WORK/ro.log" &
+RO_PID=$!
+PIDS+=($RO_PID)
+RO=$(address "$WORK/ro.log")
+query "$PO" "put notes {title: 'plain too'}" >/dev/null
+for _ in $(seq 1 600); do
+    query "$RO" "get notes count" | grep -q '"count":2' && break
+    sleep 0.05
+done
+query "$RO" "get notes count" | grep -q '"count":2' ||
+    fail "this tree's replica did not follow the old primary: $(tail -3 "$WORK/ro.log")"
+kill "$RO_PID" "$PO_PID" 2>/dev/null || true
+wait "$RO_PID" "$PO_PID" 2>/dev/null || true
+"$NEW/fennec-server" --file "$WORK/po.fennec" --http 127.0.0.1:0 \
+    --http-token t 2>"$WORK/po-new.log" &
+PIDS+=($!)
+PN=$(address "$WORK/po-new.log")
+query "$PN" "put notes {title: 'summed'}" | grep -q '"error"' &&
+    fail "this tree's server took no write on the old primary's file"
+query "$PN" "get notes count" | grep -q '"count":3' ||
+    fail "this tree's server lost a write of the old primary's file"
+echo "new replica:  followed the old primary; this tree's server opened its file and wrote to it"
+echo "ok: the binaries from before stop in words at a checked record"
