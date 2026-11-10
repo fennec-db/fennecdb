@@ -10,7 +10,7 @@
     <RootNamespace>FennecDb</RootNamespace>
 
     <PackageId>FennecDb</PackageId>
-    <Version>0.1.12</Version>
+    <Version>0.2.0</Version>
     <Authors>fennecdb</Authors>
     <Description>A client for fennecdb's server over HTTP: FennecQL queries, vector search, atomic batches, subscriptions and the change stream.</Description>
     <PackageTags>fennecdb;database;vector;search;hnsw</PackageTags>

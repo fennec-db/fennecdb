@@ -8,9 +8,9 @@ publish = false
 # tag (the crates are not on crates.io). CI builds it against this checkout
 # instead: examples/run-tests.sh patches the three to their paths.
 [dependencies]
-fennec-core = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.1.12" }
-fennec-ql = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.1.12" }
-fennec-abi = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.1.12", default-features = false }
+fennec-core = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.2.0" }
+fennec-ql = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.2.0" }
+fennec-abi = { git = "https://github.com/fennec-db/fennecdb", tag = "v0.2.0", default-features = false }
 
 # Not a member of the repository's workspace.
 [workspace]

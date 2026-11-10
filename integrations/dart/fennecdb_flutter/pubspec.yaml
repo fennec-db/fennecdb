@@ -1,6 +1,6 @@
 name: fennecdb_flutter
 description: fennecdb in a Flutter app on iOS, Android and macOS -- the fennecdb package with the native library bundled for each platform.
-version: 0.1.12
+version: 0.2.0
 homepage: https://github.com/fennec-db/fennecdb
 repository: https://github.com/fennec-db/fennecdb/tree/main/integrations/dart/fennecdb_flutter
 topics: [database, vector, embedded, ffi]
@@ -12,7 +12,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  fennecdb: 0.1.12
+  fennecdb: 0.2.0
 
 dev_dependencies:
   flutter_test:

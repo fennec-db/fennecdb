@@ -1,6 +1,6 @@
 {
   "name": "@fennecdb/react",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "description": "useLiveQuery for fennecdb: a query's rows over the database in the page, rendered again as they change",
   "license": "Apache-2.0",
   "type": "module",

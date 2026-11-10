@@ -441,7 +441,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fennec-abi"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-core",
  "fennec-ql",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-bench"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-core",
  "fennec-http",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-cli"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -475,14 +475,14 @@ dependencies = [
 
 [[package]]
 name = "fennec-core"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-ql",
 ]
 
 [[package]]
 name = "fennec-ffi"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-http"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-import"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-core",
  "fennec-ql",
@@ -511,14 +511,14 @@ dependencies = [
 
 [[package]]
 name = "fennec-ql"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-core",
 ]
 
 [[package]]
 name = "fennec-server"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-shard"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-tls"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "rcgen",
  "rustls",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-wasm"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-abi",
  "fennec-core",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-wire"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "fennec-core",
  "fennec-http",
