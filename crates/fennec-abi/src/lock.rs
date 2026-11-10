@@ -83,7 +83,8 @@ impl Sink for Holding {
     fn record_parts(&mut self, seq: u64, original: &[u8], parts: &[&[u8]]) -> CoreResult<()> {
         self.sink.record_parts(seq, original, parts)
     }
-    fn durable(&self) -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn durable(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
         self.sink.durable()
     }
     fn set_durable(&mut self, at: u64) {

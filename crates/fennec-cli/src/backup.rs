@@ -70,9 +70,10 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
             end opens; says from when to when it can restore, and exits 1
             when it cannot. Given a database file, holds every record of it
             to its checksum -- the image's and those before the point the
-            file was synced to, which an open reads unchecked -- and exits 1
-            naming the first that fails; on a file no server is writing,
-            whose last record a write in flight would show cut short
+            file was synced to, which an open reads unchecked, the sync
+            log's writes put back as an open would -- and exits 1 naming the
+            first that fails; on a file no server is writing, whose last
+            record a write in flight would show cut short
 
   --force   backup and restore write a file over one there already, which
             they refuse without it (exit 2): a database is never replaced
@@ -261,11 +262,17 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             ));
         };
         if std::path::Path::new(dir).is_file() {
-            let checked = std::fs::File::open(dir)
-                .map_err(|e| e.to_string())
-                .and_then(|mut f| {
-                    fennec_core::engine::check_reader(&mut f).map_err(|e| e.to_string())
-                });
+            // The sync log's writes put back first, as an open would: after
+            // the machine went down they are in the log alone, and the file
+            // read as it was failed their sums.
+            let checked = match fennec_core::fs::read_with_sync_log(dir) {
+                Ok(Some(bytes)) => fennec_core::engine::check_records(&bytes),
+                Ok(None) => std::fs::File::open(dir)
+                    .map_err(fennec_core::error::Error::from)
+                    .and_then(|mut f| fennec_core::engine::check_reader(&mut f)),
+                Err(e) => Err(e),
+            }
+            .map_err(|e| e.to_string());
             return match checked {
                 Ok(n) => {
                     println!("{dir}: {n} records, each whole by its checksum or carrying none");

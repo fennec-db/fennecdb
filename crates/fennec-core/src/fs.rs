@@ -619,8 +619,9 @@ impl Sink for FileSink {
     fn record_parts(&mut self, _seq: u64, _original: &[u8], parts: &[&[u8]]) -> Result<()> {
         self.append_parts(parts)
     }
-    fn durable(&self) -> u64 {
-        self.durable.load(Ordering::Acquire)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn durable(&self) -> Option<Arc<AtomicU64>> {
+        Some(Arc::clone(&self.durable))
     }
     fn set_durable(&mut self, at: u64) {
         self.durable.fetch_max(at, Ordering::AcqRel);
@@ -1349,14 +1350,21 @@ fn open_mapped_into(
 /// looks torn, and cutting it there destroyed that write, and the file with
 /// it once the server's next append landed past the cut.
 ///
-/// Nor is the sync log beside it applied ([`crate::synclog`]): writing it
-/// back is a write. While the process that keeps the log runs, or after it
+/// Nor is the sync log beside it written back ([`crate::synclog`]): that
+/// is a write. While the process that keeps the log runs, or after it
 /// ended on its own, the file holds those writes already; after the machine
-/// went down, they are in the log until the file is opened to be written
-/// -- so `fennec types`, or a raw copy of the file, taken then and before a
-/// server or the library opens it again, may lack the last durable writes.
+/// went down, they are in the log until the file is opened to be written,
+/// and the file is read into memory with them put back
+/// ([`read_with_sync_log`]) -- read as it was, the last durable writes were
+/// damage their sums refused. A raw copy of the file taken then, before a
+/// server or the library opens it again, may lack them.
 pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
     let mut db = Database::new();
+    if let Some(bytes) = read_with_sync_log(path.as_ref())? {
+        db.load(&bytes)?;
+        db.set_sink(Box::new(ReadOnly));
+        return Ok(db);
+    }
     // Where a server would not map the file, neither does a reader: a
     // share's read error would end it, and on FAT32 its view refuses the
     // server's rename.
@@ -1381,6 +1389,28 @@ pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
     db.load(&std::fs::read(path)?)?;
     db.set_sink(Box::new(ReadOnly));
     Ok(db)
+}
+
+/// The file at `path` with what the sync log beside it holds and the file
+/// lost put back, writing neither, where a log names it and puts anything
+/// back: what a tool that only looks -- [`open_read_only`], `fennec verify`
+/// -- reads after the machine went down. `None` otherwise: the file is to
+/// be read as it is.
+pub fn read_with_sync_log(path: impl AsRef<Path>) -> Result<Option<Vec<u8>>> {
+    #[cfg(unix)]
+    {
+        let path = resolved(path.as_ref());
+        let file = File::open(&path)?;
+        Ok(crate::synclog::applied(
+            &file,
+            &crate::synclog::path_for(&path),
+        )?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 /// The sink of a database [`open_read_only`] opened.

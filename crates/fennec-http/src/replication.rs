@@ -842,7 +842,7 @@ impl Sink for Tee {
         self.feed.push(seq, original);
         Ok(())
     }
-    fn durable(&self) -> u64 {
+    fn durable(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
         self.file.durable()
     }
     fn set_durable(&mut self, at: u64) {

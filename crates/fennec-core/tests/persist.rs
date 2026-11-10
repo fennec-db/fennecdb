@@ -791,6 +791,285 @@ fn a_hole_in_an_unsynced_record_before_a_whole_one_is_cut() {
     cleanup(dir, path);
 }
 
+/// `n` rows of `vector<64>` put in one statement, one record of their
+/// `f32`s -- 256 bytes a row -- each a number of its own: bytes that read as
+/// record heads by chance, about one in twenty, as a model's vectors do.
+#[cfg(feature = "std-fs")]
+fn put_vectors(db: &mut Database, n: usize, seed: &mut u64) {
+    let mut text = String::with_capacity(n * 64 * 12);
+    text.push_str("put v [");
+    for k in 0..n {
+        text.push_str(if k == 0 { "{e: [" } else { ", {e: [" });
+        for d in 0..64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let x = ((*seed >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0;
+            if d > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&format!("{x:.6}"));
+        }
+        text.push_str("]}");
+    }
+    text.push(']');
+    run(db, &text);
+}
+
+/// The records of a file of vectors written as `steps` says -- `'s'` a
+/// sync, a number that many rows put in one statement -- and what its
+/// bytes are before any close, with each record's start and end.
+#[cfg(feature = "std-fs")]
+fn vector_file(path: &std::path::Path, steps: &[&str]) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let _ = std::fs::remove_file(path);
+    let mut db = fennec_core::fs::open(path).expect("open");
+    run(&mut db, "create collection v (e vector<64>)");
+    let mut seed = 7;
+    for step in steps {
+        match *step {
+            "s" => db.sync().expect("sync"),
+            n => put_vectors(&mut db, n.parse().unwrap(), &mut seed),
+        }
+    }
+    let good = written(&mut db, path);
+    drop(db);
+    let all = heads(&good);
+    (good, all)
+}
+
+/// Each way an open writes a file -- mapped, in memory -- over `bad`: the
+/// rows kept, the cut said where it starts, the file cut there, and a write
+/// after it read back by the next open.
+#[cfg(feature = "std-fs")]
+fn cut_every_way(path: &std::path::Path, bad: &[u8], at: usize, rows: usize, what: &str) {
+    for way in ["mapped", "in-memory"] {
+        std::fs::write(path, bad).unwrap();
+        let open = |p: &std::path::Path| match way {
+            "mapped" => fennec_core::fs::open(p),
+            _ => fennec_core::fs::open_in_memory(p),
+        };
+        {
+            let mut db = open(path).unwrap_or_else(|e| panic!("{what}, {way}: {e}"));
+            assert_eq!(ids(&mut db, "v").len(), rows, "{what}, {way}");
+            let cut = db.cut_on_open().expect("the cut said").clone();
+            assert_eq!(cut.at, at as u64, "{what}, {way}");
+            assert_eq!(std::fs::read(path).unwrap(), bad[..at], "{what}, {way}");
+            run(
+                &mut db,
+                &format!("put v {{e: [{}]}}", ["0.5"; 64].join(", ")),
+            );
+            db.sync().expect("sync");
+        }
+        let mut db = open(path).expect("the open after that");
+        assert!(db.cut_on_open().is_none(), "{what}, {way}");
+        assert_eq!(ids(&mut db, "v").len(), rows + 1, "{what}, {way}");
+    }
+}
+
+/// A record of 16 000 vectors -- 4 MiB of `f32`s -- cut short 3 MiB in, as
+/// a crash leaves its last append: a torn tail, cut where it began without
+/// a look at its bytes. Looked through a byte at a time for a whole record
+/// after it, a tear 1.2 MB into 2 MB of vectors was refused, the look's
+/// work spent on vectors' bytes reading as heads.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_tear_inside_a_large_vector_record_is_cut() {
+    let (dir, path) = tmp_path("vector-tear");
+    let (good, all) = vector_file(&path, &["10", "s", "16000"]);
+    let (big, end) = *all.last().unwrap();
+    assert!(end - big > 4 << 20 && end == good.len(), "{big} {end}");
+    let bad = &good[..big + (3 << 20)];
+    cut_every_way(&path, bad, big, 10, "cut 3 MiB in");
+    // Its length's own bytes cut short, and zeros from its head to the end.
+    cut_every_way(&path, &good[..big + 2], big, 10, "cut in its head");
+    let mut zeros = good.clone();
+    zeros[big..].fill(0);
+    cut_every_way(&path, &zeros, big, 10, "zeros from its head");
+    cleanup(dir, path);
+}
+
+/// A page of a 4 MiB record of vectors lost -- zeros, or another file's
+/// stale bytes -- where it was written after the last fsync, with whole
+/// records after it written since too: the record frames, fails its sum,
+/// and the walk goes on at its end, a head at a time, to the end of the
+/// file -- nothing there claims the file durable past it -- and the file is
+/// cut where it starts. Looked through a byte at a time, as the first
+/// version of this change did, a 1 MB one was refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_page_lost_inside_an_unsynced_vector_record_is_cut() {
+    let (dir, path) = tmp_path("vector-hole");
+    let (good, all) = vector_file(&path, &["10", "s", "16000", "1", "1"]);
+    let (big, end) = all[all.len() - 3];
+    assert!(end - big > 4 << 20, "{big} {end}");
+    let page = (big / 4096 + 300) * 4096;
+    for (what, fill) in [("zeros", 0u8), ("stale bytes", 0x5a)] {
+        let mut bad = good.clone();
+        bad[page..page + 4096].fill(fill);
+        cut_every_way(&path, &bad, big, 10, what);
+    }
+    cleanup(dir, path);
+}
+
+/// The same page lost from a 4 MiB record of vectors synced before the
+/// records after it: the first of those claims the file durable past where
+/// the record starts -- an fsync covered the page before that record was
+/// written -- so the page changed after it was durable, and the open is
+/// refused, the file left as it is. The record ends past the newest
+/// record's claim, which is rounded down a page from its own start, so the
+/// open checks it.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_page_lost_inside_a_synced_vector_record_refuses_the_open() {
+    let (dir, path) = tmp_path("vector-hole-synced");
+    let (good, all) = vector_file(&path, &["10", "s", "16000", "s", "1", "1"]);
+    let (big, end) = all[all.len() - 3];
+    assert!(end - big > 4 << 20, "{big} {end}");
+    let next = all[all.len() - 2].0;
+    let page = (big / 4096 + 300) * 4096;
+    let mut bad = good.clone();
+    bad[page..page + 4096].fill(0);
+    refused_every_way(
+        &path,
+        &bad,
+        &format!(
+            "the record at {big} fails its checksum, and the whole record at {next} says the \
+             file was durable past it"
+        ),
+    );
+    cleanup(dir, path);
+}
+
+/// A page lost from the head of a 4 MiB record of vectors on: no record
+/// reads from its head, and its vectors are looked through a byte at a time
+/// -- a twentieth of them read as heads -- for the next whole record. Synced
+/// before the record after it, which claims the file durable past the lost
+/// head: refused, naming both. Written since the last fsync, the record
+/// after it claiming no more than the fsync before: a torn tail, cut where
+/// the head was, which a version before checksums refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_head_lost_before_vectors_is_judged_by_the_records_after_them() {
+    let (dir, path) = tmp_path("vector-head");
+    let (good, all) = vector_file(&path, &["10", "s", "8000", "16000", "s", "1", "1"]);
+    let (big, end) = all[all.len() - 3];
+    assert!(end - big > 4 << 20, "{big} {end}");
+    let next = all[all.len() - 2].0;
+    let mut bad = good.clone();
+    bad[big..big + 4096].fill(0);
+    refused_every_way(
+        &path,
+        &bad,
+        &format!(
+            "no whole record starts at {big}, and the whole record at {next} says the file \
+             was durable past it"
+        ),
+    );
+    let (good, all) = vector_file(&path, &["10", "s", "8000", "16000", "1", "1"]);
+    let (big, _) = all[all.len() - 3];
+    let mut bad = good.clone();
+    bad[big..big + 4096].fill(0);
+    cut_every_way(&path, &bad, big, 8010, "the head lost, unsynced");
+    cleanup(dir, path);
+}
+
+/// Stale bytes past the durable point that read as a record of no checksum
+/// -- a newline is kind 10, a tab kind 9 -- or as the counter's head, which
+/// is at the front alone: judged as a head no record reads from, by the
+/// records after them. Nothing after them claiming the file durable past
+/// them, they are cut; read as a plain record after checked ones they were
+/// refused at once, and a stray 6 read as a counter moved the image's end.
+#[cfg(feature = "std-fs")]
+#[test]
+fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
+    let (dir, path) = tmp_path("stale-plain");
+    let good = {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "synced"}"#);
+        db.sync().expect("sync");
+        run(&mut db, r#"put t {a: "since"}"#);
+        let good = written(&mut db, &path);
+        drop(db);
+        good
+    };
+    let (last, _) = *heads(&good).last().unwrap();
+    let stale: [&[u8]; 3] = [b"\n\0\x05hello", b"\t\0\x03abc", &[6; 17]];
+    for bytes in stale {
+        let mut bad = good.clone();
+        bad.extend_from_slice(bytes);
+        for way in ["mapped", "in-memory"] {
+            std::fs::write(&path, &bad).unwrap();
+            let mut db = match way {
+                "mapped" => fennec_core::fs::open(&path),
+                _ => fennec_core::fs::open_in_memory(&path),
+            }
+            .unwrap_or_else(|e| panic!("{bytes:?}, {way}: {e}"));
+            assert_eq!(ids(&mut db, "t"), vec![1, 2], "{bytes:?}, {way}");
+            assert_eq!(db.cut_on_open().map(|c| c.at), Some(good.len() as u64));
+            drop(db);
+            assert_eq!(std::fs::read(&path).unwrap(), good, "{bytes:?}, {way}");
+        }
+        // A whole record after them claiming the file durable past them:
+        // they were durable once, and refused -- a plain record framed by
+        // its length is then below the point that record's claim makes,
+        // refused as a checked record whose high bit flipped is.
+        let mut bad = good.clone();
+        bad.extend_from_slice(bytes);
+        let mut p = last + 1;
+        let cid = varint(&good, &mut p) as u32;
+        let len = varint(&good, &mut p) as usize;
+        let body = &good[p..p + len - 1 - 4];
+        let at = bad.len();
+        let claiming = fennec_core::engine::record_claiming(3, cid, body, at as u64, at as u64);
+        bad.extend_from_slice(&claiming);
+        let x = good.len();
+        let says = match bytes[0] {
+            6 => format!(
+                "no whole record starts at {x}, and the whole record at {at} says the file \
+                 was durable past it"
+            ),
+            _ => format!("the record at {x} carries no checksum, after records that do"),
+        };
+        refused_every_way(&path, &bad, &says);
+    }
+    cleanup(dir, path);
+}
+
+/// A close's mark, appended with no fsync of its own, torn by a power cut
+/// after the close -- cut short, or its bytes zeros -- is cut and not said
+/// as a cut: it was no write, and everything before it was durable.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_torn_close_mark_is_cut_unsaid() {
+    let (dir, path) = tmp_path("torn-mark");
+    {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "one"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    let mark = good.len() - 8;
+    assert_eq!(good[mark], 0x80 | 14, "the close's mark");
+    let mut zeroed = good.clone();
+    zeroed[mark + 3..].fill(0);
+    for bad in [
+        good[..mark + 3].to_vec(),
+        zeroed,
+        good[..mark].iter().chain(&[0; 8]).copied().collect(),
+    ] {
+        std::fs::write(&path, &bad).unwrap();
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        assert_eq!(ids(&mut db, "t"), vec![1]);
+        assert!(db.cut_on_open().is_none(), "{:?}", db.cut_on_open());
+        drop(db);
+        // Cut, and no mark again: nothing was written since.
+        assert_eq!(std::fs::read(&path).unwrap(), good[..mark]);
+    }
+    cleanup(dir, path);
+}
+
 /// After a record carrying a checksum, every record does: one with none
 /// is a checked record's kind bit flipped -- read so, its claim and sum
 /// would be read as its body -- and refused.

@@ -133,8 +133,30 @@ const LANE_SHIFT: u32 = {
     p
 };
 
+/// The checksum of the last `back` bytes of a run, from the checksum of
+/// the whole run and of the bytes before them, `front`: `crc32c(0, a ++ b)`
+/// is `crc32c(0, a) · x^(8 |b|) ^ crc32c(0, b)` in the polynomial's field
+/// (zlib's `crc32_combine`), so `b`'s is found without reading `b` again.
+/// What a judgment of damage checks a long record it may have found by
+/// chance with (`engine::judge_after`): summed again, the vectors' bytes
+/// after a lost head -- a twentieth of which read as heads, some of
+/// megabytes -- were 133 MB summed for a look over 4 MiB.
+pub(crate) fn crc32c_after(whole: u32, front: u32, back: u64) -> u32 {
+    // x^(8 back): x^8 squared once a bit of `back`, and taken where the
+    // bit is set -- a table of the squares, made once, was 220 bytes more
+    // of the browser module for its lock.
+    let (mut shift, mut square, mut n) = (1u32 << 31, 1u32 << 23, back);
+    while n != 0 {
+        if n & 1 != 0 {
+            shift = mul(square, shift);
+        }
+        square = mul(square, square);
+        n >>= 1;
+    }
+    whole ^ mul(shift, front)
+}
+
 /// `a` times `b` modulo the polynomial, both reflected (zlib's `multmodp`).
-#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn mul(a: u32, mut b: u32) -> u32 {
     let mut m = 1u32 << 31;
     let mut p = 0;
@@ -289,6 +311,13 @@ mod tests {
                     crc32c(crc32c(0, &b[..cut]), &b[cut..]),
                     want,
                     "{len} at {cut}"
+                );
+                // And the bytes after the cut's, from the whole's and
+                // those before.
+                assert_eq!(
+                    crc32c_after(want, crc32c(0, &b[..cut]), (len - cut) as u64),
+                    crc32c(0, &b[cut..]),
+                    "{len} after {cut}"
                 );
             }
         }

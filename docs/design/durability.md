@@ -190,8 +190,10 @@ What an fsync covered is also what the next record claims
 ([storage.md](storage.md#file-format)): each of these -- `Disk::sync`, its
 sync log's durability, `sync_inherited`, `sync_existing`, a cut's, a
 rewrite's swap -- stores the file's length in `Disk::durable` once the call
-returned, never before, and an append reads it (`Sink::durable`) into the
-record's claim. So a claim never runs ahead of a completed fsync: a
+returned, never before, and an append reads it into the record's claim:
+the database holds the atomic itself, taken from the sink with it
+(`Sink::durable`, `Database::set_sink`), so a server's write reads it
+with no call through the sinks wrapped around the file's. So a claim never runs ahead of a completed fsync: a
 durability still at the disk claims nothing new, the records appended
 meanwhile claiming the point before it; a failed one stores nothing. No
 fsync is added for it, and a durability that covers nothing appended runs

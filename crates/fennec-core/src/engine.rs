@@ -429,34 +429,283 @@ pub fn checksum_holds(record: &[u8]) -> Option<bool> {
     r.checked().then(|| r.holds(record))
 }
 
-/// Where the first record from `from` on starts that is whole by its own
-/// sum -- found at any byte, not by walking from a head, since what stops
-/// a walk may have swallowed the heads after it -- and, `past` given,
-/// claims the file durable past that byte: what damage is judged by
-/// ([`judge`]; an archive's segment, whose records' claims are its
-/// primary's, by any). A head is summed only where its kind is one this
-/// version knows, checked, its collection id and length read and fit, and
-/// its claim passes `past`; and no more is summed than four times the bytes
-/// looked over and 64 MiB: past that, stale bytes making heads by chance,
-/// it answers `Err`, and its caller refuses rather than cut what it could
-/// not judge.
-#[allow(clippy::result_unit_err)]
-pub fn whole_after(
-    bytes: &[u8],
-    from: usize,
-    past: Option<usize>,
-) -> std::result::Result<Option<usize>, ()> {
-    let mut budget = bytes.len().saturating_sub(from).saturating_mul(4) + (64 << 20);
-    for at in from..bytes.len() {
-        let Some((holds, summed)) = whole_at(bytes, at, false, past) else {
-            continue;
-        };
-        if holds {
-            return Ok(Some(at));
-        }
-        budget = budget.checked_sub(summed).ok_or(())?;
+/// How the records damage is judged among are laid out ([`judge_after`]):
+/// a database file's, or an archive segment's.
+#[derive(Clone, Copy, Debug)]
+pub struct Laid {
+    /// The bytes before each record: an archive segment's time, 8; none in
+    /// a file.
+    pub prefix: usize,
+    /// For a file, the point it was durable to before the damage, the
+    /// survey's: a whole record after the damage refuses it where it claims
+    /// the file durable past it. `None` for an archive's segment, whose
+    /// records' claims are their primary's file's: any whole record after
+    /// the damage refuses it.
+    pub durable: Option<usize>,
+}
+
+/// What the bytes after damage say of it ([`judge_after`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum After {
+    /// Nothing whole after it says it was durable: a torn tail, cut where
+    /// it starts.
+    Torn,
+    /// The whole record starting at this byte says it was: refused.
+    Whole(usize),
+    /// What follows could not be judged in the work allowed: refused, as a
+    /// version before checksums refused all damage it could not frame past.
+    Unjudged,
+}
+
+/// How far below the durable point a judgment takes a record's claim to
+/// go and still be a record this version appended after it: a claim is
+/// rounded down to a page from its own record, and a process opened after
+/// a power cut claims from the point its open found, a page under the one
+/// before. A filter of what is summed, never a verdict.
+const CLAIM_SLACK: usize = 16 * CLAIM_UNIT as usize;
+
+/// Damage at `x` -- the head of a record that fails its sum, ending at
+/// `framed`, or, `None`, one no record reads from -- judged by what
+/// follows it, laid out as `laid` says: [`After::Whole`] where a record
+/// after it is whole by its sum and claims the file durable past it (any
+/// whole record, in an archive's segment), [`After::Torn`] where none is.
+///
+/// Framed first: a record whose head frames -- a kind this version knows,
+/// a length that fits -- holds the damage inside it, and the walk goes on
+/// at its end, a record at a time, as long as its end reads as one more
+/// (the bytes' end, zeros to it, or a head that frames or runs past it).
+/// A head whose length runs past the end of the bytes is a torn tail,
+/// whatever came before: nothing after it is looked at. Only a head that
+/// does not frame is looked past a byte at a time, for the next record
+/// whole by its sum: a head summed only where it frames, its claim is
+/// one this version could have written after the durable point, and its
+/// end reads as one more; from the first whole one found, the walk goes
+/// on by heads again. A long record found so is checked from the sums of
+/// the bytes up to each of its ends, kept as the look goes
+/// ([`crate::crc::crc32c_after`]), rather than summed again: over 4 MiB of
+/// vectors a twentieth of the bytes read as heads, some of megabytes. Every
+/// byte summed counts against sixteen times the bytes after the damage and
+/// 64 MiB: past that it answers [`After::Unjudged`], refused as a version
+/// before refused every head it could not frame. A tear at the end of the
+/// bytes is never looked past a byte at a time.
+pub fn judge_after(bytes: &[u8], x: usize, framed: Option<usize>, laid: Laid) -> After {
+    let n = bytes.len();
+    // Where the zeros the bytes end in start: a loop, where an iterator's
+    // `take_while` was 118 bytes of the browser module.
+    let mut zeros = n;
+    while zeros > 0 && bytes[zeros - 1] == 0 {
+        zeros -= 1;
     }
-    Ok(None)
+    let mut j = Judging {
+        bytes,
+        laid,
+        x,
+        floor: laid
+            .durable
+            .map_or(0, |d| d.min(x).saturating_sub(CLAIM_SLACK)),
+        zeros,
+        budget: (n.saturating_sub(x) as u64).saturating_mul(16) + (64 << 20),
+        base: usize::MAX,
+        prefix: vec![0],
+    };
+    let mut step = match framed {
+        Some(end) if j.ends_well(end) => Goes::Frame(end),
+        _ => Goes::Scan(x + 1),
+    };
+    loop {
+        step = match step {
+            Goes::Frame(e) => {
+                let r = e + laid.prefix;
+                if e >= j.zeros || r >= n {
+                    return After::Torn;
+                }
+                match head_at(bytes, r, false) {
+                    Head::Past => return After::Torn,
+                    Head::No => Goes::Scan(r + 1),
+                    Head::Fits { end, w } => match j.sum(r, end) {
+                        None => return After::Unjudged,
+                        Some(true) if j.says(r, end, w) => return After::Whole(r),
+                        Some(true) => Goes::Frame(end),
+                        // The damage goes on inside it, its length read as
+                        // it was written where its end reads as one more.
+                        Some(false) if j.ends_well(end) => Goes::Frame(end),
+                        Some(false) => Goes::Scan(r + 1),
+                    },
+                }
+            }
+            Goes::Scan(from) => {
+                j.base = j.base.min(from);
+                let mut found = None;
+                for r in from..j.zeros {
+                    if !may_head(bytes[r]) || !j.time_fits(r) {
+                        continue;
+                    }
+                    let Head::Fits { end, w } = head_at(bytes, r, false) else {
+                        continue;
+                    };
+                    if !j.claim_fits(r, end, w) || !j.ends_well(end) {
+                        continue;
+                    }
+                    match j.sum(r, end) {
+                        None => return After::Unjudged,
+                        Some(false) => {}
+                        Some(true) if j.says(r, end, w) => return After::Whole(r),
+                        Some(true) => {
+                            found = Some(end);
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(end) => Goes::Frame(end),
+                    None => return After::Torn,
+                }
+            }
+        }
+    }
+}
+
+/// Where a judgment goes on: a walk by heads from where an entry starts,
+/// or a look a byte at a time from a record's possible head.
+enum Goes {
+    Frame(usize),
+    Scan(usize),
+}
+
+/// A judgment of damage under way ([`judge_after`]).
+struct Judging<'a> {
+    bytes: &'a [u8],
+    laid: Laid,
+    /// Where the damage starts.
+    x: usize,
+    /// The least point a record this version appended after the durable
+    /// one claims ([`CLAIM_SLACK`]).
+    floor: usize,
+    /// Where the zeros the bytes end in start.
+    zeros: usize,
+    /// The bytes still to be summed.
+    budget: u64,
+    /// Where a look by bytes first began, and the sum of the bytes from
+    /// there to each [`STRIDE`] past it, made as far as a sum needed them.
+    base: usize,
+    prefix: Vec<u32>,
+}
+
+/// How far apart the sums a look by bytes keeps are: a long record found
+/// by chance is checked from the two around each of its ends and no more
+/// than this many bytes read at each ([`crate::crc::crc32c_after`]).
+const STRIDE: usize = 4096;
+
+impl Judging<'_> {
+    /// Whether the record from `r` to `end` is whole by its sum, `None`
+    /// once the work allowed is spent.
+    fn sum(&mut self, r: usize, end: usize) -> Option<bool> {
+        let s = end - SUM;
+        let want = u32::from_le_bytes(self.bytes[s..end].try_into().ok()?);
+        let got = match r >= self.base && s - r > 4 * STRIDE {
+            true => {
+                let (front, whole) = (self.sum_to(r)?, self.sum_to(s)?);
+                crate::crc::crc32c_after(whole, front, (s - r) as u64)
+            }
+            false => {
+                self.budget = self.budget.checked_sub((s - r) as u64)?;
+                crc32c(0, &self.bytes[r..s])
+            }
+        };
+        Some(got == want)
+    }
+
+    /// The sum of the bytes from [`Self::base`] to `i`, each counted once
+    /// against the work allowed, and those after the last stride before
+    /// `i` each time.
+    fn sum_to(&mut self, i: usize) -> Option<u32> {
+        let k = (i - self.base) / STRIDE;
+        while self.prefix.len() <= k {
+            let from = self.base + (self.prefix.len() - 1) * STRIDE;
+            self.budget = self.budget.checked_sub(STRIDE as u64)?;
+            let next = crc32c(
+                self.prefix[self.prefix.len() - 1],
+                &self.bytes[from..from + STRIDE],
+            );
+            self.prefix.push(next);
+        }
+        let from = self.base + k * STRIDE;
+        self.budget = self.budget.checked_sub((i - from) as u64)?;
+        Some(crc32c(self.prefix[k], &self.bytes[from..i]))
+    }
+
+    /// The point the checked record from `r` to `end`, its claim `w` bytes
+    /// wide, claims: `Some(0)` for none, `None` for one more than a page
+    /// before the bytes' start, which no record this version wrote makes.
+    fn claim(&self, r: usize, end: usize, w: usize) -> Option<usize> {
+        let c = self.bytes[end - SUM - w..end - SUM]
+            .iter()
+            .rev()
+            .fold(0u64, |c, &b| c << 8 | u64::from(b));
+        match c {
+            0 => Some(0),
+            // Rounded down a page from its own record, a claim may point
+            // up to a page before the bytes' start: none, then.
+            c => {
+                let back = (c - 1) * CLAIM_UNIT;
+                (back <= r as u64 + CLAIM_UNIT).then(|| r.saturating_sub(back as usize))
+            }
+        }
+    }
+
+    /// Whether the whole record from `r` says the damage was durable.
+    fn says(&self, r: usize, end: usize, w: usize) -> bool {
+        match self.laid.durable {
+            None => true,
+            Some(_) => self.claim(r, end, w).is_some_and(|p| p > self.x),
+        }
+    }
+
+    /// Whether the record's claim is one this version could have written
+    /// after the durable point: none, or at least [`Self::floor`].
+    fn claim_fits(&self, r: usize, end: usize, w: usize) -> bool {
+        match self.laid.durable {
+            None => true,
+            Some(_) => self
+                .claim(r, end, w)
+                .is_some_and(|p| p == 0 || p >= self.floor),
+        }
+    }
+
+    /// Whether the bytes before a record at `r` read as an archive
+    /// entry's time, a number of milliseconds under 2^48 (the year 10889):
+    /// stale bytes or a vector's rarely do.
+    fn time_fits(&self, r: usize) -> bool {
+        // The browser reads no archive.
+        if cfg!(target_arch = "wasm32") {
+            return true;
+        }
+        let p = self.laid.prefix;
+        p == 0
+            || r.checked_sub(p)
+                .and_then(|e| self.bytes.get(e..r))
+                .and_then(|t| t.try_into().ok())
+                .is_some_and(|t: [u8; 8]| u64::from_le_bytes(t) >> 48 == 0)
+    }
+
+    /// Whether an entry starting at `e` reads as one more after a record
+    /// ending there: the bytes end, or zeros run to their end, or a head
+    /// frames there -- its claim one this version could have written --
+    /// or runs past their end.
+    fn ends_well(&self, e: usize) -> bool {
+        let r = e + self.laid.prefix;
+        if e >= self.zeros || r >= self.bytes.len() {
+            return true;
+        }
+        if !self.time_fits(r) {
+            return false;
+        }
+        match head_at(self.bytes, r, false) {
+            Head::Past => true,
+            Head::Fits { end, w } => self.claim_fits(r, end, w),
+            Head::No => false,
+        }
+    }
 }
 
 /// Sums again the record of `file` that holds byte `at`: what a test that
@@ -560,7 +809,8 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
             return Ok(n);
         }
         let byte = kind[0];
-        if byte == REC_SEQ {
+        // The counter's head is at the front alone ([`whole_record`]).
+        if byte == REC_SEQ && at == MAGIC.len() as u64 {
             let mut h = [0u8; REC_SEQ_LEN - 1];
             r.read_exact(&mut h).map_err(|_| short(at))?;
             at += REC_SEQ_LEN as u64;
@@ -1518,8 +1768,9 @@ impl Block {
 /// Whether the record at `at` is all there, rather than cut short where the
 /// bytes end -- in its header or its body -- as a crash in the middle of an
 /// append leaves the last one. The counter header is only ever written by
-/// a rewrite, whole or not at all; a kind this version does not know is
-/// refused here, by where it is.
+/// a rewrite, whole or not at all, at the file's front: a 6 anywhere else
+/// is stale bytes, which read as a counter moved the image's end. A kind
+/// this version does not know is refused here, by where it is.
 ///
 /// Zeros from a head to the end are a torn tail too, when [`zero_tail`]
 /// says they start there; any other zero head is refused. Judged only once
@@ -1528,7 +1779,7 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !known(kind) {
         return match kind {
-            REC_SEQ => Ok(true),
+            REC_SEQ if at == MAGIC.len() => Ok(true),
             0 if zero_tail(bytes, at, edge) => Ok(false),
             _ => Err(unknown_kind(kind, at)),
         };
@@ -1572,53 +1823,155 @@ fn known(byte: u8) -> bool {
     ) || (kind == REC_SYNCED && byte & CHECKED != 0)
 }
 
-/// Whether a checked record starts at `at` -- of a kind this version knows,
-/// or any, `any` said -- whole by its own sum, and, `past` given, claiming
-/// the file durable past that byte; `Some` then, with how many bytes its
-/// sum took, and `None` without summing where its head does not read, does
-/// not fit or its claim does not pass.
-fn whole_at(bytes: &[u8], at: usize, any: bool, past: Option<usize>) -> Option<(bool, usize)> {
-    let byte = *bytes.get(at)?;
-    if byte & CHECKED == 0 || byte & KIND == 0 || !(any || known(byte)) {
-        return None;
-    }
-    let mut q = at + 1;
-    let cid = get_uvarint(bytes, &mut q).ok()?;
-    let len = get_uvarint(bytes, &mut q).ok()?;
-    let w = (((byte & WIDTH) >> 5) + 1) as usize;
-    let end = (q as u64)
-        .checked_add(len)
-        .filter(|&e| e <= bytes.len() as u64)? as usize;
-    if cid > u32::MAX as u64 || (len as usize) < w + SUM {
-        return None;
-    }
-    let (claim_at, sum_at) = (end - SUM - w, end - SUM);
-    if let Some(past) = past {
-        let mut c = [0u8; 4];
-        c[..w].copy_from_slice(&bytes[claim_at..sum_at]);
-        let back = (u32::from_le_bytes(c) as u64).checked_sub(1)? * CLAIM_UNIT;
-        if at.checked_sub(back as usize)? <= past {
-            return None;
-        }
-    }
-    let sum = u32::from_le_bytes(bytes[sum_at..end].try_into().ok()?);
-    Some((crc32c(0, &bytes[at..sum_at]) == sum, sum_at - at))
+/// What a head reads as to a judgment of damage ([`head_at`]).
+enum Head {
+    /// A checked record of a kind this version knows, whole within the
+    /// bytes by its length, ending at `end`; its claim `w` bytes wide.
+    Fits { end: usize, w: usize },
+    /// One whose head or length runs past the end of the bytes: a record
+    /// cut short there.
+    Past,
+    /// No such record's head.
+    No,
 }
 
-/// Damage at `x`, at or past the point the file was durable to -- a record
-/// failing its sum, a head no record reads from -- in a file this version
-/// wrote to: refused where a whole record after it claims the file durable
-/// past it, the damage then in bytes an fsync covered, and otherwise a torn
-/// tail, which its caller cuts: nothing after it was covered by an fsync
-/// that completed, so no write there was answered as durable. Refused too
-/// where what follows could not be judged ([`whole_after`]).
-fn judge(bytes: &[u8], x: usize, what: std::fmt::Arguments<'_>) -> Result<()> {
-    match whole_after(bytes, x + 1, Some(x)) {
-        Ok(None) => Ok(()),
-        Ok(Some(at)) => Err(Error::Corrupt(format!(
+/// The record a head at `at` frames as [`judge_after`] reads one: checked,
+/// of a kind this version knows (any, `any` said), its collection id 0
+/// where its kind has none, and its length holding its claim and sum --
+/// and for the close's mark nothing more. Cheap to ask at every byte: no
+/// more than the head is read.
+fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
+    let Some(&byte) = bytes.get(at) else {
+        return Head::Past;
+    };
+    let kind = byte & KIND;
+    let kinds = if any { !1 } else { CHECKED_KINDS };
+    if byte & CHECKED == 0 || kinds >> kind & 1 == 0 {
+        return Head::No;
+    }
+    let mut q = at + 1;
+    let mut v = [0u64; 2];
+    for x in &mut v {
+        // A varint read in place, a byte at a time: [`get_uvarint`]'s
+        // error, made at every byte a look passes, was most of its time.
+        let (mut n, mut shift) = (0u64, 0);
+        loop {
+            let Some(&b) = bytes.get(q) else {
+                return Head::Past;
+            };
+            q += 1;
+            n |= u64::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 63 {
+                return Head::No;
+            }
+        }
+        *x = n;
+    }
+    let [cid, len] = v;
+    let w = (((byte & WIDTH) >> 5) + 1) as usize;
+    let trailer = (w + SUM) as u64;
+    let none = matches!(
+        kind,
+        REC_BLOCK | REC_SPILL | REC_LAND | REC_HISTORY | REC_STATEMENT | REC_SYNCED
+    );
+    if cid > u32::MAX as u64
+        || (none && cid != 0)
+        || len < trailer
+        || (kind == REC_SYNCED && len != trailer)
+    {
+        return Head::No;
+    }
+    match len.checked_add(q as u64) {
+        Some(end) if end <= bytes.len() as u64 => Head::Fits {
+            end: end as usize,
+            w,
+        },
+        _ => Head::Past,
+    }
+}
+
+/// The kinds a checked record of this version is, a bit each: [`known`]'s
+/// for a byte whose [`CHECKED`] bit is set, asked at every byte a look
+/// for a whole record passes.
+const CHECKED_KINDS: u32 = 1 << REC_CREATE
+    | 1 << REC_DROP
+    | 1 << REC_DATA
+    | 1 << REC_GRAPH
+    | 1 << REC_ALTER
+    | 1 << REC_FIELDS
+    | 1 << REC_STATEMENT
+    | 1 << REC_NEXTID
+    | 1 << REC_HISTORY
+    | 1 << REC_BLOCK
+    | 1 << REC_SPILL
+    | 1 << REC_LAND
+    | 1 << REC_SYNCED;
+
+/// Whether a byte is the kind of a checked record of this version, a bit
+/// a byte ([`CHECKED_KINDS`]): [`may_head`] reads it.
+const HEADS: [u64; 4] = {
+    let mut t = [0u64; 4];
+    let mut b = CHECKED as usize;
+    while b < 256 {
+        if CHECKED_KINDS >> (b as u8 & KIND) & 1 != 0 {
+            t[b >> 6] |= 1 << (b & 63);
+        }
+        b += 1;
+    }
+    t
+};
+
+/// Whether `b` may start a checked record of this version: what a look by
+/// bytes asks of each before reading a head. One branch, rarely taken,
+/// where the kind's two tests were a coin each over a vector's bytes:
+/// 24 ms for 4 MiB of them, 17 so.
+#[inline(always)]
+fn may_head(b: u8) -> bool {
+    HEADS[(b >> 6) as usize] >> (b & 63) & 1 != 0
+}
+
+/// Whether a checked record of any kind starts at `at`, whole by its sum:
+/// one of a kind this version does not know is a later version's, refused
+/// for its kind rather than judged as damage.
+fn whole_unknown(bytes: &[u8], at: usize) -> bool {
+    match head_at(bytes, at, true) {
+        Head::Fits { end, .. } => {
+            let sum = u32::from_le_bytes(bytes[end - SUM..end].try_into().unwrap());
+            crc32c(0, &bytes[at..end - SUM]) == sum
+        }
+        _ => false,
+    }
+}
+
+/// Damage at `x` -- a record failing its sum that ends at `framed`, or a
+/// head no record reads from -- in a file this version wrote to, past the
+/// point `durable` it was durable to: refused where a whole record after it
+/// claims the file durable past it, the damage then in bytes an fsync
+/// covered, and otherwise a torn tail, which its caller cuts: nothing after
+/// it was covered by an fsync that completed, so no write there was
+/// answered as durable. Refused too where what follows could not be judged
+/// ([`judge_after`]).
+fn judge(
+    bytes: &[u8],
+    x: usize,
+    framed: Option<usize>,
+    durable: usize,
+    what: std::fmt::Arguments<'_>,
+) -> Result<()> {
+    let laid = Laid {
+        prefix: 0,
+        durable: Some(durable),
+    };
+    match judge_after(bytes, x, framed, laid) {
+        After::Torn => Ok(()),
+        After::Whole(at) => Err(Error::Corrupt(format!(
             "{what}, and the whole record at {at} says the file was durable past it"
         ))),
-        Err(()) => Err(Error::Corrupt(format!(
+        After::Unjudged => Err(Error::Corrupt(format!(
             "{what}, and what follows it could not be judged"
         ))),
     }
@@ -1666,6 +2019,14 @@ pub struct Cut {
     pub bytes: u64,
     /// How many records a walk framed among them, the torn one first.
     pub records: u64,
+}
+
+/// Whether `cut`, what an open cuts off a file's end, is no more than a
+/// close's mark ([`REC_SYNCED`]) torn: its bytes or zeros in their place.
+fn torn_mark(cut: &[u8]) -> bool {
+    // Its head and claim: `[kind | CHECKED][0][5][1]`, then its sum.
+    let head = [CHECKED | REC_SYNCED, 0, (1 + SUM) as u8, 1];
+    cut.len() <= head.len() + SUM && cut.iter().zip(&head).all(|(&b, &m)| b == m || b == 0)
 }
 
 /// How many records a walk frames from `at` on: what a cut there takes.
@@ -1872,13 +2233,18 @@ pub trait Sink: Send {
         let _ = original;
         self.record(seq, &parts.concat())
     }
-    /// How far the file is durable: every byte before this point was
-    /// covered by a completed fsync, or the sync log's, or by a claim the
-    /// open found ([`Self::set_durable`]) -- what each record appended
-    /// claims ([`claim_of`]), and an open checks the records from. 0, no
-    /// claim, for every sink but a file's.
-    fn durable(&self) -> u64 {
-        0
+    /// How far the file is durable -- every byte before this point covered
+    /// by a completed fsync, or the sync log's, or by a claim the open
+    /// found ([`Self::set_durable`]) -- as the sink keeps it, stored as
+    /// each fsync completes: what each record appended claims
+    /// ([`claim_of`]), and an open checks the records from. The database
+    /// takes it with the sink and reads it at each append itself: asked of
+    /// the sink, a server's write called through each sink around the
+    /// file's, three calls of the 155 instructions a claim cost a lone
+    /// `put`. `None`, no claim, for every sink but a file's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn durable(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
+        None
     }
     /// The point the load found the file durable to, handed over as the
     /// database takes the sink: the appends claim it until an fsync covers
@@ -5152,6 +5518,10 @@ pub struct Database {
     /// sink it is given ([`Self::set_sink`]), which each append's claim is
     /// made from until an fsync of its own covers more.
     loaded_durable: u64,
+    /// How far the file is durable, as its sink keeps it ([`Sink::durable`]):
+    /// what each append claims.
+    #[cfg(not(target_arch = "wasm32"))]
+    durable: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// What the load cut off a torn tail, for whoever opened the file to
     /// say ([`Self::cut_on_open`]).
     cut: Option<Cut>,
@@ -5393,6 +5763,8 @@ impl Database {
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
             loaded_durable: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            durable: None,
             cut: None,
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
@@ -5476,6 +5848,10 @@ impl Database {
 
     pub fn with_sink(sink: Box<dyn Sink>) -> Database {
         let mut db = Database::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            db.durable = sink.durable();
+        }
         db.sink = Mutex::new(sink);
         db
     }
@@ -5484,6 +5860,10 @@ impl Database {
     /// in it: the caller starts it from a [`Self::snapshot`].
     pub fn set_sink(&mut self, mut sink: Box<dyn Sink>) {
         sink.set_durable(self.loaded_durable);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.durable = sink.durable();
+        }
         *self.sink_mut() = sink;
     }
 
@@ -5495,17 +5875,28 @@ impl Database {
         self.cut.as_ref()
     }
 
+    /// The cut an open made before it opened the file again, cut
+    /// (`fs::windows::cut_and_open`): what [`Self::cut_on_open`] says.
+    #[cfg(windows)]
+    pub(crate) fn said_cut(&mut self, cut: Option<Cut>) {
+        self.cut = cut;
+    }
+
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
     fn sink_mut(&mut self) -> &mut Box<dyn Sink> {
         self.sink.get_mut().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The claim of a record appended at `at` ([`claim_of`]), by how far the
-    /// sink says the file is durable. Native only: a page's sink knows of
+    /// The claim of a record appended at `at` ([`claim_of`]), by how far
+    /// the sink keeps the file durable. Native only: a page's sink knows of
     /// no fsync, and its records claim nothing.
     #[cfg(not(target_arch = "wasm32"))]
-    fn claim(&mut self, at: u64) -> u32 {
-        claim_of(at, self.sink_mut().durable())
+    fn claim(&self, at: u64) -> u32 {
+        let durable = self
+            .durable
+            .as_ref()
+            .map_or(0, |d| d.load(std::sync::atomic::Ordering::Acquire));
+        claim_of(at, durable)
     }
 
     // -------------------------------------------------------------- changes
@@ -6398,13 +6789,30 @@ impl Database {
         // Whether a record carrying a sum came yet: from then on every one
         // does, this version writing nothing else into a file -- a replica
         // frames anew what an older primary sends -- so one with none is a
-        // checked record's kind bit flipped, read past its sum otherwise.
+        // checked record's kind bit flipped, read past its sum otherwise:
+        // refused. Past the durable point it is as likely stale bytes that
+        // read as a plain record -- a newline is kind 10, a tab 9 -- and is
+        // judged as a head no record reads from is.
         let mut checked = false;
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
             if r.kind != REC_SEQ {
                 match r.checked() {
                     true => checked = true,
+                    false if checked && tail && r.at >= durable => {
+                        judge(
+                            bytes,
+                            r.at,
+                            None,
+                            durable,
+                            format_args!(
+                                "the record at {} carries no checksum, after records that do",
+                                r.at
+                            ),
+                        )?;
+                        torn_at = Some(r.at);
+                        break;
+                    }
                     false if checked => {
                         return Err(Error::Corrupt(format!(
                             "the record at {} carries no checksum, after records that do",
@@ -6431,6 +6839,8 @@ impl Database {
                 judge(
                     bytes,
                     r.at,
+                    Some(walk.pos),
+                    durable,
                     format_args!("the record at {} fails its checksum", r.at),
                 )?;
                 torn_at = Some(r.at);
@@ -6616,17 +7026,30 @@ impl Database {
                     "a record of the checkpoint image at {at} runs past the end of the file"
                 )));
             }
-            if checked {
+            if walk.torn {
+                // A record whose head or length runs past the end, or zeros
+                // to it from a head (`zero_tail`): a torn tail whatever came
+                // before it, cut as a version before cut it. Nothing after
+                // it is looked at: a big record's bytes, vectors' above all,
+                // read as heads by chance, and looking past one for a whole
+                // record refused a tear 1.2 MB into 2 MB of `vector<64>`.
+            } else if checked {
                 // In a file this version wrote to, a head no record reads
-                // from is judged as a record failing its sum is: a power
-                // cut's lost bytes -- zeros, stale bytes, a record cut short
-                // -- with nothing after them claiming the file durable past
-                // them. A whole record of a kind this version does not know
-                // is a later version's, refused as before.
-                if whole_at(bytes, at, true, None).is_some_and(|(holds, _)| holds) {
+                // from -- zeros with a byte after them, stale bytes -- is
+                // judged as a record failing its sum is, by whether a whole
+                // record after it claims the file durable past it. A whole
+                // record of a kind this version does not know is a later
+                // version's, refused as before.
+                if whole_unknown(bytes, at) {
                     return Err(unknown_kind(bytes[at], at));
                 }
-                judge(bytes, at, format_args!("no whole record starts at {at}"))?;
+                judge(
+                    bytes,
+                    at,
+                    None,
+                    durable,
+                    format_args!("no whole record starts at {at}"),
+                )?;
             } else if let Some(e) = walk.refused {
                 // One a version before wrote: zeros only where they run to the
                 // end from a head (`zero_tail`), any other byte refused.
@@ -6641,8 +7064,10 @@ impl Database {
             whole = whole.min(at);
         }
         // What a cut takes, said by whoever opened the file: past the point
-        // the file was durable to, so never a write answered as durable.
-        self.cut = (whole < bytes.len()).then(|| Cut {
+        // the file was durable to, so never a write answered as durable. A
+        // close's mark torn by a power cut after the close is cut and not
+        // said: it was no write, and every byte before it was durable.
+        self.cut = (whole < bytes.len() && !torn_mark(&bytes[whole..])).then(|| Cut {
             at: whole as u64,
             bytes: (bytes.len() - whole) as u64,
             records: records_from(bytes, whole),

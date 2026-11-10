@@ -121,6 +121,16 @@ written since the last sync, which a power cut may lose in any order: the
 file is cut there, and the server logs how many bytes and records went.
 None of them was a write answered as durable.</p>
 
+<p>What follows is read record by record where it can be: after a record
+that fails its checksum, from that record's end. A record whose length
+runs past the end of the file is a crash's torn tail however much of it
+came, cut without a look further. Only past a head that does not read is
+the file looked through byte by byte for the next whole record, a long one
+checked without reading its bytes twice; where that look would take more
+than sixteen times the bytes after the damage, the open is refused
+(<code>what follows it could not be judged</code>), as every such head was
+refused before checksums.</p>
+
 <p>On Linux a sync goes to <code>&lt;file&gt;.sync</code> beside the
 file: a log of fixed size holding what the file took since its last own
 fsync. An fsync of a file that grew commits ext4's journal as well, 356 us
@@ -132,8 +142,10 @@ names the file it was written for (its inode, and a hash of the bytes
 before the log's start), so an entry cut short ends it and a log beside
 another file -- one a restore or an import renamed into the place -- is
 ignored. A clean close syncs the file and removes the log. A tool that only
-reads the file (<code>fennec types</code>) applies none: after a power loss,
-open the database before you copy or inspect it. The file's format is the
+reads the file (<code>fennec types</code>, <code>fennec verify
+data.fennec</code>) reads it with what the log holds put back and writes
+neither; a raw copy of the file taken after a power loss lacks those writes
+until the database is opened, so open it before you copy it. The file's format is the
 same with it or without.</p>
 </details>
 

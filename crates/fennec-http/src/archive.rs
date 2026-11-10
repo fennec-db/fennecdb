@@ -185,10 +185,39 @@ fn mixed(path: &Path, sealed: bool) -> io::Error {
 /// A write's record, whole, from the front of `bytes`: its length, or
 /// `None` when it is cut short.
 fn record_len(bytes: &[u8]) -> Option<usize> {
+    match framed(bytes) {
+        Framed::Whole(len) => Some(len),
+        _ => None,
+    }
+}
+
+/// How the record at the front of a segment's bytes frames.
+enum Framed {
+    /// Whole by its length, this many bytes.
+    Whole(usize),
+    /// Its head or its length runs past the end of the bytes: cut short.
+    Short,
+    /// Its head does not read.
+    Bad,
+}
+
+fn framed(bytes: &[u8]) -> Framed {
+    if bytes.is_empty() {
+        return Framed::Short;
+    }
     let mut pos = 1;
-    get_uvarint(bytes, &mut pos).ok()?;
-    let len = get_uvarint(bytes, &mut pos).ok()? as usize;
-    (bytes.len() >= pos + len && !bytes.is_empty()).then_some(pos + len)
+    let mut len = 0;
+    for _ in 0..2 {
+        len = match get_uvarint(bytes, &mut pos) {
+            Ok(v) => v,
+            Err(_) if pos >= bytes.len() => return Framed::Short,
+            Err(_) => return Framed::Bad,
+        };
+    }
+    match (pos as u64).checked_add(len) {
+        Some(end) if end <= bytes.len() as u64 => Framed::Whole(end as usize),
+        _ => Framed::Short,
+    }
 }
 
 /// `(time, start, end, writes)` of each record in a segment's bytes: a
@@ -204,13 +233,16 @@ fn writes(record: &[u8]) -> u64 {
 /// How [`entries`] takes damage in a segment's records -- a record failing
 /// its checksum, a head no record reads from -- past a record that carries
 /// one: what a reader does (`verify`, a restore, an image's assembly),
-/// refusing damage with a whole record after it, found at any byte past it
-/// (`fennec_core::engine::whole_after`), and cutting it otherwise; or what
-/// the archiver going on does ([`Archive::position`]), cutting it whatever
-/// follows and taking the writes after it again from its primary. A
-/// segment's records claim nothing of its own syncs -- their claims are
-/// their primary's file's -- so a reader cannot tell a power cut's hole in
-/// the writes the archiver had not yet synced from damage in those it had.
+/// refusing damage with a whole record after it, found as a database's open
+/// finds one (`fennec_core::engine::judge_after`: by heads past a record
+/// that frames, a byte at a time past one that does not), and cutting it
+/// otherwise; or what the archiver going on does ([`Archive::position`]),
+/// cutting it whatever follows and taking the writes after it again from
+/// its primary. A record whose head or length runs past the segment's end
+/// is its end, either way, nothing after it looked at. A segment's records
+/// claim nothing of its own syncs -- their claims are their primary's
+/// file's -- so a reader cannot tell a power cut's hole in the writes the
+/// archiver had not yet synced from damage in those it had.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Damage {
     Refuse,
@@ -240,9 +272,9 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
     // is judged as `damage` says, and before it as a segment from before
     // checksums always was.
     let mut checked = false;
-    // A torn tail or damage, where it starts: the entry's time, and its
-    // record's head, which a refusal names.
-    let mut stopped: Option<(usize, usize)> = None;
+    // Damage, where it starts: the entry's time, its record's head, which
+    // a refusal names, and where the record ends if its head frames.
+    let mut stopped: Option<(usize, usize, Option<usize>)> = None;
     while pos + 8 < data.len() {
         // No kind is 0. Zeros from a record's head -- its time -- to the
         // end, after a byte that is not zero, are a torn tail, as a
@@ -258,20 +290,26 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
             if !checked {
                 return Err(corrupt(format!("unknown record kind 0 at {}", pos + 8)));
             }
-            stopped = Some((pos, pos + 8));
+            stopped = Some((pos, pos + 8, None));
             break;
         }
         let time = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        let Some(len) = record_len(&data[pos + 8..]) else {
-            stopped = checked.then_some((pos, pos + 8));
-            break;
+        let len = match framed(&data[pos + 8..]) {
+            Framed::Whole(len) => len,
+            // Cut short at the end: the segment's torn tail, as before
+            // checksums, however much of a large record came before it.
+            Framed::Short => break,
+            Framed::Bad => {
+                stopped = checked.then_some((pos, pos + 8, None));
+                break;
+            }
         };
         let record = &data[pos + 8..pos + 8 + len];
         // A record whose checksum fails -- its length on the disk, part of
         // its bytes not -- is damage, judged as `damage` says.
         match fennec_core::engine::checksum_holds(record) {
             Some(false) => {
-                stopped = Some((pos, pos + 8));
+                stopped = Some((pos, pos + 8, Some(pos + 8 + len)));
                 break;
             }
             Some(true) => checked = true,
@@ -280,15 +318,20 @@ fn entries(data: &[u8], damage: Damage) -> io::Result<(Entries, usize)> {
         out.push((time, pos + 8, pos + 8 + len, writes(record)));
         pos += 8 + len;
     }
-    if let Some((entry, at)) = stopped.filter(|_| damage == Damage::Refuse) {
-        match fennec_core::engine::whole_after(data, at + 1, None) {
-            Ok(None) => {}
-            Ok(Some(whole)) => {
+    if let Some((entry, at, ends)) = stopped.filter(|_| damage == Damage::Refuse) {
+        use fennec_core::engine::{judge_after, After, Laid};
+        let laid = Laid {
+            prefix: 8,
+            durable: None,
+        };
+        match judge_after(data, at, ends, laid) {
+            After::Torn => {}
+            After::Whole(whole) => {
                 return Err(corrupt(format!(
                     "the record at {at} is damaged, with the whole record at {whole} after it"
                 )))
             }
-            Err(()) => {
+            After::Unjudged => {
                 return Err(corrupt(format!(
                     "the record at {at} is damaged, and what follows it could not be judged"
                 )))
@@ -1864,5 +1907,59 @@ mod tests {
         assert_eq!(archive.images().unwrap().len(), 1);
         assert_eq!(listed().len(), 1, "the image alone: {:?}", listed());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A segment whose last record -- 4 MiB of vectors' `f32`s -- a crash
+    /// cut short ends there: a torn tail, nothing of it looked at, where a
+    /// look for a whole record after it, a byte at a time, refused a
+    /// segment ending in 256 KiB of them. Damage before a whole record is
+    /// refused, a lost page inside the vectors and a lost head before them
+    /// alike; the same page in the last record, nothing after it, is the
+    /// segment's end.
+    #[test]
+    fn a_large_record_cut_short_ends_a_segment() {
+        let mut seed = 7u64;
+        let vectors: Vec<u8> = (0..1 << 20)
+            .flat_map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let x = ((seed >> 33) as f64 / (1u64 << 31) as f64) as f32 * 2.0 - 1.0;
+                x.to_le_bytes()
+            })
+            .collect();
+        let time = 1_762_000_000_000u64.to_le_bytes();
+        let small = fennec_core::engine::record(3, 1, b"a write");
+        let mut seg = LOG_MAGIC.to_vec();
+        seg.extend_from_slice(&time);
+        seg.extend_from_slice(&small);
+        let big = seg.len() + 8;
+        seg.extend_from_slice(&time);
+        seg.extend_from_slice(&fennec_core::engine::record(3, 1, &vectors));
+        let whole = seg.len();
+        for damage in [Damage::Refuse, Damage::Cut] {
+            for cut in [big + 2, big + (1 << 20), big + (3 << 20), whole - 1] {
+                let (list, end) = entries(&seg[..cut], damage).unwrap();
+                assert_eq!((list.len(), end), (1, big - 8), "cut at {cut}");
+            }
+        }
+        let mut lost = seg.clone();
+        lost[big + (1 << 20)..big + (1 << 20) + 4096].fill(0);
+        let (list, end) = entries(&lost, Damage::Refuse).unwrap();
+        assert_eq!((list.len(), end), (1, big - 8));
+        // A whole record after them.
+        let after = seg.len() + 8;
+        seg.extend_from_slice(&time);
+        seg.extend_from_slice(&small);
+        let says =
+            format!("the record at {big} is damaged, with the whole record at {after} after it");
+        for (what, at) in [("a page inside", big + (1 << 20)), ("its head", big)] {
+            let mut bad = seg.clone();
+            bad[at..at + 4096].fill(0);
+            let e = entries(&bad, Damage::Refuse).unwrap_err();
+            assert!(e.to_string().contains(&says), "{what}: {e}");
+            let (list, end) = entries(&bad, Damage::Cut).unwrap();
+            assert_eq!((list.len(), end), (1, big - 8), "{what}");
+        }
     }
 }
