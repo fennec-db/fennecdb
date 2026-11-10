@@ -789,7 +789,17 @@ a store for the `memcpy` -3), -41 by the plain counts (inside two standard error
 and the trace counts fennecdb's own code at +118 against main's (`commit`
 +101, `record_at` +13, `note_record` +3; the allocator's draw -254 there). A keyed `put` +337 (+0.40%, SE 82), its own code +171:
 the block's record framed around its claim and summed (`framed_claiming`
-+150, `frame_into` -57). The claim is
++150, `frame_into` -57). The fourth review's round frames a block record
+in place: its length counted from its heads first, the frames copied once
+after its head, where main and the rounds before copied them into a body
+and the body into the record, one allocation more. A keyed `put` then
+measured -292 against main (83 568 against 83 860, -0.35%, SE 77) and a
+lone `put`, whose path it leaves as it was, +196 (21 365 against 21 169,
++0.93%, SE 40); the trace counts the keyed `put`'s own code at +170
+(`commit` +107 with the length counted, the claim and sum's `closed` +74,
+`frame_into` -57) and a call each of `malloc`, `free` and `memcpy` fewer,
+the allocator's paths for that allocation and the body's copy gone. The
+claim is
 what bounds the open: without it the 64 KB file read from the disk took
 3.8 s against 1.5. In the browser module, in
 Node (medians of 15 interleaved rounds), a lone `put` took 3.84 us against
@@ -813,7 +823,11 @@ they are now made as each length needs them, was 220 bytes more for its
 lock, a 256-byte table of the kind bytes 224 more than its 32 bytes of
 bits, and a `take_while` over the trailing zeros 118 more than a loop.
 The third review's round added 36 (852 761), `crc32c` inlined where it is
-called; what it added for the archive and the survey is native alone. The browser opens files a server wrote (`openFile`), so it
+called; what it added for the archive and the survey is native alone. The
+fourth's added 63 (852 824; 344.6 KB gzip, 285.1 brotli): the block
+record's length counted from its heads, less `Laid`'s `None` branches; the
+claim and sum's writer (`closed`) is left to the compiler, which, told to
+inline it into both callers, made the module 51 bytes larger still. The browser opens files a server wrote (`openFile`), so it
 judges damage as a server does; the survey, the downgrade to a follower and
 `fennec verify`'s stream are native alone. A compact of that 1 GB file to
 0.9 GB, its image summed in three lanes as it is written, took 561 to 944 ms
