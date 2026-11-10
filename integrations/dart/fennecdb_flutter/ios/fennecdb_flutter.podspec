@@ -8,7 +8,7 @@
 # at "Build input file cannot be found".
 Pod::Spec.new do |s|
   s.name             = 'fennecdb_flutter'
-  s.version          = '0.1.12'
+  s.version          = '0.2.0'
   s.summary          = 'fennecdb in a Flutter app: the native library for iOS.'
   s.homepage         = 'https://github.com/fennec-db/fennecdb'
   s.license          = { :type => 'Apache-2.0' }

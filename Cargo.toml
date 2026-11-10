@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.12"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/fennec-db/fennecdb"
@@ -32,22 +32,22 @@ categories = ["database", "database-implementations", "wasm"]
 # Without its files: fennec-ql and fennec-wasm take the core as it is, and a
 # crate that opens files names `std-fs`. Left on here, the `default-features =
 # false` those two write was ignored and the browser build had them too.
-fennec-core = { version = "0.1.3", path = "crates/fennec-core", default-features = false }
+fennec-core = { version = "0.2.0", path = "crates/fennec-core", default-features = false }
 # Without named statements' definitions and calls (`statements`): the browser
 # module takes the parser as it is, and the server, the shell and the native
 # library name them.
-fennec-ql = { version = "0.1.3", path = "crates/fennec-ql", default-features = false }
-fennec-abi = { version = "0.1.7", path = "crates/fennec-abi", default-features = false }
-fennec-http = { version = "0.1.3", path = "crates/fennec-http" }
-fennec-server = { version = "0.1.3", path = "crates/fennec-server" }
+fennec-ql = { version = "0.2.0", path = "crates/fennec-ql", default-features = false }
+fennec-abi = { version = "0.2.0", path = "crates/fennec-abi", default-features = false }
+fennec-http = { version = "0.2.0", path = "crates/fennec-http" }
+fennec-server = { version = "0.2.0", path = "crates/fennec-server" }
 # Without TLS (`tls`), which the binaries name: a crate taking either has no
 # dependency from outside the workspace unless it asks for one.
-fennec-wire = { version = "0.1.12", path = "crates/fennec-wire", default-features = false }
-fennec-import = { version = "0.1.3", path = "crates/fennec-import", default-features = false }
+fennec-wire = { version = "0.2.0", path = "crates/fennec-wire", default-features = false }
+fennec-import = { version = "0.2.0", path = "crates/fennec-import", default-features = false }
 # rustls, ring and Mozilla's roots behind a crate of their own: the only
 # dependencies from outside the workspace a shipped crate may take
 # (docs/design/crates.md#zero-dependencies).
-fennec-tls = { version = "0.1.12", path = "crates/fennec-tls" }
+fennec-tls = { version = "0.2.0", path = "crates/fennec-tls" }
 
 [profile.release]
 opt-level = 3

@@ -279,7 +279,7 @@ into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
 ```bash
-docker pull ghcr.io/fennec-db/fennec-server:0.1.12     # published, multi-arch
+docker pull ghcr.io/fennec-db/fennec-server:0.2.0     # published, multi-arch
 make docker && make docker-run TOKEN=secret   # or build it yourself
 ```
 
