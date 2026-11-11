@@ -151,6 +151,29 @@ function windowed(pids) {
   return null;
 }
 
+/** Every file under `root` and its SHA-256, by its path in the tree. */
+function listing(root) {
+  const out = new Map();
+  const walk = (dir) => {
+    for (const n of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, n.name);
+      if (n.isDirectory()) walk(full);
+      else out.set(full.slice(root.length + 1), n.isFile() ? sha256(full) : 'not a file');
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** That a run changed nothing under `root`, `was` its listing before: what it added, removed or changed is named. */
+function unchanged(root, was, what) {
+  const now = listing(root);
+  const added = [...now.keys()].filter((p) => !was.has(p));
+  const removed = [...was.keys()].filter((p) => !now.has(p));
+  const changed = [...now.keys()].filter((p) => was.has(p) && was.get(p) !== now.get(p));
+  assert.ok(!added.length && !removed.length && !changed.length, `${what}: added ${added.join(', ') || 'nothing'}; removed ${removed.join(', ') || 'nothing'}; changed ${changed.join(', ') || 'nothing'}`);
+}
+
 /** The environment the app runs in: the check's own home, and nothing of the test hooks. */
 function homeOf(label) {
   const home = join(ROOT, `home-${label}`);
@@ -258,8 +281,9 @@ assert.equal(hooks.status, 0, 'the app in the archive holds none of the test hoo
 step('started where it was unpacked, as a browser download is');
 {
   const { env } = homeOf('unpacked');
+  const was = listing(app);
   await launchAndStop(app, launcher, 'unpacked', env);
-  assert.deepEqual(treeDigest(app), digest, 'the run wrote nothing into the app');
+  unchanged(app, was, 'the run wrote into the app');
   log(`the folder: ${digest.files} files unchanged by the run`);
 }
 
@@ -329,8 +353,9 @@ assert.equal(same(target), same(join(dest, 'bin', `launcher${EXE}`)), `the ${WIN
 log(`${WIN ? 'the Start-menu shortcut' : 'the menu entry'} starts ${target}`);
 
 step('started where the installer put it, by its shortcut\'s target');
+const wasInstalled = listing(dest);
 await launchAndStop(dest, target, 'installed', inst.env);
-assert.deepEqual(treeDigest(dest), digest, 'the run wrote nothing into the installed app');
+unchanged(dest, wasInstalled, 'the run wrote into the installed app');
 log(`the installed app: ${digest.files} files unchanged by the run`);
 
 rmSync(ROOT, { recursive: true, force: true });
