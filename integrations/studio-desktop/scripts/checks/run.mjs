@@ -14,20 +14,23 @@
 // check that failed half-way fails alone, never the ones after it.
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
-import { D, HERE, describe, freshState, keepEvidence, mine } from './lib.mjs';
+import { homedir } from 'node:os';
+import { D, HERE, IDENTIFIER, describe, freshState, keepEvidence, mine } from './lib.mjs';
 
 const ALL = ['release', 'warmup', 'files', 'server-dies', 'orphan', 'sandbox', 'pages', 'storage', 'environment', 'remote', 'newdb', 'serve', 'backups', 'finder'];
 const only = (process.env.ONLY ?? '').split(',').filter(Boolean);
 const names = only.length ? ALL.filter((n) => only.includes(n)) : ALL;
 const LIMIT_MS = 240_000;
 
+// The test variant's own userData, never a real install's (a different identifier): emptied once a
+// run, so `warmup` is a first launch; each check then starts with no state of it (`freshState`).
+rmSync(`${homedir()}/Library/Application Support/${IDENTIFIER}`, { recursive: true, force: true });
 rmSync(`${D}/data`, { recursive: true, force: true });
 mkdirSync(`${D}/data`, { recursive: true });
 mkdirSync(`${D}/logs`, { recursive: true });
 
 const results = [];
 for (const name of names) {
-  // The test variant's own state, never a real install's: a different identifier.
   freshState();
   const t0 = Date.now();
   const log = openSync(`${D}/logs/${name}.log`, 'w');
@@ -46,7 +49,14 @@ for (const name of names) {
   const code = await new Promise((r) => child.on('exit', (c) => r(c)));
   clearTimeout(timer);
   closeSync(log);
-  if (code !== 0) keepEvidence(name, t0);
+  if (code !== 0) {
+    // What it keeps is for reading after; a report that went or a full disk fails no check.
+    try {
+      keepEvidence(name, t0);
+    } catch (e) {
+      console.log(`${name}: the evidence was not all kept: ${e.message}`);
+    }
+  }
 
   let left = mine();
   if (left.length) {

@@ -274,13 +274,18 @@ export const WEBKIT = join(homedir(), 'Library', 'WebKit', IDENTIFIER);
  * service exactly (`dev.fennecdb.studio`, a real install's, is another).
  */
 export function freshState() {
-  rmSync(join(homedir(), 'Library', 'Application Support', IDENTIFIER), { recursive: true, force: true });
+  // state.json alone: the rest of userData is Electrobun's (its self-extraction cache, its uninstall
+  // notes), no check's state, and goes once a run, before `warmup` (run.mjs).
+  rmSync(join(USER_DATA, 'state.json'), { force: true });
   rmSync(WEBKIT, { recursive: true, force: true });
-  // `security` deletes the first item it finds, so it is asked until none is left; bounded, as `ps` is.
+  // `security` deletes the first item it finds, so it is asked until none is left (44: none found);
+  // bounded, as `ps` is, and one it could not answer stops the run rather than leave items unsaid.
   for (let i = 0; ; i++) {
     if (i === 1000) throw new Error(`more than 1000 Keychain items under ${IDENTIFIER}`);
     const r = spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER], { stdio: 'ignore', timeout: 30000 });
-    if (r.status !== 0) break;
+    if (r.status === 0) continue;
+    if (r.status === 44) break;
+    throw new Error(`security delete-generic-password -s ${IDENTIFIER}: ${r.error ?? `status ${r.status}, signal ${r.signal}`}`);
   }
 }
 

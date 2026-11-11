@@ -38,7 +38,7 @@ no test hook, such as an environment read outside `__TESTABLE__`
 (`checks/release.mjs`). Each check starts with none of the test variant's
 state, its `state.json`, Keychain items and WebKit stores (`freshState`), so
 one that fails half-way fails alone; a failed one keeps the system log of the
-app and of WebKit's processes (`keepEvidence`), the only record of a page that
+app and of WebKit's processes (`keepEvidence`), the main record of a page that
 never loads. The toolchain is fetched into `.hutch-home/`,
 never `~/.hutch` or a shell file, and held to `hutch-pin.json`
 (`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an

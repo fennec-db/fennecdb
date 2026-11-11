@@ -178,9 +178,10 @@ digests, and the script says which hashes a mismatch is.
 with a bundle identifier of its own, and LaunchServices may list it among the
 programs that can open a `.fennec` file (the `finder` check needs the document
 type). Before each check `run.mjs` deletes what the test variant keeps
-(`freshState`): its own folder in
+(`freshState`): its `state.json` in
 `~/Library/Application Support/dev.fennecdb.studio.test` (the saved
-connections, the databases it served), its WebKit data stores in
+connections, the databases it served; the folder itself, Electrobun's
+unpacked copy of the app among it, once a run, before `warmup`), its WebKit data stores in
 `~/Library/WebKit/dev.fennecdb.studio.test` and every Keychain item of its
 service, `dev.fennecdb.studio.test`, so a check that failed half-way, with a
 connection it never removed, fails alone and never the ones after it. The

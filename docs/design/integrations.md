@@ -413,7 +413,12 @@ named by the SHA-256 of the store's name) -- and `run.mjs` used to empty only
 the first, once, before the first check. In run 42876456804 `storage` failed
 after saving a connection and before removing it, and `remote`, two checks
 later, failed on its last assertion (no saved connections) for that
-connection. So `run.mjs` empties all three before each check (`freshState`):
+connection. So `run.mjs` empties all three before each check (`freshState`),
+`state.json` alone of its folder, whose rest is Electrobun's (its
+self-extraction cache, its uninstall notes) and no check's state, and which
+goes once a run, before `warmup`, as it went before (a CI run emptying the
+whole folder before each check passed too, so this is less removed under
+`~/Library`, not a fix):
 the Keychain is emptied by service, one `security delete-generic-password -s`
 an item until none is left, which matches the service exactly (checked: an item
 under a longer service that begins with it stays), so a real install's
