@@ -7,12 +7,13 @@
 // seen unsigned, in place and from `open`; not verified for a signed and
 // notarized build). So the checks start from a build that has been launched
 // once, and this does it: start, wait for the app, quit it, end the helper.
-import { EXE, cmd, describe, mine, sleep, startApp, step, waitFor, log, now } from './lib.mjs';
+import { EXE, WRAPPER, cmd, describe, mine, sleep, startApp, step, waitFor, log, now } from './lib.mjs';
 
-// SPIKE: the launcher by its path on every system (macOS: .app/Contents/MacOS/launcher).
-const isLauncher = (p) => p.command.endsWith('/Contents/MacOS/launcher') || p.command.startsWith(EXE);
+// SPIKE: the self-extractor by its path on every system (macOS: .app/Contents/MacOS/launcher;
+// Windows and Linux: the build's bin/launcher, which installs the app and starts the installed one).
+const isLauncher = (p) => p.command.endsWith('/Contents/MacOS/launcher') || (WRAPPER !== null && p.command.startsWith(WRAPPER));
 
-const app = startApp('warmup', { FENNEC_DESKTOP_LAUNCHER: '1' });
+const app = startApp('warmup', { FENNEC_DESKTOP_LAUNCHER: '1' }, WRAPPER ?? EXE);
 await waitFor((l) => l.what === 'ready', 90000, 'the app, after unpacking itself');
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open file/.test(l.text), 20000, 'the launcher drawn');
 log('the app is up');

@@ -7,10 +7,11 @@ const service = 'dev.fennecdb.studio.spike';
 const name = `probe:${crypto.randomUUID()}`;
 const value = `${'x'.repeat(40)}-${Date.now()}`;
 const step = async (what, f) => {
+  const t0 = Date.now();
   try {
-    return { what, ok: true, value: await f() };
+    return { what, ok: true, value: (await f()) ?? null, ms: Date.now() - t0 };
   } catch (e) {
-    return { what, ok: false, error: String(e?.message ?? e), code: e?.code ?? null };
+    return { what, ok: false, error: String(e?.message ?? e), code: e?.code ?? null, ms: Date.now() - t0 };
   }
 };
 const steps = [];

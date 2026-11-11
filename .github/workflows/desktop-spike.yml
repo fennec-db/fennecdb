@@ -108,17 +108,6 @@ jobs:
             *.tar.zst) zstd -dc "$f" 2>/dev/null | tar -tvf - | head -12 || echo "(no zstd)" ;;
           esac; done
 
-      - name: Linux, what the binaries need of the system (glibc, the libraries)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        run: |
-          for f in $(find build -type f \( -name '*.so' -o -name launcher -o -name bun -o -name 'fennec*' \) | grep -v '\.json$'); do
-            need=$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
-            echo "$f: ${need:-static or none}"
-          done
-          so=$(find build -name 'libNativeWrapper.so' | head -1)
-          echo "== ldd $so (direct needs)"; objdump -p "$so" | grep NEEDED
-
       - name: Type check
         continue-on-error: true
         run: npm run typecheck
@@ -151,7 +140,7 @@ jobs:
             echo "-- on a D-Bus session with no Secret Service"
             dbus-run-session -- "$bun" scripts/spike/probe-secrets.mjs
             echo "-- with gnome-keyring's Secret Service, its login keyring unlocked"
-            dbus-run-session -- sh -c 'printf "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; "$0" scripts/spike/probe-secrets.mjs' "$bun"
+            dbus-run-session -- sh -c 'printf spike | gnome-keyring-daemon --unlock --components=secrets >/dev/null; "$0" scripts/spike/probe-secrets.mjs' "$bun"
           fi
 
       - name: The scripted checks that port (${{ matrix.checks }})
@@ -160,9 +149,24 @@ jobs:
           ONLY: ${{ matrix.checks }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            dbus-run-session -- sh -c 'printf "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/run.mjs'
+            dbus-run-session -- sh -c 'printf spike | gnome-keyring-daemon --unlock --components=secrets >/dev/null; xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/run.mjs'
           else
             node scripts/checks/run.mjs
+          fi
+
+      - name: The installed test variant (warmup installed it), its largest files, and on Linux what they need of the system
+        continue-on-error: true
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then root="$LOCALAPPDATA/dev.fennecdb.studio.test/stable/app"; else root="${XDG_DATA_HOME:-$HOME/.local/share}/dev.fennecdb.studio.test/stable/app"; fi
+          du -sh "$root" || true
+          find "$root" -type f -size +500k -exec ls -l {} \; | awk '{print $5, $NF}' | sort -rn | head -20 || true
+          if [ "$RUNNER_OS" = Linux ]; then
+            for f in $(find "$root" -type f \( -name '*.so*' -o -name launcher -o -name bun -o -name main -o -name 'fennec*' \) ! -name '*.json' ! -name '*.desktop'); do
+              need=$( (objdump -T "$f" 2>/dev/null || true) | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true)
+              echo "$f: ${need:-no glibc symbol (static)}"
+            done
+            so=$(find "$root" -name 'libNativeWrapper.so' | head -1)
+            [ -n "$so" ] && { echo "== $so needs"; objdump -p "$so" | grep NEEDED || true; }
           fi
 
       - name: Linux, a web link from a page through Electrobun's openExternal
@@ -188,7 +192,7 @@ jobs:
             echo "== installed"; find "$LOCALAPPDATA/dev.fennecdb.studio" -maxdepth 3 | head -40; du -sh "$LOCALAPPDATA/dev.fennecdb.studio/stable/app" || true
             echo "== shortcuts"; find "$APPDATA/Microsoft/Windows/Start Menu/Programs" "$USERPROFILE/Desktop" -iname '*fennec*' 2>/dev/null
             echo "== Add/Remove Programs (HKCU)"; reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall' //s //f fennec 2>/dev/null | head -30
-            echo "== .fennec association (HKCU)"; reg query 'HKCU\Software\Classes\.fennec' 2>&1 | head -5
+            echo "== .fennec association (HKCU)"; (reg query 'HKCU\Software\Classes\.fennec' 2>&1 || true) | head -5
             echo "== running from the install"
             powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.ExecutablePath -like '*dev.fennecdb.studio*' } | ForEach-Object { '{0} {1}' -f \$_.ProcessId, \$_.CommandLine; Stop-Process -Id \$_.ProcessId -Force }"
           else

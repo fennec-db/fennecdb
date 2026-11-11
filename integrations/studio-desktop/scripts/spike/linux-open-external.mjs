@@ -9,10 +9,9 @@
 //    reached with the URL unchanged (the test variant reports it instead of
 //    opening it: testhooks.external).
 // 2. The test variant's spike hook calls Utils.openExternal(<payload>) for real,
-//    with no GIO handler configured (XDG_DATA_DIRS and XDG_CONFIG_DIRS empty):
-//    does the marker file appear?
+//    with a default browser GIO cannot start: does the marker file appear?
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { D, assertClean, cmd, data, evalIn, quit, startApp, step, waitFor, waitStudio, log } from '../checks/lib.mjs';
@@ -23,10 +22,19 @@ rmSync(marker, { force: true });
 const payload = `https://example.invalid/?q=$(touch$IFS${marker})`;
 log('payload', payload, 'as a WHATWG URL:', new URL(payload).href, new URL(payload).href === payload ? '(unchanged)' : '(changed)');
 
-const empty = join(D, 'no-xdg');
-mkdirSync(empty, { recursive: true });
+// A default web browser GIO finds and cannot start (its program is not there):
+// what a machine whose browser was removed, or a minimal desktop, gives it.
+const xdg = join(D, 'xdg');
+mkdirSync(join(xdg, 'share', 'applications'), { recursive: true });
+mkdirSync(join(xdg, 'config'), { recursive: true });
+writeFileSync(join(xdg, 'share', 'applications', 'gone-browser.desktop'), '[Desktop Entry]\nType=Application\nName=Gone\nExec=/nonexistent/browser %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n');
+writeFileSync(join(xdg, 'config', 'mimeapps.list'), '[Default Applications]\nx-scheme-handler/http=gone-browser.desktop\nx-scheme-handler/https=gone-browser.desktop\n');
 const SMALL = data('small', 20);
-const app = startApp('spike-open-external', { FENNEC_DESKTOP_OPEN: SMALL, XDG_DATA_DIRS: empty, XDG_CONFIG_DIRS: empty, BROWSER: '' });
+const app = startApp('spike-open-external', {
+  FENNEC_DESKTOP_OPEN: SMALL,
+  XDG_DATA_DIRS: `${join(xdg, 'share')}:${process.env.XDG_DATA_DIRS || '/usr/local/share:/usr/share'}`,
+  XDG_CONFIG_HOME: join(xdg, 'config'),
+});
 await waitStudio(`file:${SMALL}`, 0, 60000);
 
 step('a page opens the payload');

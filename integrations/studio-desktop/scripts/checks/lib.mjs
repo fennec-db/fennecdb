@@ -21,18 +21,25 @@ import { fileURLToPath } from 'node:url';
 
 // SPIKE (Windows and Linux): where the test variant is, its launcher, its
 // userData and the processes on the machine differ by system. macOS is as it was.
+const IDENTIFIER_ = 'dev.fennecdb.studio.test';
 export const WIN = process.platform === 'win32';
 export const MAC = process.platform === 'darwin';
 export const HERE = fileURLToPath(new URL('../..', import.meta.url));
-/** The test variant's launcher on Windows and Linux: build-test/stable-<os>-<arch>/<name>/bin/launcher[.exe], found. */
+/**
+ * What installs the test variant on Windows and Linux: on Linux the build's
+ * build-test/stable-linux-<arch>/<name>/bin/launcher, a self-extractor; on
+ * Windows build-test/stable-win-<arch>/<name>-Setup.exe beside its payload (the
+ * folder's bin/launcher.exe is the wrapper the Setup carries, and says "Not a
+ * valid self-extracting installer" when run).
+ */
 function findLauncher() {
-  const want = WIN ? 'launcher.exe' : 'launcher';
+  const want = (name) => (WIN ? /-Setup\.exe$/.test(name) : name === 'launcher');
   const walk = (dir, depth) => {
     if (!existsSync(dir)) return null;
     for (const name of readdirSync(dir).sort()) {
       const full = join(dir, name);
       const st = statSync(full);
-      if (st.isFile() && name === want) return full;
+      if (st.isFile() && want(name)) return full;
       if (st.isDirectory() && depth < 4) {
         const hit = walk(full, depth + 1);
         if (hit) return hit;
@@ -40,10 +47,23 @@ function findLauncher() {
     }
     return null;
   };
-  return walk(join(HERE, 'build-test'), 0) ?? join(HERE, 'build-test', 'launcher-not-found', want);
+  return walk(join(HERE, 'build-test'), 0) ?? join(HERE, 'build-test', 'installer-not-found');
 }
-export const APP = process.env.FENNEC_DESKTOP_APP ?? (MAC ? `${HERE}build-test/stable-macos-arm64/fennec studio test.app` : join(findLauncher(), '..', '..'));
-export const EXE = MAC ? `${APP}/Contents/MacOS/launcher` : process.env.FENNEC_DESKTOP_EXE ?? findLauncher();
+/**
+ * On Windows and Linux the build's launcher is a self-extractor that installs
+ * (into Electrobun's appData/<identifier>/stable/app, the folder its userData
+ * also lives in) and starts the installed app: run again, it installs again
+ * over the app it may have started. So `warmup` runs it once and every other
+ * check runs the installed launcher.
+ */
+export const WRAPPER = MAC ? null : findLauncher();
+const INSTALLED_ROOT = MAC
+  ? null
+  : join(WIN ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local') : process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), IDENTIFIER_, 'stable', 'app');
+export const APP = process.env.FENNEC_DESKTOP_APP ?? (MAC ? `${HERE}build-test/stable-macos-arm64/fennec studio test.app` : INSTALLED_ROOT);
+export const EXE = MAC ? `${APP}/Contents/MacOS/launcher` : join(APP, 'bin', WIN ? 'launcher.exe' : 'launcher');
+/** The build's own folder of the test variant (Windows and Linux): its wrapper's processes are the app's too. */
+const BUILT = MAC ? null : join(WRAPPER, '..', '..');
 export const SERVER = process.env.FENNEC_SERVER_BIN ?? join(HERE, 'bin', `fennec-server${WIN ? '.exe' : ''}`);
 export const IDENTIFIER = 'dev.fennecdb.studio.test';
 
@@ -101,7 +121,7 @@ export const mine = () =>
     MAC
       ? p.command.startsWith(APP) || p.command.includes(`fennec-server --file ${R}/`) || p.command.includes(`fennec-server --file ${D}/`)
       : // SPIKE: Windows' and Linux's command lines: the app's folder (launcher, bun, the bundled servers) and servers on this run's files.
-        p.command.includes(APP) || (/fennec-server/.test(p.command) && (p.command.includes(`--file ${R}`) || p.command.includes(`--file ${D}`))),
+        p.command.includes(APP) || p.command.includes(BUILT) || (/fennec-server/.test(p.command) && (p.command.includes(`--file ${R}`) || p.command.includes(`--file ${D}`))),
   );
 export const describe = (list) => list.map((p) => `${p.pid} (ppid ${p.ppid}) ${p.command.replace(APP, "<APP>").slice(0, 200)}`).join('\n');
 
@@ -208,13 +228,13 @@ export async function pressNotice(notice, id) {
  * The test variant, started with `env` added to the hooks' own. Its output
  * goes to logs/<name>.app.log, which a failing run keeps.
  */
-export function startApp(name, env = {}) {
+export function startApp(name, env = {}, exe = EXE) {
   current = name;
   rmSync(REPORT, { force: true });
   writeFileSync(CONTROL, '');
-  if (!existsSync(EXE)) throw new Error(`no app at ${APP}: build it with \`make studio-desktop-test\``);
+  if (!existsSync(exe)) throw new Error(`no app at ${exe}: build it with \`make studio-desktop-test\` (on Windows and Linux, the warmup check installs it)`);
   const fd = openSync(`${D}/logs/${name}.app.log`, 'w');
-  const child = spawn(EXE, [], {
+  const child = spawn(exe, [], {
     // SPIKE: a stable Windows launcher is a GUI program that drops the app's
     // output unless asked to keep a console (Electrobun's cross-platform guide).
     env: { ...process.env, ...(WIN ? { ELECTROBUN_CONSOLE: '1' } : {}), FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env },
