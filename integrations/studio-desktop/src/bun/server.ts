@@ -49,6 +49,8 @@ export const bunSpawn: Spawn = (argv, env): Child => {
 			return p.exitCode;
 		},
 		kill: (signal) => p.kill(signal),
+		// The pipe's end, which the server reads as its shutdown (process.ts: how Windows stops one).
+		endStdin: () => void p.stdin.end(),
 	};
 };
 
@@ -103,7 +105,9 @@ export const runCli: Run = (args, env) => {
 
 /**
  * What a quit does first: every run of `fennec` is stopped (SIGTERM, which
- * the one-shot commands take as an end) and its caller has seen it end. A
+ * the one-shot commands take as an end; on Windows TerminateProcess, which
+ * leaves the same: they hold no lock past their run and write nothing in
+ * place) and its caller has seen it end. A
  * backup stopped so leaves no image (an image is written as `.tmp` and
  * renamed once whole, and `.tmp` is no image to the shell); a restore, nothing
  * at the new name, its folder removed by its caller (backups.ts).

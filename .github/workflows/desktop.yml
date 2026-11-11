@@ -277,8 +277,9 @@ jobs:
 
       # What the app links on Linux (WebKitGTK 4.1, GTK 3, AppIndicator, librsvg: Ubuntu
       # 24.04 calls GTK 3 libgtk-3-0t64), and what the checks drive it with: an X server
-      # (xvfb), a session bus, and a Secret Service (gnome-keyring) for Bun.secrets, whose
-      # items secret-tool clears.
+      # (xvfb), a session bus, a Secret Service (gnome-keyring) for Bun.secrets, whose
+      # items secret-tool clears, and xdg-open, which the app hands links and folders to
+      # (checks/opener.mjs runs it for real).
       - name: Linux packages
         if: runner.os == 'Linux'
         timeout-minutes: 10
@@ -296,7 +297,7 @@ jobs:
             echo "$h: not resolved here, asked of 1.1.1.1"
             for a in $(dig +short +time=3 +tries=2 @1.1.1.1 "$h" A | grep -E '^[0-9.]+$'); do echo "$a $h"; done | sudo tee -a /etc/hosts
           done
-          packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
+          packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools xdg-utils"
           sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
 
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
@@ -320,6 +321,24 @@ jobs:
 
       - name: Build the test variant
         run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
+
+      # TEMPORARY (phase 2): what Bun and the system answer, printed; removed before review.
+      - name: Phase 2 probe (temporary)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          bun=$(ls .hutch-home/toolchains/bun/*/*/bun* | grep -v '\.lock$' | head -1)
+          "$bun" scripts/probe-phase2.ts
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "== unlocked login keyring"
+            dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && "$0" scripts/probe-phase2.ts store' "$bun"
+            echo "== a bus with no Secret Service started"
+            dbus-run-session -- "$bun" scripts/probe-phase2.ts store
+            echo "== gnome-keyring started, no login keyring"
+            dbus-run-session -- sh -c 'gnome-keyring-daemon --start --components=secrets >/dev/null; "$0" scripts/probe-phase2.ts store' "$bun"
+            echo "== no bus"
+            env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$bun" scripts/probe-phase2.ts store
+          fi
 
       - name: The scripted checks
         run: |

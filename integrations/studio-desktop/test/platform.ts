@@ -1,9 +1,9 @@
 // What the unit tests ask of the system they run on, the same question on
 // macOS, Linux and Windows: a program's name, a process's arguments, whether a
-// file is its owner's alone. And the tests a system cannot pass yet, each with
-// its reason and the phase of the Windows and Linux plan that brings it (#578;
-// docs/design/integrations.md#studio-desktop): `node --test` prints the reason
-// beside the test it skipped.
+// file is its owner's alone. A test a system cannot pass yet is skipped there
+// with its reason and the phase of the Windows and Linux plan that brings it
+// (#578; docs/design/integrations.md#studio-desktop), which `node --test`
+// prints beside it; since phase 2 none is.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
@@ -19,14 +19,6 @@ export const EXE = WINDOWS ? ".exe" : "";
  * under a second (scripts/checks/lib.mjs's POWERSHELL says the same).
  */
 const POWERSHELL = (process.env["PATH"] ?? "").split(delimiter).some((d) => d !== "" && existsSync(join(d, "pwsh.exe"))) ? "pwsh.exe" : "powershell.exe";
-
-/**
- * Phase 2. A stop is `kill("SIGTERM")`, which on Windows libuv and Bun make
- * TerminateProcess: the server ends in a few ms with no checkpoint and exit 1,
- * not its shutdown and exit 0. The end of its stdin is that shutdown there
- * (`--exit-on-stdin-close`), which the app does not use to stop it yet.
- */
-export const WINDOWS_STOP = WINDOWS && "phase 2: a stop on Windows is TerminateProcess (exit 1, no checkpoint) until the app ends the server's stdin";
 
 /** A process's command line, as the system shows it to every user (`ps`), or to its own on Windows (WMI). */
 export function argvOf(pid: number): string {

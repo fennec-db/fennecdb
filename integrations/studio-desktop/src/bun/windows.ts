@@ -8,9 +8,13 @@
 //     (`window.open`, target=_blank) goes to the default browser instead;
 //   - learns its token from its preload, never from a URL (session.ts).
 
-import { BrowserView, BrowserWindow, Utils } from "electrobun/main";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { BrowserView, BrowserWindow, PATHS, Session } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
+import { linkOut, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
+import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
 
 let cascade = 0;
 
@@ -41,20 +45,66 @@ function frame(width: number, height: number) {
 const detailOf = (e: any): any => e?.data?.detail ?? e?.data;
 
 /**
- * A link out of a studio window goes to the default browser, and only if it is
- * a web address: never a file: or a custom scheme. Electrobun 2.0.4 does not
- * say whether a click asked for it (a script's `window.open` is the same event),
- * so a window is given at most one in `EXTERNAL_GAP_MS`: a page that asks over and
- * over does not open tabs without end.
+ * A link out of a studio window goes to the default browser if `linkOut` lets
+ * it (a web address, never a file: or a custom scheme; one in three seconds a
+ * window), and never through a shell (opener.ts). The test variant reports it
+ * instead, and hands it on as well only when a check asks it to
+ * (`checks/opener.mjs`).
  */
-const EXTERNAL_GAP_MS = 3000;
 async function openExternal(url: string, last: { at: number }) {
-	if (!/^https?:/.test(url)) return;
-	const now = Date.now();
-	if (now - last.at < EXTERNAL_GAP_MS) return;
-	last.at = now;
-	if (__TESTABLE__) return void (await import("./testhooks.ts")).external(url);
-	Utils.openExternal(url);
+	const link = linkOut(url, last);
+	if (!link) return;
+	if (__TESTABLE__) return void (await import("./testhooks.ts")).external(link);
+	await openLink(link);
+}
+
+/**
+ * What a store holds that taking it away must take: Electrobun 2.0.4's native
+ * `sessionClearStorageData` on macOS and Linux knows these six names and
+ * nothing else, and the "all" its TypeScript sends (as `["all"]`) matches none
+ * of them, so it does nothing. (The type has no `serviceWorkers` and a `webSQL`
+ * the native code does not know, hence the cast.)
+ */
+const STORE_KINDS = ["cookies", "localStorage", "sessionStorage", "indexedDB", "cache", "serviceWorkers"] as never[];
+
+/** Windows: where WebView2 keeps the app's stores (stores.ts), from the identifier and channel the build wrote. */
+let webview2: string | null | undefined;
+function webview2Folder(): string | null {
+	if (webview2 === undefined) {
+		let version: { identifier?: string; channel?: string } = {};
+		try {
+			version = JSON.parse(readFileSync(join(PATHS.RESOURCES_FOLDER, "version.json"), "utf8"));
+		} catch {
+			// no version.json: no folder known, and none is removed
+		}
+		webview2 = webview2Root(process.env, version);
+	}
+	return webview2;
+}
+
+/**
+ * Takes away what a store holds once no window uses it: on Windows its folder
+ * (stores.ts says why not Electrobun's call there), elsewhere a persistent
+ * store's data by `STORE_KINDS` (one in memory goes with its window). True
+ * once it is empty.
+ */
+export async function dropStore(partition: string): Promise<boolean> {
+	let ok: boolean;
+	if (process.platform === "win32") {
+		const root = webview2Folder();
+		ok = root ? await removeStoreFolder(root, partition) : false;
+	} else {
+		ok = !inUse(partition);
+		if (ok && partition.startsWith("persist:")) Session.fromPartition(partition).clearStorageData(STORE_KINDS);
+	}
+	if (__TESTABLE__) (await import("./testhooks.ts")).report("store-dropped", { partition, ok });
+	return ok;
+}
+
+/** Windows, by the one instance (index.ts): the stores a run that ended left (stores.ts). */
+export function sweepLeftStores(): Promise<void> {
+	const root = process.platform === "win32" ? webview2Folder() : null;
+	return root ? sweepStores(root) : Promise.resolve();
 }
 
 /** A studio window: Electrobun's window, and the view that shows the server's page in it. */
@@ -72,8 +122,11 @@ export type StudioWindow = { win: BrowserWindow; view: BrowserView };
  * So the window is made with no page, and the view is made in it with a store
  * of its own: `persist:remote-<id>` for a saved server (kept between runs, and
  * apart from every other saved server's), a name without `persist:` for a file
- * (a store that exists only for this window). The window's own view is removed
- * first, which costs nothing: with it kept, idle memory was 20 MB more.
+ * (a store that exists only for this window; on Windows a folder no other
+ * window is given, stores.ts). The window's own view is removed first, which
+ * costs nothing: with it kept, idle memory was 20 MB more. The partition is
+ * in use from before the view is made until the window has closed, and no
+ * store is removed while it is (stores.ts).
  */
 export async function openStudioWindow(opts: { key: string; title: string; session: StudioSession; partition: string }): Promise<StudioWindow> {
 	const { origin } = opts.session;
@@ -87,6 +140,12 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 	// the page's: it would be a second web view per window for nothing, and the
 	// shared store is the one thing this is made to avoid.
 	win.webview?.remove();
+	storeOpened(opts.partition);
+	win.on("close", () => {
+		storeClosed(opts.partition);
+		// A file window's store goes with it: on Windows a folder, removed once WebView2 lets it go.
+		if (goesWithWindow(opts.partition)) void dropStore(opts.partition);
+	});
 	const view = new BrowserView({
 		url: `${origin}/_studio/`,
 		preload: sessionPreload(opts.session) + extra,

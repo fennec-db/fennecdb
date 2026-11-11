@@ -4,11 +4,10 @@
 // shutdown, its output, what another program holding the file or the port
 // does to it, a server that dies, and what a relaunch starts: nothing.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import {
-  assertClean, cmd, data, evalIn, forgetServeItems, IDENTIFIER, lines, mine, pressNotice, procs, quit, sleep, startApp, startServer, step, until, USER_DATA, waitFor, waitNone, waitNotice, waitStudio, log,
+  assertClean, cmd, credential, data, evalIn, forgetServeItems, lines, mine, pressNotice, procs, quit, sleep, startApp, startServer, step, until, USER_DATA, waitFor, waitNone, waitNotice, waitStudio, log,
 } from './lib.mjs';
 
 assertClean('before');
@@ -18,7 +17,8 @@ const HELD = data('held-by-another', 5);
 
 const state = () => JSON.parse(readFileSync(`${USER_DATA}/state.json`, 'utf8'));
 const entry = (path) => state().databases.find((d) => d.path === path);
-const keychainHas = (name) => spawnSync('security', ['find-generic-password', '-s', IDENTIFIER, '-a', name], { stdio: 'ignore' }).status === 0;
+/** The system's credential store holds item `name` of the test variant's (lib.mjs). */
+const keychainHas = (name) => credential(name).there;
 /** What the app answered to `c`, by the report it writes for it. */
 async function ask(c, what, ms = 30000) {
   const n = lines().length;

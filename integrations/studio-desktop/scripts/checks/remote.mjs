@@ -1,30 +1,32 @@
-// Saved servers: the token in the Keychain and in no file of the app's, no
-// process's arguments and no URL; the server's own studio in a window; and
-// every way it can fail said in words before a window opens on nothing.
+// Saved servers: the token in the system's credential store and in no file of
+// the app's, no process's arguments and no URL; the server's own studio in a
+// window; and every way it can fail said in words before a window opens on
+// nothing.
 //
 // The token is out of the app's own files and out of reach of the pages it
 // shows and of other users. It is not out of reach of another program of the
-// same user: the Keychain's client here is the bundled `bun`, a general-purpose
+// same user: the store's client here is the bundled `bun`, a general-purpose
 // runtime that any program running as that user can run with a script of its
 // own (`Bun.secrets.get`, with the service and the id that state.json names),
-// and nothing in this app makes the Keychain ask first. What a signed build
+// and nothing in this app makes the store ask first. What a signed build
 // asks, if anything, is for the README's list to look at. So this reads the
-// secret back through the app, and from here only asks that the item exists
-// (attributes, no `-w`).
+// secret back through the app, and from here only asks the store by name that
+// the item exists (lib.mjs's `credential`), on Windows also that it is kept
+// on this machine.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import {
-  assertClean, cmd, data, evalIn, IDENTIFIER, lines, pressNotice, procs, quit, startApp, startServer, step, textOf, until, USER_DATA, waitFor, waitNotice, waitStudio, log, file,
+  assertClean, cmd, credential, data, evalIn, lines, pressNotice, WIN, procs, quit, startApp, startServer, step, textOf, until, USER_DATA, waitFor, waitNotice, waitStudio, log, file,
 } from './lib.mjs';
 
 assertClean('before');
 const REMOTE = data('remote', 30);
 const OTHER = data('held', 10);
 
-const keychainHas = (id) => spawnSync('security', ['find-generic-password', '-s', IDENTIFIER, '-a', `connection:${id}`], { stdio: 'ignore' }).status === 0;
+/** The system's credential store holds the connection's item (lib.mjs). */
+const keychainHas = (id) => credential(`connection:${id}`).there;
 const state = () => JSON.parse(readFileSync(`${USER_DATA}/state.json`, 'utf8'));
 
 const app = startApp('remote', { FENNEC_DESKTOP_LAUNCHER: '1' });
@@ -60,7 +62,12 @@ cmd({ cmd: 'secret', id });
 const held = await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret');
 assert.equal(held.token, TOKEN, 'the Keychain holds the token');
 assert.equal(held.origin, remote.origin, 'and it holds it for the address it was saved with');
-assert.ok(keychainHas(id), 'the item exists in the Keychain');
+assert.ok(keychainHas(id), 'the item exists in the system\'s credential store');
+if (WIN) {
+  // Bun.secrets would have written it to roam with a domain profile (CRED_PERSIST_ENTERPRISE).
+  const item = credential(`connection:${id}`);
+  assert.ok(item.local, `kept on this machine, not with a roaming profile: ${item.said}`);
+}
 const written = readFileSync(`${USER_DATA}/state.json`, 'utf8');
 assert.ok(!written.includes(TOKEN), 'state.json holds no token');
 assert.deepEqual(state().connections.find((c) => c.id === id), { id, name: 'remote check', url: remote.origin, tenant: null });

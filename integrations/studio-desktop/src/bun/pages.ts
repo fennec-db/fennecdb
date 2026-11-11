@@ -40,6 +40,7 @@ import {
 	verifyBackups,
 } from "./app.ts";
 import { copySecret, SECRET_ON_CLIPBOARD_MS, type Clipboard } from "./clipboard.ts";
+import { reveal } from "./opener.ts";
 import { DEFAULT_SYNC, isSync, settingsFrom, SYNC_NOTES, type Sync } from "./serving.ts";
 import { holdTo, pageFrame } from "./windows.ts";
 
@@ -59,6 +60,12 @@ async function pick(kind: "file" | "folder" | "key", startingFolder: string): Pr
 		allowsMultipleSelection: false,
 	});
 	return paths.find((p) => p) ?? null;
+}
+
+/** Shows a database in the file manager; the test variant reports what it was handed, and what the system did with it (`checks/opener.mjs`). */
+export async function revealPath(path: string): Promise<void> {
+	const done = await reveal(path);
+	if (__TESTABLE__) (await import("./testhooks.ts")).report("revealed", { path, done });
 }
 
 export async function chooseFile() {
@@ -119,8 +126,9 @@ const launcherRPC = BrowserView.defineRPC<LauncherRPC>({
 				await forgetDatabase(path);
 				return overview();
 			},
+			// Never through a shell: Linux's Electrobun hands the folder to one (opener.ts).
 			reveal: async ({ path }) => {
-				Utils.showItemInFolder(path);
+				await revealPath(path);
 				return { ok: true };
 			},
 			figures: ({ path }) => figuresOf(path),

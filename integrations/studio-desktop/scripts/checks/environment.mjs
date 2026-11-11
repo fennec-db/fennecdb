@@ -5,20 +5,42 @@
 // Finder, from a shell with anything exported in it, or by another program.
 //
 // The test variant lets FENNEC_SERVER_BIN name the server it starts; here that
-// is a script that writes its own environment down and becomes the real one.
-// (A shipped app does not read it: checks/release.mjs.)
+// is a stand-in that writes its own environment down and runs the real one: a
+// shell script on macOS and Linux, and on Windows, where a script is no program
+// the app can start without a shell, a program built from a few lines by the
+// app's own Bun (`bun build --compile`), the real server its child with the
+// stand-in's stdin, so the app's stop by its end reaches it. (A shipped app
+// does not read FENNEC_SERVER_BIN: checks/release.mjs.)
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { D, SERVER, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { join } from 'node:path';
+import { BUN, D, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
-mkdirSync(`${D}/wrap`, { recursive: true });
-const SEEN = `${D}/wrap/server-env.txt`;
-const WRAP = `${D}/wrap/fennec-server`;
-// `env -0` would be exact, and is not on every system; one a line is enough for names.
-writeFileSync(WRAP, `#!/bin/sh\nenv > '${SEEN}'\nexec '${SERVER}' "$@"\n`);
-chmodSync(WRAP, 0o755);
+mkdirSync(join(D, 'wrap'), { recursive: true });
+const SEEN = join(D, 'wrap', 'server-env.txt');
+const WRAP = join(D, 'wrap', `fennec-server${WIN ? '.exe' : ''}`);
+if (WIN) {
+  const source = join(D, 'wrap', 'stand-in.ts');
+  writeFileSync(
+    source,
+    [
+      `import { writeFileSync } from "node:fs";`,
+      `import { spawn } from "node:child_process";`,
+      `writeFileSync(${JSON.stringify(SEEN)}, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
+      `const child = spawn(${JSON.stringify(SERVER)}, process.argv.slice(2), { stdio: "inherit" });`,
+      `child.on("exit", (code) => process.exit(code ?? 1));`,
+    ].join('\n'),
+  );
+  const built = spawnSync(BUN, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
+  assert.equal(built.status, 0, `the stand-in built: ${built.stderr}${built.stdout}`);
+} else {
+  // `env -0` would be exact, and is not on every system; one a line is enough for names.
+  writeFileSync(WRAP, `#!/bin/sh\nenv > '${SEEN}'\nexec '${SERVER}' "$@"\n`);
+  chmodSync(WRAP, 0o755);
+}
 
 const LEAKS = {
   OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:9',
@@ -35,14 +57,21 @@ await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
 await waitStudio(`file:${SMALL}`);
 
 step('the environment the server was started with');
-const seen = () => Object.fromEntries(readFileSync(SEEN, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+// Windows' names are case-blind: one is the same however it is spelled.
+const seen = () =>
+  Object.fromEntries(readFileSync(SEEN, 'utf8').split(/\r?\n/).filter((l) => l.indexOf('=') > 0).map((l) => [WIN ? l.slice(0, l.indexOf('=')).toUpperCase() : l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 const names = Object.keys(seen());
 log('names:', names.join(' '));
 for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENNEC_JWT_SECRET', 'FENNEC_KEY_FILE', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENNEC_DESKTOP_REPORT', 'FENNEC_DESKTOP_CONTROL', 'FENNEC_DESKTOP_OPEN', 'FENNEC_SERVER_BIN']) {
   assert.ok(!names.includes(leak), `${leak} must not reach the server`);
 }
-const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
+// On Windows the allowlist's own names for the system's, temporary and user's folders (src/bun/env.ts), which libuv hands a child whatever it is given.
+const ALLOWED = WIN
+  ? /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|HOMEDRIVE|HOMEPATH|LOGONSERVER|SYSTEMDRIVE|SYSTEMROOT|TEMP|TMP|USERDOMAIN|USERNAME|USERPROFILE|WINDIR|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN)$/
+  : /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
 assert.deepEqual(names.filter((n) => !ALLOWED.test(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
+// The case-blind compare is what lets Windows' `Path` through, where a name compared as macOS's would drop it.
+if (WIN) assert.ok(names.includes('PATH') && names.includes('SYSTEMROOT'), 'Path and SystemRoot, however Windows spells them');
 const env = seen();
 assert.notEqual(env.FENNEC_HTTP_TOKEN, 'leak-old-token', 'the app\'s own token, not one that was in its environment');
 assert.match(env.FENNEC_HTTP_TOKEN, /^[A-Za-z0-9_-]{43}$/, '32 random bytes, base64url');
@@ -51,7 +80,7 @@ assert.equal(env.FENNEC_REPLICATION_TOKEN, undefined, 'a file with no backups se
 
 step('its backups set up, the server started next gets a replication token of the app\'s own');
 let n = lines().length;
-cmd({ cmd: 'set-archive', path: SMALL, dir: `${D}/wrap/backups/small` });
+cmd({ cmd: 'set-archive', path: SMALL, dir: join(D, 'wrap', 'backups', 'small') });
 const setUp = await waitFor((l, i) => i >= n && l.what === 'set-archive-result', 30000, 'set up');
 assert.equal(setUp.ok, true, setUp.message);
 assert.match(setUp.message, /next start/, 'the server running now is said to take them from its next start');

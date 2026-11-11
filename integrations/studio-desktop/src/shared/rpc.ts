@@ -64,7 +64,7 @@ export type DatabaseRow = {
 	archive: { dir: string; keyFile: string | null; lastAt: number | null; lastChange: number | null } | null;
 };
 
-export type Connection = { id: string; name: string; url: string; tenant: string | null; hasToken: boolean };
+export type Connection = { id: string; name: string; url: string; tenant: string | null; hasToken: boolean | null };
 export type Check = { at: number; ok: boolean; text: string };
 
 export type Overview = {

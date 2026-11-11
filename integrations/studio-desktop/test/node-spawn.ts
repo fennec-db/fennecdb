@@ -31,6 +31,7 @@ export const nodeSpawn: Spawn = (argv, env): Child => {
 			return p.exitCode;
 		},
 		kill: (signal) => void p.kill(signal),
+		endStdin: () => void p.stdin.end(),
 	};
 };
 
