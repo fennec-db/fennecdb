@@ -1378,11 +1378,6 @@ html { scrollbar-color: var(--rule-hot) transparent; }
   background: rgba(21,15,38,.9);
 }
 .dl-say { margin: 0 0 14px; color: var(--sand-dim); font: 400 13.5px/1.5 var(--mono); }
-.dl-notice {
-  margin: 0 0 16px; padding: 14px 16px; border: 1px solid rgba(255,206,115,.4); border-radius: 10px;
-  background: rgba(255,206,115,.06); color: var(--sand); font-size: 15.5px; line-height: 1.55;
-}
-.dl-notice b { color: var(--sun-hot); font-weight: 600; }
 /* A command is a code block, with its copy button always shown (a page that
    exists to be copied from) and its text kept out from under the button. */
 .dl .code { margin: 0; max-width: none; }

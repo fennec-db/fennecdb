@@ -79,18 +79,19 @@ sudo dnf install ./fennecdb-{{version}}-1.x86_64.rpm</pre>
 <div class="lang" data-name="Windows" data-keep="false">
 <div class="dl-panel">
 <p class="dl-say">Windows 10 and 11, Windows Server 2016 and later · x86_64 and arm64 · PowerShell 5.1 or 7</p>
-<p class="dl-notice"><b>Releases after 0.1.12 carry a Windows build</b>, for
-x86_64 and for arm64. On a release that lists no zip for your processor, the
-script names the missing file and installs nothing.</p>
 <div class="dl-main"><pre data-lang="powershell">irm https://fennecdb.com/install.ps1 | iex</pre></div>
 <p class="dl-under">Installs <code>fennec-server.exe</code> and
 <code>fennec.exe</code> in <code>%LOCALAPPDATA%\fennecdb\bin</code>, with no
 administrator. It touches no profile and no <code>PATH</code>: it prints the
 line that puts the folder on this session's <code>PATH</code>.</p>
+<p class="dl-under">From 0.2.0 on, each release carries a Windows build for
+x86_64 and one for arm64, and the script takes your processor's: from a
+release that lists none for it, it names the missing file and installs
+nothing.</p>
 <div class="dl-alts">
   <div class="dl-alt">
     <p class="dl-name">The zip</p>
-    <p class="dl-files"><a href="https://github.com/fennec-db/fennecdb/releases/latest">x86_64-pc-windows-msvc</a><a href="https://github.com/fennec-db/fennecdb/releases/latest">aarch64-pc-windows-msvc</a></p>
+    <p class="dl-files"><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-x86_64-pc-windows-msvc.zip">x86_64-pc-windows-msvc</a><a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-v{{version}}-aarch64-pc-windows-msvc.zip">aarch64-pc-windows-msvc</a></p>
     <p class="dl-note">Not signed. Check its sum, then <code>Unblock-File</code>
     it before you unpack it, or SmartScreen warns of a program in it.</p>
   </div>
@@ -205,7 +206,7 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 <thead><tr><th scope="col">Way</th><th scope="col">Gives you</th><th scope="col">On</th></tr></thead>
 <tbody>
 <tr><td><a href="docs/install.html#install-script">The install script</a></td><td><code>fennec-server</code> and <code>fennec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
-<tr><td><a href="docs/install.html#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64 and arm64. Releases after 0.1.12 carry a Windows build</td></tr>
+<tr><td><a href="docs/install.html#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64 and arm64, from 0.2.0 on</td></tr>
 <tr><td><a href="docs/install.html#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="docs/install.html#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
 <tr><td><a href="docs/install.html#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
